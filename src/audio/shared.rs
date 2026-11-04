@@ -2,7 +2,6 @@
 //! UI: the ring buffer, the cushion (its fill target), meters, mix settings
 //! and what each side really runs at.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -12,7 +11,14 @@ use super::plugins::{PluginChain, PluginPref, PluginView};
 use super::types::{CushionMode, Snapshot};
 
 pub(crate) struct Shared {
-    pub(crate) ring: Mutex<VecDeque<f32>>,
+    /// Interleaved stereo samples as `f32` bit patterns.  The input side alone
+    /// writes the slots at `head`; the output side alone writes `tail`, so the
+    /// two never need a lock or touch the same index.
+    ring: Vec<AtomicU32>,
+    /// Monotonic frame counters.  `head - tail` is the number of frames ready
+    /// to read; slots are `counter % capacity_frames`.
+    head: AtomicU64,
+    tail: AtomicU64,
     pub(crate) capacity_frames: usize,
     pub(crate) target_frames: AtomicU64,
     /// Starting cushion from the chosen buffer (Safe mode's floor).
@@ -28,6 +34,8 @@ pub(crate) struct Shared {
     pub(crate) out_l: AtomicU32,
     pub(crate) out_r: AtomicU32,
     pub(crate) underruns: AtomicU64,
+    /// Frames the input dropped because the consumer had not kept up.
+    pub(crate) overruns: AtomicU64,
     pub(crate) frames: AtomicU64,
     pub(crate) drift_ppm: AtomicU32,
     pub(crate) running: AtomicBool,
@@ -64,7 +72,11 @@ impl Shared {
     pub(crate) fn new(sample_rate: u32) -> Self {
         let capacity_frames = (sample_rate as usize * 2).max(4096);
         Self {
-            ring: Mutex::new(VecDeque::with_capacity(capacity_frames * 2)),
+            ring: (0..capacity_frames * 2)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            head: AtomicU64::new(0),
+            tail: AtomicU64::new(0),
             capacity_frames,
             target_frames: AtomicU64::new((sample_rate as u64 / 187).max(256)),
             base_frames: AtomicU64::new((sample_rate as u64 / 187).max(256)),
@@ -77,6 +89,7 @@ impl Shared {
             out_l: AtomicU32::new(0.0f32.to_bits()),
             out_r: AtomicU32::new(0.0f32.to_bits()),
             underruns: AtomicU64::new(0),
+            overruns: AtomicU64::new(0),
             frames: AtomicU64::new(0),
             drift_ppm: AtomicU32::new(0.0f32.to_bits()),
             running: AtomicBool::new(false),
@@ -293,12 +306,15 @@ impl Shared {
         self.out_l.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.out_r.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.underruns.store(0, Ordering::Relaxed);
+        self.overruns.store(0, Ordering::Relaxed);
         self.frames.store(0, Ordering::Relaxed);
         self.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.running.store(false, Ordering::Relaxed);
-        if let Ok(mut ring) = self.ring.lock() {
-            ring.clear();
-        }
+        // No callback may be running here (the bridge is stopped first).
+        // Clear `head` before `tail` so a concurrent reader never sees a
+        // negative fill.
+        self.head.store(0, Ordering::Relaxed);
+        self.tail.store(0, Ordering::Relaxed);
         self.set_status("Starting bridge");
         self.device_lost.store(false, Ordering::Relaxed);
         if let Ok(mut error) = self.error.lock() {
@@ -509,28 +525,35 @@ impl Shared {
         f32::from_bits(self.output_gain.load(Ordering::Relaxed))
     }
 
+    /// Called by the one input producer.  Never blocks: a full ring counts an
+    /// overrun and drops this frame, so the consumer is never pushed aside.
     pub(crate) fn push_frame(&self, left: f32, right: f32) {
-        if let Ok(mut ring) = self.ring.lock() {
-            if ring.len() + 2 > self.capacity_frames * 2 {
-                // The writer is ahead of the consumer.  Drop the oldest frame
-                // instead of letting latency grow without a bound.
-                ring.pop_front();
-                ring.pop_front();
-            }
-            ring.push_back(left);
-            ring.push_back(right);
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
+        if head.wrapping_sub(tail) >= self.capacity_frames as u64 {
+            self.overruns.fetch_add(1, Ordering::Relaxed);
+            return;
         }
+        let index = (head % self.capacity_frames as u64) as usize * 2;
+        // The release store of `head` publishes both samples to the consumer.
+        self.ring[index].store(left.to_bits(), Ordering::Relaxed);
+        self.ring[index + 1].store(right.to_bits(), Ordering::Relaxed);
+        self.head.store(head.wrapping_add(1), Ordering::Release);
     }
 
+    /// Called by the one output consumer.  Never blocks.
     pub(crate) fn pop_frame(&self) -> Option<(f32, f32)> {
-        let mut ring = self.ring.lock().ok()?;
-        if ring.len() >= 2 {
-            let left = ring.pop_front()?;
-            let right = ring.pop_front()?;
-            Some((left, right))
-        } else {
-            None
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
+        if tail == head {
+            return None;
         }
+        let index = (tail % self.capacity_frames as u64) as usize * 2;
+        // The acquire load above paired with the producer's release store.
+        let left = f32::from_bits(self.ring[index].load(Ordering::Relaxed));
+        let right = f32::from_bits(self.ring[index + 1].load(Ordering::Relaxed));
+        self.tail.store(tail.wrapping_add(1), Ordering::Release);
+        Some((left, right))
     }
 
     pub(crate) fn ring_fill(&self) -> f32 {
@@ -540,7 +563,11 @@ impl Shared {
     }
 
     pub(crate) fn ring_frames(&self) -> usize {
-        self.ring.lock().map(|ring| ring.len() / 2).unwrap_or(0)
+        // Either side may advance between the loads, so saturate rather than
+        // wrapping a momentary tail-ahead-of-head observation into a huge fill.
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Relaxed);
+        head.saturating_sub(tail).min(self.capacity_frames as u64) as usize
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {
@@ -550,6 +577,7 @@ impl Shared {
             out_l: f32::from_bits(self.out_l.load(Ordering::Relaxed)),
             out_r: f32::from_bits(self.out_r.load(Ordering::Relaxed)),
             underruns: self.underruns.load(Ordering::Relaxed),
+            overruns: self.overruns.load(Ordering::Relaxed),
             frames: self.frames.load(Ordering::Relaxed),
             ring_fill: self.ring_fill(),
             target_frames: self.target_frames(),

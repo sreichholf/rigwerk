@@ -196,6 +196,9 @@ pub struct Snapshot {
     pub out_l: f32,
     pub out_r: f32,
     pub underruns: u64,
+    /// Frames the input callback dropped because the ring was full.
+    #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
+    pub overruns: u64,
     pub frames: u64,
     pub ring_fill: f32,
     pub target_frames: usize,
