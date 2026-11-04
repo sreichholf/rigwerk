@@ -6,6 +6,7 @@ use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Vec2};
 use crate::app::RigWerkApp;
 use crate::audio::EngineState;
 use crate::ui::scope::{draw_scope, scope_stats};
+use crate::ui::theme::ts;
 use crate::ui::theme::{AMBER, BLUE, CARD_DEEP, DIM, GREEN, MUTED, TEAL};
 use crate::ui::widgets::{ellipsize, legend_dot, metric_tile, micro_label, mono, status_dot};
 
@@ -115,7 +116,7 @@ impl RigWerkApp {
                     status_dot(ui, current.1);
                     ui.label(
                         RichText::new(ellipsize(&current.0, 42))
-                            .size(9.5)
+                            .size(ts(9.5))
                             .color(MUTED),
                     );
                 });

@@ -7,6 +7,7 @@ use egui::{
 };
 
 use crate::app::RigWerkApp;
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT,
 };
@@ -51,7 +52,7 @@ pub(crate) fn route_cell(ui: &mut egui::Ui, enabled: bool, input: usize, output:
             rect.center(),
             Align2::CENTER_CENTER,
             format!("{}{}", input + 1, output + 1),
-            FontId::new(7.5, FontFamily::Monospace),
+            FontId::new(ts(7.5), FontFamily::Monospace),
             Color32::from_rgb(53, 64, 80),
         );
     }
@@ -65,7 +66,7 @@ pub(crate) fn tap_row(ui: &mut egui::Ui, output: usize, active: bool, level: f32
         rect.left_center() + Vec2::new(2.0, 0.0),
         Align2::LEFT_CENTER,
         format!("OUT {}", output + 1),
-        FontId::new(8.5, FontFamily::Monospace),
+        FontId::new(ts(8.5), FontFamily::Monospace),
         if active { MUTED } else { DIM },
     );
     let bar = Rect::from_min_size(
@@ -88,7 +89,7 @@ pub(crate) fn tap_row(ui: &mut egui::Ui, output: usize, active: bool, level: f32
         rect.right_center() + Vec2::new(-2.0, 0.0),
         Align2::RIGHT_CENTER,
         if active { "ROUTED" } else { "MUTED" },
-        FontId::new(7.0, FontFamily::Monospace),
+        FontId::new(ts(7.0), FontFamily::Monospace),
         if active { color } else { DIM },
     );
 }
@@ -136,7 +137,7 @@ impl RigWerkApp {
                                     rect.left_center() + Vec2::new(12.0, -6.0),
                                     Align2::LEFT_CENTER,
                                     format!("IN {}", input + 1),
-                                    FontId::new(11.5, FontFamily::Proportional),
+                                    FontId::new(ts(11.5), FontFamily::Proportional),
                                     TEXT,
                                 );
                                 ui.painter().text(
@@ -147,7 +148,7 @@ impl RigWerkApp {
                                     } else {
                                         "ASIO 2 · spare"
                                     },
-                                    FontId::new(8.5, FontFamily::Proportional),
+                                    FontId::new(ts(8.5), FontFamily::Proportional),
                                     DIM,
                                 );
                                 for output in 0..4 {
@@ -180,12 +181,12 @@ impl RigWerkApp {
                         horizontal_line(ui, BORDER_SOFT);
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Tip").size(9.5).color(AMBER).strong());
+                            ui.label(RichText::new("Tip").size(ts(9.5)).color(AMBER).strong());
                             ui.label(
                                 RichText::new(
                                     "Keep one dry route for monitoring and one for your recorder.",
                                 )
-                                .size(10.0)
+                                .size(ts(10.0))
                                 .color(MUTED),
                             );
                         });
@@ -247,7 +248,7 @@ impl RigWerkApp {
                         ui.checkbox(
                             &mut self.monitor,
                             RichText::new("Direct monitor input")
-                                .size(10.5)
+                                .size(ts(10.5))
                                 .color(MUTED),
                         );
                         ui.add_space(10.0);
@@ -256,7 +257,7 @@ impl RigWerkApp {
                             .checkbox(
                                 &mut drift,
                                 RichText::new("Automatic drift correction")
-                                    .size(10.5)
+                                    .size(ts(10.5))
                                     .color(MUTED),
                             )
                             .changed()
@@ -273,7 +274,7 @@ impl RigWerkApp {
                                     RichText::new(
                                         "Routes apply live. Out 1 and 2 feed the selected output; 3 and 4 are used on interfaces with four or more channels.",
                                     )
-                                    .size(9.0)
+                                    .size(ts(9.0))
                                     .color(MUTED),
                                 )
                                 .wrap(),

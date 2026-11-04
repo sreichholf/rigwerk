@@ -9,6 +9,7 @@ use egui::{
 
 use crate::audio::DeviceItem;
 use crate::ui::icons::{paint_icon, Icon};
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, MUTED, TEAL, TEXT,
 };
@@ -59,7 +60,7 @@ pub(crate) fn card_fixed<R>(
 
 pub(crate) fn micro_label(text: &str, color: Color32) -> RichText {
     RichText::new(text)
-        .size(9.5)
+        .size(ts(9.5))
         .color(color)
         .family(FontFamily::Proportional)
         .strong()
@@ -68,14 +69,14 @@ pub(crate) fn micro_label(text: &str, color: Color32) -> RichText {
 pub(crate) fn mono(text: impl Into<String>, color: Color32, size: f32) -> RichText {
     RichText::new(text)
         .family(FontFamily::Monospace)
-        .size(size)
+        .size(ts(size))
         .color(color)
 }
 
 pub(crate) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
-        FontId::new(9.5, FontFamily::Proportional),
+        FontId::new(ts(9.5), FontFamily::Proportional),
         color,
     );
     let size = Vec2::new(galley.size().x + 14.0, 19.0);
@@ -102,7 +103,7 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
 pub(crate) fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
-        FontId::new(10.0, FontFamily::Proportional),
+        FontId::new(ts(10.0), FontFamily::Proportional),
         color,
     );
     let (rect, _) = ui.allocate_exact_size(Vec2::new(galley.size().x + 30.0, 25.0), Sense::hover());
@@ -143,7 +144,7 @@ pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, fill: Color32, widt
         [width, 34.0],
         egui::Button::new(
             RichText::new(label)
-                .size(12.5)
+                .size(ts(12.5))
                 .color(Color32::from_rgb(8, 16, 14))
                 .strong(),
         )
@@ -157,7 +158,7 @@ pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, fill: Color32, widt
 pub(crate) fn ghost_button(ui: &mut egui::Ui, label: &str, width: f32) -> bool {
     ui.add_sized(
         [width, 32.0],
-        egui::Button::new(RichText::new(label).size(12.0).color(MUTED))
+        egui::Button::new(RichText::new(label).size(ts(12.0)).color(MUTED))
             .fill(CARD_RAISED)
             .stroke(Stroke::new(1.0, BORDER_SOFT))
             .corner_radius(CornerRadius::same(8)),
@@ -228,14 +229,14 @@ pub(crate) fn nav_item(
         rect.left_center() + Vec2::new(39.0, -5.0),
         Align2::LEFT_CENTER,
         label,
-        FontId::new(12.2, FontFamily::Proportional),
+        FontId::new(ts(12.2), FontFamily::Proportional),
         if selected { TEXT } else { MUTED },
     );
     ui.painter().text(
         rect.left_center() + Vec2::new(39.0, 8.0),
         Align2::LEFT_CENTER,
         hint,
-        FontId::new(8.0, FontFamily::Proportional),
+        FontId::new(ts(8.0), FontFamily::Proportional),
         if selected { with_alpha(TEAL, 190) } else { DIM },
     );
     response.clicked()
@@ -280,7 +281,7 @@ pub(crate) fn tab_button_sized(
     ui.add(
         egui::Button::new(
             RichText::new(label)
-                .size(size)
+                .size(ts(size))
                 .color(if selected { color } else { DIM })
                 .strong(),
         )
@@ -310,17 +311,22 @@ pub(crate) fn channel_chip(ui: &mut egui::Ui, label: &str, checked: &mut bool, c
     };
     let text_color = if *checked { color } else { DIM };
     let response = ui.add(
-        egui::Button::new(RichText::new(label).size(9.0).color(text_color).strong())
-            .fill(fill)
-            .stroke(Stroke::new(
-                1.0,
-                if *checked {
-                    with_alpha(color, 65)
-                } else {
-                    BORDER_SOFT
-                },
-            ))
-            .corner_radius(CornerRadius::same(6)),
+        egui::Button::new(
+            RichText::new(label)
+                .size(ts(9.0))
+                .color(text_color)
+                .strong(),
+        )
+        .fill(fill)
+        .stroke(Stroke::new(
+            1.0,
+            if *checked {
+                with_alpha(color, 65)
+            } else {
+                BORDER_SOFT
+            },
+        ))
+        .corner_radius(CornerRadius::same(6)),
     );
     if response.clicked() {
         *checked = !*checked;
@@ -468,14 +474,14 @@ pub(crate) fn metric_tile(
         rect.left_top() + Vec2::new(9.0, 8.0),
         Align2::LEFT_TOP,
         label,
-        FontId::new(8.0, FontFamily::Proportional),
+        FontId::new(ts(8.0), FontFamily::Proportional),
         DIM,
     );
     ui.painter().text(
         rect.left_bottom() + Vec2::new(9.0, -8.0),
         Align2::LEFT_BOTTOM,
         value,
-        FontId::new(18.0, FontFamily::Monospace),
+        FontId::new(ts(18.0), FontFamily::Monospace),
         color,
     );
     if !unit.is_empty() {
@@ -483,7 +489,7 @@ pub(crate) fn metric_tile(
             .painter()
             .layout_no_wrap(
                 value.to_owned(),
-                FontId::new(18.0, FontFamily::Monospace),
+                FontId::new(ts(18.0), FontFamily::Monospace),
                 color,
             )
             .size()
@@ -492,7 +498,7 @@ pub(crate) fn metric_tile(
             rect.left_bottom() + Vec2::new(11.0 + value_width, -10.0),
             Align2::LEFT_BOTTOM,
             unit,
-            FontId::new(8.0, FontFamily::Proportional),
+            FontId::new(ts(8.0), FontFamily::Proportional),
             DIM,
         );
     }
@@ -509,7 +515,11 @@ pub(crate) fn route_summary(ui: &mut egui::Ui, label: &str, value: &str, color: 
     ui.horizontal(|ui| {
         ui.label(micro_label(label, DIM));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(ellipsize(value, 28)).size(9.5).color(color));
+            ui.label(
+                RichText::new(ellipsize(value, 28))
+                    .size(ts(9.5))
+                    .color(color),
+            );
         });
     });
 }
@@ -571,7 +581,7 @@ pub(crate) fn device_selector(
                 .width(ui.available_width())
                 .selected_text(
                     RichText::new(ellipsize(&current, 30))
-                        .size(12.0)
+                        .size(ts(12.0))
                         .color(TEXT),
                 )
                 .show_ui(ui, |ui| {

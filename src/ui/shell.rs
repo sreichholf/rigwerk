@@ -6,6 +6,7 @@ use egui::{Align, Color32, CornerRadius, FontFamily, Layout, Margin, RichText, S
 use crate::app::{Page, RigWerkApp};
 use crate::audio::EngineState;
 use crate::ui::icons::{draw_logo, Icon};
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, RED,
     TEAL, TEXT,
@@ -20,14 +21,14 @@ impl RigWerkApp {
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new("RIGWERK")
-                        .size(15.5)
+                        .size(ts(15.5))
                         .color(TEXT)
                         .strong()
                         .family(FontFamily::Proportional),
                 );
                 ui.label(
                     RichText::new("independent bridge")
-                        .size(8.5)
+                        .size(ts(8.5))
                         .color(DIM)
                         .strong(),
                 );
@@ -135,7 +136,7 @@ impl RigWerkApp {
                 ui.add_space(2.0);
                 ui.label(
                     RichText::new("Any input. Any output. Two clocks.")
-                        .size(9.5)
+                        .size(ts(9.5))
                         .color(MUTED),
                 );
             });
@@ -150,7 +151,7 @@ impl RigWerkApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add(
-                        egui::Button::new(RichText::new("about").size(9.5).color(DIM))
+                        egui::Button::new(RichText::new("about").size(ts(9.5)).color(DIM))
                             .fill(Color32::TRANSPARENT)
                             .stroke(Stroke::new(1.0, BORDER_SOFT))
                             .corner_radius(CornerRadius::same(6)),
@@ -205,12 +206,12 @@ impl RigWerkApp {
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new(title)
-                        .size(27.0)
+                        .size(ts(27.0))
                         .strong()
                         .color(TEXT)
                         .family(FontFamily::Proportional),
                 );
-                ui.label(RichText::new(subtitle).size(11.5).color(MUTED));
+                ui.label(RichText::new(subtitle).size(ts(11.5)).color(MUTED));
             });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -228,17 +229,22 @@ impl RigWerkApp {
                 };
                 let button = ui.add_sized(
                     [112.0, 36.0],
-                    egui::Button::new(RichText::new(label).size(12.0).color(text_color).strong())
-                        .fill(fill)
-                        .stroke(Stroke::new(
-                            1.0,
-                            if active {
-                                BORDER
-                            } else {
-                                with_alpha(Color32::WHITE, 30)
-                            },
-                        ))
-                        .corner_radius(CornerRadius::same(9)),
+                    egui::Button::new(
+                        RichText::new(label)
+                            .size(ts(12.0))
+                            .color(text_color)
+                            .strong(),
+                    )
+                    .fill(fill)
+                    .stroke(Stroke::new(
+                        1.0,
+                        if active {
+                            BORDER
+                        } else {
+                            with_alpha(Color32::WHITE, 30)
+                        },
+                    ))
+                    .corner_radius(CornerRadius::same(9)),
                 );
                 if button.clicked() {
                     if active {
@@ -261,7 +267,7 @@ impl RigWerkApp {
                 if ui
                     .checkbox(
                         &mut auto_start,
-                        RichText::new("auto-start").size(9.5).color(MUTED),
+                        RichText::new("auto-start").size(ts(9.5)).color(MUTED),
                     )
                     .on_hover_text(
                         "Start the bridge automatically when RigWerk opens. Off by default.",

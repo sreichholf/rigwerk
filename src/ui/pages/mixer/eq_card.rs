@@ -12,6 +12,7 @@ use crate::app::RigWerkApp;
 use crate::audio::{
     BandKind, EngineState, EqSettings, EqSlot, EQ_BANDS, EQ_MAX_GAIN_DB, EQ_MAX_Q, EQ_MIN_Q,
 };
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL,
     TEXT,
@@ -62,7 +63,7 @@ impl RigWerkApp {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new("5 bands · master mix · no added latency")
-                        .size(10.0)
+                        .size(ts(10.0))
                         .color(DIM),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -113,7 +114,7 @@ impl RigWerkApp {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(spec.name)
-                                        .size(10.5)
+                                        .size(ts(10.5))
                                         .color(if live { TEXT } else { DIM })
                                         .strong(),
                                 )
@@ -282,7 +283,7 @@ pub(crate) fn draw_curve(ui: &egui::Ui, rect: Rect, eq: &EqSettings, rate: u32, 
     let x_of = |hz: f32| plot.left() + plot.width() * (hz / CURVE_MIN_HZ).ln() / span;
     let range = EQ_MAX_GAIN_DB + 3.0;
     let y_of = |db: f32| plot.center().y - db.clamp(-range, range) / range * plot.height() / 2.0;
-    let label = FontId::new(7.5, FontFamily::Monospace);
+    let label = FontId::new(ts(7.5), FontFamily::Monospace);
     let dot = if labels { 4.0 } else { 2.5 };
     let zero_y = y_of(0.0);
 

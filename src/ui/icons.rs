@@ -3,6 +3,7 @@
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Rect, Sense, Stroke, Vec2};
 
+use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, BLUE, TEAL};
 
 #[derive(Clone, Copy)]
@@ -143,7 +144,7 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 center,
                 Align2::CENTER_CENTER,
                 "?",
-                FontId::new(12.0, FontFamily::Proportional),
+                FontId::new(ts(12.0), FontFamily::Proportional),
                 color,
             );
         }

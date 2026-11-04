@@ -3,6 +3,7 @@
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Rect, Sense, Stroke, Vec2};
 
+use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, DIM, MUTED, TEAL, TEXT};
 
 pub(crate) fn draw_scope(
@@ -95,7 +96,7 @@ pub(crate) fn draw_scope(
         rect.right_top() + Vec2::new(-9.0, 8.0),
         Align2::RIGHT_TOP,
         if active { "LIVE" } else { "IDLE" },
-        FontId::new(8.5, FontFamily::Monospace),
+        FontId::new(ts(8.5), FontFamily::Monospace),
         if active { with_alpha(TEAL, 180) } else { DIM },
     );
 }
@@ -159,14 +160,14 @@ pub(crate) fn draw_mini_scope(ui: &egui::Ui, rect: Rect, ctx: &egui::Context, ac
         rect.left_top() + Vec2::new(8.0, 7.0),
         Align2::LEFT_TOP,
         "AUDIO",
-        FontId::new(8.0, FontFamily::Monospace),
+        FontId::new(ts(8.0), FontFamily::Monospace),
         DIM,
     );
     painter.text(
         rect.right_top() + Vec2::new(-8.0, 7.0),
         Align2::RIGHT_TOP,
         if active { "FLOWING" } else { "PAUSED" },
-        FontId::new(8.0, FontFamily::Monospace),
+        FontId::new(ts(8.0), FontFamily::Monospace),
         if active { with_alpha(AMBER, 190) } else { DIM },
     );
 }
@@ -203,14 +204,14 @@ pub(crate) fn scope_stats(
             egui::pos2(left, rect.top() + 2.0),
             Align2::LEFT_TOP,
             label,
-            FontId::new(7.8, FontFamily::Proportional),
+            FontId::new(ts(7.8), FontFamily::Proportional),
             DIM,
         );
         ui.painter().text(
             egui::pos2(left, rect.top() + 12.0),
             Align2::LEFT_TOP,
             &value,
-            FontId::new(10.0, FontFamily::Monospace),
+            FontId::new(ts(10.0), FontFamily::Monospace),
             color,
         );
         let bar = Rect::from_min_size(

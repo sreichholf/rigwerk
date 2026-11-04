@@ -26,6 +26,7 @@ use crate::app::settings::{
     Preset, PREFERENCES_KEY,
 };
 use crate::audio::{self, AudioEngine, CushionMode, EqSettings, EqSlot, Inventory, Snapshot};
+use crate::ui::theme::ts;
 use crate::ui::theme::{configure_style, AMBER, BG, BLUE, DIM, GREEN, MUTED, SIDEBAR, TEAL, TEXT};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -230,14 +231,14 @@ impl eframe::App for RigWerkApp {
                         RichText::new(
                             "ASIO and system-host inputs and outputs are wired on Windows. Linux uses PipeWire as its default backend at a low quantum, with direct ALSA hw: devices and JACK available on the low-latency side and PulseAudio on the system side. RigWerk compares the ALSA period with the PipeWire quantum and reports a collision instead of hiding it.",
                         )
-                        .size(10.5)
+                        .size(ts(10.5))
                         .color(GREEN),
                     );
                     ui.label(
                         RichText::new(
                             "Select any input and output; whether one interface can do both jobs at once depends on its driver, so RigWerk reports what the driver says instead of guessing.",
                         )
-                        .size(10.0)
+                        .size(ts(10.0))
                         .color(MUTED),
                     );
                     ui.add_space(8.0);
@@ -258,13 +259,13 @@ impl eframe::App for RigWerkApp {
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
                 .show(&ctx, |ui| {
                     ui.set_width(380.0);
-                    ui.label(RichText::new(message).size(12.5).color(TEXT));
+                    ui.label(RichText::new(message).size(ts(12.5)).color(TEXT));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
                             "Plug the device back in (or pick another one on the Devices page), then start the bridge again.",
                         )
-                        .size(10.5)
+                        .size(ts(10.5))
                         .color(MUTED),
                     );
                     ui.add_space(12.0);

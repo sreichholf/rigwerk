@@ -12,6 +12,7 @@ use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
 
 use crate::app::{Page, RigWerkApp};
+use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER, CARD, CARD_RAISED, DIM, MUTED, RED, TEAL};
 use crate::ui::widgets::{card, card_fixed, connector, ellipsize, micro_label, mono, status_dot};
 
@@ -125,14 +126,14 @@ impl RigWerkApp {
                 status_dot(ui, latest.2);
                 ui.label(
                     RichText::new(ellipsize(&latest.1, 96))
-                        .size(9.2)
+                        .size(ts(9.2))
                         .color(MUTED),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("Open setup guide").size(9.5).color(TEAL),
+                                RichText::new("Open setup guide").size(ts(9.5)).color(TEAL),
                             )
                             .fill(with_alpha(TEAL, 16))
                             .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))

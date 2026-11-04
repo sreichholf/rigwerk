@@ -8,6 +8,7 @@ use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::app::driver_check::{DriverActual, DriverTone};
 use crate::app::settings::rate_label;
+use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, DIM, GREEN, MUTED};
 use crate::ui::widgets::{micro_label, mono};
 
@@ -79,7 +80,7 @@ pub(crate) fn driver_line(
                     ui.label(mono("checking driver…".to_owned(), MUTED, 8.0));
                 } else {
                     let button = egui::Button::new(
-                        RichText::new("Check driver").size(8.0).color(AMBER),
+                        RichText::new("Check driver").size(ts(8.0)).color(AMBER),
                     )
                     .fill(with_alpha(AMBER, 14))
                     .stroke(Stroke::new(1.0, with_alpha(AMBER, 50)))

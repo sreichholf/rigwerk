@@ -6,6 +6,7 @@ use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{EqSettings, EqSlot};
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, RED, TEAL, TEXT,
 };
@@ -101,7 +102,7 @@ impl RigWerkApp {
                             arrow.center(),
                             egui::Align2::CENTER_CENTER,
                             "→",
-                            egui::FontId::new(11.0, egui::FontFamily::Monospace),
+                            egui::FontId::new(ts(11.0), egui::FontFamily::Monospace),
                             DIM,
                         );
                     }
@@ -129,14 +130,14 @@ impl RigWerkApp {
                         rect.left_top() + Vec2::new(9.0, 7.0),
                         egui::Align2::LEFT_TOP,
                         *label,
-                        egui::FontId::new(7.5, egui::FontFamily::Monospace),
+                        egui::FontId::new(ts(7.5), egui::FontFamily::Monospace),
                         if *live { *color } else { DIM },
                     );
                     ui.painter().text(
                         rect.left_bottom() + Vec2::new(9.0, -7.0),
                         egui::Align2::LEFT_BOTTOM,
                         value,
-                        egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                        egui::FontId::new(ts(10.0), egui::FontFamily::Proportional),
                         if *live { TEXT } else { MUTED },
                     );
                     if response.on_hover_text("Open the Mixer page").clicked() {
@@ -148,11 +149,13 @@ impl RigWerkApp {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
                         .add(
-                            egui::Button::new(RichText::new("Open mixer").size(10.0).color(TEAL))
-                                .fill(with_alpha(TEAL, 14))
-                                .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
-                                .corner_radius(CornerRadius::same(7))
-                                .min_size(Vec2::new(button_w, 30.0)),
+                            egui::Button::new(
+                                RichText::new("Open mixer").size(ts(10.0)).color(TEAL),
+                            )
+                            .fill(with_alpha(TEAL, 14))
+                            .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
+                            .corner_radius(CornerRadius::same(7))
+                            .min_size(Vec2::new(button_w, 30.0)),
                         )
                         .clicked()
                     {

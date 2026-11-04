@@ -8,6 +8,7 @@ use egui::{
 
 use crate::app::RigWerkApp;
 use crate::audio::DeviceItem;
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT,
 };
@@ -57,7 +58,7 @@ pub(crate) fn device_row(
         rect.left_center() + Vec2::new(28.0, -5.0),
         Align2::LEFT_CENTER,
         ellipsize(&device.name, 34),
-        FontId::new(10.8, FontFamily::Proportional),
+        FontId::new(ts(10.8), FontFamily::Proportional),
         if selected { TEXT } else { MUTED },
     );
     ui.painter().text(
@@ -69,7 +70,7 @@ pub(crate) fn device_row(
             device.channels,
             if device.demo { " · preview" } else { "" }
         ),
-        FontId::new(8.3, FontFamily::Proportional),
+        FontId::new(ts(8.3), FontFamily::Proportional),
         if device.demo { AMBER } else { DIM },
     );
     if selected {
@@ -77,7 +78,7 @@ pub(crate) fn device_row(
             rect.right_center() + Vec2::new(-11.0, 0.0),
             Align2::RIGHT_CENTER,
             "IN USE",
-            FontId::new(7.5, FontFamily::Monospace),
+            FontId::new(ts(7.5), FontFamily::Monospace),
             accent,
         );
     }
@@ -130,7 +131,7 @@ impl RigWerkApp {
                         "s"
                     }
                 ))
-                .size(10.5)
+                .size(ts(10.5))
                 .color(DIM),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -184,7 +185,7 @@ impl RigWerkApp {
                         ui.add_space(7.0);
                         ui.label(
                             RichText::new("Capture on its own clock, independent of playback.")
-                                .size(10.0)
+                                .size(ts(10.0))
                                 .color(MUTED),
                         );
                         ui.add_space(8.0);
@@ -221,7 +222,7 @@ impl RigWerkApp {
                                 RichText::new(
                                     "Input opens independently; the driver reports if it cannot.",
                                 )
-                                .size(9.5)
+                                .size(ts(9.5))
                                 .color(MUTED),
                             );
                         });
@@ -244,7 +245,7 @@ impl RigWerkApp {
                         ui.add_space(7.0);
                         ui.label(
                             RichText::new("Playback on its own clock, independent of capture.")
-                                .size(10.0)
+                                .size(ts(10.0))
                                 .color(MUTED),
                         );
                         ui.add_space(8.0);
@@ -279,7 +280,7 @@ impl RigWerkApp {
                                 RichText::new(
                                     "Output opens independently; the driver reports if it cannot.",
                                 )
-                                .size(9.5)
+                                .size(ts(9.5))
                                 .color(MUTED),
                             );
                         });
@@ -310,12 +311,12 @@ impl RigWerkApp {
                                 info.quantum as f32 / info.rate.max(1) as f32 * 1000.0,
                                 info.rate as f32 / 1000.0
                             ))
-                            .size(10.0)
+                            .size(ts(10.0))
                             .color(MUTED),
                         );
                     });
                     ui.add_space(4.0);
-                    ui.label(RichText::new(&info.note).size(9.8).color(tone));
+                    ui.label(RichText::new(&info.note).size(ts(9.8)).color(tone));
                 });
         }
 
@@ -335,7 +336,7 @@ impl RigWerkApp {
                         } else {
                             "PipeWire is the default Linux backend: its endpoints sit on the low-latency side next to direct ALSA hardware (hw: or plughw:) and JACK. The low-latency switch asks PipeWire for a 64-frame quantum and ALSA for its smallest period; the PIPEWIRE QUANTUM card above warns when the two do not line up. PulseAudio devices stay on the system side."
                         })
-                        .size(10.0)
+                        .size(ts(10.0))
                         .color(MUTED),
                     );
                 });

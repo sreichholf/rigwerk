@@ -9,6 +9,7 @@ use egui::{
 use crate::app::plugins::PluginCandidate;
 use crate::app::RigWerkApp;
 use crate::audio::{PluginParamView, PluginView};
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL,
     TEXT,
@@ -60,14 +61,14 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
         icon.center(),
         Align2::CENTER_CENTER,
         candidate.format.short(),
-        FontId::new(7.5, FontFamily::Monospace),
+        FontId::new(ts(7.5), FontFamily::Monospace),
         TEAL,
     );
     ui.painter().text(
         rect.left_center() + Vec2::new(40.0, -8.0),
         Align2::LEFT_CENTER,
         ellipsize(&candidate.name, 42),
-        FontId::new(11.0, FontFamily::Proportional),
+        FontId::new(ts(11.0), FontFamily::Proportional),
         TEXT,
     );
     let detail = if candidate.vendor.trim().is_empty() {
@@ -79,7 +80,7 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
         rect.left_center() + Vec2::new(40.0, 8.0),
         Align2::LEFT_CENTER,
         ellipsize(&detail, 52),
-        FontId::new(8.3, FontFamily::Proportional),
+        FontId::new(ts(8.3), FontFamily::Proportional),
         DIM,
     );
     let label = if in_chain { "IN CHAIN" } else { "+ ADD" };
@@ -100,7 +101,7 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
         pill.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::new(8.0, FontFamily::Monospace),
+        FontId::new(ts(8.0), FontFamily::Monospace),
         color,
     );
     response.clicked() && !in_chain
@@ -129,7 +130,7 @@ fn chain_row(ui: &mut egui::Ui, index: usize, view: &PluginView) -> Option<Chain
                 ui.vertical(|ui| {
                     ui.label(
                         RichText::new(ellipsize(&view.name, 34))
-                            .size(10.5)
+                            .size(ts(10.5))
                             .color(if view.bypass { DIM } else { TEXT })
                             .strong(),
                     );
@@ -146,7 +147,7 @@ fn chain_row(ui: &mut egui::Ui, index: usize, view: &PluginView) -> Option<Chain
                                 view.category
                             )
                         })
-                        .size(8.2)
+                        .size(ts(8.2))
                         .color(if view.error.is_some() {
                             RED
                         } else {
@@ -157,7 +158,7 @@ fn chain_row(ui: &mut egui::Ui, index: usize, view: &PluginView) -> Option<Chain
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
                         .add(
-                            egui::Button::new(RichText::new("×").size(13.0).color(DIM))
+                            egui::Button::new(RichText::new("×").size(ts(13.0)).color(DIM))
                                 .fill(Color32::TRANSPARENT)
                                 .stroke(Stroke::NONE),
                         )
@@ -183,7 +184,7 @@ fn chain_row(ui: &mut egui::Ui, index: usize, view: &PluginView) -> Option<Chain
                         .add(
                             egui::Button::new(
                                 RichText::new(if bypass { "BYP" } else { "ON" })
-                                    .size(7.5)
+                                    .size(ts(7.5))
                                     .color(if bypass { DIM } else { AMBER }),
                             )
                             .fill(if bypass {
@@ -213,7 +214,7 @@ fn chain_row(ui: &mut egui::Ui, index: usize, view: &PluginView) -> Option<Chain
                     if ui
                         .add_enabled(
                             view.error.is_none(),
-                            egui::Button::new(RichText::new("CFG").size(7.5).color(BLUE))
+                            egui::Button::new(RichText::new("CFG").size(ts(7.5)).color(BLUE))
                                 .fill(with_alpha(BLUE, 14))
                                 .stroke(Stroke::new(1.0, with_alpha(BLUE, 45)))
                                 .corner_radius(CornerRadius::same(5)),
@@ -268,7 +269,7 @@ fn parameter_card(ui: &mut egui::Ui, parameter: &PluginParamView, accent: Color3
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(ellipsize(&parameter.name, 30))
-                        .size(9.8)
+                        .size(ts(9.8))
                         .color(if parameter.read_only { DIM } else { TEXT }),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -280,7 +281,7 @@ fn parameter_card(ui: &mut egui::Ui, parameter: &PluginParamView, accent: Color3
                                 !parameter.read_only,
                                 egui::Button::new(
                                     RichText::new(if on { "ON" } else { "OFF" })
-                                        .size(7.5)
+                                        .size(ts(7.5))
                                         .color(color),
                                 )
                                 .fill(if on {
@@ -309,7 +310,7 @@ fn parameter_card(ui: &mut egui::Ui, parameter: &PluginParamView, accent: Color3
                         ui.label(
                             RichText::new(ellipsize(&shown, 20))
                                 .family(FontFamily::Monospace)
-                                .size(8.2)
+                                .size(ts(8.2))
                                 .color(if modified { accent } else { MUTED }),
                         )
                         .on_hover_text(format!("Default: {:.0}%", parameter.default * 100.0));
@@ -413,7 +414,7 @@ impl RigWerkApp {
                         icon.center(),
                         Align2::CENTER_CENTER,
                         format.short(),
-                        FontId::new(9.0, FontFamily::Monospace),
+                        FontId::new(ts(9.0), FontFamily::Monospace),
                         TEAL,
                     );
                     ui.add_space(2.0);
@@ -421,7 +422,7 @@ impl RigWerkApp {
                         ui.add_space(1.0);
                         ui.label(
                             RichText::new(ellipsize(&name, 40))
-                                .size(15.0)
+                                .size(ts(15.0))
                                 .strong()
                                 .color(TEXT),
                         );
@@ -432,7 +433,7 @@ impl RigWerkApp {
                         };
                         ui.label(
                             RichText::new(ellipsize(&detail, 52))
-                                .size(9.2)
+                                .size(ts(9.2))
                                 .color(DIM),
                         );
                     });
@@ -440,7 +441,7 @@ impl RigWerkApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("×").size(15.0).color(MUTED),
+                                    RichText::new("×").size(ts(15.0)).color(MUTED),
                                 )
                                 .fill(Color32::TRANSPARENT)
                                 .stroke(Stroke::NONE)
@@ -474,7 +475,7 @@ impl RigWerkApp {
                         .add(
                             egui::Button::new(
                                 RichText::new(if bypass { "Enable" } else { "Bypass" })
-                                    .size(8.2)
+                                    .size(ts(8.2))
                                     .color(if bypass { TEXT } else { MUTED }),
                             )
                             .fill(if bypass {
@@ -504,7 +505,7 @@ impl RigWerkApp {
                                 .add(
                                     egui::Button::new(
                                         RichText::new("Open plugin interface")
-                                            .size(9.0)
+                                            .size(ts(9.0))
                                             .color(if gui_is_open { MUTED } else { BLUE }),
                                     )
                                     .fill(with_alpha(BLUE, if gui_is_open { 6 } else { 14 }))
@@ -534,7 +535,7 @@ impl RigWerkApp {
                         .corner_radius(CornerRadius::same(7))
                         .inner_margin(Margin::symmetric(10, 7))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(error).size(9.2).color(RED));
+                            ui.label(RichText::new(error).size(ts(9.2)).color(RED));
                         });
                 }
 
@@ -549,7 +550,7 @@ impl RigWerkApp {
                             } else {
                                 "This effect reports no adjustable controls."
                             })
-                            .size(11.0)
+                            .size(ts(11.0))
                             .strong()
                             .color(TEXT),
                         );
@@ -562,7 +563,7 @@ impl RigWerkApp {
                             } else {
                                 "Its saved defaults still apply."
                             })
-                            .size(9.2)
+                            .size(ts(9.2))
                             .color(MUTED),
                         );
                     });
@@ -617,14 +618,14 @@ impl RigWerkApp {
                                             "No control matches “{}”.",
                                             self.plugin_param_filter.trim()
                                         ))
-                                        .size(9.5)
+                                        .size(ts(9.5))
                                         .color(MUTED),
                                     );
                                     if ui
                                         .add(
                                             egui::Button::new(
                                                 RichText::new("Clear filter")
-                                                    .size(8.5)
+                                                    .size(ts(8.5))
                                                     .color(TEAL),
                                             )
                                             .fill(Color32::TRANSPARENT)
@@ -661,7 +662,7 @@ impl RigWerkApp {
                         .add_enabled(
                             !parameters.is_empty(),
                             egui::Button::new(
-                                RichText::new("Reset to defaults").size(9.0).color(AMBER),
+                                RichText::new("Reset to defaults").size(ts(9.0)).color(AMBER),
                             )
                             .fill(with_alpha(AMBER, 10))
                             .stroke(Stroke::new(1.0, with_alpha(AMBER, 40)))
@@ -676,7 +677,7 @@ impl RigWerkApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
                             RichText::new("Changes apply live and are saved with this insert.")
-                                .size(8.2)
+                                .size(ts(8.2))
                                 .color(DIM),
                         );
                     });
@@ -726,7 +727,7 @@ impl RigWerkApp {
                     library.len(),
                     if library.len() == 1 { "" } else { "s" }
                 ))
-                .size(10.5)
+                .size(ts(10.5))
                 .color(DIM),
             );
             ui.add_space(12.0);
@@ -735,7 +736,7 @@ impl RigWerkApp {
                 .checkbox(
                     &mut prefer,
                     RichText::new("Prefer plugin interface")
-                        .size(9.5)
+                        .size(ts(9.5))
                         .color(MUTED),
                 )
                 .on_hover_text(
@@ -772,7 +773,7 @@ impl RigWerkApp {
         if let Some((notice, at)) = &self.plugin_browser.notice {
             if at.elapsed().as_secs() < 8 {
                 ui.add_space(3.0);
-                ui.label(RichText::new(notice).size(9.5).color(
+                ui.label(RichText::new(notice).size(ts(9.5)).color(
                     if notice.to_lowercase().contains("could not")
                         || notice.to_lowercase().contains("failed")
                     {
@@ -814,7 +815,7 @@ impl RigWerkApp {
                             RichText::new(
                                 "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the master insert chain; CFG opens its controls and its own interface, when it has one.",
                             )
-                            .size(9.5)
+                            .size(ts(9.5))
                             .color(MUTED),
                         );
                         ui.add_space(7.0);
@@ -833,7 +834,7 @@ impl RigWerkApp {
                                         status_dot(ui, AMBER);
                                         ui.label(
                                             RichText::new("Scanning VST3 and CLAP folders…")
-                                                .size(10.0)
+                                                .size(ts(10.0))
                                                 .color(MUTED),
                                         );
                                     });
@@ -841,7 +842,7 @@ impl RigWerkApp {
                                     ui.add_space(20.0);
                                     ui.label(
                                         RichText::new("No plugins found here yet.")
-                                            .size(10.5)
+                                            .size(ts(10.5))
                                             .color(MUTED)
                                             .strong(),
                                     );
@@ -850,7 +851,7 @@ impl RigWerkApp {
                                         RichText::new(
                                             "Install a .vst3 or .clap plugin in its standard folder, or add one by path on the right, then rescan.",
                                         )
-                                        .size(9.5)
+                                        .size(ts(9.5))
                                         .color(DIM),
                                     );
                                 } else {
@@ -895,7 +896,7 @@ impl RigWerkApp {
                             RichText::new(
                                 "Top to bottom, after routing and gain. Bypass keeps a slot in place.",
                             )
-                            .size(9.5)
+                            .size(ts(9.5))
                             .color(MUTED),
                         );
                         ui.add_space(7.0);
@@ -913,7 +914,7 @@ impl RigWerkApp {
                                         status_dot(ui, DIM);
                                         ui.label(
                                             RichText::new("The master bus is dry.")
-                                                .size(10.5)
+                                                .size(ts(10.5))
                                                 .color(MUTED),
                                         );
                                     });
@@ -922,7 +923,7 @@ impl RigWerkApp {
                                         RichText::new(
                                             "Add an effect from the library and it processes the final mix.",
                                         )
-                                        .size(9.5)
+                                        .size(ts(9.5))
                                         .color(DIM),
                                     );
                                 } else {
@@ -950,7 +951,7 @@ impl RigWerkApp {
                                 .add_sized(
                                     [50.0, 26.0],
                                     egui::Button::new(
-                                        RichText::new("Add").size(10.0).color(TEAL),
+                                        RichText::new("Add").size(ts(10.0)).color(TEAL),
                                     )
                                     .fill(with_alpha(TEAL, 14))
                                     .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))

@@ -3,6 +3,15 @@
 use eframe::egui;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Vec2};
 
+/// Every text size in the window is multiplied by this, so the whole interface
+/// can be made easier to read from one place.
+pub(crate) const FONT_SCALE: f32 = 1.2;
+
+/// A text size at the interface's reading scale.
+pub(crate) fn ts(size: f32) -> f32 {
+    size * FONT_SCALE
+}
+
 pub(crate) const BG: Color32 = Color32::from_rgb(8, 11, 17);
 pub(crate) const SIDEBAR: Color32 = Color32::from_rgb(11, 15, 23);
 pub(crate) const CARD: Color32 = Color32::from_rgb(16, 21, 31);
@@ -61,23 +70,23 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
         style.text_styles = [
             (
                 egui::TextStyle::Heading,
-                FontId::new(27.0, FontFamily::Proportional),
+                FontId::new(ts(27.0), FontFamily::Proportional),
             ),
             (
                 egui::TextStyle::Body,
-                FontId::new(13.5, FontFamily::Proportional),
+                FontId::new(ts(13.5), FontFamily::Proportional),
             ),
             (
                 egui::TextStyle::Button,
-                FontId::new(13.0, FontFamily::Proportional),
+                FontId::new(ts(13.0), FontFamily::Proportional),
             ),
             (
                 egui::TextStyle::Small,
-                FontId::new(10.5, FontFamily::Proportional),
+                FontId::new(ts(10.5), FontFamily::Proportional),
             ),
             (
                 egui::TextStyle::Monospace,
-                FontId::new(11.5, FontFamily::Monospace),
+                FontId::new(ts(11.5), FontFamily::Monospace),
             ),
         ]
         .into();

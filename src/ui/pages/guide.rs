@@ -6,6 +6,7 @@ use egui::{
 };
 
 use crate::app::RigWerkApp;
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, GREEN, MUTED, TEAL, TEXT,
 };
@@ -86,14 +87,14 @@ pub(crate) fn os_card(
                     });
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new(tagline).size(10.5).color(MUTED));
+                ui.label(RichText::new(tagline).size(ts(10.5)).color(MUTED));
                 ui.add_space(8.0);
                 horizontal_line(ui, BORDER_SOFT);
                 ui.add_space(6.0);
                 for bullet in bullets {
                     ui.horizontal(|ui| {
                         status_dot(ui, color);
-                        ui.label(RichText::new(*bullet).size(9.3).color(MUTED));
+                        ui.label(RichText::new(*bullet).size(ts(9.3)).color(MUTED));
                     });
                 }
             });
@@ -116,7 +117,7 @@ pub(crate) fn note_card(ui: &mut egui::Ui, title: &str, text: &str, color: Color
                     });
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new(text).size(9.8).color(MUTED));
+                ui.label(RichText::new(text).size(ts(9.8)).color(MUTED));
             });
         },
     );
@@ -143,7 +144,7 @@ impl RigWerkApp {
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new("One app. Two clocks.")
-                                .size(23.0)
+                                .size(ts(23.0))
                                 .strong()
                                 .color(TEXT),
                         );
@@ -151,7 +152,7 @@ impl RigWerkApp {
                             RichText::new(
                                 "RigWerk sits between the driver your interface insists on and the speakers you actually want to use.",
                             )
-                            .size(11.5)
+                            .size(ts(11.5))
                             .color(MUTED),
                         );
                     });
@@ -190,19 +191,19 @@ impl RigWerkApp {
                             ui.label(
                                 RichText::new(number)
                                     .family(FontFamily::Monospace)
-                                    .size(11.0)
+                                    .size(ts(11.0))
                                     .color(color)
                                     .strong(),
                             );
                             ui.add_space(9.0);
                             ui.label(
                                 RichText::new(title)
-                                    .size(13.0)
+                                    .size(ts(13.0))
                                     .color(TEXT)
                                     .strong(),
                             );
                             ui.add_space(4.0);
-                            ui.label(RichText::new(text).size(10.5).color(MUTED));
+                            ui.label(RichText::new(text).size(ts(10.5)).color(MUTED));
                             ui.add_space(10.0);
                             let (rect, _) = ui.allocate_exact_size(
                                 Vec2::new(step_w - 32.0, 42.0),

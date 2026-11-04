@@ -7,6 +7,7 @@ use egui::{
 };
 
 use crate::app::RigWerkApp;
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, RED, TEAL, TEXT,
 };
@@ -63,28 +64,28 @@ pub(crate) fn preset_row(
         rect.left_top() + Vec2::new(10.0, 9.0),
         Align2::LEFT_TOP,
         name,
-        FontId::new(11.0, FontFamily::Proportional),
+        FontId::new(ts(11.0), FontFamily::Proportional),
         TEXT,
     );
     ui.painter().text(
         rect.left_top() + Vec2::new(10.0, 25.0),
         Align2::LEFT_TOP,
         ellipsize(note, 48),
-        FontId::new(8.2, FontFamily::Proportional),
+        FontId::new(ts(8.2), FontFamily::Proportional),
         DIM,
     );
     ui.painter().text(
         rect.left_bottom() + Vec2::new(10.0, -9.0),
         Align2::LEFT_BOTTOM,
         ellipsize(path, 52),
-        FontId::new(8.2, FontFamily::Monospace),
+        FontId::new(ts(8.2), FontFamily::Monospace),
         MUTED,
     );
     ui.painter().text(
         rect.right_bottom() + Vec2::new(-10.0, -9.0),
         Align2::RIGHT_BOTTOM,
         facts,
-        FontId::new(7.8, FontFamily::Monospace),
+        FontId::new(ts(7.8), FontFamily::Monospace),
         DIM,
     );
     let delete_color = if confirming_delete || delete.hovered() {
@@ -106,7 +107,7 @@ pub(crate) fn preset_row(
         delete_rect.center(),
         Align2::CENTER_CENTER,
         delete_label,
-        FontId::new(7.3, FontFamily::Monospace),
+        FontId::new(ts(7.3), FontFamily::Monospace),
         delete_color,
     );
     if selected {
@@ -114,7 +115,7 @@ pub(crate) fn preset_row(
             delete_rect.left_center() + Vec2::new(-8.0, 0.0),
             Align2::RIGHT_CENTER,
             "CURRENT",
-            FontId::new(7.3, FontFamily::Monospace),
+            FontId::new(ts(7.3), FontFamily::Monospace),
             BLUE,
         );
     }
@@ -166,7 +167,7 @@ impl RigWerkApp {
                                         .frame(egui::Frame::NONE)
                                         .text_color(TEXT)
                                         .hint_text("Name this patch")
-                                        .font(FontId::new(14.0, FontFamily::Proportional)),
+                                        .font(FontId::new(ts(14.0), FontFamily::Proportional)),
                                 );
                             });
                         ui.add_space(9.0);
@@ -221,14 +222,14 @@ impl RigWerkApp {
                                     ui.vertical_centered(|ui| {
                                         ui.label(
                                             RichText::new("+")
-                                                .size(25.0)
+                                                .size(ts(25.0))
                                                 .color(TEAL)
                                                 .strong(),
                                         );
                                         ui.add_space(3.0);
                                         ui.label(
                                             RichText::new("No saved patches yet")
-                                                .size(12.5)
+                                                .size(ts(12.5))
                                                 .color(TEXT)
                                                 .strong(),
                                         );
@@ -237,7 +238,7 @@ impl RigWerkApp {
                                             RichText::new(
                                                 "Name the input and output pair above, then save it here for the next take.",
                                             )
-                                            .size(9.5)
+                                            .size(ts(9.5))
                                             .color(MUTED),
                                         );
                                     });
@@ -248,7 +249,7 @@ impl RigWerkApp {
                                     RichText::new(
                                         "Start the bridge, play a few notes, save the pairing you like.",
                                     )
-                                    .size(8.8)
+                                    .size(ts(8.8))
                                     .color(DIM),
                                 );
                             });
@@ -309,7 +310,7 @@ impl RigWerkApp {
                         ui.add_space(8.0);
                         ui.label(
                             RichText::new("Patches are saved on this computer.")
-                                .size(9.0)
+                                .size(ts(9.0))
                                 .color(DIM),
                         );
                     });

@@ -7,6 +7,7 @@ use egui::{Align, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, 
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{EngineState, EqSlot, PluginView};
 use crate::ui::pages::mixer::eq_card::{draw_curve, slot_hint, slot_title};
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL,
     TEXT,
@@ -48,14 +49,14 @@ impl RigWerkApp {
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new("Master bus · in the order the sound flows, left to right")
-                        .size(10.0)
+                        .size(ts(10.0))
                         .color(DIM),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("Manage plugins").size(9.5).color(TEAL),
+                                RichText::new("Manage plugins").size(ts(9.5)).color(TEAL),
                             )
                             .fill(with_alpha(TEAL, 14))
                             .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
@@ -151,7 +152,7 @@ impl RigWerkApp {
                             .add(
                                 egui::Button::new(
                                     RichText::new(if mute { "muted" } else { "mute" })
-                                        .size(8.0)
+                                        .size(ts(8.0))
                                         .color(if mute { RED } else { GREEN }),
                                 )
                                 .fill(if mute {
@@ -257,7 +258,7 @@ impl RigWerkApp {
                     if shaping == 1 { "" } else { "s" }
                 )
             })
-            .size(8.5)
+            .size(ts(8.5))
             .color(if eq.enabled && shaping > 0 {
                 MUTED
             } else {
@@ -337,23 +338,25 @@ fn inserts_stage(
                     status_dot(ui, DIM);
                     ui.label(
                         RichText::new("No inserts yet")
-                            .size(10.5)
+                            .size(ts(10.5))
                             .color(MUTED)
                             .strong(),
                     );
                 });
                 ui.label(
                     RichText::new("Plugins run here, between the pre and post EQ.")
-                        .size(9.0)
+                        .size(ts(9.0))
                         .color(DIM),
                 );
                 ui.add_space(8.0);
                 if ui
                     .add(
-                        egui::Button::new(RichText::new("+ Add a plugin").size(9.5).color(TEAL))
-                            .fill(with_alpha(TEAL, 14))
-                            .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
-                            .corner_radius(CornerRadius::same(7)),
+                        egui::Button::new(
+                            RichText::new("+ Add a plugin").size(ts(9.5)).color(TEAL),
+                        )
+                        .fill(with_alpha(TEAL, 14))
+                        .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
+                        .corner_radius(CornerRadius::same(7)),
                     )
                     .clicked()
                 {
@@ -378,7 +381,7 @@ fn inserts_stage(
                         ui.add_space((INSERT_H - 36.0) / 2.0);
                         if ui
                             .add(
-                                egui::Button::new(RichText::new("+").size(18.0).color(TEAL))
+                                egui::Button::new(RichText::new("+").size(ts(18.0)).color(TEAL))
                                     .fill(with_alpha(TEAL, 10))
                                     .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
                                     .corner_radius(CornerRadius::same(9))
@@ -425,7 +428,7 @@ fn insert_card(ui: &mut egui::Ui, index: usize, view: &PluginView, actions: &mut
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
                 .add(
-                    egui::Button::new(RichText::new("×").size(12.0).color(DIM))
+                    egui::Button::new(RichText::new("×").size(ts(12.0)).color(DIM))
                         .fill(Color32::TRANSPARENT)
                         .stroke(Stroke::NONE),
                 )
@@ -439,7 +442,7 @@ fn insert_card(ui: &mut egui::Ui, index: usize, view: &PluginView, actions: &mut
                 .add(
                     egui::Button::new(
                         RichText::new(if bypass { "BYP" } else { "ON" })
-                            .size(7.5)
+                            .size(ts(7.5))
                             .color(if bypass { DIM } else { AMBER }),
                     )
                     .fill(if bypass {
@@ -469,7 +472,7 @@ fn insert_card(ui: &mut egui::Ui, index: usize, view: &PluginView, actions: &mut
             if ui
                 .add_enabled(
                     view.error.is_none(),
-                    egui::Button::new(RichText::new("CFG").size(7.5).color(BLUE))
+                    egui::Button::new(RichText::new("CFG").size(ts(7.5)).color(BLUE))
                         .fill(with_alpha(BLUE, 14))
                         .stroke(Stroke::new(1.0, with_alpha(BLUE, 45)))
                         .corner_radius(CornerRadius::same(5)),
@@ -484,7 +487,7 @@ fn insert_card(ui: &mut egui::Ui, index: usize, view: &PluginView, actions: &mut
     ui.add_space(3.0);
     ui.label(
         RichText::new(ellipsize(&view.name, 21))
-            .size(10.0)
+            .size(ts(10.0))
             .color(if view.bypass { DIM } else { TEXT })
             .strong(),
     );
@@ -497,7 +500,7 @@ fn insert_card(ui: &mut egui::Ui, index: usize, view: &PluginView, actions: &mut
             },
             24,
         ))
-        .size(8.0)
+        .size(ts(8.0))
         .color(if view.error.is_some() { RED } else { DIM }),
     )
     .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));

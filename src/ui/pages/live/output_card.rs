@@ -8,6 +8,7 @@ use crate::app::settings::{rate_label, BUFFERS, RATES};
 use crate::app::RigWerkApp;
 use crate::audio::{DeviceItem, EngineState};
 use crate::ui::pages::live::driver_line::driver_line;
+use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEXT,
 };
@@ -68,7 +69,7 @@ impl RigWerkApp {
                             "No {low_label} outputs found. The bridge keeps using {}.",
                             self.selected_output().name
                         ))
-                        .size(10.0)
+                        .size(ts(10.0))
                         .color(MUTED),
                     );
                 });
@@ -89,8 +90,12 @@ impl RigWerkApp {
         // is too large to count as low latency, is shown right at the output
         // that would suffer from it.
         if let Some(problem) = &quantum_problem {
-            ui.label(RichText::new(ellipsize(problem, 78)).size(8.6).color(AMBER))
-                .on_hover_text(problem.clone());
+            ui.label(
+                RichText::new(ellipsize(problem, 78))
+                    .size(ts(8.6))
+                    .color(AMBER),
+            )
+            .on_hover_text(problem.clone());
         }
 
         // Measured: ASIO4ALL takes the cards it drives for itself, so the same
@@ -101,7 +106,7 @@ impl RigWerkApp {
         {
             ui.label(
                 RichText::new("ASIO4ALL in use: pick an output on other hardware")
-                    .size(8.6)
+                    .size(ts(8.6))
                     .color(AMBER),
             )
             .on_hover_text(
@@ -118,7 +123,7 @@ impl RigWerkApp {
                     .add(
                         egui::Button::new(
                             RichText::new(if self.mute { "muted" } else { "mute" })
-                                .size(9.0)
+                                .size(ts(9.0))
                                 .color(if self.mute { RED } else { GREEN }),
                         )
                         .fill(if self.mute {
@@ -145,7 +150,7 @@ impl RigWerkApp {
                 if self.selected_output().asio_clsid.is_some() {
                     ui.label(
                         RichText::new("ASIO direct")
-                            .size(8.3)
+                            .size(ts(8.3))
                             .color(BLUE)
                             .strong(),
                     )
@@ -169,7 +174,7 @@ impl RigWerkApp {
                         .add(
                             egui::Button::new(
                                 RichText::new(label)
-                                    .size(8.3)
+                                    .size(ts(8.3))
                                     .color(if low_latency { AMBER } else { DIM }),
                             )
                             .fill(if low_latency {
@@ -273,7 +278,7 @@ impl RigWerkApp {
                 }
                 None => backend,
             };
-            ui.label(RichText::new(ellipsize(&name, 30)).size(9.0).color(DIM));
+            ui.label(RichText::new(ellipsize(&name, 30)).size(ts(9.0)).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(micro_label(&backend_label, BLUE))
                     .on_hover_text(self.output_mode_text());

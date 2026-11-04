@@ -7,6 +7,7 @@ use crate::app::settings::{rate_label, BUFFERS, RATES};
 use crate::app::RigWerkApp;
 use crate::audio::EngineState;
 use crate::ui::pages::live::driver_line::driver_line;
+use crate::ui::theme::ts;
 use crate::ui::theme::{AMBER, BLUE, DIM, GREEN, MUTED, TEAL, TEXT};
 use crate::ui::widgets::{
     channel_chip, db_slider, device_selector, ellipsize, meter_row, micro_label, mono, source_tab,
@@ -102,11 +103,11 @@ impl RigWerkApp {
             } else {
                 "dedicated clock"
             };
-            ui.label(RichText::new(ellipsize(&name, 24)).size(9.0).color(DIM));
+            ui.label(RichText::new(ellipsize(&name, 24)).size(ts(9.0)).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     RichText::new(hint)
-                        .size(9.0)
+                        .size(ts(9.0))
                         .color(if demo { AMBER } else { GREEN }),
                 );
             });

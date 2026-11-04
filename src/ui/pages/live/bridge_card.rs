@@ -6,6 +6,7 @@ use egui::{Align, Layout, RichText, Sense, Vec2};
 use crate::app::RigWerkApp;
 use crate::audio::{CushionMode, EngineState};
 use crate::ui::scope::draw_mini_scope;
+use crate::ui::theme::ts;
 use crate::ui::theme::{AMBER, DIM, GREEN, MUTED, TEXT};
 use crate::ui::widgets::{
     hinted_tab, metric_inline, micro_label, mono, progress_line, status_dot, styled_slider,
@@ -22,11 +23,11 @@ impl RigWerkApp {
         ui.add_space(4.0);
         ui.label(
             RichText::new("Two clocks, one strip of audio")
-                .size(11.5)
+                .size(ts(11.5))
                 .color(TEXT)
                 .strong(),
         );
-        ui.label(RichText::new("Async ring buffer").size(9.5).color(DIM));
+        ui.label(RichText::new("Async ring buffer").size(ts(9.5)).color(DIM));
         ui.add_space(9.0);
 
         let (rect, _) =
@@ -71,7 +72,9 @@ impl RigWerkApp {
             if ui
                 .checkbox(
                     &mut drift,
-                    RichText::new("Drift correction").size(10.0).color(MUTED),
+                    RichText::new("Drift correction")
+                        .size(ts(10.0))
+                        .color(MUTED),
                 )
                 .changed()
             {
