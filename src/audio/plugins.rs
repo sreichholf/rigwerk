@@ -394,10 +394,16 @@ impl PluginChain {
         (slot, result)
     }
 
-    /// Splices an already loaded slot into the chain.  The caller holds the
-    /// chain lock only for this push.
-    pub(crate) fn push_slot(&mut self, slot: Slot) {
+    /// Splices an already loaded slot into the chain, but only when it was
+    /// built for the chain's current rate.  The caller holds the chain lock.
+    /// A mismatched slot is handed back so the caller can release the lock
+    /// before dropping it and rebuild at the new rate.
+    pub(crate) fn push_slot(&mut self, slot: Slot, loaded_rate: u32) -> Result<(), Slot> {
+        if loaded_rate != self.sample_rate {
+            return Err(slot);
+        }
         self.slots.push(slot);
+        Ok(())
     }
 
     pub(crate) fn refresh_rate(&mut self, sample_rate: u32) {

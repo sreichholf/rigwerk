@@ -170,23 +170,43 @@ impl Shared {
     }
 
     pub(crate) fn add_plugin(&self, pref: PluginPref) -> Result<(), String> {
-        let rate = self
-            .plugins
-            .lock()
-            .map(|chain| chain.rate())
-            .unwrap_or(48_000);
-        // Build the slot before taking the chain lock again: loading a dynamic
-        // library and calling `start_processing` can take milliseconds, and the
-        // audio callback only try-locks the chain.  Holding the lock here would
-        // turn every add into a dry block for the callback's whole load.
-        let (slot, result) = PluginChain::load_slot(pref, rate);
-        let mut chain = self
-            .plugins
-            .lock()
-            .map_err(|_| "Plugin chain unavailable".to_owned())?;
-        chain.push_slot(slot);
-        self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        result
+        const MAX_ATTEMPTS: usize = 3;
+        let mut attempts = 0;
+        loop {
+            let rate = self
+                .plugins
+                .lock()
+                .map(|chain| chain.rate())
+                .map_err(|_| "Plugin chain unavailable".to_owned())?;
+            // Build the slot before taking the chain lock again: loading a
+            // dynamic library and calling `start_processing` can take
+            // milliseconds, and the audio callback only try-locks the chain.
+            let (slot, result) = PluginChain::load_slot(pref.clone(), rate);
+            let mut chain = self
+                .plugins
+                .lock()
+                .map_err(|_| "Plugin chain unavailable".to_owned())?;
+            match chain.push_slot(slot, rate) {
+                Ok(()) => {
+                    self.plugin_active.store(chain.active(), Ordering::Relaxed);
+                    return result;
+                }
+                Err(stale) => {
+                    // The bridge changed rate while the slot was loading, so
+                    // it is set up for the wrong rate.  Drop it outside the
+                    // chain lock and build a fresh one.
+                    drop(chain);
+                    drop(stale);
+                }
+            }
+            attempts += 1;
+            if attempts >= MAX_ATTEMPTS {
+                return Err(
+                    "The plugin chain kept changing sample rate while the plugin was loading."
+                        .to_owned(),
+                );
+            }
+        }
     }
 
     pub(crate) fn remove_plugin(&self, index: usize) {

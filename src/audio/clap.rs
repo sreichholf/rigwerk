@@ -6,6 +6,7 @@
 //! serialised through the same mutex the VST3 host already uses, so a plugin
 //! instance is only ever called from one thread at a time.
 
+use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -52,6 +53,29 @@ use crate::audio::plugins::PluginParamView;
 /// fixed-buffer effects can handle, and longer bridge blocks are split.
 const MAX_BLOCK: usize = 512;
 
+thread_local! {
+    /// True while the current thread is inside a CLAP `process` call.  The
+    /// thread-check callback answers from here, so the audio callback never
+    /// takes a host-state lock just to report its identity.
+    static ON_AUDIO_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the current thread as the CLAP audio thread for as long as it lives.
+struct AudioThreadScope;
+
+impl AudioThreadScope {
+    fn enter() -> Self {
+        ON_AUDIO_THREAD.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+impl Drop for AudioThreadScope {
+    fn drop(&mut self) {
+        ON_AUDIO_THREAD.with(|flag| flag.set(false));
+    }
+}
+
 const HOST_NAME: &[u8] = b"RigWerk\0";
 const HOST_VENDOR: &[u8] = b"RigWerk\0";
 const HOST_URL: &[u8] = b"https://rigwerk.local\0";
@@ -76,10 +100,10 @@ struct TimerEntry {
 }
 
 /// Callback state shared with the plugin.  The plugin may call into this from
-/// its main, audio or helper threads, so everything here is atomics or a mutex.
+/// its main, audio or helper threads, so everything here is atomics or a mutex
+/// that callbacks only try to take.
 pub(crate) struct HostState {
     main_thread: std::thread::ThreadId,
-    audio_thread: Mutex<Option<std::thread::ThreadId>>,
     restart_requested: AtomicBool,
     process_requested: AtomicBool,
     callback_requested: AtomicBool,
@@ -96,7 +120,6 @@ impl HostState {
     fn new() -> Self {
         Self {
             main_thread: std::thread::current().id(),
-            audio_thread: Mutex::new(None),
             restart_requested: AtomicBool::new(false),
             process_requested: AtomicBool::new(false),
             callback_requested: AtomicBool::new(false),
@@ -363,6 +386,7 @@ impl ClapPlugin {
         };
         plugin.has_editor = gui_supports_embedding(plugin.plugin, plugin.gui_ext);
         plugin.activate()?;
+        plugin.start_processing()?;
         plugin.refresh_parameters();
         Ok(plugin)
     }
@@ -382,7 +406,10 @@ impl ClapPlugin {
         Ok(())
     }
 
-    fn ensure_started(&mut self) -> Result<(), String> {
+    /// Starts the plugin on the loading thread, before the insert is published
+    /// to the chain.  `process` must never call this: starting a plugin can do
+    /// arbitrary work and belongs on the UI/startup side.
+    fn start_processing(&mut self) -> Result<(), String> {
         if self.started {
             return Ok(());
         }
@@ -614,13 +641,10 @@ impl ClapPlugin {
         if !self.active {
             return Err("The CLAP plugin is not active.".to_owned());
         }
-        self.ensure_started()?;
-        if let Ok(mut audio_thread) = self.host_state.audio_thread.lock() {
-            let current = std::thread::current().id();
-            if *audio_thread != Some(current) {
-                *audio_thread = Some(current);
-            }
+        if !self.started {
+            return Err("The CLAP plugin is not started.".to_owned());
         }
+        let _audio_thread = AudioThreadScope::enter();
         let mix = mix.clamp(0.0, 1.0);
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
@@ -979,16 +1003,8 @@ unsafe extern "C" fn host_is_main_thread(host: *const clap_host) -> bool {
         .unwrap_or(false)
 }
 
-unsafe extern "C" fn host_is_audio_thread(host: *const clap_host) -> bool {
-    let Some(state) = (unsafe { state(host) }) else {
-        return false;
-    };
-    let current = std::thread::current().id();
-    state
-        .audio_thread
-        .lock()
-        .map(|thread| *thread == Some(current))
-        .unwrap_or(false)
+unsafe extern "C" fn host_is_audio_thread(_host: *const clap_host) -> bool {
+    ON_AUDIO_THREAD.with(|flag| flag.get())
 }
 
 static HOST_LOG: clap_host_log = clap_host_log {
@@ -1007,7 +1023,8 @@ unsafe extern "C" fn host_log(
         return;
     };
     let text = unsafe { cstring(message) };
-    if let Ok(mut last) = state.last_log.lock() {
+    // A plugin may log from its process callback; never wait behind the UI.
+    if let Ok(mut last) = state.last_log.try_lock() {
         *last = Some(text);
     }
 }
@@ -1105,7 +1122,9 @@ unsafe extern "C" fn host_register_timer(
         return false;
     }
     let period = Duration::from_millis(period_ms.max(1) as u64);
-    if let Ok(mut timers) = state.timers.lock() {
+    // Timer callbacks can run on the audio thread, so never wait for the UI's
+    // timer service; a failed registration is a valid CLAP answer.
+    if let Ok(mut timers) = state.timers.try_lock() {
         timers.push(TimerEntry {
             id,
             period,
@@ -1122,7 +1141,7 @@ unsafe extern "C" fn host_unregister_timer(host: *const clap_host, timer_id: u32
     let Some(state) = (unsafe { state(host) }) else {
         return false;
     };
-    if let Ok(mut timers) = state.timers.lock() {
+    if let Ok(mut timers) = state.timers.try_lock() {
         timers.retain(|timer| timer.id != timer_id);
         true
     } else {
