@@ -389,7 +389,7 @@ impl RigWerkApp {
         {
             if matches!(
                 self.engine.state,
-                EngineState::Running | EngineState::Starting
+                EngineState::Running | EngineState::Starting | EngineState::Stopping
             ) {
                 if manual {
                     self.push_log("Stop the bridge before checking its output driver.", AMBER);
@@ -440,7 +440,7 @@ impl RigWerkApp {
         {
             if matches!(
                 self.engine.state,
-                EngineState::Running | EngineState::Starting
+                EngineState::Running | EngineState::Starting | EngineState::Stopping
             ) {
                 if manual {
                     self.push_log("Stop the bridge before checking its output driver.", AMBER);
@@ -549,7 +549,10 @@ impl RigWerkApp {
             }
             if matches!(
                 self.engine.state,
-                EngineState::Preview | EngineState::Starting | EngineState::Running
+                EngineState::Preview
+                    | EngineState::Starting
+                    | EngineState::Running
+                    | EngineState::Stopping
             ) {
                 return;
             }
@@ -581,7 +584,10 @@ impl RigWerkApp {
             }
             if matches!(
                 self.engine.state,
-                EngineState::Preview | EngineState::Starting | EngineState::Running
+                EngineState::Preview
+                    | EngineState::Starting
+                    | EngineState::Running
+                    | EngineState::Stopping
             ) {
                 return;
             }

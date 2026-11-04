@@ -323,6 +323,7 @@ impl RigWerkApp {
             self.engine.stop();
             self.engine.clear_error();
             self.bridge_signature = 0;
+            self.bridge_restart_pending = false;
             self.push_log(format!("{subject} {verb} unplugged — bridge stopped."), RED);
             self.device_alert = Some(format!(
                 "{subject} {verb} unplugged, so the bridge was stopped. Reconnect the device, then start the bridge again."

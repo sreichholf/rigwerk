@@ -1,6 +1,8 @@
 //! The engine the UI talks to: start, stop, poll and live settings.  The
 //! bridge itself runs on its own thread.
 
+use std::any::Any;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -14,19 +16,36 @@ use super::plugins::{PluginPref, PluginView};
 use super::shared::Shared;
 use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
 
+/// A driver open can take seconds (ASIO's own timeout is six); a start that
+/// never reports live is treated as stuck rather than left on "Linking".
+const START_TIMEOUT: Duration = Duration::from_secs(12);
+/// Output callbacks advance `frames` even while the input is silent, so a
+/// counter that stays put means the output or its thread is gone.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(4);
+/// Last-resort wait when the engine itself is going away.  Normal stops never
+/// sleep here; the UI polls `Stopping` instead.
+const DROP_STOP_WAIT: Duration = Duration::from_millis(900);
+
 pub struct AudioEngine {
     /// The session the UI reads and writes.  Every real start replaces it, so
     /// an older bridge can only ever touch the session it was started with.
     pub(crate) shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
+    /// The thread of the current session.
     handle: Option<JoinHandle<()>>,
-    /// A bridge that outlived the bounded stop wait.  While it is alive, a
-    /// new start must not open a second device session.
-    lingering: Option<JoinHandle<()>>,
+    /// Bridge threads whose stop was requested but whose driver has not
+    /// returned from teardown yet.  While one is alive it still owns its audio
+    /// device, so `start` must not open a second session.
+    lingering: Vec<JoinHandle<()>>,
     /// Rate each session's `Shared` is built at.  Devices negotiate their own
     /// working rates inside the session.
     sample_rate: u32,
     pub state: EngineState,
+    /// When `Starting` began, for the start timeout.
+    started_at: Option<Instant>,
+    /// Frames at the last heartbeat check and when they last advanced.
+    last_frames: u64,
+    last_frames_at: Instant,
     /// The quantum that was forced before RigWerk changed it, restored on stop.
     #[cfg(target_os = "linux")]
     previous_quantum: u32,
@@ -41,9 +60,12 @@ impl AudioEngine {
             shared: Arc::new(Shared::new(sample_rate)),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
-            lingering: None,
+            lingering: Vec::new(),
             sample_rate,
             state: EngineState::Idle,
+            started_at: None,
+            last_frames: 0,
+            last_frames_at: Instant::now(),
             #[cfg(target_os = "linux")]
             previous_quantum: 0,
             #[cfg(target_os = "linux")]
@@ -95,21 +117,71 @@ impl AudioEngine {
         self.shared.set_routes(routes);
     }
 
+    /// Advances the session's observed state.  This is where a stuck start, a
+    /// dead output or a bridge thread that ended on its own becomes visible;
+    /// the UI calls it once a frame.
     pub fn poll(&mut self) {
-        if self.state == EngineState::Starting && self.shared.running.load(Ordering::Relaxed) {
-            self.state = EngineState::Running;
+        self.reap_finished_bridge();
+        let current_finished = self.reap_current_bridge();
+
+        if self.current_error().is_some() {
+            self.enter_error();
+            return;
         }
-        if let Some(error) = self.shared.snapshot().error {
-            #[cfg(target_os = "linux")]
-            let was_error = self.state == EngineState::Error;
-            self.state = EngineState::Error;
-            #[cfg(target_os = "linux")]
-            if !was_error && self.quantum_forced {
-                pipewire::restore_quantum(self.previous_quantum);
-                self.previous_quantum = 0;
-                self.quantum_forced = false;
+
+        if current_finished && matches!(self.state, EngineState::Starting | EngineState::Running) {
+            if self.stop.load(Ordering::Relaxed) {
+                self.finish_stop();
+                return;
             }
-            self.shared.set_status(format!("Error: {error}"));
+            let message = if self.state == EngineState::Starting {
+                "The bridge stopped before it became live. The audio driver closed the session; start the bridge again or choose another device."
+            } else {
+                "The bridge stopped unexpectedly. The audio driver ended the audio session; start the bridge again or choose another device."
+            };
+            self.shared.set_error(message);
+            self.enter_error();
+            return;
+        }
+
+        match self.state {
+            EngineState::Starting => {
+                if self.shared.running.load(Ordering::Relaxed) {
+                    self.state = EngineState::Running;
+                    self.last_frames = self.shared.frames.load(Ordering::Relaxed);
+                    self.last_frames_at = Instant::now();
+                } else if self
+                    .started_at
+                    .is_some_and(|started| started.elapsed() >= START_TIMEOUT)
+                {
+                    self.stop.store(true, Ordering::Relaxed);
+                    self.shared.set_error(format!(
+                        "The bridge did not become live within {} seconds. The audio driver may be stuck opening the device; stop the bridge, then start it again or choose another device.",
+                        START_TIMEOUT.as_secs()
+                    ));
+                    self.enter_error();
+                }
+            }
+            EngineState::Running => {
+                let frames = self.shared.frames.load(Ordering::Relaxed);
+                if frames != self.last_frames {
+                    self.last_frames = frames;
+                    self.last_frames_at = Instant::now();
+                } else if self.last_frames_at.elapsed() >= HEARTBEAT_TIMEOUT {
+                    self.stop.store(true, Ordering::Relaxed);
+                    self.shared.set_error(format!(
+                        "The bridge stopped producing audio: no output frames arrived for {} seconds. The output device or its driver may have stalled; stop the bridge and start it again.",
+                        HEARTBEAT_TIMEOUT.as_secs()
+                    ));
+                    self.enter_error();
+                }
+            }
+            EngineState::Stopping => {
+                if self.handle.is_none() && self.lingering.is_empty() {
+                    self.finish_stop();
+                }
+            }
+            EngineState::Idle | EngineState::Preview | EngineState::Error => {}
         }
     }
 
@@ -122,6 +194,7 @@ impl AudioEngine {
         self.replace_session();
         self.shared.reset();
         self.shared.set_status("Preview bridge · animated signal");
+        self.started_at = None;
         self.state = EngineState::Preview;
     }
 
@@ -201,11 +274,7 @@ impl AudioEngine {
 
     pub fn start(&mut self, config: StartConfig) {
         self.stop();
-        if self
-            .lingering
-            .as_ref()
-            .is_some_and(|handle| !handle.is_finished())
-        {
+        if self.lingering.iter().any(|handle| !handle.is_finished()) {
             // The driver ignored the stop flag and still owns the old device
             // session.  Opening the device again would put two streams on the
             // same hardware, so fail visibly instead while it finishes.  The
@@ -254,6 +323,9 @@ impl AudioEngine {
         self.stop = Arc::new(AtomicBool::new(false));
         self.shared.set_status("Opening independent output…");
         self.state = EngineState::Starting;
+        self.started_at = Some(Instant::now());
+        self.last_frames = 0;
+        self.last_frames_at = Instant::now();
 
         // The closure gets the new session's `Arc` and nothing older, so this
         // bridge's writes cannot reach a later start either.
@@ -262,11 +334,19 @@ impl AudioEngine {
         let handle = thread::Builder::new()
             .name("rigwerk-bridge".to_owned())
             .spawn(move || {
-                if let Err(error) = run_bridge(config, Arc::clone(&shared), Arc::clone(&stop)) {
-                    shared.set_error(error);
-                } else {
-                    shared.running.store(false, Ordering::Relaxed);
-                    shared.set_status("Bridge stopped");
+                let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    run_bridge(config, shared.clone(), stop)
+                }));
+                match result {
+                    Ok(Ok(())) => {
+                        shared.running.store(false, Ordering::Relaxed);
+                        shared.set_status("Bridge stopped");
+                    }
+                    Ok(Err(error)) => shared.set_error(error),
+                    Err(payload) => shared.set_error(format!(
+                        "The bridge thread panicked: {}",
+                        panic_text(&*payload)
+                    )),
                 }
             });
         match handle {
@@ -274,56 +354,111 @@ impl AudioEngine {
             Err(error) => {
                 self.shared
                     .set_error(format!("Could not start bridge: {error}"));
-                self.state = EngineState::Error;
+                self.enter_error();
             }
         }
     }
 
+    /// Asks the bridge to stop without waiting for its driver.  The thread is
+    /// moved to `lingering`; `poll` joins it once it finishes and only then
+    /// moves the engine back to `Idle`.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.reap_finished_bridge();
+
+        let mut live = !self.lingering.is_empty();
         if let Some(handle) = self.handle.take() {
-            // A misbehaving ASIO driver can block far longer than a UI frame.
-            // Wait a bounded 900 ms; past that, leave the thread to finish on
-            // its own and remember the handle instead of blocking the UI
-            // forever.
-            let deadline = Instant::now() + Duration::from_millis(900);
-            while !handle.is_finished() && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-            }
             if handle.is_finished() {
                 let _ = handle.join();
             } else {
-                // Keep the handle so `start` can refuse to open a second
-                // device session while this thread still owns the old one.
-                self.lingering = Some(handle);
+                self.lingering.push(handle);
+                live = true;
             }
         }
-        self.reap_finished_bridge();
-        // Everything below touches the current session only.  A bridge that
-        // outlived the wait owns that same session, never a newer one.
+
+        if live {
+            if self.state != EngineState::Stopping {
+                self.state = EngineState::Stopping;
+                self.shared.set_status("Stopping bridge…");
+            }
+            self.started_at = None;
+            self.shared.running.store(false, Ordering::Relaxed);
+            self.release_quantum();
+            return;
+        }
+
+        self.finish_stop();
+    }
+
+    /// Enters `Idle` after every bridge thread has confirmed teardown.
+    fn finish_stop(&mut self) {
         self.shared.running.store(false, Ordering::Relaxed);
         self.shared.device_lost.store(false, Ordering::Relaxed);
-        // Give PipeWire its own quantum back when the bridge stops.
+        self.release_quantum();
+        self.shared.set_status("Bridge stopped");
+        if let Ok(mut error) = self.shared.error.lock() {
+            *error = None;
+        }
+        self.started_at = None;
+        self.state = EngineState::Idle;
+    }
+
+    /// Joins a bridge that finished after its stop was requested, releasing
+    /// the old session it kept alive.  The result is deliberately ignored:
+    /// with a preview or a later session the `Shared` it wrote to is no
+    /// longer the one the UI reads.
+    fn reap_finished_bridge(&mut self) {
+        let mut index = 0;
+        while index < self.lingering.len() {
+            if self.lingering[index].is_finished() {
+                let handle = self.lingering.swap_remove(index);
+                let _ = handle.join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Joins the current session's thread if it ended, so a clean exit or a
+    /// panic cannot leave it running invisibly.  Returns whether it ended.
+    fn reap_current_bridge(&mut self) -> bool {
+        if !self.handle.as_ref().is_some_and(JoinHandle::is_finished) {
+            return false;
+        }
+        if let Some(handle) = self.handle.take() {
+            if handle.join().is_err() && self.current_error().is_none() {
+                self.shared
+                    .set_error("The bridge thread panicked; start the bridge again.");
+            }
+        }
+        true
+    }
+
+    fn current_error(&self) -> Option<String> {
+        self.shared
+            .error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
+    }
+
+    /// Publishes an error as the visible engine state and gives a forced
+    /// PipeWire quantum back.
+    fn enter_error(&mut self) {
+        self.state = EngineState::Error;
+        self.started_at = None;
+        self.release_quantum();
+        if let Some(error) = self.current_error() {
+            self.shared.set_status(format!("Error: {error}"));
+        }
+    }
+
+    fn release_quantum(&mut self) {
         #[cfg(target_os = "linux")]
         if self.quantum_forced {
             pipewire::restore_quantum(self.previous_quantum);
             self.previous_quantum = 0;
             self.quantum_forced = false;
-        }
-        self.shared.set_status("Bridge stopped");
-        if let Ok(mut error) = self.shared.error.lock() {
-            *error = None;
-        }
-        self.state = EngineState::Idle;
-    }
-
-    /// Joins a bridge that finished after its bounded stop wait, releasing
-    /// the old session it kept alive.
-    fn reap_finished_bridge(&mut self) {
-        if self.lingering.as_ref().is_some_and(JoinHandle::is_finished) {
-            if let Some(handle) = self.lingering.take() {
-                let _ = handle.join();
-            }
         }
     }
 
@@ -334,15 +469,34 @@ impl AudioEngine {
         if let Ok(mut error) = self.shared.error.lock() {
             *error = None;
         }
-        if self.state == EngineState::Error {
+        if self.state == EngineState::Error && self.handle.is_none() && self.lingering.is_empty() {
             self.state = EngineState::Idle;
         }
         self.shared.set_status("Bridge stopped");
     }
 }
 
+fn panic_text(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         self.stop();
+        // Shutdown is the one place a short wait is worth it: the process is
+        // going away and a detached driver thread must not outlive it.
+        let deadline = Instant::now() + DROP_STOP_WAIT;
+        for handle in self.lingering.drain(..) {
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
     }
 }

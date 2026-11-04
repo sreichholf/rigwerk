@@ -186,6 +186,9 @@ pub enum EngineState {
     Preview,
     Starting,
     Running,
+    /// Stop was requested but the bridge thread has not confirmed teardown.
+    /// The device is only released once `poll` sees it finish.
+    Stopping,
     Error,
 }
 

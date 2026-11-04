@@ -216,7 +216,10 @@ impl RigWerkApp {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let active = self.is_active();
-                let label = if active {
+                let stopping = self.engine.state == EngineState::Stopping;
+                let label = if stopping {
+                    "Stopping…"
+                } else if active {
                     "Stop bridge"
                 } else {
                     "Start bridge"
@@ -246,7 +249,7 @@ impl RigWerkApp {
                     ))
                     .corner_radius(CornerRadius::same(9)),
                 );
-                if button.clicked() {
+                if button.clicked() && !stopping {
                     if active {
                         self.stop_bridge();
                     } else {
@@ -258,6 +261,7 @@ impl RigWerkApp {
                     EngineState::Preview => ("Preview active", AMBER),
                     EngineState::Running => ("Bridge live", GREEN),
                     EngineState::Starting => ("Linking", BLUE),
+                    EngineState::Stopping => ("Stopping", AMBER),
                     EngineState::Error => ("Needs attention", RED),
                     EngineState::Idle => ("Ready", MUTED),
                 };

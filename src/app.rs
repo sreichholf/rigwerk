@@ -138,6 +138,9 @@ pub struct RigWerkApp {
     pub(crate) device_scan: Option<mpsc::Receiver<Inventory>>,
     pub(crate) manual_scan: bool,
     pub(crate) bridge_signature: u64,
+    /// A settings change asked for a new bridge while the old one was still
+    /// releasing its device; start again as soon as the engine is Idle.
+    pub(crate) bridge_restart_pending: bool,
     /// Whether this bridge start's real driver settings were already logged.
     pub(crate) driver_checked: bool,
     pub(crate) device_alert: Option<String>,
@@ -458,6 +461,7 @@ impl RigWerkApp {
             device_scan: None,
             manual_scan: false,
             bridge_signature: 0,
+            bridge_restart_pending: false,
             driver_checked: false,
             device_alert: None,
             driver_probe: None,

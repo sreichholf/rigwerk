@@ -16,7 +16,10 @@ impl RigWerkApp {
     pub(crate) fn is_active(&self) -> bool {
         matches!(
             self.engine.state,
-            EngineState::Preview | EngineState::Starting | EngineState::Running
+            EngineState::Preview
+                | EngineState::Starting
+                | EngineState::Running
+                | EngineState::Stopping
         )
     }
 
@@ -38,6 +41,14 @@ impl RigWerkApp {
     }
 
     pub(crate) fn start_bridge(&mut self) {
+        if self.engine.state == EngineState::Stopping {
+            self.push_log(
+                "The previous bridge is still releasing its audio device.",
+                AMBER,
+            );
+            return;
+        }
+        self.bridge_restart_pending = false;
         self.bridge_signature = self.current_bridge_signature();
         self.driver_checked = false;
         self.engine.set_gains(self.input_gain, self.output_gain);
@@ -86,17 +97,35 @@ impl RigWerkApp {
     }
 
     pub(crate) fn stop_bridge(&mut self) {
+        self.bridge_restart_pending = false;
         self.bridge_signature = 0;
         self.engine.stop();
         #[cfg(target_os = "linux")]
         self.refresh_quantum_check(false);
-        self.push_log("Bridge stopped. Devices released.", MUTED);
+        if self.engine.state == EngineState::Stopping {
+            self.push_log(
+                "Stopping the bridge — the devices release when the driver finishes.",
+                MUTED,
+            );
+        } else {
+            self.push_log("Bridge stopped. Devices released.", MUTED);
+        }
     }
 
     /// Re-opens the bridge as soon as the device, rate or buffer selection
     /// changes, instead of waiting for the person to stop and start it.
+    /// Stopping is asynchronous, so the new start waits until the old driver
+    /// has actually released the device.
     pub(crate) fn sync_bridge_config(&mut self) {
-        if !self.is_active() || self.bridge_signature == 0 {
+        if self.bridge_restart_pending && self.engine.state == EngineState::Idle {
+            self.bridge_restart_pending = false;
+            self.start_bridge();
+            return;
+        }
+        if self.engine.state == EngineState::Stopping
+            || !self.is_active()
+            || self.bridge_signature == 0
+        {
             return;
         }
         if self.current_bridge_signature() == self.bridge_signature {
@@ -106,7 +135,8 @@ impl RigWerkApp {
             "Bridge settings changed — reconnecting with the new setup.",
             BLUE,
         );
-        self.start_bridge();
+        self.stop_bridge();
+        self.bridge_restart_pending = true;
     }
 
     pub(crate) fn meters(&mut self, ctx: &egui::Context) {
@@ -145,6 +175,7 @@ impl RigWerkApp {
             self.engine.stop();
             self.engine.clear_error();
             self.bridge_signature = 0;
+            self.bridge_restart_pending = false;
             self.push_log("A bridge device was disconnected — bridge stopped.", RED);
             self.device_alert = Some(format!(
                 "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
