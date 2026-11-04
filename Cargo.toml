@@ -1,0 +1,47 @@
+[package]
+name = "rigwerk"
+version = "0.2.0"
+edition = "2021"
+description = "RigWerk - an ASIO input bridge with an independent output device"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui = "0.37"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cpal = "0.18"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# VST3 discovery, hosting and processing.  The crate ships its own bindings,
+# so no Steinberg SDK or extra native toolchain is needed.
+vst3-host = { version = "0.11", default-features = false }
+# CLAP discovery and hosting.  The bindings are plain C, and libloading opens
+# the .clap bundles at runtime without a build-time SDK.
+clap-sys = "0.5"
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+azo = "0.5"
+winapi = { version = "0.3", features = ["libloaderapi", "minwindef", "windef", "winuser"] }
+# Direct WASAPI access for the REAL-style output (IAudioClient3 at the
+# smallest engine step the driver allows).  Same version cpal already uses.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Linux needs a window system; the default features that bring it are off
+# above, so X11 and Wayland are switched back on here.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["x11", "wayland"] }
+
+[profile.release]
+opt-level = 2
+
