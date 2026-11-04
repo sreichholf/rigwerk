@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use super::bridge::run_bridge;
 use super::eq::{EqSettings, EqSlot};
+#[cfg(target_os = "linux")]
+use super::linux::pipewire;
 use super::plugins::{PluginPref, PluginView};
 use super::shared::Shared;
 use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
@@ -17,6 +19,12 @@ pub struct AudioEngine {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     pub state: EngineState,
+    /// The quantum that was forced before RigWerk changed it, restored on stop.
+    #[cfg(target_os = "linux")]
+    previous_quantum: u32,
+    /// Whether this engine is the one that set `clock.force-quantum`.
+    #[cfg(target_os = "linux")]
+    quantum_forced: bool,
 }
 
 impl AudioEngine {
@@ -26,6 +34,10 @@ impl AudioEngine {
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
             state: EngineState::Idle,
+            #[cfg(target_os = "linux")]
+            previous_quantum: 0,
+            #[cfg(target_os = "linux")]
+            quantum_forced: false,
         }
     }
 
@@ -78,7 +90,15 @@ impl AudioEngine {
             self.state = EngineState::Running;
         }
         if let Some(error) = self.shared.snapshot().error {
+            #[cfg(target_os = "linux")]
+            let was_error = self.state == EngineState::Error;
             self.state = EngineState::Error;
+            #[cfg(target_os = "linux")]
+            if !was_error && self.quantum_forced {
+                pipewire::restore_quantum(self.previous_quantum);
+                self.previous_quantum = 0;
+                self.quantum_forced = false;
+            }
             self.shared.set_status(format!("Error: {error}"));
         }
     }
@@ -155,6 +175,28 @@ impl AudioEngine {
     pub fn start(&mut self, config: StartConfig) {
         self.stop();
         self.shared.reset();
+        // Ask PipeWire for the low quantum before the output opens, so the
+        // first graph cycle already runs at the requested size.  A missing
+        // pw-metadata is not fatal: the bridge still opens on the ALSA period.
+        #[cfg(target_os = "linux")]
+        if config.pipewire_low_latency {
+            self.previous_quantum = pipewire::forced_quantum();
+            match pipewire::force_low_quantum() {
+                Ok(state) => {
+                    self.quantum_forced = true;
+                    self.shared.set_status(format!(
+                        "PipeWire quantum {} frames ({:.1} ms)…",
+                        state.quantum,
+                        state.quantum as f32 / state.rate.max(1) as f32 * 1000.0
+                    ));
+                }
+                Err(error) => {
+                    self.quantum_forced = false;
+                    self.shared
+                        .set_status(format!("PipeWire quantum not set: {error}"));
+                }
+            }
+        }
         // Open the saved inserts at the rate the output will run at, before
         // the first callback asks for frames.
         self.shared
@@ -202,6 +244,13 @@ impl AudioEngine {
         }
         self.shared.running.store(false, Ordering::Relaxed);
         self.shared.device_lost.store(false, Ordering::Relaxed);
+        // Give PipeWire its own quantum back when the bridge stops.
+        #[cfg(target_os = "linux")]
+        if self.quantum_forced {
+            pipewire::restore_quantum(self.previous_quantum);
+            self.previous_quantum = 0;
+            self.quantum_forced = false;
+        }
         self.shared.set_status("Bridge stopped");
         if let Ok(mut error) = self.shared.error.lock() {
             *error = None;

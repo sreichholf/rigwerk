@@ -18,7 +18,7 @@ fn real_style_opens_the_outputs() {
             .unwrap_or_default();
         let Ok(id) = device.id() else { continue };
         let shared = Arc::new(super::shared::Shared::new(48_000));
-        match super::real_output::open(id.id(), 48_000, Arc::clone(&shared)) {
+        match super::win::wasapi::open(id.id(), 48_000, Arc::clone(&shared)) {
             Ok((stream, info)) => {
                 println!("{name}: {}", info.describe(48_000));
                 std::thread::sleep(std::time::Duration::from_millis(300));
@@ -50,7 +50,7 @@ fn probe_reports_each_output_driver() {
             .map(|description| description.name().to_owned())
             .unwrap_or_default();
         let Ok(id) = device.id() else { continue };
-        match super::real_output::probe(id.id()) {
+        match super::win::wasapi::probe(id.id()) {
             Ok(info) => println!(
                 "{name}: smallest {} smp · default {} smp",
                 info.min_frames, info.default_frames
@@ -141,6 +141,7 @@ fn hardware_bridge() {
         output_buffer: 128,
         asio_wrapper: input.name.to_lowercase().contains("asio4all"),
         real_style_output: true,
+        pipewire_low_latency: false,
     });
     let mut ring_seen = 0.0f32;
     for _ in 0..30 {
@@ -189,7 +190,7 @@ fn real_style_stream_renders_on_the_default_output() {
     let host = cpal::host_from_id(cpal::HostId::Wasapi).unwrap();
     let id = host.default_output_device().unwrap().id().unwrap();
     let shared = Arc::new(super::shared::Shared::new(48_000));
-    let (stream, info) = super::real_output::open(id.id(), 48_000, Arc::clone(&shared))
+    let (stream, info) = super::win::wasapi::open(id.id(), 48_000, Arc::clone(&shared))
         .expect("IAudioClient3 stream");
     std::thread::sleep(std::time::Duration::from_millis(500));
     drop(stream);

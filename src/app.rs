@@ -116,6 +116,11 @@ pub struct RigWerkApp {
     pub(crate) peak_out_l: f32,
     pub(crate) peak_out_r: f32,
     pub(crate) snapshot: Snapshot,
+    /// Linux: PipeWire quantum compared with the ALSA period.  Recomputed at
+    /// startup, when the output changes and once the bridge reports its real
+    /// period.
+    #[cfg(target_os = "linux")]
+    pub(crate) quantum: Option<audio::QuantumInfo>,
     pub(crate) session_name: String,
     pub(crate) sessions: Vec<Preset>,
     pub(crate) selected_session: Option<usize>,
@@ -223,7 +228,7 @@ impl eframe::App for RigWerkApp {
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new(
-                            "ASIO and system-host inputs and outputs are wired on Windows. Linux uses ALSA: direct hw: devices on the low-latency side, and the desktop's PipeWire, PulseAudio or default device on the other.",
+                            "ASIO and system-host inputs and outputs are wired on Windows. Linux uses PipeWire as its default backend at a low quantum, with direct ALSA hw: devices and JACK available on the low-latency side and PulseAudio on the system side. RigWerk compares the ALSA period with the PipeWire quantum and reports a collision instead of hiding it.",
                         )
                         .size(10.5)
                         .color(GREEN),
@@ -431,6 +436,8 @@ impl RigWerkApp {
             peak_out_l: 0.0,
             peak_out_r: 0.0,
             snapshot: Snapshot::default(),
+            #[cfg(target_os = "linux")]
+            quantum: None,
             session_name: preferences.session_name.clone(),
             sessions,
             selected_session,
@@ -478,6 +485,8 @@ impl RigWerkApp {
         if !screenshot_mode {
             app.begin_plugin_scan();
         }
+        #[cfg(target_os = "linux")]
+        app.refresh_quantum_check(!screenshot_mode);
         let low_label = app.inventory.low_latency_label.clone();
         app.push_log(
             format!("{low_label} or system input: the chosen output opens independently."),

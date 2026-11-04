@@ -20,10 +20,7 @@ pub(crate) fn default_index(devices: &[DeviceItem]) -> usize {
     if let Some(index) = devices.iter().position(|device| device.preferred) {
         return index;
     }
-    devices
-        .iter()
-        .position(|device| !device.demo)
-        .unwrap_or(0)
+    devices.iter().position(|device| !device.demo).unwrap_or(0)
 }
 
 /// Drivers that wrap a sound card Windows already owns instead of talking to
@@ -177,6 +174,8 @@ impl RigWerkApp {
                 self.driver_probe_job = None;
                 self.last_output_driver = None;
                 self.start_output_driver_check(false);
+                #[cfg(target_os = "linux")]
+                self.refresh_quantum_check(true);
             }
             if !changed && self.manual_scan {
                 self.push_log("Scan complete — no device changes.", GREEN);
@@ -307,7 +306,7 @@ impl RigWerkApp {
         if missing.is_empty() {
             self.push_log(
                 format!(
-                    "Device change applied · {asio_count} ASIO / {output_count} output devices."
+                    "Device change applied · {asio_count} low-latency / {output_count} output devices."
                 ),
                 BLUE,
             );

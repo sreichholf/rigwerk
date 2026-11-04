@@ -5,7 +5,13 @@
 //! drains it; the output converts from the input's real rate when the two
 //! differ, and the ring only has to absorb the remaining drift.
 //!
-//! Where things live:
+//! Backends live in their own platform folders:
+//! - `win/asio`: ASIO drivers on either or both sides (Windows).
+//! - `win/wasapi`: REAL-style WASAPI playback (Windows).
+//! - `linux/pipewire`: the default Linux backend, including the low quantum.
+//! - `linux/alsa`: direct ALSA hardware PCMs and the output period.
+//!
+//! The rest of the audio side is backend-neutral:
 //! - `types`: the public vocabulary (devices, snapshot, start settings).
 //! - `engine`: the handle the UI uses to start, stop and tune the bridge.
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
@@ -14,8 +20,6 @@
 //! - `input` / `output`: the cpal capture and playback sides.
 //! - `mixer` / `resampler`: turning ring frames into output frames.
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
-//! - `real_output`: REAL-style WASAPI playback (Windows).
-//! - `asio`: ASIO drivers on either or both sides (Windows).
 
 mod bridge;
 pub(crate) mod clap;
@@ -31,18 +35,17 @@ mod shared;
 mod types;
 
 #[cfg(target_os = "windows")]
-mod asio;
-#[cfg(target_os = "windows")]
-mod real_output;
+mod win;
+
+#[cfg(any(target_os = "linux", test))]
+mod linux;
 
 #[cfg(target_os = "windows")]
-pub use real_output::probe as probe_output_driver;
+pub use win::wasapi::probe as probe_output_driver;
 
 #[cfg(test)]
 mod hardware_tests;
 
-#[cfg(target_os = "linux")]
-pub(crate) use devices::alsa_pcm_is_direct;
 pub(crate) use devices::is_low_latency_device;
 pub use devices::scan_devices;
 pub use engine::AudioEngine;
@@ -51,7 +54,15 @@ pub use eq::{
     MAX_Q as EQ_MAX_Q, MIN_Q as EQ_MIN_Q,
 };
 #[cfg(target_os = "linux")]
-pub(crate) use output::smallest_output_buffer;
+pub(crate) use linux::alsa::alsa_pcm_is_direct;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::alsa::{planned_output_period, smallest_output_buffer};
+#[cfg(target_os = "linux")]
+pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
 pub(crate) use plugins::PluginHandle;
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
-pub use types::{CushionMode, DeviceItem, EngineState, Inventory, Snapshot, StartConfig};
+#[cfg(target_os = "linux")]
+pub use types::QuantumInfo;
+pub use types::{
+    CushionMode, DeviceItem, EngineState, Inventory, Snapshot, StartConfig, PIPEWIRE_LOW_QUANTUM,
+};

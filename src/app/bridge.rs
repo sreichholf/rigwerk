@@ -9,7 +9,7 @@ use egui::Color32;
 use crate::app::devices::is_wrapper_driver;
 use crate::app::RigWerkApp;
 use crate::audio::EqSlot;
-use crate::audio::{EngineState, StartConfig};
+use crate::audio::{self, EngineState, StartConfig};
 use crate::ui::theme::{AMBER, BLUE, MUTED, RED};
 
 impl RigWerkApp {
@@ -52,6 +52,10 @@ impl RigWerkApp {
 
         let input = self.active_input().clone();
         let output = self.selected_output().clone();
+        #[cfg(target_os = "linux")]
+        let pipewire_low_latency = self.low_latency_output && audio::is_pipewire_device(&output);
+        #[cfg(not(target_os = "linux"))]
+        let pipewire_low_latency = false;
         let config = StartConfig {
             asio_clsid: input.asio_clsid,
             input_id: if input.asio_clsid.is_some() {
@@ -67,6 +71,7 @@ impl RigWerkApp {
             output_buffer: self.output_buffer,
             asio_wrapper: input.asio_clsid.is_some() && is_wrapper_driver(&input),
             real_style_output: self.low_latency_output && output.asio_clsid.is_none(),
+            pipewire_low_latency,
         };
         self.push_log(
             format!(
@@ -76,11 +81,15 @@ impl RigWerkApp {
             BLUE,
         );
         self.engine.start(config);
+        #[cfg(target_os = "linux")]
+        self.refresh_quantum_check(true);
     }
 
     pub(crate) fn stop_bridge(&mut self) {
         self.bridge_signature = 0;
         self.engine.stop();
+        #[cfg(target_os = "linux")]
+        self.refresh_quantum_check(false);
         self.push_log("Bridge stopped. Devices released.", MUTED);
     }
 
@@ -115,6 +124,8 @@ impl RigWerkApp {
         }
         self.engine.poll();
         self.snapshot = self.engine.snapshot();
+        #[cfg(target_os = "linux")]
+        self.refresh_quantum_actual();
         self.remember_output_driver();
         self.poll_output_driver_check();
         self.watch_output_driver();
@@ -230,8 +241,10 @@ impl RigWerkApp {
                 "REAL-style: the driver's smallest step, one step queued (normal output if refused)"
                     .to_owned()
             } else {
-                "Low latency: ALSA's smallest usable period (normal output buffer if refused)"
-                    .to_owned()
+                format!(
+                    "Low latency: PipeWire {}-frame quantum, ALSA's smallest usable period (normal output buffer if refused)",
+                    audio::PIPEWIRE_LOW_QUANTUM
+                )
             }
         } else {
             format!("Standard output · {} smp buffer", self.output_buffer)

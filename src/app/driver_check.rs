@@ -62,6 +62,106 @@ fn system_rate_settings() -> &'static str {
 }
 
 impl RigWerkApp {
+    /// Re-reads PipeWire's quantum and compares it with the period this output
+    /// will ask ALSA for.  Runs at startup, when the device changes and when
+    /// the bridge starts, so a collision is visible before any audio flows.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refresh_quantum_check(&mut self, log: bool) {
+        let output = self.selected_output().clone();
+        if output.demo {
+            self.quantum = None;
+            return;
+        }
+        let period = crate::audio::planned_output_period(
+            &output.id,
+            self.low_latency_output,
+            self.output_buffer,
+        );
+        let next = crate::audio::pipewire_check_output(&output, period);
+        let changed = match (&self.quantum, &next) {
+            (Some(previous), Some(next)) => {
+                previous.quantum != next.quantum
+                    || previous.alsa_period != next.alsa_period
+                    || previous.fits != next.fits
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        self.quantum = next;
+        if log && changed {
+            if let Some(info) = &self.quantum {
+                let tone = if info.fits && info.low_latency {
+                    GREEN
+                } else {
+                    AMBER
+                };
+                if !self.log.iter().any(|entry| entry.text == info.note) {
+                    self.push_log(info.note.clone(), tone);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)]
+    pub(crate) fn refresh_quantum_check(&mut self, _log: bool) {}
+
+    /// Once the output runs, replaces the planned ALSA period with the one the
+    /// driver really delivered, so the fit check tells the truth.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refresh_quantum_actual(&mut self) {
+        if self.engine.state != EngineState::Running {
+            return;
+        }
+        let frames = self.snapshot.output_step_frames;
+        if frames == 0 {
+            return;
+        }
+        if let Some(info) = self.quantum.clone() {
+            self.quantum = Some(info.with_period(frames));
+        } else {
+            self.refresh_quantum_check(false);
+            if let Some(info) = self.quantum.clone() {
+                self.quantum = Some(info.with_period(frames));
+            }
+        }
+    }
+
+    /// One short line for the Live page's MODE tile.
+    pub(crate) fn quantum_summary(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.quantum.as_ref().map(|info| {
+                if info.available {
+                    let ms = info.quantum as f32 / info.rate.max(1) as f32 * 1000.0;
+                    format!("PIPEWIRE · {} SMP QUANTUM · {:.1} MS", info.quantum, ms)
+                } else {
+                    "PIPEWIRE · QUANTUM UNKNOWN".to_owned()
+                }
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    /// The user-facing warning when the ALSA period and quantum collide or the
+    /// quantum is too large to call low latency.
+    pub(crate) fn quantum_problem(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.quantum
+                .as_ref()
+                .filter(|info| !info.fits || !info.low_latency)
+                .map(|info| info.note.clone())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     /// The input driver's real rate and block size, once the bridge runs and
     /// the first block has arrived.
     pub(crate) fn input_actual(&self) -> Option<DriverActual> {
@@ -248,6 +348,11 @@ impl RigWerkApp {
                     ),
                     AMBER,
                 );
+            }
+        }
+        if let Some(text) = self.quantum_problem() {
+            if !self.log.iter().any(|entry| entry.text == text) {
+                self.push_log(text, AMBER);
             }
         }
     }
@@ -566,15 +671,32 @@ fn probe_output(id: &str) -> Result<DriverActual, String> {
                 .to_owned(),
         );
     }
+    let quantum_device = crate::audio::DeviceItem {
+        id: id.to_owned(),
+        name: String::new(),
+        backend: "ALSA".to_owned(),
+        channels: 0,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    };
+    let mut tone = if direct {
+        DriverTone::Good
+    } else {
+        DriverTone::Notice
+    };
+    if let Some(info) = crate::audio::pipewire_check_output(&quantum_device, frames) {
+        let low = info.fits && info.low_latency;
+        notes.push(info.note);
+        if !low {
+            tone = DriverTone::Notice;
+        }
+    }
     Ok(DriverActual {
         rate,
         frames,
         notes,
-        tone: if direct {
-            DriverTone::Good
-        } else {
-            DriverTone::Notice
-        },
+        tone,
     })
 }
 

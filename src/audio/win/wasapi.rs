@@ -7,9 +7,9 @@
 //! also carries the bridge's audio, so the output side shrinks from about
 //! 10-20 ms to a few milliseconds and other apps on that device benefit too.
 
-use super::mixer::OutputMixer;
-use super::output::write_frame;
-use super::shared::Shared;
+use crate::audio::mixer::OutputMixer;
+use crate::audio::output::write_frame;
+use crate::audio::shared::Shared;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};

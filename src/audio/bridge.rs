@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use cpal::traits::StreamTrait;
 
-#[cfg(target_os = "windows")]
-use super::asio::{run_asio_bridge, run_asio_output_bridge};
 use super::devices::pick_input_config;
 use super::input::{make_input_stream, open_input_device};
 use super::output::open_output;
 use super::shared::{initial_target, Shared};
 use super::types::StartConfig;
+#[cfg(target_os = "windows")]
+use super::win::asio::{run_asio_bridge, run_asio_output_bridge};
 
 /// "48000 Hz" when both sides share a rate, "44100 → 48000 Hz" when the
 /// output converts.

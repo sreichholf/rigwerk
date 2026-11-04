@@ -2,6 +2,10 @@
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
+#[cfg(any(target_os = "linux", test))]
+use super::linux::alsa::{alsa_pcm_is_direct, alsa_pcm_is_placeholder};
+#[cfg(any(target_os = "linux", test))]
+use super::linux::pipewire;
 use super::types::{DeviceItem, Inventory, DEMO_ASIO_ID, DEMO_INPUT_ID, DEMO_OUTPUT_ID};
 
 pub fn scan_devices() -> Inventory {
@@ -94,6 +98,15 @@ pub fn scan_devices() -> Inventory {
                 .map(|description| description.name().to_owned())
                 .unwrap_or_else(|_| "Audio device".to_owned());
             let id = device.id().map(|id| id.to_string()).ok();
+            #[cfg(target_os = "linux")]
+            let device_backend =
+                if pipewire::is_pipewire_endpoint(id.as_deref().unwrap_or_default(), &name) {
+                    "PIPEWIRE".to_owned()
+                } else {
+                    host_name.to_owned()
+                };
+            #[cfg(not(target_os = "linux"))]
+            let device_backend = host_name.to_owned();
 
             // ALSA publishes sink/source plugins that cannot carry a guitar:
             // "null" discards everything and "oss" is the legacy emulation.
@@ -110,7 +123,7 @@ pub fn scan_devices() -> Inventory {
                     output_candidates.push(DeviceItem {
                         id: id.clone(),
                         name: name.clone(),
-                        backend: host_name.to_owned(),
+                        backend: device_backend.clone(),
                         channels: config.channels() as usize,
                         demo: false,
                         preferred: default_output_id.as_deref() == Some(id.as_str()),
@@ -123,7 +136,7 @@ pub fn scan_devices() -> Inventory {
                         output_candidates.push(DeviceItem {
                             id: id.clone(),
                             name: name.clone(),
-                            backend: host_name.to_owned(),
+                            backend: device_backend.clone(),
                             channels: range.channels() as usize,
                             demo: false,
                             preferred: default_output_id.as_deref() == Some(id.as_str()),
@@ -138,7 +151,7 @@ pub fn scan_devices() -> Inventory {
                     input_candidates.push(DeviceItem {
                         id: id.clone(),
                         name: name.clone(),
-                        backend: host_name.to_owned(),
+                        backend: device_backend.clone(),
                         channels: config.channels() as usize,
                         demo: false,
                         preferred: default_input_id.as_deref() == Some(id.as_str()),
@@ -151,7 +164,7 @@ pub fn scan_devices() -> Inventory {
                         input_candidates.push(DeviceItem {
                             id: id.clone(),
                             name,
-                            backend: host_name.to_owned(),
+                            backend: device_backend.clone(),
                             channels: range.channels() as usize,
                             demo: false,
                             preferred: default_input_id.as_deref() == Some(id.as_str()),
@@ -162,6 +175,14 @@ pub fn scan_devices() -> Inventory {
             }
         }
     }
+
+    // PipeWire is the default Linux backend.  When a PipeWire endpoint is
+    // present, it becomes the preferred output and input instead of whichever
+    // generic `default` plugin cpal happened to list first.
+    #[cfg(any(target_os = "linux", test))]
+    let pipewire_output = prefer_pipewire(&mut output_candidates);
+    #[cfg(any(target_os = "linux", test))]
+    prefer_pipewire(&mut input_candidates);
 
     // WASAPI is the host that keeps other apps audible in shared mode, which is
     // exactly what an ASIO input needs on the other side of the bridge.  Rank
@@ -206,14 +227,28 @@ pub fn scan_devices() -> Inventory {
     });
     input_candidates.dedup_by(|a, b| a.name == b.name && a.backend == b.backend);
 
-    // On Linux, JACK inputs are the dedicated low-latency path (the platform
-    // counterpart to ASIO).  Without JACK, direct ALSA hardware PCMs (`hw:` and
-    // `plughw:`) take that role while the virtual `default`, PipeWire and
-    // PulseAudio PCMs stay on the system side.  On a machine that exposes only
-    // virtual ALSA inputs, fall back to those so the ALSA tab has something to
-    // open instead of showing only a preview placeholder.
+    // On Linux, PipeWire is the default low-latency backend.  Its inputs and
+    // the default PCM come first; JACK follows when present, then direct ALSA
+    // hardware PCMs (`hw:`/`plughw:`).  Virtual PulseAudio/default inputs stay
+    // on the system side.  On a machine that exposes only virtual ALSA inputs,
+    // fall back to those so the side has something to open instead of showing
+    // only a preview placeholder.
     #[cfg(target_os = "linux")]
     {
+        let mut pipewire_inputs = Vec::new();
+        input_candidates.retain(|device| {
+            if pipewire::is_pipewire_device(device) {
+                pipewire_inputs.push(device.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        let mut low_inputs = Vec::new();
+        let has_pipewire = !pipewire_inputs.is_empty();
+        low_inputs.extend(pipewire_inputs);
+
         let mut jack_inputs = Vec::new();
         input_candidates.retain(|device| {
             if device.backend.eq_ignore_ascii_case("JACK") {
@@ -223,34 +258,53 @@ pub fn scan_devices() -> Inventory {
                 true
             }
         });
-        if !jack_inputs.is_empty() {
-            inventory.low_latency_label = "JACK".to_owned();
-            inventory.asio.extend(jack_inputs);
-        } else {
-            inventory.low_latency_label = "ALSA".to_owned();
-            let mut direct_inputs = Vec::new();
-            input_candidates.retain(|device| {
-                if device.backend.eq_ignore_ascii_case("ALSA") && alsa_pcm_is_direct(&device.id) {
-                    direct_inputs.push(device.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            if direct_inputs.is_empty() {
-                // Containers and some desktops only publish the "default"
-                // plugin; keep it usable as the ALSA-side input too.  The
-                // system list still has the same device.
-                let alsa_inputs: Vec<DeviceItem> = input_candidates
-                    .iter()
-                    .filter(|device| device.backend.eq_ignore_ascii_case("ALSA"))
-                    .cloned()
-                    .collect();
-                inventory.asio.extend(alsa_inputs);
+        let has_jack = !jack_inputs.is_empty();
+        low_inputs.extend(jack_inputs);
+
+        let mut direct_inputs = Vec::new();
+        input_candidates.retain(|device| {
+            if device.backend.eq_ignore_ascii_case("ALSA") && alsa_pcm_is_direct(&device.id) {
+                direct_inputs.push(device.clone());
+                false
             } else {
-                inventory.asio.extend(direct_inputs);
+                true
             }
+        });
+        low_inputs.extend(direct_inputs);
+
+        inventory.low_latency_label = if has_pipewire || pipewire_output {
+            "PIPEWIRE"
+        } else if has_jack {
+            "JACK"
+        } else {
+            "ALSA"
         }
+        .to_owned();
+
+        if low_inputs.is_empty() {
+            // Containers and some desktops only publish the "default" plugin;
+            // keep it usable as the low-latency input too.  The system list
+            // still has the same device.
+            let alsa_inputs: Vec<DeviceItem> = input_candidates
+                .iter()
+                .filter(|device| {
+                    device.backend.eq_ignore_ascii_case("ALSA")
+                        || device.backend.eq_ignore_ascii_case("PIPEWIRE")
+                })
+                .cloned()
+                .collect();
+            inventory.asio.extend(alsa_inputs);
+        } else {
+            inventory.asio.extend(low_inputs);
+        }
+        // The preferred PipeWire entry must stay first even when a JACK or
+        // direct ALSA device also landed on this side.
+        inventory.asio.sort_by(|a, b| {
+            b.preferred
+                .cmp(&a.preferred)
+                .then_with(|| low_latency_rank(&a.backend).cmp(&low_latency_rank(&b.backend)))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
     }
 
     inventory.outputs = output_candidates;
@@ -286,6 +340,8 @@ pub fn scan_devices() -> Inventory {
             name: "System speakers · preview".to_owned(),
             backend: if cfg!(target_os = "windows") {
                 "WASAPI".to_owned()
+            } else if cfg!(target_os = "linux") {
+                inventory.low_latency_label.clone()
             } else {
                 "ALSA".to_owned()
             },
@@ -299,42 +355,49 @@ pub fn scan_devices() -> Inventory {
     inventory
 }
 
-/// Whether a cpal ALSA id names a physical PCM rather than a virtual plugin.
-/// `hw:` bypasses every conversion; `plughw:` still goes straight to the card
-/// but lets ALSA convert formats.  Both are the low-latency ALSA side.
+/// PipeWire-backed endpoints are preferred on Linux.
 #[cfg(any(target_os = "linux", test))]
-fn alsa_pcm_name(device_id: &str) -> &str {
-    // cpal prints the host in lower case (`alsa:hw:CARD=0,DEV=0`), while other
-    // backends and older versions use the display spelling (`ALSA:...`).
-    match device_id.split_once(':') {
-        Some((host, pcm)) if host.eq_ignore_ascii_case("alsa") => pcm.trim(),
-        _ => device_id.trim(),
+fn prefer_pipewire(devices: &mut [DeviceItem]) -> bool {
+    let Some(index) = devices.iter().position(pipewire::is_pipewire_device) else {
+        return false;
+    };
+    for device in devices.iter_mut() {
+        device.preferred = false;
+    }
+    devices[index].preferred = true;
+    true
+}
+
+/// Low-latency groups list PipeWire first, then JACK, then direct ALSA.
+#[cfg(target_os = "linux")]
+fn low_latency_rank(backend: &str) -> u8 {
+    if backend.eq_ignore_ascii_case("PIPEWIRE") {
+        0
+    } else if backend.eq_ignore_ascii_case("JACK") {
+        1
+    } else {
+        2
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn alsa_pcm_is_direct(device_id: &str) -> bool {
-    let pcm = alsa_pcm_name(device_id);
-    pcm.starts_with("hw:") || pcm.starts_with("plughw:")
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn alsa_pcm_is_placeholder(device_id: &str) -> bool {
-    let pcm = alsa_pcm_name(device_id);
-    pcm == "null" || pcm == "oss" || pcm.starts_with("oss:")
-}
-
 /// The shared answer to "does this device belong on the low-latency tab?".
-/// ASIO is low latency on Windows; JACK is on Linux; direct ALSA hardware PCMs
-/// are Linux's fallback when JACK is absent.  Virtual ALSA devices (`default`,
-/// `pipewire`, `pulse`, `sysdefault`) stay on the system side.
+/// ASIO is low latency on Windows.  On Linux, PipeWire is the default backend,
+/// JACK is the dedicated graph, and direct ALSA hardware PCMs are the
+/// exclusive fallback.  PulseAudio and other virtual plugins stay on the
+/// system side.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn is_low_latency_device(device: &DeviceItem, low_latency_label: &str) -> bool {
     if device.asio_clsid.is_some() {
         return true;
     }
-    if device.backend.eq_ignore_ascii_case("ALSA") {
-        return low_latency_label.eq_ignore_ascii_case("ALSA") && alsa_pcm_is_direct(&device.id);
+    if pipewire::is_pipewire_device(device) {
+        return true;
+    }
+    if device.backend.eq_ignore_ascii_case("JACK") {
+        return true;
+    }
+    if device.backend.eq_ignore_ascii_case("ALSA") && alsa_pcm_is_direct(&device.id) {
+        return true;
     }
     device.backend.eq_ignore_ascii_case(low_latency_label)
 }
@@ -391,7 +454,7 @@ pub(crate) fn pick_input_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{alsa_pcm_is_direct, alsa_pcm_is_placeholder, is_low_latency_device};
+    use super::is_low_latency_device;
     use crate::audio::DeviceItem;
 
     fn device(id: &str, backend: &str) -> DeviceItem {
@@ -407,45 +470,30 @@ mod tests {
     }
 
     #[test]
-    fn direct_alsa_pcms_are_recognised() {
-        assert!(alsa_pcm_is_direct("ALSA:hw:CARD=0,DEV=0"));
-        assert!(alsa_pcm_is_direct("ALSA:plughw:CARD=1,DEV=0"));
-        assert!(alsa_pcm_is_direct("alsa:hw:CARD=0,DEV=0"));
-        assert!(alsa_pcm_is_direct("alsa:plughw:CARD=1,DEV=0"));
-        assert!(alsa_pcm_is_direct("hw:CARD=0,DEV=0"));
+    fn pipewire_is_the_low_latency_backend() {
+        let pipewire = device("ALSA:pipewire", "ALSA");
+        assert!(is_low_latency_device(&pipewire, "PIPEWIRE"));
+        assert!(is_low_latency_device(&pipewire, "ALSA"));
     }
 
     #[test]
-    fn virtual_alsa_pcms_stay_on_the_system_side() {
-        for id in [
-            "ALSA:default",
-            "ALSA:pipewire",
-            "ALSA:pulse",
-            "ALSA:sysdefault:CARD=0",
-        ] {
-            assert!(!alsa_pcm_is_direct(id), "{id}");
-            assert!(!is_low_latency_device(&device(id, "ALSA"), "ALSA"), "{id}");
+    fn virtual_alsa_pcms_other_than_pipewire_stay_on_the_system_side() {
+        for id in ["ALSA:pulse", "ALSA:sysdefault:CARD=0"] {
+            assert!(
+                !is_low_latency_device(&device(id, "ALSA"), "PIPEWIRE"),
+                "{id}"
+            );
         }
     }
 
     #[test]
-    fn sink_plugins_that_cannot_carry_audio_are_skipped() {
-        assert!(alsa_pcm_is_placeholder("ALSA:null"));
-        assert!(alsa_pcm_is_placeholder("alsa:null"));
-        assert!(alsa_pcm_is_placeholder("ALSA:oss"));
-        assert!(alsa_pcm_is_placeholder("ALSA:oss:default"));
-        assert!(!alsa_pcm_is_placeholder("ALSA:pulse"));
-        assert!(!alsa_pcm_is_placeholder("ALSA:hw:CARD=0,DEV=0"));
-    }
-
-    #[test]
-    fn a_direct_alsa_pcm_is_low_latency_only_when_alsa_owns_that_side() {
+    fn direct_alsa_and_jack_are_low_latency() {
         let direct = device("ALSA:hw:CARD=0,DEV=0", "ALSA");
-        assert!(is_low_latency_device(&direct, "ALSA"));
-        assert!(!is_low_latency_device(&direct, "JACK"));
+        assert!(is_low_latency_device(&direct, "PIPEWIRE"));
+        assert!(is_low_latency_device(&direct, "JACK"));
         assert!(is_low_latency_device(
             &device("JACK:system", "JACK"),
-            "JACK"
+            "PIPEWIRE"
         ));
     }
 }

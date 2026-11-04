@@ -126,6 +126,13 @@ impl RigWerkApp {
         let mode_text = &self.snapshot.output_mode;
         let (mode, color) = if self.selected_output().asio_clsid.is_some() {
             ("ASIO output · direct".to_owned(), BLUE)
+        } else if let Some(summary) = self.quantum_summary() {
+            let tone = if self.quantum_problem().is_some() {
+                AMBER
+            } else {
+                GREEN
+            };
+            (summary, tone)
         } else if running && mode_text.starts_with("REAL-style") {
             let driver_minimum = mode_text.contains("no smaller step");
             let step = self

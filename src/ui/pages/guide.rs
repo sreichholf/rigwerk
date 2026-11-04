@@ -233,11 +233,11 @@ impl RigWerkApp {
             os_card(
                 ui,
                 "LINUX",
-                "Direct ALSA input + PipeWire, PulseAudio or ALSA output.",
+                "PipeWire low quantum by default, with direct ALSA and JACK still selectable.",
                 &[
-                    "hw:/plughw: inputs are listed on the low-latency side",
-                    "Virtual ALSA devices stay on the desktop's sound server",
-                    "The bridge opens each side on its own clock",
+                    "PipeWire is the default low-latency backend",
+                    "hw:/plughw: and JACK stay on the low-latency side",
+                    "The ALSA period is checked against the quantum",
                 ],
                 half,
                 BLUE,
@@ -253,7 +253,7 @@ impl RigWerkApp {
         } else {
             (
                 "LINUX LATENCY",
-                "The low latency switch asks ALSA for the smallest period the output allows (at least 32 samples) instead of the manual output buffer. Direct hw: outputs can go lower; the default PipeWire or PulseAudio device stays shared, so other apps keep their sound. \"Check driver\" reads the output's supported period range without opening a stream.",
+                "PipeWire is the default Linux backend. While the low-latency bridge runs, RigWerk asks PipeWire for a 64-frame quantum (about 1.3 ms at 48 kHz) and ALSA for the smallest period the output allows (at least 32 samples). At startup, when the output changes and when the bridge starts, it compares the ALSA period with the quantum: equal or evenly divisible values are a fit, a coarser ALSA block or a period that does not divide the quantum is flagged on the OUTPUT card and in the activity log. A quantum above 256 frames is marked as the desktop's shared size, not low latency. Direct hw: outputs bypass the desktop mixer; PulseAudio devices stay on the system side.",
             )
         };
         note_card(ui, latency_title, latency_text, AMBER, total);
@@ -270,7 +270,7 @@ impl RigWerkApp {
             note_card(
                 ui,
                 "STILL OPEN",
-                "Whether one interface can play while its ASIO driver holds it depends on the driver. The Linux ALSA path is a prototype: its device classification, low-latency period request and driver check are built and tested, but this build has not yet been run with real Linux audio hardware.",
+                "Whether one interface can play while its ASIO driver holds it depends on the driver. The Linux PipeWire path is a prototype: its device classification, low-quantum request, ALSA-period fit check and driver check are built and tested, but the quantum request depends on the installed pw-metadata and the desktop's PipeWire settings.",
                 AMBER,
                 half,
             );

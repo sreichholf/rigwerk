@@ -288,6 +288,37 @@ impl RigWerkApp {
             );
         });
 
+        #[cfg(target_os = "linux")]
+        if let Some(info) = self.quantum.clone() {
+            let good = info.fits && info.low_latency;
+            let tone = if good { crate::ui::theme::GREEN } else { AMBER };
+            ui.add_space(10.0);
+            egui::Frame::new()
+                .fill(with_alpha(tone, 12))
+                .stroke(Stroke::new(1.0, with_alpha(tone, 45)))
+                .corner_radius(CornerRadius::same(11))
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(micro_label("PIPEWIRE QUANTUM", tone));
+                        ui.label(
+                            RichText::new(format!(
+                                "ALSA period {} smp · quantum {} smp · {:.1} ms at {:.1} kHz",
+                                info.alsa_period,
+                                info.quantum,
+                                info.quantum as f32 / info.rate.max(1) as f32 * 1000.0,
+                                info.rate as f32 / 1000.0
+                            ))
+                            .size(10.0)
+                            .color(MUTED),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&info.note).size(9.8).color(tone));
+                });
+        }
+
         ui.add_space(12.0);
         egui::Frame::new()
             .fill(with_alpha(AMBER, 12))
@@ -302,7 +333,7 @@ impl RigWerkApp {
                         RichText::new(if cfg!(target_os = "windows") {
                             "Inputs and outputs are grouped by driver type: ASIO on the low-latency side, WASAPI, DirectSound and MME on the system side, and every device stays selectable. Same-interface playback is up to the driver: most vendor ASIO drivers allow it, ASIO4ALL-style wrappers usually do not. RigWerk tries the pairing and shows the driver's error instead of blocking it."
                         } else {
-                            "Inputs and outputs are grouped by driver type: direct ALSA hardware PCMs (hw: or plughw:) sit on the low-latency side, while the default, PipeWire and PulseAudio devices stay on the system side. Direct hardware can take the card exclusively; the virtual device shares it with every other app. RigWerk tries the pairing and shows the driver's error instead of blocking it."
+                            "PipeWire is the default Linux backend: its endpoints sit on the low-latency side next to direct ALSA hardware (hw: or plughw:) and JACK. The low-latency switch asks PipeWire for a 64-frame quantum and ALSA for its smallest period; the PIPEWIRE QUANTUM card above warns when the two do not line up. PulseAudio devices stay on the system side."
                         })
                         .size(10.0)
                         .color(MUTED),

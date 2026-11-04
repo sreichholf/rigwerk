@@ -5,6 +5,156 @@ pub const DEMO_ASIO_ID: &str = "demo:asio";
 pub const DEMO_INPUT_ID: &str = "demo:input";
 pub const DEMO_OUTPUT_ID: &str = "demo:output";
 
+/// The quantum RigWerk asks PipeWire for while the low-latency bridge runs.
+pub const PIPEWIRE_LOW_QUANTUM: u32 = 64;
+/// Above this quantum a PipeWire route is shown as the desktop's shared size
+/// instead of being counted as low latency.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub const PIPEWIRE_LOW_QUANTUM_MAX: u32 = 256;
+
+/// What the Linux low-latency path got: PipeWire's graph quantum compared with
+/// the ALSA period the output will use.  Empty on other platforms.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[derive(Clone, Debug, Default)]
+pub struct QuantumInfo {
+    /// Whether PipeWire's settings store could be read.
+    pub available: bool,
+    /// PipeWire's current graph quantum in frames (0 when unknown).
+    pub quantum: u32,
+    /// PipeWire's graph rate in Hz (0 when unknown).
+    pub rate: u32,
+    /// The ALSA period the output asks for (0 until it is known).
+    pub alsa_period: u32,
+    /// Whether the quantum is small enough to count as low latency.
+    pub low_latency: bool,
+    /// Whether the ALSA period and quantum line up without extra buffering.
+    pub fits: bool,
+    /// One plain explanation, ready for the UI and the activity log.
+    pub note: String,
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+impl QuantumInfo {
+    /// Builds the comparison.  A period at or below the quantum that divides
+    /// it evenly is a fit: the ALSA side is at least as fine as the graph.
+    pub fn assess(available: bool, quantum: u32, rate: u32, alsa_period: u32) -> Self {
+        let rate = if rate == 0 { 48_000 } else { rate };
+        let ms = |frames: u32| frames as f32 / rate as f32 * 1000.0;
+        if !available || quantum == 0 {
+            return Self {
+                available,
+                quantum,
+                rate,
+                alsa_period,
+                low_latency: false,
+                fits: false,
+                note: "PipeWire's quantum is not readable (pw-metadata is missing or the server is not running). RigWerk still uses the ALSA period; start PipeWire to get the low-quantum path.".to_owned(),
+            };
+        }
+        let low_latency = quantum <= PIPEWIRE_LOW_QUANTUM_MAX;
+        let fits = alsa_period > 0 && alsa_period <= quantum && quantum % alsa_period == 0;
+        let note = if !low_latency {
+            format!(
+                "PipeWire's quantum is {quantum} frames ({:.1} ms at {:.1} kHz). That is the desktop's shared size, so RigWerk marks this route as shared, not low latency; the low-latency path asks for {} frames.",
+                ms(quantum),
+                rate as f32 / 1000.0,
+                PIPEWIRE_LOW_QUANTUM
+            )
+        } else if alsa_period == 0 {
+            format!(
+                "PipeWire is running at a {quantum}-frame quantum ({:.1} ms). The ALSA period is not known yet; the bridge compares them as soon as the output opens.",
+                ms(quantum)
+            )
+        } else if fits {
+            if alsa_period == quantum {
+                format!(
+                    "ALSA period {alsa_period} frames matches the PipeWire quantum ({quantum} frames, {:.1} ms). Low latency path.",
+                    ms(quantum)
+                )
+            } else {
+                format!(
+                    "ALSA period {alsa_period} frames fits {}× into the PipeWire quantum ({quantum} frames, {:.1} ms). Low latency path.",
+                    quantum / alsa_period,
+                    ms(quantum)
+                )
+            }
+        } else if alsa_period > quantum {
+            format!(
+                "The ALSA period ({alsa_period} frames) is larger than the PipeWire quantum ({quantum} frames), so the coarser ALSA block sets the real latency and the small quantum is wasted. Set the output buffer to {quantum} frames or lower, or raise the quantum."
+            )
+        } else {
+            format!(
+                "The ALSA period ({alsa_period} frames) does not divide the PipeWire quantum ({quantum} frames), so the two clocks do not line up and can xrun. Pick a period that divides {quantum} (for example 32 or 64 frames)."
+            )
+        };
+        Self {
+            available,
+            quantum,
+            rate,
+            alsa_period,
+            low_latency,
+            fits,
+            note,
+        }
+    }
+
+    /// Re-checks the fit once the output's real period is known.
+    pub fn with_period(&self, alsa_period: u32) -> Self {
+        if alsa_period == self.alsa_period {
+            return self.clone();
+        }
+        Self::assess(self.available, self.quantum, self.rate, alsa_period)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
+
+    #[test]
+    fn an_equal_period_and_quantum_fit() {
+        let info = QuantumInfo::assess(true, 64, 48_000, 64);
+        assert!(info.low_latency);
+        assert!(info.fits);
+    }
+
+    #[test]
+    fn an_alsa_period_that_divides_the_quantum_fits() {
+        let info = QuantumInfo::assess(true, PIPEWIRE_LOW_QUANTUM, 48_000, 32);
+        assert!(info.fits);
+        assert!(info.note.contains("fits 2"));
+    }
+
+    #[test]
+    fn a_coarser_alsa_period_is_reported_as_a_collision() {
+        let info = QuantumInfo::assess(true, 64, 48_000, 128);
+        assert!(!info.fits);
+        assert!(info.note.contains("larger than the PipeWire quantum"));
+    }
+
+    #[test]
+    fn a_period_that_does_not_divide_the_quantum_is_reported() {
+        let info = QuantumInfo::assess(true, 64, 48_000, 48);
+        assert!(!info.fits);
+        assert!(info.note.contains("does not divide"));
+    }
+
+    #[test]
+    fn a_large_quantum_is_marked_as_shared_not_low_latency() {
+        let info = QuantumInfo::assess(true, 1024, 48_000, 64);
+        assert!(!info.low_latency);
+        assert!(info.note.contains("not low latency"));
+    }
+
+    #[test]
+    fn an_unreadable_quantum_says_so_instead_of_pretending() {
+        let info = QuantumInfo::assess(false, 0, 0, 128);
+        assert!(!info.available);
+        assert!(!info.fits);
+        assert!(info.note.contains("not readable"));
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DeviceItem {
     pub id: String,
@@ -26,7 +176,7 @@ pub struct Inventory {
     pub notes: Vec<String>,
     pub os: String,
     /// What the dedicated low-latency input is called on this platform.
-    /// "ASIO" on Windows, "JACK" on Linux.
+    /// "ASIO" on Windows, "PIPEWIRE" (or "JACK"/"ALSA") on Linux.
     pub low_latency_label: String,
 }
 
@@ -115,4 +265,8 @@ pub struct StartConfig {
     /// smallest engine step the driver allows.  If the driver refuses, the
     /// output falls back to a normal shared stream with `output_buffer`.
     pub real_style_output: bool,
+    /// Linux: ask PipeWire for its low quantum while the bridge runs.  The
+    /// quantum is released as soon as the bridge stops.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub pipewire_low_latency: bool,
 }

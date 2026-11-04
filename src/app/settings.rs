@@ -64,7 +64,7 @@ impl Default for Preferences {
             session_name: "My guitar rig".to_owned(),
             page: "live".to_owned(),
             eq_edit: 0,
-            output_tab_low_latency: false,
+            output_tab_low_latency: cfg!(target_os = "linux"),
             selected_session: None,
             asio_name: None,
             input_name: None,

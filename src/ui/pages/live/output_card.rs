@@ -18,6 +18,7 @@ use crate::ui::widgets::{
 impl RigWerkApp {
     pub(crate) fn output_card(&mut self, ui: &mut egui::Ui) {
         let low_label = self.inventory.low_latency_label.clone();
+        let quantum_problem = self.quantum_problem();
         // Keep the tab on the selected output's side, unless the person has
         // switched to a side that has no outputs at all.
         let selected_low = self.is_low_latency_output(self.selected_output());
@@ -82,6 +83,14 @@ impl RigWerkApp {
                 .unwrap_or(0);
             device_selector(ui, "system_output", &devices, &mut position, BLUE);
             self.output_idx = indices[position];
+        }
+
+        // A PipeWire quantum that does not match the ALSA period, or one that
+        // is too large to count as low latency, is shown right at the output
+        // that would suffer from it.
+        if let Some(problem) = &quantum_problem {
+            ui.label(RichText::new(ellipsize(problem, 78)).size(8.6).color(AMBER))
+                .on_hover_text(problem.clone());
         }
 
         // Measured: ASIO4ALL takes the cards it drives for itself, so the same
@@ -153,7 +162,7 @@ impl RigWerkApp {
                     } else {
                         (
                             "Low latency",
-                            "Ask ALSA for the smallest period this output allows (at least 32 samples). Direct hardware PCMs usually go lower than the desktop's default plugin; if the driver refuses the small period, the normal output buffer is used instead.",
+                            "Ask PipeWire for a 64-frame quantum and ALSA for the smallest period this output allows (at least 32 samples). The PIPEWIRE QUANTUM card and the DRIVER line warn when the ALSA period and the quantum do not fit, or when PipeWire falls back to its shared size.",
                         )
                     };
                     if ui
@@ -187,12 +196,12 @@ impl RigWerkApp {
                                 if cfg!(target_os = "windows") {
                                     "REAL-style output on: smallest driver step when allowed."
                                 } else {
-                                    "Low-latency output on: smallest ALSA period when allowed."
+                                    "Low-latency output on: PipeWire low quantum + smallest ALSA period when allowed."
                                 }
                             } else if cfg!(target_os = "windows") {
                                 "REAL-style output off: normal shared output."
                             } else {
-                                "Low-latency output off: normal output buffer."
+                                "Low-latency output off: normal output buffer, PipeWire quantum released."
                             },
                             if self.low_latency_output { AMBER } else { MUTED },
                         );
@@ -247,17 +256,20 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             let name = self.selected_output().name.clone();
             let backend = self.selected_output().backend.clone();
+            let quantum_label = self.quantum_summary();
             let backend_label = match self.output_step() {
                 Some((frames, ms)) => format!("STEP {frames} SMP · {ms:.1} MS"),
                 None if self.low_latency_output && self.selected_output().asio_clsid.is_none() => {
-                    format!(
-                        "{backend} · {}",
-                        if cfg!(target_os = "windows") {
-                            "REAL-STYLE"
-                        } else {
-                            "LOW LATENCY"
-                        }
-                    )
+                    quantum_label.unwrap_or_else(|| {
+                        format!(
+                            "{backend} · {}",
+                            if cfg!(target_os = "windows") {
+                                "REAL-STYLE"
+                            } else {
+                                "LOW LATENCY"
+                            }
+                        )
+                    })
                 }
                 None => backend,
             };
@@ -313,7 +325,7 @@ impl RigWerkApp {
                     .on_hover_text(if cfg!(target_os = "windows") {
                         "Output rate. When it differs from the input, RigWerk converts with a cubic resampler. Shared WASAPI outputs mix at the rate set in Windows."
                     } else {
-                        "Output rate. When it differs from the input, RigWerk converts with a cubic resampler. The desktop's sound server may keep its own output rate."
+                        "Output rate. When it differs from the input, RigWerk converts with a cubic resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
                     });
                 if rate != self.output_rate {
                     self.output_rate = rate;

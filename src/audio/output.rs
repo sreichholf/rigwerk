@@ -8,10 +8,12 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SizedSample};
 
 use super::devices::pick_output_config;
+#[cfg(target_os = "linux")]
+use super::linux::alsa::smallest_output_buffer;
 use super::mixer::OutputMixer;
-#[cfg(target_os = "windows")]
-use super::real_output;
 use super::shared::Shared;
+#[cfg(target_os = "windows")]
+use super::win::wasapi;
 
 /// What `open_output` hands back: the live stream plus the rate and channel
 /// count it really runs at.
@@ -27,7 +29,7 @@ pub(crate) struct OpenedOutput {
 pub(crate) enum OutputStream {
     Cpal(cpal::Stream),
     #[cfg(target_os = "windows")]
-    Real(real_output::RealOutput),
+    Real(wasapi::RealOutput),
 }
 
 /// Opens the playback side.  With `real_style` set, a WASAPI output is first
@@ -52,7 +54,7 @@ pub(crate) fn open_output(
     #[cfg(target_os = "windows")]
     if real_style {
         if id.host() == cpal::HostId::Wasapi {
-            match real_output::open(id.id(), sample_rate, Arc::clone(shared)) {
+            match wasapi::open(id.id(), sample_rate, Arc::clone(shared)) {
                 Ok((stream, info)) => {
                     shared.set_output(info.rate, info.step_frames, info.describe(sample_rate));
                     return Ok(OpenedOutput {
@@ -159,18 +161,6 @@ pub(crate) fn clamp_output_buffer(config: &cpal::SupportedStreamConfig, frames: 
     }
 }
 
-/// The smallest period ALSA allows, with a floor so a driver that reports a
-/// one-frame minimum cannot turn the bridge into a stream of xruns.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn smallest_output_buffer(config: &cpal::SupportedStreamConfig, floor: usize) -> usize {
-    match config.buffer_size() {
-        cpal::SupportedBufferSize::Range { min, max } => {
-            (*min as usize).max(floor).min(*max as usize)
-        }
-        cpal::SupportedBufferSize::Unknown => floor,
-    }
-}
-
 pub(crate) fn make_output_stream(
     device: &cpal::Device,
     config: cpal::SupportedStreamConfig,
@@ -203,27 +193,6 @@ pub(crate) fn write_frame<T: Sample + FromSample<f32>>(frame: &mut [T], out: [f3
     let rest = (out[0] + out[1]) * 0.5;
     for (channel, sample) in frame.iter_mut().enumerate() {
         *sample = T::from_sample(out.get(channel).copied().unwrap_or(rest));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::smallest_output_buffer;
-
-    fn config(min: u32, max: u32) -> cpal::SupportedStreamConfig {
-        cpal::SupportedStreamConfig::new(
-            2,
-            48_000,
-            cpal::SupportedBufferSize::Range { min, max },
-            cpal::SampleFormat::F32,
-        )
-    }
-
-    #[test]
-    fn the_smallest_period_respects_a_sane_floor() {
-        assert_eq!(smallest_output_buffer(&config(16, 4096), 32), 32);
-        assert_eq!(smallest_output_buffer(&config(128, 4096), 32), 128);
-        assert_eq!(smallest_output_buffer(&config(16, 24), 32), 24);
     }
 }
 
