@@ -76,6 +76,19 @@ impl OutputMixer {
         }
     }
 
+    /// Grows the per-block scratch while the bridge is still opening, so the
+    /// first driver callback never has to allocate.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn prepare(&mut self, frames: usize) {
+        if self.block.len() < frames {
+            self.block.resize(frames, [0.0; 4]);
+        }
+        if self.plugin_l.len() < frames {
+            self.plugin_l.resize(frames, 0.0);
+            self.plugin_r.resize(frames, 0.0);
+        }
+    }
+
     /// Picks up EQ changes made in the UI since the last block.
     fn follow_eq(&mut self, shared: &Shared) {
         for slot in EqSlot::ALL {
