@@ -16,12 +16,15 @@ use crate::ui::widgets::{
     styled_slider,
 };
 
-/// Height of every stage in the chain.
-const STAGE_H: f32 = 136.0;
+/// Height of every stage in the chain.  Tall enough that an EQ stage holds
+/// its header, curve, summary and edit button with a real margin below.
+const STAGE_H: f32 = 150.0;
 const STRIP_W: f32 = 112.0;
 const EQ_W: f32 = 132.0;
 const ARROW_W: f32 = 20.0;
 const INSERT_W: f32 = 154.0;
+/// The insert cards fill the stage, leaving the same 4 px they had before.
+const INSERT_H: f32 = STAGE_H - 4.0;
 
 enum MixerAction {
     Bypass(usize, bool),
@@ -36,9 +39,9 @@ impl RigWerkApp {
         let mut actions: Vec<MixerAction> = Vec::new();
         let mut open_plugins = false;
 
-        // The header and the stages need 40 + 136 px inside the frame's 15 px
-        // margin; 196 left the bottom of each stage clipped.
-        card_fixed(ui, CARD, BORDER, 212.0, |ui| {
+        // The header and the stages need 40 + STAGE_H px inside the frame's
+        // 15 px margin, plus the 7 px gap between header and stages.
+        card_fixed(ui, CARD, BORDER, STAGE_H + 76.0, |ui| {
             ui.set_width(width - 32.0);
             ui.horizontal(|ui| {
                 ui.label(micro_label("MIXER", TEAL));
@@ -213,6 +216,8 @@ impl RigWerkApp {
                 .max_rect(rect.shrink(8.0))
                 .layout(Layout::top_down(Align::LEFT)),
         );
+        // Nothing may paint over the stage's border.
+        child.set_clip_rect(rect.shrink(8.0));
         let ui = &mut child;
         let mut enabled = eq.enabled;
         ui.horizontal(|ui| {
@@ -233,11 +238,9 @@ impl RigWerkApp {
                 }
             });
         });
-        ui.add_space(3.0);
         let (curve, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::hover());
         draw_curve(ui, curve, &eq, rate, false);
-        ui.add_space(3.0);
         let shaping = eq
             .bands
             .iter()
@@ -261,15 +264,20 @@ impl RigWerkApp {
                 DIM
             }),
         );
-        if hinted_tab(
-            ui,
-            if editing { "EDITING BELOW" } else { "EDIT" },
-            editing,
-            AMBER,
-            "Show this EQ's bands in the EQ card below.",
-        ) {
-            self.eq_edit = slot;
-        }
+        // The edit button is pinned to the bottom and centred, so it keeps a
+        // visible margin below it and lines up with the stage's axis.
+        ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
+            ui.add_space(6.0);
+            if hinted_tab(
+                ui,
+                if editing { "EDITING BELOW" } else { "EDIT" },
+                editing,
+                AMBER,
+                "Show this EQ's bands in the EQ card below.",
+            ) {
+                self.eq_edit = slot;
+            }
+        });
 
         if enabled != eq.enabled {
             let mut updated = eq;
@@ -364,10 +372,10 @@ fn inserts_stage(
                     insert_card(ui, index, view, actions);
                 }
                 ui.allocate_ui_with_layout(
-                    Vec2::new(38.0, 132.0),
+                    Vec2::new(38.0, INSERT_H),
                     Layout::top_down(Align::Center),
                     |ui| {
-                        ui.add_space(48.0);
+                        ui.add_space((INSERT_H - 36.0) / 2.0);
                         if ui
                             .add(
                                 egui::Button::new(RichText::new("+").size(18.0).color(TEAL))
@@ -389,7 +397,7 @@ fn inserts_stage(
 
 /// One plugin insert: number, bypass, controls, remove, name and dry/wet mix.
 fn insert_card(ui: &mut egui::Ui, index: usize, view: &PluginView, actions: &mut Vec<MixerAction>) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(INSERT_W, 132.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(INSERT_W, INSERT_H), Sense::hover());
     let border = if view.error.is_some() {
         with_alpha(RED, 55)
     } else if view.bypass {
@@ -493,21 +501,25 @@ fn insert_card(ui: &mut egui::Ui, index: usize, view: &PluginView, actions: &mut
         .color(if view.error.is_some() { RED } else { DIM }),
     )
     .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));
-    ui.add_space(3.0);
-    ui.horizontal(|ui| {
-        ui.label(mono("MIX", DIM, 7.5));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(mono(
-                format!("{}%", (view.mix * 100.0).round() as i32),
-                MUTED,
-                8.0,
-            ));
+    // The mix control stays at the foot of the card when the stage is taller
+    // than the text above it needs.
+    ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+        ui.add_space(3.0);
+        let mut mix = view.mix;
+        if styled_slider(ui, &mut mix, 0.0, 1.0, 0.01, AMBER).changed() {
+            actions.push(MixerAction::Mix(index, mix));
+        }
+        ui.horizontal(|ui| {
+            ui.label(mono("MIX", DIM, 7.5));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(mono(
+                    format!("{}%", (view.mix * 100.0).round() as i32),
+                    MUTED,
+                    8.0,
+                ));
+            });
         });
     });
-    let mut mix = view.mix;
-    if styled_slider(ui, &mut mix, 0.0, 1.0, 0.01, AMBER).changed() {
-        actions.push(MixerAction::Mix(index, mix));
-    }
 }
 
 /// Keeps a card's contents inside its rounded border.

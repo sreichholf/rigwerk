@@ -264,10 +264,23 @@ pub(crate) fn tab_button(
     selected: bool,
     color: Color32,
 ) -> egui::Response {
+    tab_button_sized(ui, label, selected, color, 8.2)
+}
+
+/// A [`tab_button`] at a larger font size, for choices such as the channel
+/// mode.  The unselected state keeps a quiet outline, so an "off" choice still
+/// looks like a button instead of plain text.
+pub(crate) fn tab_button_sized(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    color: Color32,
+    size: f32,
+) -> egui::Response {
     ui.add(
         egui::Button::new(
             RichText::new(label)
-                .size(8.2)
+                .size(size)
                 .color(if selected { color } else { DIM })
                 .strong(),
         )
@@ -276,11 +289,14 @@ pub(crate) fn tab_button(
         } else {
             Color32::TRANSPARENT
         })
-        .stroke(if selected {
-            Stroke::new(1.0, with_alpha(color, 60))
-        } else {
-            Stroke::NONE
-        })
+        .stroke(Stroke::new(
+            1.0,
+            if selected {
+                with_alpha(color, 60)
+            } else {
+                BORDER_SOFT
+            },
+        ))
         .corner_radius(CornerRadius::same(5))
         .min_size(Vec2::new(0.0, 18.0)),
     )

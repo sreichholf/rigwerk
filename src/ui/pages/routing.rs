@@ -10,7 +10,9 @@ use crate::app::RigWerkApp;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT,
 };
-use crate::ui::widgets::{card, horizontal_line, micro_label, mono, route_summary, status_dot};
+use crate::ui::widgets::{
+    card, horizontal_line, micro_label, mono, route_summary, status_dot, tab_button_sized,
+};
 
 pub(crate) fn route_cell(ui: &mut egui::Ui, enabled: bool, input: usize, output: usize) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(58.0, 48.0), Sense::click());
@@ -232,16 +234,10 @@ impl RigWerkApp {
                         ui.label(micro_label("CHANNEL MODE", DIM));
                         ui.add_space(4.0);
                         let mut mono = self.mono;
-                        if ui
-                            .selectable_label(!mono, RichText::new("Stereo").size(11.0))
-                            .clicked()
-                        {
+                        if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
                             mono = false;
                         }
-                        if ui
-                            .selectable_label(mono, RichText::new("Mono sum").size(11.0))
-                            .clicked()
-                        {
+                        if tab_button_sized(ui, "Mono sum", mono, BLUE, 11.0).clicked() {
                             mono = true;
                         }
                         self.mono = mono;

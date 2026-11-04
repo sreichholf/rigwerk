@@ -628,7 +628,8 @@ impl RigWerkApp {
                                                     .color(TEAL),
                                             )
                                             .fill(Color32::TRANSPARENT)
-                                            .stroke(Stroke::NONE),
+                                            .stroke(Stroke::new(1.0, BORDER_SOFT))
+                                            .corner_radius(CornerRadius::same(5)),
                                         )
                                         .clicked()
                                     {
