@@ -47,9 +47,10 @@ use clap_sys::version::CLAP_VERSION;
 
 use crate::audio::plugins::PluginParamView;
 
-/// The largest block the insert chain accepts; the same ceiling the VST3 side
-/// uses, so a bridge block never has to be split by the plugin.
-const MAX_BLOCK: usize = 4096;
+/// The largest block the insert chain accepts.  Kept in step with the VST3
+/// side: plugins get set up with this size, so it must stay a block size that
+/// fixed-buffer effects can handle, and longer bridge blocks are split.
+const MAX_BLOCK: usize = 512;
 
 const HOST_NAME: &[u8] = b"RigWerk\0";
 const HOST_VENDOR: &[u8] = b"RigWerk\0";

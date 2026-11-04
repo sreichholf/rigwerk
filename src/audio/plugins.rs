@@ -49,9 +49,14 @@ pub(crate) enum PluginHandle {
 
 impl PluginHandle {}
 
-/// The largest block the chain accepts.  Every output path in RigWerk uses
-/// blocks far below this, so a plugin is configured once per sample rate.
-const MAX_BLOCK: usize = 4096;
+/// The largest block a plugin is asked to process, and the block size it is
+/// set up with.  Many plugins allocate fixed internal buffers for the size
+/// announced at setup and ignore the smaller `numSamples` passed later, so a
+/// big 4096-frame announcement makes them write past those buffers and can
+/// take the whole app down (Eye Scream Man does exactly this).  512 frames is
+/// the size every VST3/CLAP effect can be expected to handle, and longer
+/// bridge blocks are split into chunks of this size below.
+const MAX_BLOCK: usize = 512;
 
 /// A parameter value the person changed, kept with the insert so the plugin
 /// opens with the same settings after a restart or a sample-rate change.
@@ -615,10 +620,23 @@ impl PluginChain {
                     while offset < frames {
                         let count = (frames - offset).min(MAX_BLOCK);
                         buffers.block_size = count;
-                        buffers.inputs[0][..count].copy_from_slice(&left[offset..offset + count]);
-                        buffers.inputs[1][..count].copy_from_slice(&right[offset..offset + count]);
-                        buffers.outputs[0][..count].fill(0.0);
-                        buffers.outputs[1][..count].fill(0.0);
+                        // The VST3 host works out how many frames to run from the
+                        // length of these vectors, not from `block_size`.  They
+                        // are allocated at MAX_BLOCK, so without trimming them to
+                        // `count` every short callback would still advance the
+                        // plugin by a full 512 frames — the plugin would run too
+                        // fast and time-based effects would sound detuned.  The
+                        // vectors keep their capacity, so this does not allocate.
+                        for channel in &mut buffers.inputs {
+                            channel.resize(count, 0.0);
+                        }
+                        for channel in &mut buffers.outputs {
+                            channel.resize(count, 0.0);
+                        }
+                        buffers.inputs[0].copy_from_slice(&left[offset..offset + count]);
+                        buffers.inputs[1].copy_from_slice(&right[offset..offset + count]);
+                        buffers.outputs[0].fill(0.0);
+                        buffers.outputs[1].fill(0.0);
                         if mix < 1.0 {
                             dry_l[..count].copy_from_slice(&left[offset..offset + count]);
                             dry_r[..count].copy_from_slice(&right[offset..offset + count]);
