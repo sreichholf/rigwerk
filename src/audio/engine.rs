@@ -22,6 +22,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(12);
 /// Output callbacks advance `frames` even while the input is silent, so a
 /// counter that stays put means the output or its thread is gone.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(4);
+/// A driver that never returns from teardown still holds its device.  Surface
+/// that instead of leaving the UI on `Stopping` indefinitely.
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Last-resort wait when the engine itself is going away.  Normal stops never
 /// sleep here; the UI polls `Stopping` instead.
 const DROP_STOP_WAIT: Duration = Duration::from_millis(900);
@@ -43,6 +46,8 @@ pub struct AudioEngine {
     pub state: EngineState,
     /// When `Starting` began, for the start timeout.
     started_at: Option<Instant>,
+    /// When `Stopping` began, for the teardown watchdog.
+    stopping_since: Option<Instant>,
     /// Frames at the last heartbeat check and when they last advanced.
     last_frames: u64,
     last_frames_at: Instant,
@@ -64,6 +69,7 @@ impl AudioEngine {
             sample_rate,
             state: EngineState::Idle,
             started_at: None,
+            stopping_since: None,
             last_frames: 0,
             last_frames_at: Instant::now(),
             #[cfg(target_os = "linux")]
@@ -124,6 +130,25 @@ impl AudioEngine {
         self.reap_finished_bridge();
         let current_finished = self.reap_current_bridge();
 
+        // A user stop owns the state until the old thread confirms teardown.
+        // A late error from that same session must not turn Stopping into
+        // Error; the watchdog is the only failure path while stopping.
+        if self.state == EngineState::Stopping {
+            if self.handle.is_none() && self.lingering.is_empty() {
+                self.finish_stop();
+            } else if self
+                .stopping_since
+                .is_some_and(|since| since.elapsed() >= STOP_TIMEOUT)
+            {
+                self.shared.set_error(format!(
+                    "The audio driver has not released the device after {} seconds. It is still shutting down; restart RigWerk before starting the bridge again.",
+                    STOP_TIMEOUT.as_secs()
+                ));
+                self.enter_error();
+            }
+            return;
+        }
+
         if self.current_error().is_some() {
             self.enter_error();
             return;
@@ -155,10 +180,21 @@ impl AudioEngine {
                     .is_some_and(|started| started.elapsed() >= START_TIMEOUT)
                 {
                     self.stop.store(true, Ordering::Relaxed);
-                    self.shared.set_error(format!(
-                        "The bridge did not become live within {} seconds. The audio driver may be stuck opening the device; stop the bridge, then start it again or choose another device.",
-                        START_TIMEOUT.as_secs()
-                    ));
+                    // Park the still-live thread before publishing the error,
+                    // so the next Start sees teardown pending instead of a
+                    // second session on the same device.
+                    let pending = self.park_current_bridge() || !self.lingering.is_empty();
+                    if pending {
+                        self.shared.set_error(format!(
+                            "The bridge did not become live within {} seconds. The audio driver is still shutting down and has not released the device; start again after it finishes, or restart RigWerk.",
+                            START_TIMEOUT.as_secs()
+                        ));
+                    } else {
+                        self.shared.set_error(format!(
+                            "The bridge did not become live within {} seconds. The audio driver may be stuck opening the device; stop the bridge, then start it again or choose another device.",
+                            START_TIMEOUT.as_secs()
+                        ));
+                    }
                     self.enter_error();
                 }
             }
@@ -176,12 +212,10 @@ impl AudioEngine {
                     self.enter_error();
                 }
             }
-            EngineState::Stopping => {
-                if self.handle.is_none() && self.lingering.is_empty() {
-                    self.finish_stop();
-                }
-            }
-            EngineState::Idle | EngineState::Preview | EngineState::Error => {}
+            EngineState::Idle
+            | EngineState::Preview
+            | EngineState::Stopping
+            | EngineState::Error => {}
         }
     }
 
@@ -195,6 +229,7 @@ impl AudioEngine {
         self.shared.reset();
         self.shared.set_status("Preview bridge · animated signal");
         self.started_at = None;
+        self.stopping_since = None;
         self.state = EngineState::Preview;
     }
 
@@ -282,7 +317,7 @@ impl AudioEngine {
             self.shared.set_error(
                 "The previous bridge is still shutting down and has not released the audio device. Start again once it has finished.",
             );
-            self.state = EngineState::Error;
+            self.enter_error();
             return;
         }
         self.reap_finished_bridge();
@@ -324,6 +359,7 @@ impl AudioEngine {
         self.shared.set_status("Opening independent output…");
         self.state = EngineState::Starting;
         self.started_at = Some(Instant::now());
+        self.stopping_since = None;
         self.last_frames = 0;
         self.last_frames_at = Instant::now();
 
@@ -366,20 +402,14 @@ impl AudioEngine {
         self.stop.store(true, Ordering::Relaxed);
         self.reap_finished_bridge();
 
-        let mut live = !self.lingering.is_empty();
-        if let Some(handle) = self.handle.take() {
-            if handle.is_finished() {
-                let _ = handle.join();
-            } else {
-                self.lingering.push(handle);
-                live = true;
-            }
-        }
-
+        let live = self.park_current_bridge() || !self.lingering.is_empty();
         if live {
             if self.state != EngineState::Stopping {
                 self.state = EngineState::Stopping;
+                self.stopping_since = Some(Instant::now());
                 self.shared.set_status("Stopping bridge…");
+            } else if self.stopping_since.is_none() {
+                self.stopping_since = Some(Instant::now());
             }
             self.started_at = None;
             self.shared.running.store(false, Ordering::Relaxed);
@@ -400,6 +430,7 @@ impl AudioEngine {
             *error = None;
         }
         self.started_at = None;
+        self.stopping_since = None;
         self.state = EngineState::Idle;
     }
 
@@ -416,6 +447,22 @@ impl AudioEngine {
             } else {
                 index += 1;
             }
+        }
+    }
+
+    /// Moves the current thread to `lingering` when it is still alive.
+    /// Returns whether it was parked (the caller decides what state that
+    /// means; `stop` enters `Stopping`, a failed start enters `Error`).
+    fn park_current_bridge(&mut self) -> bool {
+        let Some(handle) = self.handle.take() else {
+            return false;
+        };
+        if handle.is_finished() {
+            let _ = handle.join();
+            false
+        } else {
+            self.lingering.push(handle);
+            true
         }
     }
 
@@ -447,6 +494,7 @@ impl AudioEngine {
     fn enter_error(&mut self) {
         self.state = EngineState::Error;
         self.started_at = None;
+        self.stopping_since = None;
         self.release_quantum();
         if let Some(error) = self.current_error() {
             self.shared.set_status(format!("Error: {error}"));
