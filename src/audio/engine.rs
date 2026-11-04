@@ -115,11 +115,11 @@ impl AudioEngine {
 
     pub fn start_preview(&mut self) {
         self.stop();
-        // Preview draws synthetic meters and never starts a callback, so it
-        // deliberately keeps the current session instead of adopting a fresh
-        // one.  A bridge from a stop that timed out still owns that session
-        // and can write to it while it finishes; a real start is the path
-        // that refuses to open a second device session.
+        // A preview starts no callback, but it still gets its own session: a
+        // bridge from a stop that timed out keeps the old `Arc<Shared>` and
+        // can no longer write status, error or device-loss into what the UI
+        // shows as Preview.
+        self.replace_session();
         self.shared.reset();
         self.shared.set_status("Preview bridge · animated signal");
         self.state = EngineState::Preview;
@@ -187,6 +187,18 @@ impl AudioEngine {
         self.shared.reset_plugin_parameters(index)
     }
 
+    /// Swaps in a fresh session that inherits the settings which outlive a
+    /// bridge start.  Every older bridge keeps the `Arc<Shared>` it was
+    /// started with, so none of them can write into the session the UI now
+    /// uses.
+    fn replace_session(&mut self) {
+        let previous = Arc::clone(&self.shared);
+        let mut session = Shared::new(self.sample_rate);
+        session.adopt_settings_from(&previous);
+        self.shared = Arc::new(session);
+        drop(previous);
+    }
+
     pub fn start(&mut self, config: StartConfig) {
         self.stop();
         if self
@@ -206,15 +218,11 @@ impl AudioEngine {
         }
         self.reap_finished_bridge();
 
-        // Every start gets its own session state.  The bridge that was just
-        // stopped keeps the `Arc<Shared>` it was started with, so it can no
+        // Every start gets its own session state.  A bridge that outlived a
+        // stop keeps the `Arc<Shared>` it was started with, so it can no
         // longer write `running`, `status`, `error`, `device_lost`, meters or
         // samples into the session this start is about to open.
-        let previous = Arc::clone(&self.shared);
-        let mut session = Shared::new(self.sample_rate);
-        session.adopt_settings_from(&previous);
-        self.shared = Arc::new(session);
-        drop(previous);
+        self.replace_session();
 
         self.shared.reset();
         // Ask PipeWire for the low quantum before the output opens, so the

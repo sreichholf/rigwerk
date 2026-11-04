@@ -3,7 +3,7 @@
 //! and what each side really runs at.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use super::eq::{EqSettings, EqSlot};
@@ -170,11 +170,16 @@ impl Shared {
             Ordering::Relaxed,
         );
         for slot in EqSlot::ALL {
-            if let Ok(settings) = previous.eq[slot.index()].lock() {
-                self.set_eq(slot, *settings);
-            }
+            let settings = previous.eq[slot.index()]
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.set_eq(slot, *settings);
         }
-        let plugins = previous.plugin_prefs();
+        let plugins = previous
+            .plugins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .prefs();
         self.restore_plugins(plugins);
     }
 
