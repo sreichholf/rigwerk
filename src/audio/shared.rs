@@ -175,12 +175,16 @@ impl Shared {
             .lock()
             .map(|chain| chain.rate())
             .unwrap_or(48_000);
-        // Load outside the lock so a slow plugin does not block playback.
+        // Build the slot before taking the chain lock again: loading a dynamic
+        // library and calling `start_processing` can take milliseconds, and the
+        // audio callback only try-locks the chain.  Holding the lock here would
+        // turn every add into a dry block for the callback's whole load.
+        let (slot, result) = PluginChain::load_slot(pref, rate);
         let mut chain = self
             .plugins
             .lock()
             .map_err(|_| "Plugin chain unavailable".to_owned())?;
-        let result = chain.push(pref, rate);
+        chain.push_slot(slot);
         self.plugin_active.store(chain.active(), Ordering::Relaxed);
         result
     }
@@ -289,12 +293,13 @@ impl Shared {
     }
 
     /// Called from the output callback.  The flag keeps the common no-plugin
-    /// case lock-free.
+    /// case lock-free, and `try_lock` keeps a UI edit from stalling the block:
+    /// when the chain is busy this block passes through dry.
     pub(crate) fn process_plugins(&self, left: &mut [f32], right: &mut [f32], frames: usize) {
         if self.plugin_active.load(Ordering::Relaxed) == 0 {
             return;
         }
-        if let Ok(mut chain) = self.plugins.lock() {
+        if let Ok(mut chain) = self.plugins.try_lock() {
             chain.process(left, right, frames);
             self.plugin_active.store(chain.active(), Ordering::Relaxed);
         }

@@ -6,7 +6,7 @@
 //! plugin objects themselves.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use vst3_host::{AudioBuffers, Plugin, Vst3Host};
 
@@ -142,7 +142,7 @@ pub struct PluginView {
     pub has_editor: bool,
 }
 
-struct Slot {
+pub(crate) struct Slot {
     pref: PluginPref,
     plugin: Option<PluginHandle>,
     error: Option<String>,
@@ -348,9 +348,10 @@ fn load_vst3(pref: &PluginPref, sample_rate: u32) -> Result<Plugin, String> {
     Ok(plugin)
 }
 
-/// The master insert chain.  Processing is done under the same lock the UI
-/// uses for edits; the chain is short and a callback only holds it for one
-/// block.
+/// The master insert chain.  The audio callback only try-locks the chain and
+/// each loaded plugin, so an edit or an open editor skips that processing for
+/// a block instead of stalling the callback; UI paths may still block on the
+/// chain lock.
 pub(crate) struct PluginChain {
     slots: Vec<Slot>,
     buffers: AudioBuffers,
@@ -379,15 +380,24 @@ impl PluginChain {
         self.slots = prefs.into_iter().map(Slot::empty).collect();
     }
 
-    pub(crate) fn push(&mut self, pref: PluginPref, sample_rate: u32) -> Result<(), String> {
+    /// Builds a fully opened slot without holding the chain lock.  Add it with
+    /// [`Self::push_slot`] once it is ready, so a slow library load or
+    /// `start_processing` never stalls the audio callback.  A failed load is
+    /// returned as an error but remains a valid slot to push, so the failure
+    /// stays visible in the insert list instead of disappearing.
+    pub(crate) fn load_slot(pref: PluginPref, sample_rate: u32) -> (Slot, Result<(), String>) {
         let slot = Slot::loaded(pref, sample_rate);
-        if let Some(error) = &slot.error {
-            let message = error.clone();
-            self.slots.push(slot);
-            return Err(message);
-        }
+        let result = match &slot.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        };
+        (slot, result)
+    }
+
+    /// Splices an already loaded slot into the chain.  The caller holds the
+    /// chain lock only for this push.
+    pub(crate) fn push_slot(&mut self, slot: Slot) {
         self.slots.push(slot);
-        Ok(())
     }
 
     pub(crate) fn refresh_rate(&mut self, sample_rate: u32) {
@@ -588,8 +598,10 @@ impl PluginChain {
         Ok(())
     }
 
-    /// Runs the enabled effects over one stereo block.  A plugin that fails is
-    /// left in the chain with its error so the person can see why it is silent.
+    /// Runs the enabled effects over one stereo block.  A plugin whose lock is
+    /// held (its editor is doing UI work) is skipped for this block, and a
+    /// plugin that fails is left in the chain with its error so the person can
+    /// see why it is silent.
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
@@ -615,7 +627,14 @@ impl PluginChain {
             };
             match handle {
                 PluginHandle::Vst3(plugin) => {
-                    let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+                    // The plugin's editor holds this lock while it runs UI work.
+                    // Skipping the insert for this block is better than blocking
+                    // the audio callback behind the UI thread.
+                    let mut plugin = match plugin.try_lock() {
+                        Ok(plugin) => plugin,
+                        Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
+                        Err(TryLockError::WouldBlock) => continue,
+                    };
                     let mut offset = 0;
                     while offset < frames {
                         let count = (frames - offset).min(MAX_BLOCK);
@@ -666,7 +685,11 @@ impl PluginChain {
                     }
                 }
                 PluginHandle::Clap(plugin) => {
-                    let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let mut plugin = match plugin.try_lock() {
+                        Ok(plugin) => plugin,
+                        Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
+                        Err(TryLockError::WouldBlock) => continue,
+                    };
                     if let Err(error) = plugin.process(left, right, frames, mix) {
                         drop(plugin);
                         slots[index].error = Some(format!("Processing failed: {error}"));
