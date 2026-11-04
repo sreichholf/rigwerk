@@ -128,6 +128,56 @@ impl Shared {
         }
     }
 
+    /// Copies the settings that outlive one bridge start into this fresh
+    /// session.  Live plugin instances belong to the session that opened them;
+    /// only the saved preferences move, and the chain rebuilds from them.
+    pub(crate) fn adopt_settings_from(&mut self, previous: &Shared) {
+        self.input_gain.store(
+            previous.input_gain.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.output_gain.store(
+            previous.output_gain.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.set_mix(
+            previous.mute.load(Ordering::Relaxed),
+            previous.monitor.load(Ordering::Relaxed),
+            previous.mono.load(Ordering::Relaxed),
+            [
+                previous.input_enabled[0].load(Ordering::Relaxed),
+                previous.input_enabled[1].load(Ordering::Relaxed),
+            ],
+            [
+                previous.output_enabled[0].load(Ordering::Relaxed),
+                previous.output_enabled[1].load(Ordering::Relaxed),
+            ],
+            previous.drift_enabled.load(Ordering::Relaxed),
+        );
+        let mut routes = [[false; 4]; 2];
+        for (input, row) in routes.iter_mut().enumerate() {
+            for (output, enabled) in row.iter_mut().enumerate() {
+                *enabled = previous.routes[input * 4 + output].load(Ordering::Relaxed);
+            }
+        }
+        self.set_routes(routes);
+        self.cushion_mode.store(
+            previous.cushion_mode.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.manual_cushion_ms.store(
+            previous.manual_cushion_ms.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        for slot in EqSlot::ALL {
+            if let Ok(settings) = previous.eq[slot.index()].lock() {
+                self.set_eq(slot, *settings);
+            }
+        }
+        let plugins = previous.plugin_prefs();
+        self.restore_plugins(plugins);
+    }
+
     /// Applies new EQ settings; unchanged settings cost nothing.
     pub(crate) fn set_eq(&self, slot: EqSlot, settings: EqSettings) {
         if let Ok(mut current) = self.eq[slot.index()].lock() {

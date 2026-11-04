@@ -2,9 +2,9 @@
 //! bridge itself runs on its own thread.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::bridge::run_bridge;
 use super::eq::{EqSettings, EqSlot};
@@ -15,9 +15,17 @@ use super::shared::Shared;
 use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
 
 pub struct AudioEngine {
+    /// The session the UI reads and writes.  Every real start replaces it, so
+    /// an older bridge can only ever touch the session it was started with.
     pub(crate) shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    /// A bridge that outlived the bounded stop wait.  While it is alive, a
+    /// new start must not open a second device session.
+    lingering: Option<JoinHandle<()>>,
+    /// Rate each session's `Shared` is built at.  Devices negotiate their own
+    /// working rates inside the session.
+    sample_rate: u32,
     pub state: EngineState,
     /// The quantum that was forced before RigWerk changed it, restored on stop.
     #[cfg(target_os = "linux")]
@@ -33,6 +41,8 @@ impl AudioEngine {
             shared: Arc::new(Shared::new(sample_rate)),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
+            lingering: None,
+            sample_rate,
             state: EngineState::Idle,
             #[cfg(target_os = "linux")]
             previous_quantum: 0,
@@ -105,6 +115,11 @@ impl AudioEngine {
 
     pub fn start_preview(&mut self) {
         self.stop();
+        // Preview draws synthetic meters and never starts a callback, so it
+        // deliberately keeps the current session instead of adopting a fresh
+        // one.  A bridge from a stop that timed out still owns that session
+        // and can write to it while it finishes; a real start is the path
+        // that refuses to open a second device session.
         self.shared.reset();
         self.shared.set_status("Preview bridge · animated signal");
         self.state = EngineState::Preview;
@@ -174,6 +189,33 @@ impl AudioEngine {
 
     pub fn start(&mut self, config: StartConfig) {
         self.stop();
+        if self
+            .lingering
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
+            // The driver ignored the stop flag and still owns the old device
+            // session.  Opening the device again would put two streams on the
+            // same hardware, so fail visibly instead while it finishes.  The
+            // error belongs to the current session, which is the old one.
+            self.shared.set_error(
+                "The previous bridge is still shutting down and has not released the audio device. Start again once it has finished.",
+            );
+            self.state = EngineState::Error;
+            return;
+        }
+        self.reap_finished_bridge();
+
+        // Every start gets its own session state.  The bridge that was just
+        // stopped keeps the `Arc<Shared>` it was started with, so it can no
+        // longer write `running`, `status`, `error`, `device_lost`, meters or
+        // samples into the session this start is about to open.
+        let previous = Arc::clone(&self.shared);
+        let mut session = Shared::new(self.sample_rate);
+        session.adopt_settings_from(&previous);
+        self.shared = Arc::new(session);
+        drop(previous);
+
         self.shared.reset();
         // Ask PipeWire for the low quantum before the output opens, so the
         // first graph cycle already runs at the requested size.  A missing
@@ -205,6 +247,8 @@ impl AudioEngine {
         self.shared.set_status("Opening independent output…");
         self.state = EngineState::Starting;
 
+        // The closure gets the new session's `Arc` and nothing older, so this
+        // bridge's writes cannot reach a later start either.
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
         let handle = thread::Builder::new()
@@ -231,17 +275,24 @@ impl AudioEngine {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             // A misbehaving ASIO driver can block far longer than a UI frame.
-            // Let the bridge thread finish on its own, but never freeze the
-            // window while waiting for it.
-            let (done_tx, done_rx) = mpsc::channel::<()>();
-            let _ = thread::Builder::new()
-                .name("rigwerk-wait".to_owned())
-                .spawn(move || {
-                    let _ = handle.join();
-                    let _ = done_tx.send(());
-                });
-            let _ = done_rx.recv_timeout(Duration::from_millis(900));
+            // Wait a bounded 900 ms; past that, leave the thread to finish on
+            // its own and remember the handle instead of blocking the UI
+            // forever.
+            let deadline = Instant::now() + Duration::from_millis(900);
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                // Keep the handle so `start` can refuse to open a second
+                // device session while this thread still owns the old one.
+                self.lingering = Some(handle);
+            }
         }
+        self.reap_finished_bridge();
+        // Everything below touches the current session only.  A bridge that
+        // outlived the wait owns that same session, never a newer one.
         self.shared.running.store(false, Ordering::Relaxed);
         self.shared.device_lost.store(false, Ordering::Relaxed);
         // Give PipeWire its own quantum back when the bridge stops.
@@ -256,6 +307,16 @@ impl AudioEngine {
             *error = None;
         }
         self.state = EngineState::Idle;
+    }
+
+    /// Joins a bridge that finished after its bounded stop wait, releasing
+    /// the old session it kept alive.
+    fn reap_finished_bridge(&mut self) {
+        if self.lingering.as_ref().is_some_and(JoinHandle::is_finished) {
+            if let Some(handle) = self.lingering.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     /// Clears a stale device error after the bridge has been stopped on
