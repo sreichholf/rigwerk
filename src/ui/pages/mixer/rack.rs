@@ -23,7 +23,6 @@ use crate::ui::widgets::{
 };
 
 const ROW_H: f32 = 58.0;
-const INSERT_H: f32 = 44.0;
 const PANE_HEAD_H: f32 = 36.0;
 const PANE_PAD_X: f32 = 14.0;
 
@@ -592,8 +591,16 @@ fn insert_row(
     } else {
         with_alpha(AMBER, 40)
     };
+    // Size the card from the two text lines it holds (plus the gap the
+    // vertical stack below puts between them), so neither spills out of it.
+    let pad = Vec2::new(8.0, 6.0);
+    let title_font = FontId::new(ts(11.5), FontFamily::Proportional);
+    let mix_font = FontId::new(ts(9.5), FontFamily::Proportional);
+    let text_h = ui.fonts_mut(|fonts| fonts.row_height(&title_font) + fonts.row_height(&mix_font))
+        + ui.spacing().item_spacing.y;
+    let row_h = (text_h + pad.y * 2.0).max(ui.spacing().interact_size.y + pad.y * 2.0);
     let (rect, row_response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), INSERT_H), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(8),
@@ -611,10 +618,13 @@ fn insert_row(
     );
     let mut child = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink2(Vec2::new(8.0, 6.0)))
+            .max_rect(rect.shrink2(pad))
             .layout(Layout::left_to_right(Align::Center)),
     );
-    child.horizontal(|ui| {
+    // `horizontal_centered` spans the full inner height; plain `horizontal`
+    // starts as one interact-height line centred in the row, which pushes
+    // the two-line stack below the card.
+    child.horizontal_centered(|ui| {
         let (grip_rect, grip_response) =
             ui.allocate_exact_size(Vec2::new(14.0, 18.0), Sense::hover());
         paint_grip(ui, grip_rect.center(), DIM);
@@ -622,14 +632,14 @@ fn insert_row(
         ui.vertical(|ui| {
             ui.label(
                 RichText::new(format!("{:02} {}", index + 1, ellipsize(&view.name, 22)))
-                    .size(ts(11.5))
+                    .font(title_font.clone())
                     .color(if view.bypass { DIM } else { TEXT })
                     .strong(),
             )
             .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));
             ui.label(
                 RichText::new(format!("mix {}%", (view.mix * 100.0).round() as i32))
-                    .size(ts(9.5))
+                    .font(mix_font.clone())
                     .color(DIM),
             );
         });
