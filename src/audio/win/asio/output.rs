@@ -34,17 +34,20 @@ pub(crate) fn run_asio_output_bridge(
         return run_asio_duplex_bridge(config, output_clsid, shared, stop);
     }
 
-    shared.set_status("Opening ASIO output…");
-    let (worker, output_rate, output_channels) = open_asio_output_worker(
-        output_clsid,
-        config.output_rate.unwrap_or(config.sample_rate),
-        config.output_buffer,
-        Arc::clone(&shared),
-        Arc::clone(&stop),
-    )?;
-    shared.prepare_plugins(output_rate);
-
     if let Some(input_clsid) = config.asio_clsid {
+        shared.set_status("Opening ASIO output…");
+        let (worker, output_rate, _output_channels) = open_asio_output_worker(
+            output_clsid,
+            config.output_rate.unwrap_or(config.sample_rate),
+            config.output_buffer,
+            Arc::clone(&shared),
+            Arc::clone(&stop),
+        )?;
+        shared.prepare_plugins(output_rate);
+
+        // Two drivers keep two clocks, so the input rate is only known after
+        // its driver opens.  That is the one path where the output mixer may
+        // still design its filter on the first callback; see REVIEW-FIXES.md.
         shared.set_status("Opening ASIO input…");
         run_asio_input_only(
             input_clsid,
@@ -54,7 +57,11 @@ pub(crate) fn run_asio_output_bridge(
             &shared,
             &stop,
         )?;
+        drop(worker);
     } else {
+        // Open the input first and publish its real rate, so the ASIO output
+        // worker designs the resampler before its driver starts rather than
+        // inside the first audio callback.
         shared.set_status("Opening input…");
         let input_device = open_input_device(config)?;
         let input_config = pick_input_config(&input_device, config.sample_rate)?;
@@ -68,6 +75,17 @@ pub(crate) fn run_asio_output_bridge(
             Arc::clone(&shared),
             config.buffer_size,
         )?;
+
+        shared.set_status("Opening ASIO output…");
+        let (worker, output_rate, output_channels) = open_asio_output_worker(
+            output_clsid,
+            config.output_rate.unwrap_or(config.sample_rate),
+            config.output_buffer,
+            Arc::clone(&shared),
+            Arc::clone(&stop),
+        )?;
+        shared.prepare_plugins(output_rate);
+
         input_stream
             .play()
             .map_err(|error| format!("Starting input: {error}"))?;
@@ -84,9 +102,9 @@ pub(crate) fn run_asio_output_bridge(
             thread::sleep(Duration::from_millis(20));
         }
         drop(input_stream);
+        drop(worker);
     }
 
-    drop(worker);
     Ok(())
 }
 
