@@ -3,13 +3,32 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 
 #[cfg(any(target_os = "linux", test))]
-use super::linux::alsa::{alsa_pcm_is_direct, alsa_pcm_is_placeholder};
+use super::linux::alsa::alsa_pcm_is_direct;
+#[cfg(target_os = "linux")]
+use super::linux::alsa::alsa_pcm_is_placeholder;
 #[cfg(any(target_os = "linux", test))]
 use super::linux::pipewire;
 use super::types::{DeviceItem, Inventory, DEMO_ASIO_ID, DEMO_INPUT_ID, DEMO_OUTPUT_ID};
 
 pub fn scan_devices() -> Inventory {
     scan_devices_from(&Inventory::default(), true)
+}
+
+/// Preview rows only — enough to paint the shell before the first real scan.
+pub(crate) fn placeholder_inventory() -> Inventory {
+    let mut inventory = Inventory {
+        os: std::env::consts::OS.to_owned(),
+        low_latency_label: if cfg!(target_os = "windows") {
+            "ASIO".to_owned()
+        } else if cfg!(target_os = "linux") {
+            "PIPEWIRE".to_owned()
+        } else {
+            "SYSTEM".to_owned()
+        },
+        ..Inventory::default()
+    };
+    ensure_placeholders(&mut inventory);
+    inventory
 }
 
 /// Like [`scan_devices`], but a device whose configuration cannot be read is
@@ -203,8 +222,12 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
         &mut inventory.notes,
     );
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     let pipewire_output = prefer_pipewire(&mut output_candidates);
+    #[cfg(all(test, not(target_os = "linux")))]
+    {
+        let _ = prefer_pipewire(&mut output_candidates);
+    }
     #[cfg(any(target_os = "linux", test))]
     prefer_pipewire(&mut input_candidates);
 

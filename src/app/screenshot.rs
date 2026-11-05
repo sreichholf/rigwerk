@@ -17,6 +17,12 @@ pub(crate) struct ScreenshotJob {
 
 impl RigWerkApp {
     pub(crate) fn handle_screenshot(&mut self, ctx: &egui::Context) {
+        // Wait until the first device inventory is in so the capture matches
+        // a normal settled window, not the boot placeholder shell.
+        if self.startup.is_some() {
+            ctx.request_repaint();
+            return;
+        }
         self.frames += 1;
         let Some(job) = &mut self.screenshot else {
             return;

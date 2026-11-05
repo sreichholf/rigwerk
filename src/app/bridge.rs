@@ -48,6 +48,10 @@ impl RigWerkApp {
     }
 
     pub(crate) fn start_bridge(&mut self) {
+        if self.startup.is_some() {
+            self.push_log("Still finding audio devices…", MUTED);
+            return;
+        }
         if self.engine.state == EngineState::Stopping {
             self.push_log(
                 "The previous bridge is still releasing its audio device.",

@@ -51,6 +51,7 @@ mod hardware_tests;
 
 pub(crate) use devices::device_choice_label;
 pub(crate) use devices::is_low_latency_device;
+pub(crate) use devices::placeholder_inventory;
 pub use devices::scan_devices;
 pub(crate) use devices::scan_devices_from;
 pub use engine::AudioEngine;

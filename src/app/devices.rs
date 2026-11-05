@@ -478,23 +478,27 @@ impl RigWerkApp {
             _ => {}
         }
         if let Some(fresh) = finished {
-            let changed = self.apply_inventory(fresh);
-            if changed {
-                // The driver under a device can change while its name or id
-                // stays the same.  Throw away any old answer (and any check
-                // still in flight) and ask again.
-                self.driver_probe = None;
-                self.driver_probe_job = None;
-                self.last_output_driver = None;
-                self.start_output_driver_check(false);
-                #[cfg(target_os = "linux")]
-                self.refresh_quantum_check(true);
+            if self.startup.is_some() {
+                self.finish_startup_scan(fresh);
+            } else {
+                let changed = self.apply_inventory(fresh);
+                if changed {
+                    // The driver under a device can change while its name or id
+                    // stays the same.  Throw away any old answer (and any check
+                    // still in flight) and ask again.
+                    self.driver_probe = None;
+                    self.driver_probe_job = None;
+                    self.last_output_driver = None;
+                    self.start_output_driver_check(false);
+                    #[cfg(target_os = "linux")]
+                    self.refresh_quantum_check(true);
+                }
+                if !changed && self.manual_scan {
+                    self.push_log("Scan complete — no device changes.", GREEN);
+                    self.start_output_driver_check(true);
+                }
+                self.manual_scan = false;
             }
-            if !changed && self.manual_scan {
-                self.push_log("Scan complete — no device changes.", GREEN);
-                self.start_output_driver_check(true);
-            }
-            self.manual_scan = false;
         }
         let hotplug = hotplug_pending();
         if self.device_scan.is_none()
@@ -517,17 +521,31 @@ impl RigWerkApp {
                 | crate::audio::EngineState::Running
                 | crate::audio::EngineState::Stopping
         );
+        let cold_start = self.startup.is_some();
         let scan = thread::Builder::new()
             .name("rigwerk-scan".to_owned())
             .spawn(move || {
-                let _ = sender.send(audio::scan_devices_from(&previous, probe));
+                let fresh = if cold_start {
+                    audio::scan_devices()
+                } else {
+                    audio::scan_devices_from(&previous, probe)
+                };
+                let _ = sender.send(fresh);
             });
         match scan {
             Ok(_) => self.device_scan = Some(receiver),
             Err(_) => {
                 // No spare thread: fall back to scanning here, once.
-                let fresh = audio::scan_devices_from(&self.inventory, probe);
-                self.apply_inventory(fresh);
+                let fresh = if cold_start {
+                    audio::scan_devices()
+                } else {
+                    audio::scan_devices_from(&self.inventory, probe)
+                };
+                if self.startup.is_some() {
+                    self.finish_startup_scan(fresh);
+                } else {
+                    self.apply_inventory(fresh);
+                }
             }
         }
     }

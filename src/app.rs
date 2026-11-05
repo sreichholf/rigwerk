@@ -238,6 +238,14 @@ pub struct RigWerkApp {
     /// Last time the running bridge re-read PipeWire's graph quantum.
     #[cfg(target_os = "linux")]
     quantum_live_at: Instant,
+    /// Preferences kept until the first background device scan finishes, so
+    /// the window can paint before hosts are probed.
+    startup: Option<StartupGate>,
+}
+
+/// Saved device choices applied once the first inventory arrives.
+struct StartupGate {
+    preferences: Preferences,
 }
 
 impl eframe::App for RigWerkApp {
@@ -255,7 +263,12 @@ impl eframe::App for RigWerkApp {
         self.poll_plugin_gui();
         self.sync_bridge_config();
         let plugin_editor_open = self.plugin_editor.is_some() || self.plugin_gui.is_some();
-        ctx.request_repaint_after(repaint_interval(self.engine.state, plugin_editor_open));
+        let interval = if self.startup.is_some() {
+            Duration::from_millis(16)
+        } else {
+            repaint_interval(self.engine.state, plugin_editor_open)
+        };
+        ctx.request_repaint_after(interval);
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -364,6 +377,36 @@ impl eframe::App for RigWerkApp {
 
         self.plugin_editor_window(&ctx);
 
+        if self.startup.is_some() {
+            egui::Window::new("Starting RigWerk")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .fixed_size(Vec2::new(360.0, 120.0))
+                .frame(
+                    egui::Frame::new()
+                        .fill(CARD)
+                        .stroke(egui::Stroke::new(1.0, BORDER))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(Margin::same(18)),
+                )
+                .show(&ctx, |ui| {
+                    ui.label(
+                        RichText::new("Finding audio devices…")
+                            .size(ts(14.0))
+                            .color(TEXT),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "The window is ready. Device lists fill in as soon as the scan finishes.",
+                        )
+                        .size(ts(11.0))
+                        .color(MUTED),
+                    );
+                });
+        }
+
         if let Some(message) = self.device_alert.clone() {
             egui::Window::new("Audio device disconnected")
                 .collapsible(false)
@@ -394,6 +437,11 @@ impl eframe::App for RigWerkApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Placeholder rows must not overwrite the real stored pair while the
+        // first scan is still running.
+        if self.startup.is_some() {
+            return;
+        }
         // A side whose stored identity startup did not find keeps that
         // name, id, and backend. The on-screen row can still be the fallback.
         // An id match, a legacy name match, and a side with nothing stored
@@ -477,29 +525,17 @@ impl RigWerkApp {
         // The screenshot path is a headless check, not a practice session.
         // Keep real drivers closed there even if auto-start was left on.
         let screenshot_mode = screenshot.is_some();
-        let inventory = audio::scan_devices();
+        // Paint the shell before hosts are probed. The first real inventory
+        // arrives on the scan thread; restore and auto-start wait for it.
+        let inventory = audio::placeholder_inventory();
         let inventory_fingerprint = inventory_fingerprint(&inventory);
-        // Restore the pair the person left the app with. When a stored
-        // device is gone, the system's default (or the first real device)
-        // is what the window shows, and that identity is held so `save`
-        // writes the stored name, id, and backend back.
         let restored = restore_saved_devices(&inventory, &preferences);
         let asio_idx = restored.asio_idx;
         let input_idx = restored.input_idx;
         let output_idx = restored.output_idx;
-        let default_use_asio = !(inventory
-            .asio
-            .first()
-            .map(|device| device.demo)
-            .unwrap_or(true)
-            && inventory
-                .inputs
-                .first()
-                .map(|device| !device.demo)
-                .unwrap_or(false));
         let use_asio_input = match &stored {
             Some(saved) => saved.use_asio_input,
-            None => default_use_asio,
+            None => true,
         };
         let engine = AudioEngine::new(48_000);
         let sessions = unique_presets(&preferences.sessions);
@@ -605,6 +641,9 @@ impl RigWerkApp {
             quantum_checked_key: None,
             #[cfg(target_os = "linux")]
             quantum_live_at: Instant::now(),
+            startup: Some(StartupGate {
+                preferences: preferences.clone(),
+            }),
         };
         app.engine.set_gains(app.input_gain, app.output_gain);
         app.engine.set_mix(
@@ -624,28 +663,51 @@ impl RigWerkApp {
         if !screenshot_mode {
             app.begin_plugin_scan();
         }
-        #[cfg(target_os = "linux")]
-        app.refresh_quantum_check(!screenshot_mode);
-        let low_label = app.inventory.low_latency_label.clone();
-        app.push_log(
+        app.push_log("Looking for audio devices…", BLUE);
+        for notice in loaded.notices {
+            app.push_log(notice, AMBER);
+        }
+        app.start_device_scan();
+        app
+    }
+
+    /// Applies the first real inventory, then quantum check / auto-start.
+    pub(crate) fn finish_startup_scan(&mut self, fresh: Inventory) {
+        let Some(gate) = self.startup.take() else {
+            let _ = self.apply_inventory(fresh);
+            return;
+        };
+        let scan_notes = fresh.notes.clone();
+        self.inventory = fresh;
+        self.inventory_fingerprint = inventory_fingerprint(&self.inventory);
+        let restored = restore_saved_devices(&self.inventory, &gate.preferences);
+        self.asio_idx = restored.asio_idx;
+        self.input_idx = restored.input_idx;
+        self.output_idx = restored.output_idx;
+        self.asio_held = restored.asio_held;
+        self.input_held = restored.input_held;
+        self.output_held = restored.output_held;
+
+        let low_label = self.inventory.low_latency_label.clone();
+        self.push_log(
             format!("{low_label} or system input: the chosen output opens independently."),
             TEAL,
         );
-        if app.inventory.asio.iter().all(|driver| driver.demo) {
-            app.push_log(
+        if self.inventory.asio.iter().all(|driver| driver.demo) {
+            self.push_log(
                 format!("Preview driver loaded — connect a {low_label} input to go live."),
                 AMBER,
             );
         } else {
-            app.push_log(
+            self.push_log(
                 format!("{low_label} input detected. Ready to go live."),
                 GREEN,
             );
         }
-        app.push_log("Output stays independent — shared mode is allowed.", BLUE);
-        let input_name = app.active_input().name.clone();
-        let output_name = app.selected_output().name.clone();
-        let output_hint = if app.selected_output().preferred {
+        self.push_log("Output stays independent — shared mode is allowed.", BLUE);
+        let input_name = self.active_input().name.clone();
+        let output_name = self.selected_output().name.clone();
+        let output_hint = if self.selected_output().preferred {
             if cfg!(target_os = "windows") {
                 " (Windows default)"
             } else {
@@ -654,31 +716,29 @@ impl RigWerkApp {
         } else {
             ""
         };
-        app.push_log(
+        self.push_log(
             format!("Ready: {input_name} -> {output_name}{output_hint}."),
             TEAL,
         );
-        if app.auto_start_bridge {
-            app.push_log("Auto-start is on — starting the bridge.", BLUE);
-            app.start_bridge();
+        for note in restored.notes {
+            self.push_log(note, AMBER);
+        }
+        self.log_scan_notes(&scan_notes);
+        #[cfg(target_os = "linux")]
+        self.refresh_quantum_check(self.screenshot.is_none());
+        self.driver_probe = None;
+        self.driver_probe_job = None;
+        self.last_output_driver = None;
+        self.start_output_driver_check(false);
+        if self.auto_start_bridge {
+            self.push_log("Auto-start is on — starting the bridge.", BLUE);
+            self.start_bridge();
         } else {
-            app.push_log(
+            self.push_log(
                 "Bridge stopped at launch. Start it when you're ready.",
                 MUTED,
             );
         }
-        // Preference and restore notices, then scan notes. A failed device
-        // scan stays in the diagnostics log, and it is the line the Live
-        // page shows until the next event.
-        for notice in loaded.notices {
-            app.push_log(notice, AMBER);
-        }
-        for note in restored.notes {
-            app.push_log(note, AMBER);
-        }
-        let scan_notes = app.inventory.notes.clone();
-        app.log_scan_notes(&scan_notes);
-        app
     }
 
     pub(crate) fn push_log(&mut self, text: impl Into<String>, tone: Color32) {
@@ -897,6 +957,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         quantum_checked_key: None,
         #[cfg(target_os = "linux")]
         quantum_live_at: Instant::now(),
+        startup: None,
     }
 }
 
@@ -908,7 +969,7 @@ mod tests {
 
     use super::settings::{load_preferences, Preferences, Preset, PREFERENCES_KEY};
     use super::{blank_app, repaint_interval, restore_saved_devices, ACTIVE_REPAINT, IDLE_REPAINT};
-    use crate::audio::{DeviceItem, EngineState};
+    use crate::audio::{self, DeviceItem, EngineState, Inventory};
 
     #[derive(Default)]
     struct MemoryStorage(HashMap<String, String>);
@@ -984,6 +1045,58 @@ mod tests {
         };
         install(&mut app, &preferences);
         app
+    }
+
+    #[test]
+    fn finish_startup_scan_restores_saved_devices_and_clears_the_gate() {
+        let mut app = blank_app();
+        app.inventory = audio::placeholder_inventory();
+        app.startup = Some(super::StartupGate {
+            preferences: Preferences {
+                asio_name: Some("Focusrite USB".to_owned()),
+                asio_id: "asio:focusrite".to_owned(),
+                asio_backend: "ASIO".to_owned(),
+                output_name: Some("Speakers".to_owned()),
+                output_id: "speakers".to_owned(),
+                output_backend: "WASAPI".to_owned(),
+                auto_start_bridge: false,
+                ..Preferences::default()
+            },
+        });
+        let mut fresh = Inventory {
+            os: "test".to_owned(),
+            low_latency_label: "ASIO".to_owned(),
+            ..Inventory::default()
+        };
+        fresh
+            .asio
+            .push(item("asio:focusrite", "Focusrite USB", "ASIO", false));
+        fresh
+            .outputs
+            .push(item("speakers", "Speakers", "WASAPI", true));
+        fresh.inputs.push(item("mic", "Mic", "WASAPI", false));
+        app.finish_startup_scan(fresh);
+        assert!(app.startup.is_none());
+        assert_eq!(app.selected_asio().id, "asio:focusrite");
+        assert_eq!(app.selected_output().id, "speakers");
+        assert!(
+            app.log
+                .iter()
+                .any(|entry| entry.text.contains("Ready: Focusrite USB -> Speakers")),
+            "{:?}",
+            app.log.iter().map(|entry| &entry.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn save_is_skipped_while_startup_scan_is_pending() {
+        let mut app = absent_studio();
+        app.startup = Some(super::StartupGate {
+            preferences: Preferences::default(),
+        });
+        let mut storage = MemoryStorage::default();
+        app.save(&mut storage);
+        assert!(eframe::Storage::get_string(&storage, PREFERENCES_KEY).is_none());
     }
 
     #[test]
