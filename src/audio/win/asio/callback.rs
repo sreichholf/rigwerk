@@ -149,6 +149,9 @@ impl AsioCallbackContext {
     /// Reads input, renders output or does both for one ASIO buffer index.
     /// Runs on the driver's callback thread; it must not allocate or block.
     fn process(&mut self, buffer_index: c_long) {
+        // Input gain and the whole output chain run with flush-to-zero; the
+        // driver's own code on this thread gets its mode back afterwards.
+        let _denormals = crate::audio::denormal::DenormalGuard::new();
         self.signal.callbacks.fetch_add(1, Ordering::Relaxed);
         let index = buffer_index.clamp(0, 1) as usize;
 

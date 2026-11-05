@@ -38,6 +38,12 @@ Linux needs PipeWire or ALSA development headers (`libpipewire-0.3-dev`,
 `libasound2-dev`) and a display (X11 or Wayland). Windows needs the MSVC
 toolchain; ASIO drivers are optional.
 
+On Linux, direct ALSA streams run their audio threads at real-time priority
+when your user may use it (an `RLIMIT_RTPRIO`, usually via the `audio` group
+in `/etc/security/limits.d`). Without it they run at normal priority, as
+before. PipeWire's own threads are real time either way. At real-time
+priority, a plugin chain that overloads the CPU can starve the desktop.
+
 ```bash
 cargo test
 ```

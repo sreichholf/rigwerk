@@ -7,7 +7,9 @@ use std::sync::Arc;
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, FromSample, Sample, SizedSample};
 
+use super::denormal::DenormalGuard;
 use super::shared::Shared;
+use super::thread_priority::PromoteOnce;
 use super::types::StartConfig;
 
 pub(crate) fn open_input_device(config: &StartConfig) -> Result<cpal::Device, String> {
@@ -82,11 +84,15 @@ where
     let gain_shared = Arc::clone(&shared);
     let error_shared = Arc::clone(&shared);
     let channels = channels.max(1);
+    let mut promote = PromoteOnce::default();
 
     let stream = device
         .build_input_stream(
             config,
             move |data: &[T], _info: &cpal::InputCallbackInfo| {
+                // cpal's stream thread starts at normal priority on Linux.
+                promote.run();
+                let _denormals = DenormalGuard::new();
                 // The ring has to hold at least one whole input block, or
                 // the output runs dry between two deliveries.
                 gain_shared.note_input_block(data.len() / channels);

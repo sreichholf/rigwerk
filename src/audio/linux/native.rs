@@ -23,6 +23,7 @@ use ::pipewire as pw;
 use pw::spa;
 use pw::spa::pod::Pod;
 
+use crate::audio::denormal::DenormalGuard;
 use crate::audio::input::{make_input_stream, open_input_device};
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
@@ -406,13 +407,21 @@ fn run_graph(
                     }
                     let data_buf = &mut datas[0];
                     let channels = data.channels.load(Ordering::Relaxed).max(1) as usize;
-                    let stride = channels * 4;
-                    let frames = (data_buf.chunk().size() as usize) / stride;
+                    let (offset, size, stride) = {
+                        let chunk = data_buf.chunk();
+                        (chunk.offset(), chunk.size(), chunk.stride())
+                    };
                     let Some(bytes) = data_buf.data() else {
                         return;
                     };
-                    let frames = frames.min(bytes.len() / stride);
-                    push_capture(&data.shared, bytes, channels, frames);
+                    let window = capture_window(bytes.len(), offset, size, stride, channels);
+                    push_capture(
+                        &data.shared,
+                        &bytes[window.start..],
+                        channels,
+                        window.stride,
+                        window.frames,
+                    );
                 })
                 .register()
                 .map_err(|error| format!("PipeWire capture listener: {error}"))?,
@@ -557,7 +566,58 @@ struct PlaybackData {
     mixer: OutputMixer,
 }
 
-fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, frames: usize) {
+/// Where the valid capture frames sit in a mapped buffer.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CaptureWindow {
+    /// Byte offset of the first frame.
+    pub(crate) start: usize,
+    /// Bytes from one frame to the next.
+    pub(crate) stride: usize,
+    pub(crate) frames: usize,
+}
+
+/// Reads a `spa_chunk` the way PipeWire defines it: the valid data starts at
+/// `offset` (taken modulo the mapped size), is `size` bytes long, and frames
+/// are `stride` bytes apart.  A stride of 0, or one too small for the
+/// negotiated channels, falls back to packed f32 frames.  The frame count is
+/// bounded by what is mapped after the offset, so a bogus chunk can never make
+/// the reader run past the buffer.
+pub(crate) fn capture_window(
+    mapped: usize,
+    offset: u32,
+    size: u32,
+    stride: i32,
+    channels: usize,
+) -> CaptureWindow {
+    let packed = channels.max(1) * 4;
+    let stride = match usize::try_from(stride) {
+        Ok(stride) if stride >= packed => stride,
+        _ => packed,
+    };
+    if mapped == 0 {
+        return CaptureWindow {
+            start: 0,
+            stride,
+            frames: 0,
+        };
+    }
+    let start = offset as usize % mapped;
+    let available = (size as usize).min(mapped - start);
+    // The last frame only needs its own samples, not a whole stride after it.
+    let frames = if available < packed {
+        0
+    } else {
+        (available - packed) / stride + 1
+    };
+    CaptureWindow {
+        start,
+        stride,
+        frames,
+    }
+}
+
+fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, stride: usize, frames: usize) {
+    let _denormals = DenormalGuard::new();
     let channels = channels.max(1);
     shared.note_input_block(frames);
     shared.note_input_frames(frames);
@@ -567,10 +627,10 @@ fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, frames: usize) {
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     for frame in 0..frames {
-        let base = frame * channels;
+        let base = frame * stride;
         let mut left = sample_at(bytes, base) * gain;
         let mut right = if channels > 1 {
-            sample_at(bytes, base + 1) * gain
+            sample_at(bytes, base + 4) * gain
         } else {
             left
         };
@@ -588,8 +648,8 @@ fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, frames: usize) {
     shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
 }
 
-fn sample_at(bytes: &[u8], index: usize) -> f32 {
-    let start = index * 4;
+/// The f32 sample starting at byte `start`, or silence past the end.
+fn sample_at(bytes: &[u8], start: usize) -> f32 {
     let Some(chunk) = bytes.get(start..start + 4) else {
         return 0.0;
     };
@@ -685,8 +745,8 @@ fn ensure_init() {
 #[cfg(test)]
 mod tests {
     use super::{
-        endpoint_kind, is_alsa_shim, is_native_id, node_latency_frames, node_name, path_delay_ns,
-        playback_frames, EndpointKind,
+        capture_window, endpoint_kind, is_alsa_shim, is_native_id, node_latency_frames, node_name,
+        path_delay_ns, playback_frames, EndpointKind,
     };
 
     #[test]
@@ -757,6 +817,29 @@ mod tests {
         assert_eq!(playback_frames(128 * 8, 8, 1024), 128);
         assert_eq!(playback_frames(64, 8, 16), 8);
         assert_eq!(playback_frames(0, 8, 64), 0);
+    }
+
+    #[test]
+    fn capture_reads_from_the_chunk_offset_with_its_stride() {
+        // Packed stereo f32, no offset: every byte of `size` is frames.
+        let window = capture_window(8192, 0, 64 * 8, 0, 2);
+        assert_eq!((window.start, window.stride, window.frames), (0, 8, 64));
+        // An offset moves the start, and the size is bounded by what is
+        // mapped after it.
+        let window = capture_window(1024, 1000, 512, 8, 2);
+        assert_eq!((window.start, window.frames), (1000, 3));
+        // The offset is taken modulo the mapped size.
+        assert_eq!(capture_window(1024, 1024 + 16, 64, 8, 2).start, 16);
+        // A wider stride than the samples (padding) is honoured; the last
+        // frame does not need trailing padding.
+        let window = capture_window(4096, 0, 16 * 3 + 8, 16, 2);
+        assert_eq!((window.stride, window.frames), (16, 4));
+        // A stride too small for the channels falls back to packed frames.
+        assert_eq!(capture_window(4096, 0, 64, 4, 2).stride, 8);
+        assert_eq!(capture_window(4096, 0, 64, -8, 2).stride, 8);
+        // Nothing mapped, or less than one frame, yields no frames.
+        assert_eq!(capture_window(0, 0, 64, 8, 2).frames, 0);
+        assert_eq!(capture_window(4096, 0, 7, 8, 2).frames, 0);
     }
 
     #[test]
