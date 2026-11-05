@@ -328,9 +328,9 @@ impl RigWerkApp {
                     })
                     .response
                     .on_hover_text(if cfg!(target_os = "windows") {
-                        "Output rate. When it differs from the input, RigWerk converts with a cubic resampler. Shared WASAPI outputs mix at the rate set in Windows."
+                        "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. Shared WASAPI outputs mix at the rate set in Windows."
                     } else {
-                        "Output rate. When it differs from the input, RigWerk converts with a cubic resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
+                        "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
                     });
                 if rate != self.output_rate {
                     self.output_rate = rate;
