@@ -119,45 +119,185 @@ audio devices. A plain `cargo test` fails at link time on this Alpine image with
 `cannot find -lasound` / `cannot find -lxcb`; the `-crt-static` override is an
 environment packaging workaround, not a source change.
 
+## Third phase: completing the partial fixes
+
+A second round of seven independent reviewers (one per area, all judging the
+cumulative change at `66fa9a2` rather than single commits) confirmed M1, M3,
+M5, M6 and H10, rated M2, M4, H1 and H2 as partial, and found regressions
+introduced by the fixes. This phase completes those four and fixes the
+regressions. It is not committed yet.
+
+### Session lifecycle (M4)
+
+- **`Error` now stops the bridge thread.** `enter_error` sets the stop flag.
+  Before, a thread that reported an error but stayed alive (a WASAPI or ASIO
+  output that stopped, a device loss while an alert was already shown) kept its
+  device. The first Start after such an error was then always refused ("still
+  shutting down"), and Preview was blocked for good.
+- **Driver opens that time out are joined, not detached.** On the WASAPI
+  (4 s) and ASIO-output (6 s) open timeouts, the bridge thread now waits for
+  the open thread instead of leaving it running. The engine's start timeout and
+  teardown tracking cover the wait, so a late open can no longer claim the
+  device after the cpal fallback or a new session has opened it.
+- **ASIO output open errors are reported.** Failures in `create_driver` and
+  `buffer_size` now go back through `ready`, so the user sees the real reason
+  instead of "closed channel".
+
+### ASIO callback (M5)
+
+- **`outputReady` is no longer called.** It was issued later from the bridge
+  thread, without checking that the driver supports it, and calls could merge.
+  A late call can tell a driver a buffer is ready after it has started playing
+  it. Leaving it out is the ASIO default and always correct: the filled buffer
+  plays at the next switch.
+- **A panic in the callback no longer aborts the app.** `dispatch` wraps
+  `process` in `catch_unwind`. On a panic it silences the output buffers, stops
+  touching that context, and the bridge ends with an error message.
+- **Driver reset requests end the session cleanly.** `kAsioResetRequest`
+  (rate or buffer size changed in the driver's control panel) is now accepted.
+  The bridge stops with "the driver changed its sample rate or buffer size",
+  instead of running on at a stale rate or reporting an unplug.
+- **The callback selectors now match what is handled.** `RESYNC_REQUEST` and
+  `LATENCIES_CHANGED` are no longer claimed as supported.
+- **Hung callbacks are never freed.** When the watchdog reports no callback
+  for 2 s, the context is detached and leaked instead of freed, because a
+  callback stuck inside `process` may still be using it.
+
+### Plugin chain and CLAP threading (M2)
+
+- **Removed plugins are destroyed outside the chain lock.** `remove` and
+  `restore` hand the old slots back; `Shared` drops them after unlocking.
+- **CLAP main-thread work no longer takes the plugin's lock.** `on_main_thread`
+  and timers (where most editors repaint) now run through `HostState` while
+  the audio thread keeps processing. CLAP allows these calls concurrently with
+  `process`.
+  - The plugin pointer sits behind an `RwLock` that `Drop` clears before
+    destroying the plugin.
+  - Only a pending parameter flush or rescan takes the instance lock, and then
+    with `try_lock`.
+  - `service_plugins` collects the handles under the chain lock and services
+    them after releasing it.
+- **Parameter sync reads the plugin outside the chain lock.** The 250 ms
+  editor sync takes the chain lock only to fetch the handle and to store the
+  result, and stores it only if the slot still holds the same instance.
+- **A slider drag refreshes one parameter, not all.** `set_parameter` used to
+  rebuild the whole VST3 parameter list (twice) on every drag event; it now
+  formats only the moved control. `has_editor` is cached at load, so drawing
+  the insert list never locks a plugin.
+- **CLAP `start_processing` runs on the audio thread.** The first `process`
+  call makes it, inside the audio-thread scope; at load it had run on the main
+  thread, against the CLAP spec. The CLAP main thread is now recorded once from
+  the UI thread, so `is_main_thread` is right even for a plugin reloaded on a
+  bridge thread.
+- **The CLAP event list no longer allocates on the audio thread.** It is
+  reserved to the parameter count after every scan.
+- **The mixer scratch is sized before the stream starts.** The cpal and WASAPI
+  outputs now call `OutputMixer::prepare` too, so their first callback and the
+  first block after adding a plugin no longer allocate.
+
+### Resampler (H1)
+
+- **The kernel is a Kaiser-windowed sinc (80 dB stop band) whose length
+  depends on the rate pair**, from 32 to 512 taps.
+  - The passband is flat to 20 kHz, or 45 % of the lower rate.
+  - The stop band starts where content would fold back onto the passband edge,
+    so nothing aliases below 20 kHz.
+  - Only content folding into the inaudible range between 20 kHz and the output
+    Nyquist is partially attenuated.
+- **Kernel lengths and the look-ahead they add:**
+
+  | Rate pair | Taps | Look-ahead |
+  | --- | --- | --- |
+  | 1:1 at 48 kHz | 32 | 0.33 ms |
+  | 44.1 ↔ 48 kHz | 56 | 0.58–0.63 ms |
+  | 96 → 48 kHz | 64 | 0.33 ms |
+  | 192 → 44.1 kHz | 224 | 0.58 ms |
+- **No allocation for any source up to 192 kHz.** Storage for the longest
+  kernel such a source needs is reserved when the mixer is created, so
+  `configure` stays inside it and `next` never allocates.
+- **New tests pin the behaviour.**
+  - The passband is within 0.1 dB at 20 kHz for 44.1↔48, 96→48, 192→44.1, and
+    1:1 at 44.1 and 48 kHz with drift on.
+  - Tones that would fold below 20 kHz are below −70 dB: 96→48 at 28.5 and
+    40 kHz, 192→44.1 at 24.5 and 30 kHz, 88.2→44.1 at 30 kHz.
+  - A 192 kHz reconfigure reuses the reserved storage.
+
+### Drift steering (H2)
+
+- **The fill error is low-passed (0.5 s) before the PI controller, and the
+  gains are an order of magnitude lower** (Kp 0.06, Ki 0.0012; damping about
+  0.87).
+  - The old gains turned the block-quantised fill sawtooth into a correction
+    swinging between ±500 ppm.
+  - A simulation with block-quantised clocks and jitter reproduced the
+    reviewer's result (81 % of blocks saturated at 512/441). With the new gains
+    the correction's standard deviation is about 15–65 ppm, with no saturation
+    at offsets up to ±200 ppm.
+- **An underrun keeps the learned clock offset.** Only the filtered fill starts
+  over, so a small cushion does not underrun again while the loop relearns.
+- **Switching drift on or off at 1:1 resets the resampler.** Turning it on no
+  longer replays history from before the bypass. Turning it off skips the
+  look-ahead frames once (about 0.33 ms at 48 kHz).
+
+### Verification
+
+All of the following were run on Windows, which has no Linux target installed:
+
+- `cargo fmt --check`: pass.
+- `cargo test`: 51 passed, 0 failed, 4 ignored.
+- `cargo clippy --all-targets`: the same warning set as before this phase.
+
+Not verified:
+- The Linux build was not compiled. The touched code is platform-neutral apart
+  from the Windows-only files.
+- No ASIO hardware, CLAP plugin, or audio device was exercised.
+
 ## Remaining risks after the fixes
 
 These are recorded so the fixes are not overclaimed:
 
-- **M2:** UI-side chain holds now cause a dry bypass rather than an audio block.
-  `refresh_rate`/`ensure_loaded`/`plugin_views`/`service_plugins` can still hold
-  the chain for a long time; a plugin processing error still formats a string on
-  the audio thread; `vst3-host`'s internal level mutex remains untouched.
-- **M3/M4:** a driver that never returns from teardown leaves a parked thread
-  and a visible error; the 15 s watchdog tells the user to restart RigWerk but
-  cannot release a stuck driver. Late teardown errors are suppressed for the
-  state machine but may still appear in the activity log/status tile.
-- **M5:** no ASIO hardware or Windows desktop was available, so callback
-  timing, `outputReady` behavior, and driver stop/dispose semantics are
-  compile-verified only. `outputReady` is issued one wake-up later and can
-  coalesce; a driver that requires it from the callback thread may behave
-  differently.
+- **M2:**
+  - A chain-lock collision still passes that block through dry, without a
+    crossfade. Remaining holds that can collide:
+    - `refresh_rate` (bridge start or rate change)
+    - `ensure_loaded` (opening an editor for a never-loaded slot)
+    - `plugin_views` (clones the view list)
+    - storing a parameter sync or a drag
+    - VST3 editor servicing, which still holds that plugin's own lock. The
+      vst3-host API offers no lock-free path.
+  - A plugin processing error still formats a string on the audio thread, once
+    per failure.
+  - CLAP `stop_processing` still runs from `Drop`, off the audio thread.
+- **M3/M4:**
+  - A driver that never returns from teardown or open leaves a parked bridge
+    thread and a visible error; the watchdog tells the user to restart RigWerk
+    but cannot release a stuck driver.
+  - Late teardown errors may still appear in the activity log/status tile.
+- **M5:**
+  - Callback timing, driver stop/dispose, and reset-request behaviour are
+    compile-verified only.
+  - `sampleRateDidChange` is deliberately ignored (some drivers send it during
+    start); only `kAsioResetRequest` ends the session.
 - **M6:** gain is applied per block, not ramped per sample, so large slider
   moves can still step; the H3 ramping issue remains.
-- **H1 transition band:** with 32 taps the anti-alias transition is wide. For
-  96→48 kHz the measured response is about −9.5 dB at 24 kHz, −18 dB at 26 kHz
-  and −55 dB at 30 kHz, so content just above the output Nyquist (24-28 kHz) is
-  only partially rejected and aliases into 20-24 kHz. 192→44.1 kHz is worse.
-  More taps would narrow this at higher CPU cost.
-- **H1/H2 1:1 filtering:** drift is enabled by default, so a 1:1 bridge runs
-  through the 0.475·Fs lowpass even at 0 ppm (about −1.5 dB at 20 kHz and
-  −4.3 dB at 22 kHz at 48 kHz). A true bypass only happens with drift off.
-- **H2 limits:** ±500 ppm is a hard correction ceiling; a larger clock offset
-  eventually hits the excess purge or an underrun. Look-ahead is now 16 source
-  frames (about 0.36 ms at 44.1 kHz). `drift_ppm` is instantaneous, so the UI
-  drift readout responds to block-level fill jitter.
-- **H2 purge:** a large cushion reduction still pops `fill - target` frames;
-  not resetting the resampler turns that into a short crossfade rather than an
-  instant reset. This path is rare and pre-existing.
+- **H1:** content between the output Nyquist and `lower rate − 20 kHz` (e.g.
+  24–28 kHz for 96→48) is only partially rejected. It folds to 20 kHz–Nyquist,
+  above the audible band.
+- **H2:**
+  - ±500 ppm is a hard ceiling. Larger offsets eventually hit the excess purge
+    or an underrun.
+  - The loop settles over tens of seconds. A large offset at start-up, or a
+    Low-latency cushion, can still underrun once before the integral has
+    learned the offset; the cushion then grows as before.
+- **H2 purge:** a large cushion reduction still pops `fill - target` frames,
+  which the resampler turns into a short crossfade. This path is rare and
+  pre-existing.
 - **ASIO two-driver startup:** when the output and input are two different ASIO
-  drivers, the output worker still starts before the input driver reports its
-  rate, so its first callback may design the filter once. This is startup-only
-  and silent (the ring is priming), but it is the one remaining kernel build on
-  an audio thread. Fixing it needs a prepare/start split for the ASIO input.
+  drivers, the output worker starts before the input driver reports its rate.
+  Its first callback may then design the filter once, on the audio thread. This
+  happens only at startup and is silent (the ring is priming), and it no longer
+  allocates for sources up to 192 kHz. Removing it needs a prepare/start split
+  for the ASIO input.
 
 ## Not fixed yet
 
@@ -166,3 +306,17 @@ The non-blocking findings still open in `REVIEW.md` are plugin lifecycle/state
 classification and quantum (H11, H17, H18), UI data honesty/layout/
 accessibility/diagnostics (U1-U7), and build/package hygiene. H1, H2, H10 and
 the M3/M4 runtime residuals listed above are addressed by this branch.
+
+The second review round re-verified every open finding above at `66fa9a2`; all
+are still open. It also sharpened several of them:
+
+- **H7** loses data: after a reload, the next parameter sync overwrites the
+  saved CLAP values with the plugin's defaults.
+- **H12** applies to Linux `hw:` devices only. ASIO devices come from the
+  registry and cannot drop out.
+- **H16** also covers `PluginPref`: one bad plugin entry wipes all preferences.
+- **H17:** a failed read-back can also clear a quantum the user had forced.
+- **U5** overstated keyboard access: egui activates focusable rows with Enter
+  and Space. The real gap is that focus is never shown.
+- **U7:** a fix must keep a slow repaint tick (100–250 ms), because servicing
+  the hidden window relies on it.
