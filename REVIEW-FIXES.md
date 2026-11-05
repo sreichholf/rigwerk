@@ -373,14 +373,63 @@ H8 (plugin lifecycle on bridge threads) is not claimed as complete here.
 Not verified: a real multi-port CLAP plugin or CLAP validator was available, so
 the port layout is covered by the in-process fake only.
 
+## Fifth phase: mix ramping (H3)
+
+`84ac304` added the ramp types and did not call them, so gain, mute, channel
+enable and routing still stepped once per block. This phase wires those ramps
+into the output mixer.
+
+| Finding | Commit | Subject |
+| --- | --- | --- |
+| H3 | (this phase) | Crossfade gain, mute, and routing instead of stepping per block |
+
+### H3: gain, mute, channel enable, and routing
+
+- Each route, each output channel, mono, and the output level keeps its own
+  per-sample ramp. A change takes 6 ms at any block size, and a ramp that
+  crosses a callback boundary keeps its slope instead of restarting.
+- Mute and monitor are not a hard gate. They fold into the level ramp, so
+  muting, unmuting, and moving the fader in the same moment is one continuous
+  move. The ramp lands on the exact target and then holds it, so a settled
+  control adds no extra modulation.
+- The first block adopts the live settings directly. Starting the bridge does
+  not fade in from silence or from unity gain.
+- Routing, output-channel enable, and mono still run before the pre EQ and the
+  plugin inserts. The level ramp still runs after the post EQ, in the same
+  place the master fader used to step.
+- Input gain and the input-channel switches are unchanged: each input callback
+  still reads them once and holds them for that block. A fast move of the
+  input fader can still step at the input block boundary. That is the M6
+  residual from the earlier phase; it is not the per-block output step H3
+  describes.
+
+### Verification for the fifth phase
+
+On this Linux host, Rust 1.99.1:
+
+- `cargo fmt --check`: pass.
+- `cargo test`: 106 passed, 0 failed, 1 ignored
+  (`audio::hardware_tests::hardware_bridge`, which opens real devices).
+- `cargo clippy --all-targets`: no new warnings. The warnings that remain are
+  the pre-existing dead-code and style notes outside the mixer.
+- The new mixer tests cover a ramp that lands and holds, a repeated target
+  that does not restart the slope, a retarget from the current value, the
+  first block adopting a non-default level, a level move that continues across
+  two callbacks, mute and monitor fades, a route crossfade that leaves the
+  other taps alone, an output-channel fade, and a mono crossfade.
+
+Not verified here: no audio device was exercised, so the ramps are covered by
+the mixer tests only.
+
 ## Not fixed yet
 
-The non-blocking findings still open in `REVIEW.md` are gain/mute/routing
-ramping (H3), latency reporting (H4), plugin lifecycle placement (H8), Linux
-classification and quantum (H11, H17, H18), device identity and presets
-(H12-H15), UI data honesty/layout/accessibility/diagnostics (U1-U7), and
-build/package hygiene. H1, H2, H5-H7, H9, H10, H16 and the M3/M4 runtime
-residuals listed above are addressed by this branch.
+The non-blocking findings still open in `REVIEW.md` are latency reporting
+(H4), plugin lifecycle placement (H8), Linux classification and quantum
+(H11, H17, H18), device identity and presets (H12-H15), UI data
+honesty/layout/accessibility/diagnostics (U1-U7), and build/package hygiene.
+H1, H2, H3, H5-H7, H9, H10, H16 and the M3/M4 runtime residuals listed above
+are addressed by this branch. Input gain still steps once per input callback;
+that residual is recorded in the H3 notes above and in the earlier M6 note.
 
 The second review round re-verified every open finding at `66fa9a2`; at that
 point all of them, including H5-H9, were still open. It also sharpened several

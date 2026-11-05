@@ -88,8 +88,7 @@ impl Ramp {
     fn next(&mut self) -> f32 {
         if self.current != self.target {
             let next = self.current + self.step;
-            if (self.step > 0.0 && next >= self.target)
-                || (self.step < 0.0 && next <= self.target)
+            if (self.step > 0.0 && next >= self.target) || (self.step < 0.0 && next <= self.target)
             {
                 self.current = self.target;
                 self.step = 0.0;
@@ -125,9 +124,9 @@ impl MixRamps {
     /// First block: adopt the live settings directly, so starting a bridge
     /// neither fades in nor jumps to them.
     fn snap(&mut self, routes: &[[f32; 4]; 2], enabled: [f32; 2], mono: f32, gain: f32) {
-        for input in 0..2 {
-            for tap in 0..4 {
-                self.route[input][tap].snap(routes[input][tap]);
+        for (row, targets) in self.route.iter_mut().zip(routes) {
+            for (ramp, target) in row.iter_mut().zip(targets) {
+                ramp.snap(*target);
             }
         }
         for (ramp, target) in self.output_enabled.iter_mut().zip(enabled) {
@@ -145,9 +144,9 @@ impl MixRamps {
         gain: f32,
         samples: f32,
     ) {
-        for input in 0..2 {
-            for tap in 0..4 {
-                self.route[input][tap].set_target(routes[input][tap], samples);
+        for (row, targets) in self.route.iter_mut().zip(routes) {
+            for (ramp, target) in row.iter_mut().zip(targets) {
+                ramp.set_target(*target, samples);
             }
         }
         for (ramp, target) in self.output_enabled.iter_mut().zip(enabled) {
@@ -232,6 +231,13 @@ pub(crate) struct OutputMixer {
     /// each was last updated from.
     eq: [Equalizer; 2],
     eq_version: [u64; 2],
+    /// Per-sample ramps for routing, channel enable, mono and the output
+    /// level.  A control read once per block would step; these move over a
+    /// few milliseconds instead.
+    ramps: MixRamps,
+    /// The first block adopts the live settings directly.  Later blocks ramp
+    /// toward them, so opening the bridge does not fade in from the defaults.
+    controls_adopted: bool,
 }
 
 impl OutputMixer {
@@ -255,6 +261,8 @@ impl OutputMixer {
             plugin_r: Vec::new(),
             eq: [Equalizer::new(output_rate), Equalizer::new(output_rate)],
             eq_version: [0; 2],
+            ramps: MixRamps::new(),
+            controls_adopted: false,
         }
     }
 
@@ -269,6 +277,35 @@ impl OutputMixer {
         if self.plugin_l.len() < frames {
             self.plugin_l.resize(frames, 0.0);
             self.plugin_r.resize(frames, 0.0);
+        }
+    }
+
+    /// Points every mix ramp at the settings for this block.  The first block
+    /// snaps, so a bridge opens at the current mix; after that a change takes
+    /// [`CONTROL_RAMP_SECONDS`], however long the block itself is.
+    fn follow_controls(&mut self, shared: &Shared) {
+        let coefficient = |flag: bool| if flag { 1.0 } else { 0.0 };
+        let mut routes = [[0.0f32; 4]; 2];
+        for (input, row) in routes.iter_mut().enumerate() {
+            for (output, coefficient_out) in row.iter_mut().enumerate() {
+                *coefficient_out =
+                    coefficient(shared.routes[input * 4 + output].load(Ordering::Relaxed));
+            }
+        }
+        let enabled = [
+            coefficient(shared.output_enabled[0].load(Ordering::Relaxed)),
+            coefficient(shared.output_enabled[1].load(Ordering::Relaxed)),
+        ];
+        let mono = coefficient(shared.mono.load(Ordering::Relaxed));
+        let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
+        let gain = if silent { 0.0 } else { shared.output_gain() };
+        let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
+        if self.controls_adopted {
+            self.ramps
+                .set_targets(&routes, enabled, mono, gain, samples);
+        } else {
+            self.ramps.snap(&routes, enabled, mono, gain);
+            self.controls_adopted = true;
         }
     }
 
@@ -353,19 +390,9 @@ impl OutputMixer {
     ) {
         self.follow_source_rate(shared);
         self.follow_eq(shared);
+        self.follow_controls(shared);
         let pre_eq = self.eq[EqSlot::Pre.index()].active();
         let post_eq = self.eq[EqSlot::Post.index()].active();
-        let gain = shared.output_gain();
-        let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
-        let mono = shared.mono.load(Ordering::Relaxed);
-        let out_l = shared.output_enabled[0].load(Ordering::Relaxed);
-        let out_r = shared.output_enabled[1].load(Ordering::Relaxed);
-        let route =
-            |input: usize, output: usize| shared.routes[input * 4 + output].load(Ordering::Relaxed);
-        let routes = [
-            [route(0, 0), route(0, 1), route(0, 2), route(0, 3)],
-            [route(1, 0), route(1, 1), route(1, 2), route(1, 3)],
-        ];
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
         // The ring holds input frames; one output block drains this many.
         // The very first block is skipped: a host fills its whole buffer once
@@ -438,17 +465,9 @@ impl OutputMixer {
                 take_ring_frame(shared, &mut missed, last)
             };
             self.last = (left, right);
-            let mut out = route_frame(left, right, &routes);
-            if !out_l {
-                out[0] = 0.0;
-            }
-            if !out_r {
-                out[1] = 0.0;
-            }
-            if mono {
-                let sum = (out[0] + out[1]) * 0.5;
-                out = [sum; 4];
-            }
+            // Routing, channel enable and mono move with the ramps, before
+            // the EQ and the inserts, which is where those controls act.
+            let mut out = self.ramps.next_input(left, right);
             // The chain on the master mix (taps 1/2), in order: pre EQ, the
             // plugin inserts, post EQ, then the output level and mute.  The
             // EQs work one sample at a time, so they add no latency.
@@ -484,12 +503,12 @@ impl OutputMixer {
             if post_eq {
                 (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
             }
-            if silent {
-                out = [0.0; 4];
-            } else {
-                for value in out.iter_mut() {
-                    *value *= gain;
-                }
+            // Mute, monitor and the level are one ramp, so any of them can move
+            // without a step.  One call per frame keeps it aligned with the
+            // input ramps above.
+            let gain = self.ramps.next_output_gain();
+            for value in out.iter_mut() {
+                *value *= gain;
             }
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
@@ -523,38 +542,221 @@ impl OutputMixer {
     }
 }
 
-pub(crate) fn route_frame(left: f32, right: f32, routes: &[[bool; 4]; 2]) -> [f32; 4] {
+pub(crate) fn route_frame(left: f32, right: f32, routes: &[[f32; 4]; 2]) -> [f32; 4] {
     let mut out = [0.0f32; 4];
     for (tap, value) in out.iter_mut().enumerate() {
-        if routes[0][tap] {
-            *value += left;
-        }
-        if routes[1][tap] {
-            *value += right;
-        }
+        *value = left * routes[0][tap] + right * routes[1][tap];
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::route_frame;
+    use std::sync::atomic::Ordering;
+
+    use super::super::eq::{EqSettings, EqSlot};
+    use super::super::shared::Shared;
+    use super::super::types::CushionMode;
+    use super::{route_frame, OutputMixer, Ramp, CONTROL_RAMP_SECONDS};
 
     #[test]
     fn default_routes_keep_channels_apart() {
-        let routes = [[true, false, false, false], [false, true, false, false]];
+        let routes = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
         assert_eq!(route_frame(0.5, -0.25, &routes), [0.5, -0.25, 0.0, 0.0]);
     }
 
     #[test]
     fn a_tap_can_receive_both_inputs() {
-        let routes = [[false, true, false, false], [false, true, false, false]];
+        let routes = [[0.0, 1.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
         assert_eq!(route_frame(0.5, 0.25, &routes), [0.0, 0.75, 0.0, 0.0]);
     }
 
     #[test]
+    fn partial_routes_scale_each_input() {
+        let routes = [[0.5, 0.0, 0.0, 0.0], [0.0, 0.5, 0.0, 0.0]];
+        assert_eq!(route_frame(0.5, -0.25, &routes), [0.25, -0.125, 0.0, 0.0]);
+    }
+
+    #[test]
     fn muted_matrix_is_silent() {
-        let routes = [[false; 4]; 2];
+        let routes = [[0.0; 4]; 2];
         assert_eq!(route_frame(0.5, 0.5, &routes), [0.0; 4]);
+    }
+
+    #[test]
+    fn ramp_lands_on_its_target_and_holds() {
+        let mut ramp = Ramp::new(0.0);
+        ramp.set_target(1.0, 4.0);
+        let values: Vec<f32> = (0..6).map(|_| ramp.next()).collect();
+        assert_eq!(values, vec![0.25, 0.5, 0.75, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn ramp_keeps_its_slope_when_the_target_is_repeated() {
+        let mut ramp = Ramp::new(0.0);
+        ramp.set_target(1.0, 4.0);
+        assert_eq!(ramp.next(), 0.25);
+        // A block boundary that repeats the same target must not restart the
+        // move from wherever the ramp currently sits.
+        ramp.set_target(1.0, 4.0);
+        assert_eq!(ramp.next(), 0.5);
+    }
+
+    #[test]
+    fn ramp_retargets_from_where_it_is() {
+        let mut ramp = Ramp::new(0.0);
+        ramp.set_target(1.0, 4.0);
+        assert_eq!(ramp.next(), 0.25);
+        ramp.set_target(0.0, 2.0);
+        assert_eq!(ramp.next(), 0.125);
+        assert_eq!(ramp.next(), 0.0);
+    }
+
+    #[test]
+    fn snap_adopts_a_value_without_moving() {
+        let mut ramp = Ramp::new(1.0);
+        ramp.snap(0.25);
+        assert_eq!(ramp.next(), 0.25);
+        assert_eq!(ramp.next(), 0.25);
+    }
+
+    /// A 1:1 bridge with drift off, a deep cushion and the EQs bypassed, so a
+    /// rendered frame is the mix itself and not the resampler or a filter.
+    fn steady_mixer(signal: (f32, f32)) -> (OutputMixer, Shared) {
+        let shared = Shared::new(48_000);
+        shared.set_source_rate(48_000);
+        shared.set_cushion(CushionMode::Manual, 100.0);
+        shared.set_mix(false, true, false, [true, true], [true, true], false);
+        let bypassed = EqSettings {
+            enabled: false,
+            ..EqSettings::default()
+        };
+        shared.set_eq(EqSlot::Pre, bypassed);
+        shared.set_eq(EqSlot::Post, bypassed);
+        for _ in 0..5_000 {
+            shared.push_frame(signal.0, signal.1);
+        }
+        (OutputMixer::new(48_000), shared)
+    }
+
+    fn render(mixer: &mut OutputMixer, shared: &Shared, frames: usize) -> Vec<[f32; 4]> {
+        let mut out = vec![[0.0f32; 4]; frames];
+        mixer.render(shared, frames, |index, frame| out[index] = frame);
+        out
+    }
+
+    fn store_gain(shared: &Shared, gain: f32) {
+        shared.output_gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    #[test]
+    fn the_first_block_adopts_the_live_level() {
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        store_gain(&shared, 0.25);
+        let out = render(&mut mixer, &shared, 64);
+        assert!(out.iter().all(|frame| frame == &[0.125, -0.0625, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_level_change_ramps_across_blocks_and_then_holds() {
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        let adopted = render(&mut mixer, &shared, 32);
+        assert_eq!(adopted[0], [0.5, -0.25, 0.0, 0.0]);
+
+        store_gain(&shared, 0.5);
+        let ramp_frames = (CONTROL_RAMP_SECONDS * 48_000.0).round() as usize;
+        let first = render(&mut mixer, &shared, 100);
+        let second = render(&mut mixer, &shared, ramp_frames);
+        let joined = [first.clone(), second.clone()].concat();
+
+        assert!(first[0][0] < 0.5 && first[0][0] > 0.49);
+        let step = (first[0][0] - first[1][0]).abs();
+        let full_drop = 0.5 - 0.25;
+        assert!(step > 0.0 && step < full_drop / 50.0);
+        // The block boundary continues the same slope instead of jumping
+        // back toward the old level or landing on the new one early.
+        let boundary = (first[99][0] - second[0][0]).abs();
+        assert!(boundary < step * 1.5);
+
+        let settled_at = joined
+            .iter()
+            .position(|frame| frame[0] == 0.25)
+            .expect("ramp reaches the new level");
+        assert!((settled_at as i32 - (ramp_frames as i32 - 1)).abs() <= 2);
+        assert!(joined[settled_at..].iter().all(|frame| frame[0] == 0.25));
+        assert!(joined[settled_at..].iter().all(|frame| frame[1] == -0.125));
+    }
+
+    #[test]
+    fn mute_fades_out_and_a_new_level_fades_back_in() {
+        let (mut mixer, shared) = steady_mixer((0.5, 0.0));
+        let _adopted = render(&mut mixer, &shared, 16);
+        store_gain(&shared, 0.5);
+        shared.set_mix(true, true, false, [true, true], [true, true], false);
+        let muted = render(&mut mixer, &shared, 320);
+        assert!(muted[0][0] > 0.4);
+        assert!(muted.last().unwrap()[0] == 0.0);
+        assert!(muted.iter().all(|frame| frame[1] == 0.0));
+
+        shared.set_mix(false, true, false, [true, true], [true, true], false);
+        let restored = render(&mut mixer, &shared, 320);
+        assert!(restored[0][0] > 0.0 && restored[0][0] < 0.2);
+        assert_eq!(restored.last().unwrap()[0], 0.25);
+    }
+
+    #[test]
+    fn monitor_off_fades_to_silence() {
+        let (mut mixer, shared) = steady_mixer((0.5, 0.0));
+        let _adopted = render(&mut mixer, &shared, 16);
+        shared.set_mix(false, false, false, [true, true], [true, true], false);
+        let out = render(&mut mixer, &shared, 320);
+        assert!(out[0][0] > 0.4);
+        assert_eq!(out.last().unwrap()[0], 0.0);
+    }
+
+    #[test]
+    fn a_route_change_crossfades_and_leaves_other_taps_put() {
+        let (mut mixer, shared) = steady_mixer((0.5, 0.0));
+        let adopted = render(&mut mixer, &shared, 16);
+        assert_eq!(adopted[0], [0.5, 0.0, 0.0, 0.0]);
+
+        // Keep left on tap 1, and move it off tap 0.  Tap 1 fades in; tap 0
+        // fades out; nothing else starts carrying the input.
+        shared.set_routes([[false, true, false, false], [false, false, false, false]]);
+        let out = render(&mut mixer, &shared, 320);
+        assert!(out[0][0] > 0.4 && out[0][1] < 0.1);
+        assert_eq!(*out.last().unwrap(), [0.0, 0.5, 0.0, 0.0]);
+        assert!(out.iter().all(|frame| frame[2] == 0.0 && frame[3] == 0.0));
+        let mid = out[out.len() / 2];
+        assert!(mid[0] > 0.1 && mid[0] < 0.4);
+        assert!(mid[1] > 0.1 && mid[1] < 0.4);
+    }
+
+    #[test]
+    fn disabling_a_channel_fades_that_tap_only() {
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        let _adopted = render(&mut mixer, &shared, 16);
+        shared.set_mix(false, true, false, [true, true], [false, true], false);
+        let out = render(&mut mixer, &shared, 320);
+        assert!(out.iter().all(|frame| frame[1] == -0.25));
+        assert!(out[0][0] > 0.4);
+        assert_eq!(out.last().unwrap()[0], 0.0);
+    }
+
+    #[test]
+    fn mono_crossfades_every_tap_to_the_average() {
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        let _adopted = render(&mut mixer, &shared, 16);
+        shared.set_routes([[true, false, true, false], [false, true, false, false]]);
+        // Adopt the new route on its own before mono, so this test only
+        // watches the mono crossfade.  One long block settles the route.
+        let _routed = render(&mut mixer, &shared, 320);
+        shared.set_mix(false, true, true, [true, true], [true, true], false);
+        let out = render(&mut mixer, &shared, 320);
+        assert!(out[0][0] > 0.4);
+        assert_eq!(*out.last().unwrap(), [0.125; 4]);
+        // The third tap was carrying the left input and fades toward the average.
+        let mid = out[out.len() / 2];
+        assert!(mid[2] > 0.125 && mid[2] < 0.5);
     }
 }
