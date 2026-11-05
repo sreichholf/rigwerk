@@ -1,6 +1,6 @@
 [package]
 name = "rigwerk"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.95"
 description = "Independent audio bridge: any input clock to any output clock (PipeWire, ALSA, ASIO, WASAPI)"

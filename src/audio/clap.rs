@@ -83,7 +83,7 @@ impl Drop for AudioThreadScope {
 const HOST_NAME: &[u8] = b"RigWerk\0";
 const HOST_VENDOR: &[u8] = b"RigWerk\0";
 const HOST_URL: &[u8] = b"https://rigwerk.local\0";
-const HOST_VERSION: &[u8] = b"0.2.0\0";
+const HOST_VERSION: &[u8] = b"0.3.0\0";
 
 /// One CLAP parameter, cached while the plugin is loaded.
 #[derive(Clone, Debug)]
