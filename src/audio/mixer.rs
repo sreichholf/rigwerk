@@ -32,6 +32,11 @@ const DRIFT_KP: f32 = 0.06;
 /// ratio then moves only by a few ppm.
 const DRIFT_KI: f32 = 0.0012;
 
+/// How long an underrun takes to fade the held frame to silence, and how long
+/// playback takes to fade back in once the cushion has refilled.  Long enough
+/// that neither edge clicks, short enough not to smear the note around it.
+const DROPOUT_FADE_SECONDS: f32 = 0.0025;
+
 /// A control change is ramped over this long, whatever block size the host
 /// hands over: long enough to hide the step, short enough to feel immediate.
 const CONTROL_RAMP_SECONDS: f32 = 0.006;
@@ -188,9 +193,9 @@ impl MixRamps {
     }
 }
 
-/// Takes the next frame from the bridge.  A short gap holds the previous
-/// sample instead of clicking to silence, and marks the callback as late so
-/// the buffer can grow for the next round.
+/// Takes the next frame from the bridge.  An empty ring returns the previous
+/// frame (so the resampler's window stays continuous) and marks the callback
+/// as late, so the mixer fades out and the buffer can grow for the next round.
 pub(crate) fn take_ring_frame(shared: &Shared, missed: &mut bool, last: (f32, f32)) -> (f32, f32) {
     match shared.pop_frame() {
         Some(pair) => pair,
@@ -209,6 +214,24 @@ pub(crate) struct OutputMixer {
     source_rate: u32,
     resampler: FrameResampler,
     last: (f32, f32),
+    /// Playback gain around an underrun, 0..=1.  It is 1 while the ring
+    /// delivers.  When the ring runs dry the last frame is held and this
+    /// falls to 0 over [`DROPOUT_FADE_SECONDS`] (into the re-priming silence
+    /// if the block ends first); when priming ends it rises back to 1 over
+    /// the same time.  It starts at 1, so a ring that is already full on the
+    /// first block plays straight away; a bridge that primes for a while
+    /// fades in from that silence like any other recovery.  Both ends snap,
+    /// so float rounding never leaves a finished fade a hair short of 0 or 1.
+    fade_gain: f32,
+    /// The frame held while fading out after an underrun.
+    held: (f32, f32),
+    /// Whether any ring frame has been played yet.  Only a ring that is full
+    /// before the first frame starts at full level instead of fading in.
+    played: bool,
+    /// The ring ran dry in this block.  The rest of the block fades the held
+    /// frame out instead of picking up whatever trickles in meanwhile; the
+    /// next block re-primes as before.
+    dropping: bool,
     priming: bool,
     started: bool,
     // Drift correction steers the resampler ratio from the ring-fill error
@@ -253,6 +276,10 @@ impl OutputMixer {
             source_rate: output_rate,
             resampler: FrameResampler::new(output_rate, output_rate),
             last: (0.0, 0.0),
+            fade_gain: 1.0,
+            held: (0.0, 0.0),
+            played: false,
+            dropping: false,
             // Wait for the ring to reach its target before draining it.
             priming: true,
             started: false,
@@ -450,7 +477,12 @@ impl OutputMixer {
 
         // Do not drain the ring before the input has had time to fill it,
         // otherwise playback starts with a burst of underruns.
-        if self.priming && shared.ring_frames() >= target {
+        // After an underrun the held frame must have faded out first (at most
+        // DROPOUT_FADE_SECONDS), so a quick refill fades in from silence
+        // instead of jumping from the half-faded held frame to new audio.
+        // Only a ring that is full before anything played starts at full level.
+        let faded = self.fade_gain == 0.0 || !self.played;
+        if self.priming && faded && shared.ring_frames() >= target {
             self.priming = false;
         }
 
@@ -476,20 +508,55 @@ impl OutputMixer {
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
         let mut missed = false;
+        let fade_step = 1.0 / (DROPOUT_FADE_SECONDS * self.output_rate as f32).max(1.0);
         if self.block.len() < frames {
             self.block.resize(frames, [0.0; 4]);
         }
         for index in 0..frames {
-            let last = self.last;
-            let (left, right) = if self.priming {
-                (0.0, 0.0)
-            } else if needs_resample {
-                self.resampler
-                    .next(|| take_ring_frame(shared, &mut missed, last))
+            let (left, right) = if self.priming || self.dropping {
+                // After an underrun: keep fading the held frame down, into
+                // the priming silence if it outlasts this block.  A silent
+                // held frame (or none yet) has nothing to fade.
+                self.fade_gain = if self.held == (0.0, 0.0) {
+                    0.0
+                } else {
+                    fade_down(self.fade_gain, fade_step)
+                };
+                let out = (self.held.0 * self.fade_gain, self.held.1 * self.fade_gain);
+                // Once silent, resume as soon as the cushion is back, inside
+                // this block, rather than waiting for the next one.
+                if self.priming && self.fade_gain == 0.0 && shared.ring_frames() >= target {
+                    self.priming = false;
+                }
+                out
             } else {
-                take_ring_frame(shared, &mut missed, last)
+                let last = self.last;
+                let mut dry = false;
+                let frame = if needs_resample {
+                    self.resampler
+                        .next(|| take_ring_frame(shared, &mut dry, last))
+                } else {
+                    take_ring_frame(shared, &mut dry, last)
+                };
+                self.last = frame;
+                if dry {
+                    // The ring ran dry: hold this frame and fade it out
+                    // from wherever the gain is, instead of holding it at
+                    // full level and then dropping to silence.
+                    missed = true;
+                    self.dropping = true;
+                    self.held = frame;
+                    self.fade_gain = fade_down(self.fade_gain, fade_step);
+                } else {
+                    self.played = true;
+                    if self.fade_gain < 1.0 {
+                        // Back from an underrun: fade in instead of starting
+                        // on a step.
+                        self.fade_gain = fade_up(self.fade_gain, fade_step);
+                    }
+                }
+                (frame.0 * self.fade_gain, frame.1 * self.fade_gain)
             };
-            self.last = (left, right);
             // Routing, channel enable and mono move with the ramps, before
             // the EQ and the inserts, which is where those controls act.
             let mut out = self.ramps.next_input(left, right);
@@ -558,6 +625,8 @@ impl OutputMixer {
             // on every callback.
             shared.raise_target_after_underrun();
             self.priming = true;
+            // The held frame keeps fading through the priming silence.
+            self.dropping = false;
             self.resampler.reset();
             // The integral (the learned clock offset) survives the underrun;
             // only the filtered fill starts over.
@@ -575,6 +644,27 @@ impl OutputMixer {
         shared
             .drift_ppm
             .store(self.drift_ppm.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// One step of the underrun fade-out, snapping to 0 instead of stopping a
+/// rounding error above it.
+fn fade_down(gain: f32, step: f32) -> f32 {
+    let next = gain - step;
+    if next < step * 0.5 {
+        0.0
+    } else {
+        next
+    }
+}
+
+/// One step of the fade-in, snapping to 1 the same way.
+fn fade_up(gain: f32, step: f32) -> f32 {
+    let next = gain + step;
+    if next > 1.0 - step * 0.5 {
+        1.0
+    } else {
+        next
     }
 }
 
@@ -777,6 +867,110 @@ mod tests {
         assert!(out.iter().all(|frame| frame[1] == -0.25));
         assert!(out[0][0] > 0.4);
         assert_eq!(out.last().unwrap()[0], 0.0);
+    }
+
+    /// The largest sample-to-sample move on tap 0 across a run of blocks.
+    fn largest_step(out: &[[f32; 4]]) -> f32 {
+        out.windows(2)
+            .map(|pair| (pair[1][0] - pair[0][0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// Renders `blocks` blocks of 256 frames into one run.
+    fn render_blocks(mixer: &mut OutputMixer, shared: &Shared, blocks: usize) -> Vec<[f32; 4]> {
+        (0..blocks)
+            .flat_map(|_| render(mixer, shared, 256))
+            .collect()
+    }
+
+    fn underrun_fades_out(drift: bool) {
+        let (mut mixer, shared) = steady_mixer((0.8, 0.8));
+        shared.set_mix(false, true, false, [true, true], [true, true], drift);
+        // 5 000 frames drain in a little under 20 blocks; the 20th runs dry
+        // part way through.
+        let out = render_blocks(&mut mixer, &shared, 24);
+        assert!(shared.underruns.load(Ordering::Relaxed) >= 1);
+        assert!((out[100][0] - 0.8).abs() < 1.0e-3, "{}", out[100][0]);
+        assert_eq!(out.last().unwrap()[0], 0.0, "the dropout ends in silence");
+        let step = largest_step(&out);
+        assert!(step < 0.05, "underrun stepped by {step}");
+    }
+
+    #[test]
+    fn an_underrun_fades_the_held_frame_to_silence() {
+        underrun_fades_out(false);
+    }
+
+    #[test]
+    fn an_underrun_through_the_resampler_fades_too() {
+        underrun_fades_out(true);
+    }
+
+    #[test]
+    fn playback_fades_back_in_after_an_underrun() {
+        let (mut mixer, shared) = steady_mixer((0.8, 0.8));
+        let mut out = render_blocks(&mut mixer, &shared, 24);
+        assert!(shared.underruns.load(Ordering::Relaxed) >= 1);
+        let resumed_from = out.len();
+        for _ in 0..6_000 {
+            shared.push_frame(0.8, 0.8);
+        }
+        out.extend(render_blocks(&mut mixer, &shared, 4));
+        let first = out[resumed_from..]
+            .iter()
+            .position(|frame| frame[0] != 0.0)
+            .map(|index| out[resumed_from + index][0])
+            .expect("playback resumes");
+        assert!(first > 0.0 && first < 0.05, "resumed at {first}");
+        assert_eq!(out.last().unwrap()[0], 0.8);
+        let step = largest_step(&out);
+        assert!(step < 0.05, "recovery stepped by {step}");
+    }
+
+    #[test]
+    fn an_underrun_that_fades_out_by_the_block_end_resumes_next_block() {
+        let (mut mixer, shared) = steady_mixer((0.8, 0.8));
+        // 5 000 frames: four 1024 blocks leave 904, so the fifth runs dry at
+        // sample 904 and its 120-sample fade ends exactly at the block end.
+        let _played = (0..5)
+            .map(|_| render(&mut mixer, &shared, 1024))
+            .collect::<Vec<_>>();
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 1);
+        for _ in 0..6_000 {
+            shared.push_frame(0.8, 0.8);
+        }
+        let resumed = render(&mut mixer, &shared, 1024);
+        assert!(
+            resumed[0][0] > 0.0 && resumed[0][0] < 0.05,
+            "{}",
+            resumed[0][0]
+        );
+        assert_eq!(resumed[200][0], 0.8);
+    }
+
+    #[test]
+    fn a_short_priming_fades_in_from_silence() {
+        let shared = Shared::new(48_000);
+        shared.set_source_rate(48_000);
+        shared.set_cushion(CushionMode::Manual, 100.0);
+        shared.set_mix(false, true, false, [true, true], [true, true], false);
+        let bypassed = EqSettings {
+            enabled: false,
+            ..EqSettings::default()
+        };
+        shared.set_eq(EqSlot::Pre, bypassed);
+        shared.set_eq(EqSlot::Post, bypassed);
+        let mut mixer = OutputMixer::new(48_000);
+        // Block 1: nothing has arrived yet.
+        let empty = render(&mut mixer, &shared, 64);
+        assert!(empty.iter().all(|frame| frame[0] == 0.0));
+        // Block 2: the cushion is full and playback fades in from about 0.
+        for _ in 0..6_000 {
+            shared.push_frame(0.8, 0.8);
+        }
+        let out = render(&mut mixer, &shared, 64);
+        assert!(out[0][0] > 0.0 && out[0][0] < 0.05, "{}", out[0][0]);
+        assert!(largest_step(&out) < 0.05);
     }
 
     #[test]
