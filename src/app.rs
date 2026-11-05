@@ -164,16 +164,25 @@ pub struct RigWerkApp {
 }
 
 impl eframe::App for RigWerkApp {
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = root.ctx().clone();
-        self.handle_screenshot(&ctx);
-        self.meters(&ctx);
+    /// Non-painting maintenance.  eframe also calls this while the window is
+    /// hidden or minimized, with no egui pass, so engine watchdogs, device
+    /// watching and plugin main-thread/timer servicing keep running.  The
+    /// timed repaint request at the end is what keeps those hidden passes
+    /// coming.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.meters(ctx);
         self.watch_devices();
         self.poll_plugin_scan();
         self.engine.service_plugins();
         self.poll_plugin_gui();
         self.sync_bridge_config();
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root.ctx().clone();
+        // Screenshots need a painted frame, so they stay on the drawing side.
+        self.handle_screenshot(&ctx);
 
         egui::Panel::left("rigwerk_nav")
             .exact_size(224.0)

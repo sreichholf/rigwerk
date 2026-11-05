@@ -51,6 +51,11 @@ pub struct AudioEngine {
     /// Frames at the last heartbeat check and when they last advanced.
     last_frames: u64,
     last_frames_at: Instant,
+    /// Input frames at the last heartbeat check and when they last advanced.
+    last_input_frames: u64,
+    last_input_frames_at: Instant,
+    /// Whether this session should be receiving input blocks while it runs.
+    input_expected: bool,
     /// The quantum that was forced before RigWerk changed it, restored on stop.
     #[cfg(target_os = "linux")]
     previous_quantum: u32,
@@ -72,6 +77,9 @@ impl AudioEngine {
             stopping_since: None,
             last_frames: 0,
             last_frames_at: Instant::now(),
+            last_input_frames: 0,
+            last_input_frames_at: Instant::now(),
+            input_expected: false,
             #[cfg(target_os = "linux")]
             previous_quantum: 0,
             #[cfg(target_os = "linux")]
@@ -81,6 +89,16 @@ impl AudioEngine {
 
     pub fn snapshot(&self) -> Snapshot {
         self.shared.snapshot()
+    }
+
+    /// Whether a bridge thread from an earlier start is still alive and may
+    /// still own its audio device.  Preview must wait for it instead of
+    /// replacing the state while the old hardware is still open.
+    pub fn teardown_pending(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+            || self.lingering.iter().any(|handle| !handle.is_finished())
     }
 
     /// Chooses how the cushion is sized.  Takes effect immediately, also while
@@ -175,6 +193,8 @@ impl AudioEngine {
                     self.state = EngineState::Running;
                     self.last_frames = self.shared.frames.load(Ordering::Relaxed);
                     self.last_frames_at = Instant::now();
+                    self.last_input_frames = self.shared.input_frames.load(Ordering::Relaxed);
+                    self.last_input_frames_at = Instant::now();
                 } else if self
                     .started_at
                     .is_some_and(|started| started.elapsed() >= START_TIMEOUT)
@@ -203,12 +223,32 @@ impl AudioEngine {
                 if frames != self.last_frames {
                     self.last_frames = frames;
                     self.last_frames_at = Instant::now();
-                } else if self.last_frames_at.elapsed() >= HEARTBEAT_TIMEOUT {
+                }
+                let input_frames = self.shared.input_frames.load(Ordering::Relaxed);
+                if input_frames != self.last_input_frames {
+                    self.last_input_frames = input_frames;
+                    self.last_input_frames_at = Instant::now();
+                }
+                let output_stalled = self.last_frames_at.elapsed() >= HEARTBEAT_TIMEOUT;
+                let input_stalled =
+                    self.input_expected && self.last_input_frames_at.elapsed() >= HEARTBEAT_TIMEOUT;
+                if output_stalled || input_stalled {
                     self.stop.store(true, Ordering::Relaxed);
-                    self.shared.set_error(format!(
-                        "The bridge stopped producing audio: no output frames arrived for {} seconds. The output device or its driver may have stalled; stop the bridge and start it again.",
-                        HEARTBEAT_TIMEOUT.as_secs()
-                    ));
+                    let message = match (output_stalled, input_stalled) {
+                        (true, true) => format!(
+                            "The bridge stopped passing audio: no input or output blocks arrived for {} seconds. A device or its driver may have stalled; stop the bridge and start it again.",
+                            HEARTBEAT_TIMEOUT.as_secs()
+                        ),
+                        (_, true) => format!(
+                            "The bridge stopped receiving audio: no input blocks arrived for {} seconds. The input device or its driver may have stalled; stop the bridge and start it again.",
+                            HEARTBEAT_TIMEOUT.as_secs()
+                        ),
+                        _ => format!(
+                            "The bridge stopped producing audio: no output frames arrived for {} seconds. The output device or its driver may have stalled; stop the bridge and start it again.",
+                            HEARTBEAT_TIMEOUT.as_secs()
+                        ),
+                    };
+                    self.shared.set_error(message);
                     self.enter_error();
                 }
             }
@@ -230,6 +270,9 @@ impl AudioEngine {
         self.shared.set_status("Preview bridge · animated signal");
         self.started_at = None;
         self.stopping_since = None;
+        self.input_expected = false;
+        self.last_input_frames = 0;
+        self.last_input_frames_at = Instant::now();
         self.state = EngineState::Preview;
     }
 
@@ -362,6 +405,11 @@ impl AudioEngine {
         self.stopping_since = None;
         self.last_frames = 0;
         self.last_frames_at = Instant::now();
+        self.last_input_frames = 0;
+        self.last_input_frames_at = Instant::now();
+        // Every real bridge path opens an input; the heartbeat only holds the
+        // input side to it when the start actually asked for one.
+        self.input_expected = config.input_id.is_some() || config.asio_clsid.is_some();
 
         // The closure gets the new session's `Arc` and nothing older, so this
         // bridge's writes cannot reach a later start either.
@@ -431,6 +479,7 @@ impl AudioEngine {
         }
         self.started_at = None;
         self.stopping_since = None;
+        self.input_expected = false;
         self.state = EngineState::Idle;
     }
 

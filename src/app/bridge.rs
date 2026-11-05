@@ -23,6 +23,16 @@ impl RigWerkApp {
         )
     }
 
+    /// The error worth showing.  While a stop is still releasing the device, a
+    /// late error written by that same session is teardown noise, not a bridge
+    /// failure; once a newer session starts it owns the snapshot again.
+    pub(crate) fn visible_error(&self) -> Option<&str> {
+        if self.engine.state == EngineState::Stopping {
+            return None;
+        }
+        self.snapshot.error.as_deref()
+    }
+
     /// Identifies the exact routing the running bridge was opened with.  Any
     /// change to this value means the bridge must be re-opened to take effect.
     pub(crate) fn current_bridge_signature(&self) -> u64 {
@@ -44,6 +54,15 @@ impl RigWerkApp {
         if self.engine.state == EngineState::Stopping {
             self.push_log(
                 "The previous bridge is still releasing its audio device.",
+                AMBER,
+            );
+            return;
+        }
+        if self.is_preview() && self.engine.teardown_pending() {
+            // Preview would replace the state and clear the teardown watchdog
+            // while the previous driver still owns its device.
+            self.push_log(
+                "The previous bridge is still releasing its audio device. Preview starts once it has finished.",
                 AMBER,
             );
             return;
@@ -160,13 +179,17 @@ impl RigWerkApp {
         self.poll_output_driver_check();
         self.watch_output_driver();
         self.check_driver_settings();
-        if let Some(error) = self.snapshot.error.clone() {
+        if let Some(error) = self.visible_error().map(str::to_owned) {
             let message = format!("Bridge error: {error}");
             if !self.log.iter().any(|entry| entry.text == message) {
                 self.push_log(message, RED);
             }
         }
-        if self.snapshot.device_lost && self.device_alert.is_none() && self.bridge_signature != 0 {
+        if self.engine.state != EngineState::Stopping
+            && self.snapshot.device_lost
+            && self.device_alert.is_none()
+            && self.bridge_signature != 0
+        {
             let reason = self
                 .snapshot
                 .error
@@ -283,7 +306,13 @@ impl RigWerkApp {
     }
 
     pub(crate) fn status_message(&self) -> (String, Color32) {
-        if let Some(error) = &self.snapshot.error {
+        if self.engine.state == EngineState::Stopping {
+            return (
+                "Stopping the bridge — waiting for the audio device to release.".to_owned(),
+                MUTED,
+            );
+        }
+        if let Some(error) = self.visible_error() {
             return (format!("Bridge error: {error}"), RED);
         }
         self.log

@@ -36,6 +36,9 @@ pub(crate) struct Shared {
     pub(crate) underruns: AtomicU64,
     /// Frames the input dropped because the consumer had not kept up.
     pub(crate) overruns: AtomicU64,
+    /// Frames the input callback delivered.  Unlike `head`, this advances even
+    /// when the ring is full, so a stalled capture stream is visible.
+    pub(crate) input_frames: AtomicU64,
     pub(crate) frames: AtomicU64,
     pub(crate) drift_ppm: AtomicU32,
     pub(crate) running: AtomicBool,
@@ -90,6 +93,7 @@ impl Shared {
             out_r: AtomicU32::new(0.0f32.to_bits()),
             underruns: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
+            input_frames: AtomicU64::new(0),
             frames: AtomicU64::new(0),
             drift_ppm: AtomicU32::new(0.0f32.to_bits()),
             running: AtomicBool::new(false),
@@ -387,6 +391,7 @@ impl Shared {
         self.out_r.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.underruns.store(0, Ordering::Relaxed);
         self.overruns.store(0, Ordering::Relaxed);
+        self.input_frames.store(0, Ordering::Relaxed);
         self.frames.store(0, Ordering::Relaxed);
         self.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.running.store(false, Ordering::Relaxed);
@@ -489,6 +494,14 @@ impl Shared {
         if self.input_block.swap(frames as u64, Ordering::Relaxed) != frames as u64 {
             self.lift_to_floor();
         }
+    }
+
+    /// Called by every input callback.  It advances independently of the ring,
+    /// so a capture stream that stops delivering is distinguishable from a
+    /// consumer that is simply staying ahead.
+    pub(crate) fn note_input_frames(&self, frames: usize) {
+        self.input_frames
+            .fetch_add(frames as u64, Ordering::Relaxed);
     }
 
     pub(crate) fn note_output_block(&self, frames: usize) {
@@ -658,6 +671,7 @@ impl Shared {
             out_r: f32::from_bits(self.out_r.load(Ordering::Relaxed)),
             underruns: self.underruns.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
+            input_frames: self.input_frames.load(Ordering::Relaxed),
             frames: self.frames.load(Ordering::Relaxed),
             ring_fill: self.ring_fill(),
             target_frames: self.target_frames(),

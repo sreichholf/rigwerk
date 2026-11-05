@@ -156,6 +156,7 @@ impl AsioCallbackContext {
 
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
+        self.shared.note_input_frames(self.frames);
         for frame in 0..self.frames {
             let mut left = unsafe { read_asio_sample(left_ptr, frame, left_type) } * gain;
             let mut right = match right {

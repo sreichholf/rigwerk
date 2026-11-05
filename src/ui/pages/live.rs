@@ -112,7 +112,7 @@ impl RigWerkApp {
             .last()
             .map(|entry| (entry.at.clone(), entry.text.clone(), entry.tone))
             .unwrap_or_else(|| ("00:00".to_owned(), "Bridge ready.".to_owned(), MUTED));
-        let latest = if let Some(error) = &self.snapshot.error {
+        let latest = if let Some(error) = self.visible_error() {
             (latest.0, format!("Bridge error: {error}"), RED)
         } else {
             latest

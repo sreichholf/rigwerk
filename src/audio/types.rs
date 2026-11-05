@@ -202,6 +202,9 @@ pub struct Snapshot {
     /// Frames the input callback dropped because the ring was full.
     #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
     pub overruns: u64,
+    /// Frames the input callback delivered (0 until the first block arrives).
+    #[allow(dead_code)] // Published for diagnostics; the heartbeat reads Shared directly.
+    pub input_frames: u64,
     pub frames: u64,
     pub ring_fill: f32,
     pub target_frames: usize,
