@@ -540,7 +540,11 @@ impl AudioEngine {
 
     /// Publishes an error as the visible engine state and gives a forced
     /// PipeWire quantum back.
+    /// Every error ends the session: a bridge thread that reported a failure
+    /// but is still alive (a WASAPI or ASIO output that stopped, a device
+    /// loss) would otherwise keep its devices and block the next start.
     fn enter_error(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         self.state = EngineState::Error;
         self.started_at = None;
         self.stopping_since = None;

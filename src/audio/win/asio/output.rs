@@ -12,7 +12,7 @@ use cpal::traits::StreamTrait;
 
 use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
-    CallbackWait,
+    CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
 use super::duplex::run_asio_duplex_bridge;
 use super::input::run_asio_input_only;
@@ -165,7 +165,12 @@ pub(crate) fn open_asio_output_worker(
             Err(error)
         }
         Err(error) => {
+            // Same as the WASAPI open: never leave a driver open running
+            // detached, or a later session could open the device a second
+            // time.  The bridge thread stays alive until the driver returns,
+            // so the engine keeps reporting the teardown as pending.
             worker_stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
             Err(format!("ASIO output did not start: {error}"))
         }
     }
@@ -186,10 +191,16 @@ pub(crate) fn run_asio_output_loop(
     use azo::windows_core::GUID;
     use std::ffi::c_void;
 
+    // Every failure before the driver starts goes back through `ready`, so
+    // the caller reports the real reason rather than a closed channel.
+    let fail = |error: String| {
+        let _ = ready.send(Err(error.clone()));
+        error
+    };
     let host = azo::Host::new();
     let driver = host
         .create_driver(&GUID::from_u128(clsid))
-        .map_err(|error| format!("Opening ASIO output driver: {error}"))?;
+        .map_err(|error| fail(format!("Opening ASIO output driver: {error}")))?;
     if !driver.init(None) {
         let error = "The ASIO output driver refused to initialize".to_owned();
         let _ = ready.send(Err(error.clone()));
@@ -222,7 +233,7 @@ pub(crate) fn run_asio_output_loop(
 
     let buffer = driver
         .buffer_size()
-        .map_err(|error| format!("ASIO output buffer size: {error}"))?;
+        .map_err(|error| fail(format!("ASIO output buffer size: {error}")))?;
     let buffer_frames =
         if requested_buffer >= buffer.min as usize && requested_buffer <= buffer.max as usize {
             requested_buffer as i32
@@ -310,18 +321,26 @@ pub(crate) fn run_asio_output_loop(
         format!("ASIO output · driver buffer {buffer_frames} smp"),
     );
 
-    match wait_for_callbacks(
-        registration.signal(),
-        || worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed),
-        || {
-            let _ = driver.output_ready();
-        },
-    ) {
+    let wait = wait_for_callbacks(registration.signal(), || {
+        worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed)
+    });
+    match wait {
         CallbackWait::Stopped => {}
-        CallbackWait::Hung => {
+        CallbackWait::Reset | CallbackWait::Failed => {
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.clear();
+            return Err(if matches!(wait, CallbackWait::Reset) {
+                DRIVER_RESET_MESSAGE
+            } else {
+                CALLBACK_PANIC_MESSAGE
+            }
+            .to_owned());
+        }
+        CallbackWait::Hung => {
+            let _ = driver.stop();
+            let _ = driver.dispose_buffers();
+            registration.abandon();
             shared.set_device_lost(
                 "The ASIO output stopped responding — the interface may have been unplugged"
                     .to_owned(),

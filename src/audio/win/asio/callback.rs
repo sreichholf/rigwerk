@@ -2,14 +2,22 @@
 //! published through an atomic pointer only while that driver runs.
 //!
 //! ASIO guarantees a buffer index only until the next `bufferSwitch`, so all
-//! sample work happens inside the callback.  The bridge thread keeps two
-//! atomics it can watch without touching the audio state: a callback counter
-//! for the watchdog and an output-ready counter that tells it the driver has a
-//! finished output buffer.
+//! sample work happens inside the callback.  The bridge thread only watches
+//! atomics: a callback counter for the watchdog, a flag for a callback that
+//! panicked, and a counter of driver reset requests.
+//!
+//! `outputReady` is deliberately never called.  It is an optional ASIO
+//! optimisation that must follow the fill of the current buffer, which only
+//! the callback thread can guarantee; azo routes every driver call through its
+//! host window, so calling it from the callback would block the audio thread,
+//! and calling it later from another thread can tell the driver a buffer is
+//! ready after it already started playing it.  Without it every driver plays
+//! the filled buffer at the next switch, which is the ASIO default.
 
 use std::ffi::{c_long, c_void};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
@@ -22,12 +30,13 @@ use crate::audio::shared::Shared;
 use super::samples::{read_asio_sample, write_asio_sample};
 
 /// The bridge-owned half of a callback session.  The callback only touches
-/// these atomics; the bridge thread uses them for the watchdog and to call
-/// `outputReady` after a buffer was filled.
+/// these atomics; the bridge thread uses them for the watchdog.
 pub(crate) struct AsioSignal {
     thread: Thread,
     callbacks: AtomicU64,
-    outputs_ready: AtomicU64,
+    /// Set when a callback panicked (a plugin, most likely).  The context is
+    /// then left alone and the bridge ends with an error.
+    failed: AtomicBool,
 }
 
 impl AsioSignal {
@@ -35,10 +44,24 @@ impl AsioSignal {
         Arc::new(Self {
             thread: thread::current(),
             callbacks: AtomicU64::new(0),
-            outputs_ready: AtomicU64::new(0),
+            failed: AtomicBool::new(false),
         })
     }
 }
+
+/// Bumped by `kAsioResetRequest`.  The driver asks for a full teardown there
+/// (its rate or buffer size changed in its control panel), which the bridge
+/// reports instead of running on with a stale rate.
+static RESET_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_driver_reset() {
+    RESET_REQUESTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) const DRIVER_RESET_MESSAGE: &str =
+    "The ASIO driver changed its sample rate or buffer size and asked for a restart. Start the bridge again to use the new settings.";
+pub(crate) const CALLBACK_PANIC_MESSAGE: &str =
+    "The audio callback failed (most likely inside a plugin). The bridge was stopped; remove the plugin or start the bridge again.";
 
 struct InputBuffers {
     buffers: Vec<[*mut c_void; 2]>,
@@ -95,9 +118,37 @@ impl AsioCallbackContext {
         self
     }
 
+    /// Runs one buffer switch.  A panic must not unwind into the driver
+    /// (that aborts the process), so it is caught here: the output buffers
+    /// are silenced and the context is never processed again.
+    fn dispatch(&mut self, buffer_index: c_long) {
+        if self.signal.failed.load(Ordering::Relaxed) {
+            self.silence(buffer_index);
+            return;
+        }
+        if catch_unwind(AssertUnwindSafe(|| self.process(buffer_index))).is_err() {
+            self.signal.failed.store(true, Ordering::Relaxed);
+            self.silence(buffer_index);
+            self.signal.thread.unpark();
+        }
+    }
+
+    fn silence(&self, buffer_index: c_long) {
+        let index = buffer_index.clamp(0, 1) as usize;
+        if let Some(output) = self.output.as_ref() {
+            for (buffer, sample_type) in output.buffers.iter().zip(&output.types) {
+                for frame in 0..self.frames {
+                    unsafe {
+                        write_asio_sample(buffer[index].cast::<u8>(), frame, *sample_type, 0.0);
+                    }
+                }
+            }
+        }
+    }
+
     /// Reads input, renders output or does both for one ASIO buffer index.
     /// Runs on the driver's callback thread; it must not allocate or block.
-    pub(crate) fn process(&mut self, buffer_index: c_long) {
+    fn process(&mut self, buffer_index: c_long) {
         self.signal.callbacks.fetch_add(1, Ordering::Relaxed);
         let index = buffer_index.clamp(0, 1) as usize;
 
@@ -123,11 +174,6 @@ impl AsioCallbackContext {
                     }
                 }
             });
-            // The buffer is filled; the bridge thread does the actual
-            // `outputReady` call because a call back into the driver's COM
-            // host from this thread could re-enter it during `start()`.
-            self.signal.outputs_ready.fetch_add(1, Ordering::Release);
-            self.signal.thread.unpark();
         }
     }
 
@@ -242,6 +288,14 @@ impl CallbackRegistration {
         &self.signal
     }
 
+    /// Detaches the slot without freeing the context.  Used when the driver
+    /// stopped calling back: a callback stuck inside `process` (a hung
+    /// plugin, a driver that never returns) may still be using the context,
+    /// so it is leaked rather than freed under it.
+    pub(crate) fn abandon(self) {
+        drop(self);
+    }
+
     /// Clears the slot and reclaims the context.  Call only after
     /// `stop()` and `dispose_buffers()` have guaranteed no more callbacks.
     pub(crate) fn clear(mut self) {
@@ -282,34 +336,40 @@ impl Drop for CallbackRegistration {
 }
 
 pub(crate) enum CallbackWait {
+    /// The bridge was asked to stop.
     Stopped,
+    /// No callback for two seconds: unplugged, or stuck inside a callback.
+    /// The context must be abandoned, not freed.
     Hung,
+    /// The driver asked for a reset (rate or buffer size changed).
+    Reset,
+    /// A callback panicked; the context is idle and may be freed.
+    Failed,
 }
 
-/// Waits for the bridge stop flag while watching the driver callback.  Output
-/// callbacks wake the thread immediately so `outputReady` follows the fill;
-/// otherwise the watchdog checks every 80 ms.
+/// Waits for the bridge stop flag while watching the driver callback.  The
+/// watchdog checks every 80 ms; a failed callback wakes it at once.
 pub(crate) fn wait_for_callbacks(
     signal: &AsioSignal,
     mut stopped: impl FnMut() -> bool,
-    mut output_ready: impl FnMut(),
 ) -> CallbackWait {
     let mut last_count = 0;
-    let mut last_ready = 0;
+    let resets = RESET_REQUESTS.load(Ordering::Relaxed);
     let mut last_callback = Instant::now();
     loop {
         if stopped() {
             return CallbackWait::Stopped;
         }
+        if signal.failed.load(Ordering::Relaxed) {
+            return CallbackWait::Failed;
+        }
+        if RESET_REQUESTS.load(Ordering::Relaxed) != resets {
+            return CallbackWait::Reset;
+        }
         let count = signal.callbacks.load(Ordering::Relaxed);
         if count != last_count {
             last_count = count;
             last_callback = Instant::now();
-        }
-        let ready = signal.outputs_ready.load(Ordering::Acquire);
-        if ready != last_ready {
-            last_ready = ready;
-            output_ready();
         }
         if last_callback.elapsed() >= Duration::from_secs(2) {
             return CallbackWait::Hung;
@@ -326,7 +386,7 @@ pub(crate) fn dispatch_input(buffer_index: c_long) {
         return;
     }
     // Safety: the registration owns this box until `dispose_buffers` returned.
-    unsafe { (*pointer).process(buffer_index) };
+    unsafe { (*pointer).dispatch(buffer_index) };
 }
 
 pub(crate) fn dispatch_output(buffer_index: c_long) {
@@ -334,5 +394,5 @@ pub(crate) fn dispatch_output(buffer_index: c_long) {
     if pointer.is_null() {
         return;
     }
-    unsafe { (*pointer).process(buffer_index) };
+    unsafe { (*pointer).dispatch(buffer_index) };
 }

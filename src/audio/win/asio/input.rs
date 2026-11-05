@@ -8,7 +8,7 @@ use crate::audio::types::StartConfig;
 
 use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
-    CallbackWait,
+    CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
 use super::ASIO_INPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
@@ -150,16 +150,24 @@ pub(crate) fn run_asio_bridge(
         output.channels
     ));
 
-    match wait_for_callbacks(
-        registration.signal(),
-        || stop.load(Ordering::Relaxed),
-        || {},
-    ) {
+    let wait = wait_for_callbacks(registration.signal(), || stop.load(Ordering::Relaxed));
+    match wait {
         CallbackWait::Stopped => {}
-        CallbackWait::Hung => {
+        CallbackWait::Reset | CallbackWait::Failed => {
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.clear();
+            return Err(if matches!(wait, CallbackWait::Reset) {
+                DRIVER_RESET_MESSAGE
+            } else {
+                CALLBACK_PANIC_MESSAGE
+            }
+            .to_owned());
+        }
+        CallbackWait::Hung => {
+            let _ = driver.stop();
+            let _ = driver.dispose_buffers();
+            registration.abandon();
             shared.set_device_lost(
                 "The ASIO input stopped responding — the interface may have been unplugged"
                     .to_owned(),
@@ -285,16 +293,24 @@ pub(crate) fn run_asio_input_only(
         rate_path(rate, output_rate)
     ));
 
-    match wait_for_callbacks(
-        registration.signal(),
-        || stop.load(Ordering::Relaxed),
-        || {},
-    ) {
+    let wait = wait_for_callbacks(registration.signal(), || stop.load(Ordering::Relaxed));
+    match wait {
         CallbackWait::Stopped => {}
-        CallbackWait::Hung => {
+        CallbackWait::Reset | CallbackWait::Failed => {
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.clear();
+            return Err(if matches!(wait, CallbackWait::Reset) {
+                DRIVER_RESET_MESSAGE
+            } else {
+                CALLBACK_PANIC_MESSAGE
+            }
+            .to_owned());
+        }
+        CallbackWait::Hung => {
+            let _ = driver.stop();
+            let _ = driver.dispose_buffers();
+            registration.abandon();
             shared.set_device_lost(
                 "The ASIO input stopped responding — the interface may have been unplugged"
                     .to_owned(),
