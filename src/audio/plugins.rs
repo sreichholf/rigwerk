@@ -111,6 +111,8 @@ pub struct PluginPref {
     pub format: PluginFormat,
     #[serde(default)]
     pub class_id: Option<String>,
+    /// Filled in from the file name when a saved entry lacks it.
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub vendor: String,

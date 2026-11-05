@@ -9,6 +9,9 @@ eframe = { version = "0.37", default-features = false, features = ["default_font
 egui = "0.37"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The format eframe stores preferences in; used directly so a damaged saved
+# entry can be skipped (and an unreadable file kept) instead of lost.
+ron = "0.12"
 cpal = "0.18"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # VST3 discovery, hosting and processing.  The crate ships its own bindings,

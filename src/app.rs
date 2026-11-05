@@ -22,8 +22,9 @@ use egui::{Align2, Color32, Margin, RichText, Vec2};
 use crate::app::devices::{default_index, inventory_fingerprint};
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
-    cushion_from_pref, cushion_to_pref, page_from_key, page_key, unique_presets, Preferences,
-    Preset, PREFERENCES_KEY,
+    cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
+    preferences_backup_key, store_preferences, unique_presets, Preferences, Preset,
+    PREFERENCES_KEY, PREFERENCES_SCHEMA,
 };
 use crate::audio::{self, AudioEngine, CushionMode, EqSettings, EqSlot, Inventory, Snapshot};
 use crate::ui::theme::ts;
@@ -161,6 +162,9 @@ pub struct RigWerkApp {
     pub(crate) plugin_param_filter: String,
     /// Open the plugin's own interface straight from the insert when it has one.
     pub(crate) prefer_plugin_interface: bool,
+    /// A copy of stored preferences that could not be fully read, written
+    /// under its own key on the next save so that save cannot lose it.
+    preferences_backup: Option<(String, String)>,
 }
 
 impl eframe::App for RigWerkApp {
@@ -295,6 +299,7 @@ impl eframe::App for RigWerkApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let preferences = Preferences {
+            schema_version: PREFERENCES_SCHEMA,
             auto_start_bridge: self.auto_start_bridge,
             sessions: self.sessions.clone(),
             session_name: self.session_name.clone(),
@@ -331,7 +336,7 @@ impl eframe::App for RigWerkApp {
             plugins: self.engine.plugin_prefs(),
             prefer_plugin_interface: self.prefer_plugin_interface,
         };
-        eframe::set_value(storage, PREFERENCES_KEY, &preferences);
+        store_preferences(storage, &preferences, &mut self.preferences_backup);
     }
 }
 
@@ -341,14 +346,22 @@ impl RigWerkApp {
         // services CLAP plugins; record it before any plugin can load.
         crate::audio::clap::mark_main_thread();
         configure_style(&cc.egui_ctx);
-        let stored: Option<Preferences> = if screenshot.is_some() {
-            // A screenshot run must be reproducible and must never open audio
-            // hardware, so it starts from defaults instead of saved settings.
+        // A screenshot run must be reproducible and must never open audio
+        // hardware, so it starts from defaults instead of saved settings.
+        let raw_preferences = if screenshot.is_some() {
             None
         } else {
             cc.storage
-                .and_then(|storage| eframe::get_value(storage, PREFERENCES_KEY))
+                .and_then(|storage| storage.get_string(PREFERENCES_KEY))
         };
+        let backup_key = preferences_backup_key(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+        );
+        let loaded = load_preferences(raw_preferences.as_deref(), &backup_key);
+        let stored: Option<Preferences> = loaded.preferences;
         let preferences = stored.clone().unwrap_or_default();
         // The screenshot path is a headless check, not a practice session.
         // Keep real drivers closed there even if auto-start was left on.
@@ -484,6 +497,7 @@ impl RigWerkApp {
             plugin_gui: None,
             plugin_param_filter: String::new(),
             prefer_plugin_interface: preferences.prefer_plugin_interface,
+            preferences_backup: loaded.backup,
         };
         app.engine.set_gains(app.input_gain, app.output_gain);
         app.engine.set_mix(
@@ -544,6 +558,10 @@ impl RigWerkApp {
                 "Bridge stopped at launch. Start it when you're ready.",
                 MUTED,
             );
+        }
+        // Last, so the short start-up log does not push them out of view.
+        for notice in loaded.notices {
+            app.push_log(notice, AMBER);
         }
         app
     }
