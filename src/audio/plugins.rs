@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 
 use vst3_host::{AudioBuffers, Plugin, Vst3Host};
 
-use super::clap::{ClapPlugin, HostState};
+use super::clap::{ClapPlugin, HostState, StateSave};
 
 /// Which plugin format an insert uses.  Saved inserts written before CLAP
 /// support default to VST3.
@@ -59,9 +59,10 @@ impl PluginHandle {
 }
 
 /// Reads a plugin's current controls for [`PluginChain::apply_synced_parameters`],
-/// without the chain lock.  Returns `None` while a CLAP control moved in
-/// RigWerk's panel is still waiting for the next audio block, because reading
-/// the plugin then would show the old value.
+/// without the chain lock.  Returns `None` while a CLAP value (one moved in
+/// RigWerk's panel, or a saved one restored into a plugin without
+/// `params.flush`) is still waiting for the next audio block, because reading
+/// the plugin then would show the old value and the sync would save it.
 pub(crate) fn read_plugin_parameters(handle: &PluginHandle) -> Option<Vec<PluginParamView>> {
     if let PluginHandle::Clap(clap) = handle {
         let clap = clap.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -86,6 +87,74 @@ pub(crate) fn service_clap(host: &HostState, plugin: &Mutex<ClapPlugin>) {
     }
 }
 
+/// One plugin whose state [`PluginChain::state_requests`] wants captured.
+pub(crate) struct StateRequest {
+    pub(crate) index: usize,
+    pub(crate) handle: PluginHandle,
+    host: Option<Arc<HostState>>,
+    /// The saved parameters at request time, kept with the blob as its
+    /// snapshot.
+    params: Vec<PluginParamPref>,
+}
+
+/// Captures one plugin's opaque state.  Call it on the UI thread without the
+/// chain lock.  CLAP saves through the main-thread target and never takes the
+/// instance lock, so the audio callback keeps processing the insert; VST3 has
+/// to lock the instance, which is why only stale slots are requested.
+pub(crate) fn capture_state(request: &StateRequest) -> Capture {
+    let bytes = match (&request.handle, &request.host) {
+        (PluginHandle::Clap(_), Some(host)) => match host.save_state() {
+            StateSave::Saved(bytes) => bytes,
+            StateSave::Unavailable => return Capture::Failed,
+            StateSave::Deferred => return Capture::Deferred,
+        },
+        (PluginHandle::Clap(_), None) => return Capture::Failed,
+        (PluginHandle::Vst3(plugin), _) => {
+            match plugin
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .save_state()
+            {
+                Ok(bytes) => bytes,
+                Err(_) => return Capture::Failed,
+            }
+        }
+    };
+    if bytes.is_empty() {
+        Capture::Failed
+    } else if bytes.len() > MAX_STATE_BLOB {
+        eprintln!(
+            "[plugins] not saving a plugin's state: it is larger than {} MB",
+            MAX_STATE_BLOB / (1024 * 1024)
+        );
+        Capture::Failed
+    } else {
+        Capture::Saved(PluginState::capture(&bytes, &request.params))
+    }
+}
+
+/// The largest state blob kept in the preferences file.
+const MAX_STATE_BLOB: usize = 8 * 1024 * 1024;
+
+/// The outcome of [`capture_state`].
+#[derive(Debug)]
+pub(crate) enum Capture {
+    Saved(PluginState),
+    /// The plugin cannot save its state; the previous blob is kept.
+    Failed,
+    /// Values are still queued for the plugin, so its state would be older
+    /// than the saved parameters; the slot stays stale and the next save
+    /// tries again.
+    Deferred,
+}
+
+impl Capture {
+    /// Whether the slot still needs a capture afterwards.
+    fn leaves_stale(&self) -> bool {
+        matches!(self, Capture::Deferred)
+    }
+}
+
 /// The largest block a plugin is asked to process, and the block size it is
 /// set up with.  Many plugins allocate fixed internal buffers for the size
 /// announced at setup and ignore the smaller `numSamples` passed later, so a
@@ -97,10 +166,203 @@ const MAX_BLOCK: usize = 512;
 
 /// A parameter value the person changed, kept with the insert so the plugin
 /// opens with the same settings after a restart or a sample-rate change.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PluginParamPref {
     pub id: u32,
     pub value: f64,
+}
+
+/// The layout of [`PluginState::data`] this build writes and reads: the bytes
+/// the format's own state call produced (CLAP `clap_plugin_state.save`, or
+/// `vst3-host`'s `Plugin::save_state` envelope), base64-encoded.  A blob with
+/// any other version is ignored and the insert falls back to its parameters.
+pub(crate) const PLUGIN_STATE_VERSION: u32 = 1;
+
+/// A plugin's opaque state, captured on the UI thread whenever preferences
+/// are saved.  It covers what parameters cannot (loaded samples, internal
+/// modes, a plugin's own preset), so it is restored before the parameters.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PluginState {
+    pub version: u32,
+    /// Base64 of the plugin's state bytes.
+    pub data: String,
+    /// [`PluginPref::params`] as it was when the state was captured.  A
+    /// parameter changed after the capture differs from this snapshot, and is
+    /// applied on top of the restored state so the newer value wins.
+    #[serde(default)]
+    pub params: Vec<PluginParamPref>,
+}
+
+impl PluginState {
+    pub(crate) fn capture(bytes: &[u8], params: &[PluginParamPref]) -> Self {
+        Self {
+            version: PLUGIN_STATE_VERSION,
+            data: base64_encode(bytes),
+            params: params.to_vec(),
+        }
+    }
+
+    /// The state bytes, or `None` when this build cannot use the blob.
+    pub(crate) fn bytes(&self) -> Option<Vec<u8>> {
+        if self.version != PLUGIN_STATE_VERSION {
+            return None;
+        }
+        base64_decode(&self.data).filter(|bytes| !bytes.is_empty())
+    }
+}
+
+/// Reads a saved state blob, treating a damaged one as absent: losing the
+/// blob falls back to the parameter list, while failing here would drop the
+/// whole insert from the preferences.
+fn lenient_state<'de, D>(deserializer: D) -> Result<Option<PluginState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Good(Option<PluginState>),
+        Bad(serde::de::IgnoredAny),
+    }
+    Ok(
+        match <Stored as serde::Deserialize>::deserialize(deserializer)? {
+            Stored::Good(state) => state,
+            Stored::Bad(_) => None,
+        },
+    )
+}
+
+/// What a fresh instance gets restored with, in this order: the opaque state
+/// blob, then the parameter values it does not already cover.
+pub(crate) struct Restore<'a> {
+    /// Decoded state bytes, if the pref holds a usable blob.
+    pub(crate) state: Option<Vec<u8>>,
+    pref: &'a PluginPref,
+}
+
+impl<'a> Restore<'a> {
+    pub(crate) fn from_pref(pref: &'a PluginPref) -> Self {
+        Self {
+            state: pref.state.as_ref().and_then(PluginState::bytes),
+            pref,
+        }
+    }
+
+    /// The parameter values to apply once the state blob was (or was not)
+    /// loaded.  `None` asks for the parameter's default.
+    pub(crate) fn params(&self, state_loaded: bool) -> Vec<(u32, Option<f64>)> {
+        let snapshot = if state_loaded {
+            self.pref
+                .state
+                .as_ref()
+                .map(|state| state.params.as_slice())
+        } else {
+            None
+        };
+        params_to_restore(&self.pref.params, snapshot)
+    }
+}
+
+/// The values two parameter lists may differ by and still count as equal.
+const PARAM_EPSILON: f64 = 0.0005;
+
+/// Which saved parameters still need applying.  Without a restored state
+/// blob that is every saved value.  After one, it is only what changed since
+/// the blob was captured: a value that differs from (or is missing in) the
+/// blob's snapshot, and a parameter that went back to its default (`None`),
+/// which the saved list no longer names.  An unchanged list applies nothing,
+/// so the blob takes precedence.
+pub(crate) fn params_to_restore(
+    saved: &[PluginParamPref],
+    snapshot: Option<&[PluginParamPref]>,
+) -> Vec<(u32, Option<f64>)> {
+    let Some(snapshot) = snapshot else {
+        return saved
+            .iter()
+            .map(|saved| (saved.id, Some(saved.value)))
+            .collect();
+    };
+    let changed = saved.iter().filter(|saved| {
+        !snapshot.iter().any(|captured| {
+            captured.id == saved.id && (captured.value - saved.value).abs() <= PARAM_EPSILON
+        })
+    });
+    let reset = snapshot
+        .iter()
+        .filter(|captured| !saved.iter().any(|saved| saved.id == captured.id));
+    changed
+        .map(|saved| (saved.id, Some(saved.value)))
+        .chain(reset.map(|captured| (captured.id, None)))
+        .collect()
+}
+
+/// The saved parameter list after reading the plugin's live controls: every
+/// control away from its default, plus any saved entry the plugin does not
+/// list (an id hidden or renamed by this plugin version), which a sync must
+/// not silently delete.
+pub(crate) fn merge_synced_params(
+    previous: &[PluginParamPref],
+    live: &[PluginParamView],
+) -> Vec<PluginParamPref> {
+    let unseen = previous
+        .iter()
+        .filter(|saved| !live.iter().any(|parameter| parameter.id == saved.id))
+        .cloned();
+    live.iter()
+        .filter(|parameter| (parameter.value - parameter.default).abs() > PARAM_EPSILON)
+        .map(|parameter| PluginParamPref {
+            id: parameter.id,
+            value: parameter.value,
+        })
+        .chain(unseen)
+        .collect()
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (index, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if index <= chunk.len() {
+                out.push(BASE64_ALPHABET[((n >> shift) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim().as_bytes();
+    if !text.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    for (chunk_index, chunk) in text.chunks(4).enumerate() {
+        let last = chunk_index + 1 == text.len() / 4;
+        let padding = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        if padding > 2 || (padding > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &chunk[..4 - padding] {
+            let value = BASE64_ALPHABET.iter().position(|&a| a == c)? as u32;
+            n = (n << 6) | value;
+        }
+        n <<= 6 * padding as u32;
+        let decoded = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&decoded[..3 - padding]);
+    }
+    Some(out)
 }
 
 /// One effect in the insert chain, in the form that is saved to preferences.
@@ -126,6 +388,15 @@ pub struct PluginPref {
     /// settings after a restart or a sample-rate change.
     #[serde(default)]
     pub params: Vec<PluginParamPref>,
+    /// The plugin's opaque state from the last save.  When it restores, it
+    /// takes precedence over `params` (see [`params_to_restore`]).  Older
+    /// preferences have none, and a damaged one is read as none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_state"
+    )]
+    pub state: Option<PluginState>,
 }
 
 fn default_mix() -> f32 {
@@ -144,6 +415,7 @@ impl Default for PluginPref {
             bypass: false,
             mix: 1.0,
             params: Vec::new(),
+            state: None,
         }
     }
 }
@@ -191,6 +463,10 @@ pub(crate) struct Slot {
     /// A CLAP plugin's callback state, so its main-thread work can run
     /// without the chain lock or the instance lock.
     clap_host: Option<Arc<HostState>>,
+    /// Whether `pref.state` may no longer describe the live plugin: it was
+    /// missing or did not restore, or a control changed since.  The next
+    /// preference save captures a fresh blob.
+    state_stale: bool,
 }
 
 impl Slot {
@@ -202,12 +478,13 @@ impl Slot {
             parameters: Vec::new(),
             has_editor: false,
             clap_host: None,
+            state_stale: false,
         }
     }
 
     fn loaded(pref: PluginPref, sample_rate: u32) -> Self {
         match load_plugin(&pref, sample_rate) {
-            Ok(plugin) => {
+            Ok((plugin, state_current)) => {
                 let parameters = host_parameters(&plugin);
                 let has_editor = host_has_editor(&plugin);
                 let clap_host = match &plugin {
@@ -225,6 +502,7 @@ impl Slot {
                     parameters,
                     has_editor,
                     clap_host,
+                    state_stale: !state_current,
                 }
             }
             Err(error) => Self {
@@ -360,10 +638,14 @@ fn parameter_views(plugin: &Plugin) -> Vec<PluginParamView> {
         .collect()
 }
 
-fn load_plugin(pref: &PluginPref, sample_rate: u32) -> Result<PluginHandle, String> {
+/// Opens the plugin with its saved state and controls applied.  The flag says
+/// whether the saved state blob still describes the new instance exactly (it
+/// restored and no newer control value had to be applied on top).
+fn load_plugin(pref: &PluginPref, sample_rate: u32) -> Result<(PluginHandle, bool), String> {
+    let restore = Restore::from_pref(pref);
     match pref.format {
-        PluginFormat::Vst3 => load_vst3(pref, sample_rate)
-            .map(|plugin| PluginHandle::Vst3(Arc::new(Mutex::new(plugin)))),
+        PluginFormat::Vst3 => load_vst3(pref, &restore, sample_rate)
+            .map(|(plugin, current)| (PluginHandle::Vst3(Arc::new(Mutex::new(plugin))), current)),
         PluginFormat::Clap => {
             let plugin_id = pref
                 .class_id
@@ -374,13 +656,18 @@ fn load_plugin(pref: &PluginPref, sample_rate: u32) -> Result<PluginHandle, Stri
             if !path.exists() {
                 return Err(format!("Plugin not found: {}", path.display()));
             }
-            super::clap::ClapPlugin::load(&path, plugin_id, sample_rate, MAX_BLOCK)
-                .map(|plugin| PluginHandle::Clap(Arc::new(Mutex::new(plugin))))
+            super::clap::ClapPlugin::load(&path, plugin_id, sample_rate, MAX_BLOCK, &restore).map(
+                |(plugin, current)| (PluginHandle::Clap(Arc::new(Mutex::new(plugin))), current),
+            )
         }
     }
 }
 
-fn load_vst3(pref: &PluginPref, sample_rate: u32) -> Result<Plugin, String> {
+fn load_vst3(
+    pref: &PluginPref,
+    restore: &Restore<'_>,
+    sample_rate: u32,
+) -> Result<(Plugin, bool), String> {
     let path = PathBuf::from(&pref.path);
     if !path.exists() {
         return Err(format!("Plugin not found: {}", path.display()));
@@ -403,15 +690,32 @@ fn load_vst3(pref: &PluginPref, sample_rate: u32) -> Result<Plugin, String> {
             .load_plugin(&path)
             .map_err(|error| format!("Load failed: {error}"))?,
     };
-    // Restore the controls the person changed.  A stale parameter id from an
-    // older plugin version is skipped rather than failing the whole insert.
-    for saved in &pref.params {
-        let _ = plugin.set_parameter(saved.id, saved.value.clamp(0.0, 1.0));
+    // Restore the saved state first, then the controls it does not already
+    // cover, all before processing starts.  A stale parameter id from an older
+    // plugin version is skipped rather than failing the whole insert.
+    let state_loaded = restore
+        .state
+        .as_deref()
+        .is_some_and(|bytes| plugin.load_state(bytes).is_ok());
+    let values = restore.params(state_loaded);
+    if !values.is_empty() {
+        let defaults = plugin.get_parameters().unwrap_or_default();
+        for (id, value) in &values {
+            let value = value.or_else(|| {
+                defaults
+                    .iter()
+                    .find(|parameter| parameter.id == *id)
+                    .map(|parameter| parameter.default)
+            });
+            if let Some(value) = value {
+                let _ = plugin.set_parameter(*id, value.clamp(0.0, 1.0));
+            }
+        }
     }
     plugin
         .start_processing()
         .map_err(|error| format!("Start failed: {error}"))?;
-    Ok(plugin)
+    Ok((plugin, state_loaded && values.is_empty()))
 }
 
 /// The master insert chain.  The audio callback only try-locks the chain and
@@ -604,15 +908,67 @@ impl PluginChain {
         {
             return;
         }
-        slot.pref.params = parameters
-            .iter()
-            .filter(|parameter| (parameter.value - parameter.default).abs() > 0.0005)
-            .map(|parameter| PluginParamPref {
-                id: parameter.id,
-                value: parameter.value,
-            })
-            .collect();
+        slot.pref.params = merge_synced_params(&slot.pref.params, &parameters);
         slot.parameters = parameters;
+        // The editor is open and can change more than parameters.
+        slot.state_stale = true;
+    }
+
+    /// The loaded plugins whose state should be captured now: those whose
+    /// saved blob is missing, did not restore, or is older than a control
+    /// change, and CLAP plugins that marked themselves dirty.  The caller
+    /// captures them with [`capture_state`] after releasing the chain lock
+    /// and hands the results to [`Self::store_state`].
+    pub(crate) fn state_requests(&self) -> Vec<StateRequest> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let handle = slot.plugin.clone()?;
+                let dirty = slot
+                    .clap_host
+                    .as_ref()
+                    .is_some_and(|host| host.state_dirty());
+                (slot.state_stale || dirty).then(|| StateRequest {
+                    index,
+                    handle,
+                    host: slot.clap_host.clone(),
+                    params: slot.pref.params.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Stores a captured state blob, provided the slot still holds the same
+    /// plugin instance.  A failed capture keeps the previous blob, whose
+    /// parameter snapshot still lets newer control values win on restore,
+    /// and is not retried until a control changes again.  A deferred one
+    /// keeps the slot stale so the next save retries.
+    pub(crate) fn store_state(&mut self, index: usize, handle: &PluginHandle, capture: Capture) {
+        let Some(slot) = self.slots.get_mut(index) else {
+            return;
+        };
+        if !slot
+            .plugin
+            .as_ref()
+            .is_some_and(|current| current.same(handle))
+        {
+            return;
+        }
+        slot.state_stale = capture.leaves_stale();
+        if let Capture::Saved(state) = capture {
+            slot.pref.state = Some(state);
+        }
+    }
+
+    /// Marks one slot's saved state as out of date, e.g. when its editor
+    /// closes, so the next preference save captures it.
+    pub(crate) fn mark_state_stale(&mut self, index: usize) {
+        if let Some(slot) = self.slots.get_mut(index) {
+            if slot.plugin.is_some() {
+                slot.state_stale = true;
+            }
+        }
     }
 
     /// Sets one normalized plugin control and keeps the saved insert in step.
@@ -663,6 +1019,7 @@ impl PluginChain {
         } else {
             slot.pref.params.push(PluginParamPref { id, value });
         }
+        slot.state_stale = true;
         Ok(())
     }
 
@@ -682,6 +1039,7 @@ impl PluginChain {
         };
         slot.parameters = host_reset_parameters(plugin)?;
         slot.pref.params.clear();
+        slot.state_stale = true;
         Ok(())
     }
 
@@ -784,5 +1142,172 @@ impl PluginChain {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn param(id: u32, value: f64) -> PluginParamPref {
+        PluginParamPref { id, value }
+    }
+
+    fn view(id: u32, value: f64, default: f64) -> PluginParamView {
+        PluginParamView {
+            id,
+            value,
+            default,
+            ..PluginParamView::default()
+        }
+    }
+
+    #[test]
+    fn base64_round_trips_every_length() {
+        let data: Vec<u8> = (0..=255u8).collect();
+        for len in 0..data.len() {
+            let encoded = base64_encode(&data[..len]);
+            assert_eq!(encoded.len() % 4, 0);
+            assert_eq!(base64_decode(&encoded).as_deref(), Some(&data[..len]));
+        }
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_decode("Zm8="), Some(b"fo".to_vec()));
+    }
+
+    #[test]
+    fn base64_rejects_damage() {
+        assert_eq!(base64_decode("Zm8"), None);
+        assert_eq!(base64_decode("Zm*="), None);
+        assert_eq!(base64_decode("Z==="), None);
+        assert_eq!(base64_decode("Zg==Zm8="), None);
+    }
+
+    #[test]
+    fn state_blob_needs_a_known_version_and_data() {
+        let state = PluginState::capture(&[1, 2, 3], &[param(1, 0.5)]);
+        assert_eq!(state.version, PLUGIN_STATE_VERSION);
+        assert_eq!(state.bytes(), Some(vec![1, 2, 3]));
+        assert_eq!(state.params, vec![param(1, 0.5)]);
+        let newer = PluginState {
+            version: PLUGIN_STATE_VERSION + 1,
+            ..state.clone()
+        };
+        assert_eq!(newer.bytes(), None);
+        let damaged = PluginState {
+            data: "!!".to_owned(),
+            ..state.clone()
+        };
+        assert_eq!(damaged.bytes(), None);
+        assert_eq!(PluginState::capture(&[], &[]).bytes(), None);
+    }
+
+    #[test]
+    fn pref_round_trips_with_and_without_state() {
+        let mut pref = PluginPref {
+            path: "C:/Plugins/Verb.clap".to_owned(),
+            format: PluginFormat::Clap,
+            class_id: Some("com.example.verb".to_owned()),
+            params: vec![param(4, 0.75)],
+            ..PluginPref::default()
+        };
+        let plain = ron::to_string(&pref).expect("serialize");
+        assert!(!plain.contains("state"), "{plain}");
+        let back: PluginPref = ron::from_str(&plain).expect("deserialize");
+        assert!(back.state.is_none());
+        assert_eq!(back.params, pref.params);
+
+        pref.state = Some(PluginState::capture(b"\x00\xffstate", &pref.params));
+        let text = ron::to_string(&pref).expect("serialize");
+        let back: PluginPref = ron::from_str(&text).expect("deserialize");
+        assert_eq!(back.state, pref.state);
+        assert_eq!(
+            back.state.and_then(|state| state.bytes()),
+            Some(b"\x00\xffstate".to_vec())
+        );
+    }
+
+    #[test]
+    fn old_pref_without_state_still_loads() {
+        let back: PluginPref = ron::from_str(
+            r#"(path:"C:/A.clap",format:clap,class_id:Some("a"),params:[(id:1,value:0.3)])"#,
+        )
+        .expect("old layout");
+        assert!(back.state.is_none());
+        assert_eq!(back.params, vec![param(1, 0.3)]);
+        let damaged: PluginPref =
+            ron::from_str(r#"(path:"C:/A.clap",state:Some((version:"x")))"#).expect("damaged blob");
+        assert!(damaged.state.is_none());
+    }
+
+    #[test]
+    fn without_a_restored_state_every_saved_value_is_applied() {
+        let saved = [param(1, 0.2), param(2, 0.9)];
+        assert_eq!(
+            params_to_restore(&saved, None),
+            vec![(1, Some(0.2)), (2, Some(0.9))]
+        );
+    }
+
+    #[test]
+    fn a_restored_state_takes_precedence_over_unchanged_values() {
+        let saved = [param(1, 0.2), param(2, 0.9)];
+        assert!(params_to_restore(&saved, Some(&saved)).is_empty());
+    }
+
+    #[test]
+    fn values_changed_after_the_capture_win_over_the_state() {
+        let snapshot = [param(1, 0.2), param(2, 0.9), param(3, 0.4)];
+        // 1 moved, 2 unchanged, 3 back to default (no longer saved), 4 new.
+        let saved = [param(1, 0.6), param(2, 0.9), param(4, 0.1)];
+        assert_eq!(
+            params_to_restore(&saved, Some(&snapshot)),
+            vec![(1, Some(0.6)), (4, Some(0.1)), (3, None)]
+        );
+    }
+
+    #[test]
+    fn restore_ignores_the_snapshot_when_the_state_did_not_load() {
+        let pref = PluginPref {
+            params: vec![param(1, 0.2)],
+            state: Some(PluginState::capture(&[7], &[param(1, 0.2)])),
+            ..PluginPref::default()
+        };
+        let restore = Restore::from_pref(&pref);
+        assert_eq!(restore.state, Some(vec![7]));
+        assert!(restore.params(true).is_empty());
+        assert_eq!(restore.params(false), vec![(1, Some(0.2))]);
+    }
+
+    #[test]
+    fn only_a_deferred_capture_keeps_the_slot_stale() {
+        assert!(Capture::Deferred.leaves_stale());
+        assert!(!Capture::Failed.leaves_stale());
+        assert!(!Capture::Saved(PluginState::capture(&[1], &[])).leaves_stale());
+    }
+
+    #[test]
+    fn a_kept_older_blob_still_restores_newer_values() {
+        // A panel move was still queued at save time, so the capture was
+        // deferred and the older blob (with its own snapshot) was kept.
+        let pref = PluginPref {
+            params: vec![param(1, 0.9)],
+            state: Some(PluginState::capture(&[7], &[param(1, 0.2), param(2, 0.4)])),
+            ..PluginPref::default()
+        };
+        assert_eq!(
+            Restore::from_pref(&pref).params(true),
+            vec![(1, Some(0.9)), (2, None)]
+        );
+    }
+
+    #[test]
+    fn sync_keeps_changed_values_and_ids_the_plugin_does_not_list() {
+        let previous = [param(1, 0.8), param(9, 0.3)];
+        let live = [view(1, 0.5, 0.5), view(2, 0.7, 0.1)];
+        assert_eq!(
+            merge_synced_params(&previous, &live),
+            vec![param(2, 0.7), param(9, 0.3)]
+        );
     }
 }

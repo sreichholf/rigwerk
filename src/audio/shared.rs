@@ -179,6 +179,9 @@ impl Shared {
                 .unwrap_or_else(PoisonError::into_inner);
             self.set_eq(slot, *settings);
         }
+        // Capture the old instances' state on this (UI) thread first, so the
+        // rebuilt chain reopens with what the person set since the last save.
+        previous.capture_plugin_states();
         let plugins = previous
             .plugins
             .lock()
@@ -386,7 +389,37 @@ impl Shared {
         }
     }
 
+    /// Captures the opaque state of every loaded plugin whose saved blob is
+    /// missing or stale.  Runs on the UI thread (the CLAP main thread); the
+    /// plugins are saved without the chain lock, which is only taken briefly
+    /// to list them and to store the results.
+    pub(crate) fn capture_plugin_states(&self) {
+        let requests = match self.plugins.lock() {
+            Ok(chain) => chain.state_requests(),
+            Err(_) => return,
+        };
+        if requests.is_empty() {
+            return;
+        }
+        let captured: Vec<_> = requests.iter().map(super::plugins::capture_state).collect();
+        if let Ok(mut chain) = self.plugins.lock() {
+            for (request, state) in requests.iter().zip(captured) {
+                chain.store_state(request.index, &request.handle, state);
+            }
+        }
+    }
+
+    /// Marks one insert's saved state as out of date (its editor closed).
+    pub(crate) fn mark_plugin_state_stale(&self, index: usize) {
+        if let Ok(mut chain) = self.plugins.lock() {
+            chain.mark_state_stale(index);
+        }
+    }
+
+    /// The insert chain as it should be saved, with fresh plugin state.
+    /// Call it from the UI thread.
     pub(crate) fn plugin_prefs(&self) -> Vec<PluginPref> {
+        self.capture_plugin_states();
         self.plugins
             .lock()
             .map(|chain| chain.prefs())

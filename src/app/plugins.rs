@@ -216,6 +216,7 @@ impl RigWerkApp {
             bypass: false,
             mix: 1.0,
             params: Vec::new(),
+            state: None,
         };
         self.install_plugin(pref);
     }
@@ -300,9 +301,10 @@ impl RigWerkApp {
     }
 
     pub(crate) fn move_plugin(&mut self, index: usize, delta: isize) {
+        // Finished while its index still names the right insert.
+        self.finish_plugin_gui();
         self.engine.move_plugin(index, delta);
         self.plugin_editor = None;
-        self.plugin_gui = None;
         self.plugin_param_filter.clear();
     }
 
@@ -322,7 +324,7 @@ impl RigWerkApp {
         if self.plugin_editor != Some(index) {
             // A different insert: the plugin editor and the filter belong to
             // the one that was open before.
-            self.plugin_gui = None;
+            self.finish_plugin_gui();
             self.plugin_param_filter.clear();
         }
         if self.prefer_plugin_interface {

@@ -34,7 +34,7 @@ use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_ENUM,
     CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
 };
-use clap_sys::ext::state::{clap_host_state, CLAP_EXT_STATE};
+use clap_sys::ext::state::{clap_host_state, clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK};
 use clap_sys::ext::timer_support::{
     clap_host_timer_support, clap_plugin_timer_support, CLAP_EXT_TIMER_SUPPORT,
@@ -43,10 +43,11 @@ use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY
 use clap_sys::host::clap_host;
 use clap_sys::plugin::{clap_plugin, clap_plugin_descriptor};
 use clap_sys::process::{clap_process, CLAP_PROCESS_ERROR};
+use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::string_sizes::CLAP_NAME_SIZE;
 use clap_sys::version::CLAP_VERSION;
 
-use crate::audio::plugins::PluginParamView;
+use crate::audio::plugins::{PluginParamView, Restore};
 
 /// The largest block the insert chain accepts.  Kept in step with the VST3
 /// side: plugins get set up with this size, so it must stay a block size that
@@ -118,6 +119,7 @@ pub(crate) fn mark_main_thread() {
 struct MainThreadTarget {
     plugin: *const clap_plugin,
     timer_ext: *const clap_plugin_timer_support,
+    state_ext: *const clap_plugin_state,
 }
 
 // Safety: the pointers are only dereferenced on the main thread while the
@@ -138,6 +140,12 @@ pub(crate) struct HostState {
     flush_requested: AtomicBool,
     gui_closed: AtomicBool,
     gui_resize: AtomicU64,
+    /// Set by `clap_host_state.mark_dirty`.
+    state_dirty: AtomicBool,
+    /// Mirrors whether the instance holds parameter values the plugin has
+    /// not received yet, so a state save can be deferred without taking the
+    /// instance lock.
+    params_pending: AtomicBool,
     timers: Mutex<Vec<TimerEntry>>,
     next_timer: AtomicU32,
     last_log: Mutex<Option<String>>,
@@ -150,6 +158,7 @@ impl HostState {
             target: RwLock::new(MainThreadTarget {
                 plugin: ptr::null(),
                 timer_ext: ptr::null(),
+                state_ext: ptr::null(),
             }),
             restart_requested: AtomicBool::new(false),
             process_requested: AtomicBool::new(false),
@@ -158,6 +167,8 @@ impl HostState {
             flush_requested: AtomicBool::new(false),
             gui_closed: AtomicBool::new(false),
             gui_resize: AtomicU64::new(0),
+            state_dirty: AtomicBool::new(false),
+            params_pending: AtomicBool::new(false),
             timers: Mutex::new(Vec::new()),
             next_timer: AtomicU32::new(1),
             last_log: Mutex::new(None),
@@ -175,6 +186,55 @@ impl HostState {
 
     pub(crate) fn take_gui_closed(&self) -> bool {
         self.gui_closed.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether the plugin reported state changes since the last save.
+    pub(crate) fn state_dirty(&self) -> bool {
+        self.state_dirty.load(Ordering::Relaxed)
+    }
+
+    /// Saves the plugin's state through `clap_plugin_state.save`.  That is a
+    /// main-thread call which CLAP allows while the audio thread processes,
+    /// so it runs under the target's read lock instead of the instance mutex
+    /// (the audio callback keeps the insert).
+    ///
+    /// While parameter values are still queued for the next block the
+    /// plugin's state would hold the old values, so the save is deferred.
+    pub(crate) fn save_state(&self) -> StateSave {
+        if self.params_pending.load(Ordering::Acquire) {
+            return StateSave::Deferred;
+        }
+        if std::thread::current().id() != self.main_thread {
+            return StateSave::Deferred;
+        }
+        let target = self
+            .target
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if target.plugin.is_null() {
+            return StateSave::Unavailable;
+        }
+        let Some(save) = (unsafe { target.state_ext.as_ref() }).and_then(|state| state.save) else {
+            return StateSave::Unavailable;
+        };
+        // Cleared first, so a change the plugin marks during the save is
+        // picked up by the next one; set again if the save fails.
+        self.state_dirty.store(false, Ordering::Relaxed);
+        let mut writer = StateWriter::default();
+        let stream = writer.stream();
+        let saved = unsafe { save(target.plugin, &stream) };
+        if writer.overflowed {
+            eprintln!(
+                "[plugins] not saving a CLAP plugin's state: it is larger than {} MB",
+                MAX_STATE_BYTES / (1024 * 1024)
+            );
+        }
+        if saved && !writer.overflowed {
+            StateSave::Saved(writer.bytes)
+        } else {
+            self.state_dirty.store(true, Ordering::Relaxed);
+            StateSave::Unavailable
+        }
     }
 
     /// Runs `on_main_thread` and due timers.  CLAP allows these main-thread
@@ -222,6 +282,17 @@ impl HostState {
             unsafe { on_timer(target.plugin, id) };
         }
     }
+}
+
+/// The outcome of [`HostState::save_state`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StateSave {
+    Saved(Vec<u8>),
+    /// No state extension, or the save failed.
+    Unavailable,
+    /// Not now (values still queued, or not on the main thread); try again
+    /// at the next save.
+    Deferred,
 }
 
 /// The event list passed to `process` and `params.flush`.  It is kept on the
@@ -326,6 +397,7 @@ pub(crate) struct ClapPlugin {
     params_ext: *const clap_plugin_params,
     gui_ext: *const clap_plugin_gui,
     timer_ext: *const clap_plugin_timer_support,
+    state_ext: *const clap_plugin_state,
     cached_params: Vec<ClapParam>,
     input_buffers: Vec<Vec<f32>>,
     output_buffers: Vec<Vec<f32>>,
@@ -356,7 +428,8 @@ impl ClapPlugin {
         plugin_id: &str,
         sample_rate: u32,
         max_block: usize,
-    ) -> Result<Self, String> {
+        restore: &Restore<'_>,
+    ) -> Result<(Self, bool), String> {
         let binary = bundle_binary_path(path);
         let library = unsafe { libloading::Library::new(&binary) }
             .map_err(|error| format!("CLAP load failed: {error}"))?;
@@ -426,6 +499,7 @@ impl ClapPlugin {
         let gui_ext = extension::<clap_plugin_gui>(plugin, CLAP_EXT_GUI);
         let timer_ext = extension::<clap_plugin_timer_support>(plugin, CLAP_EXT_TIMER_SUPPORT);
         let audio_ports_ext = extension::<clap_plugin_audio_ports>(plugin, CLAP_EXT_AUDIO_PORTS);
+        let state_ext = extension::<clap_plugin_state>(plugin, CLAP_EXT_STATE);
 
         let (input_channels, output_channels) = audio_channel_counts(plugin, audio_ports_ext)?;
         let rate = if sample_rate == 0 {
@@ -444,6 +518,7 @@ impl ClapPlugin {
             params_ext,
             gui_ext,
             timer_ext,
+            state_ext,
             cached_params: Vec::new(),
             input_buffers: vec![vec![0.0; block]; input_channels],
             output_buffers: vec![vec![0.0; block]; output_channels],
@@ -469,12 +544,95 @@ impl ClapPlugin {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = MainThreadTarget {
             plugin: plugin.plugin,
             timer_ext: plugin.timer_ext,
+            state_ext: plugin.state_ext,
         };
+        // Restore the saved state and controls while the plugin is still
+        // inactive: `state.load` is a main-thread call, and `params.flush` is
+        // one too until activation (never concurrent with `process`), so both
+        // take effect before the first audio block and the panel reads the
+        // restored values below.  They run on whichever thread loads the
+        // plugin, like `init` and `activate` (see REVIEW.md H8).
+        plugin.scan_parameters();
+        let state_loaded = restore
+            .state
+            .as_deref()
+            .is_some_and(|bytes| plugin.load_state(bytes));
+        if state_loaded {
+            // The state may bring a different parameter set.
+            plugin.scan_parameters();
+        }
+        let values = restore.params(state_loaded);
+        plugin.restore_parameters(&values);
         plugin.activate()?;
         // `start_processing` is an audio-thread call in CLAP; the first
         // `process` makes it (see `process`).
         plugin.refresh_parameters();
-        Ok(plugin)
+        Ok((plugin, state_loaded && values.is_empty()))
+    }
+
+    /// Hands saved state bytes to `clap_plugin_state.load`.
+    fn load_state(&mut self, bytes: &[u8]) -> bool {
+        let Some(load) = (unsafe { self.state_ext.as_ref() }).and_then(|state| state.load) else {
+            return false;
+        };
+        let mut reader = StateReader::new(bytes);
+        let stream = reader.stream();
+        unsafe { load(self.plugin, &stream) }
+    }
+
+    /// Applies saved normalized values (`None` meaning the default) before
+    /// activation.  They go through `params.flush` right away; a plugin
+    /// without `flush` gets them with the first `process` instead, and until
+    /// then [`Self::has_pending_parameters`] keeps the editor sync from
+    /// reading (and saving) the not-yet-applied defaults.
+    fn restore_parameters(&mut self, values: &[(u32, Option<f64>)]) {
+        for (id, value) in values {
+            let Some(param) = self.cached_params.iter().find(|param| param.id == *id) else {
+                continue;
+            };
+            if param.read_only {
+                continue;
+            }
+            let native = match value {
+                Some(value) => self.denormalise(param, *value),
+                None => param.default,
+            };
+            if let Some(pending) = self
+                .pending_params
+                .iter_mut()
+                .find(|(pending_id, _)| *pending_id == *id)
+            {
+                pending.1 = native;
+            } else {
+                self.pending_params.push((*id, native));
+            }
+        }
+        let can_flush =
+            unsafe { self.params_ext.as_ref() }.is_some_and(|params| params.flush.is_some());
+        if !self.active && can_flush {
+            self.flush_parameters(false);
+        }
+        self.note_pending();
+    }
+
+    /// Publishes whether values are queued, for [`HostState::save_state`].
+    fn note_pending(&self) {
+        self.host_state
+            .params_pending
+            .store(!self.pending_params.is_empty(), Ordering::Release);
+    }
+
+    /// Loads with nothing to restore, for the fixture smoke tests.
+    #[cfg(test)]
+    pub(crate) fn load_fresh(
+        path: &Path,
+        plugin_id: &str,
+        sample_rate: u32,
+        max_block: usize,
+    ) -> Result<Self, String> {
+        let pref = crate::audio::PluginPref::default();
+        let restore = Restore::from_pref(&pref);
+        Self::load(path, plugin_id, sample_rate, max_block, &restore).map(|(plugin, _)| plugin)
     }
 
     /// The callback state the main-thread servicing works from.
@@ -617,15 +775,23 @@ impl ClapPlugin {
         self.cached_params
             .iter()
             .map(|param| {
-                let native = params
-                    .get_value
-                    .and_then(|get| {
-                        let mut value = param.default;
-                        if unsafe { get(self.plugin, param.id, &mut value) } {
-                            Some(value)
-                        } else {
-                            None
-                        }
+                // A queued value is what the plugin will have from the next
+                // block on, so the panel shows that rather than the old one.
+                let pending = self
+                    .pending_params
+                    .iter()
+                    .find(|(id, _)| *id == param.id)
+                    .map(|(_, value)| *value);
+                let native = pending
+                    .or_else(|| {
+                        params.get_value.and_then(|get| {
+                            let mut value = param.default;
+                            if unsafe { get(self.plugin, param.id, &mut value) } {
+                                Some(value)
+                            } else {
+                                None
+                            }
+                        })
                     })
                     .unwrap_or(param.default);
                 PluginParamView {
@@ -692,6 +858,7 @@ impl ClapPlugin {
         } else {
             self.pending_params.push((id, native));
         }
+        self.note_pending();
         Ok(())
     }
 
@@ -735,6 +902,7 @@ impl ClapPlugin {
         let output = output_events();
         unsafe { flush(self.plugin, &input, &output) };
         self.events = events;
+        self.note_pending();
     }
 
     pub(crate) fn process(
@@ -824,6 +992,8 @@ impl ClapPlugin {
             };
             self.steady_time = self.steady_time.saturating_add(count as i64);
             self.events = events;
+            // Only now has the plugin received the queued values.
+            self.note_pending();
 
             if status == CLAP_PROCESS_ERROR {
                 return Err("The CLAP plugin reported a processing error.".to_owned());
@@ -1226,7 +1396,111 @@ static HOST_STATE: clap_host_state = clap_host_state {
     mark_dirty: Some(host_state_mark_dirty),
 };
 
-unsafe extern "C" fn host_state_mark_dirty(_host: *const clap_host) {}
+unsafe extern "C" fn host_state_mark_dirty(host: *const clap_host) {
+    if let Some(state) = unsafe { state(host) } {
+        state.state_dirty.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The most state bytes accepted from one plugin, so a runaway `save` cannot
+/// exhaust memory.
+const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Collects what a plugin writes in `clap_plugin_state.save`.
+#[derive(Default)]
+struct StateWriter {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+impl StateWriter {
+    /// The stream handed to the plugin.  It points at `self`, so `self` must
+    /// stay in place while the plugin uses it.
+    fn stream(&mut self) -> clap_ostream {
+        clap_ostream {
+            ctx: self as *mut Self as *mut c_void,
+            write: Some(state_write),
+        }
+    }
+}
+
+unsafe extern "C" fn state_write(
+    stream: *const clap_ostream,
+    buffer: *const c_void,
+    size: u64,
+) -> i64 {
+    let Some(stream) = (unsafe { stream.as_ref() }) else {
+        return -1;
+    };
+    let Some(writer) = (unsafe { (stream.ctx as *mut StateWriter).as_mut() }) else {
+        return -1;
+    };
+    if size == 0 {
+        return 0;
+    }
+    if buffer.is_null() {
+        return -1;
+    }
+    let size = match usize::try_from(size) {
+        Ok(size) if size <= MAX_STATE_BYTES - writer.bytes.len().min(MAX_STATE_BYTES) => size,
+        _ => {
+            writer.overflowed = true;
+            return -1;
+        }
+    };
+    let data = unsafe { std::slice::from_raw_parts(buffer as *const u8, size) };
+    writer.bytes.extend_from_slice(data);
+    size as i64
+}
+
+/// Feeds saved bytes to `clap_plugin_state.load`.
+struct StateReader<'a> {
+    data: &'a [u8],
+    position: usize,
+}
+
+impl<'a> StateReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, position: 0 }
+    }
+
+    /// The stream handed to the plugin.  It points at `self`, so `self` must
+    /// stay in place while the plugin uses it.
+    fn stream(&mut self) -> clap_istream {
+        clap_istream {
+            ctx: self as *mut Self as *mut c_void,
+            read: Some(state_read),
+        }
+    }
+}
+
+/// Copies up to `size` bytes; returns how many, 0 at the end, -1 on error.
+unsafe extern "C" fn state_read(
+    stream: *const clap_istream,
+    buffer: *mut c_void,
+    size: u64,
+) -> i64 {
+    let Some(stream) = (unsafe { stream.as_ref() }) else {
+        return -1;
+    };
+    let Some(reader) = (unsafe { (stream.ctx as *mut StateReader<'_>).as_mut() }) else {
+        return -1;
+    };
+    let remaining = &reader.data[reader.position..];
+    let count = usize::try_from(size)
+        .unwrap_or(usize::MAX)
+        .min(remaining.len())
+        .min(i64::MAX as usize);
+    if count == 0 {
+        return 0;
+    }
+    if buffer.is_null() {
+        return -1;
+    }
+    unsafe { ptr::copy_nonoverlapping(remaining.as_ptr(), buffer as *mut u8, count) };
+    reader.position += count;
+    count as i64
+}
 
 static HOST_LATENCY: clap_host_latency = clap_host_latency {
     changed: Some(host_latency_changed),
@@ -1546,6 +1820,102 @@ fn collect_bundles(folder: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
+    use super::{HostState, StateReader, StateSave, StateWriter};
+    use std::ffi::c_void;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn state_save_waits_while_values_are_queued() {
+        let mut host = HostState::new();
+        // On the main thread with no plugin, a save would report
+        // `Unavailable`; only the queued values make it wait.
+        host.main_thread = std::thread::current().id();
+        assert_eq!(host.save_state(), StateSave::Unavailable);
+        host.params_pending.store(true, Ordering::Release);
+        assert_eq!(host.save_state(), StateSave::Deferred);
+    }
+
+    #[test]
+    fn state_writer_collects_every_chunk() {
+        let mut writer = StateWriter::default();
+        let stream = writer.stream();
+        let write = stream.write.expect("write callback");
+        let first = [1u8, 2, 3];
+        let second = [4u8; 5];
+        unsafe {
+            assert_eq!(write(&stream, first.as_ptr() as *const c_void, 3), 3);
+            assert_eq!(write(&stream, second.as_ptr() as *const c_void, 5), 5);
+            assert_eq!(write(&stream, std::ptr::null(), 0), 0);
+            assert_eq!(write(&stream, std::ptr::null(), 4), -1);
+            assert_eq!(
+                write(std::ptr::null(), first.as_ptr() as *const c_void, 3),
+                -1
+            );
+        }
+        assert!(!writer.overflowed);
+        assert_eq!(writer.bytes, vec![1, 2, 3, 4, 4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn state_writer_refuses_runaway_sizes() {
+        let mut writer = StateWriter::default();
+        let stream = writer.stream();
+        let byte = [0u8];
+        let result = unsafe {
+            (stream.write.expect("write"))(&stream, byte.as_ptr() as *const c_void, u64::MAX)
+        };
+        assert_eq!(result, -1);
+        assert!(writer.overflowed);
+        assert!(writer.bytes.is_empty());
+    }
+
+    #[test]
+    fn state_reader_hands_out_the_bytes_in_pieces() {
+        let data: Vec<u8> = (0..10).collect();
+        let mut reader = StateReader::new(&data);
+        let stream = reader.stream();
+        let read = stream.read.expect("read callback");
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 4];
+        loop {
+            let count = unsafe { read(&stream, chunk.as_mut_ptr() as *mut c_void, 4) };
+            assert!(count >= 0);
+            if count == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..count as usize]);
+        }
+        assert_eq!(out, data);
+        // At the end it keeps reporting end of stream.
+        assert_eq!(
+            unsafe { read(&stream, chunk.as_mut_ptr() as *mut c_void, 4) },
+            0
+        );
+        assert_eq!(
+            unsafe { read(std::ptr::null(), chunk.as_mut_ptr() as *mut c_void, 4) },
+            -1
+        );
+    }
+
+    #[test]
+    fn state_round_trips_through_both_streams() {
+        let mut writer = StateWriter::default();
+        let ostream = writer.stream();
+        let payload = b"plugin state";
+        let written = unsafe {
+            (ostream.write.expect("write"))(&ostream, payload.as_ptr() as *const c_void, 12)
+        };
+        assert_eq!(written, 12);
+        let saved = std::mem::take(&mut writer.bytes);
+        let mut reader = StateReader::new(&saved);
+        let istream = reader.stream();
+        let mut back = [0u8; 64];
+        let count = unsafe {
+            (istream.read.expect("read"))(&istream, back.as_mut_ptr() as *mut c_void, 64)
+        };
+        assert_eq!(&back[..count as usize], payload);
+    }
+
     /// Optional smoke test used while developing the host: point
     /// `RIGWERK_CLAP_FIXTURE` at a `.clap` file, then run `cargo test`.
     #[test]
@@ -1558,8 +1928,8 @@ mod tests {
         let candidates = scan_bundle(&path).expect("scan the fixture");
         assert!(!candidates.is_empty(), "fixture exposed no effects");
         let candidate = &candidates[0];
-        let mut plugin =
-            ClapPlugin::load(&path, &candidate.plugin_id, 48_000, 512).expect("load the fixture");
+        let mut plugin = ClapPlugin::load_fresh(&path, &candidate.plugin_id, 48_000, 512)
+            .expect("load the fixture");
         assert!(!plugin.parameters().is_empty());
         if plugin.has_editor() {
             let (width, height) = plugin

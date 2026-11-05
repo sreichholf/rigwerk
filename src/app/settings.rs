@@ -402,6 +402,7 @@ mod tests {
             bypass: true,
             mix: 0.5,
             params: ron::from_str("[(id: 7, value: 0.25)]").expect("params"),
+            state: None,
         }
     }
 
@@ -413,11 +414,16 @@ mod tests {
 
     #[test]
     fn round_trip_keeps_everything() {
+        let mut verb = plugin("C:/Plugins/Verb.clap", PluginFormat::Clap);
+        verb.state = ron::from_str(
+            r#"Some((version: 1, data: "AAEC/w==", params: [(id: 7, value: 0.25)]))"#,
+        )
+        .expect("state");
         let preferences = Preferences {
             sessions: vec![preset("Clean"), preset("Lead")],
             plugins: vec![
                 plugin("C:/Plugins/Amp.vst3", PluginFormat::Vst3),
-                plugin("C:/Plugins/Verb.clap", PluginFormat::Clap),
+                verb.clone(),
             ],
             sample_rate: 96_000,
             session_name: "Gig".to_owned(),
@@ -441,6 +447,20 @@ mod tests {
         assert!(back.plugins[1].bypass);
         assert_eq!(back.plugins[1].mix, 0.5);
         assert_eq!(back.plugins[1].params[0].id, 7);
+        assert_eq!(back.plugins[1].state, verb.state);
+        assert!(back.plugins[0].state.is_none());
+    }
+
+    #[test]
+    fn damaged_plugin_state_keeps_the_insert() {
+        let raw = r#"(plugins:[(path:"C:/Plugins/Amp.clap",format:clap,name:"Amp",params:[(id:3,value:0.5)],state:Some((version:"one",data:12))),(path:"C:/Plugins/Old.vst3",name:"Old")])"#;
+        let loaded = load_preferences(Some(raw), BACKUP);
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+        let preferences = loaded.preferences.expect("readable");
+        assert_eq!(preferences.plugins.len(), 2);
+        assert!(preferences.plugins[0].state.is_none());
+        assert_eq!(preferences.plugins[0].params[0].id, 3);
+        assert!(preferences.plugins[1].state.is_none());
     }
 
     #[test]

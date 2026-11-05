@@ -349,7 +349,7 @@ impl RigWerkApp {
         let views = self.engine.plugin_views();
         let Some(view) = views.get(index) else {
             self.plugin_editor = None;
-            self.plugin_gui = None;
+            self.finish_plugin_gui();
             return;
         };
         let name = view.name.clone();

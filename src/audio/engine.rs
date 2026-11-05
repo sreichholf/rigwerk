@@ -330,6 +330,13 @@ impl AudioEngine {
         self.shared.sync_plugin_parameters(index)
     }
 
+    /// Copies the editor's last changes back and marks the insert's saved
+    /// state for capture, when its editor closes.
+    pub fn finish_plugin_editor(&self, index: usize) {
+        let _ = self.shared.sync_plugin_parameters(index);
+        self.shared.mark_plugin_state_stale(index);
+    }
+
     pub fn set_plugin_parameter(&self, index: usize, id: u32, value: f64) -> Result<(), String> {
         self.shared.set_plugin_parameter(index, id, value)
     }

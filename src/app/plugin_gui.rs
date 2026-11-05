@@ -52,7 +52,7 @@ impl RigWerkApp {
     pub(crate) fn open_plugin_gui(&mut self, index: usize) -> bool {
         self.engine.ensure_plugin_loaded(index);
         // Dropping the old window detaches its editor before the new one opens.
-        self.plugin_gui = None;
+        self.finish_plugin_gui();
         let Some(handle) = self.engine.plugin_handle(index) else {
             self.plugin_browser.notice = Some((
                 "The effect is not loaded, so its interface cannot open.".to_owned(),
@@ -120,6 +120,15 @@ impl RigWerkApp {
     /// Closes the plugin's window, if one is open.  Dropping it detaches the
     /// editor from its native window first, so nothing outlives the window.
     pub(crate) fn close_plugin_gui(&mut self) {
+        self.finish_plugin_gui();
+    }
+
+    /// Drops the editor after a last sync, so whatever it changed since the
+    /// previous 250 ms sync reaches the saved insert and its state blob.
+    pub(crate) fn finish_plugin_gui(&mut self) {
+        if let Some(index) = self.plugin_gui.as_ref().map(|gui| gui.index) {
+            self.engine.finish_plugin_editor(index);
+        }
         self.plugin_gui = None;
     }
 
@@ -147,7 +156,11 @@ impl RigWerkApp {
             }
             (dismissed, same_plugin, due)
         };
-        if dismissed || !same_plugin {
+        if dismissed && same_plugin {
+            self.finish_plugin_gui();
+            return;
+        }
+        if !same_plugin {
             self.plugin_gui = None;
             return;
         }
@@ -444,7 +457,8 @@ mod tests {
             return;
         };
         let plugin = Arc::new(Mutex::new(
-            ClapPlugin::load(&path, &candidate.plugin_id, 48_000, 512).expect("load the fixture"),
+            ClapPlugin::load_fresh(&path, &candidate.plugin_id, 48_000, 512)
+                .expect("load the fixture"),
         ));
         if !plugin
             .lock()
