@@ -306,7 +306,7 @@ These are recorded so the fixes are not overclaimed:
 | H5 | `2af8fba` | Share one init per CLAP module across instances and scans |
 | H6 | `478eb70` | Never leak a CLAP plugin or module init on a failed load |
 | H7 | `3eb2704` | Restore CLAP parameters and save plugin state for both formats |
-| H9 | this change | Give CLAP plugins one buffer per declared audio port |
+| H9 | `3f42c70` | Give CLAP plugins one buffer per declared audio port |
 
 H8 (plugin lifecycle on bridge threads) is not claimed as complete here.
 
