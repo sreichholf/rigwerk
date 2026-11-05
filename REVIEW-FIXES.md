@@ -381,7 +381,7 @@ into the output mixer.
 
 | Finding | Commit | Subject |
 | --- | --- | --- |
-| H3 | (this phase) | Crossfade gain, mute, and routing instead of stepping per block |
+| H3 | `8bfecad` | Crossfade gain, mute, and routing instead of stepping per block |
 
 ### H3: gain, mute, channel enable, and routing
 
