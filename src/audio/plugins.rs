@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 
 use vst3_host::{AudioBuffers, Plugin, Vst3Host};
 
-use super::clap::{ClapPlugin, HostState, StateSave};
+use super::clap::{ClapPlugin, HostState, StateSave, AUDIO_PORTS_CHANGED};
 
 /// Which plugin format an insert uses.  Saved inserts written before CLAP
 /// support default to VST3.
@@ -513,7 +513,24 @@ impl Slot {
     }
 
     fn active(&self) -> bool {
-        !self.pref.bypass && self.error.is_none() && self.plugin.is_some()
+        !self.pref.bypass && self.error.is_none() && self.plugin.is_some() && !self.ports_changed()
+    }
+
+    /// Whether this slot's CLAP plugin invalidated its port buffers.  The
+    /// insert is left out of the chain and the panel shows the error until it
+    /// is removed and added again.
+    fn ports_changed(&self) -> bool {
+        self.clap_host
+            .as_ref()
+            .is_some_and(|host| host.ports_changed())
+    }
+
+    /// The first error the slot should show: a load/processing failure, or a
+    /// port change that has not yet reached `process`.
+    fn resolved_error(&self) -> Option<String> {
+        self.error
+            .clone()
+            .or_else(|| self.ports_changed().then(|| AUDIO_PORTS_CHANGED.to_owned()))
     }
 
     /// Opens a saved slot on demand (the configure window may be opened before
@@ -549,7 +566,7 @@ impl Slot {
             category: self.pref.category.clone(),
             bypass: self.pref.bypass,
             mix: self.pref.mix,
-            error: self.error.clone(),
+            error: self.resolved_error(),
             parameters: self.parameters.clone(),
             has_editor: self.plugin.is_some() && self.has_editor,
         }
@@ -884,8 +901,7 @@ impl PluginChain {
             return Err("That insert is no longer in the chain".to_owned());
         };
         slot.plugin.clone().ok_or_else(|| {
-            slot.error
-                .clone()
+            slot.resolved_error()
                 .unwrap_or_else(|| "The plugin is not loaded".to_owned())
         })
     }
@@ -1314,5 +1330,17 @@ mod tests {
             merge_synced_params(&previous, &live),
             vec![param(2, 0.7), param(9, 0.3)]
         );
+    }
+
+    #[test]
+    fn a_port_change_is_visible_without_processing_a_block() {
+        let mut slot = Slot::empty(PluginPref::default());
+        slot.clap_host = Some(Arc::new(HostState::for_test(true)));
+        assert!(slot.ports_changed());
+        assert_eq!(slot.resolved_error().as_deref(), Some(AUDIO_PORTS_CHANGED));
+
+        slot.clap_host = Some(Arc::new(HostState::for_test(false)));
+        assert!(!slot.ports_changed());
+        assert!(slot.resolved_error().is_none());
     }
 }

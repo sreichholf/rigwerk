@@ -299,16 +299,91 @@ These are recorded so the fixes are not overclaimed:
   allocates for sources up to 192 kHz. Removing it needs a prepare/start split
   for the ASIO input.
 
+## Fourth phase: plugin lifecycle and state (H5-H7, H9)
+
+| Finding | Commit | Subject |
+| --- | --- | --- |
+| H5 | `2af8fba` | Share one init per CLAP module across instances and scans |
+| H6 | `478eb70` | Never leak a CLAP plugin or module init on a failed load |
+| H7 | `3eb2704` | Restore CLAP parameters and save plugin state for both formats |
+| H9 | this change | Give CLAP plugins one buffer per declared audio port |
+
+H8 (plugin lifecycle on bridge threads) is not claimed as complete here.
+
+### H9: multiple audio ports
+
+- Every port the plugin declares through `clap_plugin_audio_ports` now gets its
+  own `clap_audio_buffer`, in plugin index order, and `process` sets the real
+  `audio_inputs_count` / `audio_outputs_count`. A sidechain or multi-output
+  effect no longer sees a port count that contradicts its descriptor.
+- The main port is the one flagged `CLAP_AUDIO_PORT_IS_MAIN` (index 0 when no
+  port is flagged). A mono main port gets the mono sum and feeds both output
+  sides; a main port with more than two channels gets left/right on its first
+  two channels and silence on the rest, and only its first two output channels
+  are read.
+- Auxiliary input ports are silent; auxiliary output ports are allocated and
+  ignored. Zero-channel ports get a null `data32` and `channel_count == 0`.
+- The layout is read once, after state restore and before `activate`, because
+  CLAP only allows port changes while the plugin is inactive. A later
+  `clap_host_audio_ports.rescan` that changes the port list, channel counts, or
+  main flag sets an atomic flag; the insert stops (without allocating or
+  reallocating on the audio thread) and the panel says to remove and add it
+  again. Rescans for names, port type, or in-place pairing are absorbed because
+  they cannot invalidate these buffers.
+- Malformed port descriptions are rejected before activation: no ports, more
+  than 32 ports per direction, more than 64 channels per port, a main port with
+  no channels, or a port that cannot be described. The existing RAII load guard
+  still destroys the plugin and releases the module on that path.
+- The buffer descriptions (pointers, channel counts, masks) are restored from
+  the cached layout before every block, so a plugin that overwrites `data32`,
+  `data64`, or `constant_mask` cannot leave the host pointing at stale memory.
+  Zero-channel ports stay null.
+
+### Reviewer verdict for H9
+
+**PASS WITH FINDINGS**, all addressed in the follow-up:
+
+- The ports-changed path no longer allocates a `String`: `process` returns a
+  static message, and the chain skips a slot whose port flag is set before
+  calling into the plugin.
+- A zero-channel port now gets a null `data32` instead of a one-past-the-end
+  pointer, and the placeholder `PortBuffers` no longer panics if its main port
+  is asked for.
+- The rescan callback ignores flags that cannot invalidate the buffers
+  (names, port type, in-place pairing) while still stopping on a port list,
+  channel count, flags, or unknown flag.
+- A port change is visible in the insert list even while the bridge is stopped
+  or the insert is bypassed, through the same cached host state the panel
+  already holds.
+- New tests cover a trailing zero-channel port, pointer/metadata tampering
+  between blocks, multiple sub-blocks, harmless versus stopping rescan flags,
+  and the panel-visible port-change error.
+
+### Verification for the fourth phase
+
+- `cargo fmt --check`: pass.
+- `cargo test`: 99 passed, 0 failed, 4 ignored.
+- `cargo clippy --all-targets`: no new warnings.
+- Hardware smoke test on this Windows host: ASIO input (Valeton GP-5, 44.1 kHz)
+  into the WASAPI High Definition Audio output at 48 kHz, Low-latency cushion,
+  128-frame output step, three seconds, silence only: `Running`, 0 underruns,
+  input and output frames advancing, clean stop back to `Idle`.
+
+Not verified: a real multi-port CLAP plugin or CLAP validator was available, so
+the port layout is covered by the in-process fake only.
+
 ## Not fixed yet
 
-The non-blocking findings still open in `REVIEW.md` are plugin lifecycle/state
-(H5-H9), device identity and presets (H12-H16), latency reporting (H4), Linux
-classification and quantum (H11, H17, H18), UI data honesty/layout/
-accessibility/diagnostics (U1-U7), and build/package hygiene. H1, H2, H10 and
-the M3/M4 runtime residuals listed above are addressed by this branch.
+The non-blocking findings still open in `REVIEW.md` are plugin lifecycle
+placement (H8), device identity and presets (H12-H16), latency reporting (H4),
+Linux classification and quantum (H11, H17, H18), UI data honesty/layout/
+accessibility/diagnostics (U1-U7), and build/package hygiene. H1, H2, H5-H7,
+H9, H10 and the M3/M4 runtime residuals listed above are addressed by this
+branch.
 
-The second review round re-verified every open finding above at `66fa9a2`; all
-are still open. It also sharpened several of them:
+The second review round re-verified every open finding at `66fa9a2`; at that
+point all of them, including H5-H9, were still open. It also sharpened several
+of them:
 
 - **H7** loses data: after a reload, the next parameter sync overwrites the
   saved CLAP values with the plugin's defaults.

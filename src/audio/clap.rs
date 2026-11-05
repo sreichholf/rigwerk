@@ -21,7 +21,10 @@ use clap_sys::events::{
     CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE,
 };
 use clap_sys::ext::audio_ports::{
-    clap_audio_port_info, clap_host_audio_ports, clap_plugin_audio_ports, CLAP_AUDIO_PORT_IS_MAIN,
+    clap_audio_port_info, clap_host_audio_ports, clap_plugin_audio_ports,
+    CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT, CLAP_AUDIO_PORTS_RESCAN_FLAGS,
+    CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR, CLAP_AUDIO_PORTS_RESCAN_LIST,
+    CLAP_AUDIO_PORTS_RESCAN_NAMES, CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE, CLAP_AUDIO_PORT_IS_MAIN,
     CLAP_EXT_AUDIO_PORTS,
 };
 use clap_sys::ext::gui::{
@@ -138,6 +141,9 @@ pub(crate) struct HostState {
     callback_requested: AtomicBool,
     params_rescan: AtomicBool,
     flush_requested: AtomicBool,
+    /// Set by `clap_host_audio_ports.rescan` once the plugin is set up: its
+    /// ports no longer match the buffers, so it needs loading again.
+    ports_changed: AtomicBool,
     gui_closed: AtomicBool,
     gui_resize: AtomicU64,
     /// Set by `clap_host_state.mark_dirty`.
@@ -165,6 +171,7 @@ impl HostState {
             callback_requested: AtomicBool::new(false),
             params_rescan: AtomicBool::new(false),
             flush_requested: AtomicBool::new(false),
+            ports_changed: AtomicBool::new(false),
             gui_closed: AtomicBool::new(false),
             gui_resize: AtomicU64::new(0),
             state_dirty: AtomicBool::new(false),
@@ -191,6 +198,20 @@ impl HostState {
     /// Whether the plugin reported state changes since the last save.
     pub(crate) fn state_dirty(&self) -> bool {
         self.state_dirty.load(Ordering::Relaxed)
+    }
+
+    /// Whether the plugin asked for an audio-port rescan that the fixed
+    /// buffers cannot follow.  The insert is stopped until it is reloaded.
+    pub(crate) fn ports_changed(&self) -> bool {
+        self.ports_changed.load(Ordering::Relaxed)
+    }
+
+    /// A state for tests that only exercise slot bookkeeping.
+    #[cfg(test)]
+    pub(crate) fn for_test(ports_changed: bool) -> Self {
+        let state = Self::new();
+        state.ports_changed.store(ports_changed, Ordering::Relaxed);
+        state
     }
 
     /// Saves the plugin's state through `clap_plugin_state.save`.  That is a
@@ -716,10 +737,9 @@ pub(crate) struct ClapPlugin {
     timer_ext: *const clap_plugin_timer_support,
     state_ext: *const clap_plugin_state,
     cached_params: Vec<ClapParam>,
-    input_buffers: Vec<Vec<f32>>,
-    output_buffers: Vec<Vec<f32>>,
-    input_pointers: Vec<*mut f32>,
-    output_pointers: Vec<*mut f32>,
+    /// One buffer per declared audio port, set up just before activation.
+    inputs: PortBuffers,
+    outputs: PortBuffers,
     dry_l: Vec<f32>,
     dry_r: Vec<f32>,
     events: EventBuffer,
@@ -792,7 +812,6 @@ impl ClapPlugin {
         let audio_ports_ext = extension::<clap_plugin_audio_ports>(plugin, CLAP_EXT_AUDIO_PORTS);
         let state_ext = extension::<clap_plugin_state>(plugin, CLAP_EXT_STATE);
 
-        let (input_channels, output_channels) = audio_channel_counts(plugin, audio_ports_ext)?;
         let rate = if sample_rate == 0 {
             48_000.0
         } else {
@@ -811,10 +830,8 @@ impl ClapPlugin {
             timer_ext,
             state_ext,
             cached_params: Vec::new(),
-            input_buffers: vec![vec![0.0; block]; input_channels],
-            output_buffers: vec![vec![0.0; block]; output_channels],
-            input_pointers: vec![ptr::null_mut(); input_channels],
-            output_pointers: vec![ptr::null_mut(); output_channels],
+            inputs: PortBuffers::default(),
+            outputs: PortBuffers::default(),
             dry_l: vec![0.0; block],
             dry_r: vec![0.0; block],
             events: EventBuffer::default(),
@@ -853,6 +870,20 @@ impl ClapPlugin {
         }
         let values = restore.params(state_loaded);
         plugin.restore_parameters(&values);
+        // The ports are read last before activation: the restored state may
+        // have changed them, and they cannot change while the plugin is
+        // active.  A rescan request from here on means the buffers are stale.
+        plugin
+            .host_state
+            .ports_changed
+            .store(false, Ordering::Relaxed);
+        let layout = port_layout(
+            read_audio_ports(plugin.plugin, audio_ports_ext)?
+                .as_ref()
+                .map(|(inputs, outputs)| (inputs.as_slice(), outputs.as_slice())),
+        )?;
+        plugin.inputs = PortBuffers::new(&layout.inputs, layout.main_input, block);
+        plugin.outputs = PortBuffers::new(&layout.outputs, layout.main_output, block);
         plugin.activate()?;
         // `start_processing` is an audio-thread call in CLAP; the first
         // `process` makes it (see `process`).
@@ -947,17 +978,22 @@ impl ClapPlugin {
 
     /// Starts processing.  CLAP marks `start_processing` as an audio-thread
     /// call, so `process` makes it on the first block, inside the audio-thread
-    /// scope.
-    fn start_processing(&mut self) -> Result<(), String> {
+    /// scope.  The error is static so the audio path does not allocate.
+    fn start_processing(&mut self) -> Result<(), &'static str> {
         if self.started {
             return Ok(());
         }
         if let Some(start) = unsafe { (*self.plugin).start_processing } {
             if !unsafe { start(self.plugin) } {
-                return Err("The CLAP plugin could not start processing.".to_owned());
+                return Err("The CLAP plugin could not start processing.");
             }
         }
         self.started = true;
+        // A rescan during `start_processing` would otherwise only be noticed
+        // before the second block.
+        if self.host_state.ports_changed() {
+            return Err(AUDIO_PORTS_CHANGED);
+        }
         Ok(())
     }
 
@@ -1201,9 +1237,15 @@ impl ClapPlugin {
         right: &mut [f32],
         frames: usize,
         mix: f32,
-    ) -> Result<(), String> {
+    ) -> Result<(), &'static str> {
         if !self.instance.active {
-            return Err("The CLAP plugin is not active.".to_owned());
+            return Err("The CLAP plugin is not active.");
+        }
+        if self.host_state.ports_changed() {
+            // The buffers were built for the old ports; using them could
+            // hand the plugin fewer ports or channels than it now expects.
+            // A static message keeps this audio path allocation-free.
+            return Err(AUDIO_PORTS_CHANGED);
         }
         let _audio_thread = AudioThreadScope::enter();
         if !self.started {
@@ -1218,18 +1260,19 @@ impl ClapPlugin {
         let mut offset = 0;
         while offset < frames {
             let count = (frames - offset).min(self.max_block);
-            if self.input_buffers.len() == 1 {
+            // Auxiliary inputs and main channels past the second stay
+            // silent; the plugin may have written into any of them.
+            self.inputs.silence(count);
+            let main = self.inputs.main_channels();
+            if let [mono] = main {
                 for sample in 0..count {
-                    self.input_buffers[0][sample] =
-                        0.5 * (left[offset + sample] + right[offset + sample]);
+                    mono[sample] = 0.5 * (left[offset + sample] + right[offset + sample]);
                 }
             } else {
-                self.input_buffers[0][..count].copy_from_slice(&left[offset..offset + count]);
-                self.input_buffers[1][..count].copy_from_slice(&right[offset..offset + count]);
+                main[0][..count].copy_from_slice(&left[offset..offset + count]);
+                main[1][..count].copy_from_slice(&right[offset..offset + count]);
             }
-            for channel in &mut self.output_buffers {
-                channel[..count].fill(0.0);
-            }
+            self.outputs.silence(count);
             if mix < 1.0 {
                 self.dry_l[..count].copy_from_slice(&left[offset..offset + count]);
                 self.dry_r[..count].copy_from_slice(&right[offset..offset + count]);
@@ -1242,37 +1285,20 @@ impl ClapPlugin {
             }
             events.finish();
 
-            for (index, buffer) in self.input_buffers.iter_mut().enumerate() {
-                self.input_pointers[index] = buffer.as_mut_ptr();
-            }
-            for (index, buffer) in self.output_buffers.iter_mut().enumerate() {
-                self.output_pointers[index] = buffer.as_mut_ptr();
-            }
-
-            let input_audio = clap_audio_buffer {
-                data32: self.input_pointers.as_mut_ptr(),
-                data64: ptr::null_mut(),
-                channel_count: self.input_buffers.len() as u32,
-                latency: 0,
-                constant_mask: 0,
-            };
-            let mut output_audio = clap_audio_buffer {
-                data32: self.output_pointers.as_mut_ptr(),
-                data64: ptr::null_mut(),
-                channel_count: self.output_buffers.len() as u32,
-                latency: 0,
-                constant_mask: 0,
-            };
+            self.inputs.refresh();
+            self.outputs.refresh();
             let input = events.as_clap();
             let output = output_events();
+            // One buffer per declared port, in the plugin's order, so the
+            // counts match what it reported through `clap_plugin_audio_ports`.
             let process = clap_process {
                 steady_time: self.steady_time,
                 frames_count: count as u32,
                 transport: ptr::null(),
-                audio_inputs: &input_audio,
-                audio_outputs: &mut output_audio,
-                audio_inputs_count: 1,
-                audio_outputs_count: 1,
+                audio_inputs: self.inputs.ports.as_ptr(),
+                audio_outputs: self.outputs.ports.as_mut_ptr(),
+                audio_inputs_count: self.inputs.ports.len() as u32,
+                audio_outputs_count: self.outputs.ports.len() as u32,
                 in_events: &input,
                 out_events: &output,
             };
@@ -1286,12 +1312,13 @@ impl ClapPlugin {
             self.note_pending();
 
             if status == CLAP_PROCESS_ERROR {
-                return Err("The CLAP plugin reported a processing error.".to_owned());
+                return Err("The CLAP plugin reported a processing error.");
             }
 
-            if self.output_buffers.len() == 1 {
+            let main = self.outputs.main_channels();
+            if let [mono] = main {
                 for sample in 0..count {
-                    let wet = self.output_buffers[0][sample];
+                    let wet = mono[sample];
                     if mix < 1.0 {
                         let dry = 1.0 - mix;
                         left[offset + sample] = self.dry_l[sample] * dry + wet * mix;
@@ -1303,8 +1330,8 @@ impl ClapPlugin {
                 }
             } else {
                 for sample in 0..count {
-                    let wet_l = self.output_buffers[0][sample];
-                    let wet_r = self.output_buffers[1][sample];
+                    let wet_l = main[0][sample];
+                    let wet_r = main[1][sample];
                     if mix < 1.0 {
                         let dry = 1.0 - mix;
                         left[offset + sample] = self.dry_l[sample] * dry + wet_l * mix;
@@ -1617,11 +1644,47 @@ static HOST_AUDIO_PORTS: clap_host_audio_ports = clap_host_audio_ports {
     rescan: Some(host_audio_ports_rescan),
 };
 
-unsafe extern "C" fn host_audio_ports_flag_supported(_host: *const clap_host, _flag: u32) -> bool {
-    false
+/// What a slot shows once the plugin has declared audio ports that no longer
+/// match the buffers it was loaded with.
+pub(crate) const AUDIO_PORTS_CHANGED: &str =
+    "The CLAP plugin changed its audio ports; remove it and add it again.";
+
+/// Rescan flags that cannot invalidate the buffers: port names and metadata,
+/// and the in-place pairing, which this host never uses because every port has
+/// its own buffers.
+const AUDIO_PORTS_RESCAN_HARMLESS: u32 = CLAP_AUDIO_PORTS_RESCAN_NAMES
+    | CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE
+    | CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR;
+
+/// Rescan flags whose change would leave the buffers wrongly sized or wired:
+/// a different port list, channel count, or port flags needs another load.
+const AUDIO_PORTS_RESCAN_STOPS: u32 = CLAP_AUDIO_PORTS_RESCAN_LIST
+    | CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT
+    | CLAP_AUDIO_PORTS_RESCAN_FLAGS;
+
+const AUDIO_PORTS_RESCAN_ALL: u32 = AUDIO_PORTS_RESCAN_HARMLESS | AUDIO_PORTS_RESCAN_STOPS;
+
+/// Every rescan flag is "supported" in the only way RigWerk can: the buffers
+/// are fixed once the plugin is active.  A request that changes the port
+/// layout or channel counts stops the insert until it is loaded again (see
+/// `process`); requests about names, port type, or in-place pairing are
+/// absorbed without touching the buffers.
+unsafe extern "C" fn host_audio_ports_flag_supported(_host: *const clap_host, flag: u32) -> bool {
+    flag != 0 && flag & !AUDIO_PORTS_RESCAN_ALL == 0
 }
 
-unsafe extern "C" fn host_audio_ports_rescan(_host: *const clap_host, _flags: u32) {}
+/// Marks the port buffers stale when the change would make them wrong.  Only
+/// a flag is set, so nothing is reallocated under the audio thread.
+unsafe extern "C" fn host_audio_ports_rescan(host: *const clap_host, flags: u32) {
+    // An unknown flag means the plugin is asking for something this host did
+    // not agree to handle; stop rather than risk stale buffers.
+    if flags & (AUDIO_PORTS_RESCAN_STOPS | !AUDIO_PORTS_RESCAN_ALL) == 0 {
+        return;
+    }
+    if let Some(state) = unsafe { state(host) } {
+        state.ports_changed.store(true, Ordering::Relaxed);
+    }
+}
 
 static HOST_TIMER_SUPPORT: clap_host_timer_support = clap_host_timer_support {
     register_timer: Some(host_register_timer),
@@ -1818,47 +1881,233 @@ fn bundle_binary_path(bundle: &Path) -> PathBuf {
     bundle.to_path_buf()
 }
 
-fn audio_channel_counts(
-    plugin: *const clap_plugin,
-    ports: *const clap_plugin_audio_ports,
-) -> Result<(usize, usize), String> {
-    let Some(ports) = (unsafe { ports.as_ref() }) else {
-        return Ok((2, 2));
+/// The most audio ports per direction, and channels per port, RigWerk sets up
+/// buffers for.  Anything larger is a broken description, not an effect.
+const MAX_AUDIO_PORTS: usize = 32;
+const MAX_PORT_CHANNELS: usize = 64;
+
+/// What [`port_layout`] needs to know about one declared audio port.  The
+/// channel count is authoritative (the port type only names a common
+/// layout), and every port gets its own buffers, so `in_place_pair` never
+/// matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PortInfo {
+    channel_count: u32,
+    flags: u32,
+}
+
+/// The ports `process` hands the plugin: one entry per declared port, in the
+/// plugin's index order, with its channel count.
+#[derive(Debug, PartialEq, Eq)]
+struct PortLayout {
+    inputs: Vec<usize>,
+    outputs: Vec<usize>,
+    /// The input that gets the stereo signal; every other input (a
+    /// sidechain, say) gets silence.
+    main_input: usize,
+    /// The output that is read back; the others are ignored.
+    main_output: usize,
+}
+
+/// Decides the buffers for the ports a plugin declares.  `None` means the
+/// plugin has no audio-ports extension.  The CLAP spec says such a plugin
+/// has no ports at all, but RigWerk has always given it one stereo input
+/// and output, which is what simple effects without the extension expect.
+///
+/// The main port is the one flagged `CLAP_AUDIO_PORT_IS_MAIN` (the spec puts
+/// it at index 0, but the flag wins wherever it is); with no flag, index 0
+/// stands in.  A main port with one channel gets the mono sum and its output
+/// goes to both sides; one with more than two gets left and right on its
+/// first two channels and silence on the rest, and only its first two
+/// output channels are read.
+fn port_layout(ports: Option<(&[PortInfo], &[PortInfo])>) -> Result<PortLayout, String> {
+    let Some((inputs, outputs)) = ports else {
+        return Ok(PortLayout {
+            inputs: vec![2],
+            outputs: vec![2],
+            main_input: 0,
+            main_output: 0,
+        });
     };
-    let input = main_port_channels(plugin, ports, true);
-    let output = main_port_channels(plugin, ports, false);
-    match (input, output) {
-        (Some(input), Some(output)) if input >= 1 && output >= 1 && input <= 2 && output <= 2 => {
-            Ok((input, output))
+    let (inputs, main_input) = direction_layout(inputs, "input")?;
+    let (outputs, main_output) = direction_layout(outputs, "output")?;
+    Ok(PortLayout {
+        inputs,
+        outputs,
+        main_input,
+        main_output,
+    })
+}
+
+fn direction_layout(ports: &[PortInfo], direction: &str) -> Result<(Vec<usize>, usize), String> {
+    if ports.is_empty() {
+        return Err(format!("This CLAP plugin has no audio {direction}."));
+    }
+    if ports.len() > MAX_AUDIO_PORTS {
+        return Err(format!(
+            "This CLAP plugin declares more than {MAX_AUDIO_PORTS} audio {direction}s."
+        ));
+    }
+    let counts: Vec<usize> = ports
+        .iter()
+        .map(|port| port.channel_count as usize)
+        .collect();
+    if counts.iter().any(|count| *count > MAX_PORT_CHANNELS) {
+        return Err(format!(
+            "This CLAP plugin declares an audio {direction} with more than {MAX_PORT_CHANNELS} channels."
+        ));
+    }
+    let main = ports
+        .iter()
+        .position(|port| port.flags & CLAP_AUDIO_PORT_IS_MAIN != 0)
+        .unwrap_or(0);
+    if counts[main] == 0 {
+        return Err(format!(
+            "This CLAP plugin's main audio {direction} has no channels."
+        ));
+    }
+    Ok((counts, main))
+}
+
+/// Input and output ports as a plugin declares them.
+type DeclaredPorts = (Vec<PortInfo>, Vec<PortInfo>);
+
+/// Reads every audio port the plugin declares, for [`port_layout`].  A
+/// main-thread call, made while the plugin is inactive.
+fn read_audio_ports(
+    plugin: *const clap_plugin,
+    ext: *const clap_plugin_audio_ports,
+) -> Result<Option<DeclaredPorts>, String> {
+    let Some(ext) = (unsafe { ext.as_ref() }) else {
+        return Ok(None);
+    };
+    let (Some(count), Some(get)) = (ext.count, ext.get) else {
+        return Err("This CLAP plugin's audio ports cannot be read.".to_owned());
+    };
+    let read = |is_input: bool| -> Result<Vec<PortInfo>, String> {
+        let total = unsafe { count(plugin, is_input) } as usize;
+        // Checked before asking for each port, so a nonsense count cannot
+        // make the host allocate or loop for long.
+        if total > MAX_AUDIO_PORTS {
+            return Err(format!(
+                "This CLAP plugin declares more than {MAX_AUDIO_PORTS} audio ports."
+            ));
         }
-        (Some(_), Some(_)) => {
-            Err("This CLAP plugin wants more than a stereo input and output.".to_owned())
+        let mut ports = Vec::with_capacity(total);
+        for index in 0..total as u32 {
+            let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
+            // A port that cannot be described still exists at its index, so
+            // skipping it would shift every later buffer onto the wrong port.
+            if !unsafe { get(plugin, index, is_input, &mut info) } {
+                return Err(
+                    "This CLAP plugin could not describe one of its audio ports.".to_owned(),
+                );
+            }
+            ports.push(PortInfo {
+                channel_count: info.channel_count,
+                flags: info.flags,
+            });
         }
-        _ => Err("This CLAP plugin has no main audio input or output.".to_owned()),
+        Ok(ports)
+    };
+    Ok(Some((read(true)?, read(false)?)))
+}
+
+/// The preallocated buffers for one direction: one `clap_audio_buffer` per
+/// declared port, each pointing at that port's channels.  Nothing here
+/// allocates after [`PortBuffers::new`].
+struct PortBuffers {
+    /// Every channel of every port, in port order, each `max_block` long.
+    channels: Vec<Vec<f32>>,
+    /// The channel pointers the `clap_audio_buffer`s point into.
+    pointers: Vec<*mut f32>,
+    ports: Vec<clap_audio_buffer>,
+    /// Index into `channels` of each port's first channel.
+    first: Vec<usize>,
+    /// Each port's channel count.
+    counts: Vec<usize>,
+    /// The main port's index.
+    main: usize,
+}
+
+impl Default for PortBuffers {
+    fn default() -> Self {
+        Self::new(&[], 0, 0)
     }
 }
 
-fn main_port_channels(
-    plugin: *const clap_plugin,
-    ports: &clap_plugin_audio_ports,
-    is_input: bool,
-) -> Option<usize> {
-    let count = ports.count?;
-    let get = ports.get?;
-    let count = unsafe { count(plugin, is_input) };
-    let mut fallback = None;
-    for index in 0..count {
-        let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
-        if !unsafe { get(plugin, index, is_input, &mut info) } {
-            continue;
+impl PortBuffers {
+    fn new(counts: &[usize], main: usize, block: usize) -> Self {
+        let total = counts.iter().sum();
+        let mut first = Vec::with_capacity(counts.len());
+        let mut next = 0;
+        for count in counts {
+            first.push(next);
+            next += count;
         }
-        let channels = info.channel_count as usize;
-        if info.flags & CLAP_AUDIO_PORT_IS_MAIN != 0 {
-            return Some(channels);
-        }
-        fallback.get_or_insert(channels);
+        let mut buffers = Self {
+            channels: vec![vec![0.0; block]; total],
+            pointers: vec![ptr::null_mut(); total],
+            ports: counts
+                .iter()
+                .map(|count| clap_audio_buffer {
+                    data32: ptr::null_mut(),
+                    data64: ptr::null_mut(),
+                    channel_count: *count as u32,
+                    latency: 0,
+                    constant_mask: 0,
+                })
+                .collect(),
+            first,
+            counts: counts.to_vec(),
+            main,
+        };
+        buffers.refresh();
+        buffers
     }
-    fallback
+
+    /// The channels of the main port.  Empty when the buffers have not been
+    /// set up (only [`PortBuffers::default`]), so a stray call cannot panic.
+    fn main_channels(&mut self) -> &mut [Vec<f32>] {
+        let (Some(first), Some(count)) = (self.first.get(self.main), self.counts.get(self.main))
+        else {
+            return &mut [];
+        };
+        &mut self.channels[*first..*first + *count]
+    }
+
+    /// Clears the first `frames` samples of every channel.
+    fn silence(&mut self, frames: usize) {
+        for channel in &mut self.channels {
+            channel[..frames].fill(0.0);
+        }
+    }
+
+    /// Points every port at its channels again.  The plugin gets mutable
+    /// pointers and could have changed any of them (or set a constant
+    /// mask), so this runs before each block.
+    fn refresh(&mut self) {
+        for (pointer, channel) in self.pointers.iter_mut().zip(&mut self.channels) {
+            *pointer = channel.as_mut_ptr();
+        }
+        let base = self.pointers.as_mut_ptr();
+        for (index, port) in self.ports.iter_mut().enumerate() {
+            let count = self.counts[index];
+            // A zero-channel port gets a null pointer rather than one past the
+            // end of `pointers`; a plugin that checks the pointer instead of
+            // the count then sees the empty port.
+            port.data32 = if count == 0 {
+                ptr::null_mut()
+            } else {
+                // In bounds: `first + count <= pointers.len()`.
+                unsafe { base.add(self.first[index]) }
+            };
+            port.data64 = ptr::null_mut();
+            port.channel_count = count as u32;
+            port.latency = 0;
+            port.constant_mask = 0;
+        }
+    }
 }
 
 fn gui_supports_embedding(plugin: *const clap_plugin, gui: *const clap_plugin_gui) -> bool {
@@ -2174,6 +2423,8 @@ mod tests {
     /// thread-local and the tests can run in parallel.
     mod fake {
         use super::super::*;
+        use clap_sys::id::CLAP_INVALID_ID;
+        use clap_sys::process::{clap_process_status, CLAP_PROCESS_CONTINUE};
         use std::cell::RefCell;
 
         #[derive(Clone, Copy, PartialEq, Debug)]
@@ -2185,13 +2436,17 @@ mod tests {
             CreateNull,
             NoPluginInit,
             PluginInit,
-            TooManyChannels,
+            NoAudioPorts,
             Activate,
         }
 
         thread_local! {
             static FAIL: Cell<Fail> = const { Cell::new(Fail::Nothing) };
             static LOG: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+            /// The ports the fake declares; `None` leaves out the extension.
+            static PORTS_DECLARED: RefCell<Option<DeclaredPorts>> =
+                const { RefCell::new(None) };
+            static SEEN: RefCell<Option<Seen>> = const { RefCell::new(None) };
         }
 
         fn log(event: &'static str) {
@@ -2205,6 +2460,12 @@ mod tests {
         pub(super) fn reset(step: Fail) {
             FAIL.with(|fail| fail.set(step));
             LOG.with(|log| log.borrow_mut().clear());
+            SEEN.with(|seen| seen.borrow_mut().take());
+            // `NoAudioPorts` declares the extension with no ports at all.
+            PORTS_DECLARED.with(|ports| {
+                *ports.borrow_mut() =
+                    (step == Fail::NoAudioPorts).then(|| (Vec::new(), Vec::new()));
+            });
         }
 
         pub(super) fn events() -> Vec<&'static str> {
@@ -2257,7 +2518,7 @@ mod tests {
                 start_processing: None,
                 stop_processing: None,
                 reset: None,
-                process: None,
+                process: Some(plugin_process),
                 get_extension: Some(plugin_get_extension),
                 on_main_thread: None,
             }))
@@ -2292,27 +2553,128 @@ mod tests {
             id: *const c_char,
         ) -> *const c_void {
             let id = unsafe { CStr::from_ptr(id) };
-            if id == CLAP_EXT_AUDIO_PORTS && failing(Fail::TooManyChannels) {
+            if id == CLAP_EXT_AUDIO_PORTS && PORTS_DECLARED.with(|ports| ports.borrow().is_some()) {
                 return (&PORTS as *const clap_plugin_audio_ports).cast();
             }
             ptr::null()
         }
 
-        unsafe extern "C" fn ports_count(_plugin: *const clap_plugin, _is_input: bool) -> u32 {
-            1
+        fn declared(is_input: bool) -> Vec<PortInfo> {
+            PORTS_DECLARED.with(|ports| {
+                let ports = ports.borrow();
+                let (inputs, outputs) = ports.as_ref().expect("ports declared");
+                if is_input {
+                    inputs.clone()
+                } else {
+                    outputs.clone()
+                }
+            })
+        }
+
+        unsafe extern "C" fn ports_count(_plugin: *const clap_plugin, is_input: bool) -> u32 {
+            declared(is_input).len() as u32
         }
 
         unsafe extern "C" fn ports_get(
             _plugin: *const clap_plugin,
-            _index: u32,
-            _is_input: bool,
+            index: u32,
+            is_input: bool,
             info: *mut clap_audio_port_info,
         ) -> bool {
+            let Some(port) = declared(is_input).get(index as usize).copied() else {
+                return false;
+            };
             unsafe {
-                (*info).channel_count = 6;
-                (*info).flags = CLAP_AUDIO_PORT_IS_MAIN;
+                (*info).id = index;
+                (*info).channel_count = port.channel_count;
+                (*info).flags = port.flags;
+                (*info).port_type = ptr::null();
+                (*info).in_place_pair = CLAP_INVALID_ID;
             }
             true
+        }
+
+        /// Reads every channel of every input port the host passes (so a
+        /// port pointing at the wrong memory shows up) and fills each output
+        /// channel with `10 * port + channel + 1`.
+        unsafe extern "C" fn plugin_process(
+            _plugin: *const clap_plugin,
+            process: *const clap_process,
+        ) -> clap_process_status {
+            let process = unsafe { &*process };
+            let frames = process.frames_count as usize;
+            let inputs = unsafe {
+                std::slice::from_raw_parts(
+                    process.audio_inputs,
+                    process.audio_inputs_count as usize,
+                )
+            };
+            let input_sums = inputs
+                .iter()
+                .map(|port| {
+                    (0..port.channel_count as usize)
+                        .map(|channel| {
+                            let samples = unsafe {
+                                std::slice::from_raw_parts(*port.data32.add(channel), frames)
+                            };
+                            samples.iter().sum::<f32>()
+                        })
+                        .collect()
+                })
+                .collect();
+            let outputs = unsafe {
+                std::slice::from_raw_parts_mut(
+                    process.audio_outputs,
+                    process.audio_outputs_count as usize,
+                )
+            };
+            for (index, port) in outputs.iter().enumerate() {
+                for channel in 0..port.channel_count as usize {
+                    let samples = unsafe {
+                        std::slice::from_raw_parts_mut(*port.data32.add(channel), frames)
+                    };
+                    samples.fill((10 * index + channel + 1) as f32);
+                }
+            }
+            SEEN.with(|seen| {
+                *seen.borrow_mut() = Some(Seen {
+                    inputs_count: process.audio_inputs_count,
+                    outputs_count: process.audio_outputs_count,
+                    input_sums,
+                    output_channels: outputs.iter().map(|port| port.channel_count).collect(),
+                });
+            });
+            CLAP_PROCESS_CONTINUE
+        }
+
+        /// What the fake plugin saw in its last `process` call.
+        #[derive(Debug, PartialEq)]
+        pub(super) struct Seen {
+            pub(super) inputs_count: u32,
+            pub(super) outputs_count: u32,
+            /// Per input port, per channel: the sum of the block.
+            pub(super) input_sums: Vec<Vec<f32>>,
+            pub(super) output_channels: Vec<u32>,
+        }
+
+        /// Makes the fake plugin offer the audio-ports extension with these
+        /// `(channel_count, flags)` ports.
+        pub(super) fn declare_ports(inputs: &[(u32, u32)], outputs: &[(u32, u32)]) {
+            let ports = |list: &[(u32, u32)]| {
+                list.iter()
+                    .map(|&(channel_count, flags)| PortInfo {
+                        channel_count,
+                        flags,
+                    })
+                    .collect()
+            };
+            PORTS_DECLARED.with(|declared| {
+                *declared.borrow_mut() = Some((ports(inputs), ports(outputs)));
+            });
+        }
+
+        pub(super) fn seen() -> Option<Seen> {
+            SEEN.with(|seen| seen.borrow_mut().take())
         }
 
         static PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports {
@@ -2601,7 +2963,7 @@ mod tests {
                 ],
             ),
             (
-                fake::Fail::TooManyChannels,
+                fake::Fail::NoAudioPorts,
                 &[
                     "entry.init",
                     "create",
@@ -2659,6 +3021,279 @@ mod tests {
         assert_eq!(fake::count("entry.deinit"), 0);
         drop(guard);
         assert_eq!(fake::events(), ["entry.init", "entry.deinit"]);
+    }
+
+    fn port(channel_count: u32, flags: u32) -> super::PortInfo {
+        super::PortInfo {
+            channel_count,
+            flags,
+        }
+    }
+
+    fn layout(
+        inputs: &[usize],
+        outputs: &[usize],
+        main_input: usize,
+        main_output: usize,
+    ) -> super::PortLayout {
+        super::PortLayout {
+            inputs: inputs.to_vec(),
+            outputs: outputs.to_vec(),
+            main_input,
+            main_output,
+        }
+    }
+
+    const MAIN: u32 = super::CLAP_AUDIO_PORT_IS_MAIN;
+
+    /// `(channel_count, flags)` per input and per output port.
+    type FakePorts<'a> = (&'a [(u32, u32)], &'a [(u32, u32)]);
+
+    #[test]
+    fn port_layout_follows_the_declared_ports() {
+        use super::port_layout;
+        let stereo = [port(2, MAIN)];
+        // Main at index 0.
+        assert_eq!(
+            port_layout(Some((&stereo, &stereo))),
+            Ok(layout(&[2], &[2], 0, 0))
+        );
+        // Main at index 1: the flag wins, every port keeps its buffer.
+        let late = [port(1, 0), port(2, MAIN)];
+        assert_eq!(
+            port_layout(Some((&late, &late))),
+            Ok(layout(&[1, 2], &[1, 2], 1, 1))
+        );
+        // No main flag: index 0 stands in.
+        let unflagged = [port(2, 0), port(1, 0)];
+        assert_eq!(
+            port_layout(Some((&unflagged, &stereo))),
+            Ok(layout(&[2, 1], &[2], 0, 0))
+        );
+        // A sidechain input gets its own buffer.
+        let sidechain = [port(2, MAIN), port(2, 0)];
+        assert_eq!(
+            port_layout(Some((&sidechain, &stereo))),
+            Ok(layout(&[2, 2], &[2], 0, 0))
+        );
+        // Mono main ports.
+        let mono = [port(1, MAIN)];
+        assert_eq!(
+            port_layout(Some((&mono, &mono))),
+            Ok(layout(&[1], &[1], 0, 0))
+        );
+        // More than two channels on the main port are set up in full.
+        let surround = [port(6, MAIN)];
+        assert_eq!(
+            port_layout(Some((&surround, &surround))),
+            Ok(layout(&[6], &[6], 0, 0))
+        );
+        // No extension: one stereo input and output, as before.
+        assert_eq!(port_layout(None), Ok(layout(&[2], &[2], 0, 0)));
+        // An auxiliary port without channels is fine.
+        let empty_aux = [port(2, MAIN), port(0, 0)];
+        assert_eq!(
+            port_layout(Some((&empty_aux, &stereo))),
+            Ok(layout(&[2, 0], &[2], 0, 0))
+        );
+    }
+
+    #[test]
+    fn port_layout_rejects_unusable_ports() {
+        use super::port_layout;
+        let stereo = [port(2, MAIN)];
+        // Zero ports in either direction.
+        assert!(port_layout(Some((&[], &stereo))).is_err());
+        assert!(port_layout(Some((&stereo, &[]))).is_err());
+        assert!(port_layout(Some((&[], &[]))).is_err());
+        // A main port without channels.
+        assert!(port_layout(Some((&[port(0, MAIN), port(2, 0)], &stereo))).is_err());
+        // Nonsense sizes.
+        let wide = [port(super::MAX_PORT_CHANNELS as u32 + 1, MAIN)];
+        assert!(port_layout(Some((&wide, &stereo))).is_err());
+        let many = vec![port(2, 0); super::MAX_AUDIO_PORTS + 1];
+        assert!(port_layout(Some((&stereo, &many))).is_err());
+    }
+
+    /// Loads the fake with `(inputs, outputs)` ports (`None`: no extension)
+    /// and runs one block of left 0.5, right -0.25 through it.
+    fn process_fake(ports: Option<FakePorts<'_>>) -> (fake::Seen, Vec<f32>, Vec<f32>) {
+        fake::reset(fake::Fail::Nothing);
+        if let Some((inputs, outputs)) = ports {
+            fake::declare_ports(inputs, outputs);
+        }
+        let mut plugin = fake::load("fake").expect("load the fake plugin");
+        let mut left = vec![0.5f32; 64];
+        let mut right = vec![-0.25f32; 64];
+        plugin
+            .process(&mut left, &mut right, 64, 1.0)
+            .expect("process a block");
+        let seen = fake::seen().expect("the plugin processed");
+        (seen, left, right)
+    }
+
+    #[test]
+    fn process_passes_every_declared_port() {
+        // A sidechain compressor: main stereo input plus a stereo sidechain.
+        let (seen, left, right) = process_fake(Some((&[(2, MAIN), (2, 0)], &[(2, MAIN)])));
+        assert_eq!(seen.inputs_count, 2);
+        assert_eq!(seen.outputs_count, 1);
+        assert_eq!(seen.input_sums, [vec![32.0, -16.0], vec![0.0, 0.0]]);
+        assert_eq!(seen.output_channels, [2]);
+        assert!(left.iter().all(|sample| *sample == 1.0));
+        assert!(right.iter().all(|sample| *sample == 2.0));
+    }
+
+    #[test]
+    fn process_feeds_and_reads_the_flagged_main_port() {
+        // Main ports at index 1: a 6-channel input after a mono aux, a mono
+        // output after a stereo aux.
+        let (seen, left, right) = process_fake(Some((&[(1, 0), (6, MAIN)], &[(2, 0), (1, MAIN)])));
+        assert_eq!(seen.inputs_count, 2);
+        assert_eq!(seen.outputs_count, 2);
+        assert_eq!(
+            seen.input_sums,
+            [vec![0.0], vec![32.0, -16.0, 0.0, 0.0, 0.0, 0.0]]
+        );
+        assert_eq!(seen.output_channels, [2, 1]);
+        // Output port 1, channel 0, on both sides.
+        assert!(left.iter().all(|sample| *sample == 11.0));
+        assert!(right.iter().all(|sample| *sample == 11.0));
+    }
+
+    #[test]
+    fn process_mixes_a_mono_main_port_down_and_back_up() {
+        let (seen, left, right) = process_fake(Some((&[(1, MAIN)], &[(1, MAIN)])));
+        assert_eq!(seen.input_sums, [vec![8.0]]);
+        assert!(left.iter().chain(&right).all(|sample| *sample == 1.0));
+    }
+
+    #[test]
+    fn process_without_the_extension_uses_one_stereo_pair() {
+        let (seen, left, right) = process_fake(None);
+        assert_eq!(seen.inputs_count, 1);
+        assert_eq!(seen.outputs_count, 1);
+        assert_eq!(seen.input_sums, [vec![32.0, -16.0]]);
+        assert_eq!(seen.output_channels, [2]);
+        assert!(left.iter().all(|sample| *sample == 1.0));
+        assert!(right.iter().all(|sample| *sample == 2.0));
+    }
+
+    #[test]
+    fn a_zero_channel_port_gets_a_null_pointer() {
+        use super::PortBuffers;
+        let buffers = PortBuffers::new(&[2, 0], 0, 8);
+        assert_eq!(buffers.ports[0].channel_count, 2);
+        assert!(!buffers.ports[0].data32.is_null());
+        assert_eq!(buffers.ports[1].channel_count, 0);
+        assert!(buffers.ports[1].data32.is_null());
+        // The empty default is only a placeholder, but asking for its main
+        // port must not panic.
+        let mut empty = PortBuffers::default();
+        assert!(empty.main_channels().is_empty());
+    }
+
+    #[test]
+    fn process_passes_a_zero_channel_aux_port_as_empty() {
+        let (seen, left, right) = process_fake(Some((&[(2, MAIN), (0, 0)], &[(2, MAIN), (0, 0)])));
+        assert_eq!(seen.inputs_count, 2);
+        assert_eq!(seen.input_sums, [vec![32.0, -16.0], vec![]]);
+        assert_eq!(seen.outputs_count, 2);
+        assert_eq!(seen.output_channels, [2, 0]);
+        assert!(left.iter().all(|sample| *sample == 1.0));
+        assert!(right.iter().all(|sample| *sample == 2.0));
+    }
+
+    #[test]
+    fn process_restores_pointers_a_plugin_changed() {
+        fake::reset(fake::Fail::Nothing);
+        fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+        let mut plugin = fake::load("fake").expect("load the fake plugin");
+        let mut left = vec![0.5f32; 32];
+        let mut right = vec![-0.25f32; 32];
+        plugin
+            .process(&mut left, &mut right, 32, 1.0)
+            .expect("process the first block");
+        // A misbehaving plugin can overwrite the buffer descriptions it was
+        // handed.  `refresh` must restore everything before the next call.
+        for port in &mut plugin.inputs.ports {
+            port.data32 = std::ptr::null_mut();
+            port.data64 = std::ptr::null_mut();
+            port.constant_mask = u64::MAX;
+        }
+        for port in &mut plugin.outputs.ports {
+            port.data32 = std::ptr::null_mut();
+            port.channel_count = 0;
+            port.constant_mask = u64::MAX;
+        }
+        left.fill(0.5);
+        right.fill(-0.25);
+        plugin
+            .process(&mut left, &mut right, 32, 1.0)
+            .expect("process the second block");
+        let seen = fake::seen().expect("the plugin processed");
+        assert_eq!(seen.inputs_count, 1);
+        assert_eq!(seen.input_sums, [vec![16.0, -8.0]]);
+        assert_eq!(seen.output_channels, [2]);
+        assert!(left.iter().all(|sample| *sample == 1.0));
+        assert!(right.iter().all(|sample| *sample == 2.0));
+        for port in plugin.inputs.ports.iter().chain(&plugin.outputs.ports) {
+            assert!(port.data64.is_null());
+            assert_eq!(port.constant_mask, 0);
+        }
+        assert_eq!(plugin.outputs.ports[0].channel_count, 2);
+    }
+
+    #[test]
+    fn process_refreshes_every_sub_block_of_a_long_buffer() {
+        fake::reset(fake::Fail::Nothing);
+        fake::declare_ports(&[(2, MAIN), (2, 0)], &[(2, MAIN)]);
+        let mut plugin = fake::load("fake").expect("load the fake plugin");
+        // 600 frames are three calls (256, 256, 88) at the fake's block size.
+        let mut left = vec![0.5f32; 600];
+        let mut right = vec![-0.25f32; 600];
+        plugin
+            .process(&mut left, &mut right, 600, 1.0)
+            .expect("process a long buffer");
+        let seen = fake::seen().expect("the plugin processed");
+        assert_eq!(seen.inputs_count, 2);
+        assert_eq!(seen.input_sums, [vec![44.0, -22.0], vec![0.0, 0.0]]);
+        assert_eq!(seen.output_channels, [2]);
+        assert!(left.iter().all(|sample| *sample == 1.0));
+        assert!(right.iter().all(|sample| *sample == 2.0));
+    }
+
+    #[test]
+    fn a_port_rescan_stops_processing_until_reloaded() {
+        use super::*;
+        fake::reset(fake::Fail::Nothing);
+        fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+        let mut plugin = fake::load("fake").expect("load the fake plugin");
+        let host: *const clap_host = &*plugin._host;
+        let mut left = vec![0.5f32; 16];
+        let mut right = vec![0.5f32; 16];
+        unsafe {
+            assert!(host_audio_ports_flag_supported(
+                host,
+                CLAP_AUDIO_PORTS_RESCAN_LIST
+            ));
+            assert!(!host_audio_ports_flag_supported(host, 1 << 31));
+            // Names and the two metadata flags do not touch the buffers.
+            host_audio_ports_rescan(host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
+            assert!(!plugin.host_state.ports_changed());
+            assert!(plugin.process(&mut left, &mut right, 16, 1.0).is_ok());
+            host_audio_ports_rescan(
+                host,
+                CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE | CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR,
+            );
+            assert!(!plugin.host_state.ports_changed());
+            assert!(plugin.process(&mut left, &mut right, 16, 1.0).is_ok());
+        }
+        assert!(fake::seen().is_some());
+        unsafe { host_audio_ports_rescan(host, CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT) };
+        assert!(plugin.host_state.ports_changed());
+        assert!(plugin.process(&mut left, &mut right, 16, 1.0).is_err());
+        assert!(fake::seen().is_none(), "the plugin was not called");
     }
 
     /// Optional smoke test used while developing the host: point
