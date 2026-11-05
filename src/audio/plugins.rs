@@ -51,6 +51,16 @@ pub(crate) enum PluginHandle {
 
 impl PluginHandle {
     /// Whether both handles point at the same plugin instance.
+    /// Identifies this plugin instance in [`PluginView::instance`].  It is
+    /// the address of the shared instance, so it stays unique for as long as
+    /// anyone (an open editor, for one) holds a clone of this handle.
+    pub(crate) fn instance_id(&self) -> usize {
+        match self {
+            PluginHandle::Vst3(plugin) => instance_id(plugin),
+            PluginHandle::Clap(plugin) => instance_id(plugin),
+        }
+    }
+
     pub(crate) fn same(&self, other: &PluginHandle) -> bool {
         match (self, other) {
             (PluginHandle::Vst3(a), PluginHandle::Vst3(b)) => Arc::ptr_eq(a, b),
@@ -58,6 +68,14 @@ impl PluginHandle {
             _ => false,
         }
     }
+}
+
+/// The identity [`PluginView::instance`] reports for a shared plugin
+/// instance.  An editor that holds the `Arc` compares its own against the
+/// published view instead of fetching the handle under the chain lock; the
+/// address cannot be reused while that `Arc` keeps the instance alive.
+pub(crate) fn instance_id<T>(plugin: &Arc<T>) -> usize {
+    Arc::as_ptr(plugin) as *const () as usize
 }
 
 /// Reads a plugin's current controls for [`PluginChain::apply_synced_parameters`],
@@ -453,6 +471,10 @@ pub struct PluginView {
     pub parameters: Vec<PluginParamView>,
     /// Whether the plugin can draw its own graphical editor.
     pub has_editor: bool,
+    /// Which loaded instance this view describes (see
+    /// [`PluginHandle::instance_id`]); `None` while the slot is not loaded.
+    /// An open editor checks it to notice that its insert was replaced.
+    pub(crate) instance: Option<usize>,
 }
 
 pub(crate) struct Slot {
@@ -616,6 +638,7 @@ impl Slot {
             error: self.resolved_error(),
             parameters: self.parameters.clone(),
             has_editor: self.plugin.is_some() && self.has_editor,
+            instance: self.plugin.as_ref().map(PluginHandle::instance_id),
         }
     }
 }
@@ -967,6 +990,22 @@ impl PluginChain {
         self.slots.push(Slot::tracked_for_test());
     }
 
+    /// Adds an already loaded CLAP plugin as a slot, the way a real load
+    /// fills one in.
+    #[cfg(test)]
+    pub(crate) fn insert_clap_for_test(&mut self, plugin: ClapPlugin) {
+        let host = plugin.host();
+        let mut slot = Slot::empty(PluginPref {
+            name: "Fake".to_owned(),
+            format: PluginFormat::Clap,
+            ..PluginPref::default()
+        });
+        slot.plugin = Some(PluginHandle::Clap(Arc::new(Mutex::new(plugin))));
+        slot.clap_host = Some(host);
+        slot.built_rate = Some(self.sample_rate);
+        self.slots.push(slot);
+    }
+
     pub(crate) fn rate(&self) -> u32 {
         self.sample_rate
     }
@@ -977,6 +1016,20 @@ impl PluginChain {
 
     pub(crate) fn prefs(&self) -> Vec<PluginPref> {
         self.slots.iter().map(|slot| slot.pref.clone()).collect()
+    }
+
+    /// Whether a restored slot is still waiting for its first open.
+    pub(crate) fn has_unopened(&self) -> bool {
+        self.slots.iter().any(Slot::needs_open)
+    }
+
+    /// How many CLAP slots report a port change.  Published with the views,
+    /// so the UI thread can notice a new one without the chain lock.
+    pub(crate) fn ports_changed_count(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.ports_changed())
+            .count()
     }
 
     pub(crate) fn active(&self) -> usize {
@@ -1209,11 +1262,16 @@ impl PluginChain {
     /// held (its editor is doing UI work) is skipped for this block, and a
     /// plugin that fails is left in the chain with its error so the person can
     /// see why it is silent.
-    pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
+    ///
+    /// Returns whether a slot gained an error in this block, so the caller
+    /// can ask the UI thread to republish the insert views (the audio thread
+    /// does not build them itself).
+    pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
-            return;
+            return false;
         }
+        let mut failed = false;
         let Self {
             slots,
             buffers,
@@ -1290,6 +1348,7 @@ impl PluginChain {
                             Err(error) => {
                                 drop(plugin);
                                 slot.error = Some(format!("Processing failed: {error}"));
+                                failed = true;
                                 break;
                             }
                         }
@@ -1305,10 +1364,12 @@ impl PluginChain {
                     if let Err(error) = plugin.process(left, right, frames, mix) {
                         drop(plugin);
                         slot.error = Some(format!("Processing failed: {error}"));
+                        failed = true;
                     }
                 }
             }
         }
+        failed
     }
 }
 

@@ -79,7 +79,7 @@ pub(crate) use linux::native::{is_native_id, node_latency_frames};
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
 #[cfg(target_os = "windows")]
 pub(crate) use plugins::service_clap;
-pub(crate) use plugins::PluginHandle;
+pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use shared::SCOPE_LEN;
 #[cfg(target_os = "linux")]
