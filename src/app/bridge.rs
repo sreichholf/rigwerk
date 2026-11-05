@@ -3,9 +3,6 @@
 
 use std::time::Instant;
 
-use eframe::egui;
-use egui::Color32;
-
 use crate::app::devices::is_wrapper_driver;
 use crate::app::RigWerkApp;
 use crate::audio::EqSlot;
@@ -16,8 +13,21 @@ impl RigWerkApp {
     pub(crate) fn is_active(&self) -> bool {
         matches!(
             self.engine.state,
-            EngineState::Preview | EngineState::Starting | EngineState::Running
+            EngineState::Preview
+                | EngineState::Starting
+                | EngineState::Running
+                | EngineState::Stopping
         )
+    }
+
+    /// The error worth showing.  While a stop is still releasing the device, a
+    /// late error written by that same session is teardown noise, not a bridge
+    /// failure; once a newer session starts it owns the snapshot again.
+    pub(crate) fn visible_error(&self) -> Option<&str> {
+        if self.engine.state == EngineState::Stopping {
+            return None;
+        }
+        self.snapshot.error.as_deref()
     }
 
     /// Identifies the exact routing the running bridge was opened with.  Any
@@ -38,6 +48,23 @@ impl RigWerkApp {
     }
 
     pub(crate) fn start_bridge(&mut self) {
+        if self.engine.state == EngineState::Stopping {
+            self.push_log(
+                "The previous bridge is still releasing its audio device.",
+                AMBER,
+            );
+            return;
+        }
+        if self.is_preview() && self.engine.teardown_pending() {
+            // Preview would replace the state and clear the teardown watchdog
+            // while the previous driver still owns its device.
+            self.push_log(
+                "The previous bridge is still releasing its audio device. Preview starts once it has finished.",
+                AMBER,
+            );
+            return;
+        }
+        self.bridge_restart_pending = false;
         self.bridge_signature = self.current_bridge_signature();
         self.driver_checked = false;
         self.engine.set_gains(self.input_gain, self.output_gain);
@@ -80,23 +107,43 @@ impl RigWerkApp {
             ),
             BLUE,
         );
-        self.engine.start(config);
+        // Read the planned period before the bridge opens the same device.
+        // Doing it afterwards races the stream open and can fail the probe.
         #[cfg(target_os = "linux")]
         self.refresh_quantum_check(true);
+        self.engine.start(config);
     }
 
     pub(crate) fn stop_bridge(&mut self) {
+        self.bridge_restart_pending = false;
         self.bridge_signature = 0;
         self.engine.stop();
         #[cfg(target_os = "linux")]
-        self.refresh_quantum_check(false);
-        self.push_log("Bridge stopped. Devices released.", MUTED);
+        self.refresh_quantum_if_idle();
+        if self.engine.state == EngineState::Stopping {
+            self.push_log(
+                "Stopping the bridge — the devices release when the driver finishes.",
+                MUTED,
+            );
+        } else {
+            self.push_log("Bridge stopped. Devices released.", MUTED);
+        }
     }
 
     /// Re-opens the bridge as soon as the device, rate or buffer selection
     /// changes, instead of waiting for the person to stop and start it.
+    /// Stopping is asynchronous, so the new start waits until the old driver
+    /// has actually released the device.
     pub(crate) fn sync_bridge_config(&mut self) {
-        if !self.is_active() || self.bridge_signature == 0 {
+        if self.bridge_restart_pending && self.engine.state == EngineState::Idle {
+            self.bridge_restart_pending = false;
+            self.start_bridge();
+            return;
+        }
+        if self.engine.state == EngineState::Stopping
+            || !self.is_active()
+            || self.bridge_signature == 0
+        {
             return;
         }
         if self.current_bridge_signature() == self.bridge_signature {
@@ -106,7 +153,8 @@ impl RigWerkApp {
             "Bridge settings changed — reconnecting with the new setup.",
             BLUE,
         );
-        self.start_bridge();
+        self.stop_bridge();
+        self.bridge_restart_pending = true;
     }
 
     pub(crate) fn meters(&mut self, ctx: &egui::Context) {
@@ -122,21 +170,37 @@ impl RigWerkApp {
         for slot in EqSlot::ALL {
             self.engine.set_eq(slot, self.eqs[slot.index()]);
         }
+        self.engine.set_gate(self.gate);
         self.engine.poll();
         self.snapshot = self.engine.snapshot();
         #[cfg(target_os = "linux")]
-        self.refresh_quantum_actual();
+        {
+            self.refresh_quantum_actual();
+            self.refresh_quantum_if_idle();
+        }
         self.remember_output_driver();
         self.poll_output_driver_check();
         self.watch_output_driver();
         self.check_driver_settings();
-        if let Some(error) = self.snapshot.error.clone() {
+        if let Some(error) = self.visible_error().map(str::to_owned) {
             let message = format!("Bridge error: {error}");
             if !self.log.iter().any(|entry| entry.text == message) {
                 self.push_log(message, RED);
             }
         }
-        if self.snapshot.device_lost && self.device_alert.is_none() && self.bridge_signature != 0 {
+        // A quantum failure is stored beside the live status line, which moves
+        // on to "Opening…" or "Bridge stopped". Copy it into the log once so
+        // it survives that.
+        if let Some(note) = self.engine.quantum_note().map(str::to_owned) {
+            if !self.log.iter().any(|entry| entry.text == note) {
+                self.push_log(note, AMBER);
+            }
+        }
+        if self.engine.state != EngineState::Stopping
+            && self.snapshot.device_lost
+            && self.device_alert.is_none()
+            && self.bridge_signature != 0
+        {
             let reason = self
                 .snapshot
                 .error
@@ -145,6 +209,7 @@ impl RigWerkApp {
             self.engine.stop();
             self.engine.clear_error();
             self.bridge_signature = 0;
+            self.bridge_restart_pending = false;
             self.push_log("A bridge device was disconnected — bridge stopped.", RED);
             self.device_alert = Some(format!(
                 "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
@@ -195,11 +260,24 @@ impl RigWerkApp {
         self.peak_in_r *= decay;
         self.peak_out_l *= decay;
         self.peak_out_r *= decay;
+
+        if self.scope_in.len() != crate::audio::SCOPE_LEN {
+            self.scope_in.resize(crate::audio::SCOPE_LEN, 0.0);
+            self.scope_out.resize(crate::audio::SCOPE_LEN, 0.0);
+        }
+        if self.engine.state == EngineState::Running {
+            self.engine
+                .copy_scope(&mut self.scope_in, &mut self.scope_out);
+        } else {
+            self.scope_in.fill(0.0);
+            self.scope_out.fill(0.0);
+        }
     }
 
-    /// Input block + ring cushion (both at the input's real rate) + the output
-    /// step (at the output's real rate).  Before the bridge runs, the chosen
-    /// settings stand in for what the devices will report.
+    /// RigWerk's own path: input block + cushion + output step. AD/DA, the
+    /// driver, plugins, and anything past our playback node are not included.
+    /// While stopped, the requested buffer and a planned cushion of twice that
+    /// buffer stand in, so a cushion left over from the last run is not shown.
     pub(crate) fn latency_ms(&self) -> f32 {
         let running = self.engine.state == EngineState::Running;
         let pick = |live: u32, planned: u32| if running && live > 0 { live } else { planned };
@@ -211,12 +289,36 @@ impl RigWerkApp {
         };
         let output_rate = pick(self.snapshot.output_rate, planned_output_rate).max(1) as f32;
         let output_step = pick(self.snapshot.output_step_frames, self.output_buffer as u32) as f32;
-        let target = if self.snapshot.target_frames > 0 {
+        let input_block = pick(self.snapshot.input_block_frames, self.buffer_size as u32) as f32;
+        let target = if running && self.snapshot.target_frames > 0 {
             self.snapshot.target_frames
         } else {
             self.buffer_size * 2
         } as f32;
-        ((self.buffer_size as f32 + target) / input_rate + output_step / output_rate) * 1000.0 + 1.5
+        ((input_block + target) / input_rate + output_step / output_rate) * 1000.0
+    }
+
+    /// Delay past our playback node (graph filters + device), when PipeWire
+    /// has reported it. Bluetooth A2DP often shows ~100–200 ms here.
+    pub(crate) fn path_delay_ms(&self) -> Option<f32> {
+        if self.engine.state != EngineState::Running {
+            return None;
+        }
+        self.snapshot.path_delay_ms
+    }
+
+    /// `latency_ms` plus path delay when known — a better "what you hear" guess
+    /// than the bridge alone. Still not a measured ear-to-mic round trip.
+    pub(crate) fn heard_latency_ms(&self) -> Option<f32> {
+        Some(self.latency_ms() + self.path_delay_ms()?)
+    }
+
+    /// Short readout for tiles: bridge alone, or `us · after` when the path is known.
+    pub(crate) fn latency_caption(&self) -> String {
+        match self.path_delay_ms() {
+            Some(after) => format!("{:.1} · {:.1} ms", self.latency_ms(), after),
+            None => format!("{:.1} ms", self.latency_ms()),
+        }
     }
 
     /// The step the running output really got, in frames and milliseconds.
@@ -250,14 +352,144 @@ impl RigWerkApp {
             format!("Standard output · {} smp buffer", self.output_buffer)
         }
     }
+}
 
-    pub(crate) fn status_message(&self) -> (String, Color32) {
-        if let Some(error) = &self.snapshot.error {
-            return (format!("Bridge error: {error}"), RED);
-        }
-        self.log
-            .last()
-            .map(|entry| (entry.text.clone(), entry.tone))
-            .unwrap_or_else(|| ("Bridge ready.".to_owned(), MUTED))
+#[cfg(test)]
+mod tests {
+    use crate::app::RigWerkApp;
+    use crate::audio::EngineState;
+
+    /// Input block + cushion at the input rate, plus the output step at the
+    /// output rate.  Same terms as `latency_ms`, with no extra fudge.
+    fn bridge_ms(
+        input_block: f32,
+        cushion: f32,
+        input_rate: f32,
+        output_step: f32,
+        output_rate: f32,
+    ) -> f32 {
+        ((input_block + cushion) / input_rate + output_step / output_rate) * 1000.0
+    }
+
+    /// An app with chosen buffer settings and an empty snapshot.  No device
+    /// is opened; the engine stays Idle until a test sets its state.
+    fn latency_app() -> RigWerkApp {
+        let mut app = crate::app::blank_app();
+        app.use_asio_input = false;
+        app.output_gain = 0.0;
+        app.low_latency_output = false;
+        app.output_rate = 48_000;
+        app.session_name = String::new();
+        app
+    }
+
+    #[test]
+    fn running_latency_uses_the_delivered_input_block() {
+        let mut app = latency_app();
+        app.buffer_size = 128;
+        app.sample_rate = 96_000;
+        app.output_rate = 44_100;
+        app.output_buffer = 64;
+        app.engine.state = EngineState::Running;
+        app.snapshot.input_block_frames = 480;
+        app.snapshot.input_rate = 48_000;
+        app.snapshot.output_rate = 48_000;
+        app.snapshot.output_step_frames = 128;
+        app.snapshot.target_frames = 960;
+
+        let ms = app.latency_ms();
+        let delivered = bridge_ms(480.0, 960.0, 48_000.0, 128.0, 48_000.0);
+        let requested = bridge_ms(128.0, 960.0, 48_000.0, 128.0, 48_000.0);
+        assert!(
+            (ms - delivered).abs() < 0.01,
+            "running latency {ms} did not use the 480-frame block ({delivered})"
+        );
+        assert!(
+            (ms - requested).abs() > 1.0,
+            "running latency {ms} still used the requested 128-frame block"
+        );
+        assert!(
+            (ms - (delivered + 1.5)).abs() > 1.0,
+            "running latency {ms} still adds the 1.5 ms fudge"
+        );
+    }
+
+    #[test]
+    fn running_latency_falls_back_until_the_device_reports() {
+        let mut app = latency_app();
+        app.buffer_size = 128;
+        app.output_buffer = 64;
+        app.engine.state = EngineState::Running;
+        app.snapshot.input_block_frames = 0;
+        app.snapshot.target_frames = 0;
+        app.snapshot.input_rate = 48_000;
+        app.snapshot.output_rate = 48_000;
+        app.snapshot.output_step_frames = 64;
+
+        let ms = app.latency_ms();
+        let planned = bridge_ms(128.0, 256.0, 48_000.0, 64.0, 48_000.0);
+        assert!(
+            (ms - planned).abs() < 0.01,
+            "running latency {ms} did not fall back to the requested block and cushion ({planned})"
+        );
+    }
+
+    #[test]
+    fn stopped_latency_ignores_the_previous_cushion() {
+        let mut app = latency_app();
+        app.buffer_size = 128;
+        app.output_buffer = 256;
+        app.sample_rate = 48_000;
+        app.output_rate = 0;
+        app.engine.state = EngineState::Idle;
+        app.snapshot.target_frames = 4_096;
+        app.snapshot.input_block_frames = 480;
+        app.snapshot.input_rate = 96_000;
+        app.snapshot.output_rate = 44_100;
+        app.snapshot.output_step_frames = 512;
+
+        let ms = app.latency_ms();
+        let planned = bridge_ms(128.0, 256.0, 48_000.0, 256.0, 48_000.0);
+        let leftover = bridge_ms(128.0, 4_096.0, 48_000.0, 256.0, 48_000.0);
+        assert!(
+            (ms - planned).abs() < 0.01,
+            "stopped latency {ms} did not use the planned cushion ({planned})"
+        );
+        assert!(
+            (ms - leftover).abs() > 1.0,
+            "stopped latency {ms} kept the previous session's cushion"
+        );
+    }
+
+    #[test]
+    fn heard_latency_adds_the_pipewire_path_delay() {
+        let mut app = latency_app();
+        app.buffer_size = 128;
+        app.sample_rate = 48_000;
+        app.output_buffer = 64;
+        app.engine.state = EngineState::Running;
+        app.snapshot.input_block_frames = 64;
+        app.snapshot.input_rate = 48_000;
+        app.snapshot.output_rate = 48_000;
+        app.snapshot.output_step_frames = 64;
+        app.snapshot.target_frames = 128;
+        app.snapshot.path_delay_ms = Some(147.5);
+
+        let us = app.latency_ms();
+        assert!((us - bridge_ms(64.0, 128.0, 48_000.0, 64.0, 48_000.0)).abs() < 0.01);
+        assert!((app.path_delay_ms().unwrap() - 147.5).abs() < 0.01);
+        assert!((app.heard_latency_ms().unwrap() - (us + 147.5)).abs() < 0.01);
+        assert_eq!(app.latency_caption(), format!("{us:.1} · 147.5 ms"));
+    }
+
+    #[test]
+    fn path_delay_is_ignored_while_stopped() {
+        let mut app = latency_app();
+        app.engine.state = EngineState::Idle;
+        app.snapshot.path_delay_ms = Some(147.5);
+        assert_eq!(app.path_delay_ms(), None);
+        assert_eq!(app.heard_latency_ms(), None);
+        assert!(app.latency_caption().ends_with(" ms"));
+        assert!(!app.latency_caption().contains('·'));
     }
 }

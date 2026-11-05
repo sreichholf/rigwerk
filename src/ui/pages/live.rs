@@ -14,7 +14,7 @@ use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
 use crate::app::{Page, RigWerkApp};
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER, CARD, CARD_RAISED, DIM, MUTED, RED, TEAL};
-use crate::ui::widgets::{card, card_fixed, connector, ellipsize, micro_label, mono, status_dot};
+use crate::ui::widgets::{card_fixed, connector, ellipsize, micro_label, mono, status_dot};
 
 impl RigWerkApp {
     pub(crate) fn live_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -112,39 +112,56 @@ impl RigWerkApp {
             .last()
             .map(|entry| (entry.at.clone(), entry.text.clone(), entry.tone))
             .unwrap_or_else(|| ("00:00".to_owned(), "Bridge ready.".to_owned(), MUTED));
-        let latest = if let Some(error) = &self.snapshot.error {
+        let latest = if let Some(error) = self.visible_error() {
             (latest.0, format!("Bridge error: {error}"), RED)
         } else {
             latest
         };
-        card(ui, CARD, BORDER, |ui| {
-            ui.set_width(width - 32.0);
-            ui.horizontal(|ui| {
-                ui.label(micro_label("RECENT ACTIVITY", DIM));
-                ui.add_space(5.0);
-                ui.label(mono(latest.0, DIM, 8.5));
-                status_dot(ui, latest.2);
-                ui.label(
-                    RichText::new(ellipsize(&latest.1, 96))
-                        .size(ts(9.2))
-                        .color(MUTED),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add(
+        // Tight frame + one row whose height is the button. Labels are placed
+        // inside that same height with Align::Center so they share the button's
+        // vertical mid (plain ui.label sits optically high against button padding).
+        egui::Frame::new()
+            .fill(CARD)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(CornerRadius::same(13))
+            .inner_margin(egui::Margin::symmetric(15, 8))
+            .show(ui, |ui| {
+                ui.set_width(width - 32.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let guide = ui.add(
                             egui::Button::new(
-                                RichText::new("Open setup guide").size(ts(9.5)).color(TEAL),
+                                RichText::new("Open diagnostics").size(ts(9.5)).color(TEAL),
                             )
                             .fill(with_alpha(TEAL, 16))
                             .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
                             .corner_radius(CornerRadius::same(7)),
-                        )
-                        .clicked()
-                    {
-                        self.page = Page::Guide;
-                    }
+                        );
+                        if guide.clicked() {
+                            self.page = Page::Diagnostics;
+                        }
+                        ui.add_space(8.0);
+                        let row_h = guide.rect.height();
+                        let row_w = ui.available_width();
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(row_w, row_h),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.set_min_height(row_h);
+                                ui.set_max_height(row_h);
+                                ui.label(micro_label("RECENT ACTIVITY", DIM));
+                                ui.add_space(8.0);
+                                ui.label(mono(&latest.0, DIM, 8.5));
+                                status_dot(ui, latest.2);
+                                ui.label(
+                                    RichText::new(ellipsize(&latest.1, 96))
+                                        .size(ts(9.2))
+                                        .color(MUTED),
+                                );
+                            },
+                        );
+                    });
                 });
             });
-        });
     }
 }

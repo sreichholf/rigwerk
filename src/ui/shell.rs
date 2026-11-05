@@ -1,7 +1,7 @@
 //! The window shell around every page: sidebar and header.
 
 use eframe::egui;
-use egui::{Align, Color32, CornerRadius, FontFamily, Layout, Margin, RichText, Stroke};
+use egui::{Align, Color32, CornerRadius, FontFamily, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{Page, RigWerkApp};
 use crate::audio::EngineState;
@@ -103,6 +103,15 @@ impl RigWerkApp {
         ) {
             target = Some(Page::Guide);
         }
+        if nav_item(
+            ui,
+            Icon::Log,
+            "Diagnostics",
+            "Log",
+            self.page == Page::Diagnostics,
+        ) {
+            target = Some(Page::Diagnostics);
+        }
         if let Some(page) = target {
             self.page = page;
         }
@@ -112,34 +121,44 @@ impl RigWerkApp {
             ui.add_space((remaining - 164.0).max(16.0));
         }
 
-        egui::Frame::new()
-            .fill(CARD_DEEP)
-            .stroke(Stroke::new(1.0, BORDER_SOFT))
-            .corner_radius(CornerRadius::same(12))
-            .inner_margin(Margin::same(12))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(micro_label("AUDIO PATH", DIM));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        status_dot(ui, if self.is_active() { GREEN } else { DIM });
-                    });
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let input_backend = self.active_input().backend.clone();
-                    let output_backend = self.selected_output().backend.clone();
-                    ui.label(mono(format!("{input_backend} IN"), TEAL, 10.0));
-                    ui.label(mono("→", DIM, 10.0));
-                    ui.label(mono(format!("{output_backend} OUT"), BLUE, 10.0));
-                });
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new("Any input. Any output. Two clocks.")
-                        .size(ts(9.5))
-                        .color(MUTED),
-                );
+        // Lock the outer width first. Setting width inside a margined Frame to
+        // available_width() grows past the sidebar and clips the right border.
+        let path_w = ui.available_width();
+        let (path_rect, _) = ui.allocate_exact_size(Vec2::new(path_w, 88.0), Sense::hover());
+        ui.painter()
+            .rect_filled(path_rect, CornerRadius::same(12), CARD_DEEP);
+        ui.painter().rect_stroke(
+            path_rect,
+            CornerRadius::same(12),
+            Stroke::new(1.0, BORDER_SOFT),
+            egui::StrokeKind::Inside,
+        );
+        let mut path = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(path_rect.shrink(12.0))
+                .layout(Layout::top_down(Align::LEFT)),
+        );
+        path.set_clip_rect(path_rect.shrink(12.0));
+        path.horizontal(|ui| {
+            ui.label(micro_label("AUDIO PATH", DIM));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                status_dot(ui, if self.is_active() { GREEN } else { DIM });
             });
+        });
+        path.add_space(4.0);
+        path.horizontal(|ui| {
+            let input_backend = self.active_input().backend.clone();
+            let output_backend = self.selected_output().backend.clone();
+            ui.label(mono(format!("{input_backend} IN"), TEAL, 10.0));
+            ui.label(mono("->", DIM, 10.0));
+            ui.label(mono(format!("{output_backend} OUT"), BLUE, 10.0));
+        });
+        path.add_space(2.0);
+        path.label(
+            RichText::new("Any input. Any output. Two clocks.")
+                .size(ts(9.5))
+                .color(MUTED),
+        );
 
         ui.add_space(9.0);
         ui.horizontal(|ui| {
@@ -173,8 +192,7 @@ impl RigWerkApp {
             ),
             Page::Mixer => (
                 "Mixer".to_owned(),
-                "Input, pre EQ, plugins, post EQ and output, in the order the sound flows."
-                    .to_owned(),
+                "Signal chain top to bottom · inspector for the selected stage.".to_owned(),
             ),
             Page::Routing => (
                 "Signal Routing".to_owned(),
@@ -190,7 +208,7 @@ impl RigWerkApp {
             ),
             Page::Plugins => (
                 "Plugins".to_owned(),
-                "Add VST3 and CLAP effects to the master insert chain.".to_owned(),
+                "Browse VST3 and CLAP effects · inserts are edited on the Mixer.".to_owned(),
             ),
             Page::Sessions => (
                 "Sessions".to_owned(),
@@ -199,6 +217,11 @@ impl RigWerkApp {
             Page::Guide => (
                 "Setup Guide".to_owned(),
                 "A short path from guitar cable to speakers.".to_owned(),
+            ),
+            Page::Diagnostics => (
+                "Diagnostics".to_owned(),
+                "Activity log, scan notes and the bridge status. Copy or export them as text."
+                    .to_owned(),
             ),
         };
 
@@ -216,7 +239,10 @@ impl RigWerkApp {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let active = self.is_active();
-                let label = if active {
+                let stopping = self.engine.state == EngineState::Stopping;
+                let label = if stopping {
+                    "Stopping…"
+                } else if active {
                     "Stop bridge"
                 } else {
                     "Start bridge"
@@ -246,7 +272,7 @@ impl RigWerkApp {
                     ))
                     .corner_radius(CornerRadius::same(9)),
                 );
-                if button.clicked() {
+                if button.clicked() && !stopping {
                     if active {
                         self.stop_bridge();
                     } else {
@@ -258,6 +284,7 @@ impl RigWerkApp {
                     EngineState::Preview => ("Preview active", AMBER),
                     EngineState::Running => ("Bridge live", GREEN),
                     EngineState::Starting => ("Linking", BLUE),
+                    EngineState::Stopping => ("Stopping", AMBER),
                     EngineState::Error => ("Needs attention", RED),
                     EngineState::Idle => ("Ready", MUTED),
                 };

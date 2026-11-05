@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RigWerk · Mixer rack mockup (A)</title>
+  <style>
+    :root {
+      --bg: #080b11;
+      --sidebar: #0b0f17;
+      --card: #10151f;
+      --card-raised: #151b28;
+      --card-deep: #0c1019;
+      --border: #222a39;
+      --border-soft: #1b222f;
+      --text: #e8edf6;
+      --muted: #8b97ab;
+      --dim: #74859f;
+      --teal: #38ddbf;
+      --teal-dark: #104e48;
+      --blue: #70a7ff;
+      --amber: #ffb85b;
+      --red: #ff7070;
+      --green: #60d890;
+      --radius: 10px;
+      --font: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", "SF Mono", ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+    }
+
+    body {
+      display: grid;
+      grid-template-columns: 196px 1fr;
+      min-height: 100vh;
+    }
+
+    /* —— shell —— */
+    .sidebar {
+      background: var(--sidebar);
+      border-right: 1px solid var(--border);
+      padding: 18px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 10px 18px;
+      letter-spacing: 0.04em;
+      font-weight: 650;
+      font-size: 15px;
+    }
+    .brand-mark {
+      width: 22px; height: 22px;
+      border-radius: 6px;
+      background: linear-gradient(145deg, var(--teal), #1a8f7c);
+      box-shadow: 0 0 0 1px rgba(56,221,191,0.35);
+    }
+    .nav {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .nav button {
+      all: unset;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .nav button[aria-current="page"] {
+      background: rgba(56,221,191,0.1);
+      color: var(--text);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.28);
+    }
+    .nav button:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+    .nav .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--border);
+    }
+    .nav button[aria-current="page"] .dot { background: var(--teal); }
+
+    .main {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px 14px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0.01em;
+    }
+    .header p {
+      margin: 4px 0 0;
+      color: var(--dim);
+      font-size: 12.5px;
+    }
+    .header-meta {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .pill {
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 5px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      background: var(--card);
+    }
+    .pill.ok {
+      color: var(--teal);
+      border-color: rgba(56,221,191,0.35);
+      background: rgba(56,221,191,0.08);
+    }
+
+    /* live strip summary */
+    .live-strip {
+      margin: 14px 22px 0;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 11px;
+      border-radius: 8px;
+      background: var(--card);
+      border: 1px solid var(--border-soft);
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .chip:hover { border-color: var(--border); color: var(--text); }
+    .chip .swatch {
+      width: 8px; height: 8px; border-radius: 50%;
+    }
+    .chip.teal .swatch { background: var(--teal); }
+    .chip.amber .swatch { background: var(--amber); }
+    .chip.blue .swatch { background: var(--blue); }
+
+    .page {
+      padding: 14px 22px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .micro {
+      font-size: 10.5px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--teal);
+      font-weight: 650;
+    }
+    .btn {
+      all: unset;
+      cursor: pointer;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: var(--card-raised);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12.5px;
+    }
+    .btn:hover { border-color: rgba(56,221,191,0.45); }
+    .btn.primary {
+      background: rgba(56,221,191,0.12);
+      border-color: rgba(56,221,191,0.4);
+      color: var(--teal);
+    }
+
+    /* —— two-pane rack —— */
+    .rack {
+      display: grid;
+      grid-template-columns: clamp(280px, 32%, 340px) 12px 1fr;
+      gap: 0;
+      min-height: 560px;
+      flex: 1;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    .chain, .inspector {
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .chain {
+      background: var(--card-deep);
+      border-right: 1px solid var(--border);
+    }
+    .pane-head {
+      padding: 14px 14px 10px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .pane-head h2 {
+      margin: 0;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 650;
+    }
+    .pane-head .hint { color: var(--dim); font-size: 11.5px; }
+
+    .chain-list {
+      padding: 10px 10px 14px;
+      overflow: auto;
+      flex: 1;
+      position: relative;
+    }
+
+    /* spine */
+    .spine {
+      position: absolute;
+      left: 29px;
+      top: 28px;
+      bottom: 42px;
+      width: 2px;
+      background: linear-gradient(var(--border), rgba(34,42,57,0.25));
+      pointer-events: none;
+    }
+
+    .stage {
+      all: unset;
+      position: relative;
+      display: grid;
+      grid-template-columns: 20px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      width: 100%;
+      min-height: 56px;
+      padding: 8px 10px 8px 8px;
+      border-radius: 10px;
+      cursor: pointer;
+      margin-bottom: 4px;
+    }
+    .stage:hover { background: rgba(255,255,255,0.025); }
+    .stage[aria-selected="true"] {
+      background: rgba(56,221,191,0.10);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.45);
+    }
+    .stage .node {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      margin-left: 7px;
+      box-shadow: 0 0 0 3px var(--card-deep);
+      z-index: 1;
+    }
+    .stage.teal .node { background: var(--teal); }
+    .stage.amber .node { background: var(--amber); }
+    .stage.blue .node { background: var(--blue); }
+    .stage.dim .node { background: var(--dim); }
+    .stage[aria-selected="true"] .node {
+      box-shadow: 0 0 0 3px rgba(16,21,31,0.9), 0 0 0 5px rgba(56,221,191,0.25);
+    }
+
+    .stage-copy { min-width: 0; }
+    .stage-copy .name {
+      font-size: 13.2px;
+      font-weight: 650;
+      line-height: 1.2;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .stage-copy .summary {
+      margin-top: 3px;
+      font-size: 10.2px;
+      color: var(--dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .stage-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .state-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--green);
+    }
+    .state-dot.off { background: var(--dim); }
+    .state-dot.warn { background: var(--amber); }
+    .byp {
+      font-size: 9.5px;
+      letter-spacing: 0.08em;
+      padding: 3px 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .byp.on {
+      color: var(--teal);
+      border-color: rgba(56,221,191,0.35);
+    }
+    .chev { color: var(--dim); font-size: 12px; width: 12px; text-align: center; }
+    .stage[aria-selected="true"] .chev { color: var(--teal); }
+
+    .group {
+      margin: 2px 0 6px 18px;
+      padding: 6px 0 2px 8px;
+      border-left: 1px dashed rgba(255,184,91,0.28);
+    }
+    .group-head {
+      all: unset;
+      display: flex;
+      width: calc(100% - 8px);
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      margin-bottom: 2px;
+      border-radius: 8px;
+      cursor: pointer;
+      color: var(--amber);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 650;
+    }
+    .group-head:hover { background: rgba(255,184,91,0.06); }
+    .group-head[aria-selected="true"] {
+      background: rgba(56,221,191,0.08);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.35);
+      color: var(--text);
+    }
+    .insert {
+      all: unset;
+      display: grid;
+      grid-template-columns: 14px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      width: 100%;
+      min-height: 44px;
+      padding: 6px 8px;
+      margin: 2px 0;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .insert:hover { background: rgba(255,255,255,0.03); }
+    .insert[aria-selected="true"] {
+      background: rgba(56,221,191,0.10);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.45);
+    }
+    .grip {
+      color: var(--dim);
+      letter-spacing: -1px;
+      font-size: 11px;
+      cursor: grab;
+      user-select: none;
+    }
+    .insert .name { font-size: 12.5px; font-weight: 600; }
+    .insert .summary { font-size: 10px; color: var(--dim); margin-top: 2px; }
+    .add-insert {
+      all: unset;
+      display: block;
+      width: 100%;
+      margin: 4px 0 2px;
+      padding: 8px;
+      text-align: center;
+      border-radius: 8px;
+      border: 1px dashed var(--border);
+      color: var(--dim);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .add-insert:hover {
+      color: var(--teal);
+      border-color: rgba(56,221,191,0.4);
+    }
+
+    .chain-foot {
+      padding: 10px 14px;
+      border-top: 1px solid var(--border-soft);
+      color: var(--dim);
+      font-size: 11.5px;
+    }
+
+    .gutter { background: var(--card); }
+
+    /* —— inspector —— */
+    .inspector { background: var(--card); }
+    .inspector-body {
+      padding: 16px 18px 20px;
+      overflow: auto;
+      flex: 1;
+    }
+    .insp-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+    .insp-title h3 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .insp-sub {
+      margin: 4px 0 16px;
+      color: var(--dim);
+      font-size: 12.5px;
+    }
+    .toggle {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .toggle button {
+      all: unset;
+      cursor: pointer;
+      padding: 5px 11px;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+    .toggle button[aria-pressed="true"] {
+      background: rgba(56,221,191,0.14);
+      color: var(--teal);
+    }
+
+    .curve {
+      height: 148px;
+      border-radius: 10px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.03), transparent 40%),
+        var(--card-deep);
+      border: 1px solid var(--border-soft);
+      position: relative;
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+    .curve svg { width: 100%; height: 100%; display: block; }
+    .curve-label {
+      position: absolute;
+      left: 10px; top: 8px;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      color: var(--dim);
+      text-transform: uppercase;
+    }
+
+    .bands { display: flex; flex-direction: column; gap: 10px; }
+    .band {
+      display: grid;
+      grid-template-columns: 78px 72px 1fr 64px;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--card-raised);
+      border: 1px solid var(--border-soft);
+    }
+    .band .label {
+      font-size: 11.5px;
+      font-weight: 650;
+      letter-spacing: 0.04em;
+    }
+    .band .val {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .slider {
+      height: 4px;
+      border-radius: 999px;
+      background: var(--border);
+      position: relative;
+    }
+    .slider::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--text);
+      box-shadow: 0 0 0 2px var(--card-raised);
+    }
+    .band:nth-child(1) .label { color: var(--red); }
+    .band:nth-child(1) .slider { background: linear-gradient(90deg, var(--red), var(--border) 38%); }
+    .band:nth-child(1) .slider::after { left: 38%; background: var(--red); }
+    .band:nth-child(2) .label { color: var(--amber); }
+    .band:nth-child(2) .slider { background: linear-gradient(90deg, var(--amber), var(--border) 55%); }
+    .band:nth-child(2) .slider::after { left: 55%; background: var(--amber); }
+    .band:nth-child(3) .label { color: var(--green); }
+    .band:nth-child(3) .slider { background: linear-gradient(90deg, var(--border), var(--green) 48%, var(--border)); }
+    .band:nth-child(3) .slider::after { left: 48%; background: var(--green); }
+    .band:nth-child(4) .label { color: var(--teal); }
+    .band:nth-child(4) .slider { background: linear-gradient(90deg, var(--border) 40%, var(--teal) 62%, var(--border)); }
+    .band:nth-child(4) .slider::after { left: 62%; background: var(--teal); }
+    .band:nth-child(5) .label { color: var(--blue); }
+    .band:nth-child(5) .slider { background: linear-gradient(90deg, var(--border) 50%, var(--blue)); }
+    .band:nth-child(5) .slider::after { left: 72%; background: var(--blue); }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .field {
+      padding: 12px;
+      border-radius: 10px;
+      background: var(--card-raised);
+      border: 1px solid var(--border-soft);
+    }
+    .field label {
+      display: block;
+      font-size: 10.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--dim);
+      margin-bottom: 8px;
+    }
+    .field .big {
+      font-family: var(--mono);
+      font-size: 20px;
+      font-weight: 550;
+    }
+    .field .bar {
+      margin-top: 10px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .field .bar > span {
+      display: block;
+      height: 100%;
+      background: var(--teal);
+      border-radius: inherit;
+    }
+    .note {
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(255,184,91,0.07);
+      border: 1px solid rgba(255,184,91,0.22);
+      color: var(--amber);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .slot-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+    }
+    .slot-row span { color: var(--muted); font-size: 12.5px; }
+
+    .plugin-params {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .param {
+      display: grid;
+      grid-template-columns: 110px 1fr 54px;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--card-raised);
+      border: 1px solid var(--border-soft);
+      font-size: 12.5px;
+    }
+    .param .mono { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+    .param .track {
+      height: 4px; border-radius: 999px; background: var(--border); position: relative;
+    }
+    .param .track::after {
+      content: "";
+      position: absolute; top: 50%; left: var(--p, 50%);
+      width: 11px; height: 11px; border-radius: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--amber);
+    }
+
+    .hidden { display: none !important; }
+
+    .legend {
+      margin-top: 8px;
+      color: var(--dim);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+    .legend code {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      background: var(--card);
+      border: 1px solid var(--border-soft);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    @media (max-width: 1040px) {
+      body { grid-template-columns: 64px 1fr; }
+      .brand span, .nav button span { display: none; }
+      .nav button { justify-content: center; }
+      .rack { grid-template-columns: 280px 0 1fr; }
+      .gutter { display: none; }
+    }
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@450;550&family=IBM+Plex+Sans:wght@450;550;650&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <aside class="sidebar" aria-label="Navigation">
+    <div class="brand"><div class="brand-mark" aria-hidden="true"></div><span>RIGWERK</span></div>
+    <nav class="nav">
+      <button type="button"><span class="dot"></span><span>Live Bridge</span></button>
+      <button type="button" aria-current="page"><span class="dot"></span><span>Mixer</span></button>
+      <button type="button"><span class="dot"></span><span>Plugins</span></button>
+      <button type="button"><span class="dot"></span><span>Devices</span></button>
+      <button type="button"><span class="dot"></span><span>Sessions</span></button>
+      <button type="button"><span class="dot"></span><span>Settings</span></button>
+    </nav>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div>
+        <h1>Mixer</h1>
+        <p>Signal chain top-to-bottom · inspector for the selected stage · option A (fixed engine order)</p>
+      </div>
+      <div class="header-meta">
+        <span class="pill ok">Running · 48 kHz</span>
+        <span class="pill">HEARD 18.2 ms</span>
+        <span class="pill">US 4.1 · AFTER 14.1</span>
+      </div>
+    </header>
+
+    <div class="live-strip" aria-label="Live strip summary">
+      <button class="chip teal" data-jump="input" type="button"><span class="swatch"></span>Input +0.0</button>
+      <button class="chip amber" data-jump="pre-eq" type="button"><span class="swatch"></span>Pre EQ · 2</button>
+      <button class="chip amber" data-jump="plugins" type="button"><span class="swatch"></span>3 inserts</button>
+      <button class="chip amber" data-jump="gate" type="button"><span class="swatch"></span>Gate closed</button>
+      <button class="chip amber" data-jump="post-eq" type="button"><span class="swatch"></span>Post EQ flat</button>
+      <button class="chip blue" data-jump="output" type="button"><span class="swatch"></span>Out −6.0</button>
+    </div>
+
+    <section class="page">
+      <div class="toolbar">
+        <div class="micro">Mixer · rack</div>
+        <button class="btn primary" type="button">+ Add insert</button>
+      </div>
+
+      <div class="rack" role="region" aria-label="Mixer rack">
+        <div class="chain">
+          <div class="pane-head">
+            <h2>Signal chain</h2>
+            <span class="hint">drag plugs only</span>
+          </div>
+          <div class="chain-list">
+            <div class="spine" aria-hidden="true"></div>
+
+            <button class="stage teal" type="button" data-stage="input" aria-selected="false">
+              <span class="node"></span>
+              <span class="stage-copy">
+                <span class="name">Input</span>
+                <span class="summary">+0.0 dB · gain ramp</span>
+              </span>
+              <span class="stage-meta">
+                <span class="state-dot"></span>
+                <span class="byp on">ON</span>
+                <span class="chev">▸</span>
+              </span>
+            </button>
+
+            <button class="stage amber" type="button" data-stage="pre-eq" aria-selected="true">
+              <span class="node"></span>
+              <span class="stage-copy">
+                <span class="name">Pre EQ</span>
+                <span class="summary">2 bands · no added latency</span>
+              </span>
+              <span class="stage-meta">
+                <span class="state-dot"></span>
+                <span class="byp on">ON</span>
+                <span class="chev">▾</span>
+              </span>
+            </button>
+
+            <div class="group" id="plugins-group">
+              <button class="group-head" type="button" data-stage="plugins" aria-selected="false">
+                <span>▾ Plugins · 2</span>
+                <span style="color:var(--dim);font-weight:500;letter-spacing:0">reorder</span>
+              </button>
+
+              <button class="insert" type="button" data-stage="plugin-1" aria-selected="false">
+                <span class="grip" title="Reorder">⠿</span>
+                <span>
+                  <div class="name">01 Pro-Q 3</div>
+                  <div class="summary">mix 100%</div>
+                </span>
+                <span class="stage-meta">
+                  <span class="state-dot"></span>
+                  <span class="byp on">ON</span>
+                  <span class="chev">▸</span>
+                </span>
+              </button>
+
+              <button class="insert" type="button" data-stage="plugin-2" aria-selected="false">
+                <span class="grip" title="Reorder">⠿</span>
+                <span>
+                  <div class="name">02 Decapitator</div>
+                  <div class="summary">mix 100%</div>
+                </span>
+                <span class="stage-meta">
+                  <span class="state-dot"></span>
+                  <span class="byp on">ON</span>
+                  <span class="chev">▸</span>
+                </span>
+              </button>
+
+              <button class="add-insert" type="button">+ add insert</button>
+            </div>
+
+            <button class="stage amber" type="button" data-stage="gate" id="gate-stage" aria-selected="false">
+              <span class="node"></span>
+              <span class="stage-copy">
+                <span class="name">Gate</span>
+                <span class="summary">closed · slot POST</span>
+              </span>
+              <span class="stage-meta">
+                <span class="state-dot warn"></span>
+                <span class="byp on">ON</span>
+                <span class="chev">▸</span>
+              </span>
+            </button>
+
+            <button class="stage amber" type="button" data-stage="post-eq" aria-selected="false">
+              <span class="node"></span>
+              <span class="stage-copy">
+                <span class="name">Post EQ</span>
+                <span class="summary">flat</span>
+              </span>
+              <span class="stage-meta">
+                <span class="state-dot off"></span>
+                <span class="byp">BYP</span>
+                <span class="chev">▸</span>
+              </span>
+            </button>
+
+            <button class="stage blue" type="button" data-stage="output" aria-selected="false">
+              <span class="node"></span>
+              <span class="stage-copy">
+                <span class="name">Output</span>
+                <span class="summary">−6.0 dB</span>
+              </span>
+              <span class="stage-meta">
+                <span class="state-dot"></span>
+                <span class="byp on">ON</span>
+                <span class="chev">▸</span>
+              </span>
+            </button>
+          </div>
+          <div class="chain-foot">6 stages · 2 active inserts · fixed order (A)</div>
+        </div>
+
+        <div class="gutter" aria-hidden="true"></div>
+
+        <div class="inspector">
+          <div class="pane-head">
+            <h2>Inspector</h2>
+            <span class="hint" id="insp-hint">selected stage</span>
+          </div>
+          <div class="inspector-body">
+
+            <!-- PRE EQ -->
+            <div class="panel" data-panel="pre-eq">
+              <div class="insp-title">
+                <h3>Pre EQ</h3>
+                <div class="toggle" role="group" aria-label="Bypass">
+                  <button type="button" aria-pressed="true">ON</button>
+                  <button type="button" aria-pressed="false">BYP</button>
+                </div>
+              </div>
+              <p class="insp-sub">5 bands · master mix · no added latency · shapes what inserts receive</p>
+              <div class="curve">
+                <span class="curve-label">Response</span>
+                <svg viewBox="0 0 640 148" preserveAspectRatio="none" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="fill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stop-color="#38ddbf" stop-opacity="0.28"/>
+                      <stop offset="100%" stop-color="#38ddbf" stop-opacity="0"/>
+                    </linearGradient>
+                  </defs>
+                  <line x1="0" y1="74" x2="640" y2="74" stroke="#222a39" stroke-width="1"/>
+                  <path d="M0,86 C60,88 90,92 120,98 C160,108 190,118 220,96 C260,70 300,42 340,48 C390,56 430,78 470,70 C520,58 560,40 640,34 L640,148 L0,148 Z" fill="url(#fill)"/>
+                  <path d="M0,86 C60,88 90,92 120,98 C160,108 190,118 220,96 C260,70 300,42 340,48 C390,56 430,78 470,70 C520,58 560,40 640,34" fill="none" stroke="#38ddbf" stroke-width="2"/>
+                  <circle cx="120" cy="98" r="4" fill="#ff7070"/>
+                  <circle cx="220" cy="96" r="4" fill="#ffb85b"/>
+                  <circle cx="340" cy="48" r="4" fill="#60d890"/>
+                  <circle cx="470" cy="70" r="4" fill="#38ddbf"/>
+                  <circle cx="560" cy="40" r="4" fill="#70a7ff"/>
+                </svg>
+              </div>
+              <div class="bands">
+                <div class="band"><span class="label">LOW</span><span class="val">−3.0 dB</span><span class="slider"></span><span class="val">100 Hz</span></div>
+                <div class="band"><span class="label">LOW-MID</span><span class="val">+1.5 dB</span><span class="slider"></span><span class="val">300 Hz</span></div>
+                <div class="band"><span class="label">MID</span><span class="val">0.0 dB</span><span class="slider"></span><span class="val">1.0 kHz</span></div>
+                <div class="band"><span class="label">HIGH-MID</span><span class="val">+2.0 dB</span><span class="slider"></span><span class="val">3.2 kHz</span></div>
+                <div class="band"><span class="label">HIGH</span><span class="val">+1.0 dB</span><span class="slider"></span><span class="val">8.0 kHz</span></div>
+              </div>
+            </div>
+
+            <!-- INPUT -->
+            <div class="panel hidden" data-panel="input">
+              <div class="insp-title">
+                <h3>Input</h3>
+                <div class="toggle"><button type="button" aria-pressed="true">ON</button><button type="button" aria-pressed="false">MUTE</button></div>
+              </div>
+              <p class="insp-sub">Anchor stage · one-pole gain ramp · zero added latency</p>
+              <div class="field-grid">
+                <div class="field"><label>Gain</label><div class="big">+0.0 dB</div><div class="bar"><span style="width:55%"></span></div></div>
+                <div class="field"><label>Peak</label><div class="big">−12.4</div><div class="bar"><span style="width:35%;background:var(--amber)"></span></div></div>
+              </div>
+            </div>
+
+            <!-- GATE -->
+            <div class="panel hidden" data-panel="gate">
+              <div class="insp-title">
+                <h3>Gate</h3>
+                <div class="toggle"><button type="button" aria-pressed="true">ON</button><button type="button" aria-pressed="false">BYP</button></div>
+              </div>
+              <p class="insp-sub">Downward expander · causal · reacts after the transient · hysteresis on</p>
+              <div class="slot-row">
+                <span>Slot relative to inserts</span>
+                <div class="toggle" id="gate-slot">
+                  <button type="button" aria-pressed="false">PRE</button>
+                  <button type="button" aria-pressed="true">POST</button>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field"><label>Threshold</label><div class="big">−48 dB</div><div class="bar"><span style="width:42%"></span></div></div>
+                <div class="field"><label>Range</label><div class="big">−60 dB</div><div class="bar"><span style="width:70%;background:var(--amber)"></span></div></div>
+                <div class="field"><label>Attack</label><div class="big">1.2 ms</div><div class="bar"><span style="width:18%"></span></div></div>
+                <div class="field"><label>Release</label><div class="big">120 ms</div><div class="bar"><span style="width:48%;background:var(--blue)"></span></div></div>
+                <div class="field"><label>Hold</label><div class="big">40 ms</div><div class="bar"><span style="width:30%"></span></div></div>
+                <div class="field"><label>Hysteresis</label><div class="big">6 dB</div><div class="bar"><span style="width:25%;background:var(--green)"></span></div></div>
+              </div>
+              <div class="note">Default is POST — after inserts, so amp-sim / distortion hiss gets gated. Flip to PRE for single-coil / interface hiss before plugins. The row moves with the slot; no grip.</div>
+            </div>
+
+            <!-- PLUGINS GROUP -->
+            <div class="panel hidden" data-panel="plugins">
+              <div class="insp-title"><h3>Plugins</h3></div>
+              <p class="insp-sub">Insert group · reorder here · library lives on the Plugins page</p>
+              <div class="field-grid">
+                <div class="field"><label>Active</label><div class="big">2 / 2</div></div>
+                <div class="field"><label>Selected slot</label><div class="big">end</div></div>
+              </div>
+              <div class="note" style="color:var(--teal);border-color:rgba(56,221,191,0.28);background:rgba(56,221,191,0.07)">Click an insert row for its mix / bypass / params. “+ add insert” drops at the selected position.</div>
+            </div>
+
+            <!-- PLUGIN 1 -->
+            <div class="panel hidden" data-panel="plugin-1">
+              <div class="insp-title">
+                <h3>01 Pro-Q 3</h3>
+                <div class="toggle"><button type="button" aria-pressed="true">ON</button><button type="button" aria-pressed="false">BYP</button></div>
+              </div>
+              <p class="insp-sub">CLAP insert · grip to reorder · latency not compensated</p>
+              <div class="plugin-params">
+                <div class="param"><span>Dry / Wet</span><span class="track" style="--p:100%"></span><span class="mono">100%</span></div>
+                <div class="param"><span>Output</span><span class="track" style="--p:55%"></span><span class="mono">0.0 dB</span></div>
+              </div>
+              <div style="margin-top:14px"><button class="btn" type="button">Open plugin interface</button></div>
+            </div>
+
+            <!-- PLUGIN 2 -->
+            <div class="panel hidden" data-panel="plugin-2">
+              <div class="insp-title">
+                <h3>02 Decapitator</h3>
+                <div class="toggle"><button type="button" aria-pressed="true">ON</button><button type="button" aria-pressed="false">BYP</button></div>
+              </div>
+              <p class="insp-sub">VST3 insert · grip to reorder · likely source of post-gain hiss</p>
+              <div class="plugin-params">
+                <div class="param"><span>Dry / Wet</span><span class="track" style="--p:100%"></span><span class="mono">100%</span></div>
+                <div class="param"><span>Drive</span><span class="track" style="--p:72%"></span><span class="mono">72%</span></div>
+              </div>
+              <div style="margin-top:14px"><button class="btn" type="button">Open plugin interface</button></div>
+            </div>
+
+            <!-- POST EQ -->
+            <div class="panel hidden" data-panel="post-eq">
+              <div class="insp-title">
+                <h3>Post EQ</h3>
+                <div class="toggle"><button type="button" aria-pressed="false">ON</button><button type="button" aria-pressed="true">BYP</button></div>
+              </div>
+              <p class="insp-sub">After inserts · tame fizz · currently bypassed / flat</p>
+              <div class="curve">
+                <span class="curve-label">Response</span>
+                <svg viewBox="0 0 640 148" preserveAspectRatio="none" aria-hidden="true">
+                  <line x1="0" y1="74" x2="640" y2="74" stroke="#222a39" stroke-width="1"/>
+                  <path d="M0,74 L640,74" fill="none" stroke="#74859f" stroke-width="2" stroke-dasharray="6 6"/>
+                </svg>
+              </div>
+              <div class="note" style="color:var(--dim);border-color:var(--border);background:var(--card-deep)">Same editor as Pre EQ. Selecting this row replaces the old “EDITING BELOW” postcard.</div>
+            </div>
+
+            <!-- OUTPUT -->
+            <div class="panel hidden" data-panel="output">
+              <div class="insp-title">
+                <h3>Output</h3>
+                <div class="toggle"><button type="button" aria-pressed="true">ON</button><button type="button" aria-pressed="false">MUTE</button></div>
+              </div>
+              <p class="insp-sub">Anchor stage · monitor level</p>
+              <div class="field-grid">
+                <div class="field"><label>Gain</label><div class="big">−6.0 dB</div><div class="bar"><span style="width:40%"></span></div></div>
+                <div class="field"><label>Clip latch</label><div class="big" style="color:var(--green)">clear</div><div class="bar"><span style="width:8%;background:var(--green)"></span></div></div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <p class="legend">
+        Mockup target <code>A</code>: fixed engine order · gate defaults <strong>POST</strong>
+        <code>Input → Pre EQ → Inserts → Gate → Post EQ → Output</code>
+        (toggle PRE to park the gate before inserts).
+        Grips only on plugin rows. Live strip above is read-only summary; chips select a stage.
+        Resize under 1040&nbsp;px to check the 280&nbsp;px chain clamp.
+      </p>
+    </section>
+  </div>
+
+  <script>
+    const stages = document.querySelectorAll("[data-stage]");
+    const panels = document.querySelectorAll("[data-panel]");
+    const hint = document.getElementById("insp-hint");
+    const gateSummary = document.querySelector('[data-stage="gate"] .summary');
+    const gateStage = document.getElementById("gate-stage");
+    const pluginsGroup = document.getElementById("plugins-group");
+    const liveStrip = document.querySelector(".live-strip");
+
+    function placeGate(slot) {
+      if (!gateStage || !pluginsGroup) return;
+      if (slot === "PRE") {
+        pluginsGroup.parentNode.insertBefore(gateStage, pluginsGroup);
+      } else {
+        pluginsGroup.parentNode.insertBefore(gateStage, pluginsGroup.nextSibling);
+      }
+      if (gateSummary) gateSummary.textContent = `closed · slot ${slot}`;
+      if (liveStrip) {
+        const chips = [...liveStrip.querySelectorAll("[data-jump]")];
+        const byId = Object.fromEntries(chips.map((c) => [c.dataset.jump, c]));
+        const order = slot === "PRE"
+          ? ["input", "pre-eq", "gate", "plugins", "post-eq", "output"]
+          : ["input", "pre-eq", "plugins", "gate", "post-eq", "output"];
+        order.forEach((id) => liveStrip.appendChild(byId[id]));
+      }
+    }
+
+    function selectStage(id) {
+      stages.forEach((el) => {
+        const on = el.dataset.stage === id;
+        el.setAttribute("aria-selected", on ? "true" : "false");
+        const chev = el.querySelector(".chev");
+        if (chev) chev.textContent = on ? "▾" : "▸";
+      });
+      panels.forEach((panel) => {
+        panel.classList.toggle("hidden", panel.dataset.panel !== id);
+      });
+      hint.textContent = id.replace("-", " ");
+    }
+
+    stages.forEach((el) => {
+      el.addEventListener("click", () => selectStage(el.dataset.stage));
+    });
+
+    document.querySelectorAll("[data-jump]").forEach((chip) => {
+      chip.addEventListener("click", () => selectStage(chip.dataset.jump));
+    });
+
+    document.querySelectorAll(".toggle").forEach((group) => {
+      group.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          group.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", "false"));
+          btn.setAttribute("aria-pressed", "true");
+          if (group.id === "gate-slot") {
+            placeGate(btn.textContent.trim());
+          }
+        });
+      });
+    });
+
+    placeGate("POST");
+    selectStage("pre-eq");
+  </script>
+</body>
+</html>

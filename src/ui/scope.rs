@@ -1,21 +1,27 @@
-//! The signal scopes and their readouts.
+//! Live scope traces and the peak / latency readouts under them.
+//!
+//! The curves are decimated samples from the capture and playback paths
+//! (peak-hold bins), not a decorative oscillator.
 
 use eframe::egui;
 use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Rect, Sense, Stroke, Vec2};
 
 use crate::ui::theme::ts;
-use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, DIM, MUTED, TEAL, TEXT};
+use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, DIM, MUTED, TEAL};
 
-pub(crate) fn draw_scope(
-    ui: &egui::Ui,
-    rect: Rect,
-    ctx: &egui::Context,
-    in_l: f32,
-    _in_r: f32,
-    out_l: f32,
-    _out_r: f32,
-    active: bool,
-) {
+/// Caption for the Live waveform card.
+pub(crate) const LEVEL_PREVIEW_LABEL: &str = "SCOPE";
+
+/// Badge drawn on the sketch.
+pub(crate) fn scope_badge(active: bool) -> &'static str {
+    if active {
+        LEVEL_PREVIEW_LABEL
+    } else {
+        "IDLE"
+    }
+}
+
+pub(crate) fn draw_scope(ui: &egui::Ui, rect: Rect, input: &[f32], output: &[f32], active: bool) {
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, CornerRadius::same(9), CARD_DEEP);
     painter.rect_stroke(
@@ -47,61 +53,44 @@ pub(crate) fn draw_scope(
         Stroke::new(0.7, Color32::from_rgb(34, 42, 55)),
     );
 
-    let time = ctx.input(|input| input.time) as f32;
-    let make_points = |peak: f32, phase_shift: f32, color: Color32, glow: bool| {
-        let amp = if active {
-            (0.05 + peak * 0.78).min(0.88) * rect.height() * 0.43
-        } else {
-            rect.height() * 0.018
-        };
-        let points: Vec<egui::Pos2> = (0..180)
-            .map(|index| {
-                let t = index as f32 / 179.0;
-                let x = rect.left() + rect.width() * t;
-                let envelope =
-                    (0.75 + 0.25 * (t * 7.4 + time * 1.7).sin()) * (1.0 - (t - 0.5).abs() * 0.35);
-                let phase = t * std::f32::consts::TAU * 2.35 + time * 3.0 + phase_shift;
-                let signal = phase.sin() * 0.64
-                    + (phase * 2.0 + 0.6).sin() * 0.22
-                    + (phase * 3.0 + 1.3).sin() * 0.09;
-                egui::pos2(x, rect.center().y + signal * amp * envelope)
-            })
-            .collect();
-        if glow {
-            painter.add(egui::Shape::line(
-                points.clone(),
-                Stroke::new(5.0, with_alpha(color, 18)),
-            ));
-        }
-        painter.add(egui::Shape::line(points, Stroke::new(1.35, color)));
-    };
-
     if active {
-        make_points(in_l, 0.0, with_alpha(TEAL, 205), true);
-        make_points(out_l, 1.8, with_alpha(BLUE, 190), true);
+        paint_trace(
+            &painter,
+            rect,
+            input,
+            with_alpha(TEAL, 205),
+            with_alpha(TEAL, 18),
+            true,
+        );
+        paint_trace(
+            &painter,
+            rect,
+            output,
+            with_alpha(BLUE, 190),
+            with_alpha(BLUE, 16),
+            true,
+        );
     } else {
-        make_points(0.0, 0.0, with_alpha(TEAL, 80), false);
-        make_points(0.0, 1.8, with_alpha(BLUE, 70), false);
+        paint_trace(
+            &painter,
+            rect,
+            &[],
+            with_alpha(TEAL, 80),
+            Color32::TRANSPARENT,
+            false,
+        );
     }
 
-    let play_x = rect.left() + rect.width() * (0.18 + (time * 0.055).fract() * 0.64);
-    painter.line_segment(
-        [
-            egui::pos2(play_x, rect.top() + 4.0),
-            egui::pos2(play_x, rect.bottom() - 4.0),
-        ],
-        Stroke::new(0.7, with_alpha(TEXT, 32)),
-    );
     painter.text(
         rect.right_top() + Vec2::new(-9.0, 8.0),
         Align2::RIGHT_TOP,
-        if active { "LIVE" } else { "IDLE" },
+        scope_badge(active),
         FontId::new(ts(8.5), FontFamily::Monospace),
-        if active { with_alpha(TEAL, 180) } else { DIM },
+        if active { MUTED } else { DIM },
     );
 }
 
-pub(crate) fn draw_mini_scope(ui: &egui::Ui, rect: Rect, ctx: &egui::Context, active: bool) {
+pub(crate) fn draw_mini_scope(ui: &egui::Ui, rect: Rect, samples: &[f32], active: bool) {
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, CornerRadius::same(9), CARD_DEEP);
     painter.rect_stroke(
@@ -117,33 +106,8 @@ pub(crate) fn draw_mini_scope(ui: &egui::Ui, rect: Rect, ctx: &egui::Context, ac
             Stroke::new(0.6, Color32::from_rgb(24, 30, 40)),
         );
     }
-    let time = ctx.input(|input| input.time) as f32;
-    if active {
-        let points: Vec<egui::Pos2> = (0..96)
-            .map(|index| {
-                let t = index as f32 / 95.0;
-                let x = rect.left() + rect.width() * t;
-                let envelope = (0.4 + 0.6 * (time * 1.4 + t * 3.0).sin().abs())
-                    * (1.0 - (t - 0.5).abs() * 0.8);
-                let phase = t * std::f32::consts::TAU * 1.8 + time * 2.4;
-                let signal = phase.sin() * 0.66 + (phase * 2.0).sin() * 0.18;
-                egui::pos2(
-                    x,
-                    rect.center().y + signal * rect.height() * 0.28 * envelope,
-                )
-            })
-            .collect();
-        painter.add(egui::Shape::line(
-            points.clone(),
-            Stroke::new(6.0, with_alpha(AMBER, 16)),
-        ));
-        painter.add(egui::Shape::line(points, Stroke::new(1.4, AMBER)));
-        let pulse = (time * 0.9).fract();
-        painter.circle_filled(
-            egui::pos2(rect.left() + rect.width() * pulse, rect.center().y),
-            2.4,
-            with_alpha(AMBER, 220),
-        );
+    if active && samples.iter().any(|sample| sample.abs() > 1.0e-5) {
+        paint_trace(&painter, rect, samples, AMBER, with_alpha(AMBER, 16), true);
     } else {
         let points: Vec<egui::Pos2> = (0..96)
             .map(|index| {
@@ -159,33 +123,81 @@ pub(crate) fn draw_mini_scope(ui: &egui::Ui, rect: Rect, ctx: &egui::Context, ac
     painter.text(
         rect.left_top() + Vec2::new(8.0, 7.0),
         Align2::LEFT_TOP,
-        "AUDIO",
+        scope_badge(active),
         FontId::new(ts(8.0), FontFamily::Monospace),
-        DIM,
-    );
-    painter.text(
-        rect.right_top() + Vec2::new(-8.0, 7.0),
-        Align2::RIGHT_TOP,
-        if active { "FLOWING" } else { "PAUSED" },
-        FontId::new(ts(8.0), FontFamily::Monospace),
-        if active { with_alpha(AMBER, 190) } else { DIM },
+        if active { MUTED } else { DIM },
     );
 }
 
+fn paint_trace(
+    painter: &egui::Painter,
+    rect: Rect,
+    samples: &[f32],
+    color: Color32,
+    glow: Color32,
+    glow_on: bool,
+) {
+    let points = if samples.is_empty() {
+        vec![
+            egui::pos2(rect.left(), rect.center().y),
+            egui::pos2(rect.right(), rect.center().y),
+        ]
+    } else {
+        let last = (samples.len() - 1).max(1) as f32;
+        let half = rect.height() * 0.45;
+        samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                let t = index as f32 / last;
+                let x = rect.left() + rect.width() * t;
+                // Linear amplitude: ±1.0 fills the card. Quiet signals look quiet.
+                let y = rect.center().y - sample.clamp(-1.0, 1.0) * half;
+                egui::pos2(x, y)
+            })
+            .collect()
+    };
+    if glow_on {
+        painter.add(egui::Shape::line(points.clone(), Stroke::new(5.0, glow)));
+    }
+    painter.add(egui::Shape::line(points, Stroke::new(1.35, color)));
+}
+
+/// Scope readout for RigWerk's own path. Not a round trip; path delay past our
+/// node is shown beside it when PipeWire reports one.
+pub(crate) const BRIDGE_LATENCY_LABEL: &str = "US";
+pub(crate) const PATH_LATENCY_LABEL: &str = "US · AFTER";
+
+/// `peak_in` and `peak_out` are linear amplitudes from the peak meters the
+/// caller already holds.
+/// `path_delay_ms` is graph/device delay after our playback node when known.
 pub(crate) fn scope_stats(
     ui: &mut egui::Ui,
     width: f32,
-    input: f32,
-    output: f32,
+    peak_in: f32,
+    peak_out: f32,
     latency_ms: f32,
+    path_delay_ms: Option<f32>,
     frames: u64,
 ) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 35.0), Sense::hover());
     let column = rect.width() / 4.0;
+    let (latency_label, latency_value, latency_bar_ms) = match path_delay_ms {
+        Some(after) => (
+            PATH_LATENCY_LABEL,
+            format!("{latency_ms:.1} · {after:.1}"),
+            latency_ms + after,
+        ),
+        None => (
+            BRIDGE_LATENCY_LABEL,
+            format!("{latency_ms:.1} ms"),
+            latency_ms,
+        ),
+    };
     for (index, (label, value, color)) in [
-        ("PEAK IN", format!("{:.1} dB", amp_to_db(input)), TEAL),
-        ("PEAK OUT", format!("{:.1} dB", amp_to_db(output)), BLUE),
-        ("ROUND TRIP", format!("{latency_ms:.1} ms"), AMBER),
+        ("PEAK IN", format!("{:.1} dB", amp_to_db(peak_in)), TEAL),
+        ("PEAK OUT", format!("{:.1} dB", amp_to_db(peak_out)), BLUE),
+        (latency_label, latency_value, AMBER),
         (
             "SAMPLES",
             if frames == 0 {
@@ -204,32 +216,28 @@ pub(crate) fn scope_stats(
             egui::pos2(left, rect.top() + 2.0),
             Align2::LEFT_TOP,
             label,
-            FontId::new(ts(7.8), FontFamily::Proportional),
+            FontId::new(ts(7.5), FontFamily::Monospace),
             DIM,
         );
         ui.painter().text(
-            egui::pos2(left, rect.top() + 12.0),
+            egui::pos2(left, rect.top() + 14.0),
             Align2::LEFT_TOP,
-            &value,
+            value,
             FontId::new(ts(10.0), FontFamily::Monospace),
             color,
         );
         let bar = Rect::from_min_size(
             egui::pos2(left, rect.bottom() - 4.0),
-            Vec2::new((column - 18.0).max(22.0), 2.0),
+            Vec2::new(column - 10.0, 2.0),
         );
         ui.painter()
-            .rect_filled(bar, CornerRadius::same(1), Color32::from_rgb(25, 32, 43));
+            .rect_filled(bar, CornerRadius::same(1), Color32::from_rgb(28, 34, 46));
         let fill = if index < 2 {
-            (value
-                .split(' ')
-                .next()
-                .and_then(|value| value.parse::<f32>().ok())
-                .map(|db| (db + 48.0) / 48.0)
-                .unwrap_or(0.0))
-            .clamp(0.0, 1.0)
+            let peak = if index == 0 { peak_in } else { peak_out };
+            level_display_height(peak)
         } else if index == 2 {
-            (latency_ms / 25.0).clamp(0.0, 1.0)
+            // BT path delay is often >100 ms; keep the bar meaningful past the old 25 ms scale.
+            (latency_bar_ms / 200.0).clamp(0.0, 1.0)
         } else {
             (frames as f32 / 1_000_000.0).clamp(0.0, 1.0)
         };
@@ -249,6 +257,11 @@ pub(crate) fn amp_to_db(value: f32) -> f32 {
     }
 }
 
+/// Stretch linear amplitude onto the same −48…0 dBFS range the PEAK bars use.
+pub(crate) fn level_display_height(amp: f32) -> f32 {
+    ((amp_to_db(amp.clamp(0.0, 1.0)) + 48.0) / 48.0).clamp(0.0, 1.0)
+}
+
 pub(crate) fn format_compact(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}M", value as f32 / 1_000_000.0)
@@ -256,5 +269,49 @@ pub(crate) fn format_compact(value: u64) -> String {
         format!("{:.1}k", value as f32 / 1_000.0)
     } else {
         format!("{value}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        amp_to_db, level_display_height, scope_badge, BRIDGE_LATENCY_LABEL, LEVEL_PREVIEW_LABEL,
+        PATH_LATENCY_LABEL,
+    };
+
+    #[test]
+    fn level_preview_height_matches_the_peak_bar_scale() {
+        assert!((level_display_height(1.0) - 1.0).abs() < 1.0e-5);
+        let twelve = 10.0f32.powf(-12.0 / 20.0);
+        assert!((amp_to_db(twelve) + 12.0).abs() < 0.05);
+        assert!((level_display_height(twelve) - 0.75).abs() < 0.02);
+        assert!(level_display_height(twelve) > twelve + 0.4);
+        assert_eq!(level_display_height(0.0), 0.0);
+    }
+
+    #[test]
+    fn the_scope_latency_label_is_not_a_round_trip() {
+        let label = BRIDGE_LATENCY_LABEL.to_ascii_uppercase();
+        assert!(
+            !label.contains("ROUND TRIP"),
+            "{BRIDGE_LATENCY_LABEL} still claims a round trip"
+        );
+        assert_eq!(BRIDGE_LATENCY_LABEL, "US");
+        assert_eq!(PATH_LATENCY_LABEL, "US · AFTER");
+    }
+
+    #[test]
+    fn the_scope_trace_is_labeled_as_a_scope() {
+        assert_eq!(LEVEL_PREVIEW_LABEL, "SCOPE");
+        assert_eq!(scope_badge(true), LEVEL_PREVIEW_LABEL);
+        let active = scope_badge(true).to_ascii_uppercase();
+        assert!(
+            !active.contains("LIVE"),
+            "active scope still claims a live signal"
+        );
+        assert!(!active.contains("FLOWING"));
+        assert!(!active.contains("PREVIEW"));
+        assert_eq!(scope_badge(false), "IDLE");
+        assert!(!scope_badge(false).to_ascii_uppercase().contains("PAUSED"));
     }
 }

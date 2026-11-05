@@ -131,7 +131,7 @@ impl RigWerkApp {
         let step_one_text = if cfg!(target_os = "windows") {
             "Pick the driver and the input channels carrying your guitar. ASIO, WASAPI, DirectSound or MME — all are listed."
         } else {
-            "Pick the driver and the input channels carrying your guitar. JACK, ALSA, PipeWire or PulseAudio — all are listed."
+            "Pick the driver and the input channels carrying your guitar. PipeWire, direct ALSA, and PulseAudio are listed. JACK appears only when that host is actually available."
         };
         egui::Frame::new()
             .fill(with_alpha(TEAL, 10))
@@ -234,10 +234,10 @@ impl RigWerkApp {
             os_card(
                 ui,
                 "LINUX",
-                "PipeWire low quantum by default, with direct ALSA and JACK still selectable.",
+                "PipeWire sources and sinks, plus direct ALSA hardware.",
                 &[
-                    "PipeWire is the default low-latency backend",
-                    "hw:/plughw: and JACK stay on the low-latency side",
+                    "Each PipeWire source and sink is its own row",
+                    "hw: and plughw: stay on the low-latency side; pulse and sysdefault do not",
                     "The ALSA period is checked against the quantum",
                 ],
                 half,
@@ -254,7 +254,7 @@ impl RigWerkApp {
         } else {
             (
                 "LINUX LATENCY",
-                "PipeWire is the default Linux backend. While the low-latency bridge runs, RigWerk asks PipeWire for a 64-frame quantum (about 1.3 ms at 48 kHz) and ALSA for the smallest period the output allows (at least 32 samples). At startup, when the output changes and when the bridge starts, it compares the ALSA period with the quantum: equal or evenly divisible values are a fit, a coarser ALSA block or a period that does not divide the quantum is flagged on the OUTPUT card and in the activity log. A quantum above 256 frames is marked as the desktop's shared size, not low latency. Direct hw: outputs bypass the desktop mixer; PulseAudio devices stay on the system side.",
+                "PipeWire is the primary Linux path. RigWerk opens its own capture and playback nodes and links them to the source and sink you pick, so each device is its own row. On that path the graph is the clock. Low latency sets a 64-frame latency on RigWerk's node (about 1.3 ms at 48 kHz) and, with the same switch, asks the whole graph for a 64-frame quantum. A direct ALSA output still asks for the smallest period the card allows (at least 32 samples), and that period is compared with the quantum: equal or evenly divisible values are a fit, a coarser block or a period that does not divide the quantum is flagged on the OUTPUT card and in the activity log. A quantum above 256 frames is marked as the desktop's shared size. hw: and plughw: bypass the desktop mixer. If PipeWire is not running, the ALSA pipewire device stays in the list.",
             )
         };
         note_card(ui, latency_title, latency_text, AMBER, total);
@@ -271,7 +271,7 @@ impl RigWerkApp {
             note_card(
                 ui,
                 "STILL OPEN",
-                "Whether one interface can play while its ASIO driver holds it depends on the driver. The Linux PipeWire path is a prototype: its device classification, low-quantum request, ALSA-period fit check and driver check are built and tested, but the quantum request depends on the installed pw-metadata and the desktop's PipeWire settings.",
+                "Whether one interface can play while its ASIO driver holds it depends on the driver. The PipeWire graph quantum is requested with pw-metadata and depends on the desktop's PipeWire settings. A machine without a running PipeWire server falls back to the ALSA pipewire device.",
                 AMBER,
                 half,
             );

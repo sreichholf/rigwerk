@@ -52,7 +52,7 @@ impl RigWerkApp {
     pub(crate) fn open_plugin_gui(&mut self, index: usize) -> bool {
         self.engine.ensure_plugin_loaded(index);
         // Dropping the old window detaches its editor before the new one opens.
-        self.plugin_gui = None;
+        self.finish_plugin_gui();
         let Some(handle) = self.engine.plugin_handle(index) else {
             self.plugin_browser.notice = Some((
                 "The effect is not loaded, so its interface cannot open.".to_owned(),
@@ -120,6 +120,15 @@ impl RigWerkApp {
     /// Closes the plugin's window, if one is open.  Dropping it detaches the
     /// editor from its native window first, so nothing outlives the window.
     pub(crate) fn close_plugin_gui(&mut self) {
+        self.finish_plugin_gui();
+    }
+
+    /// Drops the editor after a last sync, so whatever it changed since the
+    /// previous 250 ms sync reaches the saved insert and its state blob.
+    pub(crate) fn finish_plugin_gui(&mut self) {
+        if let Some(index) = self.plugin_gui.as_ref().map(|gui| gui.index) {
+            self.engine.finish_plugin_editor(index);
+        }
         self.plugin_gui = None;
     }
 
@@ -147,7 +156,11 @@ impl RigWerkApp {
             }
             (dismissed, same_plugin, due)
         };
-        if dismissed || !same_plugin {
+        if dismissed && same_plugin {
+            self.finish_plugin_gui();
+            return;
+        }
+        if !same_plugin {
             self.plugin_gui = None;
             return;
         }
@@ -162,6 +175,7 @@ impl RigWerkApp {
 #[cfg(target_os = "windows")]
 struct ClapGuiWindow {
     plugin: Arc<Mutex<ClapPlugin>>,
+    host: Arc<crate::audio::clap::HostState>,
     hwnd: winapi::shared::windef::HWND,
     state: Box<ClapWindowState>,
     last_client: Option<(u32, u32)>,
@@ -176,9 +190,10 @@ struct ClapWindowState {
 #[cfg(target_os = "windows")]
 impl ClapGuiWindow {
     fn open(plugin: Arc<Mutex<ClapPlugin>>, title: &str) -> Result<Self, String> {
-        let (width, height) = {
+        let (width, height, host) = {
             let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            plugin.prepare_editor()?
+            let (width, height) = plugin.prepare_editor()?;
+            (width, height, plugin.host())
         };
         let state = Box::new(ClapWindowState {
             closed: std::sync::atomic::AtomicBool::new(false),
@@ -212,6 +227,7 @@ impl ClapGuiWindow {
         }
         Ok(Self {
             plugin,
+            host,
             hwnd,
             state,
             last_client: None,
@@ -225,16 +241,14 @@ impl ClapGuiWindow {
         if self.state.closed.load(Ordering::Relaxed) {
             return true;
         }
-        let mut plugin = self
-            .plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        plugin.service_main_thread();
-        if plugin.gui_closed() {
+        // Timers and `on_main_thread` (where most editors repaint) run
+        // without the instance lock, so the audio callback keeps processing
+        // this insert while the editor is busy.
+        crate::audio::service_clap(&self.host, &self.plugin);
+        if self.host.take_gui_closed() {
             return true;
         }
-        if let Some((width, height)) = plugin.take_gui_resize() {
-            drop(plugin);
+        if let Some((width, height)) = self.host.take_gui_resize() {
             unsafe {
                 resize_window(self.hwnd, width, height);
             }
@@ -247,7 +261,12 @@ impl ClapGuiWindow {
             let height = packed as u32;
             if self.last_client != Some((width, height)) {
                 self.last_client = Some((width, height));
-                plugin.resize_editor(width, height);
+                // A resize is a user action and rare; it is the one editor
+                // call that still takes the instance lock.
+                self.plugin
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .resize_editor(width, height);
             }
         }
         false
@@ -438,7 +457,8 @@ mod tests {
             return;
         };
         let plugin = Arc::new(Mutex::new(
-            ClapPlugin::load(&path, &candidate.plugin_id, 48_000, 512).expect("load the fixture"),
+            ClapPlugin::load_fresh(&path, &candidate.plugin_id, 48_000, 512)
+                .expect("load the fixture"),
         ));
         if !plugin
             .lock()

@@ -1,6 +1,7 @@
 //! One file per page of the sidebar.
 
 pub(crate) mod devices;
+pub(crate) mod diagnostics;
 pub(crate) mod guide;
 pub(crate) mod live;
 pub(crate) mod mixer;
