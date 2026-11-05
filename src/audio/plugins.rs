@@ -1067,6 +1067,11 @@ impl PluginChain {
             if mix <= 0.0 {
                 continue;
             }
+            // The slot keeps its own reference while the audio thread holds
+            // the chain lock, so dropping this clone is never the last
+            // release: a plugin (and its CLAP module, whose release takes
+            // the module registry lock and may `deinit`) is never torn down
+            // on the audio thread.
             let Some(handle) = slots[index].plugin.clone() else {
                 continue;
             };

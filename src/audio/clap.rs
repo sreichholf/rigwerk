@@ -387,13 +387,11 @@ fn output_events() -> clap_output_events {
 }
 
 /// One successful `clap_plugin_entry.init`.  Dropping it calls `deinit`
-/// exactly once, so every path out of a load or scan that got past `init`
-/// undoes it.  It must be dropped after every plugin created through the entry
-/// is destroyed and before the library is unloaded.
+/// exactly once.  It must be dropped after every plugin created through the
+/// entry is destroyed and before the library is unloaded.
 ///
-/// This is the one place the module's init/deinit pairing lives, so a
-/// per-library registry that shares a single init between instances and
-/// scans can hand out references to it instead.
+/// Outside the tests only a [`ClapModule`] owns one, so the module registry
+/// decides when `init` and `deinit` run.
 struct EntryInit {
     entry: *const clap_plugin_entry,
 }
@@ -441,6 +439,229 @@ impl Drop for EntryInit {
     }
 }
 
+/// A freshly opened CLAP library, before its entry is initialised.
+struct OpenedModule {
+    library: libloading::Library,
+    entry: *const clap_plugin_entry,
+    /// The path handed to `entry.init`.
+    init_path: CString,
+}
+
+/// One loaded CLAP library with its one successful `entry.init`.  Every
+/// instance and every scan of the library shares it through the
+/// [`ModuleRegistry`], so `init` runs once per load of the library and
+/// `deinit` only after the last user is gone.
+struct ClapModule {
+    // `init` deinits the entry before the library is unloaded.
+    init: EntryInit,
+    _library: libloading::Library,
+}
+
+// SAFETY: the entry is immutable data inside the library, which the module
+// keeps loaded.  `init` and `deinit` only run under the registry lock, and
+// CLAP makes `get_factory` and the plugin factory callable from any thread.
+unsafe impl Send for ClapModule {}
+unsafe impl Sync for ClapModule {}
+
+impl ClapModule {
+    fn plugin_factory(&self) -> *const clap_plugin_factory {
+        self.init.plugin_factory()
+    }
+}
+
+/// The process-wide table of loaded CLAP modules, keyed by the canonical path
+/// of the binary.  CLAP 1.0/1.1 modules do not tolerate a second `init`, a
+/// `deinit` under a live instance, or `init`/`deinit` racing each other, and
+/// the OS shares one copy of a library between every `LoadLibrary`/`dlopen`
+/// of it, so a per-instance or per-scan init is not safe.  The registry
+/// therefore holds one library and one `init` per module, and its lock is
+/// held for the whole of every `init` and every `deinit` (and the library
+/// load and unload around them), so those never overlap.
+///
+/// One lock covers every module, so a slow library load or `init` of one
+/// module delays loads and scans of others until it finishes; loads are
+/// rare and happen off the audio thread, so this is accepted for the
+/// simpler guarantee.
+///
+/// The lock is only ever taken on the UI, bridge and scan threads: a module is
+/// released when the last [`ModuleHandle`] drops, and the audio callback never
+/// drops the last reference to a plugin (see `PluginChain::process`).
+struct ModuleRegistry {
+    modules: Mutex<std::collections::BTreeMap<PathBuf, Arc<ClapModule>>>,
+    /// Test hook: how long a [`ModuleHandle`] drop lingers after releasing
+    /// the lock, to widen any window in which it still held a reference.
+    #[cfg(test)]
+    release_pause_ms: AtomicU64,
+}
+
+/// The registry every load and scan goes through.
+static MODULES: ModuleRegistry = ModuleRegistry::new();
+
+impl ModuleRegistry {
+    const fn new() -> Self {
+        Self {
+            modules: Mutex::new(std::collections::BTreeMap::new()),
+            #[cfg(test)]
+            release_pause_ms: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_after_release(&self) {
+        let pause = self.release_pause_ms.load(Ordering::SeqCst);
+        if pause > 0 {
+            std::thread::sleep(Duration::from_millis(pause));
+        }
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<PathBuf, Arc<ClapModule>>> {
+        self.modules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hands out the module stored under `key`, opening and initialising it
+    /// with `open` first when no one is using it.  A module whose `open`,
+    /// version check or `init` fails is not stored, so the next acquire tries
+    /// again from scratch.
+    fn acquire(
+        &'static self,
+        key: PathBuf,
+        open: impl FnOnce() -> Result<OpenedModule, String>,
+    ) -> Result<ModuleHandle, String> {
+        let mut modules = self.lock();
+        if let Some(module) = modules.get(&key) {
+            let module = Arc::clone(module);
+            return Ok(ModuleHandle {
+                registry: self,
+                key,
+                module: Some(module),
+            });
+        }
+        let opened = open()?;
+        if !clap_sys::version::clap_version_is_compatible(unsafe { (*opened.entry).clap_version }) {
+            return Err("This CLAP plugin uses an incompatible CLAP version.".to_owned());
+        }
+        // SAFETY: `opened.entry` comes from `opened.library`, which the module
+        // keeps loaded until after the guard is dropped.
+        let Some(init) = (unsafe { EntryInit::init(opened.entry, &opened.init_path) }) else {
+            return Err("The CLAP plugin could not be initialised.".to_owned());
+        };
+        let module = Arc::new(ClapModule {
+            init,
+            _library: opened.library,
+        });
+        modules.insert(key.clone(), Arc::clone(&module));
+        Ok(ModuleHandle {
+            registry: self,
+            key,
+            module: Some(module),
+        })
+    }
+
+    #[cfg(test)]
+    fn holds(&self, key: &Path) -> bool {
+        self.lock().contains_key(key)
+    }
+}
+
+/// One user's share of a [`ClapModule`].  Handles are never cloned; each one
+/// comes from [`ModuleRegistry::acquire`].  Dropping the last one deinits the
+/// module and unloads its library, under the registry lock.
+struct ModuleHandle {
+    registry: &'static ModuleRegistry,
+    key: PathBuf,
+    /// Always `Some` until `drop`.
+    module: Option<Arc<ClapModule>>,
+}
+
+impl std::ops::Deref for ModuleHandle {
+    type Target = ClapModule;
+
+    fn deref(&self) -> &ClapModule {
+        self.module.as_deref().expect("a live module handle")
+    }
+}
+
+impl Drop for ModuleHandle {
+    fn drop(&mut self) {
+        let Some(module) = self.module.take() else {
+            return;
+        };
+        let mut modules = self.registry.lock();
+        // Every reference to a module is created (`acquire`) and released
+        // (here) under the lock, so the count is stable while it is held:
+        // two references (the table's and this one) mean this is the last
+        // user.  This handle's reference is released before the lock is, on
+        // every path, so a concurrent drop never counts it.
+        let last = Arc::strong_count(&module) == 2;
+        let stored = if last {
+            let stored = modules.remove(&self.key);
+            debug_assert!(stored
+                .as_ref()
+                .is_some_and(|stored| Arc::ptr_eq(stored, &module)));
+            stored
+        } else {
+            None
+        };
+        drop(module);
+        // On the last release `deinit` and the unload run here, still under
+        // the lock.
+        drop(stored);
+        drop(modules);
+        #[cfg(test)]
+        self.registry.pause_after_release();
+    }
+}
+
+/// The registry key for a CLAP binary: its canonical path, so different
+/// spellings of one file share one module.  When the path cannot be
+/// canonicalised (a filesystem that cannot report the final path), the
+/// absolute path is used instead; the library load then decides whether the
+/// file can be opened at all.
+fn module_key(binary: &Path) -> PathBuf {
+    std::fs::canonicalize(binary)
+        .or_else(|_| std::path::absolute(binary))
+        .unwrap_or_else(|_| binary.to_path_buf())
+}
+
+/// Opens a CLAP library and finds its entry, without initialising it.
+fn open_module(bundle: &Path, binary: &Path) -> Result<OpenedModule, String> {
+    let init_path = CString::new(
+        entry_init_path(bundle, binary)
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .map_err(|_| "The CLAP path contains a NUL byte.".to_owned())?;
+    let library = unsafe { libloading::Library::new(binary) }
+        .map_err(|error| format!("CLAP load failed: {error}"))?;
+    let entry = {
+        let symbol: libloading::Symbol<'_, *const clap_plugin_entry> = unsafe {
+            library
+                .get(b"clap_entry\0")
+                .map_err(|error| format!("Missing clap_entry symbol: {error}"))?
+        };
+        *symbol
+    };
+    if entry.is_null() {
+        return Err("The clap_entry symbol is null.".to_owned());
+    }
+    Ok(OpenedModule {
+        library,
+        entry,
+        init_path,
+    })
+}
+
+/// The shared module for a `.clap` bundle (or bare binary), loading and
+/// initialising it if no one else is using it.
+fn acquire_module(bundle: &Path) -> Result<ModuleHandle, String> {
+    let binary = bundle_binary_path(bundle);
+    MODULES.acquire(module_key(&binary), || open_module(bundle, &binary))
+}
+
 /// A plugin instance `create_plugin` returned.  Dropping it deactivates the
 /// plugin if it was activated and then destroys it, exactly once, whether or
 /// not `init` ran or succeeded (CLAP allows `destroy` after a failed `init`).
@@ -476,18 +697,18 @@ impl Drop for PluginInstance {
     }
 }
 
-/// A loaded CLAP effect.  The plugin pointer and its library are kept together
+/// A loaded CLAP effect.  The plugin pointer and its module are kept together
 /// so the plugin can never outlive the code it came from.
 pub(crate) struct ClapPlugin {
     // Fields drop in declaration order, which is the teardown order CLAP
-    // needs: destroy the instance, `deinit` the entry, free the host the
-    // plugin pointed at, and only then unload the library.  These five must
-    // stay first and in this order.
+    // needs: destroy the instance, free the host the plugin pointed at, and
+    // only then release the shared module (which deinits the entry and
+    // unloads the library if this was its last user).  These four must stay
+    // first and in this order.
     instance: PluginInstance,
-    _entry: EntryInit,
     _host: Box<clap_host>,
     host_state: Arc<HostState>,
-    _library: libloading::Library,
+    _module: ModuleHandle,
     /// `instance.plugin`, copied for brevity; owned by `instance`.
     plugin: *const clap_plugin,
     params_ext: *const clap_plugin_params,
@@ -525,63 +746,26 @@ impl ClapPlugin {
         max_block: usize,
         restore: &Restore<'_>,
     ) -> Result<(Self, bool), String> {
-        let binary = bundle_binary_path(path);
-        let library = unsafe { libloading::Library::new(&binary) }
-            .map_err(|error| format!("CLAP load failed: {error}"))?;
-        let entry_symbol: libloading::Symbol<'_, *const clap_plugin_entry> = unsafe {
-            library
-                .get(b"clap_entry\0")
-                .map_err(|error| format!("Missing clap_entry symbol: {error}"))?
-        };
-        let entry = *entry_symbol;
-        let init_path = CString::new(
-            entry_init_path(path, &binary)
-                .to_string_lossy()
-                .into_owned(),
-        )
-        .map_err(|_| "The CLAP path contains a NUL byte.".to_owned())?;
-        // SAFETY: `entry` comes from `library`, which `instantiate` keeps
-        // loaded for as long as anything it creates from the entry.
-        unsafe {
-            Self::instantiate(
-                library,
-                entry,
-                &init_path,
-                plugin_id,
-                sample_rate,
-                max_block,
-                restore,
-            )
-        }
+        let module = acquire_module(path)?;
+        Self::instantiate(module, plugin_id, sample_rate, max_block, restore)
     }
 
-    /// Initialises the entry and creates, sets up and activates one plugin.
-    /// Every step after `init` may fail; the guards then tear down whatever
-    /// was set up, in order, before `library` is dropped.
-    ///
-    /// # Safety
-    /// `entry` must be a valid CLAP entry inside `library`.
-    unsafe fn instantiate(
-        library: libloading::Library,
-        entry: *const clap_plugin_entry,
-        init_path: &CStr,
+    /// Creates, sets up and activates one plugin from an initialised module.
+    /// Every step may fail; the guards then tear down whatever was set up, in
+    /// order, before the module is released.
+    fn instantiate(
+        module: ModuleHandle,
         plugin_id: &str,
         sample_rate: u32,
         max_block: usize,
         restore: &Restore<'_>,
     ) -> Result<(Self, bool), String> {
-        if !clap_sys::version::clap_version_is_compatible(unsafe { (*entry).clap_version }) {
-            return Err("This CLAP plugin uses an incompatible CLAP version.".to_owned());
-        }
-        // The host is created before the guards, so an early return destroys
-        // the plugin, then `deinit`s, then frees the host (locals drop in
-        // reverse order; `library`, a parameter, goes last).
+        // The host is created before the instance guard, so an early return
+        // destroys the plugin and then frees the host (locals drop in reverse
+        // order; `module`, a parameter, is released last).
         let host_state = Arc::new(HostState::new());
         let host = Box::new(make_host(&host_state));
-        let Some(entry_init) = (unsafe { EntryInit::init(entry, init_path) }) else {
-            return Err("The CLAP plugin could not be initialised.".to_owned());
-        };
-        let factory = entry_init.plugin_factory();
+        let factory = module.plugin_factory();
         if factory.is_null() {
             return Err("This CLAP bundle has no plugin factory.".to_owned());
         }
@@ -618,10 +802,9 @@ impl ClapPlugin {
 
         let mut plugin = Self {
             instance,
-            _entry: entry_init,
             _host: host,
             host_state,
-            _library: library,
+            _module: module,
             plugin,
             params_ext,
             gui_ext,
@@ -1258,8 +1441,8 @@ impl Drop for ClapPlugin {
             }
         }
         // The fields finish the teardown: `instance` deactivates and destroys
-        // the plugin, `_entry` deinits the module, then the host and the
-        // library go (see the field order on the struct).
+        // the plugin, then the host goes and the module is released (see the
+        // field order on the struct).
     }
 }
 
@@ -1779,56 +1962,37 @@ pub(crate) fn scan_library() -> Vec<ClapCandidate> {
     found
 }
 
+/// Lists the effects in one bundle.  The scan shares the module with any
+/// loaded instance of it: a module already in use is neither initialised
+/// again nor deinitialised when the scan finishes.
 pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<ClapCandidate>, String> {
-    let binary = bundle_binary_path(bundle);
-    let library = unsafe { libloading::Library::new(&binary) }
-        .map_err(|error| format!("CLAP load failed: {error}"))?;
-    let entry_symbol: libloading::Symbol<'_, *const clap_plugin_entry> = unsafe {
-        library
-            .get(b"clap_entry\0")
-            .map_err(|error| format!("Missing clap_entry symbol: {error}"))?
-    };
-    let entry = *entry_symbol;
-    if !clap_sys::version::clap_version_is_compatible(unsafe { (*entry).clap_version }) {
-        return Err("incompatible CLAP version".to_owned());
+    let module = acquire_module(bundle)?;
+    Ok(scan_module(bundle, &module))
+}
+
+fn scan_module(bundle: &Path, module: &ClapModule) -> Vec<ClapCandidate> {
+    let factory = module.plugin_factory();
+    if factory.is_null() {
+        return Vec::new();
     }
-    let init_path = CString::new(
-        entry_init_path(bundle, &binary)
-            .to_string_lossy()
-            .into_owned(),
-    )
-    .map_err(|_| "path contains a NUL byte".to_owned())?;
-    // SAFETY: `library` outlives the guard (it is declared first, so it is
-    // dropped last).
-    let Some(entry_init) = (unsafe { EntryInit::init(entry, &init_path) }) else {
-        return Err("init failed".to_owned());
-    };
-    let result: Result<Vec<ClapCandidate>, String> = (|| {
-        let factory = entry_init.plugin_factory();
-        if factory.is_null() {
-            return Ok(Vec::new());
-        }
-        let count = unsafe { (*factory).get_plugin_count }
-            .map(|get| unsafe { get(factory) })
-            .unwrap_or(0);
-        let mut found = Vec::new();
-        for index in 0..count {
-            let Some(get) = (unsafe { (*factory).get_plugin_descriptor }) else {
-                break;
-            };
-            let descriptor = unsafe { get(factory, index) };
-            let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
-                continue;
-            };
-            let Some(candidate) = candidate_from_descriptor(bundle, descriptor) else {
-                continue;
-            };
-            found.push(candidate);
-        }
-        Ok(found)
-    })();
-    drop(entry_init);
-    result
+    let count = unsafe { (*factory).get_plugin_count }
+        .map(|get| unsafe { get(factory) })
+        .unwrap_or(0);
+    let mut found = Vec::new();
+    for index in 0..count {
+        let Some(get) = (unsafe { (*factory).get_plugin_descriptor }) else {
+            break;
+        };
+        let descriptor = unsafe { get(factory, index) };
+        let Some(descriptor) = (unsafe { descriptor.as_ref() }) else {
+            continue;
+        };
+        let Some(candidate) = candidate_from_descriptor(bundle, descriptor) else {
+            continue;
+        };
+        found.push(candidate);
+    }
+    found
 }
 
 fn candidate_from_descriptor(
@@ -2190,23 +2354,209 @@ mod tests {
             }
         }
 
+        /// The registry the fake module is loaded through.  Each test thread
+        /// uses its own key (the log is per thread too), so parallel tests
+        /// never share a fake module.
+        pub(super) static REGISTRY: ModuleRegistry = ModuleRegistry::new();
+
+        pub(super) fn key() -> PathBuf {
+            PathBuf::from(format!("fake-{:?}.clap", std::thread::current().id()))
+        }
+
+        pub(super) fn opened(entry: &'static clap_plugin_entry) -> OpenedModule {
+            OpenedModule {
+                library: library(),
+                entry,
+                init_path: c"fake.clap".to_owned(),
+            }
+        }
+
+        /// Acquires the fake module the way a load or scan does.
+        pub(super) fn acquire() -> Result<ModuleHandle, String> {
+            REGISTRY.acquire(key(), || Ok(opened(&ENTRY)))
+        }
+
         /// Runs the real load sequence against the fake module.
         pub(super) fn load(plugin_id: &str) -> Result<ClapPlugin, String> {
             let pref = crate::audio::PluginPref::default();
             let restore = Restore::from_pref(&pref);
-            unsafe {
-                ClapPlugin::instantiate(
-                    library(),
-                    &ENTRY,
-                    c"fake.clap",
-                    plugin_id,
-                    48_000,
-                    256,
-                    &restore,
-                )
-            }
-            .map(|(plugin, _)| plugin)
+            let module = acquire()?;
+            ClapPlugin::instantiate(module, plugin_id, 48_000, 256, &restore)
+                .map(|(plugin, _)| plugin)
         }
+
+        /// A second fake entry that counts `init`/`deinit` across threads
+        /// and records whether two of those calls ever overlapped.
+        pub(super) mod counted {
+            use super::super::super::*;
+            use std::sync::atomic::AtomicUsize;
+
+            pub(in super::super) static INITS: AtomicUsize = AtomicUsize::new(0);
+            pub(in super::super) static DEINITS: AtomicUsize = AtomicUsize::new(0);
+            pub(in super::super) static OVERLAPPED: AtomicBool = AtomicBool::new(false);
+            static INSIDE: AtomicBool = AtomicBool::new(false);
+
+            fn enter_and_wait() {
+                if INSIDE.swap(true, Ordering::SeqCst) {
+                    OVERLAPPED.store(true, Ordering::SeqCst);
+                }
+                // Long enough for a racing caller to arrive.
+                std::thread::sleep(Duration::from_millis(20));
+                INSIDE.store(false, Ordering::SeqCst);
+            }
+
+            unsafe extern "C" fn init(_path: *const c_char) -> bool {
+                INITS.fetch_add(1, Ordering::SeqCst);
+                enter_and_wait();
+                true
+            }
+
+            unsafe extern "C" fn deinit() {
+                DEINITS.fetch_add(1, Ordering::SeqCst);
+                enter_and_wait();
+            }
+
+            unsafe extern "C" fn get_factory(_id: *const c_char) -> *const c_void {
+                ptr::null()
+            }
+
+            pub(in super::super) static ENTRY: clap_plugin_entry = clap_plugin_entry {
+                clap_version: CLAP_VERSION,
+                init: Some(init),
+                deinit: Some(deinit),
+                get_factory: Some(get_factory),
+            };
+        }
+    }
+
+    #[test]
+    fn instances_and_scans_of_one_module_share_one_init() {
+        fake::reset(fake::Fail::Nothing);
+        let first = fake::load("fake").expect("load the first instance");
+        let second = fake::load("fake").expect("load the second instance");
+        // A rescan while both are loaded shares the module too.
+        let scan = fake::acquire().expect("scan the module");
+        assert!(super::scan_module(std::path::Path::new("fake.clap"), &scan).is_empty());
+        drop(scan);
+        assert_eq!(fake::count("entry.init"), 1);
+        assert_eq!(fake::count("entry.deinit"), 0);
+        drop(first);
+        assert_eq!(fake::count("destroy"), 1);
+        assert_eq!(fake::count("entry.deinit"), 0);
+        assert!(fake::REGISTRY.holds(&fake::key()));
+        drop(second);
+        assert_eq!(fake::count("destroy"), 2);
+        assert_eq!(fake::count("entry.deinit"), 1);
+        assert!(!fake::REGISTRY.holds(&fake::key()));
+        // The last release came after the last instance was destroyed.
+        assert_eq!(fake::events().last(), Some(&"entry.deinit"));
+        // A load after everything is released starts the module afresh.
+        let third = fake::load("fake").expect("load again");
+        assert_eq!(fake::count("entry.init"), 2);
+        drop(third);
+        assert_eq!(fake::count("entry.deinit"), 2);
+    }
+
+    #[test]
+    fn a_failed_module_init_is_not_cached() {
+        fake::reset(fake::Fail::EntryInit);
+        assert!(fake::acquire().is_err());
+        assert!(!fake::REGISTRY.holds(&fake::key()));
+        fake::reset(fake::Fail::Nothing);
+        let plugin = fake::load("fake").expect("the next load retries the init");
+        assert_eq!(fake::count("entry.init"), 1);
+        drop(plugin);
+        assert_eq!(fake::count("entry.deinit"), 1);
+    }
+
+    #[test]
+    fn a_failed_open_is_not_cached() {
+        fake::reset(fake::Fail::Nothing);
+        let key = fake::key();
+        let error = fake::REGISTRY.acquire(key.clone(), || Err("missing".to_owned()));
+        assert!(error.is_err());
+        assert!(!fake::REGISTRY.holds(&key));
+        let module = fake::acquire().expect("the next acquire opens the module");
+        assert_eq!(fake::events(), ["entry.init"]);
+        drop(module);
+        assert_eq!(fake::events(), ["entry.init", "entry.deinit"]);
+    }
+
+    #[test]
+    fn concurrent_acquires_init_the_module_once() {
+        use fake::counted::{DEINITS, INITS, OVERLAPPED};
+        static REGISTRY: super::ModuleRegistry = super::ModuleRegistry::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let module = REGISTRY
+                        .acquire("counted.clap".into(), || {
+                            Ok(fake::opened(&fake::counted::ENTRY))
+                        })
+                        .expect("acquire the counted module");
+                    // Both threads hold the module at once before either
+                    // releases it.
+                    barrier.wait();
+                    drop(module);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("acquire thread");
+        }
+        assert_eq!(INITS.load(Ordering::SeqCst), 1);
+        assert_eq!(DEINITS.load(Ordering::SeqCst), 1);
+        assert!(!OVERLAPPED.load(Ordering::SeqCst));
+        assert!(!REGISTRY.holds(std::path::Path::new("counted.clap")));
+    }
+
+    #[test]
+    fn concurrent_last_releases_still_deinit_the_module() {
+        fake::reset(fake::Fail::Nothing);
+        static REGISTRY: super::ModuleRegistry = super::ModuleRegistry::new();
+        // Each drop lingers after unlocking; a drop that still held its
+        // reference then would make every concurrent drop see a third
+        // reference, and none would release the module.
+        REGISTRY.release_pause_ms.store(20, Ordering::SeqCst);
+        const THREADS: usize = 4;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                REGISTRY
+                    .acquire("released.clap".into(), || Ok(fake::opened(&fake::ENTRY)))
+                    .expect("acquire the fake module")
+            })
+            .collect();
+        assert_eq!(fake::events(), ["entry.init"]);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        std::thread::scope(|scope| {
+            for handle in handles {
+                let barrier = std::sync::Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    drop(handle);
+                });
+            }
+        });
+        assert!(!REGISTRY.holds(std::path::Path::new("released.clap")));
+        // `deinit` ran on whichever thread released last, so this thread's
+        // log cannot show it; the empty table is the proof it was released.
+    }
+
+    #[test]
+    fn module_keys_resolve_different_spellings_of_one_file() {
+        let dir = std::env::temp_dir().join(format!("rigwerk-clap-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the test folder");
+        let file = dir.join("module.clap");
+        std::fs::write(&file, b"").expect("create the test file");
+        let dotted = dir.join(".").join("module.clap");
+        assert_eq!(super::module_key(&file), super::module_key(&dotted));
+        // A path that cannot be canonicalised still gets an absolute key.
+        let missing = std::path::Path::new("no-such-dir/missing.clap");
+        assert!(super::module_key(missing).is_absolute());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
