@@ -52,10 +52,10 @@ impl QuantumInfo {
             };
         }
         let low_latency = quantum <= PIPEWIRE_LOW_QUANTUM_MAX;
-        let fits = alsa_period > 0 && alsa_period <= quantum && quantum % alsa_period == 0;
+        let fits = alsa_period > 0 && alsa_period <= quantum && quantum.is_multiple_of(alsa_period);
         let note = if !low_latency {
             format!(
-                "PipeWire's quantum is {quantum} frames ({:.1} ms at {:.1} kHz). That is the desktop's shared size, so RigWerk marks this route as shared, not low latency; the low-latency path asks for {} frames.",
+                "Desktop PipeWire graph is still at {quantum} frames ({:.1} ms at the graph's {:.1} kHz) — that is the shared desktop block, not the OUT CLOCK below. RigWerk marks this route as shared; low latency asks the graph for {} frames.",
                 ms(quantum),
                 rate as f32 / 1000.0,
                 PIPEWIRE_LOW_QUANTUM
@@ -143,7 +143,9 @@ mod tests {
     fn a_large_quantum_is_marked_as_shared_not_low_latency() {
         let info = QuantumInfo::assess(true, 1024, 48_000, 64);
         assert!(!info.low_latency);
-        assert!(info.note.contains("not low latency"));
+        assert!(info.note.contains("Desktop PipeWire graph"));
+        assert!(info.note.contains("not the OUT CLOCK"));
+        assert!(info.note.contains("shared"));
     }
 
     #[test]
@@ -172,11 +174,14 @@ pub struct Inventory {
     pub inputs: Vec<DeviceItem>,
     pub outputs: Vec<DeviceItem>,
     /// Problems met while scanning (only the Windows ASIO scan reports any).
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    /// The Diagnostics page lists them, and each new note is also written to
+    /// the activity log so a later scan cannot erase it.
     pub notes: Vec<String>,
     pub os: String,
     /// What the dedicated low-latency input is called on this platform.
-    /// "ASIO" on Windows, "PIPEWIRE" (or "JACK"/"ALSA") on Linux.
+    /// "ASIO" on Windows. On Linux, "PIPEWIRE" when that plugin is present,
+    /// otherwise "ALSA" for direct hardware. The label does not make every
+    /// ALSA PCM low latency.
     pub low_latency_label: String,
 }
 
@@ -186,6 +191,9 @@ pub enum EngineState {
     Preview,
     Starting,
     Running,
+    /// Stop was requested but the bridge thread has not confirmed teardown.
+    /// The device is only released once `poll` sees it finish.
+    Stopping,
     Error,
 }
 
@@ -196,12 +204,22 @@ pub struct Snapshot {
     pub out_l: f32,
     pub out_r: f32,
     pub underruns: u64,
+    /// Frames the input callback dropped because the ring was full.
+    #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
+    pub overruns: u64,
+    /// Frames the input callback delivered (0 until the first block arrives).
+    #[allow(dead_code)] // Published for diagnostics; the heartbeat reads Shared directly.
+    pub input_frames: u64,
     pub frames: u64,
     pub ring_fill: f32,
     pub target_frames: usize,
     pub drift_ppm: f32,
     pub error: Option<String>,
     pub device_lost: bool,
+    /// The bridge's own status line. The header pill follows [`EngineState`]
+    /// and does not read this, so an error pill stays an error pill.
+    #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
+    pub status: String,
     /// The rate the input clock really delivers (0 until it is known).
     pub input_rate: u32,
     /// The block size the input driver really delivers, in samples (0 until
@@ -212,6 +230,10 @@ pub struct Snapshot {
     pub output_step_frames: u32,
     /// One line on how the output runs, e.g. REAL-style or why it fell back.
     pub output_mode: String,
+    /// Milliseconds from our playback node to the graph edge (device/filters),
+    /// when PipeWire reports it. `None` on non-PipeWire outputs or before the
+    /// first timing sample. Bluetooth A2DP often lands around 100–200 ms here.
+    pub path_delay_ms: Option<f32>,
 }
 
 /// How the cushion between input and output (the ring buffer's fill target)

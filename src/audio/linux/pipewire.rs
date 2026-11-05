@@ -1,7 +1,9 @@
-//! PipeWire is the default Linux backend.  RigWerk reaches it through the
-//! ALSA `pipewire` PCM and uses the `pw-metadata` settings store to read and
-//! request the graph quantum, so the bridge can run at a low quantum without
-//! a native PipeWire dependency.
+//! PipeWire graph quantum, read and requested through `pw-metadata`.
+//!
+//! The device list and the bridge streams are a native client (`native`).
+//! This module only owns the desktop-wide `clock.force-quantum` switch, which
+//! stays behind the low-latency control because it pins every app on the
+//! graph. Node latency for our own streams is set separately.
 //!
 //! The quantum is the number of frames PipeWire processes per graph cycle.
 //! 64 frames at 48 kHz is about 1.3 ms, which RigWerk counts as low latency;
@@ -9,8 +11,10 @@
 //! shared size instead.
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::audio::types::{DeviceItem, QuantumInfo};
 
@@ -26,26 +30,6 @@ pub(crate) struct State {
     pub(crate) rate: u32,
 }
 
-fn runtime_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = env::var_os("PIPEWIRE_RUNTIME_DIR") {
-        dirs.push(PathBuf::from(dir));
-    }
-    if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
-        dirs.push(PathBuf::from(dir));
-    }
-    dirs
-}
-
-/// Whether a PipeWire server socket is present.  This is only a cheap hint for
-/// classification; the authoritative quantum values still come from
-/// `pw-metadata`.
-pub(crate) fn server_running() -> bool {
-    runtime_dirs()
-        .iter()
-        .any(|dir| dir.join("pipewire-0").exists())
-}
-
 /// A cpal ALSA id that names the PipeWire plugin directly.
 pub(crate) fn is_pipewire_pcm(device_id: &str) -> bool {
     alsa_pcm_name(device_id)
@@ -53,13 +37,91 @@ pub(crate) fn is_pipewire_pcm(device_id: &str) -> bool {
         .contains("pipewire")
 }
 
-/// The `default` PCM is owned by PipeWire on a normal desktop, so it is the
-/// default backend even when its id does not mention the server.
+/// The `default` PCM is PipeWire only when ALSA's own default plugin says so.
+///
+/// A running PipeWire socket is not enough: PulseAudio often leaves that
+/// socket on a machine whose `pcm.!default` is still `type pulse`. Forcing a
+/// 64-frame quantum on that default would pin the wrong server.
 pub(crate) fn is_pipewire_endpoint(device_id: &str, name: &str) -> bool {
     if is_pipewire_pcm(device_id) || name.to_ascii_lowercase().contains("pipewire") {
         return true;
     }
-    server_running() && alsa_pcm_is_default(device_id)
+    alsa_pcm_is_default(device_id) && default_plugin_is_pipewire()
+}
+
+/// Whether the last `pcm.!default` block in an ALSA config uses `type pipewire`.
+///
+/// Later blocks win, which is how `/etc/asound.conf` and `~/.asoundrc` override
+/// the snippets under `alsa.conf.d`.
+pub(crate) fn default_pcm_is_pipewire(config: &str) -> bool {
+    let mut last = false;
+    let mut search_from = 0;
+    let lower = config.to_ascii_lowercase();
+    while let Some(rel) = lower[search_from..].find("pcm.!default") {
+        let start = search_from + rel;
+        let after = &config[start + "pcm.!default".len()..];
+        let Some(brace) = after.find('{') else {
+            break;
+        };
+        if after[..brace].chars().any(|c| !c.is_whitespace()) {
+            search_from = start + "pcm.!default".len();
+            continue;
+        }
+        let body_start = start + "pcm.!default".len() + brace + 1;
+        let Some(end) = config[body_start..].find('}') else {
+            break;
+        };
+        last = block_type_is_pipewire(&lower[body_start..body_start + end]);
+        search_from = body_start + end;
+    }
+    last
+}
+
+fn block_type_is_pipewire(body_lower: &str) -> bool {
+    for line in body_lower.lines() {
+        let line = line.split('#').next().unwrap_or(line);
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.contains("typepipewire") {
+            return true;
+        }
+    }
+    false
+}
+
+fn default_plugin_is_pipewire() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let mut combined = String::new();
+        for dir in ["/usr/share/alsa/alsa.conf.d", "/etc/alsa/conf.d"] {
+            append_conf_dir(&mut combined, Path::new(dir));
+        }
+        append_file(&mut combined, Path::new("/etc/asound.conf"));
+        if let Some(home) = env::var_os("HOME") {
+            append_file(&mut combined, Path::new(&home).join(".asoundrc").as_path());
+        }
+        default_pcm_is_pipewire(&combined)
+    })
+}
+
+fn append_conf_dir(combined: &mut String, dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        append_file(combined, &path);
+    }
+}
+
+fn append_file(combined: &mut String, path: &Path) {
+    if let Ok(text) = fs::read_to_string(path) {
+        combined.push('\n');
+        combined.push_str(&text);
+    }
 }
 
 pub(crate) fn is_pipewire_device(device: &DeviceItem) -> bool {
@@ -119,6 +181,53 @@ pub(crate) fn state() -> Option<State> {
     read_metadata().map(|text| parse_state(&text))
 }
 
+/// The quantum someone forced before RigWerk changes it.
+///
+/// `Ok(0)` means the store was read and nothing is forced. `Err` means the
+/// store could not be read, which is not the same as "force nothing": a later
+/// restore must not invent a 0 and clear a setting it never saw.
+pub(crate) fn read_forced_quantum() -> Result<u32, String> {
+    let text = read_metadata().ok_or_else(|| {
+        "pw-metadata not available, so the current quantum was not read".to_owned()
+    })?;
+    Ok(metadata_value(&text, "clock.force-quantum").unwrap_or(0))
+}
+
+/// What to do with `clock.force-quantum` after one attempt to set it.
+///
+/// `previous` is `None` when the store could not be read. In that case nothing
+/// is written. A successful write is owned even when the read-back fails, so
+/// stop can still restore `previous`. `previous == 0` is a real "nothing was
+/// forced", not a stand-in for a failed read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuantumForce {
+    Untouched,
+    Owned { previous: u32 },
+    RolledBack,
+}
+
+pub(crate) fn decide_quantum_force(
+    previous: Option<u32>,
+    wrote: bool,
+    confirmed: bool,
+    restored_after_unconfirmed: bool,
+) -> QuantumForce {
+    let Some(previous) = previous else {
+        return QuantumForce::Untouched;
+    };
+    if !wrote {
+        return QuantumForce::Untouched;
+    }
+    if confirmed {
+        return QuantumForce::Owned { previous };
+    }
+    if restored_after_unconfirmed {
+        QuantumForce::RolledBack
+    } else {
+        QuantumForce::Owned { previous }
+    }
+}
+
 fn write_metadata(key: &str, value: &str) -> Result<(), String> {
     let output = Command::new("pw-metadata")
         .args(["-n", "settings", "0", key, value])
@@ -135,27 +244,20 @@ fn write_metadata(key: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// Asks PipeWire for the low quantum.  The setting is global while it is
-/// forced, so the bridge releases it when it stops.
-pub(crate) fn force_low_quantum() -> Result<State, String> {
+/// Asks PipeWire for the low quantum.
+///
+/// `Ok(None)` means the write was accepted and the following read failed. The
+/// caller owns the force and must restore the previous value; a failed read is
+/// not a failed write.
+pub(crate) fn force_low_quantum() -> Result<Option<State>, String> {
     write_metadata("clock.force-quantum", &LOW_QUANTUM.to_string())?;
-    state().ok_or_else(|| {
-        "PipeWire accepted the quantum but did not report it back; is the server running?"
-            .to_owned()
-    })
+    Ok(state())
 }
 
-/// The quantum someone forced before RigWerk started, so stopping the bridge
-/// can put it back instead of clearing their setting.
-pub(crate) fn forced_quantum() -> u32 {
-    read_metadata()
-        .map(|text| metadata_value(&text, "clock.force-quantum").unwrap_or(0))
-        .unwrap_or(0)
-}
-
-/// Gives the desktop its own quantum back.
-pub(crate) fn restore_quantum(previous: u32) {
-    let _ = write_metadata("clock.force-quantum", &previous.to_string());
+/// Gives the desktop its own quantum back. The error is returned so a failed
+/// restore can be shown instead of discarded.
+pub(crate) fn restore_quantum(previous: u32) -> Result<(), String> {
+    write_metadata("clock.force-quantum", &previous.to_string())
 }
 
 /// Compares the output's ALSA period with the current PipeWire quantum.
@@ -172,7 +274,10 @@ pub(crate) fn check_output(device: &DeviceItem, alsa_period: u32) -> Option<Quan
 
 #[cfg(test)]
 mod tests {
-    use super::{is_pipewire_pcm, metadata_value, parse_state};
+    use super::{
+        decide_quantum_force, default_pcm_is_pipewire, is_pipewire_pcm, metadata_value,
+        parse_state, QuantumForce,
+    };
 
     #[test]
     fn the_pipewire_pcm_is_recognised_with_or_without_a_host_prefix() {
@@ -204,5 +309,65 @@ mod tests {
     fn values_are_read_from_the_metadata_line() {
         let text = "update: id:0 key:'clock.rate' value:'44100' type:''";
         assert_eq!(metadata_value(text, "clock.rate"), Some(44_100));
+    }
+
+    #[test]
+    fn a_pulse_default_is_not_pipewire_just_because_the_name_default_appears() {
+        let pulse =
+            "pcm.!default {\n    type pulse\n    hint { show on description \"Default\" }\n}\n";
+        assert!(!default_pcm_is_pipewire(pulse));
+        let pipewire = "pcm.!default {\n    type pipewire\n}\n";
+        assert!(default_pcm_is_pipewire(pipewire));
+    }
+
+    #[test]
+    fn a_later_default_block_overrides_an_earlier_one() {
+        let config = "pcm.!default { type pipewire }\n\
+                      pcm.!default { type pulse }\n";
+        assert!(!default_pcm_is_pipewire(config));
+        let back = "pcm.!default { type pulse }\n\
+                    pcm.!default { type pipewire }\n";
+        assert!(default_pcm_is_pipewire(back));
+    }
+
+    #[test]
+    fn a_commented_pipewire_type_does_not_count() {
+        let config = "pcm.!default {\n    # type pipewire\n    type pulse\n}\n";
+        assert!(!default_pcm_is_pipewire(config));
+    }
+
+    #[test]
+    fn an_unread_quantum_is_not_treated_as_zero_and_a_write_is_owned() {
+        assert_eq!(
+            decide_quantum_force(None, false, false, false),
+            QuantumForce::Untouched
+        );
+        assert_eq!(
+            decide_quantum_force(Some(0), false, false, false),
+            QuantumForce::Untouched
+        );
+        assert_eq!(
+            decide_quantum_force(Some(0), true, true, false),
+            QuantumForce::Owned { previous: 0 }
+        );
+        assert_eq!(
+            decide_quantum_force(Some(1024), true, false, true),
+            QuantumForce::RolledBack
+        );
+        assert_eq!(
+            decide_quantum_force(Some(1024), true, false, false),
+            QuantumForce::Owned { previous: 1024 }
+        );
+    }
+
+    #[test]
+    fn restore_quantum_reports_a_missing_tool() {
+        match super::restore_quantum(0) {
+            Ok(()) => {}
+            Err(error) => assert!(
+                error.contains("pw-metadata"),
+                "restore error should name the tool: {error}"
+            ),
+        }
     }
 }

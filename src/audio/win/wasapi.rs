@@ -127,7 +127,13 @@ pub fn open(
             Err(reason)
         }
         Err(_) => {
+            // Wait for the driver instead of leaving the thread behind: a
+            // detached open could still claim the endpoint after the caller
+            // has fallen back to another stream on it.  This blocks only the
+            // bridge thread, which the engine's start timeout and teardown
+            // tracking already cover.
             stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
             Err("the driver did not answer in time".to_owned())
         }
     }
@@ -443,6 +449,9 @@ unsafe fn run(
 
     let channels = session.info.channels;
     let mut mixer = OutputMixer::new(session.info.rate);
+    // Design the filter before the loop starts, not during an audio step.
+    mixer.follow_source_rate(&shared);
+    mixer.prepare(session.buffer_frames.max(1) as usize);
     // Keep exactly one step queued.  The host hands us a much larger buffer
     // (about two steps), but filling it would add its whole size to the
     // latency and throw away the low-latency stream's advantage.  One step is

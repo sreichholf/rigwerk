@@ -2,7 +2,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::shared::{initial_target, Shared};
@@ -10,10 +10,14 @@ use crate::audio::types::StartConfig;
 
 use cpal::traits::StreamTrait;
 
+use super::callback::{
+    wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
+    CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
+};
 use super::duplex::run_asio_duplex_bridge;
 use super::input::run_asio_input_only;
 use super::samples::write_asio_sample;
-use super::{asio_output_switch_slot, ASIO_OUTPUT_CALLBACKS};
+use super::ASIO_OUTPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
 use crate::audio::devices::pick_input_config;
 use crate::audio::input::{make_input_stream, open_input_device};
@@ -30,17 +34,21 @@ pub(crate) fn run_asio_output_bridge(
         return run_asio_duplex_bridge(config, output_clsid, shared, stop);
     }
 
-    shared.set_status("Opening ASIO output…");
-    let (worker, output_rate, output_channels) = open_asio_output_worker(
-        output_clsid,
-        config.output_rate.unwrap_or(config.sample_rate),
-        config.output_buffer,
-        Arc::clone(&shared),
-        Arc::clone(&stop),
-    )?;
-    shared.prepare_plugins(output_rate);
-
     if let Some(input_clsid) = config.asio_clsid {
+        shared.set_status("Opening ASIO output…");
+        let (worker, output_rate, _output_channels) = open_asio_output_worker(
+            output_clsid,
+            config.output_rate.unwrap_or(config.sample_rate),
+            config.output_buffer,
+            Arc::clone(&shared),
+            Arc::clone(&stop),
+        )?;
+        // The worker publishes `output_rate` before the driver starts.  The
+        // UI thread reloads plugins; this thread must not.
+
+        // Two drivers keep two clocks, so the input rate is only known after
+        // its driver opens.  That is the one path where the output mixer may
+        // still design its filter on the first callback; see REVIEW-FIXES.md.
         shared.set_status("Opening ASIO input…");
         run_asio_input_only(
             input_clsid,
@@ -50,7 +58,11 @@ pub(crate) fn run_asio_output_bridge(
             &shared,
             &stop,
         )?;
+        drop(worker);
     } else {
+        // Open the input first and publish its real rate, so the ASIO output
+        // worker designs the resampler before its driver starts rather than
+        // inside the first audio callback.
         shared.set_status("Opening input…");
         let input_device = open_input_device(config)?;
         let input_config = pick_input_config(&input_device, config.sample_rate)?;
@@ -64,6 +76,18 @@ pub(crate) fn run_asio_output_bridge(
             Arc::clone(&shared),
             config.buffer_size,
         )?;
+
+        shared.set_status("Opening ASIO output…");
+        let (worker, output_rate, output_channels) = open_asio_output_worker(
+            output_clsid,
+            config.output_rate.unwrap_or(config.sample_rate),
+            config.output_buffer,
+            Arc::clone(&shared),
+            Arc::clone(&stop),
+        )?;
+        // The worker publishes `output_rate` before the driver starts.  The
+        // UI thread reloads plugins; this thread must not.
+
         input_stream
             .play()
             .map_err(|error| format!("Starting input: {error}"))?;
@@ -80,9 +104,9 @@ pub(crate) fn run_asio_output_bridge(
             thread::sleep(Duration::from_millis(20));
         }
         drop(input_stream);
+        drop(worker);
     }
 
-    drop(worker);
     Ok(())
 }
 
@@ -143,7 +167,12 @@ pub(crate) fn open_asio_output_worker(
             Err(error)
         }
         Err(error) => {
+            // Same as the WASAPI open: never leave a driver open running
+            // detached, or a later session could open the device a second
+            // time.  The bridge thread stays alive until the driver returns,
+            // so the engine keeps reporting the teardown as pending.
             worker_stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
             Err(format!("ASIO output did not start: {error}"))
         }
     }
@@ -164,10 +193,16 @@ pub(crate) fn run_asio_output_loop(
     use azo::windows_core::GUID;
     use std::ffi::c_void;
 
+    // Every failure before the driver starts goes back through `ready`, so
+    // the caller reports the real reason rather than a closed channel.
+    let fail = |error: String| {
+        let _ = ready.send(Err(error.clone()));
+        error
+    };
     let host = azo::Host::new();
     let driver = host
         .create_driver(&GUID::from_u128(clsid))
-        .map_err(|error| format!("Opening ASIO output driver: {error}"))?;
+        .map_err(|error| fail(format!("Opening ASIO output driver: {error}")))?;
     if !driver.init(None) {
         let error = "The ASIO output driver refused to initialize".to_owned();
         let _ = ready.send(Err(error.clone()));
@@ -200,7 +235,7 @@ pub(crate) fn run_asio_output_loop(
 
     let buffer = driver
         .buffer_size()
-        .map_err(|error| format!("ASIO output buffer size: {error}"))?;
+        .map_err(|error| fail(format!("ASIO output buffer size: {error}")))?;
     let buffer_frames =
         if requested_buffer >= buffer.min as usize && requested_buffer <= buffer.max as usize {
             requested_buffer as i32
@@ -228,10 +263,9 @@ pub(crate) fn run_asio_output_loop(
         channel_ids.push(id);
     }
 
-    let (sender, receiver) = mpsc::sync_channel::<i32>(2);
-    if let Ok(mut slot) = asio_output_switch_slot().lock() {
-        *slot = Some(sender);
-    }
+    let mut mixer = OutputMixer::new(rate);
+    mixer.follow_source_rate(&shared);
+    mixer.prepare(buffer_frames.max(1) as usize);
 
     let buffers: Vec<[*mut c_void; 2]> = match unsafe {
         driver.create_buffers(
@@ -242,20 +276,42 @@ pub(crate) fn run_asio_output_loop(
     } {
         Ok(buffers) => buffers.collect(),
         Err(error) => {
-            if let Ok(mut slot) = asio_output_switch_slot().lock() {
-                *slot = None;
-            }
             let error = format!("ASIO output buffers: {error}");
             let _ = ready.send(Err(error.clone()));
             return Err(error);
         }
     };
+    silence_asio_output(&buffers, &channel_types, buffer_frames.max(1) as usize);
 
+    let signal = AsioSignal::new();
+    let context = AsioCallbackContext::new(
+        Arc::clone(&shared),
+        Arc::clone(&signal),
+        buffer_frames.max(1) as usize,
+    )
+    .with_output(buffers, channel_types, mixer);
+    let registration =
+        match CallbackRegistration::install(AsioCallbackSlot::Output, Box::new(context), signal) {
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = driver.dispose_buffers();
+                let error = format!("ASIO output callbacks: {error}");
+                let _ = ready.send(Err(error.clone()));
+                return Err(error);
+            }
+        };
+
+    // Publish the rate before the driver starts so the UI can reload
+    // plugins on its own thread before the first callback.
+    shared.set_output(
+        rate,
+        buffer_frames.max(1) as u32,
+        format!("ASIO output · driver buffer {buffer_frames} smp"),
+    );
     if let Err(error) = driver.start() {
-        if let Ok(mut slot) = asio_output_switch_slot().lock() {
-            *slot = None;
-        }
+        let _ = driver.stop();
         let _ = driver.dispose_buffers();
+        registration.clear();
         let error = format!("Starting ASIO output: {error}");
         let _ = ready.send(Err(error.clone()));
         return Err(error);
@@ -264,79 +320,62 @@ pub(crate) fn run_asio_output_loop(
     if ready.send(Ok((rate, output_channels))).is_err() {
         let _ = driver.stop();
         let _ = driver.dispose_buffers();
-        if let Ok(mut slot) = asio_output_switch_slot().lock() {
-            *slot = None;
-        }
+        registration.clear();
         return Ok(());
     }
 
-    shared.set_output(
-        rate,
-        buffer_frames.max(1) as u32,
-        format!("ASIO output · driver buffer {buffer_frames} smp"),
-    );
-    let mut state = OutputMixer::new(rate);
-    let mut last_callback = Instant::now();
-
-    while !worker_stop.load(Ordering::Relaxed) && !bridge_stop.load(Ordering::Relaxed) {
-        match receiver.recv_timeout(Duration::from_millis(80)) {
-            Ok(buffer_index) => {
-                last_callback = Instant::now();
-                let index = buffer_index.clamp(0, 1) as usize;
-                fill_asio_output(
-                    &shared,
-                    &buffers,
-                    &channel_types,
-                    buffer_frames as usize,
-                    index,
-                    &mut state,
-                );
-                let _ = driver.output_ready();
+    let wait = wait_for_callbacks(registration.signal(), || {
+        worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed)
+    });
+    match wait {
+        CallbackWait::Stopped => {}
+        CallbackWait::Reset | CallbackWait::Failed => {
+            let _ = driver.stop();
+            let _ = driver.dispose_buffers();
+            registration.clear();
+            return Err(if matches!(wait, CallbackWait::Reset) {
+                DRIVER_RESET_MESSAGE
+            } else {
+                CALLBACK_PANIC_MESSAGE
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_callback.elapsed() > Duration::from_secs(2) {
-                    let _ = driver.stop();
-                    if let Ok(mut slot) = asio_output_switch_slot().lock() {
-                        *slot = None;
-                    }
-                    let _ = driver.dispose_buffers();
-                    shared.set_device_lost(
-                        "The ASIO output stopped responding — the interface may have been unplugged"
-                            .to_owned(),
-                    );
-                    return Ok(());
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            .to_owned());
+        }
+        CallbackWait::Hung => {
+            let _ = driver.stop();
+            let _ = driver.dispose_buffers();
+            registration.abandon();
+            shared.set_device_lost(
+                "The ASIO output stopped responding — the interface may have been unplugged"
+                    .to_owned(),
+            );
+            return Ok(());
         }
     }
 
     let _ = driver.stop();
     let _ = driver.dispose_buffers();
-    if let Ok(mut slot) = asio_output_switch_slot().lock() {
-        *slot = None;
-    }
+    registration.clear();
     Ok(())
 }
 
-pub(crate) fn fill_asio_output(
-    shared: &Shared,
+/// Fills both ping-pong buffers of every output channel with silence.  The
+/// driver may start playing before the first callback fills a buffer.
+pub(crate) fn silence_asio_output(
     buffers: &[[*mut std::ffi::c_void; 2]],
     channel_types: &[azo::sys::SampleType],
     buffer_frames: usize,
-    index: usize,
-    mixer: &mut OutputMixer,
 ) {
-    mixer.render(shared, buffer_frames, |frame, out| {
-        for (channel, buffer) in buffers.iter().enumerate() {
-            let value = out.get(channel).copied().unwrap_or(0.0);
-            let sample_type = channel_types
-                .get(channel)
-                .copied()
-                .unwrap_or(azo::sys::SampleType::PCM_F32_LSB);
-            unsafe {
-                write_asio_sample(buffer[index].cast::<u8>(), frame, sample_type, value);
+    for (channel, buffer) in buffers.iter().enumerate() {
+        let sample_type = channel_types
+            .get(channel)
+            .copied()
+            .unwrap_or(azo::sys::SampleType::PCM_F32_LSB);
+        for index in 0..2 {
+            for frame in 0..buffer_frames {
+                unsafe {
+                    write_asio_sample(buffer[index].cast::<u8>(), frame, sample_type, 0.0);
+                }
             }
         }
-    });
+    }
 }
