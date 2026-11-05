@@ -11,7 +11,7 @@ use vst3_host::PluginWindow;
 
 use crate::app::RigWerkApp;
 use crate::audio::clap::ClapPlugin;
-use crate::audio::PluginHandle;
+use crate::audio::{plugin_instance_id, PluginHandle, PluginView};
 use crate::ui::theme::{GREEN, RED};
 
 pub(crate) struct PluginGuiWindow {
@@ -33,16 +33,20 @@ enum GuiKind {
 }
 
 impl PluginGuiWindow {
-    fn matches(&self, handle: &PluginHandle) -> bool {
-        match (&self.kind, handle) {
-            (GuiKind::Vst3 { plugin, .. }, PluginHandle::Vst3(current)) => {
-                Arc::ptr_eq(plugin, current)
-            }
-            (GuiKind::Clap { plugin, .. }, PluginHandle::Clap(current)) => {
-                Arc::ptr_eq(plugin, current)
-            }
-            _ => false,
+    /// The identity of the instance this editor belongs to, as the published
+    /// insert views report it.
+    fn instance_id(&self) -> usize {
+        match &self.kind {
+            GuiKind::Vst3 { plugin, .. } => plugin_instance_id(plugin),
+            GuiKind::Clap { plugin, .. } => plugin_instance_id(plugin),
         }
+    }
+
+    /// Whether the insert at this editor's index still holds its instance.
+    /// Read from the published views, so polling an open editor every frame
+    /// never takes the chain lock the audio callback needs.
+    fn matches(&self, view: Option<&PluginView>) -> bool {
+        view.and_then(|view| view.instance) == Some(self.instance_id())
     }
 }
 
@@ -137,7 +141,7 @@ impl RigWerkApp {
         let Some(index) = self.plugin_gui.as_ref().map(|gui| gui.index) else {
             return;
         };
-        let current = self.engine.plugin_handle(index);
+        let views = self.engine.plugin_views();
         let (dismissed, same_plugin, due) = {
             let Some(gui) = self.plugin_gui.as_mut() else {
                 return;
@@ -149,7 +153,7 @@ impl RigWerkApp {
                 }
                 GuiKind::Clap { window, .. } => window.service(),
             };
-            let same_plugin = current.as_ref().is_some_and(|handle| gui.matches(handle));
+            let same_plugin = gui.matches(views.get(index));
             let due = gui.last_sync.elapsed() >= Duration::from_millis(250);
             if due {
                 gui.last_sync = Instant::now();

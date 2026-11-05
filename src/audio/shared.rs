@@ -111,6 +111,20 @@ impl ScopeLane {
 /// A CLAP plugin and its host state, as `service_plugins` services them.
 type ClapService = (Arc<HostState>, Arc<Mutex<ClapPlugin>>);
 
+/// Armed by `edit_chain` around the edit itself.  If the edit panics, the
+/// chain mutex is poisoned and no later edit publishes again, so the
+/// published views and CLAP services are cleared here instead of being left
+/// to describe (and hold references to) slots the edit may have changed.
+struct PublishOnUnwind<'a> {
+    shared: &'a Shared,
+}
+
+impl Drop for PublishOnUnwind<'_> {
+    fn drop(&mut self) {
+        self.shared.publish_poisoned();
+    }
+}
+
 pub(crate) struct Shared {
     /// Interleaved stereo samples as `f32` bit patterns.  The input side alone
     /// writes the slots at `head`; the output side alone writes `tail`, so the
@@ -385,12 +399,40 @@ impl Shared {
     fn edit_chain<R>(&self, edit: impl FnOnce(&mut PluginChain) -> R) -> Option<R> {
         let (result, stale) = {
             let mut chain = self.plugins.lock().ok()?;
+            // Declared after the chain guard, so it runs first while
+            // unwinding, still under the lock.
+            let unwind = PublishOnUnwind { shared: self };
             let result = edit(&mut chain);
+            std::mem::forget(unwind);
             let stale = self.publish_plugins(&chain);
             (result, stale)
         };
         drop(stale);
         Some(result)
+    }
+
+    /// What a poisoned chain looks like to every reader: no inserts, nothing
+    /// to service, nothing to reopen.  This is what `plugin_views` returned
+    /// for a poisoned chain before the views were published.
+    fn publish_poisoned(&self) {
+        self.plugin_active.store(0, Ordering::Relaxed);
+        self.chain_unopened.store(false, Ordering::Relaxed);
+        self.published_ports_changed.store(0, Ordering::Relaxed);
+        *self
+            .plugin_views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::from(Vec::new());
+        self.plugin_views_version.fetch_add(1, Ordering::Release);
+        // The slots still own these plugins, so this is never the last
+        // reference; what matters is that none outlives the chain.
+        let services = std::mem::replace(
+            &mut *self
+                .plugin_services
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            Arc::from(Vec::new()),
+        );
+        drop(services);
     }
 
     /// Publishes the views, the CLAP service list and the cheap flags for
@@ -1328,8 +1370,9 @@ mod tests {
         assert!(shared.plugin_views().is_empty());
     }
 
-    /// Holds the chain lock on another thread while the UI-side calls run on
-    /// this (main) thread.  None of them may wait for it.
+    /// Holds the chain lock on this thread while the UI-side calls run on a
+    /// worker that stands in for the main thread.  None of them may wait for
+    /// the lock: the worker must finish while it is still held.
     #[test]
     fn drawing_and_quiet_service_frames_never_wait_for_the_chain_lock() {
         let _main = claim_main_thread();
@@ -1339,28 +1382,96 @@ mod tests {
         // Opens the restored slot (it fails), so the chain is settled.
         shared.service_plugins();
         assert!(shared.plugin_views()[0].error.is_some());
+        shared.edit_chain(|chain| {
+            chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
+        });
+        let Some(handle) = shared.plugin_handle(1) else {
+            panic!("the fake is loaded");
+        };
+        let editor = match &handle {
+            crate::audio::PluginHandle::Clap(plugin) => std::sync::Arc::clone(plugin),
+            crate::audio::PluginHandle::Vst3(_) => unreachable!(),
+        };
+        drop(handle);
 
-        const HELD: std::time::Duration = std::time::Duration::from_millis(600);
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        const HELD: std::time::Duration = std::time::Duration::from_secs(5);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let chain = shared.plugins.lock().unwrap();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                let _chain = shared.plugins.lock().unwrap();
-                locked_tx.send(()).unwrap();
-                std::thread::sleep(HELD);
+                let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+                for _ in 0..100 {
+                    let views = shared.plugin_views();
+                    assert_eq!(views.len(), 2);
+                    // The open-editor poll: identity from the published view.
+                    assert_eq!(
+                        views[1].instance,
+                        Some(crate::audio::plugin_instance_id(&editor))
+                    );
+                    shared.service_plugins();
+                    shared.align_plugins_to_output_rate();
+                }
+                done_tx.send(()).unwrap();
             });
-            locked_rx.recv().unwrap();
-            let started = std::time::Instant::now();
-            for _ in 0..100 {
-                assert_eq!(shared.plugin_views().len(), 1);
-                shared.service_plugins();
-                shared.align_plugins_to_output_rate();
-            }
-            let waited = started.elapsed();
-            assert!(
-                waited < HELD / 3,
-                "a UI-side call waited {waited:?} for the chain lock"
-            );
+            let finished = done_rx.recv_timeout(HELD);
+            drop(chain);
+            assert!(finished.is_ok(), "a UI-side call waited for the chain lock");
         });
+    }
+
+    #[test]
+    fn a_panicking_edit_clears_what_it_published() {
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        shared.edit_chain(|chain| {
+            chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
+        });
+        assert_eq!(shared.plugin_views().len(), 1);
+        assert_eq!(shared.plugin_services.lock().unwrap().len(), 1);
+        assert!(shared.has_plugins());
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            shared.edit_chain(|chain| {
+                chain.set_bypass(0, true);
+                panic!("an edit failed halfway");
+            })
+        }));
+        assert!(panicked.is_err());
+        assert!(shared.plugins.is_poisoned());
+        assert!(shared.plugin_views().is_empty());
+        assert!(shared.plugin_services.lock().unwrap().is_empty());
+        assert!(!shared.has_plugins());
+        // A poisoned chain refuses further edits and publishes nothing new.
+        shared.set_plugin_bypass(0, false);
+        assert!(shared.plugin_views().is_empty());
+    }
+
+    #[test]
+    fn views_name_the_loaded_instance() {
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        shared.restore_plugins(vec![missing("a.vst3")]);
+        assert_eq!(shared.plugin_views()[0].instance, None);
+        shared.edit_chain(|chain| {
+            chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
+        });
+        let Some(handle) = shared.plugin_handle(1) else {
+            panic!("the fake is loaded");
+        };
+        assert_eq!(
+            shared.plugin_views()[1].instance,
+            Some(handle.instance_id())
+        );
+        // An editor still holding the old instance no longer matches once
+        // the insert is replaced.
+        shared.remove_plugin(1);
+        shared.edit_chain(|chain| {
+            chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
+        });
+        assert_ne!(
+            shared.plugin_views()[1].instance,
+            Some(handle.instance_id())
+        );
     }
 
     #[test]

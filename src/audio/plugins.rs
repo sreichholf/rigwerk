@@ -51,6 +51,16 @@ pub(crate) enum PluginHandle {
 
 impl PluginHandle {
     /// Whether both handles point at the same plugin instance.
+    /// Identifies this plugin instance in [`PluginView::instance`].  It is
+    /// the address of the shared instance, so it stays unique for as long as
+    /// anyone (an open editor, for one) holds a clone of this handle.
+    pub(crate) fn instance_id(&self) -> usize {
+        match self {
+            PluginHandle::Vst3(plugin) => instance_id(plugin),
+            PluginHandle::Clap(plugin) => instance_id(plugin),
+        }
+    }
+
     pub(crate) fn same(&self, other: &PluginHandle) -> bool {
         match (self, other) {
             (PluginHandle::Vst3(a), PluginHandle::Vst3(b)) => Arc::ptr_eq(a, b),
@@ -58,6 +68,14 @@ impl PluginHandle {
             _ => false,
         }
     }
+}
+
+/// The identity [`PluginView::instance`] reports for a shared plugin
+/// instance.  An editor that holds the `Arc` compares its own against the
+/// published view instead of fetching the handle under the chain lock; the
+/// address cannot be reused while that `Arc` keeps the instance alive.
+pub(crate) fn instance_id<T>(plugin: &Arc<T>) -> usize {
+    Arc::as_ptr(plugin) as *const () as usize
 }
 
 /// Reads a plugin's current controls for [`PluginChain::apply_synced_parameters`],
@@ -453,6 +471,10 @@ pub struct PluginView {
     pub parameters: Vec<PluginParamView>,
     /// Whether the plugin can draw its own graphical editor.
     pub has_editor: bool,
+    /// Which loaded instance this view describes (see
+    /// [`PluginHandle::instance_id`]); `None` while the slot is not loaded.
+    /// An open editor checks it to notice that its insert was replaced.
+    pub(crate) instance: Option<usize>,
 }
 
 pub(crate) struct Slot {
@@ -616,6 +638,7 @@ impl Slot {
             error: self.resolved_error(),
             parameters: self.parameters.clone(),
             has_editor: self.plugin.is_some() && self.has_editor,
+            instance: self.plugin.as_ref().map(PluginHandle::instance_id),
         }
     }
 }

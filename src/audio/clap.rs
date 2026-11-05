@@ -2486,10 +2486,6 @@ pub(crate) mod tests {
         assert_eq!(&back[..count as usize], payload);
     }
 
-    /// A fake CLAP module driven from Rust: every entry and plugin callback
-    /// logs itself, and `Fail` picks the step that goes wrong.  The callbacks
-    /// all run on the test thread, so the log and the setting are
-    /// thread-local and the tests can run in parallel.
     /// A loaded fake CLAP effect with one stereo main port, for tests outside
     /// this module.  With `fail_process`, every block it is given fails.  The
     /// fake's state is per thread: process it on the thread that loaded it.
@@ -2516,6 +2512,10 @@ pub(crate) mod tests {
         };
     }
 
+    /// A fake CLAP module driven from Rust: every entry and plugin callback
+    /// logs itself, and `Fail` picks the step that goes wrong.  The callbacks
+    /// all run on the test thread, so the log and the setting are
+    /// thread-local and the tests can run in parallel.
     mod fake {
         use super::super::*;
         use clap_sys::id::CLAP_INVALID_ID;
