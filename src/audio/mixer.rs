@@ -10,19 +10,25 @@ use super::resampler::FrameResampler;
 use super::shared::Shared;
 
 /// The most drift steering may trim the conversion ratio.  500 ppm is under
-/// one cent of pitch, so even the clamp point stays inaudible.
+/// one cent of pitch.  Real clock offsets between two interfaces are a few
+/// tens of ppm, so the loop normally runs far inside this limit.
 const DRIFT_LIMIT_PPM: f32 = 500.0;
 /// The same limit in ratio units, for the integral term.
 const DRIFT_LIMIT_RATIO: f32 = DRIFT_LIMIT_PPM * 1e-6;
-/// Proportional gain, in ratio per second of ring-fill error (500 ppm per
-/// millisecond of error).  Together with the integral it damps a fill
-/// excursion without stepping the pitch.
-const DRIFT_KP: f32 = 0.5;
-/// Integral gain, in ratio per second² of ring-fill error.  With the
-/// proportional gain this gives a four-second integral time constant, so a
-/// steady clock offset is removed slowly; this is what keeps ratio changes
-/// inaudible.
-const DRIFT_KI: f32 = 0.125;
+/// Time constant of the low-pass on the ring-fill error.  The fill is read
+/// once per output block and jumps by a whole input block whenever the input
+/// delivers, so the raw reading carries a sawtooth of up to one input block
+/// that says nothing about the clocks.
+const DRIFT_FILTER_SECONDS: f32 = 0.5;
+/// Proportional gain, in ratio per second of filtered fill error (60 ppm per
+/// millisecond).  Low enough that the filtered block sawtooth moves the ratio
+/// by tens of ppm, not across the whole range.
+const DRIFT_KP: f32 = 0.06;
+/// Integral gain, in ratio per second² of filtered fill error.  With the
+/// proportional gain the loop is damped (about 0.87) with a settling time of
+/// a few tens of seconds: the integral learns the steady clock offset and the
+/// ratio then moves only by a few ppm.
+const DRIFT_KI: f32 = 0.0012;
 
 /// Takes the next frame from the bridge.  A short gap holds the previous
 /// sample instead of clicking to silence, and marks the callback as late so
@@ -50,9 +56,15 @@ pub(crate) struct OutputMixer {
     // Drift correction steers the resampler ratio from the ring-fill error
     // instead of dropping or repeating frames.  `drift_ppm` is the value the
     // resampler was last trimmed by, reported to the UI as the clock offset;
-    // `drift_integral` is the slow part of the loop.
+    // `drift_integral` is the slow part of the loop, which holds the learned
+    // clock offset; `drift_error` is the low-passed fill error, `None` until
+    // the first reading after priming.
     drift_ppm: f32,
     drift_integral: f32,
+    drift_error: Option<f32>,
+    /// Whether the last block went through the resampler.  Switching between
+    /// it and the 1:1 bypass resets it, so it never replays stale history.
+    resampling: bool,
     stable_since: Instant,
     /// One output block, kept between callbacks so the VST3 inserts can work
     /// on the finished stereo mix without allocating.
@@ -78,6 +90,8 @@ impl OutputMixer {
             started: false,
             drift_ppm: 0.0,
             drift_integral: 0.0,
+            drift_error: None,
+            resampling: false,
             stable_since: Instant::now(),
             block: Vec::new(),
             plugin_l: Vec::new(),
@@ -88,8 +102,9 @@ impl OutputMixer {
     }
 
     /// Grows the per-block scratch while the bridge is still opening, so the
-    /// first driver callback never has to allocate.
-    #[cfg(target_os = "windows")]
+    /// first callback (and the first block after a plugin is added) never has
+    /// to allocate.  A host that later hands over a larger block still works;
+    /// that one block then grows the scratch.
     pub(crate) fn prepare(&mut self, frames: usize) {
         if self.block.len() < frames {
             self.block.resize(frames, [0.0; 4]);
@@ -128,24 +143,42 @@ impl OutputMixer {
             self.resampler.configure(source, self.output_rate);
             self.drift_ppm = 0.0;
             self.drift_integral = 0.0;
+            self.drift_error = None;
         }
     }
 
     /// Steers the conversion ratio from the ring-fill error.  A fill above
     /// the target makes the resampler consume source frames a little faster,
-    /// one below it a little slower; the integral term removes a steady
-    /// clock offset over a few seconds.  Returns the applied correction in
-    /// ppm, which is zero whenever drift is off or the ring is still priming.
+    /// one below it a little slower; the integral term learns the steady
+    /// clock offset.  Returns the applied correction in ppm, which is zero
+    /// whenever drift is off or the ring is still priming.
     fn steer_drift(&mut self, shared: &Shared, target: usize, seconds: f32, drift: bool) -> f32 {
-        if !drift || self.priming {
+        if !drift {
             self.drift_ppm = 0.0;
             self.drift_integral = 0.0;
+            self.drift_error = None;
+            return 0.0;
+        }
+        if self.priming {
+            // Nothing is drained while priming.  The learned clock offset in
+            // the integral stays: the clocks have not changed, and keeping it
+            // is what stops a small cushion from underrunning again.
+            self.drift_ppm = 0.0;
+            self.drift_error = None;
             return 0.0;
         }
         // Fill error as seconds of audio, so the gains do not depend on the
         // rate or the block size.  The loop works in ratio units and only
         // converts to ppm for the resampler and the readout.
-        let error = (shared.ring_frames() as f32 - target as f32) / self.source_rate as f32;
+        let raw = (shared.ring_frames() as f32 - target as f32) / self.source_rate as f32;
+        let error = match self.drift_error {
+            Some(filtered) => {
+                let weight = (seconds / DRIFT_FILTER_SECONDS).min(1.0);
+                filtered + (raw - filtered) * weight
+            }
+            None => raw,
+        };
+        self.drift_error = Some(error);
         self.drift_integral = (self.drift_integral + DRIFT_KI * error * seconds)
             .clamp(-DRIFT_LIMIT_RATIO, DRIFT_LIMIT_RATIO);
         let correction = DRIFT_KP * error + self.drift_integral;
@@ -192,8 +225,8 @@ impl OutputMixer {
         // A smaller cushion chosen while playing takes effect at once instead
         // of being trimmed one frame per block.  Normal input bursts never
         // reach this far above the target.  The resampler is not reset here:
-        // its window holds only a fraction of a millisecond, so leaving it
-        // alone avoids a filter transient for a purge that is already rare.
+        // its window holds at most about a millisecond, so the purge becomes
+        // a short crossfade through the kernel instead of a restart.
         if !self.priming {
             let excess_line = target * 2 + block_source_frames;
             let fill = shared.ring_frames();
@@ -213,15 +246,23 @@ impl OutputMixer {
         }
 
         // Steer the conversion ratio rather than splicing frames: the
-        // resampler keeps running and its step is trimmed by at most
-        // `DRIFT_LIMIT_PPM`, so a clock offset becomes an inaudible pitch
-        // offset instead of a click.  With drift off, the step is the exact
-        // base ratio.  A 1:1 bridge with drift on still goes through the
-        // interpolator so that path exists when the clocks start to differ.
+        // resampler keeps running and its step is trimmed by a few ppm, so a
+        // clock offset becomes a tiny pitch offset instead of a click.  With
+        // drift off, the step is the exact base ratio.  A 1:1 bridge with
+        // drift on still goes through the interpolator so that path exists
+        // when the clocks start to differ.
         let seconds = frames as f32 / self.output_rate as f32;
         let drift_ppm = self.steer_drift(shared, target, seconds, drift);
         self.resampler.set_correction_ppm(drift_ppm);
         let needs_resample = self.resampler.active() || drift;
+        if needs_resample != self.resampling {
+            // Entering the resampler must not reuse history from before the
+            // bypass; it restarts at the next ring frame.  Leaving it skips
+            // the few frames it had fetched ahead (half its kernel), once,
+            // when drift is switched off on a 1:1 bridge.
+            self.resampler.reset();
+            self.resampling = needs_resample;
+        }
 
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
@@ -306,8 +347,10 @@ impl OutputMixer {
             shared.raise_target_after_underrun();
             self.priming = true;
             self.resampler.reset();
+            // The integral (the learned clock offset) survives the underrun;
+            // only the filtered fill starts over.
             self.drift_ppm = 0.0;
-            self.drift_integral = 0.0;
+            self.drift_error = None;
             self.stable_since = Instant::now();
         } else if !self.priming && self.stable_since.elapsed() >= shared.relax_after() {
             shared.relax_target();

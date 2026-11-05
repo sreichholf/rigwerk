@@ -3,29 +3,83 @@
 
 use std::f64::consts::PI;
 
-/// Taps per output phase.  The window covers this many source frames, so the
-/// read position needs half of it on either side.
-const TAPS: usize = 32;
-/// Phase resolution of the precomputed kernel.
+/// Phase resolution of the precomputed kernel.  The two nearest phases are
+/// blended, which keeps the interpolation error near -90 dB.
 const PHASES: usize = 512;
-/// Half the kernel width; also the look-ahead the resampler needs.
-const HALF: usize = TAPS / 2;
-/// Power-of-two ring for the source frames around the read position.
-const HISTORY: usize = 64;
-const MASK: i64 = HISTORY as i64 - 1;
+/// Fewest and most taps a kernel may have.  The count depends on the rate
+/// pair (see [`kernel_taps`]).
+const MIN_TAPS: usize = 32;
+const MAX_TAPS: usize = 512;
+/// Stop-band attenuation of the Kaiser design, in dB.
+const STOPBAND_DB: f64 = 80.0;
+/// The highest frequency kept flat, in Hz, unless the lower rate's Nyquist
+/// is below it.
+const PASSBAND_HZ: f64 = 20_000.0;
+/// The passband never reaches past this fraction of the lower rate.
+const PASSBAND_FRACTION: f64 = 0.45;
+/// The fastest source rate the kernel storage is sized for in advance, so
+/// that a rate change up to it never allocates.
+const PREALLOCATED_SOURCE_RATE: u32 = 192_000;
 /// The most the ratio may be trimmed by drift steering.
 const MAX_CORRECTION_PPM: f32 = 500.0;
+
+/// The kernel length for a rate pair.
+///
+/// The passband runs flat to 20 kHz (or 45% of the lower rate).  The stop band
+/// starts where content would fold back onto the passband edge, `lower rate -
+/// passband`, so everything that could alias into the audible band is down by
+/// [`STOPBAND_DB`]; only content that folds into the inaudible range between
+/// the passband and the output Nyquist is left partially attenuated.  The
+/// transition width is measured in source samples, so downsampling from a
+/// high rate needs a proportionally longer kernel.
+fn kernel_taps(source_rate: u32, output_rate: u32) -> usize {
+    let (pass, stop) = band_edges(source_rate, output_rate);
+    let transition = ((stop - pass) / source_rate as f64).max(1e-6);
+    // Kaiser's estimate of the length for this attenuation and transition.
+    let taps = ((STOPBAND_DB - 7.95) / (14.36 * transition)).ceil() as usize;
+    taps.div_ceil(8).saturating_mul(8).clamp(MIN_TAPS, MAX_TAPS)
+}
+
+/// Passband edge and stop-band edge, in Hz.
+fn band_edges(source_rate: u32, output_rate: u32) -> (f64, f64) {
+    let lower = source_rate.min(output_rate) as f64;
+    let pass = PASSBAND_HZ.min(PASSBAND_FRACTION * lower);
+    (pass, lower - pass)
+}
+
+/// The zeroth-order modified Bessel function, for the Kaiser window.
+fn bessel_i0(x: f64) -> f64 {
+    let half = x / 2.0;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    for k in 1..64 {
+        term *= half / k as f64;
+        let add = term * term;
+        sum += add;
+        if add < sum * 1e-17 {
+            break;
+        }
+    }
+    sum
+}
+
+/// A power-of-two history that holds the whole window plus the frames fetched
+/// ahead of it.
+fn history_len(taps: usize) -> usize {
+    (taps * 2).next_power_of_two()
+}
 
 /// Frame-rate conversion between the capture clock and a playback device
 /// that runs at another rate.
 ///
-/// A precomputed windowed-sinc kernel band-limits the source to the lower of
-/// the two rates, so downsampling filters before it decimates instead of
-/// folding everything above the output Nyquist back into the audible band.
-/// The kernel is evaluated at the fractional read position through 512
-/// phases and its rows are normalized to unity gain at DC; the two nearest
-/// phases are blended so a slowly changing ratio does not step between them.
-/// Both the kernel and the history ring are fixed size, so `next` never
+/// A precomputed Kaiser-windowed sinc kernel band-limits the source to the
+/// lower of the two rates, so downsampling filters before it decimates
+/// instead of folding content above the output Nyquist back into the audible
+/// band.  The kernel is evaluated at the fractional read position through 512
+/// phases, each row normalized to unity gain at DC, and the two nearest phases
+/// are blended so a slowly changing ratio does not step between them.  The
+/// kernel and history storage are sized for any source up to 192 kHz when the
+/// resampler is created, so neither `configure` for such a rate nor `next`
 /// allocates.  The nominal 1:1 case is left to the caller's bypass unless a
 /// drift correction is applied.
 pub(crate) struct FrameResampler {
@@ -34,13 +88,18 @@ pub(crate) struct FrameResampler {
     /// The step actually used, including the drift correction.
     step: f64,
     correction_ppm: f32,
-    /// One windowed-sinc row per phase, normalized to unity gain at DC.  The
-    /// extra row is the fraction-1.0 kernel, so blending from the last phase
-    /// reaches the next sample with the same tap alignment instead of wrapping
-    /// to the phase-0 row one sample early.
-    kernel: [[f32; TAPS]; PHASES + 1],
-    /// The source frames around the read position, as a ring.
-    history: [(f32, f32); HISTORY],
+    /// Kernel length for the current rate pair, and half of it, which is
+    /// also the look-ahead in source frames.
+    taps: usize,
+    half: usize,
+    /// `PHASES + 1` rows of `taps` coefficients.  The extra row is the
+    /// fraction-1.0 kernel, so blending from the last phase reaches the next
+    /// sample with the same tap alignment instead of wrapping to the phase-0
+    /// row one sample early.
+    kernel: Vec<f32>,
+    /// The source frames around the read position, as a power-of-two ring.
+    history: Vec<(f32, f32)>,
+    mask: i64,
     /// Absolute source index of the next frame to fetch.
     next_index: i64,
     /// Absolute fractional source position of the next output frame.
@@ -50,12 +109,21 @@ pub(crate) struct FrameResampler {
 
 impl FrameResampler {
     pub(crate) fn new(source_rate: u32, output_rate: u32) -> Self {
+        // Reserve for the longest kernel any source up to 192 kHz needs at
+        // this output rate (downsampling from the fastest source is the
+        // worst case), so later rate changes stay inside this storage.
+        let output_rate = output_rate.max(1);
+        let most_taps = kernel_taps(PREALLOCATED_SOURCE_RATE, output_rate)
+            .max(kernel_taps(source_rate.max(1), output_rate));
         let mut resampler = Self {
             base_step: 1.0,
             step: 1.0,
             correction_ppm: 0.0,
-            kernel: [[0.0; TAPS]; PHASES + 1],
-            history: [(0.0, 0.0); HISTORY],
+            taps: 0,
+            half: 0,
+            kernel: Vec::with_capacity((PHASES + 1) * most_taps),
+            history: Vec::with_capacity(history_len(most_taps)),
+            mask: 0,
             next_index: 0,
             read_pos: 0.0,
             started: false,
@@ -64,13 +132,21 @@ impl FrameResampler {
         resampler
     }
 
-    /// Rebuilds the kernel for a new rate pair and starts over.  The kernel is
-    /// filled in place so a rate change does not copy a large temporary
-    /// through the audio thread's stack.
+    /// Rebuilds the kernel for a new rate pair and starts over.  It reuses
+    /// the storage reserved by `new`, so this only allocates for a source
+    /// faster than 192 kHz.
     pub(crate) fn configure(&mut self, source_rate: u32, output_rate: u32) {
         let source_rate = source_rate.max(1);
         let output_rate = output_rate.max(1);
         self.base_step = source_rate as f64 / output_rate as f64;
+        self.taps = kernel_taps(source_rate, output_rate);
+        self.half = self.taps / 2;
+        self.kernel.clear();
+        self.kernel.resize((PHASES + 1) * self.taps, 0.0);
+        let history = history_len(self.taps);
+        self.history.clear();
+        self.history.resize(history, (0.0, 0.0));
+        self.mask = history as i64 - 1;
         self.build_kernel(source_rate, output_rate);
         self.set_correction_ppm(0.0);
         self.reset();
@@ -94,6 +170,7 @@ impl FrameResampler {
         self.step = self.base_step * (1.0 + self.correction_ppm as f64 * 1e-6);
     }
 
+    /// Forgets the history.  The next output starts at the next source frame.
     pub(crate) fn reset(&mut self) {
         self.read_pos = 0.0;
         self.next_index = 0;
@@ -106,22 +183,22 @@ impl FrameResampler {
             // inside of, so the first output is that frame rather than a step
             // from zero.
             let first = fetch();
-            self.history = [first; HISTORY];
+            self.history.fill(first);
             self.next_index = 1;
             self.read_pos = 0.0;
             self.started = true;
         }
 
         let position = self.read_pos;
-        let index = position.floor();
-        let index = index as i64;
+        let index = position.floor() as i64;
+        let half = self.half as i64;
 
-        // The window reaches `HALF` frames ahead of the read position.  With
+        // The window reaches `half` frames ahead of the read position.  With
         // downsampling the step is larger and this loop eats every source
         // frame in between, so no source material is skipped.
-        while self.next_index <= index + HALF as i64 {
+        while self.next_index <= index + half {
             let frame = fetch();
-            self.history[(self.next_index & MASK) as usize] = frame;
+            self.history[(self.next_index & self.mask) as usize] = frame;
             self.next_index += 1;
         }
 
@@ -129,18 +206,18 @@ impl FrameResampler {
         let first_phase = (phase as usize).min(PHASES - 1);
         // The blend target is the next phase, which for the last bin is the
         // fraction-1.0 row at `PHASES`, not a wrap back to phase 0.
-        let second_phase = first_phase + 1;
         let blend = (phase - first_phase as f64) as f32;
-        let first_row = &self.kernel[first_phase];
-        let second_row = &self.kernel[second_phase];
+        let taps = self.taps;
+        let first_row = &self.kernel[first_phase * taps..(first_phase + 1) * taps];
+        let second_row = &self.kernel[(first_phase + 1) * taps..(first_phase + 2) * taps];
 
-        let first_frame = index - (HALF as i64 - 1);
+        let first_frame = index - (half - 1);
         let mut left = 0.0f32;
         let mut right = 0.0f32;
-        for tap in 0..TAPS {
+        for (tap, (first, second)) in first_row.iter().zip(second_row).enumerate() {
             let (left_sample, right_sample) =
-                self.history[((first_frame + tap as i64) & MASK) as usize];
-            let coefficient = first_row[tap] + (second_row[tap] - first_row[tap]) * blend;
+                self.history[((first_frame + tap as i64) & self.mask) as usize];
+            let coefficient = first + (second - first) * blend;
             left += left_sample * coefficient;
             right += right_sample * coefficient;
         }
@@ -149,26 +226,28 @@ impl FrameResampler {
         (left, right)
     }
 
-    /// Builds the windowed-sinc table.  The cutoff sits at half the lower of
-    /// the two rates, 5% below it so the Blackman window's transition band has
-    /// room below the output Nyquist.  With 32 taps that transition is wide
-    /// (about 0.17 source cycles/sample), so content well above the output
-    /// Nyquist is rejected strongly but the first few kHz above it only
-    /// partially; see the comment on `TAPS`.
+    /// Builds the Kaiser-windowed sinc table for the current `taps`, with the
+    /// cutoff halfway between the band edges of [`band_edges`].
     fn build_kernel(&mut self, source_rate: u32, output_rate: u32) {
-        let cutoff = 0.5 * (output_rate as f64 / source_rate as f64).min(1.0) * 0.95;
+        let (pass, stop) = band_edges(source_rate, output_rate);
+        let cutoff = 0.5 * (pass + stop) / source_rate as f64;
+        let beta = 0.1102 * (STOPBAND_DB - 8.7);
+        let scale = 1.0 / bessel_i0(beta);
+        let taps = self.taps;
+        let half = self.half as f64;
         for phase in 0..=PHASES {
             let fraction = phase as f64 / PHASES as f64;
+            let row = &mut self.kernel[phase * taps..(phase + 1) * taps];
             let mut sum = 0.0;
-            for tap in 0..TAPS {
+            for (tap, value) in row.iter_mut().enumerate() {
                 // Distance from the read position to this source frame, in
                 // source frames.
-                let distance = fraction + (HALF as f64 - 1.0 - tap as f64);
-                let x = distance / HALF as f64;
+                let distance = fraction + (half - 1.0 - tap as f64);
+                let x = distance / half;
                 let window = if x.abs() >= 1.0 {
                     0.0
                 } else {
-                    0.42 + 0.5 * (PI * x).cos() + 0.08 * (2.0 * PI * x).cos()
+                    bessel_i0(beta * (1.0 - x * x).sqrt()) * scale
                 };
                 let argument = 2.0 * PI * cutoff * distance;
                 let sinc = if argument.abs() < 1e-12 {
@@ -176,12 +255,12 @@ impl FrameResampler {
                 } else {
                     argument.sin() / argument
                 };
-                let value = sinc * window;
-                self.kernel[phase][tap] = value as f32;
-                sum += value;
+                let coefficient = sinc * window;
+                *value = coefficient as f32;
+                sum += coefficient;
             }
-            for tap in 0..TAPS {
-                self.kernel[phase][tap] = (self.kernel[phase][tap] as f64 / sum) as f32;
+            for value in row.iter_mut() {
+                *value = (*value as f64 / sum) as f32;
             }
         }
     }
@@ -189,7 +268,7 @@ impl FrameResampler {
 
 #[cfg(test)]
 mod tests {
-    use super::FrameResampler;
+    use super::{kernel_taps, FrameResampler};
 
     /// An endless sine at `frequency`, fed one source frame at a time.
     fn sine(source_rate: u32, frequency: f32) -> impl FnMut() -> (f32, f32) {
@@ -214,7 +293,11 @@ mod tests {
         }
         // One second of output consumes one second of input, plus the
         // window's look-ahead.
-        assert!((44_100..=44_120).contains(&fetched), "fetched {fetched}");
+        let look_ahead = kernel_taps(44_100, 48_000) / 2;
+        assert!(
+            (44_100..=44_100 + look_ahead + 1).contains(&fetched),
+            "fetched {fetched}"
+        );
     }
 
     #[test]
@@ -228,7 +311,11 @@ mod tests {
             });
         }
         // Downsampling must read every intervening frame, not skip them.
-        assert!((9_600..=9_620).contains(&fetched), "fetched {fetched}");
+        let look_ahead = kernel_taps(96_000, 48_000) / 2 + 1;
+        assert!(
+            (9_600..=9_600 + look_ahead + 2).contains(&fetched),
+            "fetched {fetched}"
+        );
     }
 
     #[test]
@@ -329,5 +416,71 @@ mod tests {
             position += step;
         }
         assert!(worst < 1e-3, "worst interpolation error {worst}");
+    }
+
+    /// The level of a sine at `frequency` after conversion, in dB, measured
+    /// as RMS over one second once the window has filled.
+    fn level_db(source_rate: u32, output_rate: u32, frequency: f32, correction_ppm: f32) -> f64 {
+        let mut source = sine(source_rate, frequency);
+        let mut resampler = FrameResampler::new(source_rate, output_rate);
+        resampler.set_correction_ppm(correction_ppm);
+        let skip = output_rate as usize / 10;
+        let mut sum = 0.0f64;
+        for index in 0..skip + output_rate as usize {
+            let (left, _) = resampler.next(&mut source);
+            if index >= skip {
+                sum += (left as f64) * (left as f64);
+            }
+        }
+        let rms = (sum / output_rate as f64).sqrt();
+        20.0 * (rms * std::f64::consts::SQRT_2).log10()
+    }
+
+    #[test]
+    fn the_passband_is_flat_to_20_khz_for_every_common_pair() {
+        for (source, output, ppm) in [
+            (44_100, 48_000, 0.0),
+            (48_000, 44_100, 0.0),
+            (96_000, 48_000, 0.0),
+            (192_000, 44_100, 0.0),
+            (44_100, 44_100, 100.0),
+            (48_000, 48_000, 100.0),
+        ] {
+            let level = level_db(source, output, 20_000.0, ppm);
+            assert!(
+                level.abs() < 0.1,
+                "{source} -> {output} at 20 kHz: {level:.2} dB"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_folds_into_the_audible_band() {
+        // Each tone sits above the output Nyquist at a frequency that would
+        // fold to below 20 kHz.
+        for (source, output, frequency) in [
+            (96_000, 48_000, 28_500.0),  // would fold to 19.5 kHz
+            (96_000, 48_000, 40_000.0),  // would fold to 8 kHz
+            (192_000, 44_100, 24_500.0), // would fold to 19.6 kHz
+            (192_000, 44_100, 30_000.0), // would fold to 14.1 kHz
+            (88_200, 44_100, 30_000.0),  // would fold to 14.1 kHz
+        ] {
+            let level = level_db(source, output, frequency, 0.0);
+            assert!(
+                level < -70.0,
+                "{source} -> {output}: {frequency} Hz came through at {level:.1} dB"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rate_change_reuses_the_reserved_kernel_storage() {
+        let mut resampler = FrameResampler::new(48_000, 44_100);
+        let kernel = resampler.kernel.as_ptr();
+        let history = resampler.history.as_ptr();
+        // The worst case the storage is sized for: downsampling from 192 kHz.
+        resampler.configure(192_000, 44_100);
+        assert_eq!(kernel, resampler.kernel.as_ptr());
+        assert_eq!(history, resampler.history.as_ptr());
     }
 }

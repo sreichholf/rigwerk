@@ -196,6 +196,10 @@ pub(crate) fn write_frame<T: Sample + FromSample<f32>>(frame: &mut [T], out: [f3
     }
 }
 
+/// The block size the cpal output's scratch is sized for up front.  Hosts with
+/// a default buffer hand over at most a few thousand frames.
+const PREPARED_BLOCK: usize = 8192;
+
 pub(crate) fn build_output<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
@@ -212,6 +216,12 @@ where
     // Design the filter before the stream starts: the first callback must not
     // spend a millisecond building the kernel.
     mixer.follow_source_rate(&shared);
+    // cpal only knows the block size once it calls back; size the scratch for
+    // the requested buffer or, with the host's default, for a generous one.
+    mixer.prepare(match config.buffer_size {
+        cpal::BufferSize::Fixed(frames) => (frames as usize).max(PREPARED_BLOCK),
+        cpal::BufferSize::Default => PREPARED_BLOCK,
+    });
 
     let stream = device
         .build_output_stream(
