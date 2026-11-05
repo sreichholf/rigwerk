@@ -386,14 +386,110 @@ fn output_events() -> clap_output_events {
     }
 }
 
+/// One successful `clap_plugin_entry.init`.  Dropping it calls `deinit`
+/// exactly once, so every path out of a load or scan that got past `init`
+/// undoes it.  It must be dropped after every plugin created through the entry
+/// is destroyed and before the library is unloaded.
+///
+/// This is the one place the module's init/deinit pairing lives, so a
+/// per-library registry that shares a single init between instances and
+/// scans can hand out references to it instead.
+struct EntryInit {
+    entry: *const clap_plugin_entry,
+}
+
+impl EntryInit {
+    /// Calls the entry's `init` (an entry without one counts as initialised).
+    /// `None` when the module refused; nothing needs undoing then.
+    ///
+    /// # Safety
+    /// `entry` must point to a valid CLAP entry whose library stays loaded
+    /// until the returned guard is dropped.
+    unsafe fn init(entry: *const clap_plugin_entry, path: &CStr) -> Option<Self> {
+        let initialised = match unsafe { (*entry).init } {
+            Some(init) => unsafe { init(path.as_ptr()) },
+            None => true,
+        };
+        // Not `then_some`: that would build (and drop, so `deinit`) the guard
+        // even when `init` failed.
+        if initialised {
+            Some(Self { entry })
+        } else {
+            None
+        }
+    }
+
+    fn entry(&self) -> &clap_plugin_entry {
+        unsafe { &*self.entry }
+    }
+
+    /// The entry's plugin factory, or null.
+    fn plugin_factory(&self) -> *const clap_plugin_factory {
+        self.entry()
+            .get_factory
+            .map(|get| unsafe { get(CLAP_PLUGIN_FACTORY_ID.as_ptr()) })
+            .unwrap_or(ptr::null())
+            .cast::<clap_plugin_factory>()
+    }
+}
+
+impl Drop for EntryInit {
+    fn drop(&mut self) {
+        if let Some(deinit) = self.entry().deinit {
+            unsafe { deinit() };
+        }
+    }
+}
+
+/// A plugin instance `create_plugin` returned.  Dropping it deactivates the
+/// plugin if it was activated and then destroys it, exactly once, whether or
+/// not `init` ran or succeeded (CLAP allows `destroy` after a failed `init`).
+struct PluginInstance {
+    plugin: *const clap_plugin,
+    active: bool,
+}
+
+impl PluginInstance {
+    /// # Safety
+    /// `plugin` must be a non-null instance from `create_plugin` that nothing
+    /// else destroys.
+    unsafe fn new(plugin: *const clap_plugin) -> Self {
+        Self {
+            plugin,
+            active: false,
+        }
+    }
+}
+
+impl Drop for PluginInstance {
+    fn drop(&mut self) {
+        unsafe {
+            if self.active {
+                if let Some(deactivate) = (*self.plugin).deactivate {
+                    deactivate(self.plugin);
+                }
+            }
+            if let Some(destroy) = (*self.plugin).destroy {
+                destroy(self.plugin);
+            }
+        }
+    }
+}
+
 /// A loaded CLAP effect.  The plugin pointer and its library are kept together
 /// so the plugin can never outlive the code it came from.
 pub(crate) struct ClapPlugin {
-    plugin: *const clap_plugin,
-    entry: *const clap_plugin_entry,
-    library: libloading::Library,
+    // Fields drop in declaration order, which is the teardown order CLAP
+    // needs: destroy the instance, `deinit` the entry, free the host the
+    // plugin pointed at, and only then unload the library.  These five must
+    // stay first and in this order.
+    instance: PluginInstance,
+    _entry: EntryInit,
     _host: Box<clap_host>,
     host_state: Arc<HostState>,
+    _library: libloading::Library,
+    /// `instance.plugin`, copied for brevity; owned by `instance`.
+    plugin: *const clap_plugin,
     params_ext: *const clap_plugin_params,
     gui_ext: *const clap_plugin_gui,
     timer_ext: *const clap_plugin_timer_support,
@@ -411,7 +507,6 @@ pub(crate) struct ClapPlugin {
     max_block: usize,
     steady_time: i64,
     started: bool,
-    active: bool,
     editor_open: bool,
     has_editor: bool,
 }
@@ -439,59 +534,71 @@ impl ClapPlugin {
                 .map_err(|error| format!("Missing clap_entry symbol: {error}"))?
         };
         let entry = *entry_symbol;
-        if !clap_sys::version::clap_version_is_compatible(unsafe { (*entry).clap_version }) {
-            return Err("This CLAP plugin uses an incompatible CLAP version.".to_owned());
-        }
         let init_path = CString::new(
             entry_init_path(path, &binary)
                 .to_string_lossy()
                 .into_owned(),
         )
         .map_err(|_| "The CLAP path contains a NUL byte.".to_owned())?;
-        let initialised = match unsafe { (*entry).init } {
-            Some(init) => unsafe { init(init_path.as_ptr()) },
-            None => true,
-        };
-        if !initialised {
-            return Err("The CLAP plugin could not be initialised.".to_owned());
+        // SAFETY: `entry` comes from `library`, which `instantiate` keeps
+        // loaded for as long as anything it creates from the entry.
+        unsafe {
+            Self::instantiate(
+                library,
+                entry,
+                &init_path,
+                plugin_id,
+                sample_rate,
+                max_block,
+                restore,
+            )
         }
+    }
 
+    /// Initialises the entry and creates, sets up and activates one plugin.
+    /// Every step after `init` may fail; the guards then tear down whatever
+    /// was set up, in order, before `library` is dropped.
+    ///
+    /// # Safety
+    /// `entry` must be a valid CLAP entry inside `library`.
+    unsafe fn instantiate(
+        library: libloading::Library,
+        entry: *const clap_plugin_entry,
+        init_path: &CStr,
+        plugin_id: &str,
+        sample_rate: u32,
+        max_block: usize,
+        restore: &Restore<'_>,
+    ) -> Result<(Self, bool), String> {
+        if !clap_sys::version::clap_version_is_compatible(unsafe { (*entry).clap_version }) {
+            return Err("This CLAP plugin uses an incompatible CLAP version.".to_owned());
+        }
+        // The host is created before the guards, so an early return destroys
+        // the plugin, then `deinit`s, then frees the host (locals drop in
+        // reverse order; `library`, a parameter, goes last).
         let host_state = Arc::new(HostState::new());
         let host = Box::new(make_host(&host_state));
-        let factory = unsafe {
-            (*entry)
-                .get_factory
-                .map(|get| get(CLAP_PLUGIN_FACTORY_ID.as_ptr()))
-                .unwrap_or(ptr::null())
-                .cast::<clap_plugin_factory>()
+        let Some(entry_init) = (unsafe { EntryInit::init(entry, init_path) }) else {
+            return Err("The CLAP plugin could not be initialised.".to_owned());
         };
+        let factory = entry_init.plugin_factory();
         if factory.is_null() {
-            unsafe { (*entry).deinit.map(|deinit| deinit()) };
             return Err("This CLAP bundle has no plugin factory.".to_owned());
         }
         let Some(create) = (unsafe { (*factory).create_plugin }) else {
-            unsafe { (*entry).deinit.map(|deinit| deinit()) };
             return Err("The CLAP factory cannot create plugins.".to_owned());
         };
         let id = CString::new(plugin_id)
             .map_err(|_| "The CLAP plugin id contains a NUL byte.".to_owned())?;
         let plugin = unsafe { create(factory, &*host, id.as_ptr()) };
         if plugin.is_null() {
-            unsafe { (*entry).deinit.map(|deinit| deinit()) };
             return Err("The CLAP plugin could not be created.".to_owned());
         }
+        let instance = unsafe { PluginInstance::new(plugin) };
         let Some(init) = (unsafe { (*plugin).init }) else {
-            if let Some(destroy) = unsafe { (*plugin).destroy } {
-                unsafe { destroy(plugin) };
-            }
-            unsafe { (*entry).deinit.map(|deinit| deinit()) };
             return Err("The CLAP plugin has no init function.".to_owned());
         };
         if !unsafe { init(plugin) } {
-            if let Some(destroy) = unsafe { (*plugin).destroy } {
-                unsafe { destroy(plugin) };
-            }
-            unsafe { (*entry).deinit.map(|deinit| deinit()) };
             return Err("The CLAP plugin refused to start.".to_owned());
         }
 
@@ -510,11 +617,12 @@ impl ClapPlugin {
         let block = max_block.max(1).min(MAX_BLOCK);
 
         let mut plugin = Self {
-            plugin,
-            entry,
-            library,
+            instance,
+            _entry: entry_init,
             _host: host,
             host_state,
+            _library: library,
+            plugin,
             params_ext,
             gui_ext,
             timer_ext,
@@ -532,7 +640,6 @@ impl ClapPlugin {
             max_block: block,
             steady_time: 0,
             started: false,
-            active: false,
             editor_open: false,
             has_editor: false,
         };
@@ -609,7 +716,7 @@ impl ClapPlugin {
         }
         let can_flush =
             unsafe { self.params_ext.as_ref() }.is_some_and(|params| params.flush.is_some());
-        if !self.active && can_flush {
+        if !self.instance.active && can_flush {
             self.flush_parameters(false);
         }
         self.note_pending();
@@ -651,7 +758,7 @@ impl ClapPlugin {
         if !unsafe { activate(self.plugin, self.sample_rate, 1, self.max_block as u32) } {
             return Err("The CLAP plugin refused to activate.".to_owned());
         }
-        self.active = true;
+        self.instance.active = true;
         Ok(())
     }
 
@@ -912,7 +1019,7 @@ impl ClapPlugin {
         frames: usize,
         mix: f32,
     ) -> Result<(), String> {
-        if !self.active {
+        if !self.instance.active {
             return Err("The CLAP plugin is not active.".to_owned());
         }
         let _audio_thread = AudioThreadScope::enter();
@@ -1145,25 +1252,14 @@ impl Drop for ClapPlugin {
         target.timer_ext = ptr::null();
         drop(target);
         self.close_editor();
-        unsafe {
-            if self.started {
-                if let Some(stop) = (*self.plugin).stop_processing {
-                    stop(self.plugin);
-                }
-            }
-            if self.active {
-                if let Some(deactivate) = (*self.plugin).deactivate {
-                    deactivate(self.plugin);
-                }
-            }
-            if let Some(destroy) = (*self.plugin).destroy {
-                destroy(self.plugin);
-            }
-            if let Some(deinit) = (*self.entry).deinit {
-                deinit();
+        if self.started {
+            if let Some(stop) = unsafe { (*self.plugin).stop_processing } {
+                unsafe { stop(self.plugin) };
             }
         }
-        let _ = &self.library;
+        // The fields finish the teardown: `instance` deactivates and destroys
+        // the plugin, `_entry` deinits the module, then the host and the
+        // library go (see the field order on the struct).
     }
 }
 
@@ -1702,21 +1798,13 @@ pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<ClapCandidate>, String> {
             .into_owned(),
     )
     .map_err(|_| "path contains a NUL byte".to_owned())?;
-    let initialised = match unsafe { (*entry).init } {
-        Some(init) => unsafe { init(init_path.as_ptr()) },
-        None => true,
-    };
-    if !initialised {
+    // SAFETY: `library` outlives the guard (it is declared first, so it is
+    // dropped last).
+    let Some(entry_init) = (unsafe { EntryInit::init(entry, &init_path) }) else {
         return Err("init failed".to_owned());
-    }
+    };
     let result: Result<Vec<ClapCandidate>, String> = (|| {
-        let factory = unsafe {
-            (*entry)
-                .get_factory
-                .map(|get| get(CLAP_PLUGIN_FACTORY_ID.as_ptr()))
-                .unwrap_or(ptr::null())
-                .cast::<clap_plugin_factory>()
-        };
+        let factory = entry_init.plugin_factory();
         if factory.is_null() {
             return Ok(Vec::new());
         }
@@ -1739,7 +1827,7 @@ pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<ClapCandidate>, String> {
         }
         Ok(found)
     })();
-    unsafe { (*entry).deinit.map(|deinit| deinit()) };
+    drop(entry_init);
     result
 }
 
@@ -1914,6 +2002,313 @@ mod tests {
             (istream.read.expect("read"))(&istream, back.as_mut_ptr() as *mut c_void, 64)
         };
         assert_eq!(&back[..count as usize], payload);
+    }
+
+    /// A fake CLAP module driven from Rust: every entry and plugin callback
+    /// logs itself, and `Fail` picks the step that goes wrong.  The callbacks
+    /// all run on the test thread, so the log and the setting are
+    /// thread-local and the tests can run in parallel.
+    mod fake {
+        use super::super::*;
+        use std::cell::RefCell;
+
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        pub(super) enum Fail {
+            Nothing,
+            EntryInit,
+            NoFactory,
+            NoCreate,
+            CreateNull,
+            NoPluginInit,
+            PluginInit,
+            TooManyChannels,
+            Activate,
+        }
+
+        thread_local! {
+            static FAIL: Cell<Fail> = const { Cell::new(Fail::Nothing) };
+            static LOG: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+        }
+
+        fn log(event: &'static str) {
+            LOG.with(|log| log.borrow_mut().push(event));
+        }
+
+        fn failing(step: Fail) -> bool {
+            FAIL.with(Cell::get) == step
+        }
+
+        pub(super) fn reset(step: Fail) {
+            FAIL.with(|fail| fail.set(step));
+            LOG.with(|log| log.borrow_mut().clear());
+        }
+
+        pub(super) fn events() -> Vec<&'static str> {
+            LOG.with(|log| log.borrow().clone())
+        }
+
+        pub(super) fn count(event: &str) -> usize {
+            events().iter().filter(|logged| **logged == event).count()
+        }
+
+        unsafe extern "C" fn entry_init(_path: *const c_char) -> bool {
+            log("entry.init");
+            !failing(Fail::EntryInit)
+        }
+
+        unsafe extern "C" fn entry_deinit() {
+            log("entry.deinit");
+        }
+
+        unsafe extern "C" fn entry_get_factory(_id: *const c_char) -> *const c_void {
+            match FAIL.with(Cell::get) {
+                Fail::NoFactory => ptr::null(),
+                Fail::NoCreate => (&FACTORY_WITHOUT_CREATE as *const clap_plugin_factory).cast(),
+                _ => (&FACTORY as *const clap_plugin_factory).cast(),
+            }
+        }
+
+        unsafe extern "C" fn factory_create(
+            _factory: *const clap_plugin_factory,
+            host: *const clap_host,
+            _id: *const c_char,
+        ) -> *const clap_plugin {
+            log("create");
+            assert!(!host.is_null());
+            if failing(Fail::CreateNull) {
+                return ptr::null();
+            }
+            let init = if failing(Fail::NoPluginInit) {
+                None
+            } else {
+                Some(plugin_init as unsafe extern "C" fn(*const clap_plugin) -> bool)
+            };
+            Box::into_raw(Box::new(clap_plugin {
+                desc: ptr::null(),
+                plugin_data: ptr::null_mut(),
+                init,
+                destroy: Some(plugin_destroy),
+                activate: Some(plugin_activate),
+                deactivate: Some(plugin_deactivate),
+                start_processing: None,
+                stop_processing: None,
+                reset: None,
+                process: None,
+                get_extension: Some(plugin_get_extension),
+                on_main_thread: None,
+            }))
+        }
+
+        unsafe extern "C" fn plugin_init(_plugin: *const clap_plugin) -> bool {
+            log("plugin.init");
+            !failing(Fail::PluginInit)
+        }
+
+        unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
+            log("destroy");
+            drop(unsafe { Box::from_raw(plugin as *mut clap_plugin) });
+        }
+
+        unsafe extern "C" fn plugin_activate(
+            _plugin: *const clap_plugin,
+            _rate: f64,
+            _min: u32,
+            _max: u32,
+        ) -> bool {
+            log("activate");
+            !failing(Fail::Activate)
+        }
+
+        unsafe extern "C" fn plugin_deactivate(_plugin: *const clap_plugin) {
+            log("deactivate");
+        }
+
+        unsafe extern "C" fn plugin_get_extension(
+            _plugin: *const clap_plugin,
+            id: *const c_char,
+        ) -> *const c_void {
+            let id = unsafe { CStr::from_ptr(id) };
+            if id == CLAP_EXT_AUDIO_PORTS && failing(Fail::TooManyChannels) {
+                return (&PORTS as *const clap_plugin_audio_ports).cast();
+            }
+            ptr::null()
+        }
+
+        unsafe extern "C" fn ports_count(_plugin: *const clap_plugin, _is_input: bool) -> u32 {
+            1
+        }
+
+        unsafe extern "C" fn ports_get(
+            _plugin: *const clap_plugin,
+            _index: u32,
+            _is_input: bool,
+            info: *mut clap_audio_port_info,
+        ) -> bool {
+            unsafe {
+                (*info).channel_count = 6;
+                (*info).flags = CLAP_AUDIO_PORT_IS_MAIN;
+            }
+            true
+        }
+
+        static PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports {
+            count: Some(ports_count),
+            get: Some(ports_get),
+        };
+
+        static FACTORY: clap_plugin_factory = clap_plugin_factory {
+            get_plugin_count: None,
+            get_plugin_descriptor: None,
+            create_plugin: Some(factory_create),
+        };
+
+        static FACTORY_WITHOUT_CREATE: clap_plugin_factory = clap_plugin_factory {
+            get_plugin_count: None,
+            get_plugin_descriptor: None,
+            create_plugin: None,
+        };
+
+        pub(super) static ENTRY: clap_plugin_entry = clap_plugin_entry {
+            clap_version: CLAP_VERSION,
+            init: Some(entry_init),
+            deinit: Some(entry_deinit),
+            get_factory: Some(entry_get_factory),
+        };
+
+        /// A handle on the test executable itself, standing in for the
+        /// plugin library (unloading it only drops a reference).
+        pub(super) fn library() -> libloading::Library {
+            #[cfg(windows)]
+            {
+                libloading::os::windows::Library::this()
+                    .expect("open the test executable")
+                    .into()
+            }
+            #[cfg(unix)]
+            {
+                libloading::os::unix::Library::this().into()
+            }
+        }
+
+        /// Runs the real load sequence against the fake module.
+        pub(super) fn load(plugin_id: &str) -> Result<ClapPlugin, String> {
+            let pref = crate::audio::PluginPref::default();
+            let restore = Restore::from_pref(&pref);
+            unsafe {
+                ClapPlugin::instantiate(
+                    library(),
+                    &ENTRY,
+                    c"fake.clap",
+                    plugin_id,
+                    48_000,
+                    256,
+                    &restore,
+                )
+            }
+            .map(|(plugin, _)| plugin)
+        }
+    }
+
+    #[test]
+    fn a_refused_entry_init_is_not_deinitialised() {
+        fake::reset(fake::Fail::EntryInit);
+        assert!(fake::load("fake").is_err());
+        assert_eq!(fake::events(), ["entry.init"]);
+    }
+
+    #[test]
+    fn failures_before_create_deinit_the_entry_once() {
+        for step in [fake::Fail::NoFactory, fake::Fail::NoCreate] {
+            fake::reset(step);
+            assert!(fake::load("fake").is_err(), "{step:?}");
+            assert_eq!(fake::events(), ["entry.init", "entry.deinit"], "{step:?}");
+        }
+        // A plugin id with a NUL byte fails after `init` too.
+        fake::reset(fake::Fail::Nothing);
+        assert!(fake::load("fa\0ke").is_err());
+        assert_eq!(fake::events(), ["entry.init", "entry.deinit"]);
+        // So does a factory that creates nothing.
+        fake::reset(fake::Fail::CreateNull);
+        assert!(fake::load("fake").is_err());
+        assert_eq!(fake::events(), ["entry.init", "create", "entry.deinit"]);
+    }
+
+    #[test]
+    fn failures_after_create_destroy_then_deinit_once() {
+        let cases: [(fake::Fail, &[&str]); 4] = [
+            (
+                fake::Fail::NoPluginInit,
+                &["entry.init", "create", "destroy", "entry.deinit"],
+            ),
+            (
+                fake::Fail::PluginInit,
+                &[
+                    "entry.init",
+                    "create",
+                    "plugin.init",
+                    "destroy",
+                    "entry.deinit",
+                ],
+            ),
+            (
+                fake::Fail::TooManyChannels,
+                &[
+                    "entry.init",
+                    "create",
+                    "plugin.init",
+                    "destroy",
+                    "entry.deinit",
+                ],
+            ),
+            (
+                fake::Fail::Activate,
+                &[
+                    "entry.init",
+                    "create",
+                    "plugin.init",
+                    "activate",
+                    "destroy",
+                    "entry.deinit",
+                ],
+            ),
+        ];
+        for (step, expected) in cases {
+            fake::reset(step);
+            assert!(fake::load("fake").is_err(), "{step:?}");
+            assert_eq!(fake::events(), expected, "{step:?}");
+        }
+    }
+
+    #[test]
+    fn a_loaded_plugin_tears_down_once_in_order() {
+        fake::reset(fake::Fail::Nothing);
+        let plugin = fake::load("fake").expect("load the fake plugin");
+        assert_eq!(fake::count("destroy"), 0);
+        assert_eq!(fake::count("entry.deinit"), 0);
+        drop(plugin);
+        assert_eq!(
+            fake::events(),
+            [
+                "entry.init",
+                "create",
+                "plugin.init",
+                "activate",
+                "deactivate",
+                "destroy",
+                "entry.deinit",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_entry_guard_deinits_exactly_once() {
+        fake::reset(fake::Fail::Nothing);
+        let guard = unsafe { super::EntryInit::init(&fake::ENTRY, c"fake.clap") }
+            .expect("the fake entry initialises");
+        assert!(!guard.plugin_factory().is_null());
+        assert_eq!(fake::count("entry.deinit"), 0);
+        drop(guard);
+        assert_eq!(fake::events(), ["entry.init", "entry.deinit"]);
     }
 
     /// Optional smoke test used while developing the host: point
