@@ -155,8 +155,8 @@ impl RigWerkApp {
     /// The period this output will ask for. Cached until the device, the
     /// low-latency switch, or the buffer changes, and never read while the
     /// bridge is opening that same device.
+    #[cfg(target_os = "linux")]
     fn cached_output_period(&mut self, device_id: &str) -> u32 {
-        #[cfg(target_os = "linux")]
         if crate::audio::is_native_id(device_id) {
             return crate::audio::node_latency_frames(self.low_latency_output, self.output_buffer);
         }
@@ -185,6 +185,7 @@ impl RigWerkApp {
     /// Compares PipeWire once per output setting, and only while the bridge
     /// is not holding the device. A running bridge updates the period from
     /// the snapshot instead of opening the PCM again.
+    #[cfg(target_os = "linux")]
     pub(crate) fn refresh_quantum_if_idle(&mut self) {
         if matches!(
             self.engine.state,
@@ -210,6 +211,10 @@ impl RigWerkApp {
         }
         self.refresh_quantum_check(true);
     }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)]
+    pub(crate) fn refresh_quantum_if_idle(&mut self) {}
 
     /// One short line for the Live page MODE / OUTPUT footers: graph block
     /// size in samples and how long that block lasts. Backend name is already

@@ -14,7 +14,7 @@ pub const PIPEWIRE_LOW_QUANTUM_MAX: u32 = 256;
 
 /// What the Linux low-latency path got: PipeWire's graph quantum compared with
 /// the ALSA period the output will use.  Empty on other platforms.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Debug, Default)]
 pub struct QuantumInfo {
     /// Whether PipeWire's settings store could be read.
@@ -33,7 +33,7 @@ pub struct QuantumInfo {
     pub note: String,
 }
 
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl QuantumInfo {
     /// Builds the comparison.  A period at or below the quantum that divides
     /// it evenly is a fit: the ALSA side is at least as fine as the graph.

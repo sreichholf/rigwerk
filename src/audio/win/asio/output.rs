@@ -370,10 +370,10 @@ pub(crate) fn silence_asio_output(
             .get(channel)
             .copied()
             .unwrap_or(azo::sys::SampleType::PCM_F32_LSB);
-        for index in 0..2 {
+        for &ptr in buffer {
             for frame in 0..buffer_frames {
                 unsafe {
-                    write_asio_sample(buffer[index].cast::<u8>(), frame, sample_type, 0.0);
+                    write_asio_sample(ptr.cast::<u8>(), frame, sample_type, 0.0);
                 }
             }
         }

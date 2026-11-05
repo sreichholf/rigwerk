@@ -680,6 +680,7 @@ impl Shared {
     }
 
     /// Records the graph/device delay past our playback node, in nanoseconds.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn set_path_delay_ns(&self, ns: u64) {
         self.path_delay_ns.store(ns, Ordering::Relaxed);
     }

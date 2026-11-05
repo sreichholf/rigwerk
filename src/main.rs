@@ -78,7 +78,7 @@ fn ensure_screenshot_console() {
         if handle_missing(GetStdHandle(STD_ERROR_HANDLE)) {
             for std_handle in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
                 let console = CreateFileA(
-                    b"CONOUT$\0".as_ptr(),
+                    c"CONOUT$".as_ptr().cast(),
                     GENERIC_WRITE,
                     FILE_SHARE_READ_WRITE,
                     std::ptr::null_mut(),

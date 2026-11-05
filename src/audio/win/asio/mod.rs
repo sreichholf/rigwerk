@@ -13,14 +13,14 @@ pub(crate) use output::run_asio_output_bridge;
 pub(crate) static ASIO_INPUT_CALLBACKS: azo::sys::Callbacks = azo::sys::Callbacks {
     buffer_switch: asio_buffer_switch,
     sample_rate_did_change: asio_sample_rate_did_change,
-    asio_message: asio_message,
+    asio_message,
     buffer_switch_time_info: asio_buffer_switch_time_info,
 };
 
 pub(crate) static ASIO_OUTPUT_CALLBACKS: azo::sys::Callbacks = azo::sys::Callbacks {
     buffer_switch: asio_output_buffer_switch,
     sample_rate_did_change: asio_sample_rate_did_change,
-    asio_message: asio_message,
+    asio_message,
     buffer_switch_time_info: asio_output_buffer_switch_time_info,
 };
 

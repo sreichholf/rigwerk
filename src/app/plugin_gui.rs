@@ -199,7 +199,7 @@ impl ClapGuiWindow {
             closed: std::sync::atomic::AtomicBool::new(false),
             client_size: std::sync::atomic::AtomicU64::new(0),
         });
-        let hwnd = create_window(title, width, height, &*state)?;
+        let hwnd = create_window(title, width, height, &state)?;
 
         let scale = unsafe {
             let dpi = winapi::um::winuser::GetDpiForWindow(hwnd);
@@ -324,7 +324,7 @@ fn create_window(
             }
             return 0;
         }
-        if message == WM_SIZE && wparam != SIZE_MINIMIZED as usize {
+        if message == WM_SIZE && wparam != SIZE_MINIMIZED {
             if let Some(state) = window_state(hwnd) {
                 let mut rect: RECT = mem::zeroed();
                 if GetClientRect(hwnd, &mut rect) != 0 {
