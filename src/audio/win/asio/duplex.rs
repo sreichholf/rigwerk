@@ -115,6 +115,7 @@ pub(crate) fn run_asio_duplex_bridge(
     silence_asio_output(output_buffers, &output_types, buffer_frames.max(1) as usize);
 
     let mut output_state = OutputMixer::new(rate);
+    output_state.follow_source_rate(&shared);
     output_state.prepare(buffer_frames.max(1) as usize);
     let signal = AsioSignal::new();
     let context = AsioCallbackContext::new(

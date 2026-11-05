@@ -233,6 +233,7 @@ pub(crate) fn run_asio_output_loop(
     }
 
     let mut mixer = OutputMixer::new(rate);
+    mixer.follow_source_rate(&shared);
     mixer.prepare(buffer_frames.max(1) as usize);
 
     let buffers: Vec<[*mut c_void; 2]> = match unsafe {

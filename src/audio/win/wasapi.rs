@@ -443,6 +443,8 @@ unsafe fn run(
 
     let channels = session.info.channels;
     let mut mixer = OutputMixer::new(session.info.rate);
+    // Design the filter before the loop starts, not during an audio step.
+    mixer.follow_source_rate(&shared);
     // Keep exactly one step queued.  The host hands us a much larger buffer
     // (about two steps), but filling it would add its whole size to the
     // latency and throw away the low-latency stream's advantage.  One step is

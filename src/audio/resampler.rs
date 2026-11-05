@@ -34,8 +34,11 @@ pub(crate) struct FrameResampler {
     /// The step actually used, including the drift correction.
     step: f64,
     correction_ppm: f32,
-    /// One windowed-sinc row per phase, normalized to unity gain at DC.
-    kernel: [[f32; TAPS]; PHASES],
+    /// One windowed-sinc row per phase, normalized to unity gain at DC.  The
+    /// extra row is the fraction-1.0 kernel, so blending from the last phase
+    /// reaches the next sample with the same tap alignment instead of wrapping
+    /// to the phase-0 row one sample early.
+    kernel: [[f32; TAPS]; PHASES + 1],
     /// The source frames around the read position, as a ring.
     history: [(f32, f32); HISTORY],
     /// Absolute source index of the next frame to fetch.
@@ -51,7 +54,7 @@ impl FrameResampler {
             base_step: 1.0,
             step: 1.0,
             correction_ppm: 0.0,
-            kernel: [[0.0; TAPS]; PHASES],
+            kernel: [[0.0; TAPS]; PHASES + 1],
             history: [(0.0, 0.0); HISTORY],
             next_index: 0,
             read_pos: 0.0,
@@ -124,7 +127,9 @@ impl FrameResampler {
 
         let phase = (position - index as f64) * PHASES as f64;
         let first_phase = (phase as usize).min(PHASES - 1);
-        let second_phase = (first_phase + 1) & (PHASES - 1);
+        // The blend target is the next phase, which for the last bin is the
+        // fraction-1.0 row at `PHASES`, not a wrap back to phase 0.
+        let second_phase = first_phase + 1;
         let blend = (phase - first_phase as f64) as f32;
         let first_row = &self.kernel[first_phase];
         let second_row = &self.kernel[second_phase];
@@ -145,11 +150,14 @@ impl FrameResampler {
     }
 
     /// Builds the windowed-sinc table.  The cutoff sits at half the lower of
-    /// the two rates, 5% below it so the Blackman window's transition band
-    /// ends before the output Nyquist instead of above it.
+    /// the two rates, 5% below it so the Blackman window's transition band has
+    /// room below the output Nyquist.  With 32 taps that transition is wide
+    /// (about 0.17 source cycles/sample), so content well above the output
+    /// Nyquist is rejected strongly but the first few kHz above it only
+    /// partially; see the comment on `TAPS`.
     fn build_kernel(&mut self, source_rate: u32, output_rate: u32) {
         let cutoff = 0.5 * (output_rate as f64 / source_rate as f64).min(1.0) * 0.95;
-        for phase in 0..PHASES {
+        for phase in 0..=PHASES {
             let fraction = phase as f64 / PHASES as f64;
             let mut sum = 0.0;
             for tap in 0..TAPS {
@@ -293,5 +301,33 @@ mod tests {
             assert!((left - 0.5).abs() < 1e-3, "left {left}");
             assert!((right + 0.25).abs() < 1e-3, "right {right}");
         }
+    }
+
+    #[test]
+    fn fractional_phase_blend_does_not_jump_a_sample() {
+        // A +20 ppm trim crosses the last phase bin only when the fractional
+        // part is within 1/512 of the next sample.  Blending that bin toward
+        // the phase-0 row (instead of a fraction-1.0 row at the same tap
+        // alignment) returns the previous sample there, which is a periodic
+        // full-scale error rather than a small interpolation error.
+        let source_rate = 48_000u32;
+        let frequency = 10_000.0f64;
+        let step = 1.0 + 20.0f64 * 1e-6;
+        let mut source = sine(source_rate, frequency as f32);
+        let mut resampler = FrameResampler::new(source_rate, source_rate);
+        resampler.set_correction_ppm(20.0);
+
+        let mut position = 0.0f64;
+        let mut worst = 0.0f32;
+        for output in 0..200_000 {
+            let (left, _) = resampler.next(&mut source);
+            if output >= 64 {
+                let expected = (std::f64::consts::TAU * frequency * position / source_rate as f64)
+                    .sin() as f32;
+                worst = worst.max((left - expected).abs());
+            }
+            position += step;
+        }
+        assert!(worst < 1e-3, "worst interpolation error {worst}");
     }
 }

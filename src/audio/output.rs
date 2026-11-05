@@ -209,6 +209,9 @@ where
     let error_shared = Arc::clone(&shared);
     let channels = channels.max(1);
     let mut mixer = OutputMixer::new(config.sample_rate);
+    // Design the filter before the stream starts: the first callback must not
+    // spend a millisecond building the kernel.
+    mixer.follow_source_rate(&shared);
 
     let stream = device
         .build_output_stream(
