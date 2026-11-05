@@ -12,6 +12,7 @@ use super::devices::pick_output_config;
 use super::linux::alsa::smallest_output_buffer;
 use super::mixer::OutputMixer;
 use super::shared::Shared;
+use super::thread_priority::PromoteOnce;
 #[cfg(target_os = "windows")]
 use super::win::wasapi;
 
@@ -224,6 +225,7 @@ where
     let mix_shared = Arc::clone(&shared);
     let error_shared = Arc::clone(&shared);
     let channels = channels.max(1);
+    let mut promote = PromoteOnce::default();
     let mut mixer = OutputMixer::new(config.sample_rate);
     // Design the filter before the stream starts: the first callback must not
     // spend a millisecond building the kernel.
@@ -239,6 +241,8 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
+                // cpal's stream thread starts at normal priority on Linux.
+                promote.run();
                 let frames = data.len() / channels;
                 // The block the host hands over is the step the device really
                 // runs at, whatever buffer was asked for.

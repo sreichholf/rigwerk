@@ -25,6 +25,13 @@ clap-sys = "0.5"
 libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
+# `realtime` registers cpal's own WASAPI stream threads with MMCSS "Audio"
+# (falling back to THREAD_PRIORITY_TIME_CRITICAL), so a busy UI cannot make a
+# small buffer late.  A
+# refusal is reported as `RealtimeDenied`, which the stream error callbacks do
+# not treat as device loss.  On Linux this feature does nothing without
+# rtkit/D-Bus, so RigWerk promotes its cpal threads itself (`thread_priority`).
+cpal = { version = "0.18", features = ["realtime"] }
 azo = "0.5"
 winapi = { version = "0.3", features = ["libloaderapi", "minwindef", "windef", "winuser"] }
 # Direct WASAPI access for the REAL-style output (IAudioClient3 at the

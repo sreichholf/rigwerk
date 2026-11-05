@@ -23,6 +23,7 @@
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
 //! - `denormal`: flush-to-zero for the audio callbacks.
+//! - `thread_priority`: real-time scheduling for cpal's Linux threads.
 
 mod bridge;
 pub(crate) mod clap;
@@ -37,6 +38,7 @@ mod output;
 mod plugins;
 mod resampler;
 mod shared;
+mod thread_priority;
 mod types;
 
 #[cfg(target_os = "windows")]
