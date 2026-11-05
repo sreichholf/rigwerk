@@ -299,7 +299,7 @@ These are recorded so the fixes are not overclaimed:
   allocates for sources up to 192 kHz. Removing it needs a prepare/start split
   for the ASIO input.
 
-## Fourth phase: plugin lifecycle and state (H5-H7, H9)
+## Fourth phase: plugin lifecycle and state (H5-H7, H9, H16)
 
 | Finding | Commit | Subject |
 | --- | --- | --- |
@@ -307,6 +307,7 @@ These are recorded so the fixes are not overclaimed:
 | H6 | `478eb70` | Never leak a CLAP plugin or module init on a failed load |
 | H7 | `3eb2704` | Restore CLAP parameters and save plugin state for both formats |
 | H9 | `3f42c70` | Give CLAP plugins one buffer per declared audio port |
+| H16 | `04d9c62` | Keep preferences when one patch or plugin entry cannot be read |
 
 H8 (plugin lifecycle on bridge threads) is not claimed as complete here.
 
@@ -374,12 +375,12 @@ the port layout is covered by the in-process fake only.
 
 ## Not fixed yet
 
-The non-blocking findings still open in `REVIEW.md` are plugin lifecycle
-placement (H8), device identity and presets (H12-H16), latency reporting (H4),
-Linux classification and quantum (H11, H17, H18), UI data honesty/layout/
-accessibility/diagnostics (U1-U7), and build/package hygiene. H1, H2, H5-H7,
-H9, H10 and the M3/M4 runtime residuals listed above are addressed by this
-branch.
+The non-blocking findings still open in `REVIEW.md` are gain/mute/routing
+ramping (H3), latency reporting (H4), plugin lifecycle placement (H8), Linux
+classification and quantum (H11, H17, H18), device identity and presets
+(H12-H15), UI data honesty/layout/accessibility/diagnostics (U1-U7), and
+build/package hygiene. H1, H2, H5-H7, H9, H10, H16 and the M3/M4 runtime
+residuals listed above are addressed by this branch.
 
 The second review round re-verified every open finding at `66fa9a2`; at that
 point all of them, including H5-H9, were still open. It also sharpened several
