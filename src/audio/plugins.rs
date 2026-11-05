@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 
 use vst3_host::{AudioBuffers, Plugin, Vst3Host};
 
-use super::clap::ClapPlugin;
+use super::clap::{ClapPlugin, HostState};
 
 /// Which plugin format an insert uses.  Saved inserts written before CLAP
 /// support default to VST3.
@@ -47,7 +47,44 @@ pub(crate) enum PluginHandle {
     Clap(Arc<Mutex<ClapPlugin>>),
 }
 
-impl PluginHandle {}
+impl PluginHandle {
+    /// Whether both handles point at the same plugin instance.
+    pub(crate) fn same(&self, other: &PluginHandle) -> bool {
+        match (self, other) {
+            (PluginHandle::Vst3(a), PluginHandle::Vst3(b)) => Arc::ptr_eq(a, b),
+            (PluginHandle::Clap(a), PluginHandle::Clap(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+/// Reads a plugin's current controls for [`PluginChain::apply_synced_parameters`],
+/// without the chain lock.  Returns `None` while a CLAP control moved in
+/// RigWerk's panel is still waiting for the next audio block, because reading
+/// the plugin then would show the old value.
+pub(crate) fn read_plugin_parameters(handle: &PluginHandle) -> Option<Vec<PluginParamView>> {
+    if let PluginHandle::Clap(clap) = handle {
+        let clap = clap.lock().unwrap_or_else(|poison| poison.into_inner());
+        if clap.has_pending_parameters() {
+            return None;
+        }
+    }
+    Some(host_parameters(handle))
+}
+
+/// Runs one CLAP plugin's main-thread work.  Callbacks and timers run without
+/// any lock; only a pending flush or rescan takes the instance lock, and only
+/// when the audio callback is not holding it.
+pub(crate) fn service_clap(host: &HostState, plugin: &Mutex<ClapPlugin>) {
+    if !host.service_main_thread() {
+        return;
+    }
+    match plugin.try_lock() {
+        Ok(mut plugin) => plugin.service_pending(),
+        Err(TryLockError::Poisoned(poison)) => poison.into_inner().service_pending(),
+        Err(TryLockError::WouldBlock) => {}
+    }
+}
 
 /// The largest block a plugin is asked to process, and the block size it is
 /// set up with.  Many plugins allocate fixed internal buffers for the size
@@ -147,6 +184,11 @@ pub(crate) struct Slot {
     plugin: Option<PluginHandle>,
     error: Option<String>,
     parameters: Vec<PluginParamView>,
+    /// Read once at load, so drawing the insert list never locks a plugin.
+    has_editor: bool,
+    /// A CLAP plugin's callback state, so its main-thread work can run
+    /// without the chain lock or the instance lock.
+    clap_host: Option<Arc<HostState>>,
 }
 
 impl Slot {
@@ -156,6 +198,8 @@ impl Slot {
             plugin: None,
             error: None,
             parameters: Vec::new(),
+            has_editor: false,
+            clap_host: None,
         }
     }
 
@@ -163,18 +207,27 @@ impl Slot {
         match load_plugin(&pref, sample_rate) {
             Ok(plugin) => {
                 let parameters = host_parameters(&plugin);
+                let has_editor = host_has_editor(&plugin);
+                let clap_host = match &plugin {
+                    PluginHandle::Clap(clap) => Some(
+                        clap.lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .host(),
+                    ),
+                    PluginHandle::Vst3(_) => None,
+                };
                 Self {
                     pref,
                     plugin: Some(plugin),
                     error: None,
                     parameters,
+                    has_editor,
+                    clap_host,
                 }
             }
             Err(error) => Self {
-                pref,
-                plugin: None,
                 error: Some(error),
-                parameters: Vec::new(),
+                ..Self::empty(pref)
             },
         }
     }
@@ -188,10 +241,21 @@ impl Slot {
     /// shows the values the plugin has right now.  A slot that failed stays
     /// failed.
     fn ensure_loaded(&mut self, sample_rate: u32) {
+        if !self.load_if_needed(sample_rate) {
+            if let Some(parameters) = self.plugin.as_ref().map(host_parameters) {
+                self.parameters = parameters;
+            }
+        }
+    }
+
+    /// Opens a never-loaded slot.  Returns whether it loaded one, which also
+    /// read the fresh control list.
+    fn load_if_needed(&mut self, sample_rate: u32) -> bool {
         if self.plugin.is_none() && self.error.is_none() {
             *self = Slot::loaded(self.pref.clone(), sample_rate);
-        } else if let Some(parameters) = self.plugin.as_ref().map(host_parameters) {
-            self.parameters = parameters;
+            true
+        } else {
+            false
         }
     }
 
@@ -207,7 +271,7 @@ impl Slot {
             mix: self.pref.mix,
             error: self.error.clone(),
             parameters: self.parameters.clone(),
-            has_editor: self.plugin.as_ref().map(host_has_editor).unwrap_or(false),
+            has_editor: self.plugin.is_some() && self.has_editor,
         }
     }
 }
@@ -376,8 +440,13 @@ impl PluginChain {
         }
     }
 
-    pub(crate) fn restore(&mut self, prefs: Vec<PluginPref>) {
-        self.slots = prefs.into_iter().map(Slot::empty).collect();
+    /// Replaces the slots and hands the old ones back, so the caller can
+    /// drop (and destroy) them after releasing the chain lock.
+    pub(crate) fn restore(&mut self, prefs: Vec<PluginPref>) -> Vec<Slot> {
+        std::mem::replace(
+            &mut self.slots,
+            prefs.into_iter().map(Slot::empty).collect(),
+        )
     }
 
     /// Builds a fully opened slot without holding the chain lock.  Add it with
@@ -445,10 +514,11 @@ impl PluginChain {
         self.slots.iter().filter(|slot| slot.active()).count()
     }
 
-    pub(crate) fn remove(&mut self, index: usize) {
-        if index < self.slots.len() {
-            self.slots.remove(index);
-        }
+    /// Takes a slot out of the chain.  The caller drops it after releasing
+    /// the chain lock: destroying a plugin can take a while, and the audio
+    /// callback passes the chain through dry whenever it cannot get the lock.
+    pub(crate) fn remove(&mut self, index: usize) -> Option<Slot> {
+        (index < self.slots.len()).then(|| self.slots.remove(index))
     }
 
     pub(crate) fn move_slot(&mut self, index: usize, delta: isize) {
@@ -487,45 +557,51 @@ impl PluginChain {
         self.slots.get(index).and_then(|slot| slot.plugin.clone())
     }
 
-    /// Gives CLAP plugins their main-thread callbacks and timers even when
-    /// their own interface is not open.  A busy audio callback simply skips
-    /// this frame; the work is picked up next time.
-    pub(crate) fn service_main_threads(&mut self) {
-        for slot in &mut self.slots {
-            let Some(PluginHandle::Clap(handle)) = &slot.plugin else {
-                continue;
-            };
-            match handle.try_lock() {
-                Ok(mut plugin) => plugin.service_main_thread(),
-                Err(std::sync::TryLockError::Poisoned(poison)) => {
-                    poison.into_inner().service_main_thread()
+    /// The CLAP plugins that need main-thread servicing.  The caller runs
+    /// it with [`service_clap`] after releasing the chain lock.
+    pub(crate) fn clap_services(&self) -> Vec<(Arc<HostState>, Arc<Mutex<ClapPlugin>>)> {
+        self.slots
+            .iter()
+            .filter_map(|slot| match (&slot.clap_host, &slot.plugin) {
+                (Some(host), Some(PluginHandle::Clap(plugin))) => {
+                    Some((Arc::clone(host), Arc::clone(plugin)))
                 }
-                Err(std::sync::TryLockError::WouldBlock) => {}
-            }
-        }
+                _ => None,
+            })
+            .collect()
     }
 
-    /// Copies the controls back from the plugin after its own editor changed
-    /// them, so the saved insert keeps those settings across a restart.
-    pub(crate) fn sync_from_plugin(&mut self, index: usize) -> Result<(), String> {
-        let Some(slot) = self.slots.get_mut(index) else {
+    /// The plugin behind one slot, for work that must not hold the chain
+    /// lock.  Fails with the slot's own error when it is not loaded.
+    pub(crate) fn loaded_handle(&self, index: usize) -> Result<PluginHandle, String> {
+        let Some(slot) = self.slots.get(index) else {
             return Err("That insert is no longer in the chain".to_owned());
         };
-        let Some(plugin) = &slot.plugin else {
-            return Err(slot
-                .error
+        slot.plugin.clone().ok_or_else(|| {
+            slot.error
                 .clone()
-                .unwrap_or_else(|| "The plugin is not loaded".to_owned()));
+                .unwrap_or_else(|| "The plugin is not loaded".to_owned())
+        })
+    }
+
+    /// Stores controls read with [`read_plugin_parameters`] back into the
+    /// slot, provided it still holds the same plugin instance.
+    pub(crate) fn apply_synced_parameters(
+        &mut self,
+        index: usize,
+        handle: &PluginHandle,
+        parameters: Vec<PluginParamView>,
+    ) {
+        let Some(slot) = self.slots.get_mut(index) else {
+            return;
         };
-        if let PluginHandle::Clap(clap) = plugin {
-            let clap = clap.lock().unwrap_or_else(|poison| poison.into_inner());
-            if clap.has_pending_parameters() {
-                // A control moved in RigWerk's panel is waiting for the next
-                // audio block; reading the plugin now would show the old value.
-                return Ok(());
-            }
+        if !slot
+            .plugin
+            .as_ref()
+            .is_some_and(|current| current.same(handle))
+        {
+            return;
         }
-        let parameters = host_parameters(plugin);
         slot.pref.params = parameters
             .iter()
             .filter(|parameter| (parameter.value - parameter.default).abs() > 0.0005)
@@ -535,7 +611,6 @@ impl PluginChain {
             })
             .collect();
         slot.parameters = parameters;
-        Ok(())
     }
 
     /// Sets one normalized plugin control and keeps the saved insert in step.
@@ -549,7 +624,7 @@ impl PluginChain {
         let Some(slot) = self.slots.get_mut(index) else {
             return Err("That insert is no longer in the chain".to_owned());
         };
-        slot.ensure_loaded(rate);
+        slot.load_if_needed(rate);
         let Some(plugin) = slot.plugin.as_ref() else {
             return Err(slot
                 .error
@@ -558,23 +633,27 @@ impl PluginChain {
         };
         let value = value.clamp(0.0, 1.0);
         host_set_parameter(plugin, id, value)?;
-        match plugin {
-            PluginHandle::Vst3(_) => {
-                slot.parameters = host_parameters(plugin);
+        // Only the moved control is refreshed; re-reading every parameter on
+        // each drag event held the plugin (and the chain) far longer.
+        let display = match plugin {
+            PluginHandle::Vst3(vst3) => {
+                let vst3 = vst3.lock().unwrap_or_else(|poison| poison.into_inner());
+                vst3.format_parameter(id, value).ok()
             }
-            PluginHandle::Clap(clap) => {
-                let display = clap
-                    .lock()
+            PluginHandle::Clap(clap) => Some(
+                clap.lock()
                     .unwrap_or_else(|poison| poison.into_inner())
-                    .display_for(id, value);
-                if let Some(parameter) = slot
-                    .parameters
-                    .iter_mut()
-                    .find(|parameter| parameter.id == id)
-                {
-                    parameter.value = value;
-                    parameter.display = display;
-                }
+                    .display_for(id, value),
+            ),
+        };
+        if let Some(parameter) = slot
+            .parameters
+            .iter_mut()
+            .find(|parameter| parameter.id == id)
+        {
+            parameter.value = value;
+            if let Some(display) = display {
+                parameter.display = display;
             }
         }
         if let Some(saved) = slot.pref.params.iter_mut().find(|saved| saved.id == id) {
@@ -592,7 +671,7 @@ impl PluginChain {
         let Some(slot) = self.slots.get_mut(index) else {
             return Err("That insert is no longer in the chain".to_owned());
         };
-        slot.ensure_loaded(rate);
+        slot.load_if_needed(rate);
         let Some(plugin) = slot.plugin.as_ref() else {
             return Err(slot
                 .error

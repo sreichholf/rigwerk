@@ -162,6 +162,7 @@ impl RigWerkApp {
 #[cfg(target_os = "windows")]
 struct ClapGuiWindow {
     plugin: Arc<Mutex<ClapPlugin>>,
+    host: Arc<crate::audio::clap::HostState>,
     hwnd: winapi::shared::windef::HWND,
     state: Box<ClapWindowState>,
     last_client: Option<(u32, u32)>,
@@ -176,9 +177,10 @@ struct ClapWindowState {
 #[cfg(target_os = "windows")]
 impl ClapGuiWindow {
     fn open(plugin: Arc<Mutex<ClapPlugin>>, title: &str) -> Result<Self, String> {
-        let (width, height) = {
+        let (width, height, host) = {
             let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            plugin.prepare_editor()?
+            let (width, height) = plugin.prepare_editor()?;
+            (width, height, plugin.host())
         };
         let state = Box::new(ClapWindowState {
             closed: std::sync::atomic::AtomicBool::new(false),
@@ -212,6 +214,7 @@ impl ClapGuiWindow {
         }
         Ok(Self {
             plugin,
+            host,
             hwnd,
             state,
             last_client: None,
@@ -225,16 +228,14 @@ impl ClapGuiWindow {
         if self.state.closed.load(Ordering::Relaxed) {
             return true;
         }
-        let mut plugin = self
-            .plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        plugin.service_main_thread();
-        if plugin.gui_closed() {
+        // Timers and `on_main_thread` (where most editors repaint) run
+        // without the instance lock, so the audio callback keeps processing
+        // this insert while the editor is busy.
+        crate::audio::service_clap(&self.host, &self.plugin);
+        if self.host.take_gui_closed() {
             return true;
         }
-        if let Some((width, height)) = plugin.take_gui_resize() {
-            drop(plugin);
+        if let Some((width, height)) = self.host.take_gui_resize() {
             unsafe {
                 resize_window(self.hwnd, width, height);
             }
@@ -247,7 +248,12 @@ impl ClapGuiWindow {
             let height = packed as u32;
             if self.last_client != Some((width, height)) {
                 self.last_client = Some((width, height));
-                plugin.resize_editor(width, height);
+                // A resize is a user action and rare; it is the one editor
+                // call that still takes the instance lock.
+                self.plugin
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .resize_editor(width, height);
             }
         }
         false

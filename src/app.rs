@@ -337,6 +337,9 @@ impl eframe::App for RigWerkApp {
 
 impl RigWerkApp {
     pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
+        // eframe builds the app on its UI thread, which is the thread that
+        // services CLAP plugins; record it before any plugin can load.
+        crate::audio::clap::mark_main_thread();
         configure_style(&cc.egui_ctx);
         let stored: Option<Preferences> = if screenshot.is_some() {
             // A screenshot run must be reproducible and must never open audio

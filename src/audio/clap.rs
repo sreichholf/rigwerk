@@ -11,7 +11,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use clap_sys::audio_buffer::clap_audio_buffer;
@@ -99,11 +99,38 @@ struct TimerEntry {
     next: Instant,
 }
 
+/// The thread CLAP plugins treat as their main thread: the UI thread, which
+/// runs `on_main_thread`, timers and editors.  Recorded once at startup so a
+/// plugin that happens to be loaded elsewhere still sees the right answer from
+/// `is_main_thread`.
+static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
+/// Records the calling thread as the CLAP main thread.  Call it from the UI
+/// thread before any plugin is loaded.
+pub(crate) fn mark_main_thread() {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
+}
+
+/// What main-thread servicing needs to call into the plugin without taking the
+/// instance mutex.  The pointers are cleared (under the write lock) before the
+/// plugin is destroyed, so a reader holding the read lock always sees either a
+/// live plugin or null.
+struct MainThreadTarget {
+    plugin: *const clap_plugin,
+    timer_ext: *const clap_plugin_timer_support,
+}
+
+// Safety: the pointers are only dereferenced on the main thread while the
+// read lock is held, and cleared under the write lock before destruction.
+unsafe impl Send for MainThreadTarget {}
+unsafe impl Sync for MainThreadTarget {}
+
 /// Callback state shared with the plugin.  The plugin may call into this from
 /// its main, audio or helper threads, so everything here is atomics or a mutex
 /// that callbacks only try to take.
 pub(crate) struct HostState {
     main_thread: std::thread::ThreadId,
+    target: RwLock<MainThreadTarget>,
     restart_requested: AtomicBool,
     process_requested: AtomicBool,
     callback_requested: AtomicBool,
@@ -119,7 +146,11 @@ pub(crate) struct HostState {
 impl HostState {
     fn new() -> Self {
         Self {
-            main_thread: std::thread::current().id(),
+            main_thread: *MAIN_THREAD.get_or_init(|| std::thread::current().id()),
+            target: RwLock::new(MainThreadTarget {
+                plugin: ptr::null(),
+                timer_ext: ptr::null(),
+            }),
             restart_requested: AtomicBool::new(false),
             process_requested: AtomicBool::new(false),
             callback_requested: AtomicBool::new(false),
@@ -133,7 +164,7 @@ impl HostState {
         }
     }
 
-    fn take_gui_resize(&self) -> Option<(u32, u32)> {
+    pub(crate) fn take_gui_resize(&self) -> Option<(u32, u32)> {
         let packed = self.gui_resize.swap(0, Ordering::Relaxed);
         if packed == 0 {
             None
@@ -142,8 +173,54 @@ impl HostState {
         }
     }
 
-    fn take_gui_closed(&self) -> bool {
+    pub(crate) fn take_gui_closed(&self) -> bool {
         self.gui_closed.swap(false, Ordering::Relaxed)
+    }
+
+    /// Runs `on_main_thread` and due timers.  CLAP allows these main-thread
+    /// calls while the audio thread is inside `process`, so this does not take
+    /// the instance mutex: an editor repainting from its timer can no longer
+    /// make the audio callback skip the insert.  Returns true when a parameter
+    /// flush or rescan is waiting; those touch the instance and must run
+    /// through [`ClapPlugin::service_pending`] under its lock.
+    pub(crate) fn service_main_thread(&self) -> bool {
+        if let Ok(target) = self.target.read() {
+            if !target.plugin.is_null() {
+                if self.callback_requested.swap(false, Ordering::Relaxed) {
+                    if let Some(on_main_thread) = unsafe { (*target.plugin).on_main_thread } {
+                        unsafe { on_main_thread(target.plugin) };
+                    }
+                }
+                self.service_timers(&target);
+            }
+        }
+        self.flush_requested.load(Ordering::Relaxed) || self.params_rescan.load(Ordering::Relaxed)
+    }
+
+    fn service_timers(&self, target: &MainThreadTarget) {
+        let Some(timers) = (unsafe { target.timer_ext.as_ref() }) else {
+            return;
+        };
+        let Some(on_timer) = timers.on_timer else {
+            return;
+        };
+        let due = {
+            let Ok(mut timers) = self.timers.lock() else {
+                return;
+            };
+            let now = Instant::now();
+            let mut due = Vec::new();
+            for timer in timers.iter_mut() {
+                if timer.next <= now {
+                    due.push(timer.id);
+                    timer.next = now + timer.period;
+                }
+            }
+            due
+        };
+        for id in due {
+            unsafe { on_timer(target.plugin, id) };
+        }
     }
 }
 
@@ -385,10 +462,24 @@ impl ClapPlugin {
             has_editor: false,
         };
         plugin.has_editor = gui_supports_embedding(plugin.plugin, plugin.gui_ext);
+        *plugin
+            .host_state
+            .target
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = MainThreadTarget {
+            plugin: plugin.plugin,
+            timer_ext: plugin.timer_ext,
+        };
         plugin.activate()?;
-        plugin.start_processing()?;
+        // `start_processing` is an audio-thread call in CLAP; the first
+        // `process` makes it (see `process`).
         plugin.refresh_parameters();
         Ok(plugin)
+    }
+
+    /// The callback state the main-thread servicing works from.
+    pub(crate) fn host(&self) -> Arc<HostState> {
+        Arc::clone(&self.host_state)
     }
 
     pub(crate) fn has_editor(&self) -> bool {
@@ -406,9 +497,9 @@ impl ClapPlugin {
         Ok(())
     }
 
-    /// Starts the plugin on the loading thread, before the insert is published
-    /// to the chain.  `process` must never call this: starting a plugin can do
-    /// arbitrary work and belongs on the UI/startup side.
+    /// Starts processing.  CLAP marks `start_processing` as an audio-thread
+    /// call, so `process` makes it on the first block, inside the audio-thread
+    /// scope.
     fn start_processing(&mut self) -> Result<(), String> {
         if self.started {
             return Ok(());
@@ -424,6 +515,21 @@ impl ClapPlugin {
 
     /// Reads the plugin's parameters into the cache used by the panel.
     pub(crate) fn refresh_parameters(&mut self) {
+        self.scan_parameters();
+        // One pending value per parameter at most, so this capacity means
+        // `process` never grows the event list on the audio thread.
+        let count = self.cached_params.len().max(16);
+        self.pending_params
+            .reserve(count.saturating_sub(self.pending_params.len()));
+        self.events
+            .events
+            .reserve(count.saturating_sub(self.events.events.len()));
+        self.events
+            .pointers
+            .reserve(count.saturating_sub(self.events.pointers.len()));
+    }
+
+    fn scan_parameters(&mut self) {
         self.cached_params.clear();
         let Some(params) = (unsafe { self.params_ext.as_ref() }) else {
             return;
@@ -641,10 +747,10 @@ impl ClapPlugin {
         if !self.active {
             return Err("The CLAP plugin is not active.".to_owned());
         }
-        if !self.started {
-            return Err("The CLAP plugin is not started.".to_owned());
-        }
         let _audio_thread = AudioThreadScope::enter();
+        if !self.started {
+            self.start_processing()?;
+        }
         let mix = mix.clamp(0.0, 1.0);
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
@@ -840,25 +946,9 @@ impl ClapPlugin {
         self.editor_open = false;
     }
 
-    pub(crate) fn take_gui_resize(&self) -> Option<(u32, u32)> {
-        self.host_state.take_gui_resize()
-    }
-
-    pub(crate) fn gui_closed(&self) -> bool {
-        self.host_state.take_gui_closed()
-    }
-
-    /// Runs callbacks the plugin asked the host to run on its main thread.
-    pub(crate) fn service_main_thread(&mut self) {
-        if self
-            .host_state
-            .callback_requested
-            .swap(false, Ordering::Relaxed)
-        {
-            if let Some(on_main_thread) = unsafe { (*self.plugin).on_main_thread } {
-                unsafe { on_main_thread(self.plugin) };
-            }
-        }
+    /// The parameter flush and rescan the plugin asked for.  These read and
+    /// write the instance's cached parameters and event list.
+    pub(crate) fn service_pending(&mut self) {
         if self
             .host_state
             .flush_requested
@@ -869,38 +959,21 @@ impl ClapPlugin {
         if self.host_state.params_rescan.swap(false, Ordering::Relaxed) {
             self.refresh_parameters();
         }
-        self.service_timers();
-    }
-
-    fn service_timers(&mut self) {
-        let Some(timers) = (unsafe { self.timer_ext.as_ref() }) else {
-            return;
-        };
-        let Some(on_timer) = timers.on_timer else {
-            return;
-        };
-        let due = {
-            let Ok(mut timers) = self.host_state.timers.lock() else {
-                return;
-            };
-            let now = Instant::now();
-            let mut due = Vec::new();
-            for timer in timers.iter_mut() {
-                if timer.next <= now {
-                    due.push(timer.id);
-                    timer.next = now + timer.period;
-                }
-            }
-            due
-        };
-        for id in due {
-            unsafe { on_timer(self.plugin, id) };
-        }
     }
 }
 
 impl Drop for ClapPlugin {
     fn drop(&mut self) {
+        // Wait for any main-thread service still inside the plugin, then make
+        // sure none can start once it is destroyed.
+        let mut target = self
+            .host_state
+            .target
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        target.plugin = ptr::null();
+        target.timer_ext = ptr::null();
+        drop(target);
         self.close_editor();
         unsafe {
             if self.started {

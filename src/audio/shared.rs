@@ -213,10 +213,16 @@ impl Shared {
     /// Replaces the saved insert list without loading anything.  Plugins are
     /// opened when the bridge starts (or when one is added in the UI).
     pub(crate) fn restore_plugins(&self, prefs: Vec<PluginPref>) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.restore(prefs);
-            self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        }
+        let old = match self.plugins.lock() {
+            Ok(mut chain) => {
+                let old = chain.restore(prefs);
+                self.plugin_active.store(chain.active(), Ordering::Relaxed);
+                old
+            }
+            Err(_) => Vec::new(),
+        };
+        // Destroyed after the chain lock is released.
+        drop(old);
     }
 
     /// Opens any unloaded slots (and reloads them when the rate changed)
@@ -269,10 +275,16 @@ impl Shared {
     }
 
     pub(crate) fn remove_plugin(&self, index: usize) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.remove(index);
-            self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        }
+        let removed = match self.plugins.lock() {
+            Ok(mut chain) => {
+                let removed = chain.remove(index);
+                self.plugin_active.store(chain.active(), Ordering::Relaxed);
+                removed
+            }
+            Err(_) => None,
+        };
+        // Destroyed after the chain lock is released.
+        drop(removed);
     }
 
     pub(crate) fn move_plugin(&self, index: usize, delta: isize) {
@@ -311,14 +323,23 @@ impl Shared {
     }
 
     /// Copies control values back after the plugin's own editor changed them.
+    /// The plugin is read without the chain lock; only storing the result
+    /// takes it, briefly.
     pub(crate) fn sync_plugin_parameters(&self, index: usize) -> Result<(), String> {
+        let handle = self
+            .plugins
+            .lock()
+            .map_err(|_| "Plugin chain unavailable".to_owned())?
+            .loaded_handle(index)?;
+        let Some(parameters) = super::plugins::read_plugin_parameters(&handle) else {
+            return Ok(());
+        };
         let mut chain = self
             .plugins
             .lock()
             .map_err(|_| "Plugin chain unavailable".to_owned())?;
-        let result = chain.sync_from_plugin(index);
-        self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        result
+        chain.apply_synced_parameters(index, &handle, parameters);
+        Ok(())
     }
 
     pub(crate) fn set_plugin_parameter(
@@ -353,10 +374,15 @@ impl Shared {
             .unwrap_or_default()
     }
 
-    /// Runs the CLAP main-thread callbacks and timers once per UI frame.
+    /// Runs the CLAP main-thread callbacks and timers once per UI frame,
+    /// outside the chain lock: a plugin's timer can do arbitrary work.
     pub(crate) fn service_plugins(&self) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.service_main_threads();
+        let services = match self.plugins.lock() {
+            Ok(chain) => chain.clap_services(),
+            Err(_) => return,
+        };
+        for (host, plugin) in &services {
+            super::plugins::service_clap(host, plugin);
         }
     }
 
@@ -395,9 +421,9 @@ impl Shared {
         self.frames.store(0, Ordering::Relaxed);
         self.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.running.store(false, Ordering::Relaxed);
-        // No callback may be running here (the bridge is stopped first).
-        // Clear `head` before `tail` so a concurrent reader never sees a
-        // negative fill.
+        // Only called on a session no callback has touched yet (every start
+        // and preview builds a fresh `Shared`), so the order of the two
+        // stores does not matter.
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
         self.set_status("Starting bridge");

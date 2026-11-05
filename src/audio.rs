@@ -59,7 +59,7 @@ pub(crate) use linux::alsa::alsa_pcm_is_direct;
 pub(crate) use linux::alsa::{planned_output_period, smallest_output_buffer};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
-pub(crate) use plugins::PluginHandle;
+pub(crate) use plugins::{service_clap, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 #[cfg(target_os = "linux")]
 pub use types::QuantumInfo;
