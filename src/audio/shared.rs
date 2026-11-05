@@ -168,6 +168,9 @@ pub(crate) struct Shared {
     pub(crate) output_enabled: [AtomicBool; 2],
     pub(crate) routes: [AtomicBool; 8],
     pub(crate) drift_enabled: AtomicBool,
+    /// Set while input and output run in one PipeWire graph callback (the
+    /// duplex node).  The ring, cushion and drift steering are then unused.
+    pub(crate) direct: AtomicBool,
     pub(crate) status: Mutex<String>,
     pub(crate) error: Mutex<Option<String>>,
     pub(crate) device_lost: AtomicBool,
@@ -262,6 +265,7 @@ impl Shared {
                 AtomicBool::new(false),
             ],
             drift_enabled: AtomicBool::new(true),
+            direct: AtomicBool::new(false),
             status: Mutex::new("Waiting".to_owned()),
             error: Mutex::new(None),
             device_lost: AtomicBool::new(false),
@@ -764,6 +768,7 @@ impl Shared {
         self.frames.store(0, Ordering::Relaxed);
         self.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.running.store(false, Ordering::Relaxed);
+        self.direct.store(false, Ordering::Relaxed);
         // Only called on a session no callback has touched yet (every start
         // and preview builds a fresh `Shared`), so the order of the two
         // stores does not matter.
@@ -806,6 +811,17 @@ impl Shared {
         self.scope_in.set_rate(rate);
         // A manual cushion is set in milliseconds; re-measure it in frames.
         self.lift_to_floor();
+    }
+
+    /// Publishes the one graph rate both sides of the duplex node run at.
+    /// Atomics only, so the audio thread may call it when the graph rate
+    /// changes; the mode text is updated later from the main loop.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn note_direct_rate(&self, rate: u32) {
+        self.source_rate.store(rate, Ordering::Relaxed);
+        self.scope_in.set_rate(rate);
+        self.output_rate.store(rate, Ordering::Relaxed);
+        self.scope_out.set_rate(rate);
     }
 
     pub(crate) fn set_output(&self, rate: u32, step_frames: u32, mode: impl Into<String>) {
@@ -1023,6 +1039,13 @@ impl Shared {
         self.head.store(head.wrapping_add(1), Ordering::Release);
     }
 
+    /// Peak-hold into the input scope for a path that does not go through
+    /// the ring (the PipeWire duplex node).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn push_scope_in(&self, left: f32, right: f32) {
+        self.scope_in.push(0.5 * (left + right));
+    }
+
     /// Peak-hold into the output scope after the sample is fully processed.
     /// Does not modify `left`/`right` or the device write.
     pub(crate) fn push_scope_out(&self, left: f32, right: f32) {
@@ -1094,6 +1117,7 @@ impl Shared {
                 .map(|mode| mode.clone())
                 .unwrap_or_default(),
             path_delay_ms: self.path_delay_ms(),
+            direct: self.direct.load(Ordering::Relaxed),
         }
     }
 }

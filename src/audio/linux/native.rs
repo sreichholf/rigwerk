@@ -4,7 +4,9 @@
 //! Starting the bridge creates our own nodes, "RigWerk Capture" and "RigWerk
 //! Playback", and links them to the chosen node by name (`target.object`).
 //! Names stay valid when ids change, so a device that comes back is linked
-//! again. `node.latency` is set on our streams only. The desktop-wide
+//! again. When both sides are PipeWire nodes, `duplex` replaces the two
+//! streams with one node and no ring; the streams remain for mixed bridges
+//! and as the fallback. `node.latency` is set on our streams only. The desktop-wide
 //! `clock.force-quantum` switch stays in the metadata path.
 //!
 //! `hw:` and `plughw:` are untouched: they are the exclusive ALSA path. When
@@ -235,6 +237,19 @@ pub(crate) fn run(
     let input_native = config.input_id.as_deref().is_some_and(is_native_id);
     let output_native = is_native_id(&config.output_id);
 
+    // Both sides in the PipeWire graph: one duplex node, no ring.  If that
+    // node cannot be set up, fall back to the two-stream bridge below.
+    let mut fallback_note = None;
+    if input_native && output_native {
+        match super::duplex::run(config, Arc::clone(&shared), Arc::clone(&stop)) {
+            Ok(()) => return Ok(()),
+            Err(super::duplex::DuplexError::Runtime(reason)) => return Err(reason),
+            Err(super::duplex::DuplexError::Setup(reason)) => {
+                fallback_note = Some(format!(" · duplex node unavailable: {reason}"));
+            }
+        }
+    }
+
     let mut cpal_input = None;
     let input_channels;
     let input_rate;
@@ -268,10 +283,11 @@ pub(crate) fn run(
     if output_native {
         output_channels = 2;
         let frames = node_latency_frames(config.pipewire_low_latency, config.output_buffer);
+        let note = fallback_note.as_deref().unwrap_or("");
         let mode = if config.pipewire_low_latency {
-            format!("Low latency · PipeWire node · {frames} frames")
+            format!("Low latency · PipeWire node · {frames} frames{note}")
         } else {
-            format!("PipeWire node · {frames} frames")
+            format!("PipeWire node · {frames} frames{note}")
         };
         shared.set_output(output_rate, frames, mode);
     } else {
