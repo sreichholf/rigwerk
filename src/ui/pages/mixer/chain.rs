@@ -43,6 +43,17 @@ impl ChainSelection {
         }
     }
 
+    /// The selection after the insert at `removed` left the chain, with
+    /// `plugin_count` inserts remaining: a later insert keeps its selection as
+    /// it slides up. Removing the selected insert selects the next one, or the
+    /// previous one when it was the last.
+    pub(crate) fn after_removal(self, removed: usize, plugin_count: usize) -> Self {
+        match self {
+            Self::Plugin(index) if index > removed => Self::Plugin(index - 1),
+            other => other.clamp(plugin_count),
+        }
+    }
+
     /// Where a newly added insert should land. `None` means append.
     pub(crate) fn plugin_insert_at(self, plugin_count: usize) -> Option<usize> {
         match self {
@@ -230,6 +241,42 @@ mod tests {
             ChainSelection::Plugin(1)
         );
         assert_eq!(ChainSelection::Plugin(0).clamp(0), ChainSelection::Plugins);
+    }
+
+    #[test]
+    fn selection_follows_its_insert_after_remove() {
+        // Removing an earlier insert keeps the same insert selected.
+        assert_eq!(
+            ChainSelection::Plugin(2).after_removal(0, 2),
+            ChainSelection::Plugin(1)
+        );
+        // Removing a later one leaves the selection alone.
+        assert_eq!(
+            ChainSelection::Plugin(0).after_removal(1, 2),
+            ChainSelection::Plugin(0)
+        );
+        // Removing the selected last insert selects the new last one.
+        assert_eq!(
+            ChainSelection::Plugin(2).after_removal(2, 2),
+            ChainSelection::Plugin(1)
+        );
+        assert_eq!(
+            ChainSelection::Plugin(0).after_removal(0, 0),
+            ChainSelection::Plugins
+        );
+        assert_eq!(
+            ChainSelection::Gate.after_removal(0, 0),
+            ChainSelection::Gate
+        );
+        // Removing the selected insert selects the one that slid into place.
+        assert_eq!(
+            ChainSelection::Plugin(1).after_removal(1, 2),
+            ChainSelection::Plugin(1)
+        );
+        assert_eq!(
+            ChainSelection::Plugins.after_removal(0, 1),
+            ChainSelection::Plugins
+        );
     }
 
     #[test]
