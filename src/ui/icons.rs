@@ -15,6 +15,7 @@ pub(crate) enum Icon {
     Mixer,
     Plug,
     Help,
+    Log,
 }
 
 pub(crate) fn draw_logo(ui: &mut egui::Ui) {
@@ -147,6 +148,17 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 FontId::new(ts(12.0), FontFamily::Proportional),
                 color,
             );
+        }
+        Icon::Log => {
+            for offset in [-5.0, 0.0, 5.0] {
+                painter.line_segment(
+                    [
+                        center + Vec2::new(-7.0, offset),
+                        center + Vec2::new(7.0, offset),
+                    ],
+                    Stroke::new(1.4, color),
+                );
+            }
         }
     }
 }

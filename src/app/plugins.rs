@@ -22,6 +22,7 @@ pub(crate) struct PluginCandidate {
     pub(crate) category: String,
 }
 
+#[derive(Default)]
 pub(crate) struct PluginBrowser {
     pub(crate) library: Vec<PluginCandidate>,
     pub(crate) scanning: bool,
@@ -29,19 +30,6 @@ pub(crate) struct PluginBrowser {
     pub(crate) search: String,
     pub(crate) path_input: String,
     pub(crate) notice: Option<(String, std::time::Instant)>,
-}
-
-impl Default for PluginBrowser {
-    fn default() -> Self {
-        Self {
-            library: Vec::new(),
-            scanning: false,
-            receiver: None,
-            search: String::new(),
-            path_input: String::new(),
-            notice: None,
-        }
-    }
 }
 
 impl PluginBrowser {
@@ -78,7 +66,7 @@ fn scan_library() -> Vec<PluginCandidate> {
     for candidate in clap::scan_library() {
         candidates.push(candidate_from_clap(candidate));
     }
-    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates.sort_by_cached_key(|candidate| candidate.name.to_lowercase());
     candidates.dedup_by(|a, b| {
         a.path == b.path
             && a.format == b.format
@@ -216,6 +204,7 @@ impl RigWerkApp {
             bypass: false,
             mix: 1.0,
             params: Vec::new(),
+            state: None,
         };
         self.install_plugin(pref);
     }
@@ -268,8 +257,17 @@ impl RigWerkApp {
 
     fn install_plugin(&mut self, pref: PluginPref) {
         let format = pref.format;
+        let insert_at = self.plugin_insert_at.take();
         match self.engine.add_plugin(pref) {
             Ok(()) => {
+                let mut index = self.engine.plugin_views().len().saturating_sub(1);
+                if let Some(target) = insert_at {
+                    while index > target {
+                        self.engine.move_plugin(index, -1);
+                        index -= 1;
+                    }
+                }
+                self.chain_selected = crate::ui::pages::mixer::chain::ChainSelection::Plugin(index);
                 self.push_log(
                     format!("{} insert added to the master bus.", format.label()),
                     GREEN,
@@ -300,9 +298,10 @@ impl RigWerkApp {
     }
 
     pub(crate) fn move_plugin(&mut self, index: usize, delta: isize) {
+        // Finished while its index still names the right insert.
+        self.finish_plugin_gui();
         self.engine.move_plugin(index, delta);
         self.plugin_editor = None;
-        self.plugin_gui = None;
         self.plugin_param_filter.clear();
     }
 
@@ -322,7 +321,7 @@ impl RigWerkApp {
         if self.plugin_editor != Some(index) {
             // A different insert: the plugin editor and the filter belong to
             // the one that was open before.
-            self.plugin_gui = None;
+            self.finish_plugin_gui();
             self.plugin_param_filter.clear();
         }
         if self.prefer_plugin_interface {

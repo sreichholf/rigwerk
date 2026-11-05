@@ -187,14 +187,30 @@ pub(crate) fn make_output_stream(
     }
 }
 
-/// Writes one frame of tap values into an interleaved device frame.  Taps 1-4
-/// go to the first four channels; any further channels get the L/R average.
+/// Writes the processed stereo mix into an interleaved device frame.
+///
+/// Only taps 0/1 go through EQ, gate and inserts. Extra device channels get
+/// the L/R average so a 4-in interface never hears the unused route columns.
 pub(crate) fn write_frame<T: Sample + FromSample<f32>>(frame: &mut [T], out: [f32; 4]) {
-    let rest = (out[0] + out[1]) * 0.5;
-    for (channel, sample) in frame.iter_mut().enumerate() {
-        *sample = T::from_sample(out.get(channel).copied().unwrap_or(rest));
+    let left = out[0];
+    let right = out[1];
+    let rest = (left + right) * 0.5;
+    match frame.len() {
+        0 => {}
+        1 => frame[0] = T::from_sample(rest),
+        _ => {
+            frame[0] = T::from_sample(left);
+            frame[1] = T::from_sample(right);
+            for sample in frame.iter_mut().skip(2) {
+                *sample = T::from_sample(rest);
+            }
+        }
     }
 }
+
+/// The block size the cpal output's scratch is sized for up front.  Hosts with
+/// a default buffer hand over at most a few thousand frames.
+const PREPARED_BLOCK: usize = 8192;
 
 pub(crate) fn build_output<T>(
     device: &cpal::Device,
@@ -209,6 +225,15 @@ where
     let error_shared = Arc::clone(&shared);
     let channels = channels.max(1);
     let mut mixer = OutputMixer::new(config.sample_rate);
+    // Design the filter before the stream starts: the first callback must not
+    // spend a millisecond building the kernel.
+    mixer.follow_source_rate(&shared);
+    // cpal only knows the block size once it calls back; size the scratch for
+    // the requested buffer or, with the host's default, for a generous one.
+    mixer.prepare(match config.buffer_size {
+        cpal::BufferSize::Fixed(frames) => (frames as usize).max(PREPARED_BLOCK),
+        cpal::BufferSize::Default => PREPARED_BLOCK,
+    });
 
     let stream = device
         .build_output_stream(
@@ -236,4 +261,30 @@ where
         )
         .map_err(|error| format!("Building output stream: {error}"))?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_frame;
+
+    #[test]
+    fn write_frame_keeps_the_processed_stereo_pair() {
+        let mut frame = [0.0f32; 2];
+        write_frame(&mut frame, [0.5, -0.25, 0.9, -0.9]);
+        assert_eq!(frame, [0.5, -0.25]);
+    }
+
+    #[test]
+    fn write_frame_fills_extra_channels_from_the_stereo_mix() {
+        let mut frame = [0.0f32; 4];
+        write_frame(&mut frame, [0.5, -0.25, 0.9, -0.9]);
+        assert_eq!(frame, [0.5, -0.25, 0.125, 0.125]);
+    }
+
+    #[test]
+    fn write_frame_sums_mono_devices() {
+        let mut frame = [0.0f32; 1];
+        write_frame(&mut frame, [0.5, -0.25, 0.9, -0.9]);
+        assert_eq!(frame, [0.125]);
+    }
 }

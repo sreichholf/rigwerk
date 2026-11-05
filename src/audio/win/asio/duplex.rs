@@ -1,16 +1,18 @@
 //! One ASIO driver carrying both directions: one callback moves input into
 //! the ring and output out of it.
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::shared::{initial_target, Shared};
 use crate::audio::types::StartConfig;
 
-use super::output::fill_asio_output;
-use super::samples::read_asio_sample;
-use super::{asio_switch_slot, ASIO_INPUT_CALLBACKS};
+use super::callback::{
+    wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
+    CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
+};
+use super::output::silence_asio_output;
+use super::ASIO_INPUT_CALLBACKS;
 
 pub(crate) fn run_asio_duplex_bridge(
     config: &StartConfig,
@@ -71,7 +73,7 @@ pub(crate) fn run_asio_duplex_bridge(
         buffer_frames.max(1) as u32,
         format!("ASIO in and out · one driver, {buffer_frames} smp"),
     );
-    shared.prepare_plugins(rate);
+    // The UI thread reloads plugins from the rate published above.
 
     let mut input_types = Vec::new();
     let mut output_types = Vec::new();
@@ -99,11 +101,6 @@ pub(crate) fn run_asio_duplex_bridge(
         channel_ids.push(id);
     }
 
-    let (sender, receiver) = mpsc::sync_channel::<i32>(2);
-    if let Ok(mut slot) = asio_switch_slot().lock() {
-        *slot = Some(sender);
-    }
-
     let all_buffers: Vec<[*mut c_void; 2]> = match unsafe {
         driver.create_buffers(
             channel_ids.iter().copied(),
@@ -112,21 +109,35 @@ pub(crate) fn run_asio_duplex_bridge(
         )
     } {
         Ok(buffers) => buffers.collect(),
-        Err(error) => {
-            if let Ok(mut slot) = asio_switch_slot().lock() {
-                *slot = None;
-            }
-            return Err(format!("ASIO buffers: {error}"));
-        }
+        Err(error) => return Err(format!("ASIO buffers: {error}")),
     };
-    let input_buffers = &all_buffers[..input_channels];
-    let output_buffers = &all_buffers[input_channels..];
+    let (input_buffers, output_buffers) = all_buffers.split_at(input_channels);
+    silence_asio_output(output_buffers, &output_types, buffer_frames.max(1) as usize);
+
+    let mut output_state = OutputMixer::new(rate);
+    output_state.follow_source_rate(&shared);
+    output_state.prepare(buffer_frames.max(1) as usize);
+    let signal = AsioSignal::new();
+    let context = AsioCallbackContext::new(
+        Arc::clone(&shared),
+        Arc::clone(&signal),
+        buffer_frames.max(1) as usize,
+    )
+    .with_input(input_buffers.to_vec(), input_types)
+    .with_output(output_buffers.to_vec(), output_types, output_state);
+    let registration =
+        match CallbackRegistration::install(AsioCallbackSlot::Input, Box::new(context), signal) {
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = driver.dispose_buffers();
+                return Err(format!("ASIO callbacks: {error}"));
+            }
+        };
 
     if let Err(error) = driver.start() {
-        if let Ok(mut slot) = asio_switch_slot().lock() {
-            *slot = None;
-        }
+        let _ = driver.stop();
         let _ = driver.dispose_buffers();
+        registration.clear();
         return Err(format!("Starting ASIO: {error}"));
     }
 
@@ -136,83 +147,34 @@ pub(crate) fn run_asio_duplex_bridge(
         input_channels, output_channels, buffer_frames, rate
     ));
 
-    let mut output_state = OutputMixer::new(rate);
-    let mut last_callback = Instant::now();
-
-    while !stop.load(Ordering::Relaxed) {
-        match receiver.recv_timeout(Duration::from_millis(80)) {
-            Ok(buffer_index) => {
-                last_callback = Instant::now();
-                let index = buffer_index.clamp(0, 1) as usize;
-                let gain = shared.input_gain();
-                let enabled_l = shared.input_enabled[0].load(Ordering::Relaxed);
-                let enabled_r = shared.input_enabled[1].load(Ordering::Relaxed);
-                let mut peak_l = 0.0f32;
-                let mut peak_r = 0.0f32;
-                for frame in 0..buffer_frames as usize {
-                    let mut left = unsafe {
-                        read_asio_sample(
-                            input_buffers[0][index].cast::<u8>(),
-                            frame,
-                            input_types[0],
-                        )
-                    } * gain;
-                    let mut right = if input_channels > 1 {
-                        (unsafe {
-                            read_asio_sample(
-                                input_buffers[1][index].cast::<u8>(),
-                                frame,
-                                input_types[1],
-                            )
-                        }) * gain
-                    } else {
-                        left
-                    };
-                    if !enabled_l {
-                        left = 0.0;
-                    }
-                    if !enabled_r {
-                        right = 0.0;
-                    }
-                    peak_l = peak_l.max(left.abs());
-                    peak_r = peak_r.max(right.abs());
-                    shared.push_frame(left, right);
-                }
-                shared.in_l.store(peak_l.to_bits(), Ordering::Relaxed);
-                shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
-
-                fill_asio_output(
-                    &shared,
-                    output_buffers,
-                    &output_types,
-                    buffer_frames as usize,
-                    index,
-                    &mut output_state,
-                );
-                let _ = driver.output_ready();
+    let wait = wait_for_callbacks(registration.signal(), || stop.load(Ordering::Relaxed));
+    match wait {
+        CallbackWait::Stopped => {}
+        CallbackWait::Reset | CallbackWait::Failed => {
+            let _ = driver.stop();
+            let _ = driver.dispose_buffers();
+            registration.clear();
+            return Err(if matches!(wait, CallbackWait::Reset) {
+                DRIVER_RESET_MESSAGE
+            } else {
+                CALLBACK_PANIC_MESSAGE
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_callback.elapsed() > Duration::from_secs(2) {
-                    let _ = driver.stop();
-                    if let Ok(mut slot) = asio_switch_slot().lock() {
-                        *slot = None;
-                    }
-                    let _ = driver.dispose_buffers();
-                    shared.set_device_lost(
-                        "The ASIO driver stopped responding — the interface may have been unplugged"
-                            .to_owned(),
-                    );
-                    return Ok(());
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            .to_owned());
+        }
+        CallbackWait::Hung => {
+            let _ = driver.stop();
+            let _ = driver.dispose_buffers();
+            registration.abandon();
+            shared.set_device_lost(
+                "The ASIO driver stopped responding — the interface may have been unplugged"
+                    .to_owned(),
+            );
+            return Ok(());
         }
     }
 
     let _ = driver.stop();
     let _ = driver.dispose_buffers();
-    if let Ok(mut slot) = asio_switch_slot().lock() {
-        *slot = None;
-    }
+    registration.clear();
     Ok(())
 }

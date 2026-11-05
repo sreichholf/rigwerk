@@ -167,6 +167,15 @@ fn hardware_bridge() {
         snapshot.underruns
     );
     engine.stop();
+    // Stop is asynchronous now; the devices are not released until the
+    // bridge thread has confirmed teardown.
+    for _ in 0..250 {
+        if engine.state == EngineState::Idle {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        engine.poll();
+    }
     assert!(
         snapshot.error.is_none(),
         "bridge error: {:?}",

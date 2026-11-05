@@ -1,14 +1,19 @@
 [package]
 name = "rigwerk"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "RigWerk - an ASIO input bridge with an independent output device"
+rust-version = "1.95"
+description = "Independent audio bridge: any input clock to any output clock (PipeWire, ALSA, ASIO, WASAPI)"
+license = "GPL-3.0-or-later"
+readme = "README.md"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "persistence"] }
 egui = "0.37"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# The format eframe stores preferences in; used directly so a damaged saved
+# entry can be skipped (and an unreadable file kept) instead of lost.
+ron = "0.12"
 cpal = "0.18"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # VST3 discovery, hosting and processing.  The crate ships its own bindings,
@@ -41,6 +46,11 @@ windows = { version = "0.62", features = [
 # above, so X11 and Wayland are switched back on here.
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["x11", "wayland"] }
+# Netlink uevent socket for sound-card add/remove. No libudev.
+libc = "0.2"
+# Native PipeWire client. The ALSA `pipewire` plugin is not the Linux path.
+# v0_3_50 exposes pw_buffer.requested so playback fills one quantum, not maxsize.
+pipewire = { version = "0.10", features = ["v0_3_50"] }
 
 [profile.release]
 opt-level = 2

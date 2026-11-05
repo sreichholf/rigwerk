@@ -12,7 +12,8 @@ use crate::ui::theme::{
     with_alpha, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    card, ellipsize, ghost_button, micro_label, mono, primary_button, route_summary, small_fact,
+    card, ellipsize, ghost_button, micro_label, mono, primary_button, route_summary, row_info,
+    show_focus_ring, small_fact,
 };
 
 pub(crate) fn preset_row(
@@ -124,6 +125,32 @@ pub(crate) fn preset_row(
     } else {
         "Delete this patch"
     });
+    show_focus_ring(ui, &response, rect, 8);
+    show_focus_ring(ui, &delete, delete_rect, 5);
+    row_info(
+        &response,
+        egui::Role::Button,
+        ui.is_enabled(),
+        name,
+        Some(selected),
+        Some(if note.is_empty() {
+            path.to_owned()
+        } else {
+            note.to_owned()
+        }),
+    );
+    row_info(
+        &delete,
+        egui::Role::Button,
+        ui.is_enabled(),
+        if confirming_delete {
+            format!("Confirm delete {name}")
+        } else {
+            format!("Delete {name}")
+        },
+        None,
+        None,
+    );
     if delete.clicked() {
         PresetAction::Delete
     } else if response.clicked() {
@@ -133,7 +160,7 @@ pub(crate) fn preset_row(
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum PresetAction {
     None,
     Load,
@@ -178,7 +205,15 @@ impl RigWerkApp {
                         ui.horizontal(|ui| {
                             small_fact(ui, "RATE", &format!("{} Hz", self.sample_rate));
                             small_fact(ui, "BUFFER", &format!("{} smp", self.buffer_size));
-                            small_fact(ui, "LATENCY", &format!("{:.1} ms", self.latency_ms()));
+                            small_fact(
+                                ui,
+                                if self.path_delay_ms().is_some() {
+                                    "US · AFTER"
+                                } else {
+                                    "LATENCY"
+                                },
+                                &self.latency_caption(),
+                            );
                         });
                         ui.add_space(12.0);
                         let save_label = if self.preset_named(&self.session_name).is_some() {
@@ -282,7 +317,7 @@ impl RigWerkApp {
                                             ui,
                                             name,
                                             note,
-                                            &format!("{input}  →  {output}"),
+                                            &format!("{input}  ->  {output}"),
                                             &format!("{rate} Hz · {buffer} smp"),
                                             Some(index) == self.selected_session,
                                             Some(index) == self.pending_delete,
@@ -317,5 +352,64 @@ impl RigWerkApp {
                 },
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{preset_row, PresetAction};
+    use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
+    use eframe::egui::{self, accesskit::Toggled};
+
+    #[test]
+    fn a_preset_row_exposes_its_name_and_delete_control() {
+        let tree = accesskit_frame(|ui| {
+            assert_eq!(
+                preset_row(
+                    ui,
+                    "Clean",
+                    "dry vocal",
+                    "mic -> phones",
+                    "48 kHz",
+                    true,
+                    false
+                ),
+                PresetAction::None
+            );
+        });
+        let row = node_named(&tree, "Clean");
+        assert_eq!(row.role(), egui::Role::Button);
+        assert_eq!(row.value(), Some("dry vocal"));
+        assert_eq!(row.toggled(), Some(Toggled::True));
+        let delete = node_named(&tree, "Delete Clean");
+        assert_eq!(delete.role(), egui::Role::Button);
+        assert!(delete.toggled().is_none());
+    }
+
+    #[test]
+    fn enter_on_a_focused_preset_row_loads_it() {
+        let ctx = egui::Context::default();
+        let show = |ui: &mut egui::Ui| {
+            preset_row(
+                ui,
+                "Clean",
+                "dry vocal",
+                "mic -> phones",
+                "48 kHz",
+                false,
+                false,
+            )
+        };
+        let _ = run_frame(&ctx, test_input(None), |ui| {
+            assert_eq!(show(ui), PresetAction::None);
+        });
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::Tab)), |ui| {
+            assert_eq!(show(ui), PresetAction::None);
+        });
+        let mut action = PresetAction::None;
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::Enter)), |ui| {
+            action = show(ui);
+        });
+        assert_eq!(action, PresetAction::Load);
     }
 }

@@ -127,7 +127,13 @@ pub fn open(
             Err(reason)
         }
         Err(_) => {
+            // Wait for the driver instead of leaving the thread behind: a
+            // detached open could still claim the endpoint after the caller
+            // has fallen back to another stream on it.  This blocks only the
+            // bridge thread, which the engine's start timeout and teardown
+            // tracking already cover.
             stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
             Err("the driver did not answer in time".to_owned())
         }
     }
@@ -370,47 +376,6 @@ fn report_failure(shared: &Shared, error: &windows::core::Error) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::RealInfo;
-
-    fn info(step: u32, min: u32, default: u32) -> RealInfo {
-        RealInfo {
-            rate: 48_000,
-            channels: 2,
-            step_frames: step,
-            min_frames: min,
-            default_frames: default,
-        }
-    }
-
-    #[test]
-    fn a_driver_with_only_its_default_says_so() {
-        let text = info(480, 480, 480).describe(48_000);
-        assert!(text.contains("no smaller step"), "{text}");
-        assert!(!text.contains("down from"), "{text}");
-    }
-
-    #[test]
-    fn a_genuinely_smaller_step_is_reported() {
-        let text = info(128, 128, 480).describe(48_000);
-        assert!(text.contains("down from 480 smp"), "{text}");
-        assert!(!text.contains("no smaller step"), "{text}");
-    }
-
-    #[test]
-    fn a_step_held_by_another_app_is_reported() {
-        let text = info(480, 128, 480).describe(48_000);
-        assert!(text.contains("another app holds"), "{text}");
-    }
-
-    #[test]
-    fn access_denied_is_recognised() {
-        assert!(super::access_denied(0x8007_0005u32 as i32));
-        assert!(!super::access_denied(0x8889_000Au32 as i32));
-    }
-}
-
 unsafe fn run(
     endpoint: &str,
     shared: Arc<Shared>,
@@ -443,6 +408,9 @@ unsafe fn run(
 
     let channels = session.info.channels;
     let mut mixer = OutputMixer::new(session.info.rate);
+    // Design the filter before the loop starts, not during an audio step.
+    mixer.follow_source_rate(&shared);
+    mixer.prepare(session.buffer_frames.max(1) as usize);
     // Keep exactly one step queued.  The host hands us a much larger buffer
     // (about two steps), but filling it would add its whole size to the
     // latency and throw away the low-latency stream's advantage.  One step is
@@ -501,5 +469,46 @@ unsafe fn run(
     drop(session);
     if com {
         CoUninitialize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RealInfo;
+
+    fn info(step: u32, min: u32, default: u32) -> RealInfo {
+        RealInfo {
+            rate: 48_000,
+            channels: 2,
+            step_frames: step,
+            min_frames: min,
+            default_frames: default,
+        }
+    }
+
+    #[test]
+    fn a_driver_with_only_its_default_says_so() {
+        let text = info(480, 480, 480).describe(48_000);
+        assert!(text.contains("no smaller step"), "{text}");
+        assert!(!text.contains("down from"), "{text}");
+    }
+
+    #[test]
+    fn a_genuinely_smaller_step_is_reported() {
+        let text = info(128, 128, 480).describe(48_000);
+        assert!(text.contains("down from 480 smp"), "{text}");
+        assert!(!text.contains("no smaller step"), "{text}");
+    }
+
+    #[test]
+    fn a_step_held_by_another_app_is_reported() {
+        let text = info(480, 128, 480).describe(48_000);
+        assert!(text.contains("another app holds"), "{text}");
+    }
+
+    #[test]
+    fn access_denied_is_recognised() {
+        assert!(super::access_denied(0x8007_0005u32 as i32));
+        assert!(!super::access_denied(0x8889_000Au32 as i32));
     }
 }

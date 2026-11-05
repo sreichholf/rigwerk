@@ -48,6 +48,19 @@ pub(crate) fn run_bridge(
         return run_asio_bridge(&config, clsid, Arc::clone(&shared), Arc::clone(&stop));
     }
 
+    // A `pipewire:{node.name}` id is a real PipeWire source or sink. The
+    // native client links RigWerk's own nodes to it. Mixed bridges still open
+    // the other side through cpal.
+    #[cfg(target_os = "linux")]
+    if config
+        .input_id
+        .as_deref()
+        .is_some_and(super::linux::native::is_native_id)
+        || super::linux::native::is_native_id(&config.output_id)
+    {
+        return super::linux::native::run(&config, shared, stop);
+    }
+
     // Settle the input first.  A device that cannot run at the requested rate
     // opens at its own; the output then converts from that real rate instead
     // of playing the input too fast or too slow.
@@ -66,10 +79,8 @@ pub(crate) fn run_bridge(
         config.output_buffer,
         config.real_style_output,
     )?;
-    // The driver may have opened at a rate other than the planned one; the
-    // insert chain has to run at the rate it really gets.
-    shared.prepare_plugins(output.rate);
-
+    // `open_output` already published `output.rate`.  The UI thread reloads
+    // plugins from that rate; this thread must not load or destroy them.
     shared.set_status("Waiting for input clock…");
     let input_stream = make_input_stream(
         &input_device,

@@ -3,7 +3,7 @@
 use eframe::egui;
 use egui::{Align, Layout, RichText};
 
-use crate::app::settings::{rate_label, BUFFERS, RATES};
+use crate::app::settings::{rate_label, BUFFERS, INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, RATES};
 use crate::app::RigWerkApp;
 use crate::audio::EngineState;
 use crate::ui::pages::live::driver_line::driver_line;
@@ -33,18 +33,22 @@ impl RigWerkApp {
 
         if self.using_other_input() {
             let mut idx = self.input_idx;
-            device_selector(
+            if device_selector(
                 ui,
                 "system_input_choice",
                 &self.inventory.inputs,
                 &mut idx,
                 TEAL,
-            );
+            ) {
+                self.accept_input_device();
+            }
             self.input_idx = idx;
         } else {
             let previous_asio = self.asio_idx;
             let mut idx = self.asio_idx;
-            device_selector(ui, "asio_input", &self.inventory.asio, &mut idx, TEAL);
+            if device_selector(ui, "asio_input", &self.inventory.asio, &mut idx, TEAL) {
+                self.accept_asio_device();
+            }
             self.asio_idx = idx;
             if idx != previous_asio {
                 self.use_asio_input = true;
@@ -56,7 +60,7 @@ impl RigWerkApp {
             channel_chip(ui, "IN 1", &mut self.input_channels[0], TEAL);
             channel_chip(ui, "IN 2", &mut self.input_channels[1], TEAL);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(mono(format!("{:.1} ms", self.latency_ms()), MUTED, 9.5));
+                ui.label(mono(self.latency_caption(), MUTED, 9.5));
             });
         });
 
@@ -84,7 +88,13 @@ impl RigWerkApp {
                 ui.label(mono(format!("{:+.1} dB", self.input_gain), TEXT, 10.0));
             });
         });
-        if db_slider(ui, &mut self.input_gain, -24.0, 18.0, TEAL) {
+        if db_slider(
+            ui,
+            &mut self.input_gain,
+            INPUT_GAIN_MIN_DB,
+            INPUT_GAIN_MAX_DB,
+            TEAL,
+        ) {
             self.engine.set_gains(self.input_gain, self.output_gain);
         }
 

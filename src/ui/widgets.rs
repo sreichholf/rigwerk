@@ -239,6 +239,15 @@ pub(crate) fn nav_item(
         FontId::new(ts(8.0), FontFamily::Proportional),
         if selected { with_alpha(TEAL, 190) } else { DIM },
     );
+    show_focus_ring(ui, &response, rect, 9);
+    row_info(
+        &response,
+        egui::Role::Button,
+        ui.is_enabled(),
+        label,
+        Some(selected),
+        Some(hint.to_owned()),
+    );
     response.clicked()
 }
 
@@ -333,14 +342,97 @@ pub(crate) fn channel_chip(ui: &mut egui::Ui, label: &str, checked: &mut bool, c
     }
 }
 
+/// Colour and accessible name for [`styled_slider`].
+///
+/// A bare [`Color32`] keeps existing call sites. A `(color, name)` pair is the
+/// name AccessKit reads.
+pub(crate) struct SliderStyle {
+    color: Color32,
+    name: String,
+    decibels: bool,
+}
+
+impl From<Color32> for SliderStyle {
+    fn from(color: Color32) -> Self {
+        Self {
+            color,
+            name: String::new(),
+            decibels: false,
+        }
+    }
+}
+
+impl From<(Color32, &str)> for SliderStyle {
+    fn from((color, name): (Color32, &str)) -> Self {
+        Self {
+            color,
+            name: name.to_owned(),
+            decibels: false,
+        }
+    }
+}
+
+impl From<(Color32, String)> for SliderStyle {
+    fn from((color, name): (Color32, String)) -> Self {
+        Self {
+            color,
+            name,
+            decibels: false,
+        }
+    }
+}
+
+/// Keyboard focus on a custom-painted control. Enter and Space already activate
+/// a focusable widget; this is the ring that was missing.
+pub(crate) fn show_focus_ring(ui: &egui::Ui, response: &egui::Response, rect: Rect, radius: u8) {
+    if !response.has_focus() {
+        return;
+    }
+    let mut stroke = ui.visuals().selection.stroke;
+    stroke.width = 2.0;
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(radius),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Name and value for a custom row. `selected` is the toggled value.
+pub(crate) fn row_info(
+    response: &egui::Response,
+    role: egui::Role,
+    enabled: bool,
+    name: impl Into<String>,
+    selected: Option<bool>,
+    value: Option<String>,
+) {
+    let name = name.into();
+    response.widget_info(move || {
+        let mut info = match selected {
+            Some(on) => egui::WidgetInfo::selected(role, enabled, on, name.clone()),
+            None => egui::WidgetInfo::labeled(role, enabled, name.clone()),
+        };
+        if let Some(value) = value.clone() {
+            info.current_text_value = Some(value);
+        }
+        info
+    });
+}
+
 pub(crate) fn db_slider(
     ui: &mut egui::Ui,
     value: &mut f32,
     min: f32,
     max: f32,
-    color: Color32,
+    accent: impl Into<SliderStyle>,
 ) -> bool {
-    styled_slider(ui, value, min, max, 0.1, color).changed()
+    let mut style = accent.into();
+    if style.name.is_empty() {
+        style.name = "Gain".to_owned();
+    }
+    style.decibels = true;
+    styled_slider(ui, value, min, max, 0.1, style).changed()
 }
 
 /// The gain slider's look, with an explicit step, for other values in the app.
@@ -350,15 +442,22 @@ pub(crate) fn styled_slider(
     min: f32,
     max: f32,
     step: f32,
-    color: Color32,
+    accent: impl Into<SliderStyle>,
 ) -> egui::Response {
+    let mut style = accent.into();
     let (rect, mut response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), 22.0),
         Sense::click_and_drag(),
     );
-    let track = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), 4.0));
+    // Inset the track so the 7px grip stays inside the allocated rect.
+    // Empty portion uses a lift above CARD so equal-length tracks read as
+    // equal (a short fill must not look like a short slider).
+    let track = Rect::from_center_size(
+        rect.center(),
+        Vec2::new((rect.width() - 14.0).max(0.0), 4.0),
+    );
     ui.painter()
-        .rect_filled(track, CornerRadius::same(2), Color32::from_rgb(26, 33, 45));
+        .rect_filled(track, CornerRadius::same(2), Color32::from_rgb(42, 52, 70));
     if response.dragged() || response.clicked() {
         if let Some(position) = response.interact_pointer_pos() {
             let fraction = ((position.x - track.left()) / track.width()).clamp(0.0, 1.0);
@@ -368,13 +467,39 @@ pub(crate) fn styled_slider(
             response.mark_changed();
         }
     }
+    if response.enabled() && !response.dragged() {
+        if response.has_focus() {
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                );
+            });
+        }
+        let (key_steps, set_value) = slider_keyboard_and_accesskit(ui, &response);
+        if apply_slider_steps(value, min, max, step, key_steps) {
+            response.mark_changed();
+        }
+        if let Some(requested) = set_value {
+            let step = step.max(f32::EPSILON);
+            let next = ((requested as f32 / step).round() * step).clamp(min, max);
+            if next != *value {
+                *value = next;
+                response.mark_changed();
+            }
+        }
+    }
     let fraction = ((*value - min) / (max - min)).clamp(0.0, 1.0);
     let x = track.left() + track.width() * fraction;
     if fraction > 0.0 {
         ui.painter().rect_filled(
             Rect::from_min_max(track.min, egui::pos2(x, track.bottom())),
             CornerRadius::same(2),
-            with_alpha(color, 190),
+            with_alpha(style.color, 190),
         );
     }
     ui.painter()
@@ -385,8 +510,108 @@ pub(crate) fn styled_slider(
         Stroke::new(1.2, if response.hovered() { TEXT } else { BORDER }),
     );
     ui.painter()
-        .circle_filled(egui::pos2(x, track.center().y), 3.0, color);
+        .circle_filled(egui::pos2(x, track.center().y), 3.0, style.color);
+    show_focus_ring(ui, &response, rect, 6);
+    let value_text = if style.decibels {
+        format!("{:+.1} dB", *value)
+    } else {
+        format_slider_value(*value, step)
+    };
+    if style.name.is_empty() {
+        style.name.clone_from(&value_text);
+    }
+    let enabled = ui.is_enabled();
+    let numeric = f64::from(*value);
+    let name = style.name;
+    response.widget_info({
+        let value_text = value_text.clone();
+        let name = name.clone();
+        move || {
+            let mut info = egui::WidgetInfo::slider(enabled, numeric, name.clone());
+            info.current_text_value = Some(value_text.clone());
+            info
+        }
+    });
+    let step_f = f64::from(step.max(f32::EPSILON));
+    ui.ctx().accesskit_node_builder(response.id, |builder| {
+        use egui::accesskit::Action;
+        builder.set_min_numeric_value(f64::from(min));
+        builder.set_max_numeric_value(f64::from(max));
+        builder.set_numeric_value_step(step_f);
+        builder.add_action(Action::SetValue);
+        if numeric < f64::from(max) {
+            builder.add_action(Action::Increment);
+        }
+        if numeric > f64::from(min) {
+            builder.add_action(Action::Decrement);
+        }
+    });
     response
+}
+
+/// Arrow keys and a screen reader's increment or set-value, while a drag owns
+/// the pointer.
+fn slider_keyboard_and_accesskit(ui: &egui::Ui, response: &egui::Response) -> (i32, Option<f64>) {
+    let key_steps = if response.has_focus() {
+        ui.input(|input| {
+            let down =
+                input.num_presses(egui::Key::ArrowLeft) + input.num_presses(egui::Key::ArrowDown);
+            let up =
+                input.num_presses(egui::Key::ArrowRight) + input.num_presses(egui::Key::ArrowUp);
+            up as i32 - down as i32
+        })
+    } else {
+        0
+    };
+    let (access_steps, set_value) = ui.input(|input| {
+        use egui::accesskit::{Action, ActionData};
+        let steps = input.num_accesskit_action_requests(response.id, Action::Increment) as i32
+            - input.num_accesskit_action_requests(response.id, Action::Decrement) as i32;
+        let set_value = input
+            .accesskit_action_requests(response.id, Action::SetValue)
+            .filter_map(|request| match request.data {
+                Some(ActionData::NumericValue(value)) => Some(value),
+                _ => None,
+            })
+            .last();
+        (steps, set_value)
+    });
+    (key_steps + access_steps, set_value)
+}
+
+fn apply_slider_steps(value: &mut f32, min: f32, max: f32, step: f32, steps: i32) -> bool {
+    if steps == 0 {
+        return false;
+    }
+    let next = nudge_slider(*value, min, max, step, steps);
+    if next == *value {
+        return false;
+    }
+    *value = next;
+    true
+}
+
+fn nudge_slider(value: f32, min: f32, max: f32, step: f32, steps: i32) -> f32 {
+    let step = if step.is_finite() && step > 0.0 {
+        step
+    } else {
+        f32::EPSILON
+    };
+    let snapped = ((value + steps as f32 * step) / step).round() * step;
+    snapped.clamp(min, max)
+}
+
+fn format_slider_value(value: f32, step: f32) -> String {
+    let decimals = if step + 1.0e-4 >= 1.0 {
+        0
+    } else if step + 1.0e-4 >= 0.1 {
+        1
+    } else if step + 1.0e-4 >= 0.01 {
+        2
+    } else {
+        3
+    };
+    format!("{value:.decimals$}")
 }
 
 pub(crate) fn meter_row(ui: &mut egui::Ui, label: &str, value: f32, peak: f32, color: Color32) {
@@ -460,8 +685,21 @@ pub(crate) fn metric_tile(
     unit: &str,
     color: Color32,
     width: f32,
-) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::hover());
+) -> egui::Response {
+    metric_tile_with_badge(ui, label, value, unit, color, width, None)
+}
+
+/// Like [`metric_tile`], with an optional top-right micro badge (e.g. underruns).
+pub(crate) fn metric_tile_with_badge(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    unit: &str,
+    color: Color32,
+    width: f32,
+    badge: Option<(&str, Color32)>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(8), CARD_DEEP);
     ui.painter().rect_stroke(
@@ -477,6 +715,15 @@ pub(crate) fn metric_tile(
         FontId::new(ts(8.0), FontFamily::Proportional),
         DIM,
     );
+    if let Some((badge_text, badge_color)) = badge {
+        ui.painter().text(
+            rect.right_top() + Vec2::new(-9.0, 8.0),
+            Align2::RIGHT_TOP,
+            badge_text,
+            FontId::new(ts(8.0), FontFamily::Monospace),
+            badge_color,
+        );
+    }
     ui.painter().text(
         rect.left_bottom() + Vec2::new(9.0, -8.0),
         Align2::LEFT_BOTTOM,
@@ -502,6 +749,7 @@ pub(crate) fn metric_tile(
             DIM,
         );
     }
+    response
 }
 
 pub(crate) fn small_fact(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -559,18 +807,20 @@ pub(crate) fn legend_dot(ui: &mut egui::Ui, label: &str, color: Color32) {
     });
 }
 
+/// Draws the device combo. `true` when the person picks a row, including the
+/// row that was already selected. Opening the combo does not count.
 pub(crate) fn device_selector(
     ui: &mut egui::Ui,
     id_source: &str,
     devices: &[DeviceItem],
     selected: &mut usize,
     accent: Color32,
-) {
+) -> bool {
     let current = devices
         .get(*selected)
-        .map(|device| device.name.clone())
+        .map(|device| crate::audio::device_choice_label(device, devices))
         .unwrap_or_else(|| "No device".to_owned());
-    let mut changed = false;
+    let mut picked = false;
     egui::Frame::new()
         .fill(CARD_DEEP)
         .stroke(Stroke::new(1.0, BORDER_SOFT))
@@ -589,20 +839,21 @@ pub(crate) fn device_selector(
                     for (index, device) in devices.iter().enumerate() {
                         let label = format!(
                             "{}  ·  {}",
-                            device.name,
+                            crate::audio::device_choice_label(device, devices),
                             if device.demo {
                                 "preview".to_owned()
                             } else {
                                 device.backend.clone()
                             }
                         );
-                        if ui.selectable_value(selected, index, label).changed() {
-                            changed = true;
+                        let response = ui.selectable_value(selected, index, label);
+                        if response.clicked() || response.changed() {
+                            picked = true;
                         }
                     }
                 });
         });
-    if changed {
+    if picked {
         ui.ctx().request_repaint();
     }
     if let Some(device) = devices.get(*selected) {
@@ -614,5 +865,195 @@ pub(crate) fn device_selector(
                 ui.label(micro_label(&format!("{} CH", device.channels), DIM));
             }
         });
+    }
+    picked
+}
+
+#[cfg(test)]
+pub(crate) fn run_frame(
+    ctx: &egui::Context,
+    input: egui::RawInput,
+    add: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let mut output = ctx.run_ui(input, add);
+    output.textures_delta.clear();
+    output
+}
+
+#[cfg(test)]
+pub(crate) fn accesskit_frame(add: impl FnMut(&mut egui::Ui)) -> egui::accesskit::TreeUpdate {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let output = run_frame(&ctx, test_input(None), add);
+    output
+        .platform_output
+        .accesskit_update
+        .expect("accesskit tree")
+}
+
+#[cfg(test)]
+pub(crate) fn node_named<'a>(
+    tree: &'a egui::accesskit::TreeUpdate,
+    name: &str,
+) -> &'a egui::accesskit::Node {
+    tree.nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(name))
+        .map(|(_, node)| node)
+        .unwrap_or_else(|| panic!("no AccessKit node named {name}"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_input(key: Option<egui::Key>) -> egui::RawInput {
+    let mut input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        )),
+        ..Default::default()
+    };
+    if let Some(key) = key {
+        input.events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
+    input
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        db_slider, nav_item, node_named, nudge_slider, run_frame, styled_slider, test_input,
+    };
+    use crate::ui::icons::Icon;
+    use crate::ui::theme::TEAL;
+    use eframe::egui::{self, accesskit::Toggled};
+
+    fn near(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1.0e-4, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn arrow_steps_follow_the_slider_step_and_stay_inside_the_range() {
+        near(nudge_slider(0.0, -12.0, 12.0, 0.5, 0), 0.0);
+        near(nudge_slider(0.0, -12.0, 12.0, 0.5, 1), 0.5);
+        near(nudge_slider(0.0, -12.0, 12.0, 0.5, -1), -0.5);
+        near(nudge_slider(0.2, 0.0, 1.0, 0.1, 1), 0.3);
+        near(nudge_slider(12.0, -12.0, 12.0, 0.5, 4), 12.0);
+        near(nudge_slider(-12.0, -12.0, 12.0, 0.5, -3), -12.0);
+    }
+
+    #[test]
+    fn nav_row_exposes_its_name_and_selected_value() {
+        let tree = super::accesskit_frame(|ui| {
+            assert!(!nav_item(ui, Icon::Wave, "Live", "Bridge", true));
+        });
+        let node = node_named(&tree, "Live");
+        assert_eq!(node.role(), egui::Role::Button);
+        assert_eq!(node.value(), Some("Bridge"));
+        assert_eq!(node.toggled(), Some(Toggled::True));
+    }
+
+    #[test]
+    fn gain_slider_exposes_a_name_and_decibel_value() {
+        let mut value = -3.0f32;
+        let tree = super::accesskit_frame(|ui| {
+            assert!(!db_slider(ui, &mut value, -12.0, 12.0, TEAL));
+        });
+        let node = node_named(&tree, "Gain");
+        assert_eq!(node.role(), egui::Role::Slider);
+        assert_eq!(node.numeric_value(), Some(-3.0));
+        assert_eq!(node.value(), Some("-3.0 dB"));
+        assert_eq!(node.min_numeric_value(), Some(-12.0));
+        assert_eq!(node.max_numeric_value(), Some(12.0));
+    }
+
+    #[test]
+    fn a_focused_slider_changes_with_arrow_keys_and_stays_focused() {
+        let ctx = egui::Context::default();
+        let mut value = 0.0f32;
+        let show = |ui: &mut egui::Ui, value: &mut f32| {
+            styled_slider(ui, value, -12.0, 12.0, 0.5, (TEAL, "EQ gain"))
+        };
+        let _ = run_frame(&ctx, test_input(None), |ui| {
+            show(ui, &mut value).request_focus();
+        });
+        // One idle frame installs the arrow-key filter egui applies on the next pass.
+        let _ = run_frame(&ctx, test_input(None), |ui| {
+            show(ui, &mut value);
+        });
+        let mut focused = false;
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::ArrowRight)), |ui| {
+            let response = show(ui, &mut value);
+            focused = response.has_focus();
+            assert!(response.changed());
+        });
+        near(value, 0.5);
+        assert!(focused);
+
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::ArrowLeft)), |ui| {
+            show(ui, &mut value);
+        });
+        near(value, 0.0);
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::ArrowUp)), |ui| {
+            show(ui, &mut value);
+        });
+        near(value, 0.5);
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::ArrowDown)), |ui| {
+            show(ui, &mut value);
+        });
+        near(value, 0.0);
+    }
+
+    #[test]
+    fn arrow_keys_do_nothing_until_the_slider_is_focused() {
+        let ctx = egui::Context::default();
+        let mut value = 1.0f32;
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::ArrowRight)), |ui| {
+            let response = styled_slider(ui, &mut value, 0.0, 1.0, 0.01, (TEAL, "Mix"));
+            assert!(!response.has_focus());
+        });
+        near(value, 1.0);
+    }
+
+    #[test]
+    fn pointer_click_still_sets_the_slider() {
+        let ctx = egui::Context::default();
+        let mut value = 0.0f32;
+        let mut rect = egui::Rect::NOTHING;
+        let _ = run_frame(&ctx, test_input(None), |ui| {
+            rect = styled_slider(ui, &mut value, 0.0, 1.0, 0.01, (TEAL, "Mix")).rect;
+        });
+        let pos = egui::pos2(rect.right() - 2.0, rect.center().y);
+        let mut press = test_input(None);
+        press.events.push(egui::Event::PointerMoved(pos));
+        press.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = run_frame(&ctx, press, |ui| {
+            styled_slider(ui, &mut value, 0.0, 1.0, 0.01, (TEAL, "Mix"));
+        });
+        let mut release = test_input(None);
+        release.events.push(egui::Event::PointerMoved(pos));
+        release.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = run_frame(&ctx, release, |ui| {
+            styled_slider(ui, &mut value, 0.0, 1.0, 0.01, (TEAL, "Mix"));
+        });
+        assert!(
+            value > 0.9,
+            "click at the right of the track left the mix at {value}"
+        );
     }
 }

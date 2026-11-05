@@ -4,7 +4,7 @@ use eframe::egui;
 use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke};
 
 use crate::app::devices::is_wrapper_driver;
-use crate::app::settings::{rate_label, BUFFERS, RATES};
+use crate::app::settings::{rate_label, BUFFERS, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB, RATES};
 use crate::app::RigWerkApp;
 use crate::audio::{DeviceItem, EngineState};
 use crate::ui::pages::live::driver_line::driver_line;
@@ -51,6 +51,7 @@ impl RigWerkApp {
             self.output_tab_low_latency = use_low;
             if let Some(first) = self.output_indices(use_low).first() {
                 self.output_idx = *first;
+                self.accept_output_device();
             }
         }
         ui.add_space(7.0);
@@ -82,7 +83,9 @@ impl RigWerkApp {
                 .iter()
                 .position(|&index| index == self.output_idx)
                 .unwrap_or(0);
-            device_selector(ui, "system_output", &devices, &mut position, BLUE);
+            if device_selector(ui, "system_output", &devices, &mut position, BLUE) {
+                self.accept_output_device();
+            }
             self.output_idx = indices[position];
         }
 
@@ -250,7 +253,13 @@ impl RigWerkApp {
                 ui.label(mono(format!("{:+.1} dB", self.output_gain), TEXT, 10.0));
             });
         });
-        if db_slider(ui, &mut self.output_gain, -36.0, 6.0, BLUE) {
+        if db_slider(
+            ui,
+            &mut self.output_gain,
+            OUTPUT_GAIN_MIN_DB,
+            OUTPUT_GAIN_MAX_DB,
+            BLUE,
+        ) {
             self.engine.set_gains(self.input_gain, self.output_gain);
         }
         ui.add_space(4.0);
@@ -328,9 +337,9 @@ impl RigWerkApp {
                     })
                     .response
                     .on_hover_text(if cfg!(target_os = "windows") {
-                        "Output rate. When it differs from the input, RigWerk converts with a cubic resampler. Shared WASAPI outputs mix at the rate set in Windows."
+                        "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. Shared WASAPI outputs mix at the rate set in Windows."
                     } else {
-                        "Output rate. When it differs from the input, RigWerk converts with a cubic resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
+                        "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
                     });
                 if rate != self.output_rate {
                     self.output_rate = rate;

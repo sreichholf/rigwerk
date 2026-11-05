@@ -1,4 +1,5 @@
-//! Plugins: browse installed VST3 and CLAP effects and build the master insert chain.
+//! Plugins: browse installed VST3 and CLAP effects. The insert chain itself
+//! lives on the Mixer rack; this page is the library.
 
 use eframe::egui;
 use egui::{
@@ -8,26 +9,16 @@ use egui::{
 
 use crate::app::plugins::PluginCandidate;
 use crate::app::RigWerkApp;
-use crate::audio::{PluginParamView, PluginView};
+use crate::audio::PluginParamView;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL,
     TEXT,
 };
 use crate::ui::widgets::{
-    arrow_button, card_fixed, ellipsize, ghost_button, horizontal_line, micro_label, mono,
-    status_dot, styled_slider,
+    card_fixed, ellipsize, ghost_button, horizontal_line, micro_label, mono, row_info,
+    show_focus_ring, status_dot, styled_slider,
 };
-
-#[derive(Clone, Copy)]
-enum ChainAction {
-    Bypass(usize, bool),
-    Mix(usize, f32),
-    Configure(usize),
-    Up(usize),
-    Down(usize),
-    Remove(usize),
-}
 
 fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -> bool {
     let width = ui.available_width();
@@ -104,147 +95,16 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
         FontId::new(ts(8.0), FontFamily::Monospace),
         color,
     );
+    show_focus_ring(ui, &response, rect, 8);
+    row_info(
+        &response,
+        egui::Role::Button,
+        ui.is_enabled() && !in_chain,
+        candidate.name.clone(),
+        None,
+        Some(if in_chain { "In chain" } else { "Add" }.to_owned()),
+    );
     response.clicked() && !in_chain
-}
-
-fn chain_row(ui: &mut egui::Ui, index: usize, view: &PluginView) -> Option<ChainAction> {
-    let mut action = None;
-    egui::Frame::new()
-        .fill(CARD_DEEP)
-        .stroke(Stroke::new(
-            1.0,
-            if view.error.is_some() {
-                with_alpha(RED, 55)
-            } else if view.bypass {
-                BORDER_SOFT
-            } else {
-                with_alpha(AMBER, 42)
-            },
-        ))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(9, 7))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(mono(format!("{:02}", index + 1), DIM, 8.5));
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(ellipsize(&view.name, 34))
-                            .size(ts(10.5))
-                            .color(if view.bypass { DIM } else { TEXT })
-                            .strong(),
-                    );
-                    ui.label(
-                        RichText::new(if view.error.is_some() {
-                            view.error.clone().unwrap_or_default()
-                        } else if view.vendor.is_empty() {
-                            format!("{} · {}", view.format.label(), view.category)
-                        } else {
-                            format!(
-                                "{} · {} · {}",
-                                view.format.label(),
-                                view.vendor,
-                                view.category
-                            )
-                        })
-                        .size(ts(8.2))
-                        .color(if view.error.is_some() {
-                            RED
-                        } else {
-                            DIM
-                        }),
-                    );
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("×").size(ts(13.0)).color(DIM))
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(Stroke::NONE),
-                        )
-                        .on_hover_text("Remove this insert")
-                        .clicked()
-                    {
-                        action = Some(ChainAction::Remove(index));
-                    }
-                    if arrow_button(ui, false, MUTED)
-                        .on_hover_text("Move later in the chain")
-                        .clicked()
-                    {
-                        action = Some(ChainAction::Down(index));
-                    }
-                    if arrow_button(ui, true, MUTED)
-                        .on_hover_text("Move earlier in the chain")
-                        .clicked()
-                    {
-                        action = Some(ChainAction::Up(index));
-                    }
-                    let bypass = view.bypass;
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(if bypass { "BYP" } else { "ON" })
-                                    .size(ts(7.5))
-                                    .color(if bypass { DIM } else { AMBER }),
-                            )
-                            .fill(if bypass {
-                                Color32::TRANSPARENT
-                            } else {
-                                with_alpha(AMBER, 16)
-                            })
-                            .stroke(Stroke::new(
-                                1.0,
-                                if bypass {
-                                    BORDER_SOFT
-                                } else {
-                                    with_alpha(AMBER, 45)
-                                },
-                            ))
-                            .corner_radius(CornerRadius::same(5)),
-                        )
-                        .on_hover_text(if bypass {
-                            "Enable this insert"
-                        } else {
-                            "Bypass this insert"
-                        })
-                        .clicked()
-                    {
-                        action = Some(ChainAction::Bypass(index, !bypass));
-                    }
-                    if ui
-                        .add_enabled(
-                            view.error.is_none(),
-                            egui::Button::new(RichText::new("CFG").size(ts(7.5)).color(BLUE))
-                                .fill(with_alpha(BLUE, 14))
-                                .stroke(Stroke::new(1.0, with_alpha(BLUE, 45)))
-                                .corner_radius(CornerRadius::same(5)),
-                        )
-                        .on_hover_text(
-                            "Open this plugin's controls, or its own interface when available",
-                        )
-                        .clicked()
-                    {
-                        action = Some(ChainAction::Configure(index));
-                    }
-                });
-            });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.label(mono("MIX", DIM, 7.5));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(mono(
-                        format!("{}%", (view.mix * 100.0).round() as i32),
-                        MUTED,
-                        8.0,
-                    ));
-                });
-            });
-            let mut mix = view.mix;
-            if styled_slider(ui, &mut mix, 0.0, 1.0, 0.01, AMBER).changed() {
-                action = Some(ChainAction::Mix(index, mix));
-            }
-        });
-    action
 }
 
 /// One control in the configure panel.  Compact enough that a long plugin
@@ -327,7 +187,14 @@ fn parameter_card(ui: &mut egui::Ui, parameter: &PluginParamView, accent: Color3
                 };
                 let response = ui
                     .add_enabled_ui(!parameter.read_only, |ui| {
-                        styled_slider(ui, &mut value, 0.0, 1.0, step, accent)
+                        styled_slider(
+                            ui,
+                            &mut value,
+                            0.0,
+                            1.0,
+                            step,
+                            (accent, parameter.name.clone()),
+                        )
                     })
                     .inner;
                 if response.changed() {
@@ -349,7 +216,7 @@ impl RigWerkApp {
         let views = self.engine.plugin_views();
         let Some(view) = views.get(index) else {
             self.plugin_editor = None;
-            self.plugin_gui = None;
+            self.finish_plugin_gui();
             return;
         };
         let name = view.name.clone();
@@ -500,8 +367,8 @@ impl RigWerkApp {
                         toggle_bypass = true;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if has_editor {
-                            if ui
+                        if has_editor
+                            && ui
                                 .add(
                                     egui::Button::new(
                                         RichText::new("Open plugin interface")
@@ -520,9 +387,8 @@ impl RigWerkApp {
                                     "Open the interface the plugin draws itself. Changes made there are saved with this insert too.",
                                 )
                                 .clicked()
-                            {
-                                open_gui = true;
-                            }
+                        {
+                            open_gui = true;
                         }
                     });
                 });
@@ -720,6 +586,10 @@ impl RigWerkApp {
             .collect();
 
         let total = ui.available_width();
+        let insert_hint = match self.plugin_insert_at {
+            Some(index) => format!("Next add inserts at position {}.", index + 1),
+            None => "Next add appends to the Mixer insert chain.".to_owned(),
+        };
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!(
@@ -731,6 +601,8 @@ impl RigWerkApp {
                 .color(DIM),
             );
             ui.add_space(12.0);
+            ui.label(RichText::new(insert_hint).size(ts(9.5)).color(MUTED));
+            ui.add_space(12.0);
             let mut prefer = self.prefer_plugin_interface;
             if ui
                 .checkbox(
@@ -740,7 +612,7 @@ impl RigWerkApp {
                         .color(MUTED),
                 )
                 .on_hover_text(
-                    "When an effect has its own interface that RigWerk can embed, CFG opens it directly instead of the control panel.",
+                    "When an effect has its own interface that RigWerk can embed, Open plugin interface uses it instead of the host parameter panel.",
                 )
                 .changed()
             {
@@ -786,185 +658,119 @@ impl RigWerkApp {
         }
         ui.add_space(8.0);
 
-        let left_w = (total * 0.56).clamp(420.0, (total - 330.0).max(420.0));
-        let right_w = (total - left_w - 8.0).max(300.0);
         let mut add_index: Option<usize> = None;
-        let mut actions: Vec<ChainAction> = Vec::new();
         let mut add_path = false;
+        let mut open_mixer = false;
+        let card_h = (ui.available_height() - 8.0).max(480.0);
 
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                Vec2::new(left_w, 540.0),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_min_size(Vec2::new(left_w, 540.0));
-                    card_fixed(ui, CARD, BORDER, 540.0, |ui| {
-                        ui.set_width(left_w - 32.0);
-                        ui.horizontal(|ui| {
-                            ui.label(micro_label("PLUGIN LIBRARY", TEAL));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(mono(
-                                    format!("{} SHOWN", filtered.len()),
-                                    DIM,
-                                    8.5,
-                                ));
-                            });
-                        });
-                        ui.add_space(3.0);
-                        ui.label(
-                            RichText::new(
-                                "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the master insert chain; CFG opens its controls and its own interface, when it has one.",
+        card_fixed(ui, CARD, BORDER, card_h, |ui| {
+            ui.set_width(total - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(micro_label("PLUGIN LIBRARY", TEAL));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Open mixer").size(ts(9.5)).color(TEAL),
                             )
-                            .size(ts(9.5))
-                            .color(MUTED),
-                        );
-                        ui.add_space(7.0);
-                        horizontal_line(ui, BORDER_SOFT);
-                        ui.add_space(6.0);
-                        let view_height = 402.0;
-                        egui::ScrollArea::vertical()
-                            .id_salt("plugin_library_scroll")
-                            .max_height(view_height)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                if scanning && filtered.is_empty() {
-                                    ui.add_space(24.0);
-                                    ui.horizontal(|ui| {
-                                        status_dot(ui, AMBER);
-                                        ui.label(
-                                            RichText::new("Scanning VST3 and CLAP folders…")
-                                                .size(ts(10.0))
-                                                .color(MUTED),
-                                        );
-                                    });
-                                } else if filtered.is_empty() {
-                                    ui.add_space(20.0);
-                                    ui.label(
-                                        RichText::new("No plugins found here yet.")
-                                            .size(ts(10.5))
-                                            .color(MUTED)
-                                            .strong(),
-                                    );
-                                    ui.add_space(3.0);
-                                    ui.label(
-                                        RichText::new(
-                                            "Install a .vst3 or .clap plugin in its standard folder, or add one by path on the right, then rescan.",
-                                        )
-                                        .size(ts(9.5))
-                                        .color(DIM),
-                                    );
-                                } else {
-                                    let in_chain = |candidate: &PluginCandidate| {
-                                        views.iter().any(|view| {
-                                            view.path
-                                                == candidate.path.to_string_lossy().into_owned()
-                                                && view.format == candidate.format
-                                                && view.class_id == candidate.class_id
-                                        })
-                                    };
-                                    for (index, candidate) in filtered.iter().enumerate() {
-                                        if library_row(ui, candidate, in_chain(candidate)) {
-                                            add_index = Some(index);
-                                        }
-                                        ui.add_space(4.0);
-                                    }
-                                }
-                            });
-                    });
-                },
+                            .fill(with_alpha(TEAL, 14))
+                            .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
+                            .corner_radius(CornerRadius::same(7)),
+                        )
+                        .on_hover_text("Reorder, bypass and mix inserts on the Mixer rack")
+                        .clicked()
+                    {
+                        open_mixer = true;
+                    }
+                    ui.add_space(8.0);
+                    ui.label(mono(format!("{} SHOWN", filtered.len()), DIM, 8.5));
+                });
+            });
+            ui.add_space(3.0);
+            ui.label(
+                RichText::new(
+                    "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the Mixer insert chain. Edit inserts on the Mixer page — prefer each plugin's own interface when it has one.",
+                )
+                .size(ts(9.5))
+                .color(MUTED),
             );
-            ui.allocate_ui_with_layout(
-                Vec2::new(right_w, 540.0),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_min_size(Vec2::new(right_w, 540.0));
-                    card_fixed(ui, CARD, BORDER, 540.0, |ui| {
-                        ui.set_width(right_w - 32.0);
+            ui.add_space(7.0);
+            horizontal_line(ui, BORDER_SOFT);
+            ui.add_space(6.0);
+            let view_height = (card_h - 150.0).max(280.0);
+            egui::ScrollArea::vertical()
+                .id_salt("plugin_library_scroll")
+                .max_height(view_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if scanning && filtered.is_empty() {
+                        ui.add_space(24.0);
                         ui.horizontal(|ui| {
-                            ui.label(micro_label("MASTER INSERT CHAIN", BLUE));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(mono(
-                                    format!("{} ACTIVE", views.iter().filter(|v| !v.bypass && v.error.is_none()).count()),
-                                    if views.is_empty() { DIM } else { BLUE },
-                                    8.5,
-                                ));
-                            });
-                        });
-                        ui.add_space(3.0);
-                        ui.label(
-                            RichText::new(
-                                "Top to bottom, after routing and gain. Bypass keeps a slot in place.",
-                            )
-                            .size(ts(9.5))
-                            .color(MUTED),
-                        );
-                        ui.add_space(7.0);
-                        horizontal_line(ui, BORDER_SOFT);
-                        ui.add_space(6.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("plugin_chain_scroll")
-                            .max_height(356.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                if views.is_empty() {
-                                    ui.add_space(24.0);
-                                    ui.horizontal(|ui| {
-                                        status_dot(ui, DIM);
-                                        ui.label(
-                                            RichText::new("The master bus is dry.")
-                                                .size(ts(10.5))
-                                                .color(MUTED),
-                                        );
-                                    });
-                                    ui.add_space(3.0);
-                                    ui.label(
-                                        RichText::new(
-                                            "Add an effect from the library and it processes the final mix.",
-                                        )
-                                        .size(ts(9.5))
-                                        .color(DIM),
-                                    );
-                                } else {
-                                    for (index, view) in views.iter().enumerate() {
-                                        if let Some(action) = chain_row(ui, index, view) {
-                                            actions.push(action);
-                                        }
-                                        ui.add_space(5.0);
-                                    }
-                                }
-                            });
-                        ui.add_space(7.0);
-                        horizontal_line(ui, BORDER_SOFT);
-                        ui.add_space(7.0);
-                        ui.label(micro_label("ADD FROM PATH", DIM));
-                        ui.add_space(3.0);
-                        ui.horizontal(|ui| {
-                            ui.add_sized(
-                                [ui.available_width() - 58.0, 26.0],
-                                egui::TextEdit::singleline(&mut self.plugin_browser.path_input)
-                                    .hint_text("C:\\…\\MyEffect.vst3 or MyEffect.clap")
-                                    .text_color(TEXT),
+                            status_dot(ui, AMBER);
+                            ui.label(
+                                RichText::new("Scanning VST3 and CLAP folders…")
+                                    .size(ts(10.0))
+                                    .color(MUTED),
                             );
-                            if ui
-                                .add_sized(
-                                    [50.0, 26.0],
-                                    egui::Button::new(
-                                        RichText::new("Add").size(ts(10.0)).color(TEAL),
-                                    )
-                                    .fill(with_alpha(TEAL, 14))
-                                    .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
-                                    .corner_radius(CornerRadius::same(7)),
-                                )
-                                .clicked()
-                            {
-                                add_path = true;
-                            }
                         });
-                    });
-                },
-            );
+                    } else if filtered.is_empty() {
+                        ui.add_space(20.0);
+                        ui.label(
+                            RichText::new("No plugins found here yet.")
+                                .size(ts(10.5))
+                                .color(MUTED)
+                                .strong(),
+                        );
+                        ui.add_space(3.0);
+                        ui.label(
+                            RichText::new(
+                                "Install a .vst3 or .clap plugin in its standard folder, or add one by path below, then rescan.",
+                            )
+                            .size(ts(9.5))
+                            .color(DIM),
+                        );
+                    } else {
+                        let in_chain = |candidate: &PluginCandidate| {
+                            views.iter().any(|view| {
+                                view.path == candidate.path.to_string_lossy().into_owned()
+                                    && view.format == candidate.format
+                                    && view.class_id == candidate.class_id
+                            })
+                        };
+                        for (index, candidate) in filtered.iter().enumerate() {
+                            if library_row(ui, candidate, in_chain(candidate)) {
+                                add_index = Some(index);
+                            }
+                            ui.add_space(4.0);
+                        }
+                    }
+                });
+            ui.add_space(7.0);
+            horizontal_line(ui, BORDER_SOFT);
+            ui.add_space(7.0);
+            ui.label(micro_label("ADD FROM PATH", DIM));
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [ui.available_width() - 58.0, 26.0],
+                    egui::TextEdit::singleline(&mut self.plugin_browser.path_input)
+                        .hint_text("/path/to/MyEffect.vst3 or MyEffect.clap")
+                        .text_color(TEXT),
+                );
+                if ui
+                    .add_sized(
+                        [50.0, 26.0],
+                        egui::Button::new(RichText::new("Add").size(ts(10.0)).color(TEAL))
+                            .fill(with_alpha(TEAL, 14))
+                            .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
+                            .corner_radius(CornerRadius::same(7)),
+                    )
+                    .clicked()
+                {
+                    add_path = true;
+                }
+            });
         });
 
         if let Some(index) = add_index {
@@ -975,15 +781,35 @@ impl RigWerkApp {
         if add_path {
             self.add_plugin_from_path();
         }
-        for action in actions {
-            match action {
-                ChainAction::Bypass(index, bypass) => self.set_plugin_bypass(index, bypass),
-                ChainAction::Mix(index, mix) => self.set_plugin_mix(index, mix),
-                ChainAction::Configure(index) => self.open_plugin_editor(index),
-                ChainAction::Up(index) => self.move_plugin(index, -1),
-                ChainAction::Down(index) => self.move_plugin(index, 1),
-                ChainAction::Remove(index) => self.remove_plugin(index),
-            }
+        if open_mixer {
+            self.page = crate::app::Page::Mixer;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::library_row;
+    use crate::app::plugins::PluginCandidate;
+    use crate::audio::PluginFormat;
+    use crate::ui::widgets::{accesskit_frame, node_named};
+    use std::path::PathBuf;
+
+    #[test]
+    fn a_plugin_row_exposes_its_name_and_whether_it_can_be_added() {
+        let candidate = PluginCandidate {
+            path: PathBuf::from("reverb.vst3"),
+            format: PluginFormat::Vst3,
+            class_id: None,
+            name: "Room".to_owned(),
+            vendor: "Rig".to_owned(),
+            category: "Reverb".to_owned(),
+        };
+        let tree = accesskit_frame(|ui| {
+            assert!(!library_row(ui, &candidate, false));
+        });
+        let node = node_named(&tree, "Room");
+        assert_eq!(node.role(), eframe::egui::Role::Button);
+        assert_eq!(node.value(), Some("Add"));
     }
 }

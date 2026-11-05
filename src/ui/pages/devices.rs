@@ -13,7 +13,8 @@ use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    card, ellipsize, ghost_button, horizontal_line, micro_label, pill, status_dot,
+    card, ellipsize, ghost_button, horizontal_line, micro_label, pill, row_info, show_focus_ring,
+    status_dot,
 };
 
 pub(crate) fn device_row(
@@ -21,7 +22,9 @@ pub(crate) fn device_row(
     device: &DeviceItem,
     selected: bool,
     accent: Color32,
+    peers: &[DeviceItem],
 ) -> bool {
+    let label = crate::audio::device_choice_label(device, peers);
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 52.0), Sense::click());
     let fill = if selected {
@@ -57,7 +60,7 @@ pub(crate) fn device_row(
     ui.painter().text(
         rect.left_center() + Vec2::new(28.0, -5.0),
         Align2::LEFT_CENTER,
-        ellipsize(&device.name, 34),
+        ellipsize(&label, 34),
         FontId::new(ts(10.8), FontFamily::Proportional),
         if selected { TEXT } else { MUTED },
     );
@@ -82,6 +85,21 @@ pub(crate) fn device_row(
             accent,
         );
     }
+    show_focus_ring(ui, &response, rect, 8);
+    let detail = format!(
+        "{} · {} CH{}",
+        device.backend,
+        device.channels,
+        if device.demo { " · preview" } else { "" }
+    );
+    row_info(
+        &response,
+        egui::Role::RadioButton,
+        ui.is_enabled(),
+        label.clone(),
+        Some(selected),
+        Some(detail),
+    );
     response.clicked()
 }
 
@@ -101,9 +119,10 @@ fn device_group(
     }
     ui.label(micro_label(heading, heading_color));
     ui.add_space(4.0);
+    let peers: Vec<DeviceItem> = devices.iter().map(|(_, device)| device.clone()).collect();
     let mut picked = None;
     for (index, device) in devices {
-        if device_row(ui, device, *index == selected_index, accent) {
+        if device_row(ui, device, *index == selected_index, accent, &peers) {
             picked = Some((*index, device.name.clone()));
         }
         ui.add_space(3.0);
@@ -199,6 +218,7 @@ impl RigWerkApp {
                         ) {
                             self.asio_idx = index;
                             self.use_asio_input = true;
+                            self.accept_asio_device();
                             self.push_log(format!("Input set to {name}."), TEAL);
                         }
                         if let Some((index, name)) = device_group(
@@ -211,6 +231,7 @@ impl RigWerkApp {
                         ) {
                             self.input_idx = index;
                             self.use_asio_input = false;
+                            self.accept_input_device();
                             self.push_log(format!("Input set to {name} (system input)."), BLUE);
                         }
                         ui.add_space(5.0);
@@ -258,6 +279,7 @@ impl RigWerkApp {
                             BLUE,
                         ) {
                             self.output_idx = index;
+                            self.accept_output_device();
                             self.push_log(format!("Output set to {name}."), BLUE);
                         }
                         if let Some((index, name)) = device_group(
@@ -269,6 +291,7 @@ impl RigWerkApp {
                             BLUE,
                         ) {
                             self.output_idx = index;
+                            self.accept_output_device();
                             self.push_log(format!("Output set to {name}."), BLUE);
                         }
                         ui.add_space(5.0);
@@ -302,10 +325,10 @@ impl RigWerkApp {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(micro_label("PIPEWIRE QUANTUM", tone));
+                        ui.label(micro_label("GRAPH SIZE", tone));
                         ui.label(
                             RichText::new(format!(
-                                "ALSA period {} smp · quantum {} smp · {:.1} ms at {:.1} kHz",
+                                "ALSA period {} smp · graph {} smp · {:.1} ms at {:.1} kHz",
                                 info.alsa_period,
                                 info.quantum,
                                 info.quantum as f32 / info.rate.max(1) as f32 * 1000.0,
@@ -334,12 +357,61 @@ impl RigWerkApp {
                         RichText::new(if cfg!(target_os = "windows") {
                             "Inputs and outputs are grouped by driver type: ASIO on the low-latency side, WASAPI, DirectSound and MME on the system side, and every device stays selectable. Same-interface playback is up to the driver: most vendor ASIO drivers allow it, ASIO4ALL-style wrappers usually do not. RigWerk tries the pairing and shows the driver's error instead of blocking it."
                         } else {
-                            "PipeWire is the default Linux backend: its endpoints sit on the low-latency side next to direct ALSA hardware (hw: or plughw:) and JACK. The low-latency switch asks PipeWire for a 64-frame quantum and ALSA for its smallest period; the PIPEWIRE QUANTUM card above warns when the two do not line up. PulseAudio devices stay on the system side."
+                            "A PipeWire endpoint is low latency only when it is the pipewire PCM or ALSA's default plugin is type pipewire. Direct hardware (hw: or plughw:) is the other low-latency path. PulseAudio, sysdefault, and a Pulse-backed default stay on the system side. The low-latency switch asks a real PipeWire output for a 64-frame quantum. Sound-card changes come from the kernel; a failed configuration read does not by itself stop the bridge."
                         })
                         .size(ts(10.0))
                         .color(MUTED),
                     );
                 });
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_row;
+    use crate::audio::DeviceItem;
+    use crate::ui::theme::TEAL;
+    use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
+    use eframe::egui::{self, accesskit::Toggled};
+
+    fn item(name: &str) -> DeviceItem {
+        DeviceItem {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            backend: "PIPEWIRE".to_owned(),
+            channels: 2,
+            demo: false,
+            preferred: false,
+            asio_clsid: None,
+        }
+    }
+
+    #[test]
+    fn a_device_row_exposes_its_name_and_whether_it_is_in_use() {
+        let tree = accesskit_frame(|ui| {
+            assert!(!device_row(ui, &item("Analog In"), true, TEAL, &[]));
+        });
+        let node = node_named(&tree, "Analog In");
+        assert_eq!(node.role(), egui::Role::RadioButton);
+        assert_eq!(node.value(), Some("PIPEWIRE · 2 CH"));
+        assert_eq!(node.toggled(), Some(Toggled::True));
+    }
+
+    #[test]
+    fn enter_on_a_focused_device_row_still_counts_as_a_pick() {
+        let ctx = egui::Context::default();
+        let device = item("Analog In");
+        let _ = run_frame(&ctx, test_input(None), |ui| {
+            assert!(!device_row(ui, &device, false, TEAL, &[]));
+        });
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::Tab)), |ui| {
+            assert!(!device_row(ui, &device, false, TEAL, &[]));
+        });
+        let mut picked = false;
+        let _ = run_frame(&ctx, test_input(Some(egui::Key::Enter)), |ui| {
+            picked = device_row(ui, &device, false, TEAL, &[]);
+        });
+        assert!(picked);
     }
 }

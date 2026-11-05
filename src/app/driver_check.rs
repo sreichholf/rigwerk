@@ -10,6 +10,8 @@ use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::thread;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
@@ -67,16 +69,19 @@ impl RigWerkApp {
     /// the bridge starts, so a collision is visible before any audio flows.
     #[cfg(target_os = "linux")]
     pub(crate) fn refresh_quantum_check(&mut self, log: bool) {
-        let output = self.selected_output().clone();
-        if output.demo {
-            self.quantum = None;
+        if matches!(
+            self.engine.state,
+            EngineState::Starting | EngineState::Running | EngineState::Stopping
+        ) {
             return;
         }
-        let period = crate::audio::planned_output_period(
-            &output.id,
-            self.low_latency_output,
-            self.output_buffer,
-        );
+        let output = self.selected_output().clone();
+        if output.demo || !crate::audio::is_pipewire_device(&output) {
+            self.quantum = None;
+            self.quantum_checked_key = None;
+            return;
+        }
+        let period = self.cached_output_period(&output.id);
         let next = crate::audio::pipewire_check_output(&output, period);
         let changed = match (&self.quantum, &next) {
             (Some(previous), Some(next)) => {
@@ -88,6 +93,11 @@ impl RigWerkApp {
             _ => true,
         };
         self.quantum = next;
+        self.quantum_checked_key = Some((
+            output.id.clone(),
+            self.low_latency_output,
+            self.output_buffer,
+        ));
         if log && changed {
             if let Some(info) = &self.quantum {
                 let tone = if info.fits && info.low_latency {
@@ -106,43 +116,154 @@ impl RigWerkApp {
     #[allow(dead_code)]
     pub(crate) fn refresh_quantum_check(&mut self, _log: bool) {}
 
-    /// Once the output runs, replaces the planned ALSA period with the one the
-    /// driver really delivered, so the fit check tells the truth.
+    /// Once the output runs, keep the graph quantum and the delivered block in
+    /// sync. The idle check freezes while Running, so without this the amber
+    /// OUTPUT warning can stick on a pre-start 1024/48 kHz reading after the
+    /// bridge has forced a smaller quantum (or the graph rate has moved).
     #[cfg(target_os = "linux")]
     pub(crate) fn refresh_quantum_actual(&mut self) {
         if self.engine.state != EngineState::Running {
             return;
         }
+        let output = self.selected_output().clone();
+        if output.demo || !crate::audio::is_pipewire_device(&output) {
+            return;
+        }
         let frames = self.snapshot.output_step_frames;
-        if frames == 0 {
+        let period = if frames > 0 {
+            frames
+        } else {
+            self.quantum
+                .as_ref()
+                .map(|info| info.alsa_period)
+                .unwrap_or(0)
+        };
+        // pw-metadata is a process spawn — at most once a second while live.
+        let due = self.quantum_live_at.elapsed() >= std::time::Duration::from_secs(1);
+        if due || self.quantum.is_none() {
+            self.quantum_live_at = Instant::now();
+            self.quantum = crate::audio::pipewire_check_output(&output, period);
             return;
         }
         if let Some(info) = self.quantum.clone() {
-            self.quantum = Some(info.with_period(frames));
-        } else {
-            self.refresh_quantum_check(false);
-            if let Some(info) = self.quantum.clone() {
-                self.quantum = Some(info.with_period(frames));
+            if period > 0 && info.alsa_period != period {
+                self.quantum = Some(info.with_period(period));
             }
         }
     }
 
-    /// One short line for the Live page's MODE tile.
+    /// The period this output will ask for. Cached until the device, the
+    /// low-latency switch, or the buffer changes, and never read while the
+    /// bridge is opening that same device.
+    #[cfg(target_os = "linux")]
+    fn cached_output_period(&mut self, device_id: &str) -> u32 {
+        if crate::audio::is_native_id(device_id) {
+            return crate::audio::node_latency_frames(self.low_latency_output, self.output_buffer);
+        }
+        if let Some((id, low_latency, buffer, period)) = &self.period_cache {
+            if id == device_id
+                && *low_latency == self.low_latency_output
+                && *buffer == self.output_buffer
+            {
+                return *period;
+            }
+        }
+        let period = crate::audio::planned_output_period(
+            device_id,
+            self.low_latency_output,
+            self.output_buffer,
+        );
+        self.period_cache = Some((
+            device_id.to_owned(),
+            self.low_latency_output,
+            self.output_buffer,
+            period,
+        ));
+        period
+    }
+
+    /// Compares PipeWire once per output setting, and only while the bridge
+    /// is not holding the device. A running bridge updates the period from
+    /// the snapshot instead of opening the PCM again.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refresh_quantum_if_idle(&mut self) {
+        if matches!(
+            self.engine.state,
+            EngineState::Starting | EngineState::Running | EngineState::Stopping
+        ) {
+            return;
+        }
+        let output = self.selected_output();
+        if output.demo || !crate::audio::is_pipewire_device(output) {
+            if self.quantum.is_some() {
+                self.quantum = None;
+            }
+            self.quantum_checked_key = None;
+            return;
+        }
+        let key = (
+            output.id.clone(),
+            self.low_latency_output,
+            self.output_buffer,
+        );
+        if self.quantum_checked_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.refresh_quantum_check(true);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)]
+    pub(crate) fn refresh_quantum_if_idle(&mut self) {}
+
+    /// One short line for the Live page MODE / OUTPUT footers: graph block
+    /// size in samples and how long that block lasts. Backend name is already
+    /// on the cards above; "quantum" is PipeWire jargon that does not help here.
     pub(crate) fn quantum_summary(&self) -> Option<String> {
         #[cfg(target_os = "linux")]
         {
             self.quantum.as_ref().map(|info| {
                 if info.available {
                     let ms = info.quantum as f32 / info.rate.max(1) as f32 * 1000.0;
-                    format!("PIPEWIRE · {} SMP QUANTUM · {:.1} MS", info.quantum, ms)
+                    format!("block {} smp · {:.1} ms", info.quantum, ms)
                 } else {
-                    "PIPEWIRE · QUANTUM UNKNOWN".to_owned()
+                    "graph size unknown".to_owned()
                 }
             })
         }
         #[cfg(not(target_os = "linux"))]
         {
             None
+        }
+    }
+
+    /// Hover for the MODE / OUTPUT graph-block line.
+    pub(crate) fn graph_block_hint(&self) -> String {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(info) = self.quantum.as_ref() {
+                if info.available {
+                    let ms = info.quantum as f32 / info.rate.max(1) as f32 * 1000.0;
+                    let mut text = format!(
+                        "PipeWire graph block: {} samples lasting {:.1} ms at {:.1} kHz. \
+                         That is one chunk the desktop audio graph processes — not RigWerk's \
+                         end-to-end latency (see LATENCY / HEARD above).",
+                        info.quantum,
+                        ms,
+                        info.rate as f32 / 1000.0
+                    );
+                    if let Some(problem) = self.quantum_problem() {
+                        text.push(' ');
+                        text.push_str(&problem);
+                    }
+                    return text;
+                }
+            }
+            "PipeWire graph block size is not available yet.".to_owned()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.output_mode_text()
         }
     }
 
@@ -389,7 +510,7 @@ impl RigWerkApp {
         {
             if matches!(
                 self.engine.state,
-                EngineState::Running | EngineState::Starting
+                EngineState::Running | EngineState::Starting | EngineState::Stopping
             ) {
                 if manual {
                     self.push_log("Stop the bridge before checking its output driver.", AMBER);
@@ -440,20 +561,28 @@ impl RigWerkApp {
         {
             if matches!(
                 self.engine.state,
-                EngineState::Running | EngineState::Starting
+                EngineState::Running | EngineState::Starting | EngineState::Stopping
             ) {
                 if manual {
                     self.push_log("Stop the bridge before checking its output driver.", AMBER);
                 }
                 return;
             }
-            let (demo, asio, id, name) = {
+            let (demo, asio, id, name, asked_rate, low_latency, buffer_frames) = {
                 let output = self.selected_output();
+                let asked_rate = if self.output_rate == 0 {
+                    self.sample_rate
+                } else {
+                    self.output_rate
+                };
                 (
                     output.demo,
                     output.asio_clsid.is_some(),
                     output.id.clone(),
                     output.name.clone(),
+                    asked_rate,
+                    self.low_latency_output,
+                    self.output_buffer,
                 )
             };
             if demo || asio || self.driver_probe_job.is_some() {
@@ -464,7 +593,7 @@ impl RigWerkApp {
             let spawned = thread::Builder::new()
                 .name("rigwerk-driver-check".to_owned())
                 .spawn(move || {
-                    let result = probe_output(&id);
+                    let result = probe_output(&id, asked_rate, low_latency, buffer_frames);
                     let _ = sender.send(DriverCheck {
                         device_id: id,
                         name,
@@ -549,7 +678,10 @@ impl RigWerkApp {
             }
             if matches!(
                 self.engine.state,
-                EngineState::Preview | EngineState::Starting | EngineState::Running
+                EngineState::Preview
+                    | EngineState::Starting
+                    | EngineState::Running
+                    | EngineState::Stopping
             ) {
                 return;
             }
@@ -581,7 +713,10 @@ impl RigWerkApp {
             }
             if matches!(
                 self.engine.state,
-                EngineState::Preview | EngineState::Starting | EngineState::Running
+                EngineState::Preview
+                    | EngineState::Starting
+                    | EngineState::Running
+                    | EngineState::Stopping
             ) {
                 return;
             }
@@ -622,8 +757,47 @@ fn wasapi_endpoint(device_id: &str) -> &str {
 /// the driver reports, and what the low-latency switch will ask for.  No stream
 /// is opened, so it is safe before the bridge starts.
 #[cfg(target_os = "linux")]
-fn probe_output(id: &str) -> Result<DriverActual, String> {
+fn probe_output(
+    id: &str,
+    asked_rate: u32,
+    low_latency: bool,
+    buffer_frames: usize,
+) -> Result<DriverActual, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
+
+    if crate::audio::is_native_id(id) {
+        let frames = crate::audio::node_latency_frames(low_latency, buffer_frames);
+        let rate = asked_rate.max(1);
+        let node = id.strip_prefix("pipewire:").unwrap_or(id);
+        let mut notes = vec![format!(
+            "This is the PipeWire sink \"{node}\". RigWerk links its own playback node to it and asks that node for {frames} frames ({:.1} ms at {}). The graph stays the clock, so other apps keep playing.",
+            block_ms(frames, rate),
+            rate_label(rate)
+        )];
+        let quantum_device = crate::audio::DeviceItem {
+            id: id.to_owned(),
+            name: String::new(),
+            backend: "PIPEWIRE".to_owned(),
+            channels: 2,
+            demo: false,
+            preferred: false,
+            asio_clsid: None,
+        };
+        let mut tone = DriverTone::Good;
+        if let Some(info) = crate::audio::pipewire_check_output(&quantum_device, frames) {
+            let low = info.fits && info.low_latency;
+            notes.push(info.note);
+            if !low {
+                tone = DriverTone::Notice;
+            }
+        }
+        return Ok(DriverActual {
+            rate,
+            frames,
+            notes,
+            tone,
+        });
+    }
 
     let device_id: cpal::DeviceId = id
         .parse()
