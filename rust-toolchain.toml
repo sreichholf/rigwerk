@@ -1,0 +1,4 @@
+# Minimal version that builds the current dependency graph (eframe/egui 0.37).
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
