@@ -327,7 +327,7 @@ impl AudioEngine {
     }
 
     /// The plugin insert chain as the UI needs it.
-    pub fn plugin_views(&self) -> Vec<PluginView> {
+    pub fn plugin_views(&self) -> Arc<[PluginView]> {
         self.shared.plugin_views()
     }
 

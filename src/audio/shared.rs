@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 /// Sentinel for [`Shared::path_delay_ns`]: no PipeWire path delay sampled yet.
 const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+
+use super::clap::{ClapPlugin, HostState};
 
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
@@ -106,6 +108,9 @@ impl ScopeLane {
     }
 }
 
+/// A CLAP plugin and its host state, as `service_plugins` services them.
+type ClapService = (Arc<HostState>, Arc<Mutex<ClapPlugin>>);
+
 pub(crate) struct Shared {
     /// Interleaved stereo samples as `f32` bit patterns.  The input side alone
     /// writes the slots at `head`; the output side alone writes `tail`, so the
@@ -162,6 +167,27 @@ pub(crate) struct Shared {
     /// Nanoseconds from our playback stream to the graph edge (`pw_time.delay`).
     /// [`PATH_DELAY_UNKNOWN`] until a native PipeWire playback callback writes it.
     pub(crate) path_delay_ns: AtomicU64,
+    /// The CLAP plugins the UI services every frame, published with the
+    /// views so `service_plugins` does not take the chain lock to find them.
+    ///
+    /// Declared before `plugins` on purpose: fields drop in order, so these
+    /// extra references are gone before the chain hands its slots to the
+    /// deferred queue, and the main thread's drain is always the last owner.
+    plugin_services: Mutex<Arc<[ClapService]>>,
+    /// The insert views the UI draws.  Republished by every chain edit while
+    /// that edit still holds the chain lock, and read without it.  This lock
+    /// is separate from the chain's and the audio thread never takes it, so
+    /// only UI-side readers and writers contend on it, for an `Arc` clone.
+    plugin_views: Mutex<Arc<[PluginView]>>,
+    plugin_views_version: AtomicU64,
+    /// Set by the audio thread when an insert fails; the UI thread rebuilds
+    /// the views in `service_plugins`, so the audio thread never builds them.
+    plugin_views_dirty: AtomicBool,
+    /// What the published views were built from, so the per-frame checks in
+    /// `service_plugins` can skip the chain lock when nothing changed.
+    published_ports_changed: AtomicUsize,
+    chain_rate: AtomicU32,
+    chain_unopened: AtomicBool,
     /// The master plugin insert chain and a cheap "is anything enabled?" flag so
     /// the audio callback skips the lock when no effects are loaded.
     plugins: Mutex<PluginChain>,
@@ -178,6 +204,7 @@ pub(crate) struct Shared {
 impl Shared {
     pub(crate) fn new(sample_rate: u32) -> Self {
         let capacity_frames = (sample_rate as usize * 2).max(4096);
+        let chain = PluginChain::new(sample_rate);
         Self {
             ring: (0..capacity_frames * 2)
                 .map(|_| AtomicU32::new(0))
@@ -229,7 +256,14 @@ impl Shared {
             output_step_frames: AtomicU32::new(0),
             output_mode: Mutex::new(String::new()),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
-            plugins: Mutex::new(PluginChain::new(sample_rate)),
+            plugin_services: Mutex::new(Arc::from(Vec::new())),
+            plugin_views: Mutex::new(Arc::from(Vec::new())),
+            plugin_views_version: AtomicU64::new(0),
+            plugin_views_dirty: AtomicBool::new(false),
+            published_ports_changed: AtomicUsize::new(0),
+            chain_rate: AtomicU32::new(chain.rate()),
+            chain_unopened: AtomicBool::new(false),
+            plugins: Mutex::new(chain),
             plugin_active: AtomicUsize::new(0),
             eq: [
                 Mutex::new(EqSettings::default()),
@@ -343,17 +377,55 @@ impl Shared {
         self.gate.try_lock().ok().map(|settings| *settings)
     }
 
+    /// Runs one edit under the chain lock and republishes what the UI and
+    /// the audio flag read from it before releasing the lock.  `None` when
+    /// the chain is poisoned.  The replaced CLAP service list is dropped
+    /// only after the lock is released: it may hold the last reference to a
+    /// plugin the edit removed.
+    fn edit_chain<R>(&self, edit: impl FnOnce(&mut PluginChain) -> R) -> Option<R> {
+        let (result, stale) = {
+            let mut chain = self.plugins.lock().ok()?;
+            let result = edit(&mut chain);
+            let stale = self.publish_plugins(&chain);
+            (result, stale)
+        };
+        drop(stale);
+        Some(result)
+    }
+
+    /// Publishes the views, the CLAP service list and the cheap flags for
+    /// `chain`.  The caller holds the chain lock.  Hands back the previous
+    /// service list, which the caller drops after unlocking.
+    #[must_use]
+    fn publish_plugins(&self, chain: &PluginChain) -> Arc<[ClapService]> {
+        self.plugin_active.store(chain.active(), Ordering::Relaxed);
+        self.chain_rate.store(chain.rate(), Ordering::Relaxed);
+        self.chain_unopened
+            .store(chain.has_unopened(), Ordering::Relaxed);
+        self.published_ports_changed
+            .store(chain.ports_changed_count(), Ordering::Relaxed);
+        let views: Arc<[PluginView]> = chain.views().into();
+        let services: Arc<[ClapService]> = chain.clap_services().into();
+        *self
+            .plugin_views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = views;
+        self.plugin_views_version.fetch_add(1, Ordering::Release);
+        std::mem::replace(
+            &mut *self
+                .plugin_services
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            services,
+        )
+    }
+
     /// Replaces the saved insert list without loading anything.  Plugins are
     /// opened when the bridge starts (or when one is added in the UI).
     pub(crate) fn restore_plugins(&self, prefs: Vec<PluginPref>) {
-        let old = match self.plugins.lock() {
-            Ok(mut chain) => {
-                let old = chain.restore(prefs);
-                self.plugin_active.store(chain.active(), Ordering::Relaxed);
-                old
-            }
-            Err(_) => Vec::new(),
-        };
+        let old = self
+            .edit_chain(|chain| chain.restore(prefs))
+            .unwrap_or_default();
         // Destroyed after the chain lock is released.
         drop(old);
     }
@@ -377,6 +449,14 @@ impl Shared {
         if rate == 0 {
             return;
         }
+        // The common case on every UI frame: the chain already runs at the
+        // device rate and every slot was opened.  Answer it from the
+        // published flags instead of taking the chain lock.
+        if rate == self.chain_rate.load(Ordering::Relaxed)
+            && !self.chain_unopened.load(Ordering::Relaxed)
+        {
+            return;
+        }
         self.reload_plugins_for_rate(rate);
     }
 
@@ -390,18 +470,9 @@ impl Shared {
         };
         const MAX_ATTEMPTS: usize = 3;
         for _ in 0..MAX_ATTEMPTS {
-            let plan = {
-                let mut chain = match self.plugins.lock() {
-                    Ok(chain) => chain,
-                    Err(_) => return,
-                };
-                match chain.reload_plan(rate) {
-                    Some(plan) => plan,
-                    None => {
-                        self.plugin_active.store(chain.active(), Ordering::Relaxed);
-                        return;
-                    }
-                }
+            let plan = match self.edit_chain(|chain| chain.reload_plan(rate)) {
+                Some(Some(plan)) => plan,
+                Some(None) | None => return,
             };
             let built: Vec<_> = plan
                 .jobs
@@ -411,22 +482,17 @@ impl Shared {
                     (index, pref, slot)
                 })
                 .collect();
-            let installed = {
-                let mut chain = match self.plugins.lock() {
-                    Ok(chain) => chain,
-                    Err(_) => return,
-                };
-                match chain.install_reload(plan.previous_rate, rate, built) {
-                    Ok(old) => {
-                        self.plugin_active.store(chain.active(), Ordering::Relaxed);
-                        Some(old)
-                    }
-                    Err(stale) => {
-                        drop(chain);
-                        drop(stale);
-                        None
-                    }
+            let installed = match self
+                .edit_chain(|chain| chain.install_reload(plan.previous_rate, rate, built))
+            {
+                Some(Ok(old)) => Some(old),
+                // Built for a chain that changed meanwhile; dropped here,
+                // after the chain lock was released.
+                Some(Err(stale)) => {
+                    drop(stale);
+                    None
                 }
+                None => return,
             };
             if let Some(old) = installed {
                 drop(old);
@@ -435,6 +501,8 @@ impl Shared {
         }
     }
 
+    // `push_slot` hands a mismatched slot back so it can be dropped unlocked.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn add_plugin(&self, pref: PluginPref) -> Result<(), String> {
         const MAX_ATTEMPTS: usize = 3;
         let mut attempts = 0;
@@ -448,20 +516,15 @@ impl Shared {
             // dynamic library and calling `start_processing` can take
             // milliseconds, and the audio callback only try-locks the chain.
             let (slot, result) = PluginChain::load_slot(pref.clone(), rate);
-            let mut chain = self
-                .plugins
-                .lock()
-                .map_err(|_| "Plugin chain unavailable".to_owned())?;
-            match chain.push_slot(slot, rate) {
-                Ok(()) => {
-                    self.plugin_active.store(chain.active(), Ordering::Relaxed);
-                    return result;
-                }
+            match self
+                .edit_chain(|chain| chain.push_slot(slot, rate))
+                .ok_or_else(|| "Plugin chain unavailable".to_owned())?
+            {
+                Ok(()) => return result,
                 Err(stale) => {
                     // The chain rate changed while the slot was loading, so
                     // it is set up for the wrong rate.  Drop it outside the
                     // chain lock and build a fresh one.
-                    drop(chain);
                     drop(stale);
                 }
             }
@@ -476,43 +539,25 @@ impl Shared {
     }
 
     pub(crate) fn remove_plugin(&self, index: usize) {
-        let removed = match self.plugins.lock() {
-            Ok(mut chain) => {
-                let removed = chain.remove(index);
-                self.plugin_active.store(chain.active(), Ordering::Relaxed);
-                removed
-            }
-            Err(_) => None,
-        };
+        let removed = self.edit_chain(|chain| chain.remove(index)).flatten();
         // Destroyed after the chain lock is released.
         drop(removed);
     }
 
     pub(crate) fn move_plugin(&self, index: usize, delta: isize) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.move_slot(index, delta);
-            self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        }
+        self.edit_chain(|chain| chain.move_slot(index, delta));
     }
 
     pub(crate) fn set_plugin_bypass(&self, index: usize, bypass: bool) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.set_bypass(index, bypass);
-            self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        }
+        self.edit_chain(|chain| chain.set_bypass(index, bypass));
     }
 
     pub(crate) fn set_plugin_mix(&self, index: usize, mix: f32) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.set_mix(index, mix);
-            self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        }
+        self.edit_chain(|chain| chain.set_mix(index, mix));
     }
 
     pub(crate) fn ensure_plugin_loaded(&self, index: usize) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.ensure_loaded(index);
-        }
+        self.edit_chain(|chain| chain.ensure_loaded(index));
     }
 
     /// The loaded plugin behind one insert, for its own editor window.
@@ -535,12 +580,8 @@ impl Shared {
         let Some(parameters) = super::plugins::read_plugin_parameters(&handle) else {
             return Ok(());
         };
-        let mut chain = self
-            .plugins
-            .lock()
-            .map_err(|_| "Plugin chain unavailable".to_owned())?;
-        chain.apply_synced_parameters(index, &handle, parameters);
-        Ok(())
+        self.edit_chain(|chain| chain.apply_synced_parameters(index, &handle, parameters))
+            .ok_or_else(|| "Plugin chain unavailable".to_owned())
     }
 
     pub(crate) fn set_plugin_parameter(
@@ -549,42 +590,60 @@ impl Shared {
         id: u32,
         value: f64,
     ) -> Result<(), String> {
-        let mut chain = self
-            .plugins
-            .lock()
-            .map_err(|_| "Plugin chain unavailable".to_owned())?;
-        let result = chain.set_parameter(index, id, value);
-        self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        result
+        self.edit_chain(|chain| chain.set_parameter(index, id, value))
+            .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()))
     }
 
     pub(crate) fn reset_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        let mut chain = self
-            .plugins
-            .lock()
-            .map_err(|_| "Plugin chain unavailable".to_owned())?;
-        let result = chain.reset_parameters(index);
-        self.plugin_active.store(chain.active(), Ordering::Relaxed);
-        result
+        self.edit_chain(|chain| chain.reset_parameters(index))
+            .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()))
     }
 
-    pub(crate) fn plugin_views(&self) -> Vec<PluginView> {
-        self.plugins
-            .lock()
-            .map(|chain| chain.views())
-            .unwrap_or_default()
+    /// The insert views as last published.  Never takes the chain lock, so
+    /// drawing the UI cannot make the audio callback pass a block dry.
+    pub(crate) fn plugin_views(&self) -> Arc<[PluginView]> {
+        Arc::clone(
+            &self
+                .plugin_views
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
+    /// Bumped on every publish of [`Self::plugin_views`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn plugin_views_version(&self) -> u64 {
+        self.plugin_views_version.load(Ordering::Acquire)
     }
 
     /// Runs the CLAP main-thread callbacks and timers once per UI frame,
-    /// outside the chain lock: a plugin's timer can do arbitrary work.
+    /// outside the chain lock: a plugin's timer can do arbitrary work.  The
+    /// plugins come from the published list, so a quiet frame takes no
+    /// chain lock at all.
     pub(crate) fn service_plugins(&self) {
-        let services = match self.plugins.lock() {
-            Ok(chain) => chain.clap_services(),
-            Err(_) => Vec::new(),
-        };
-        for (host, plugin) in &services {
+        let services = Arc::clone(
+            &self
+                .plugin_services
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for (host, plugin) in services.iter() {
             super::plugins::service_clap(host, plugin);
         }
+        // An insert failed on the audio thread, or a CLAP plugin changed its
+        // ports since the last publish: rebuild the views here, on the UI
+        // thread, under a normal chain lock.
+        let ports_changed = services
+            .iter()
+            .filter(|(host, _)| host.ports_changed())
+            .count();
+        let dirty = self.plugin_views_dirty.swap(false, Ordering::AcqRel);
+        if dirty || ports_changed != self.published_ports_changed.load(Ordering::Relaxed) {
+            self.edit_chain(|_| ());
+        }
+        // Dropped outside the chain lock, on this thread, in case a removal
+        // left it as the last reference to a plugin.
+        drop(services);
         // The device may have opened at a different rate than `prepare_plugins`
         // used.  Both the reload and any plugins a bridge thread deferred are
         // handled on this thread, which is the UI thread.
@@ -641,8 +700,12 @@ impl Shared {
             return;
         }
         if let Ok(mut chain) = self.plugins.try_lock() {
-            chain.process(left, right, frames);
+            let failed = chain.process(left, right, frames);
             self.plugin_active.store(chain.active(), Ordering::Relaxed);
+            if failed {
+                // The views are rebuilt on the UI thread, not here.
+                self.plugin_views_dirty.store(true, Ordering::Release);
+            }
         }
     }
 
@@ -1191,5 +1254,171 @@ mod tests {
         crate::audio::plugins::drain_deferred_plugins();
         assert_eq!(plugins(), 0, "the main thread drops the deferred slot");
         assert_eq!(queued(), 0);
+    }
+
+    fn missing(path: &str) -> crate::audio::PluginPref {
+        crate::audio::PluginPref {
+            path: path.to_owned(),
+            name: path.to_owned(),
+            ..crate::audio::PluginPref::default()
+        }
+    }
+
+    fn names(shared: &super::Shared) -> Vec<String> {
+        shared
+            .plugin_views()
+            .iter()
+            .map(|view| view.name.clone())
+            .collect()
+    }
+
+    /// Asserts that a publish happened since `last` and remembers it.
+    fn assert_published(shared: &super::Shared, last: &mut u64) {
+        let version = shared.plugin_views_version();
+        assert!(version > *last, "the edit did not republish the views");
+        *last = version;
+    }
+
+    #[test]
+    fn published_views_follow_every_chain_edit() {
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        assert!(shared.plugin_views().is_empty());
+        let mut version = shared.plugin_views_version();
+
+        shared.restore_plugins(vec![missing("a.vst3"), missing("b.vst3")]);
+        assert_published(&shared, &mut version);
+        assert_eq!(names(&shared), ["a.vst3", "b.vst3"]);
+
+        shared.set_plugin_bypass(1, true);
+        assert_published(&shared, &mut version);
+        assert!(shared.plugin_views()[1].bypass);
+
+        shared.set_plugin_mix(0, 0.25);
+        assert_published(&shared, &mut version);
+        assert_eq!(shared.plugin_views()[0].mix, 0.25);
+
+        shared.move_plugin(0, 1);
+        assert_published(&shared, &mut version);
+        assert_eq!(names(&shared), ["b.vst3", "a.vst3"]);
+
+        // Opening a slot whose file is missing leaves its error visible.
+        shared.ensure_plugin_loaded(0);
+        assert_published(&shared, &mut version);
+        assert!(shared.plugin_views()[0].error.is_some());
+
+        assert!(shared.set_plugin_parameter(1, 7, 0.5).is_err());
+        assert_published(&shared, &mut version);
+        assert!(shared.plugin_views()[1].error.is_some());
+
+        shared.remove_plugin(0);
+        assert_published(&shared, &mut version);
+        assert_eq!(names(&shared), ["a.vst3"]);
+
+        // A failed add stays in the list with its error.
+        assert!(shared.add_plugin(missing("c.vst3")).is_err());
+        assert_published(&shared, &mut version);
+        assert_eq!(names(&shared), ["a.vst3", "c.vst3"]);
+        assert!(shared.plugin_views()[1].error.is_some());
+
+        // A snapshot the UI already holds is not changed by later edits.
+        let held = shared.plugin_views();
+        shared.restore_plugins(Vec::new());
+        assert_eq!(held.len(), 2);
+        assert!(shared.plugin_views().is_empty());
+    }
+
+    /// Holds the chain lock on another thread while the UI-side calls run on
+    /// this (main) thread.  None of them may wait for it.
+    #[test]
+    fn drawing_and_quiet_service_frames_never_wait_for_the_chain_lock() {
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        shared.restore_plugins(vec![missing("a.vst3")]);
+        shared.set_output(48_000, 128, "test output");
+        // Opens the restored slot (it fails), so the chain is settled.
+        shared.service_plugins();
+        assert!(shared.plugin_views()[0].error.is_some());
+
+        const HELD: std::time::Duration = std::time::Duration::from_millis(600);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _chain = shared.plugins.lock().unwrap();
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(HELD);
+            });
+            locked_rx.recv().unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                assert_eq!(shared.plugin_views().len(), 1);
+                shared.service_plugins();
+                shared.align_plugins_to_output_rate();
+            }
+            let waited = started.elapsed();
+            assert!(
+                waited < HELD / 3,
+                "a UI-side call waited {waited:?} for the chain lock"
+            );
+        });
+    }
+
+    #[test]
+    fn a_processing_failure_is_published_on_the_next_service_frame() {
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        shared.edit_chain(|chain| {
+            chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(true))
+        });
+        assert!(shared.has_plugins());
+        assert!(shared.plugin_views()[0].error.is_none());
+
+        let mut left = vec![0.5f32; 64];
+        let mut right = vec![0.5f32; 64];
+        let version = shared.plugin_views_version();
+        shared.process_plugins(&mut left, &mut right, 64);
+        assert!(!shared.has_plugins(), "the failed insert left the chain");
+        assert_eq!(
+            shared.plugin_views_version(),
+            version,
+            "the audio thread must not rebuild the views"
+        );
+        assert!(shared.plugin_views()[0].error.is_none());
+
+        shared.service_plugins();
+        let error = shared.plugin_views()[0].error.clone();
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|text| text.starts_with("Processing failed")),
+            "{error:?}"
+        );
+        // Nothing else changed, so the next frame does not publish again.
+        let version = shared.plugin_views_version();
+        shared.service_plugins();
+        assert_eq!(shared.plugin_views_version(), version);
+    }
+
+    #[test]
+    fn a_clap_port_change_is_published_on_the_next_service_frame() {
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        shared.edit_chain(|chain| {
+            chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
+        });
+        assert!(shared.plugin_views()[0].error.is_none());
+        let Some(crate::audio::PluginHandle::Clap(plugin)) = shared.plugin_handle(0) else {
+            panic!("the fake is a loaded CLAP slot");
+        };
+        crate::audio::clap::tests::rescan_ports_for_test(&plugin.lock().unwrap());
+        drop(plugin);
+        assert!(shared.plugin_views()[0].error.is_none());
+
+        shared.service_plugins();
+        assert_eq!(
+            shared.plugin_views()[0].error.as_deref(),
+            Some(crate::audio::clap::AUDIO_PORTS_CHANGED)
+        );
+        assert!(!shared.has_plugins());
     }
 }

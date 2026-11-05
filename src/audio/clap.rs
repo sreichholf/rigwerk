@@ -2389,7 +2389,7 @@ fn collect_bundles(folder: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{HostState, StateReader, StateSave, StateWriter};
     use std::ffi::c_void;
     use std::sync::atomic::Ordering;
@@ -2490,6 +2490,32 @@ mod tests {
     /// logs itself, and `Fail` picks the step that goes wrong.  The callbacks
     /// all run on the test thread, so the log and the setting are
     /// thread-local and the tests can run in parallel.
+    /// A loaded fake CLAP effect with one stereo main port, for tests outside
+    /// this module.  With `fail_process`, every block it is given fails.  The
+    /// fake's state is per thread: process it on the thread that loaded it.
+    pub(crate) fn fake_plugin_for_test(fail_process: bool) -> super::ClapPlugin {
+        const MAIN: u32 = clap_sys::ext::audio_ports::CLAP_AUDIO_PORT_IS_MAIN;
+        fake::reset(if fail_process {
+            fake::Fail::Process
+        } else {
+            fake::Fail::Nothing
+        });
+        fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+        fake::load("fake").expect("load the fake plugin")
+    }
+
+    /// Makes `plugin` report a channel-count change, as a real plugin does
+    /// through `clap_host_audio_ports.rescan`.
+    pub(crate) fn rescan_ports_for_test(plugin: &super::ClapPlugin) {
+        let host: *const clap_sys::host::clap_host = &*plugin._host;
+        unsafe {
+            super::host_audio_ports_rescan(
+                host,
+                clap_sys::ext::audio_ports::CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT,
+            )
+        };
+    }
+
     mod fake {
         use super::super::*;
         use clap_sys::id::CLAP_INVALID_ID;
@@ -2507,6 +2533,8 @@ mod tests {
             PluginInit,
             NoAudioPorts,
             Activate,
+            /// Loads normally; every `process` call reports an error.
+            Process,
         }
 
         thread_local! {
@@ -2704,6 +2732,9 @@ mod tests {
                     };
                     samples.fill((10 * index + channel + 1) as f32);
                 }
+            }
+            if failing(Fail::Process) {
+                return clap_sys::process::CLAP_PROCESS_ERROR;
             }
             SEEN.with(|seen| {
                 *seen.borrow_mut() = Some(Seen {

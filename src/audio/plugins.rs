@@ -967,6 +967,22 @@ impl PluginChain {
         self.slots.push(Slot::tracked_for_test());
     }
 
+    /// Adds an already loaded CLAP plugin as a slot, the way a real load
+    /// fills one in.
+    #[cfg(test)]
+    pub(crate) fn insert_clap_for_test(&mut self, plugin: ClapPlugin) {
+        let host = plugin.host();
+        let mut slot = Slot::empty(PluginPref {
+            name: "Fake".to_owned(),
+            format: PluginFormat::Clap,
+            ..PluginPref::default()
+        });
+        slot.plugin = Some(PluginHandle::Clap(Arc::new(Mutex::new(plugin))));
+        slot.clap_host = Some(host);
+        slot.built_rate = Some(self.sample_rate);
+        self.slots.push(slot);
+    }
+
     pub(crate) fn rate(&self) -> u32 {
         self.sample_rate
     }
@@ -977,6 +993,20 @@ impl PluginChain {
 
     pub(crate) fn prefs(&self) -> Vec<PluginPref> {
         self.slots.iter().map(|slot| slot.pref.clone()).collect()
+    }
+
+    /// Whether a restored slot is still waiting for its first open.
+    pub(crate) fn has_unopened(&self) -> bool {
+        self.slots.iter().any(Slot::needs_open)
+    }
+
+    /// How many CLAP slots report a port change.  Published with the views,
+    /// so the UI thread can notice a new one without the chain lock.
+    pub(crate) fn ports_changed_count(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.ports_changed())
+            .count()
     }
 
     pub(crate) fn active(&self) -> usize {
@@ -1209,11 +1239,16 @@ impl PluginChain {
     /// held (its editor is doing UI work) is skipped for this block, and a
     /// plugin that fails is left in the chain with its error so the person can
     /// see why it is silent.
-    pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
+    ///
+    /// Returns whether a slot gained an error in this block, so the caller
+    /// can ask the UI thread to republish the insert views (the audio thread
+    /// does not build them itself).
+    pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
-            return;
+            return false;
         }
+        let mut failed = false;
         let Self {
             slots,
             buffers,
@@ -1290,6 +1325,7 @@ impl PluginChain {
                             Err(error) => {
                                 drop(plugin);
                                 slot.error = Some(format!("Processing failed: {error}"));
+                                failed = true;
                                 break;
                             }
                         }
@@ -1305,10 +1341,12 @@ impl PluginChain {
                     if let Err(error) = plugin.process(left, right, frames, mix) {
                         drop(plugin);
                         slot.error = Some(format!("Processing failed: {error}"));
+                        failed = true;
                     }
                 }
             }
         }
+        failed
     }
 }
 
