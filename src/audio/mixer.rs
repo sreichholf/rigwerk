@@ -5,6 +5,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use super::denormal::DenormalGuard;
 use super::eq::{EqSlot, Equalizer};
 use super::gate::{GateSlot, NoiseGate};
 use super::resampler::FrameResampler;
@@ -406,6 +407,9 @@ impl OutputMixer {
         frames: usize,
         mut write: impl FnMut(usize, [f32; 4]),
     ) {
+        // Decaying EQ and gate states must not drop into the slow subnormal
+        // range; the inserts run inside this block and get the same mode.
+        let _denormals = DenormalGuard::new();
         self.follow_source_rate(shared);
         self.follow_eq(shared);
         self.follow_gate(shared);
@@ -521,6 +525,10 @@ impl OutputMixer {
             self.plugin_r = right;
         }
 
+        // A plugin may have cleared flush-to-zero; the POST gate and post EQ
+        // still decay into silence and need it.  Dropped before the outer
+        // guard, so the thread's original mode still comes back last.
+        let _post_denormals = DenormalGuard::new();
         // POST gate (if selected), post EQ, then the output stage last.
         for index in 0..frames {
             let mut out = self.block[index];

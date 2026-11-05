@@ -7,6 +7,7 @@ use std::sync::Arc;
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, FromSample, Sample, SizedSample};
 
+use super::denormal::DenormalGuard;
 use super::shared::Shared;
 use super::types::StartConfig;
 
@@ -87,6 +88,7 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _info: &cpal::InputCallbackInfo| {
+                let _denormals = DenormalGuard::new();
                 // The ring has to hold at least one whole input block, or
                 // the output runs dry between two deliveries.
                 gain_shared.note_input_block(data.len() / channels);

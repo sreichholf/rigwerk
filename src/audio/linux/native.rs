@@ -23,6 +23,7 @@ use ::pipewire as pw;
 use pw::spa;
 use pw::spa::pod::Pod;
 
+use crate::audio::denormal::DenormalGuard;
 use crate::audio::input::{make_input_stream, open_input_device};
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
@@ -558,6 +559,7 @@ struct PlaybackData {
 }
 
 fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, frames: usize) {
+    let _denormals = DenormalGuard::new();
     let channels = channels.max(1);
     shared.note_input_block(frames);
     shared.note_input_frames(frames);

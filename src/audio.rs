@@ -22,9 +22,11 @@
 //! - `mixer` / `resampler`: turning ring frames into output frames.
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
+//! - `denormal`: flush-to-zero for the audio callbacks.
 
 mod bridge;
 pub(crate) mod clap;
+mod denormal;
 mod devices;
 mod engine;
 mod eq;
