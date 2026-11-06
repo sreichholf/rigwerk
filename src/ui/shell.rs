@@ -163,7 +163,11 @@ impl RigWerkApp {
         ui.add_space(9.0);
         ui.horizontal(|ui| {
             ui.label(mono(
-                format!("v0.2 · {}", self.inventory.os.to_lowercase()),
+                format!(
+                    "v{} · {}",
+                    env!("CARGO_PKG_VERSION"),
+                    self.inventory.os.to_lowercase()
+                ),
                 DIM,
                 9.0,
             ));
