@@ -365,7 +365,10 @@ impl Shared {
     /// (no bridge, or one that stalled for `REMOVAL_TIMEOUT`), and releases
     /// the plugins of paths whose fade is over.
     pub(crate) fn service_paths(&self) {
-        const REMOVAL_TIMEOUT: Duration = Duration::from_millis(500);
+        // The fade itself, plus the longest alignment delay the path may
+        // still have to play out (`MAX_ALIGN_DELAY` frames, under 0.9 s at
+        // 44.1 kHz), with room for a stalled block or two.
+        const REMOVAL_TIMEOUT: Duration = Duration::from_millis(1_500);
         let running = self.running.load(Ordering::Relaxed);
         for path in &self.paths {
             if path.state() == PathState::FadingOut {
@@ -1362,6 +1365,46 @@ pub(crate) mod tests {
             drop(chain);
             assert!(finished.is_ok(), "a UI-side call waited for the chain lock");
         });
+    }
+
+    /// Dragging an insert's mix, toggling its bypass and moving a plugin
+    /// control never take the chain lock, so the audio thread never misses
+    /// the chain for them: the worker finishes while this thread holds it.
+    #[test]
+    fn mix_bypass_and_controls_never_wait_for_the_chain_lock() {
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        let path = &shared.paths[0];
+        path.edit_chain(|chain| {
+            chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
+        });
+        const HELD: std::time::Duration = std::time::Duration::from_secs(5);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let chain = path.plugins.lock().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+                for step in 0..100 {
+                    path.set_plugin_mix(0, step as f32 / 100.0);
+                    path.set_plugin_bypass(0, step % 2 == 0);
+                    // The fake has no controls: this fails, but at the
+                    // plugin, without the chain lock.
+                    let _ = path.set_plugin_parameter(0, 7, 0.5);
+                }
+                path.set_plugin_mix(0, 0.25);
+                path.set_plugin_bypass(0, true);
+                done_tx.send(()).unwrap();
+            });
+            let finished = done_rx.recv_timeout(HELD);
+            drop(chain);
+            assert!(finished.is_ok(), "a mix, bypass or control change waited");
+        });
+        // The views show the change at once, and so does a save.
+        let views = path.plugin_views();
+        assert_eq!((views[0].mix, views[0].bypass), (0.25, true));
+        let saved = &path.plugin_prefs()[0];
+        assert_eq!((saved.mix, saved.bypass), (0.25, true));
+        drop(path.edit_chain(|chain| chain.restore(Vec::new())));
     }
 
     #[test]

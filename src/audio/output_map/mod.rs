@@ -25,7 +25,7 @@
 //! Every device stores one [`PathMapSettings`] per path slot (`MAX_PATHS`):
 //! the path's map, its level (dB, ramped) and polarity there (a flip ramps
 //! the path's gain through zero, so it never clicks), and an alignment trim
-//! that is stored only until the alignment engine exists.  The device level,
+//! (see below).  The device level,
 //! mute and the unused rule belong to the device.  The mapper maps each live
 //! path's frame with its own map, scales it by its level and polarity on the
 //! device and adds the paths up per channel (cells that meet on a channel
@@ -42,18 +42,45 @@
 //!
 //! One path at 0 dB with normal polarity gives exactly its own mapped frame,
 //! bit for bit: unity gains copy instead of multiplying.
+//!
+//! # Alignment
+//!
+//! Plugins delay their path by their latency, so two paths that meet on
+//! one device would comb filter.  The mixer writes every live path's frame
+//! (after the master) into that path's delay line (one per path slot,
+//! preallocated for [`MAX_ALIGN_DELAY`] frames), and each device mapper
+//! reads every path through its own tap on that line: memory grows with
+//! the paths, not with paths × devices.  The delay of path `p` on device
+//! `d` is `max(latency) − latency(p) + trim(p, d)`, the maximum over the
+//! paths `d` plays (muted and un-soloed ones included: the routing decides,
+//! so muting never moves the latency), shifted so the smallest delay is 0
+//! when a trim goes negative.  A path only one device plays keeps its own
+//! latency there.  With the device's `align` switch off only the trims
+//! apply.  A changed delay (a plugin reports a new latency, a path is
+//! routed somewhere else, a trim moves) crossfades from the old tap to the
+//! new one over a few ms (`delay::TAP_FADE_SECONDS`), it never jumps.  The
+//! same mapping runs for the clock device and every follower, on the ring
+//! path and the PipeWire direct path alike: a generic follower is mapped on
+//! the clock callback and only its finished channels cross into its own
+//! stream (see `follower`).  The mapper publishes what it applies
+//! ([`DeviceControls::alignment`]) for the UI.
+//!
+//! An unaligned path with no trim reads its line at delay 0, which is the
+//! frame just written: one path with no latency stays bit-identical.
 
 mod mapper;
 mod types;
 
 pub(crate) use mapper::{
-    frame_lanes, DeviceControls, DeviceFrame, DeviceMapper, SLOTS as FRAME_LANES,
+    frame_lanes, DeviceControls, DeviceFrame, DeviceMapper, PathLines, PathTiming,
+    SLOTS as FRAME_LANES,
 };
-pub(crate) use types::path_level_gain;
+pub(crate) use types::{path_level_gain, MAX_ALIGN_DELAY};
 pub use types::{
-    sanitize_path_level, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
-    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
-    PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_TRIM_MAX_MS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    sanitize_path_level, AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings,
+    PathMapSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS,
+    MAX_OUTPUT_CHANNELS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_TRIM_MAX_MS, VIRTUAL_OUT_ID,
+    VIRTUAL_OUT_NAME,
 };
 
 #[cfg(test)]
@@ -393,6 +420,7 @@ mod tests {
                 right: 0b0011,
             }),
             unused: UnusedChannels::Silent,
+            align: false,
         };
         controls.set(&settings);
         let next = DeviceControls::new();
@@ -419,12 +447,12 @@ mod tests {
             PathState::Inactive,
         ]);
         let mut mapper = DeviceMapper::new(3);
-        mapper.begin_paths(&controls, RAMP, live);
+        mapper.begin_paths(&controls, RAMP, live, &super::PathTiming::default());
         let mut frames = [[0.0f32; 2]; MAX_PATHS];
         frames[0] = [0.5, -0.25];
         frames[1] = [9.0, 9.0];
         frames[2] = [0.25, 0.5];
-        let out = samples(mapper.map_paths(&frames), 3);
+        let out = samples(mapper.map_frames(&frames), 3);
         assert_eq!(out, [0.75, 0.25, 0.125 + 0.375]);
         let next = DeviceControls::new();
         next.adopt_settings_from(&controls);
@@ -447,8 +475,8 @@ mod tests {
             let controls = DeviceControls::new();
             controls.set(&settings);
             let mut mapper = DeviceMapper::new(4);
-            mapper.begin_paths(&controls, RAMP, live);
-            samples(mapper.map_paths(&frames), 4)
+            mapper.begin_paths(&controls, RAMP, live, &super::PathTiming::default());
+            samples(mapper.map_frames(&frames), 4)
         };
         // Path 1 is routed nowhere: Out 3/4 copy path 0 only.
         let mut settings = OutputDeviceSettings::default();
@@ -477,6 +505,18 @@ mod tests {
         assert_eq!(old.map(0), ChannelMap { left: 4, right: 8 });
         assert_eq!(old.path_map[1], PathMapSettings::default());
         assert_eq!(old.level_db, -3.0);
+        // Files from before the align switch align.
+        assert!(old.align);
+
+        let unaligned = OutputDeviceSettings {
+            align: false,
+            ..OutputDeviceSettings::default()
+        };
+        let text = ron::to_string(&unaligned).unwrap();
+        assert_eq!(
+            ron::from_str::<OutputDeviceSettings>(&text).unwrap(),
+            unaligned
+        );
 
         let mut settings = OutputDeviceSettings::default();
         settings.path_map[1] = PathMapSettings {

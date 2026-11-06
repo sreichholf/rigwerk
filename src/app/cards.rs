@@ -8,10 +8,12 @@
 //! are kept but routed nowhere.  Any edit afterwards reads as Custom
 //! ([`RigWerkApp::current_card`] returns `None`).
 //!
-//! Warnings: until the alignment engine (P3) exists every path is
-//! unaligned, so two paths sounding on one channel of a device comb filter
-//! ([`RoutingWarningKind::Sum`], red), and two paths on different channels
-//! of one device shift the image ([`RoutingWarningKind::Shift`], amber).
+//! Warnings: two paths that sound on one channel of a device and arrive on
+//! different frames comb filter ([`RoutingWarningKind::Sum`], red).  With
+//! the device's align switch on that only happens when trims pull them
+//! apart; with it off, whenever their chain latency plus trim differ.  On
+//! an unaligned device two such paths on different channels shift the
+//! image ([`RoutingWarningKind::Shift`], amber).
 
 use crate::app::RigWerkApp;
 use crate::audio::{ChannelMap, PathMapSettings, MAX_PATHS};
@@ -57,8 +59,9 @@ impl Card {
         }
     }
 
-    /// Cards that sum paths on one channel: they comb filter until the
-    /// alignment engine (P3) exists, so the UI offers them disabled.
+    /// Cards that sum paths on one channel and rely on the latency
+    /// alignment (on by default per device, see `app::alignment`).  The
+    /// engine aligns now, so the UI may stop offering them disabled.
     pub(crate) fn needs_alignment(self) -> bool {
         matches!(self, Card::Blend | Card::DualAmp)
     }
@@ -217,11 +220,28 @@ impl RigWerkApp {
 
     /// What the Signal Routing page should warn about on output device
     /// `device` (0 = clock device, then followers).  Every live path counts,
-    /// muted or not: the routing decides, as for alignment.  Until P3 every
-    /// path is unaligned.  At most one warning: `Sum` wins over `Shift`.
+    /// muted or not: the routing decides, as for alignment.  Only paths
+    /// that arrive on different frames (chain latency, alignment and trim)
+    /// warn: `Sum` when they add up on one channel (also on an aligned
+    /// device, when trims pull them apart), `Shift` when an unaligned
+    /// device plays them on different channels.  At most one warning:
+    /// `Sum` wins over `Shift`.
     pub(crate) fn routing_warnings(&self, device: usize) -> Vec<RoutingWarning> {
         let Some(settings) = self.device_settings().get(device).copied() else {
             return Vec::new();
+        };
+        let arrival = self
+            .device_alignment(device)
+            .map(|alignment| alignment.arrival_frames)
+            .unwrap_or_default();
+        // Paths line up only when they arrive on the same frame.
+        let apart = |paths: &[bool; MAX_PATHS]| {
+            let mut times = (0..MAX_PATHS)
+                .filter(|&path| paths[path])
+                .map(|path| arrival[path].unwrap_or(0));
+            times
+                .next()
+                .is_some_and(|first| times.any(|time| time != first))
         };
         let channels = self.device_channels(device);
         let live = self.live_path_mask();
@@ -236,12 +256,13 @@ impl RigWerkApp {
             if count > 0 {
                 playing_channels.push(channel);
             }
-            if count > 1 {
+            let unaligned = count > 1 && apart(&on);
+            if unaligned {
                 sum_channels.push(channel);
             }
             for path in 0..MAX_PATHS {
                 sounding[path] |= on[path];
-                summed[path] |= on[path] && count > 1;
+                summed[path] |= on[path] && unaligned;
             }
         }
         let in_order = |flags: [bool; MAX_PATHS]| -> Vec<usize> {
@@ -255,7 +276,7 @@ impl RigWerkApp {
             }];
         }
         let paths = in_order(sounding);
-        if paths.len() > 1 {
+        if !settings.align && paths.len() > 1 && apart(&sounding) {
             return vec![RoutingWarning {
                 kind: RoutingWarningKind::Shift,
                 paths,
@@ -302,12 +323,31 @@ mod tests {
             }
         );
         assert_eq!(app.followers[0].settings.map(second), ChannelMap::default());
-        // The stream device sums both: a comb filter until P3.
+        // Aligned devices never warn.
+        assert!(app.routing_warnings(0).is_empty());
+        assert!(app.routing_warnings(1).is_empty());
+        // Unaligned with the same latency and trim: still lined up.
+        app.set_device_align(0, false);
+        app.set_device_align(1, false);
+        assert!(app.routing_warnings(1).is_empty());
+        // A trim on the second path: the stream device sums two paths that
+        // arrive apart (a comb filter) ...
+        for device in 0..2 {
+            let mut entry = app.device_path_map(device, second).unwrap();
+            entry.trim_ms = 1.0;
+            app.set_device_path_map(device, second, entry);
+        }
         let warnings = app.routing_warnings(1);
         assert_eq!(warnings[0].kind, RoutingWarningKind::Sum);
         assert_eq!(warnings[0].paths, vec![0, second]);
-        // On the clock device they sit on different channels.
+        // ... and on the clock device they sit on different channels.
         assert_eq!(app.routing_warnings(0)[0].kind, RoutingWarningKind::Shift);
+        for device in 0..2 {
+            app.set_device_align(device, true);
+            let mut entry = app.device_path_map(device, second).unwrap();
+            entry.trim_ms = 0.0;
+            app.set_device_path_map(device, second, entry);
+        }
 
         assert!(app.apply_card(Card::PerDevice));
         assert_eq!(app.current_card(), Some(Card::PerDevice));

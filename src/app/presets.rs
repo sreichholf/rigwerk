@@ -539,6 +539,7 @@ mod tests {
                 right: 0b1100,
             }),
             unused: UnusedChannels::Silent,
+            align: false,
         };
         let followers = vec![
             FollowerPref {

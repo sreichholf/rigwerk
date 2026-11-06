@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::path::MAX_PATHS;
+use super::super::plugins::MAX_ALIGN;
 
 /// Most device channels a [`ChannelMap`] can address.
 pub const MAX_OUTPUT_CHANNELS: usize = 8;
@@ -200,12 +201,12 @@ pub enum UnusedChannels {
 pub const PATH_LEVEL_MIN_DB: f32 = -60.0;
 pub const PATH_LEVEL_MAX_DB: f32 = 6.0;
 
-/// The alignment trim range (P3), ms.  Stored only for now.
+/// The alignment trim range, ms.
 pub const PATH_TRIM_MAX_MS: f32 = 5.0;
 
 /// One signal path's place in one device's sum: its channel map, its level
-/// there, its polarity, and the alignment trim (stored for P3, no audio
-/// effect yet).
+/// there, its polarity, and the alignment trim on top of the automatic
+/// alignment.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PathMapSettings {
@@ -214,7 +215,9 @@ pub struct PathMapSettings {
     pub level_db: f32,
     /// Polarity flip.
     pub invert: bool,
-    /// Alignment trim, ms (±[`PATH_TRIM_MAX_MS`]).  Not applied until P3.
+    /// Alignment trim, ms (±[`PATH_TRIM_MAX_MS`]): extra delay (positive)
+    /// or less delay (negative) for this path on this device, on top of
+    /// the automatic alignment.
     pub trim_ms: f32,
 }
 
@@ -256,6 +259,11 @@ impl PathMapSettings {
             },
             ..self
         }
+    }
+
+    /// The trim in whole frames at `rate` (rounded).
+    pub(crate) fn trim_frames(&self, rate: u32) -> i32 {
+        trim_frames(self.trim_ms, rate)
     }
 
     /// The signed linear gain the device applies to this path: the level,
@@ -309,6 +317,10 @@ pub struct OutputDeviceSettings {
     pub unused: UnusedChannels,
     /// Each path's map, level, polarity and trim on this device.
     pub path_map: [PathMapSettings; MAX_PATHS],
+    /// Latency alignment: every path routed here waits for the slowest one
+    /// (see [`plan_alignment`]).  Off, only the trims apply.  On by default,
+    /// and in files from before it existed.
+    pub align: bool,
 }
 
 /// The saved form of [`OutputDeviceSettings`].
@@ -326,6 +338,7 @@ struct StoredDeviceSettings {
     map: Option<ChannelMap>,
     unused: UnusedChannels,
     path_map: Vec<PathMapSettings>,
+    align: bool,
 }
 
 /// A legacy `map` is stored bare (not as `Some(..)`); reads it as present.
@@ -356,6 +369,7 @@ impl From<StoredDeviceSettings> for OutputDeviceSettings {
             mute: stored.mute,
             unused: stored.unused,
             path_map,
+            align: stored.align,
         }
     }
 }
@@ -373,6 +387,7 @@ impl From<OutputDeviceSettings> for StoredDeviceSettings {
             map: None,
             unused: settings.unused,
             path_map: settings.path_map[..used].to_vec(),
+            align: settings.align,
         }
     }
 }
@@ -384,6 +399,7 @@ impl Default for OutputDeviceSettings {
             mute: false,
             unused: UnusedChannels::default(),
             path_map: [PathMapSettings::default(); MAX_PATHS],
+            align: true,
         }
     }
 }
@@ -435,6 +451,40 @@ impl OutputDeviceSettings {
                 })
             })
             .count()
+    }
+
+    /// Which of the `live` paths this device plays on any of its
+    /// `channels` channels (by their own map, or through the mono copy).
+    /// The routing decides, not what is audible: muted and un-soloed paths
+    /// count.  These are the paths the alignment lines up.
+    pub(crate) fn routed_paths(
+        &self,
+        live: [bool; MAX_PATHS],
+        channels: usize,
+    ) -> [bool; MAX_PATHS] {
+        let maps = self.path_map.map(|entry| entry.map);
+        routed_paths(&maps, live, self.unused, channels)
+    }
+
+    /// The alignment this device gets at `rate` when the `live` paths have
+    /// `latency` (chain latency in frames): what the mixer applies, worked
+    /// out from the settings.  For the UI when no bridge runs; the mixer
+    /// publishes its own (see `AudioEngine::device_alignment`).
+    pub(crate) fn alignment(
+        &self,
+        live: [bool; MAX_PATHS],
+        channels: usize,
+        latency: [u32; MAX_PATHS],
+        rate: u32,
+    ) -> AlignmentReport {
+        let routed = self.routed_paths(live, channels);
+        let trims = self.path_map.map(|entry| entry.trim_frames(rate));
+        AlignmentReport::new(
+            plan_alignment(self.align, routed, latency, trims),
+            self.align,
+            latency,
+            rate,
+        )
     }
 
     /// Which of the `live` paths sound on device channel `channel` (by
@@ -489,6 +539,148 @@ impl OutputDeviceSettings {
         }
         frame
     }
+}
+
+/// A trim in ms as whole frames at `rate`, clamped to the trim range.
+pub(crate) fn trim_frames(trim_ms: f32, rate: u32) -> i32 {
+    if trim_ms.is_nan() {
+        return 0;
+    }
+    let trim_ms = trim_ms.clamp(-PATH_TRIM_MAX_MS, PATH_TRIM_MAX_MS);
+    (trim_ms * rate as f32 / 1000.0).round() as i32
+}
+
+/// The longest alignment delay, in frames: the longest chain latency
+/// ([`MAX_ALIGN`]) plus room for the trims (twice the trim range at
+/// 384 kHz), so a trim never has to be cut short.
+pub(crate) const MAX_ALIGN_DELAY: u32 = MAX_ALIGN + 4096;
+
+/// What the alignment does on one device: the delay each routed path gets
+/// there, in frames, and which path the others wait for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AlignmentPlan {
+    /// Per path slot: the delay added on this device, `None` for a path the
+    /// device does not play.
+    pub(crate) delays: [Option<u32>; MAX_PATHS],
+    /// The path the others wait for: the slowest routed one, when align is
+    /// on and some other routed path is faster.
+    pub(crate) waits_for: Option<usize>,
+}
+
+/// Works out one device's alignment from which paths it plays (`routed`),
+/// their chain latency (frames, clamped to [`MAX_ALIGN`]) and their trims
+/// (frames, signed).  Allocation free, for the audio thread.
+///
+/// With `align` on, path `p` waits `max(latency) − latency(p) + trim(p)`,
+/// the maximum taken over the routed paths: every one of them, muted or
+/// un-soloed included, so muting never moves the latency.  With it off,
+/// only the trim applies.  Negative results shift every routed path by the
+/// same amount, so the smallest delay is 0 (a negative trim makes the
+/// others wait instead).  Delays are clamped to [`MAX_ALIGN_DELAY`].
+pub(crate) fn plan_alignment(
+    align: bool,
+    routed: [bool; MAX_PATHS],
+    latency: [u32; MAX_PATHS],
+    trims: [i32; MAX_PATHS],
+) -> AlignmentPlan {
+    let latency = latency.map(|value| value.min(MAX_ALIGN) as i64);
+    let routed_paths = || (0..MAX_PATHS).filter(|&path| routed[path]);
+    let slowest = routed_paths().max_by(|&a, &b| latency[a].cmp(&latency[b]).then(b.cmp(&a)));
+    let Some(slowest) = slowest else {
+        return AlignmentPlan::default();
+    };
+    let max = latency[slowest];
+    let raw = |path: usize| {
+        let wait = if align { max - latency[path] } else { 0 };
+        wait + trims[path] as i64
+    };
+    let lowest = routed_paths().map(raw).min().unwrap_or(0);
+    let shift = (-lowest).max(0);
+    let mut plan = AlignmentPlan::default();
+    for path in routed_paths() {
+        let delay = (raw(path) + shift).clamp(0, MAX_ALIGN_DELAY as i64);
+        plan.delays[path] = Some(delay as u32);
+    }
+    if align && routed_paths().any(|path| latency[path] < max) {
+        plan.waits_for = Some(slowest);
+    }
+    plan
+}
+
+/// One device's alignment as the UI shows it, in frames at `rate`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlignmentReport {
+    /// The device's align switch.
+    pub align: bool,
+    /// The rate the frames are counted at.
+    pub rate: u32,
+    /// The path slot this device waits for (see [`AlignmentPlan`]).
+    pub waits_for: Option<usize>,
+    /// Per path slot: the alignment delay it gets on this device, `None`
+    /// when the device does not play it.
+    pub delays: [Option<u32>; MAX_PATHS],
+    /// Per path slot: its chain latency plus its delay here, what the
+    /// person hears it late by on this device.  `None` when not played.
+    pub arrivals: [Option<u32>; MAX_PATHS],
+    /// The largest of `arrivals`: the device's latency from the chains and
+    /// the alignment (the slowest routed path, plus any trim).
+    pub total: u32,
+    /// The largest alignment delay on the device: what aligning (and the
+    /// trims) adds on top of a path's own chain.
+    pub added: u32,
+    /// Some path this device plays has a chain latency above
+    /// [`MAX_ALIGN`]: it is aligned (and counted here) as if it had
+    /// exactly that much, so it arrives later than shown.
+    pub clamped: bool,
+}
+
+impl AlignmentReport {
+    pub(crate) fn new(
+        plan: AlignmentPlan,
+        align: bool,
+        latency: [u32; MAX_PATHS],
+        rate: u32,
+    ) -> Self {
+        let arrivals: [Option<u32>; MAX_PATHS] = std::array::from_fn(|path| {
+            plan.delays[path].map(|delay| delay + latency[path].min(MAX_ALIGN))
+        });
+        Self {
+            align,
+            rate,
+            waits_for: plan.waits_for,
+            delays: plan.delays,
+            arrivals,
+            total: arrivals.iter().flatten().copied().max().unwrap_or(0),
+            added: plan.delays.iter().flatten().copied().max().unwrap_or(0),
+            clamped: (0..MAX_PATHS)
+                .any(|path| plan.delays[path].is_some() && latency[path] > MAX_ALIGN),
+        }
+    }
+
+    /// Frames at this report's rate in ms.
+    pub fn ms(&self, frames: u32) -> f32 {
+        if self.rate == 0 {
+            0.0
+        } else {
+            frames as f32 * 1000.0 / self.rate as f32
+        }
+    }
+}
+
+/// Which of the `live` paths a `channels`-channel device plays: those with
+/// some non-zero weight on one of its channels.
+pub(super) fn routed_paths(
+    maps: &[ChannelMap; MAX_PATHS],
+    live: [bool; MAX_PATHS],
+    unused: UnusedChannels,
+    channels: usize,
+) -> [bool; MAX_PATHS] {
+    let last = channels.min(MAX_OUTPUT_CHANNELS);
+    std::array::from_fn(|path| {
+        (0..last).any(|channel| {
+            path_channel_weights(maps, live, unused, channels, channel, path) != [0.0; 3]
+        })
+    })
 }
 
 /// Linear gain of a device level in dB.  0 dB is exactly 1.0, so the default

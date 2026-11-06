@@ -9,16 +9,16 @@
 //!
 //! ```text
 //! clock callback (OutputMixer)                follower stream (FollowerMixer)
-//!   paths → master                              ring → resampler → drift
+//!   paths → master → per-path delay lines       ring → resampler → drift
 //!   per follower: DeviceMapper                  → dropout fade → device
-//!     (per-path map, level, polarity,
-//!      device level / mute)
+//!     (alignment taps, per-path map, level,
+//!      polarity, device level / mute)
 //!   → device channels ──▶ FollowerBus ring ──▶
 //! ```
 //!
 //! - **The clock side mixes every follower.**  Each device needs its own sum
-//!   of the paths (per-path map, level and polarity), so the clock
-//!   callback runs one [`DeviceMapper`] per follower slot,
+//!   of the paths (per-path map, level and polarity) and its own alignment
+//!   taps, so the clock callback runs one [`DeviceMapper`] per follower slot,
 //!   exactly as for the clock device and the PipeWire duplex followers.
 //!   While a follower's stream runs (`Shared::feeds_follower`), the mapped
 //!   frame goes into that follower's ring.
@@ -36,8 +36,12 @@
 //! - **Meters** come from the clock side's mapper (before the follower's
 //!   dropout fade), like the clock device's; a follower without a running
 //!   stream is not mapped and reads 0.
-//! - **Latency**: a follower plays the clock side's block plus its own
-//!   cushion and device buffer, as before paths existed.
+//! - **Latency**: a follower plays its alignment delay (it waits for the
+//!   slowest path routed to it) plus its own cushion and device buffer.
+//!   Alignment is per device and leaves out the follower's cushion and
+//!   device buffer (and the clock device's), so two devices are not
+//!   aligned with each other.  The UI that shows a device's alignment
+//!   should say so.
 //! - **Open / close**: the supervisor lays the ring out for the device's
 //!   channel count while the slot's ring-active flag is off, then turns it
 //!   on; the clock side reads the flag once per block (and again per frame

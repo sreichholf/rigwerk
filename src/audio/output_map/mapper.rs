@@ -2,12 +2,39 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
+use super::super::delay::{DelayLine, DelayTap, TAP_FADE_SECONDS};
 use super::super::mixer::Ramp;
 use super::super::path::{LiveSlots, MAX_PATHS};
 use super::types::{
-    level_gain, path_channel_weights, ChannelMap, OutputDeviceSettings, UnusedChannels,
-    MAX_OUTPUT_CHANNELS,
+    level_gain, path_channel_weights, plan_alignment, routed_paths, trim_frames, AlignmentPlan,
+    AlignmentReport, ChannelMap, OutputDeviceSettings, UnusedChannels, MAX_OUTPUT_CHANNELS,
 };
+
+/// What the mapper needs to align the paths in one block: each path's
+/// chain latency (frames, read once per block) and the rate.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PathTiming {
+    pub(crate) latency: [u32; MAX_PATHS],
+    pub(crate) rate: u32,
+}
+
+impl Default for PathTiming {
+    fn default() -> Self {
+        Self {
+            latency: [0; MAX_PATHS],
+            rate: 48_000,
+        }
+    }
+}
+
+/// One delay line per path slot, written once per frame by the mixer and
+/// read by every device's taps.
+pub(crate) type PathLines = [DelayLine; MAX_PATHS];
+
+/// "Not played here" in the published per-path delays.
+const NOT_ROUTED: u32 = u32::MAX;
+/// "Waits for no path" in the published `waits_for`.
+const NO_PATH: u8 = u8::MAX;
 
 /// One path's channel map and signed gain (level and polarity) on one
 /// device, as the callback reads it.
@@ -16,6 +43,8 @@ struct PathMap {
     right: AtomicU8,
     /// Linear gain (`f32` bits), negative when the polarity is flipped.
     gain: AtomicU32,
+    /// Alignment trim, ms (`f32` bits), already clamped.
+    trim_ms: AtomicU32,
 }
 
 impl PathMap {
@@ -24,7 +53,12 @@ impl PathMap {
             left: AtomicU8::new(map.left),
             right: AtomicU8::new(map.right),
             gain: AtomicU32::new(1.0f32.to_bits()),
+            trim_ms: AtomicU32::new(0.0f32.to_bits()),
         }
+    }
+
+    fn trim_ms(&self) -> f32 {
+        f32::from_bits(self.trim_ms.load(Ordering::Relaxed))
     }
 
     fn store(&self, map: ChannelMap) {
@@ -64,6 +98,16 @@ pub(crate) struct DeviceControls {
     /// inventory's channel count.  ASIO opens at most 4 outputs for now;
     /// the map sees that count.
     channels: AtomicU32,
+    /// The align switch (see [`OutputDeviceSettings::align`]).
+    align: AtomicBool,
+    /// What the mapper last aligned with, for the UI: the delay per path
+    /// slot ([`NOT_ROUTED`] when the device does not play it), the path it
+    /// waits for ([`NO_PATH`]), each path's chain latency, and the rate (0:
+    /// no mixer has published in this session yet).
+    applied: [AtomicU32; MAX_PATHS],
+    applied_latency: [AtomicU32; MAX_PATHS],
+    waits_for: AtomicU8,
+    applied_rate: AtomicU32,
 }
 
 impl DeviceControls {
@@ -75,6 +119,11 @@ impl DeviceControls {
             mute: AtomicBool::new(false),
             meters: std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits())),
             channels: AtomicU32::new(0),
+            align: AtomicBool::new(true),
+            applied: std::array::from_fn(|_| AtomicU32::new(NOT_ROUTED)),
+            applied_latency: std::array::from_fn(|_| AtomicU32::new(0)),
+            waits_for: AtomicU8::new(NO_PATH),
+            applied_rate: AtomicU32::new(0),
         };
         controls.set(&OutputDeviceSettings::default());
         controls
@@ -87,7 +136,9 @@ impl DeviceControls {
         for (to, from) in self.maps.iter().zip(&settings.path_map) {
             to.store(from.map);
             to.gain.store(from.gain().to_bits(), Ordering::Relaxed);
+            to.trim_ms.store(from.trim_ms.to_bits(), Ordering::Relaxed);
         }
+        self.align.store(settings.align, Ordering::Relaxed);
         self.silent
             .store(settings.unused == UnusedChannels::Silent, Ordering::Relaxed);
         self.gain
@@ -104,8 +155,11 @@ impl DeviceControls {
             to.store(from.load());
             to.gain
                 .store(from.gain.load(Ordering::Relaxed), Ordering::Relaxed);
+            to.trim_ms
+                .store(from.trim_ms.load(Ordering::Relaxed), Ordering::Relaxed);
         }
         copy_bool(&self.silent, &previous.silent);
+        copy_bool(&self.align, &previous.align);
         copy_bool(&self.mute, &previous.mute);
         self.gain
             .store(previous.gain.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -117,6 +171,53 @@ impl DeviceControls {
             meter.store(0.0f32.to_bits(), Ordering::Relaxed);
         }
         self.channels.store(0, Ordering::Relaxed);
+        self.applied_rate.store(0, Ordering::Relaxed);
+    }
+
+    /// Forgets the published alignment: no mixer maps this device now (the
+    /// bridge stopped, or a follower that is not fed).  Atomics only.
+    pub(crate) fn clear_alignment(&self) {
+        self.applied_rate.store(0, Ordering::Release);
+    }
+
+    /// The align switch as stored.
+    pub(crate) fn align(&self) -> bool {
+        self.align.load(Ordering::Relaxed)
+    }
+
+    /// The alignment the mapper works with right now (the delays its taps
+    /// settle on), or `None` before a mixer published one in this session.
+    pub(crate) fn alignment(&self) -> Option<AlignmentReport> {
+        let rate = self.applied_rate.load(Ordering::Acquire);
+        if rate == 0 {
+            return None;
+        }
+        let mut plan = AlignmentPlan::default();
+        for (delay, applied) in plan.delays.iter_mut().zip(&self.applied) {
+            let value = applied.load(Ordering::Relaxed);
+            *delay = (value != NOT_ROUTED).then_some(value);
+        }
+        let waits_for = self.waits_for.load(Ordering::Relaxed);
+        plan.waits_for = (waits_for != NO_PATH).then_some(waits_for as usize);
+        let latency =
+            std::array::from_fn(|path| self.applied_latency[path].load(Ordering::Relaxed));
+        Some(AlignmentReport::new(plan, self.align(), latency, rate))
+    }
+
+    /// Publishes the alignment the mapper works with (audio thread; atomics
+    /// only).
+    fn publish_alignment(&self, plan: &AlignmentPlan, latency: &[u32; MAX_PATHS], rate: u32) {
+        for (applied, delay) in self.applied.iter().zip(plan.delays) {
+            applied.store(delay.unwrap_or(NOT_ROUTED), Ordering::Relaxed);
+        }
+        for (applied, latency) in self.applied_latency.iter().zip(latency) {
+            applied.store(*latency, Ordering::Relaxed);
+        }
+        self.waits_for.store(
+            plan.waits_for.map_or(NO_PATH, |path| path as u8),
+            Ordering::Relaxed,
+        );
+        self.applied_rate.store(rate.max(1), Ordering::Release);
     }
 
     pub(crate) fn meters(&self) -> [f32; MAX_OUTPUT_CHANNELS] {
@@ -248,6 +349,12 @@ pub(crate) struct DeviceMapper {
     /// The paths mapped in this block, and in the one before (a path that
     /// just went live adopts its weights instead of ramping from stale ones).
     live: LiveSlots,
+    /// One read tap per path on that path's delay line: the path's
+    /// alignment delay on this device.  A delay change crossfades.
+    taps: [DelayTap; MAX_PATHS],
+    /// The paths this device played in the last block.  A path that starts
+    /// playing here snaps its tap (its weights fade in from 0 anyway).
+    routed: [bool; MAX_PATHS],
     frame: DeviceFrame,
     peaks: [f32; MAX_OUTPUT_CHANNELS],
 }
@@ -261,6 +368,8 @@ impl DeviceMapper {
             gain: Ramp::new(1.0),
             adopted: false,
             live: LiveSlots::default(),
+            taps: [DelayTap::default(); MAX_PATHS],
+            routed: [false; MAX_PATHS],
             frame: DeviceFrame {
                 samples: [0.0; SLOTS],
                 channels,
@@ -291,21 +400,30 @@ impl DeviceMapper {
     /// Path 0 alone, as every caller before paths existed.
     #[cfg(test)]
     pub(crate) fn begin_block(&mut self, controls: &DeviceControls, ramp_samples: f32) {
-        self.begin_paths(controls, ramp_samples, LiveSlots::main());
+        self.begin_paths(
+            controls,
+            ramp_samples,
+            LiveSlots::main(),
+            &PathTiming::default(),
+        );
     }
 
     /// Reads the controls for this block, for the `live` path slots.  The
     /// first block (and a path that just went live) adopts them directly;
-    /// later changes take `ramp_samples` samples.
+    /// later changes take `ramp_samples` samples.  Also works out each
+    /// path's alignment delay on this device from `timing`, points the taps
+    /// at it (see [`plan_alignment`]) and publishes it for the UI.
     pub(crate) fn begin_paths(
         &mut self,
         controls: &DeviceControls,
         ramp_samples: f32,
         live: LiveSlots,
+        timing: &PathTiming,
     ) {
         let (unused, gain) = controls.load_device();
         let maps: [ChannelMap; MAX_PATHS] = std::array::from_fn(|path| controls.path_map(path));
         let mask = live.mask();
+        self.align_paths(controls, &maps, mask, unused, timing);
         for path in live.iter() {
             let ramp = self.adopted && self.live.contains(path);
             for slot in self.slots() {
@@ -337,21 +455,65 @@ impl DeviceMapper {
         self.peaks = [0.0; MAX_OUTPUT_CHANNELS];
     }
 
+    /// Points each path's tap at its alignment delay on this device.  A
+    /// path the device keeps playing crossfades to a new delay; one that
+    /// starts playing here (and every path in the first block) snaps.
+    fn align_paths(
+        &mut self,
+        controls: &DeviceControls,
+        maps: &[ChannelMap; MAX_PATHS],
+        mask: [bool; MAX_PATHS],
+        unused: UnusedChannels,
+        timing: &PathTiming,
+    ) {
+        let routed = routed_paths(maps, mask, unused, self.channels);
+        let trims: [i32; MAX_PATHS] =
+            std::array::from_fn(|path| trim_frames(controls.maps[path].trim_ms(), timing.rate));
+        let plan = plan_alignment(controls.align(), routed, timing.latency, trims);
+        let fade = TAP_FADE_SECONDS * timing.rate as f32;
+        for (path, delay) in plan.delays.iter().enumerate() {
+            let Some(delay) = *delay else {
+                continue;
+            };
+            if self.adopted && self.routed[path] {
+                self.taps[path].set_target(delay, fade);
+            } else {
+                self.taps[path].snap(delay);
+            }
+        }
+        self.routed = routed;
+        controls.publish_alignment(&plan, &timing.latency, timing.rate);
+    }
+
     /// Path 0 alone: maps one stereo frame with path 0's map.
     #[cfg(test)]
     pub(crate) fn map(&mut self, left: f32, right: f32) -> &DeviceFrame {
         let mut frames = [[0.0; 2]; MAX_PATHS];
         frames[0] = [left, right];
-        self.map_paths(&frames)
+        self.map_frames(&frames)
     }
 
-    /// Maps one frame of every live path (each after the master) onto the
-    /// device's channels, scaled by the path's level and polarity on this
-    /// device, and sums them per channel: this is the sum of the paths.
-    /// Slots that are not live are ignored.  One live path at 0 dB and
-    /// normal polarity gives exactly its own mapped frame.
+    /// Maps the current frame of every live path onto the device's
+    /// channels: each path is read from its delay line through this
+    /// device's tap (its alignment delay here), then mapped and summed as
+    /// in [`Self::map_frames`].  A settled tap at delay 0 reads the frame
+    /// just written, so an unaligned path is exactly its own frame.
     #[inline]
-    pub(crate) fn map_paths(&mut self, frames: &[[f32; 2]; MAX_PATHS]) -> &DeviceFrame {
+    pub(crate) fn map_paths(&mut self, lines: &PathLines) -> &DeviceFrame {
+        let mut frames = [[0.0f32; 2]; MAX_PATHS];
+        for path in self.live.iter() {
+            frames[path] = self.taps[path].next(&lines[path], 0);
+        }
+        self.map_frames(&frames)
+    }
+
+    /// Maps one frame of every live path (each after the master and its
+    /// alignment) onto the device's channels, scaled by the path's level
+    /// and polarity on this device, and sums them per channel: this is the
+    /// sum of the paths.  Slots that are not live are ignored.  One live
+    /// path at 0 dB and normal polarity gives exactly its own mapped frame.
+    #[inline]
+    pub(crate) fn map_frames(&mut self, frames: &[[f32; 2]; MAX_PATHS]) -> &DeviceFrame {
         let mut sources = [[0.0f32; 3]; MAX_PATHS];
         for path in self.live.iter() {
             let [left, right] = frames[path];
@@ -385,6 +547,12 @@ impl DeviceMapper {
     /// outside the callback, so the snapshot has it before the first block.
     pub(crate) fn publish_channels(&self, controls: &DeviceControls) {
         controls.set_channels(self.channels);
+    }
+
+    /// The longest alignment delay path `path` is read at on this device:
+    /// what a removed path still has to play here after its fade.
+    pub(crate) fn tap_delay(&self, path: usize) -> u32 {
+        self.taps[path].longest()
     }
 
     /// Publishes this block's per-channel peaks.

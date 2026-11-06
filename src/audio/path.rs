@@ -32,6 +32,47 @@
 //! Each path has a level (dB), a mute and a solo, applied after its chain
 //! and before the master, as one ramped gain.  If any active path is
 //! soloed, only soloed paths sound.
+//!
+//! # Latency
+//!
+//! [`PathControls::latency_samples`] is the chain's total plugin latency,
+//! and the chain really delays by exactly that much at all times: an
+//! insert skipped for a block plays its input delayed by its latency, and
+//! an insert's dry/wet mix delays its dry side (see `PluginChain::process`).
+//! The mixer lines the paths up per device with it (`output_map`,
+//! "Alignment").
+//!
+//! # Chain handover
+//!
+//! The audio thread only try-locks a chain; a missed lock costs that chunk
+//! its inserts.  So the edits made all the time never take the chain lock:
+//! - mix and bypass are atomics per insert (`SlotControls`) that the audio
+//!   thread reads every chunk;
+//! - a plugin control goes straight to the plugin through the published
+//!   insert links (`slot_links`), holding only that plugin's own lock (the
+//!   audio thread then skips just that insert for a chunk, delayed by its
+//!   latency, never the chain); the view is patched at once and the saved
+//!   value waits in `param_backlog` until the UI takes the chain lock for
+//!   something else (an edit, a state capture, a save);
+//! - drawing reads the published views, and a quiet service frame takes no
+//!   lock.
+//!
+//! What still takes the chain lock is structural and short: adding,
+//! removing, moving or restoring inserts, reopening them for a new rate
+//! (slow loads and teardowns run outside the lock), resetting a plugin's
+//! controls, syncing from its editor, capturing state for a save, and the
+//! publish of the views those edits do.
+//!
+//! For those rare misses the mixer keeps the timing: rather than a second,
+//! lock-free copy of the chain (plugin instances are stateful and cannot be
+//! duplicated) it plays the chunk's chain input delayed by
+//! [`PathControls::latency_samples`] (`mixer::PathProcessor::run_inserts`).
+//! The path stays in time in the sum, so nothing combs and the phase does
+//! not jump, but its level and tone are not kept: for that chunk the path
+//! plays dry.  The step into the fallback is smoothed (no crossfade is
+//! possible), and the chain's own output fades back in once it runs again,
+//! after one latency's worth of frames (the inserts missed that input).
+//! [`PathControls::process_plugins`] reports whether the chain ran.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -42,7 +83,10 @@ use super::clap::{ClapPlugin, HostState};
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::output_map::{path_level_gain, sanitize_path_level};
-use super::plugins::{PluginChain, PluginHandle, PluginPref, PluginView, Vst3Service};
+use super::plugins::{
+    host_format_parameter, host_set_parameter, PluginChain, PluginHandle, PluginPref, PluginView,
+    SlotLink, Vst3Service,
+};
 
 /// Most signal paths a session can hold.  Every per-path array (controls,
 /// processors, device maps) is this long; only the active ones run.
@@ -176,7 +220,18 @@ type ClapService = (Arc<HostState>, Arc<Mutex<ClapPlugin>>);
 
 /// The service lists a publish replaces; dropped after the chain lock is
 /// released, since they may hold the last reference to a removed plugin.
-type StaleServices = (Arc<[ClapService]>, Arc<[Arc<Vst3Service>]>);
+type StaleServices = (Arc<[ClapService]>, Arc<[Arc<Vst3Service>]>, Arc<[SlotLink]>);
+
+/// A control value the UI set on a plugin without the chain lock, waiting
+/// to be stored in the chain's insert (its view and saved value) the next
+/// time the UI takes the lock anyway.
+struct ParamWrite {
+    index: usize,
+    handle: PluginHandle,
+    id: u32,
+    value: f64,
+    display: Option<String>,
+}
 
 /// Armed by `edit_chain` around the edit itself.  If the edit panics, the
 /// chain mutex is poisoned and no later edit publishes again, so the
@@ -228,6 +283,14 @@ pub(crate) struct PathControls {
     /// latency), published the same way and declared here for the same
     /// reason.
     vst3_services: Mutex<Arc<[Arc<Vst3Service>]>>,
+    /// Each insert's mix, bypass and plugin, published with the views, so
+    /// the UI sets mix, bypass and plugin controls without the chain lock
+    /// (see the module docs, "Chain handover").  Declared before `plugins`
+    /// for the same reason as the service lists.
+    slot_links: Mutex<Arc<[SlotLink]>>,
+    /// Control values set through `slot_links`, stored into the chain the
+    /// next time the UI holds its lock (an edit, a state capture, a save).
+    param_backlog: Mutex<Vec<ParamWrite>>,
     /// The insert views the UI draws.  Republished by every chain edit while
     /// that edit still holds the chain lock, and read without it.  This lock
     /// is separate from the chain's and the audio thread never takes it, so
@@ -286,6 +349,8 @@ impl PathControls {
             meter_r: AtomicU32::new(0.0f32.to_bits()),
             plugin_services: Mutex::new(Arc::from(Vec::new())),
             vst3_services: Mutex::new(Arc::from(Vec::new())),
+            slot_links: Mutex::new(Arc::from(Vec::new())),
+            param_backlog: Mutex::new(Vec::new()),
             plugin_views: Mutex::new(Arc::from(Vec::new())),
             plugin_views_version: AtomicU64::new(0),
             plugin_views_dirty: AtomicBool::new(false),
@@ -615,18 +680,79 @@ impl PathControls {
     /// only after the lock is released: it may hold the last reference to a
     /// plugin the edit removed.
     pub(super) fn edit_chain<R>(&self, edit: impl FnOnce(&mut PluginChain) -> R) -> Option<R> {
-        let (result, stale) = {
+        let (result, stale, stored) = {
             let mut chain = self.plugins.lock().ok()?;
+            let stored = self.store_backlog(&mut chain);
             // Declared after the chain guard, so it runs first while
             // unwinding, still under the lock.
             let unwind = PublishOnUnwind { path: self };
             let result = edit(&mut chain);
             std::mem::forget(unwind);
             let stale = self.publish_plugins(&chain);
-            (result, stale)
+            (result, stale, stored)
         };
-        drop(stale);
+        drop((stale, stored));
         Some(result)
+    }
+
+    /// Takes the chain lock for UI-side work that does not change the
+    /// inserts, with the control values set meanwhile stored first.  The
+    /// stored writes (they hold plugin references) are dropped after the
+    /// lock is released.
+    fn with_chain<R>(&self, work: impl FnOnce(&mut PluginChain) -> R) -> Option<R> {
+        let (result, stored) = {
+            let mut chain = self.plugins.lock().ok()?;
+            let stored = self.store_backlog(&mut chain);
+            (work(&mut chain), stored)
+        };
+        drop(stored);
+        Some(result)
+    }
+
+    /// Stores the control values set without the chain lock (see
+    /// [`Self::set_plugin_parameter`]).  The caller holds the chain lock
+    /// and drops the returned writes after releasing it.
+    #[must_use]
+    fn store_backlog(&self, chain: &mut PluginChain) -> Vec<ParamWrite> {
+        let writes = std::mem::take(
+            &mut *self
+                .param_backlog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for write in &writes {
+            chain.store_parameter(
+                write.index,
+                &write.handle,
+                write.id,
+                write.value,
+                write.display.clone(),
+            );
+        }
+        writes
+    }
+
+    /// The insert at `index` as last published.
+    fn slot_link(&self, index: usize) -> Option<SlotLink> {
+        self.slot_links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(index)
+            .cloned()
+    }
+
+    /// Changes one insert in the published views, without the chain lock.
+    fn patch_view(&self, index: usize, patch: impl FnOnce(&mut PluginView)) {
+        let mut views = self
+            .plugin_views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut list = views.to_vec();
+        if let Some(view) = list.get_mut(index) {
+            patch(view);
+            *views = list.into();
+            self.plugin_views_version.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// The latency in samples this path's insert chain should add (see
@@ -663,7 +789,20 @@ impl PathControls {
                 .unwrap_or_else(PoisonError::into_inner),
             Arc::from(Vec::new()),
         );
-        drop((services, vst3));
+        let links = std::mem::replace(
+            &mut *self
+                .slot_links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            Arc::from(Vec::new()),
+        );
+        let backlog = std::mem::take(
+            &mut *self
+                .param_backlog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        drop((services, vst3, links, backlog));
     }
 
     /// Publishes the views, the CLAP and VST3 service lists and the cheap
@@ -680,6 +819,7 @@ impl PathControls {
         let views: Arc<[PluginView]> = chain.views().into();
         let services: Arc<[ClapService]> = chain.clap_services().into();
         let vst3: Arc<[Arc<Vst3Service>]> = chain.vst3_services().into();
+        let links: Arc<[SlotLink]> = chain.slot_links().into();
         *self
             .plugin_views
             .lock()
@@ -699,7 +839,14 @@ impl PathControls {
                 .unwrap_or_else(PoisonError::into_inner),
             vst3,
         );
-        (stale_clap, stale_vst3)
+        let stale_links = std::mem::replace(
+            &mut *self
+                .slot_links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            links,
+        );
+        (stale_clap, stale_vst3, stale_links)
     }
 
     /// Replaces the saved insert list without loading anything.  Plugins are
@@ -715,6 +862,11 @@ impl PathControls {
     /// Whether the chain needs a reload for `rate`: it was built at another
     /// rate, or a restored slot was never opened.  Answered from the
     /// published flags, without the chain lock.
+    /// The rate the chain was last built for (lock-free).
+    pub(crate) fn chain_rate(&self) -> u32 {
+        self.chain_rate.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn needs_reload(&self, rate: u32) -> bool {
         rate != self.chain_rate.load(Ordering::Relaxed)
             || self.chain_unopened.load(Ordering::Relaxed)
@@ -808,12 +960,29 @@ impl PathControls {
         self.edit_chain(|chain| chain.move_slot(index, delta));
     }
 
+    /// Bypasses one insert, without the chain lock: the audio thread reads
+    /// the flag with its next chunk.
     pub(crate) fn set_plugin_bypass(&self, index: usize, bypass: bool) {
-        self.edit_chain(|chain| chain.set_bypass(index, bypass));
+        let Some(link) = self.slot_link(index) else {
+            return;
+        };
+        link.controls.set_bypass(bypass);
+        if !bypass {
+            // The cheap "anything to run?" flag the audio thread checks
+            // before locking; it recounts the active inserts itself.
+            self.plugin_active.fetch_max(1, Ordering::Relaxed);
+        }
+        self.patch_view(index, |view| view.bypass = bypass);
     }
 
+    /// Sets one insert's dry/wet mix, without the chain lock.
     pub(crate) fn set_plugin_mix(&self, index: usize, mix: f32) {
-        self.edit_chain(|chain| chain.set_mix(index, mix));
+        let Some(link) = self.slot_link(index) else {
+            return;
+        };
+        link.controls.set_mix(mix);
+        let mix = link.controls.mix();
+        self.patch_view(index, |view| view.mix = mix);
     }
 
     pub(crate) fn ensure_plugin_loaded(&self, index: usize) {
@@ -844,14 +1013,57 @@ impl PathControls {
             .ok_or_else(|| "Plugin chain unavailable".to_owned())
     }
 
+    /// Sets one plugin control.  A loaded plugin is reached through the
+    /// published links, without the chain lock (only the plugin's own lock,
+    /// which the audio thread just skips the insert for): the view is
+    /// patched at once and the saved value is stored the next time the UI
+    /// takes the chain lock anyway.  An insert that is not open yet goes
+    /// through the chain, which opens it.
     pub(crate) fn set_plugin_parameter(
         &self,
         index: usize,
         id: u32,
         value: f64,
     ) -> Result<(), String> {
-        self.edit_chain(|chain| chain.set_parameter(index, id, value))
-            .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()))
+        let Some(handle) = self.slot_link(index).and_then(|link| {
+            if let Some(vst3) = &link.vst3 {
+                vst3.nudge();
+            }
+            link.plugin
+        }) else {
+            return self
+                .edit_chain(|chain| chain.set_parameter(index, id, value))
+                .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()));
+        };
+        let value = value.clamp(0.0, 1.0);
+        host_set_parameter(&handle, id, value)?;
+        let display = host_format_parameter(&handle, id, value);
+        self.patch_view(index, |view| {
+            if let Some(parameter) = view
+                .parameters
+                .iter_mut()
+                .find(|parameter| parameter.id == id)
+            {
+                parameter.value = value;
+                if let Some(display) = &display {
+                    parameter.display = display.clone();
+                }
+            }
+        });
+        let mut backlog = self
+            .param_backlog
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A drag sends many values for one control; only the last counts.
+        backlog.retain(|write| !(write.index == index && write.id == id));
+        backlog.push(ParamWrite {
+            index,
+            handle,
+            id,
+            value,
+            display,
+        });
+        Ok(())
     }
 
     pub(crate) fn reset_plugin_parameters(&self, index: usize) -> Result<(), String> {
@@ -860,7 +1072,7 @@ impl PathControls {
     }
 
     /// The insert views as last published.  Never takes the chain lock, so
-    /// drawing the UI cannot make the audio callback pass a block dry.
+    /// drawing the UI cannot make the audio callback miss a chain block.
     pub(crate) fn plugin_views(&self) -> Arc<[PluginView]> {
         Arc::clone(
             &self
@@ -928,56 +1140,63 @@ impl PathControls {
     /// plugins are saved without the chain lock, which is only taken briefly
     /// to list them and to store the results.
     pub(crate) fn capture_plugin_states(&self) {
-        let requests = match self.plugins.lock() {
-            Ok(chain) => chain.state_requests(),
-            Err(_) => return,
+        let Some(requests) = self.with_chain(|chain| chain.state_requests()) else {
+            return;
         };
         if requests.is_empty() {
             return;
         }
         let captured: Vec<_> = requests.iter().map(super::plugins::capture_state).collect();
-        if let Ok(mut chain) = self.plugins.lock() {
+        self.with_chain(|chain| {
             for (request, state) in requests.iter().zip(captured) {
                 chain.store_state(request.index, &request.handle, state);
             }
-        }
+        });
     }
 
     /// Marks one insert's saved state as out of date (its editor closed).
     pub(crate) fn mark_plugin_state_stale(&self, index: usize) {
-        if let Ok(mut chain) = self.plugins.lock() {
-            chain.mark_state_stale(index);
-        }
+        self.with_chain(|chain| chain.mark_state_stale(index));
     }
 
     /// The insert chain as it should be saved, with fresh plugin state.
     /// Call it from the UI thread.
     pub(crate) fn plugin_prefs(&self) -> Vec<PluginPref> {
         self.capture_plugin_states();
-        self.plugins
-            .lock()
-            .map(|chain| chain.prefs())
-            .unwrap_or_default()
+        self.with_chain(|chain| chain.prefs()).unwrap_or_default()
     }
 
     pub(crate) fn has_plugins(&self) -> bool {
         self.plugin_active.load(Ordering::Relaxed) > 0
     }
 
-    /// Called from the output callback.  The flag keeps the common no-plugin
-    /// case lock-free, and `try_lock` keeps a UI edit from stalling the block:
-    /// when the chain is busy this block passes through dry.
-    pub(crate) fn process_plugins(&self, left: &mut [f32], right: &mut [f32], frames: usize) {
-        if self.plugin_active.load(Ordering::Relaxed) == 0 {
-            return;
+    /// Called from the output callback.  Returns whether the chain ran;
+    /// `false` leaves the block untouched and the caller plays the chain's
+    /// input delayed by [`Self::latency_samples`] instead (see
+    /// `mixer::PathProcessor::run_inserts` and the module docs).
+    ///
+    /// The flags keep the common no-plugin case lock-free.  A chain with no
+    /// active insert but some latency (every insert bypassed) still runs, so
+    /// its skipped inserts delay the block by their latency.  `try_lock`
+    /// keeps a UI edit from stalling the block.
+    pub(crate) fn process_plugins(
+        &self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+    ) -> bool {
+        if self.plugin_active.load(Ordering::Relaxed) == 0 && self.latency_samples() == 0 {
+            return true;
         }
-        if let Ok(mut chain) = self.plugins.try_lock() {
-            let failed = chain.process(left, right, frames);
-            self.plugin_active.store(chain.active(), Ordering::Relaxed);
-            if failed {
-                // The views are rebuilt on the UI thread, not here.
-                self.plugin_views_dirty.store(true, Ordering::Release);
-            }
+        let Ok(mut chain) = self.plugins.try_lock() else {
+            return false;
+        };
+        let failed = chain.process(left, right, frames);
+        self.plugin_active.store(chain.active(), Ordering::Relaxed);
+        if failed {
+            // The views are rebuilt on the UI thread, not here.
+            self.plugin_views_dirty.store(true, Ordering::Release);
         }
+        true
     }
 }

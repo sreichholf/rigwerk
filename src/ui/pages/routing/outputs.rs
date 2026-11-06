@@ -1360,7 +1360,7 @@ mod tests {
     };
     use crate::ui::pages::mixer::chain::ChainSelection;
     use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
-    use crate::ui::theme::{AMBER, RED};
+    use crate::ui::theme::{AMBER, MUTED, RED};
     use crate::ui::widgets::{accesskit_frame, node_named};
     use eframe::egui::{self, accesskit::Toggled};
 
@@ -1663,10 +1663,18 @@ mod tests {
             let rows = app.output_device_rows();
             app.device_paths_line(0, &rows[0], &infos)
         };
+        // Aligned (the default): no warning.
+        let aligned = line(&app);
+        assert_eq!(aligned.text, "2 paths · 0.0 ms");
+        assert_eq!(aligned.color, MUTED);
+        assert_eq!(aligned.dots, vec![infos[0].colour, infos[1].colour]);
+
+        // Unaligned, and the second path trimmed: they arrive apart.
+        app.set_device_align(0, false);
+        app.clock_device.path_map[infos[1].slot].trim_ms = 1.0;
         let shift = line(&app);
         assert_eq!(shift.text, "2 paths · 0.0 ms");
         assert_eq!(shift.color, AMBER);
-        assert_eq!(shift.dots, vec![infos[0].colour, infos[1].colour]);
 
         // Both on L/R: they add up.
         app.clock_device.path_map[infos[0].slot].map = ChannelMap::default();
@@ -1674,6 +1682,12 @@ mod tests {
         let sum = line(&app);
         assert_eq!(sum.text, "unaligned sum · comb filter");
         assert_eq!(sum.color, RED);
+        // Aligned again: the trim still pulls the sum apart ...
+        app.set_device_align(0, true);
+        assert_eq!(line(&app).color, RED);
+        // ... and without it the same sum lines up.
+        app.clock_device.path_map[infos[1].slot].trim_ms = 0.0;
+        assert_ne!(line(&app).color, RED);
 
         // Only the second path plays here.
         app.clock_device.path_map[infos[0].slot].map = ChannelMap { left: 0, right: 0 };

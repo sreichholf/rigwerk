@@ -395,6 +395,21 @@ pub(crate) fn host_set_parameter(handle: &PluginHandle, id: u32, value: f64) -> 
     }
 }
 
+/// The plugin's own text for one control value, `None` when it has none.
+pub(crate) fn host_format_parameter(handle: &PluginHandle, id: u32, value: f64) -> Option<String> {
+    match handle {
+        PluginHandle::Vst3(vst3) => {
+            let vst3 = vst3.lock().unwrap_or_else(|poison| poison.into_inner());
+            vst3.format_parameter(id, value).ok()
+        }
+        PluginHandle::Clap(clap) => Some(
+            clap.lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .display_for(id, value),
+        ),
+    }
+}
+
 pub(crate) fn host_reset_parameters(handle: &PluginHandle) -> Result<Vec<PluginParamView>, String> {
     match handle {
         PluginHandle::Vst3(plugin) => {

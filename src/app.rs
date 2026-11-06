@@ -3,6 +3,7 @@
 //! Logic is grouped in `app/` (settings, devices, bridge control, patches,
 //! screenshots); everything drawn on screen lives in `ui/`.
 
+pub(crate) mod alignment;
 pub(crate) mod bridge;
 pub(crate) mod cards;
 pub(crate) mod devices;
@@ -1083,6 +1084,7 @@ mod tests {
                 right: 0b0110,
             }),
             unused: UnusedChannels::Silent,
+            align: false,
         };
         app.followers = vec![FollowerPref {
             id: "hw:Phones".to_owned(),

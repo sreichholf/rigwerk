@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use super::bridge::run_bridge;
 #[cfg(target_os = "linux")]
 use super::linux::pipewire;
-use super::output_map::OutputDeviceSettings;
+use super::output_map::{AlignmentReport, OutputDeviceSettings};
 use super::path::{PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
 use super::shared::FollowerPlan;
@@ -212,6 +212,39 @@ impl AudioEngine {
     /// count).
     pub fn path_latency_samples(&self, slot: usize) -> u32 {
         self.shared.path(slot).latency_samples()
+    }
+
+    /// Every path slot's chain latency in samples (0 for unused slots), as
+    /// the alignment counts it.
+    pub fn path_latencies(&self) -> [u32; MAX_PATHS] {
+        std::array::from_fn(|slot| self.shared.path(slot).latency_samples())
+    }
+
+    /// Output device `device`'s alignment (0 = clock device, then the
+    /// followers) as the running mixer applies it: the delay each path
+    /// gets there, the path it waits for and the device's total latency
+    /// from the chains and the alignment.  `None` while no mixer has
+    /// published one for this device (bridge stopped, or a follower that
+    /// is not live); the UI then works it out from the settings
+    /// (`OutputDeviceSettings::alignment`).
+    pub fn device_alignment(&self, device: usize) -> Option<AlignmentReport> {
+        if !self.shared.running.load(Ordering::Relaxed) {
+            return None;
+        }
+        let controls = match device {
+            0 => &self.shared.clock_device,
+            follower if follower <= self.shared.follower_count() => {
+                &self.shared.followers[follower - 1]
+            }
+            _ => return None,
+        };
+        controls.alignment()
+    }
+
+    /// The rate alignment delays are counted at when no bridge runs: the
+    /// plugin chains' rate (the last output rate, or the session's).
+    pub fn plugin_rate(&self) -> u32 {
+        self.shared.path(0).chain_rate()
     }
 
     /// Path `slot`'s meters: the last block's peaks after its chain, before
@@ -583,6 +616,11 @@ impl AudioEngine {
     /// Enters `Idle` after every bridge thread has confirmed teardown.
     fn finish_stop(&mut self) {
         self.shared.running.store(false, Ordering::Relaxed);
+        // No mixer runs any more: what it published is stale.
+        self.shared.clock_device.clear_alignment();
+        for follower in &self.shared.followers {
+            follower.clear_alignment();
+        }
         self.shared.device_lost.store(false, Ordering::Relaxed);
         self.release_quantum();
         self.shared.set_status("Bridge stopped");

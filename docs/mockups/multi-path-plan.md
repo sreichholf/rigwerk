@@ -11,8 +11,10 @@ Read this before picking up any work package. Background and UI:
   drift). There is no ring per path.
 - One sum matrix: for each device, each path has a 2 × channels map plus a
   level and a polarity. Cells that land on one channel add up.
-- The master (level, mute) comes after the sum and is shared by every path.
-  No path skips it.
+- The master (level, mute) is shared by every path; no path skips it. It
+  is applied to each path before the alignment (so one path stays
+  bit-identical), so a master change reaches a delayed path up to its
+  alignment delay later.
 - Alignment is per device: every path routed to a device waits for the
   slowest one there. Muted or un-soloed paths still count. Each device has
   an align switch (default on). Each path on each device has a trim

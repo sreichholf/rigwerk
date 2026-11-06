@@ -27,11 +27,13 @@
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
 //! - `output_map`: per-device level, mute and channel map.
+//! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
 
 mod bridge;
 pub(crate) mod clap;
+mod delay;
 mod denormal;
 mod devices;
 mod engine;
@@ -95,9 +97,9 @@ pub(crate) use linux::native::{is_native_id, node_latency_frames, node_name as l
 #[cfg(target_os = "linux")]
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
 pub use output_map::{
-    sanitize_path_level, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
-    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
-    VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    sanitize_path_level, AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings,
+    PathMapSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS,
+    MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 // Ranges for the path level, the per-device path level and the trim, for
 // the path pages (U1/U2).

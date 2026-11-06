@@ -30,12 +30,20 @@ sends between paths.
 ```
 capture ─▶ [ring + resampler + drift, only when clocks differ]
         ─▶ split (one stereo frame, per-path input routing)
-              ├─ path 1: front (route, pre EQ, PRE gate) · inserts · POST gate · post EQ · path level
+              ├─ path 1: front (route, pre EQ, PRE gate) · inserts · POST gate · post EQ · path level · master
               ├─ path 2: …
               └─ path N
         ─▶ alignment (one delay line per path, one read tap per device)
         ─▶ sum matrix: paths × device channels, level + polarity per path and device
-        ─▶ master (level, mute) ─▶ device level / mute ─▶ clock device + followers
+        ─▶ device level / mute ─▶ clock device + followers
+```
+
+The master (level, mute) is shared by every path but applied to each path
+before the alignment, so a master change reaches a delayed path up to its
+alignment delay later on a device. The master meters and the scope show the
+stereo sum of the paths after the master, not aligned.
+
+```
 ```
 
 - **The split is where the chain starts, not at the input callback.** Both
@@ -58,7 +66,7 @@ capture ─▶ [ring + resampler + drift, only when clocks differ]
   polarity. One path with level 0 dB is bit-identical to today (test it).
 - **Generic followers are summed on the clock callback too.** The ALSA /
   cpal / WASAPI followers run on their own streams and clocks. Their sum
-  (and later their alignment taps) is per device, so the clock callback
+  and their alignment taps are per device, so the clock callback
   maps every follower with its own `DeviceMapper`, as it does for the
   clock device and the PipeWire duplex followers, and pushes the finished
   device channels into the follower's ring. The follower stream only

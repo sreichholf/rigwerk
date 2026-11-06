@@ -517,6 +517,7 @@ fn output_devices() -> (OutputDeviceSettings, Vec<FollowerPref>) {
             right: 0b1010,
         }),
         unused: UnusedChannels::Silent,
+        align: false,
     };
     let followers = vec![
         FollowerPref {
@@ -557,6 +558,8 @@ fn old_saves_without_output_devices_use_defaults() {
             right: 0b10,
         }),
         unused: UnusedChannels::MonoCopy,
+        // Files from before the switch existed align.
+        align: true,
     };
     assert_eq!(OutputDeviceSettings::default(), today);
     assert_eq!(preferences.clock_device, today);

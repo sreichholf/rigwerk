@@ -13,11 +13,27 @@
 //!    a path whose plugins were restored but not opened yet stays silent
 //!    rather than playing dry.  A removed path whose fade reached silence is
 //!    moved to inactive here, at the end of the block.
-//! 4. The master (level, mute, monitor) scales each path's frame.
-//! 5. The sum: each device mapper maps every live path with that path's
+//! 4. The master (level, mute, monitor) scales each path's frame, before
+//!    the alignment: it is shared by every path, but a master change reaches
+//!    a delayed path up to its alignment delay later on that device.  (Kept
+//!    there so one path stays bit-identical to the chain before paths.)
+//! 5. Alignment: each path's frame goes into that path's delay line; each
+//!    device mapper reads every path through its own tap, at the path's
+//!    alignment delay on that device (see `output_map`, "Alignment").  The
+//!    chain latencies are read once per block.
+//! 6. The sum: each device mapper maps every live path with that path's
 //!    channel map, level and polarity on that device and adds them per
 //!    channel, then applies the device level and mute.  A plain stereo sum
-//!    of the paths feeds the master meters and the scope.
+//!    of the paths, after the master but not aligned, feeds the master
+//!    meters and the scope.
+//!    On the ring path, each generic follower's mapped frame goes into
+//!    that follower's ring; its own stream plays it (see `follower`).
+//!
+//! The plugin chain of a path never drops out of the timing: a chunk whose
+//! chain lock the UI holds (rare: only structural edits take it) plays the
+//! chain's input delayed by its latency instead, so the sum keeps its
+//! phase; that chunk loses the inserts' sound (see
+//! [`PathProcessor::run_inserts`] and the `path` module docs).
 //!
 //! One path at 0 dB (path and device level), unmuted, normal polarity is
 //! bit-identical to the chain before paths existed: every unity gain is a
@@ -26,14 +42,20 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use super::delay::{Declick, DelayLine, DelayTap, DECLICK_SECONDS, TAP_FADE_SECONDS};
 use super::denormal::DenormalGuard;
 use super::eq::{EqSlot, Equalizer};
 use super::gate::{GateSlot, NoiseGate};
-use super::output_map::{DeviceFrame, DeviceMapper, MAX_FOLLOWERS};
+use super::output_map::{
+    DeviceFrame, DeviceMapper, PathLines, PathTiming, MAX_ALIGN_DELAY, MAX_FOLLOWERS,
+};
 use super::path::{LiveSlots, PathControls, PathState, MAX_PATHS};
+use super::plugins::MAX_ALIGN;
 use super::resampler::FrameResampler;
 use super::shared::Shared;
 
+#[cfg(test)]
+mod align_tests;
 pub(crate) mod ramp;
 
 pub(crate) use ramp::Ramp;
@@ -107,11 +129,61 @@ pub(crate) struct PathProcessor {
     gain: Ramp,
     /// The slot was being removed when this block began.
     fading: bool,
+    /// Frames a removed, silent path still runs so its alignment delay
+    /// lines play out; `None` until its fade reaches silence.
+    drain: Option<u32>,
+    /// The chain latency (frames) read at the start of the block: what the
+    /// alignment counts for this path, and what a missed chain lock is
+    /// replaced by.
+    latency: u32,
+    /// The same, before clamping to [`MAX_ALIGN`] (for the report).
+    latency_raw: u32,
+    /// The input of the plugin chain, for the blocks the chain cannot run
+    /// (see [`Self::run_inserts`]): read back delayed by the chain latency.
+    chain_line: DelayLine,
+    chain_tap: DelayTap,
+    /// How much of the chain's own output plays: 0 right after a missed
+    /// lock, back to 1 over [`CHAIN_RESUME_SECONDS`].
+    chain_mix: f32,
+    chain_step: f32,
+    /// Frames the chain still has to run before its output fades back in
+    /// after a missed lock: its inserts missed that input, so for one
+    /// latency's worth of frames their delay lines still hold the gap.
+    chain_hold: u32,
+    /// [`TAP_FADE_SECONDS`] in frames at the current rate.
+    tap_fade: f32,
+    /// The smoothing of the step into the fallback ([`DECLICK_SECONDS`]
+    /// long, `declick_len` frames).
+    chain_declick: Declick,
+    declick_len: u32,
+    /// No chain output has played since the path (re)started: nothing to
+    /// smooth a switch from.
+    chain_fresh: bool,
 }
+
+/// How long the chain's output takes to come back after a block it missed
+/// (it played its delayed input meanwhile).
+const CHAIN_RESUME_SECONDS: f32 = 0.005;
+
+/// The plugin chain runs in chunks of at most this many frames, so the
+/// fallback delay line only needs [`MAX_ALIGN`] plus one chunk.
+const CHAIN_CHUNK: usize = super::plugins::MAX_BLOCK;
 
 impl PathProcessor {
     fn new(rate: u32) -> Self {
         Self {
+            latency: 0,
+            latency_raw: 0,
+            drain: None,
+            chain_line: DelayLine::new(MAX_ALIGN as usize + CHAIN_CHUNK),
+            chain_tap: DelayTap::default(),
+            chain_mix: 1.0,
+            chain_step: 1.0,
+            chain_hold: 0,
+            tap_fade: TAP_FADE_SECONDS * rate as f32,
+            chain_declick: Declick::default(),
+            declick_len: (DECLICK_SECONDS * rate as f32) as u32,
+            chain_fresh: true,
             block: Vec::new(),
             plugin_l: Vec::new(),
             plugin_r: Vec::new(),
@@ -139,6 +211,12 @@ impl PathProcessor {
         self.ramps = PathRamps::new();
         self.controls_adopted = false;
         self.generation = generation;
+        self.chain_line.reset();
+        self.chain_mix = 1.0;
+        self.chain_hold = 0;
+        self.chain_fresh = true;
+        self.chain_declick = Declick::default();
+        self.drain = None;
     }
 
     /// Grows the per-block scratch outside the callback.
@@ -170,7 +248,8 @@ impl PathProcessor {
     /// after that a change takes `ramp_samples`.  `any_solo`: some active
     /// path is soloed, so this one sounds only if it is too.  `fade_in`:
     /// the mixer is already playing, so a path that just went live starts
-    /// at silence and ramps up instead of snapping to its level.
+    /// at silence and ramps up instead of snapping to its level.  Returns
+    /// whether the chain started fresh (a newly activated slot).
     fn begin_block(
         &mut self,
         controls: &PathControls,
@@ -178,11 +257,17 @@ impl PathProcessor {
         ramp_samples: f32,
         any_solo: bool,
         fade_in: bool,
-    ) {
+    ) -> bool {
         let generation = controls.generation();
-        if generation != self.generation {
+        let restarted = generation != self.generation;
+        if restarted {
             self.restart(rate, generation);
         }
+        self.latency_raw = controls.latency_samples();
+        self.latency = self.latency_raw.min(MAX_ALIGN);
+        self.tap_fade = TAP_FADE_SECONDS * rate as f32;
+        self.declick_len = (DECLICK_SECONDS * rate as f32) as u32;
+        self.chain_step = 1.0 / (CHAIN_RESUME_SECONDS * rate as f32).max(1.0);
         self.follow_eq(controls, rate);
         self.follow_gate(controls, rate);
         let adopted = self.controls_adopted;
@@ -209,6 +294,7 @@ impl PathProcessor {
             gate_pre: self.gate.active() && self.gate.settings().slot == GateSlot::Pre,
             gate_post: self.gate.active() && self.gate.settings().slot == GateSlot::Post,
         };
+        restarted
     }
 
     /// Points the routing, enable and mono ramps at this block's settings.
@@ -280,10 +366,39 @@ impl PathProcessor {
         self.block[index] = out;
     }
 
-    /// Runs the plugin inserts over a block that `stage_front` filled.
+    /// Runs the plugin inserts over a block that `stage_front` filled, in
+    /// chunks of at most [`CHAIN_CHUNK`] frames.
+    ///
+    /// The chain never just drops out.  Mix, bypass and plugin controls do
+    /// not take the chain lock at all (see the `path` module docs), so a
+    /// miss is rare: the UI holds the lock for a structural edit.  The
+    /// chain's input also goes into `chain_line`; a chunk the chain cannot
+    /// run plays that input delayed by the chain latency instead.  That
+    /// keeps the path's timing in the sum (no comb, no phase jump), but not
+    /// its sound: for the missed chunk the path plays dry (its inserts'
+    /// level and tone are gone).  The switch into the fallback cannot
+    /// crossfade (the chain's output for that chunk does not exist), so its
+    /// step is smoothed over [`DECLICK_SECONDS`] instead.  Once the chain
+    /// runs again its output fades back in over [`CHAIN_RESUME_SECONDS`],
+    /// after one latency's worth of frames (`chain_hold`): the inserts
+    /// missed that input, so their own delay lines still hold the gap.  A
+    /// chain with no active insert but some latency (all bypassed) still
+    /// runs: its skipped inserts delay by their latency.
     fn run_inserts(&mut self, controls: &PathControls, frames: usize) {
-        if !controls.has_plugins() {
+        if !controls.has_plugins() && self.latency == 0 {
+            // Nothing runs and nothing delays.  The history is stale from
+            // here on; a chain that comes back starts from silence.
+            self.chain_line.reset();
+            self.chain_mix = 1.0;
+            self.chain_hold = 0;
+            self.chain_fresh = true;
             return;
+        }
+        if self.chain_mix >= 1.0 {
+            // Nothing reads the fallback: it follows the latency at once.
+            self.chain_tap.snap(self.latency);
+        } else {
+            self.chain_tap.set_target(self.latency, self.tap_fade);
         }
         let mut left = std::mem::take(&mut self.plugin_l);
         let mut right = std::mem::take(&mut self.plugin_r);
@@ -295,7 +410,56 @@ impl PathProcessor {
             left[index] = self.block[index][0];
             right[index] = self.block[index][1];
         }
-        controls.process_plugins(&mut left, &mut right, frames);
+        let mut offset = 0;
+        while offset < frames {
+            let count = (frames - offset).min(CHAIN_CHUNK);
+            let chunk_l = &mut left[offset..offset + count];
+            let chunk_r = &mut right[offset..offset + count];
+            for (l, r) in chunk_l.iter().zip(chunk_r.iter()) {
+                self.chain_line.push([*l, *r]);
+            }
+            let ran = controls.process_plugins(chunk_l, chunk_r, count);
+            // Into the fallback from (some of) the chain's own output.
+            let entering = !ran && self.chain_mix > 0.0 && !self.chain_fresh;
+            if !ran {
+                self.chain_mix = 0.0;
+                self.chain_hold = self.latency;
+            }
+            if self.chain_mix < 1.0 {
+                for index in 0..count {
+                    let delayed = self.chain_tap.next(&self.chain_line, count - 1 - index);
+                    let mix = self.chain_mix;
+                    if mix <= 0.0 {
+                        chunk_l[index] = delayed[0];
+                        chunk_r[index] = delayed[1];
+                    } else {
+                        chunk_l[index] = delayed[0] + (chunk_l[index] - delayed[0]) * mix;
+                        chunk_r[index] = delayed[1] + (chunk_r[index] - delayed[1]) * mix;
+                    }
+                    if !ran {
+                        continue;
+                    }
+                    if self.chain_hold > 0 {
+                        self.chain_hold -= 1;
+                    } else {
+                        self.chain_mix = (self.chain_mix + self.chain_step).min(1.0);
+                    }
+                }
+            }
+            if entering {
+                self.chain_declick
+                    .start([chunk_l[0], chunk_r[0]], self.declick_len);
+            }
+            if self.chain_declick.is_active() {
+                for index in 0..count {
+                    [chunk_l[index], chunk_r[index]] =
+                        self.chain_declick.apply([chunk_l[index], chunk_r[index]]);
+                }
+            }
+            self.chain_declick.note(chunk_l, chunk_r);
+            self.chain_fresh = false;
+            offset += count;
+        }
         for index in 0..frames {
             self.block[index][0] = left[index];
             self.block[index][1] = right[index];
@@ -371,8 +535,10 @@ pub(crate) struct OutputMixer {
     paths: [PathProcessor; MAX_PATHS],
     /// The slots that run in the current block, read once at its start.
     live: LiveSlots,
-    /// Each live path's frame after the master, handed to the device maps.
-    frames: PathFrames,
+    /// One delay line per path slot: each live path's frame after the
+    /// master is written here, and every device mapper reads it through its
+    /// own alignment tap.
+    lines: PathLines,
     /// The master: mute, monitor and the output level folded into one
     /// effective gain, ramped per sample so they compose without a step.
     gain: Ramp,
@@ -416,7 +582,7 @@ impl OutputMixer {
             stable_since: Instant::now(),
             paths: std::array::from_fn(|_| PathProcessor::new(output_rate)),
             live: LiveSlots::default(),
-            frames: [[0.0; 2]; MAX_PATHS],
+            lines: std::array::from_fn(|_| DelayLine::new(MAX_ALIGN_DELAY as usize)),
             gain: Ramp::new(1.0),
             gain_adopted: false,
             device: DeviceMapper::new(device_channels),
@@ -522,15 +688,26 @@ impl OutputMixer {
         let any_solo = shared.any_solo();
         // Only the mixer's first block adopts the path gains outright.
         let fade_in = self.gain_adopted;
+        let mut timing = PathTiming {
+            latency: [0; MAX_PATHS],
+            rate: self.output_rate,
+        };
         for slot in self.live.iter() {
             let path = &mut self.paths[slot];
-            path.begin_block(
+            let restarted = path.begin_block(
                 &shared.paths[slot],
                 self.output_rate,
                 samples,
                 any_solo,
                 fade_in,
             );
+            if restarted {
+                // A reused slot never replays what it held before.
+                self.lines[slot].reset();
+            }
+            // Unclamped, so the report can flag a chain past MAX_ALIGN; the
+            // alignment itself clamps.
+            timing.latency[slot] = path.latency_raw;
             path.reserve_block(frames);
         }
         let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
@@ -542,12 +719,13 @@ impl OutputMixer {
             self.gain_adopted = true;
         }
         self.device
-            .begin_paths(&shared.clock_device, samples, self.live);
+            .begin_paths(&shared.clock_device, samples, self.live, &timing);
         // Every follower is summed and mapped here, like the clock device:
         // in-graph on the PipeWire duplex path, otherwise for a generic
         // follower's ring.  One without a running stream maps nothing and
         // its meters read 0.
         self.live_followers = shared.follower_count();
+        let direct = shared.direct.load(Ordering::Relaxed);
         for index in 0..self.live_followers {
             let feeding = shared.feeds_follower(index);
             self.feeding[index] = feeding.then(|| shared.follower_bus(index).generation());
@@ -557,7 +735,20 @@ impl OutputMixer {
                 2
             };
             self.followers[index].set_channels(channels);
-            self.followers[index].begin_paths(&shared.followers[index], samples, self.live);
+            self.followers[index].begin_paths(
+                &shared.followers[index],
+                samples,
+                self.live,
+                &timing,
+            );
+            if !feeding && !direct {
+                // Mapped, but nothing plays it: no alignment to show.  (The
+                // duplex graph plays every follower in-graph.)
+                shared.followers[index].clear_alignment();
+            }
+        }
+        for follower in &shared.followers[self.live_followers..] {
+            follower.clear_alignment();
         }
     }
 
@@ -614,7 +805,7 @@ impl OutputMixer {
                 for value in out.iter_mut() {
                     *value *= gain;
                 }
-                self.frames[slot] = [out[0], out[1]];
+                self.lines[slot].push([out[0], out[1]]);
                 sum = Some(match sum {
                     None => out,
                     Some(mut sum) => {
@@ -629,7 +820,7 @@ impl OutputMixer {
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
-            write(&mut self.device, followers, index, &self.frames, out);
+            write(&mut self.device, followers, index, &self.lines, out);
         }
 
         shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
@@ -640,11 +831,30 @@ impl OutputMixer {
             self.followers[index].end_block(&shared.followers[index]);
         }
         shared.note_follower_producer_block(frames);
-        // A removed path that has faded to silence by the end of this block
-        // stops running from the next one.
+        // A removed path that has faded to silence keeps running until its
+        // delay lines have played out on every device (the taps still hold
+        // up to one alignment delay of it at full level), then stops from
+        // the next block.
         for slot in live.iter() {
             let path = &self.paths[slot];
-            if path.fading && path.gain.is_settled_at(0.0) {
+            if !path.fading {
+                self.paths[slot].drain = None;
+                continue;
+            }
+            if !path.gain.is_settled_at(0.0) {
+                continue;
+            }
+            let drain = match path.drain {
+                Some(left) => left.saturating_sub(frames as u32),
+                // Went silent in this block: from here, the longest tap on
+                // the clock device or a live follower still has to play out.
+                None => self.followers[..self.live_followers]
+                    .iter()
+                    .map(|mapper| mapper.tap_delay(slot))
+                    .fold(self.device.tap_delay(slot), u32::max),
+            };
+            self.paths[slot].drain = Some(drain);
+            if drain == 0 {
                 shared.paths[slot].finish_fade();
             }
         }
@@ -930,17 +1140,14 @@ impl OutputMixer {
     }
 }
 
-/// Each live path slot's stereo frame after the master; other slots are
-/// stale and ignored.
-type PathFrames = [[f32; 2]; MAX_PATHS];
-
 /// Receives one finished frame: the clock device's mapper, the live
-/// followers' mappers, the paths' frames for the mappers to sum, and the
-/// stereo sum of the paths' four taps.
-trait WriteFrame: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathFrames, [f32; 4]) {}
+/// followers' mappers, the paths' delay lines (each holding the path's
+/// frame after the master as its newest entry) for the mappers to align
+/// and sum, and the unaligned stereo sum of the paths' four taps.
+trait WriteFrame: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathLines, [f32; 4]) {}
 
 impl<F> WriteFrame for F where
-    F: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathFrames, [f32; 4])
+    F: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathLines, [f32; 4])
 {
 }
 
@@ -2143,7 +2350,7 @@ mod tests {
         assert!(shared.remove_path(added));
         shared.service_paths();
         assert_eq!(shared.paths[added].state(), PathState::FadingOut);
-        shared.paths[added].backdate_removal(std::time::Duration::from_secs(1));
+        shared.paths[added].backdate_removal(std::time::Duration::from_secs(2));
         shared.service_paths();
         assert_eq!(shared.paths[added].state(), PathState::Inactive);
     }

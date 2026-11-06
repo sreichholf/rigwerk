@@ -794,13 +794,17 @@ impl ClapPlugin {
         self.note_pending();
     }
 
+    /// Runs the plugin over one block in place, blended with the undelayed
+    /// input by `mix` (the chain passes 1 and blends with a delayed dry side
+    /// itself).  `Ok(false)`: the plugin asked for a restart and the block
+    /// passed through unprocessed; the chain treats it as a skipped insert.
     pub(crate) fn process(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
         frames: usize,
         mix: f32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         self.host_state.blocks.fetch_add(1, Ordering::Relaxed);
         if self.host_state.restart_requested.load(Ordering::Acquire) {
             // The plugin asked to be restarted.  `stop_processing` is an
@@ -809,7 +813,7 @@ impl ClapPlugin {
             // Until then the insert passes the block through unprocessed:
             // usually one UI frame, a few tens of ms.
             self.stop_processing();
-            return Ok(());
+            return Ok(false);
         }
         if !self.instance.active {
             return Err("The CLAP plugin is not active.");
@@ -827,7 +831,7 @@ impl ClapPlugin {
         let mix = mix.clamp(0.0, 1.0);
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
-            return Ok(());
+            return Ok(true);
         }
 
         let mut offset = 0;
@@ -918,7 +922,7 @@ impl ClapPlugin {
 
             offset += count;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Creates the plugin's GUI resources and asks how large its view is.
