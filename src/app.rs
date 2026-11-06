@@ -4,8 +4,10 @@
 //! screenshots); everything drawn on screen lives in `ui/`.
 
 pub(crate) mod bridge;
+pub(crate) mod cards;
 pub(crate) mod devices;
 pub(crate) mod driver_check;
+pub(crate) mod paths;
 pub(crate) mod plugin_gui;
 pub(crate) mod plugins;
 pub(crate) mod presets;
@@ -29,8 +31,8 @@ use crate::app::settings::{
 };
 use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
-    self, AudioEngine, CushionMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
-    OutputDeviceSettings, Snapshot, WasapiOutputMode, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
+    self, AudioEngine, CushionMode, EngineState, EqSlot, Inventory, OutputDeviceSettings, Snapshot,
+    WasapiOutputMode, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -135,8 +137,7 @@ pub struct RigWerkApp {
     pub(crate) input_gain: f32,
     pub(crate) output_gain: f32,
     pub(crate) input_channels: [bool; 2],
-    pub(crate) output_channels: [bool; 2],
-    pub(crate) mono: bool,
+    /// The master mute.
     pub(crate) mute: bool,
     pub(crate) drift: bool,
     pub(crate) monitor: bool,
@@ -146,7 +147,6 @@ pub struct RigWerkApp {
     pub(crate) low_latency_output: bool,
     /// Windows WASAPI clock device mode (Shared / REAL-style / Exclusive).
     pub(crate) wasapi_output_mode: crate::audio::WasapiOutputMode,
-    pub(crate) routes: [[bool; 4]; 2],
     /// Output side rate (0 follows the input) and buffer.
     pub(crate) output_rate: u32,
     pub(crate) output_buffer: usize,
@@ -156,13 +156,16 @@ pub struct RigWerkApp {
     pub(crate) cushion_mode: CushionMode,
     /// Manual cushion size in milliseconds.
     pub(crate) cushion_ms: f32,
-    /// The two built-in EQs on the master mix, indexed by [`EqSlot`]: before
-    /// and after the plugin inserts.
-    pub(crate) eqs: [EqSettings; 2],
-    /// Built-in noise gate (PRE or POST inserts; default POST).
-    pub(crate) gate: GateSettings,
-    /// Level, mute and channel map of the clock device (the selected output),
-    /// pushed to the engine every frame.
+    /// The signal paths by engine slot: name, colour, routing, mono,
+    /// enable, EQs, gate, level, mute and solo (see `app::paths`).  At
+    /// least one is always `Some`.  Pushed to the engine every frame.
+    pub(crate) paths: [Option<paths::SignalPath>; MAX_PATHS],
+    /// The live path slots in display (and save) order.
+    pub(crate) path_order: Vec<usize>,
+    /// The path slot the Mixer and Plugins pages edit.
+    pub(crate) selected_path: usize,
+    /// Level, mute and per-path channel maps of the clock device (the
+    /// selected output), pushed to the engine every frame.
     pub(crate) clock_device: OutputDeviceSettings,
     /// Extra output devices. Stored only; nothing plays them yet.
     pub(crate) followers: Vec<FollowerPref>,
@@ -231,8 +234,8 @@ pub struct RigWerkApp {
     pub(crate) last_output_driver: Option<(String, driver_check::DriverActual)>,
     /// What the plugin browser found and what is being typed into it.
     pub(crate) plugin_browser: plugins::PluginBrowser,
-    /// Index of the insert whose control panel is open.
-    pub(crate) plugin_editor: Option<usize>,
+    /// The insert (path, index) whose control panel is open.
+    pub(crate) plugin_editor: Option<paths::InsertKey>,
     /// The plugin's own editor window, when it has one open.
     pub(crate) plugin_gui: Option<plugin_gui::PluginGuiWindow>,
     /// Filter typed into the configure panel.
@@ -491,6 +494,9 @@ impl eframe::App for RigWerkApp {
         );
         let (output_name, output_id, output_backend) =
             persisted_identity(self.output_held.as_ref(), Some(self.selected_output()));
+        let (paths, order) = self.saved_paths();
+        let selected_path = self.saved_selected_path(&order);
+        let (clock_device, followers) = self.saved_devices(&order);
         let preferences = Preferences {
             schema_version: PREFERENCES_SCHEMA,
             auto_start_bridge: self.auto_start_bridge,
@@ -515,8 +521,6 @@ impl eframe::App for RigWerkApp {
             input_gain: self.input_gain,
             output_gain: self.output_gain,
             input_channels: self.input_channels,
-            output_channels: self.output_channels,
-            mono: self.mono,
             mute: self.mute,
             drift: self.drift,
             monitor: self.monitor,
@@ -526,18 +530,17 @@ impl eframe::App for RigWerkApp {
             } else {
                 WasapiOutputMode::from_low_latency(self.low_latency_output)
             }),
-            routes: self.routes,
             output_rate: self.output_rate,
             output_buffer: self.output_buffer,
             cushion_mode: cushion_to_pref(self.cushion_mode),
             cushion_ms: self.cushion_ms,
-            eq: self.eqs[EqSlot::Pre.index()],
-            eq_post: self.eqs[EqSlot::Post.index()],
-            gate: self.gate,
-            plugins: self.engine.plugin_prefs(),
+            paths,
+            selected_path,
             prefer_plugin_interface: self.prefer_plugin_interface,
-            clock_device: self.clock_device,
-            followers: self.followers.clone(),
+            clock_device,
+            followers,
+            // The legacy mix fields are not written.
+            ..Preferences::default()
         };
         store_preferences(storage, &preferences, &mut self.preferences_backup);
     }
@@ -603,8 +606,6 @@ impl RigWerkApp {
             input_gain: preferences.input_gain,
             output_gain: preferences.output_gain,
             input_channels: preferences.input_channels,
-            output_channels: preferences.output_channels,
-            mono: preferences.mono,
             mute: preferences.mute,
             drift: preferences.drift,
             monitor: preferences.monitor,
@@ -622,8 +623,10 @@ impl RigWerkApp {
             output_tab_low_latency: preferences.output_tab_low_latency,
             cushion_mode: cushion_from_pref(preferences.cushion_mode),
             cushion_ms: preferences.cushion_ms,
-            eqs: [preferences.eq.sanitized(), preferences.eq_post.sanitized()],
-            gate: preferences.gate.sanitized(),
+            // Filled by `install_paths` below.
+            paths: std::array::from_fn(|_| None),
+            path_order: Vec::new(),
+            selected_path: 0,
             clock_device: preferences.clock_device.sanitized(),
             followers: {
                 let mut followers: Vec<_> = preferences
@@ -649,7 +652,6 @@ impl RigWerkApp {
             ),
             routing_device: 0,
             plugin_insert_at: None,
-            routes: preferences.routes,
             meter_in_l: 0.0,
             meter_in_r: 0.0,
             meter_out_l: 0.0,
@@ -717,21 +719,17 @@ impl RigWerkApp {
             app.select_chain(stage);
         }
         app.engine.set_gains(app.input_gain, app.output_gain);
-        app.engine.set_mix(
-            app.mute,
-            app.monitor,
-            app.mono,
-            app.input_channels,
-            app.output_channels,
-            app.drift,
+        app.engine
+            .set_master(app.mute, app.monitor, app.input_channels, app.drift);
+        // Old files (and no file) load as one path.
+        let (clock, followers) = (app.clock_device, app.followers.clone());
+        app.install_paths(
+            &preferences.path_prefs(),
+            clock,
+            followers,
+            preferences.selected_path,
         );
-        app.engine.set_clock_device(&app.clock_device);
         app.engine.set_cushion(app.cushion_mode, app.cushion_ms);
-        for slot in EqSlot::ALL {
-            app.engine.set_eq(slot, app.eqs[slot.index()]);
-        }
-        app.engine.set_gate(app.gate);
-        app.engine.restore_plugins(preferences.plugins.clone());
         if !screenshot_mode {
             app.begin_plugin_scan();
         }
@@ -847,21 +845,19 @@ pub(crate) fn blank_app() -> RigWerkApp {
         input_gain: 0.0,
         output_gain: -1.5,
         input_channels: [true, true],
-        output_channels: [true, true],
-        mono: false,
         mute: false,
         drift: true,
         monitor: true,
         low_latency_output: true,
         wasapi_output_mode: WasapiOutputMode::RealStyle,
-        routes: [[true, false, false, false], [false, true, false, false]],
         output_rate: 0,
         output_buffer: 128,
         output_tab_low_latency: false,
         cushion_mode: CushionMode::Safe,
         cushion_ms: 10.0,
-        eqs: [EqSettings::default(), EqSettings::default()],
-        gate: GateSettings::default(),
+        paths: std::array::from_fn(|slot| (slot == 0).then(paths::SignalPath::default)),
+        path_order: vec![0],
+        selected_path: 0,
         clock_device: OutputDeviceSettings::default(),
         followers: Vec::new(),
         eq_edit: EqSlot::Pre,
@@ -1065,10 +1061,10 @@ mod tests {
         app.clock_device = OutputDeviceSettings {
             level_db: -9.0,
             mute: true,
-            map: ChannelMap {
+            path_map: crate::audio::PathMapSettings::first(ChannelMap {
                 left: 0b0101,
                 right: 0b0110,
-            },
+            }),
             unused: UnusedChannels::Silent,
         };
         app.followers = vec![FollowerPref {

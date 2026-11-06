@@ -210,10 +210,11 @@ impl RigWerkApp {
     /// plugin's parameters on top, and a way into the plugin's own editor when
     /// it has one.
     pub(crate) fn plugin_editor_window(&mut self, ctx: &egui::Context) {
-        let Some(index) = self.plugin_editor else {
+        let Some(key) = self.plugin_editor else {
             return;
         };
-        let views = self.engine.plugin_views();
+        let index = key.insert;
+        let views = self.engine.plugin_views(key.path);
         let Some(view) = views.get(index) else {
             self.plugin_editor = None;
             self.finish_plugin_gui();
@@ -228,10 +229,7 @@ impl RigWerkApp {
         let latency = view.latency_label();
         let has_editor = view.has_editor;
         let parameters = view.parameters.clone();
-        let gui_is_open = self
-            .plugin_gui
-            .as_ref()
-            .is_some_and(|gui| gui.index == index);
+        let gui_is_open = self.plugin_gui.as_ref().is_some_and(|gui| gui.key == key);
 
         let mut open = true;
         let mut close = false;
@@ -557,16 +555,16 @@ impl RigWerkApp {
             });
 
         for (id, value) in changes {
-            self.set_plugin_parameter(index, id, value);
+            self.set_plugin_parameter(key, id, value);
         }
         if toggle_bypass {
-            self.set_plugin_bypass(index, !bypass);
+            self.engine.set_plugin_bypass(key.path, index, !bypass);
         }
         if open_gui {
-            self.open_plugin_gui(index);
+            self.open_plugin_gui(key);
         }
         if reset {
-            self.reset_plugin_parameters(index);
+            self.reset_plugin_parameters(key);
         }
         if close || escape || !open {
             self.plugin_editor = None;
@@ -576,7 +574,7 @@ impl RigWerkApp {
     }
 
     pub(crate) fn plugins_page(&mut self, ui: &mut egui::Ui) {
-        let views = self.engine.plugin_views();
+        let views = self.engine.plugin_views(self.selected_path);
         let library = self.plugin_browser.library.clone();
         let scanning = self.plugin_browser.scanning;
         let needle = self.plugin_browser.search.to_lowercase();

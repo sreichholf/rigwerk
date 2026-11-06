@@ -61,9 +61,13 @@ pub(crate) struct MapSummary {
 /// "Out 3←R" or "Out 3←mono", and "rest mono copy" when unreached channels
 /// carry the average. Follows the mapping rule (`ChannelMap::sides_at`), so
 /// a 1-channel device reads "Out 1←mono" for any non-empty map.
-pub(crate) fn map_summary(settings: &OutputDeviceSettings, channels: usize) -> MapSummary {
+pub(crate) fn map_summary(
+    settings: &OutputDeviceSettings,
+    path: usize,
+    channels: usize,
+) -> MapSummary {
     let channels = channels.min(MAX_OUTPUT_CHANNELS);
-    let map = settings.map;
+    let map = settings.map(path);
     let copy = settings.unused == UnusedChannels::MonoCopy;
     if !map.reaches_any(channels) {
         return MapSummary {
@@ -119,11 +123,16 @@ pub(crate) fn map_summary(settings: &OutputDeviceSettings, channels: usize) -> M
 }
 
 /// Whether to offer Silent / Mono copy: on any device with more than two
-/// channels, and whenever one of its channels is left unreached.
-pub(crate) fn shows_unused_choice(settings: &OutputDeviceSettings, channels: usize) -> bool {
+/// channels, and whenever one of its channels is left unreached by path
+/// `path`.
+pub(crate) fn shows_unused_choice(
+    settings: &OutputDeviceSettings,
+    path: usize,
+    channels: usize,
+) -> bool {
     channels > 2
         || (0..channels.min(MAX_OUTPUT_CHANNELS))
-            .any(|channel| settings.map.sides_at(channels, channel) == (false, false))
+            .any(|channel| settings.map(path).sides_at(channels, channel) == (false, false))
 }
 
 /// The device the page shows: `index` while it exists, else the clock
@@ -261,11 +270,12 @@ fn channel_meter(ui: &mut egui::Ui, reached: bool, unused: UnusedChannels, level
 pub(crate) fn device_summary_row(
     ui: &mut egui::Ui,
     row: &OutputDeviceRow,
+    path: usize,
     selected: bool,
     state: EngineState,
     context: &str,
 ) -> bool {
-    let summary = map_summary(&row.settings, row.channels);
+    let summary = map_summary(&row.settings, path, row.channels);
     let name_font = FontId::new(ts(11.0), FontFamily::Proportional);
     let detail_font = FontId::new(ts(8.5), FontFamily::Monospace);
     let (rect, response) =
@@ -472,9 +482,11 @@ impl RigWerkApp {
         actions: &mut Vec<RoutingAction>,
     ) {
         let state = self.engine.state;
+        let path = self.selected_path;
+        let live = self.live_path_mask();
         let playing: usize = rows
             .iter()
-            .map(|row| row.settings.playing_channels(row.channels))
+            .map(|row| row.settings.playing_channels(row.channels, live))
             .sum();
         // Title and count on separate lines: the list column is only
         // ~240–300 px, so a single row overlaps "MIX -> OUTPUTS".
@@ -490,7 +502,14 @@ impl RigWerkApp {
         ui.add_space(6.0);
         // Followers join this list in steps 2 and 3 (see `output_device_rows`).
         for (index, row) in rows.iter().enumerate() {
-            if device_summary_row(ui, row, index == selected, state, "in routing outputs") {
+            if device_summary_row(
+                ui,
+                row,
+                path,
+                index == selected,
+                state,
+                "in routing outputs",
+            ) {
                 actions.push(RoutingAction::Select(index));
             }
         }
@@ -516,6 +535,8 @@ impl RigWerkApp {
     /// unused-channel choice and notes.
     fn routing_device_map(&mut self, ui: &mut egui::Ui, row: &OutputDeviceRow, index: usize) {
         let channels = row.channels;
+        // The existing page edits the selected path's map on each device.
+        let path = self.selected_path;
         let Some(settings) = self.output_settings_mut(index).copied() else {
             return;
         };
@@ -551,7 +572,7 @@ impl RigWerkApp {
         ));
         ui.add_space(8.0);
 
-        let summary = map_summary(&settings, channels);
+        let summary = map_summary(&settings, path, channels);
         if summary.silent {
             nothing_routed_banner(ui, &row.name);
             ui.add_space(8.0);
@@ -568,10 +589,10 @@ impl RigWerkApp {
             ui.label(micro_label("PRESETS", DIM));
             ui.add_space(4.0);
             for &preset in MapPreset::available(channels) {
-                let result = settings.map.with_preset(preset, channels);
-                let active = preset_active(settings.map, preset, channels);
+                let result = settings.map(path).with_preset(preset, channels);
+                let active = preset_active(settings.map(path), preset, channels);
                 if preset_button(ui, preset.label(channels), active) {
-                    changed.map = result;
+                    changed.path_map[path].map = result;
                 }
             }
         });
@@ -592,9 +613,9 @@ impl RigWerkApp {
                     ui.horizontal(|ui| {
                         row_header(ui, name, "after master", AMBER);
                         for channel in 0..channels {
-                            let on = settings.map.routes(side, channel);
+                            let on = settings.map(path).routes(side, channel);
                             if output_cell(ui, on, side, channel) {
-                                changed.map.set(side, channel, !on);
+                                changed.path_map[path].map.set(side, channel, !on);
                             }
                         }
                     });
@@ -611,7 +632,7 @@ impl RigWerkApp {
                         DIM,
                     );
                     for channel in 0..channels {
-                        let (left, right) = settings.map.sides_at(channels, channel);
+                        let (left, right) = settings.map(path).sides_at(channels, channel);
                         let (level, peak) = if index == 0 {
                             (
                                 self.meter_out_channels[channel],
@@ -634,7 +655,7 @@ impl RigWerkApp {
             });
         ui.add_space(8.0);
 
-        if shows_unused_choice(&settings, channels) {
+        if shows_unused_choice(&settings, path, channels) {
             block(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(micro_label("UNUSED CHANNELS", DIM));
@@ -680,7 +701,7 @@ impl RigWerkApp {
             if let Some(stored) = self.output_settings_mut(index) {
                 *stored = changed;
             }
-            let summary = map_summary(&changed, channels);
+            let summary = map_summary(&changed, path, channels);
             self.push_log(
                 format!("{}: {}.", row.name, summary.text),
                 if summary.silent { AMBER } else { TEAL },
@@ -706,14 +727,14 @@ mod tests {
 
     fn with_map(left: u8, right: u8, unused: UnusedChannels) -> OutputDeviceSettings {
         OutputDeviceSettings {
-            map: ChannelMap { left, right },
+            path_map: crate::audio::PathMapSettings::first(ChannelMap { left, right }),
             unused,
             ..OutputDeviceSettings::default()
         }
     }
 
     fn text(settings: &OutputDeviceSettings, channels: usize) -> String {
-        map_summary(settings, channels).text
+        map_summary(settings, 0, channels).text
     }
 
     const SILENT: UnusedChannels = UnusedChannels::Silent;
@@ -725,7 +746,7 @@ mod tests {
         assert_eq!(text(&default, 2), "L/R");
         assert_eq!(text(&default, 4), "Out 1/2 · rest mono copy");
         assert_eq!(text(&with_map(0b01, 0b10, SILENT), 4), "Out 1/2");
-        assert!(!map_summary(&default, 2).nothing_routed);
+        assert!(!map_summary(&default, 0, 2).nothing_routed);
     }
 
     #[test]
@@ -763,24 +784,24 @@ mod tests {
 
     #[test]
     fn an_empty_map_says_what_plays_instead() {
-        let empty = map_summary(&with_map(0, 0, SILENT), 2);
+        let empty = map_summary(&with_map(0, 0, SILENT), 0, 2);
         assert_eq!(empty.text, "nothing routed · plays silence");
         assert!(empty.nothing_routed);
         assert!(empty.silent, "the only case that warns");
-        let copy = map_summary(&with_map(0, 0, COPY), 4);
+        let copy = map_summary(&with_map(0, 0, COPY), 0, 4);
         assert_eq!(copy.text, "nothing routed · mono copy on all");
         assert!(copy.nothing_routed);
         assert!(!copy.silent, "mono copy still plays: no warning");
-        assert!(!map_summary(&OutputDeviceSettings::default(), 2).silent);
+        assert!(!map_summary(&OutputDeviceSettings::default(), 0, 2).silent);
         // Bits past the device don't count.
-        assert!(map_summary(&with_map(0b0100, 0b1000, SILENT), 2).nothing_routed);
+        assert!(map_summary(&with_map(0b0100, 0b1000, SILENT), 0, 2).nothing_routed);
     }
 
     #[test]
     fn a_mono_device_reads_mono_whenever_anything_is_routed() {
         assert_eq!(text(&OutputDeviceSettings::default(), 1), "Out 1←mono");
         assert_eq!(text(&with_map(0, 0b1000, SILENT), 1), "Out 1←mono");
-        assert!(map_summary(&with_map(0, 0, SILENT), 1).nothing_routed);
+        assert!(map_summary(&with_map(0, 0, SILENT), 0, 1).nothing_routed);
     }
 
     #[test]
@@ -807,11 +828,11 @@ mod tests {
     #[test]
     fn the_unused_choice_shows_when_it_matters() {
         let default = OutputDeviceSettings::default();
-        assert!(!shows_unused_choice(&default, 2));
-        assert!(shows_unused_choice(&default, 4));
-        assert!(shows_unused_choice(&with_map(0b01, 0, SILENT), 2));
-        assert!(!shows_unused_choice(&default, 1));
-        assert!(shows_unused_choice(&with_map(0, 0, SILENT), 1));
+        assert!(!shows_unused_choice(&default, 0, 2));
+        assert!(shows_unused_choice(&default, 0, 4));
+        assert!(shows_unused_choice(&with_map(0b01, 0, SILENT), 0, 2));
+        assert!(!shows_unused_choice(&default, 0, 1));
+        assert!(shows_unused_choice(&with_map(0, 0, SILENT), 0, 1));
     }
 
     #[test]
@@ -876,6 +897,7 @@ mod tests {
             assert!(!device_summary_row(
                 ui,
                 &row,
+                0,
                 true,
                 EngineState::Running,
                 "in routing outputs"

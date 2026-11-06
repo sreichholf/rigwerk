@@ -1,6 +1,7 @@
 //! What survives a restart: preferences, saved patches and the choices
 //! offered for rates and buffers.
 
+mod path_pref;
 mod preferences;
 mod preset;
 mod serde_util;
@@ -8,6 +9,7 @@ mod serde_util;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use path_pref::{default_path_name, PathPref};
 pub(crate) use preferences::{
     cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
     preferences_backup_key, rate_label, rematch_windows_virtual_out, resolved_wasapi_output_mode,

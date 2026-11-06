@@ -261,7 +261,7 @@ impl RigWerkApp {
             let left_w = (total * 0.66).clamp(520.0, (total - 288.0).max(520.0));
             let right_w = (total - left_w - 8.0).max(280.0);
             // Same outer height on both cards so the row stays level.
-            let row_h = routing_top_row_height(self.routes.len());
+            let row_h = routing_top_row_height(self.path().mix.routes.len());
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(
                     Vec2::new(left_w, row_h),
@@ -300,7 +300,7 @@ impl RigWerkApp {
         let input = self.active_input();
         let input_caption = input_channel_caption(&input.backend, &input.name);
         let subtitle = format!("{input_caption} -> the mix bus the chain processes");
-        let input_count = self.routes.len();
+        let input_count = self.path().mix.routes.len();
 
         ui.horizontal(|ui| {
             layer_badge(ui, 1, TEAL);
@@ -330,10 +330,11 @@ impl RigWerkApp {
             ui.horizontal(|ui| {
                 row_header(ui, &format!("IN {}", input + 1), role, TEXT);
                 for (side, column) in MIX_COLUMNS.iter().enumerate() {
-                    if route_cell(ui, self.routes[input][side], input, side) {
-                        self.routes[input][side] = !self.routes[input][side];
-                        self.engine.set_routes(self.routes);
-                        let on = self.routes[input][side];
+                    let routed = self.path().mix.routes[input][side];
+                    if route_cell(ui, routed, input, side) {
+                        let on = !routed;
+                        self.path_mut().mix.routes[input][side] = on;
+                        self.push_paths_to_engine();
                         self.push_log(
                             format!(
                                 "Route {role} -> {column} {}.",
@@ -371,7 +372,7 @@ impl RigWerkApp {
         ui.add_space(8.0);
         ui.label(micro_label("CHANNEL MODE", DIM));
         ui.add_space(4.0);
-        let mut mono = self.mono;
+        let mut mono = self.path().mix.mono;
         ui.horizontal(|ui| {
             if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
                 mono = false;
@@ -380,7 +381,9 @@ impl RigWerkApp {
                 mono = true;
             }
         });
-        self.mono = mono;
+        if mono != self.path().mix.mono {
+            self.path_mut().mix.mono = mono;
+        }
         ui.add_space(10.0);
         ui.label(micro_label("MONITORING", DIM));
         ui.add_space(4.0);

@@ -1,10 +1,11 @@
-//! Per-device output settings: level, mute and which device channels the
-//! two mix sides reach.  Applied after the master (`output_gain` / `mute`).
+//! Per-device output settings and the sum matrix: device level, mute,
+//! and for every signal path a channel map, a level and a polarity on that
+//! device.  Applied after the master (`output_gain` / `mute`).
 //!
-//! # Mapping rule
+//! # Mapping rule (one path)
 //!
-//! For each device channel `c` (0-based), with `L` and `R` the mix after the
-//! master:
+//! For each device channel `c` (0-based), with `L` and `R` the path's mix
+//! after the master:
 //! - reached by L only: `L`; by R only: `R`; by both: `(L + R) / 2` (the
 //!   average, not the sum);
 //! - reached by neither: `(L + R) / 2` under [`UnusedChannels::MonoCopy`],
@@ -19,20 +20,38 @@
 //! the output has always written: L and R on channels 1 and 2, their average
 //! on every further channel, and the average on a 1-channel device.
 //!
-//! Every device stores one map per signal path slot (`MAX_PATHS`); level,
-//! mute and the unused rule belong to the device.  The mapper maps each
-//! live path's frame (already through the master) with its own map and
-//! adds them up per channel, then applies the device level.  One path
-//! gives exactly its own mapped frame.  Only path 0's map can be set so
-//! far: `OutputDeviceSettings::map` is that map.
+//! # The sum of several paths
+//!
+//! Every device stores one [`PathMapSettings`] per path slot (`MAX_PATHS`):
+//! the path's map, its level (dB, ramped) and polarity there (a flip ramps
+//! the path's gain through zero, so it never clicks), and an alignment trim
+//! that is stored only until the alignment engine exists.  The device level,
+//! mute and the unused rule belong to the device.  The mapper maps each live
+//! path's frame with its own map, scales it by its level and polarity on the
+//! device and adds the paths up per channel (cells that meet on a channel
+//! add, they are not averaged), then applies the device level.
+//!
+//! A channel no live path reaches follows [`UnusedChannels`]: silent, or
+//! under `MonoCopy` the sum of the mono copies `(L + R) / 2` of every live
+//! path that reaches some channel of this device.  If no path reaches the
+//! device at all, every live path counts, which for one path is the rule
+//! above.  So a path routed nowhere on a device (an added, empty path) never
+//! leaks into its spare channels, and one path behaves as it always did.
+//! Muted and un-soloed paths still count for this: the routing, not what is
+//! audible, decides which channels play.
+//!
+//! One path at 0 dB with normal polarity gives exactly its own mapped frame,
+//! bit for bit: unity gains copy instead of multiplying.
 
 mod mapper;
 mod types;
 
 pub(crate) use mapper::{DeviceControls, DeviceFrame, DeviceMapper};
+pub(crate) use types::path_level_gain;
 pub use types::{
-    ChannelMap, MapPreset, MixSide, OutputDeviceSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB,
-    DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    sanitize_path_level, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
+    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
+    PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_TRIM_MAX_MS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 
 #[cfg(test)]
@@ -41,6 +60,7 @@ pub(crate) use mapper::old_write_frame;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::path::MAX_PATHS;
 
     #[test]
     fn a_settled_frame_matches_the_mapper() {
@@ -51,7 +71,7 @@ mod tests {
             OutputDeviceSettings::default(),
             OutputDeviceSettings {
                 level_db: -6.0,
-                map,
+                path_map: PathMapSettings::first(map),
                 unused: UnusedChannels::Silent,
                 ..OutputDeviceSettings::default()
             },
@@ -67,7 +87,8 @@ mod tests {
                 let mut mapper = DeviceMapper::new(channels);
                 mapper.begin_block(&controls, 64.0);
                 let mapped = mapper.map(0.5, -0.25);
-                let settled = settings.settled_frame(channels, 0.5, -0.25);
+                let settled =
+                    settings.settled_sum(ONE_PATH, [1.0; MAX_PATHS], channels, 0.5, -0.25);
                 for (channel, sample) in settled.iter().enumerate() {
                     let expected = mapped.sample(channel);
                     assert!(
@@ -143,10 +164,10 @@ mod tests {
     #[test]
     fn both_sides_on_one_channel_play_their_average() {
         let settings = OutputDeviceSettings {
-            map: ChannelMap {
+            path_map: PathMapSettings::first(ChannelMap {
                 left: 0b01,
                 right: 0b01,
-            },
+            }),
             unused: UnusedChannels::Silent,
             ..OutputDeviceSettings::default()
         };
@@ -157,10 +178,10 @@ mod tests {
     #[test]
     fn silent_leaves_unreached_channels_at_zero() {
         let settings = OutputDeviceSettings {
-            map: ChannelMap {
+            path_map: PathMapSettings::first(ChannelMap {
                 left: 0b0100,
                 right: 0b1000,
-            },
+            }),
             unused: UnusedChannels::Silent,
             ..OutputDeviceSettings::default()
         };
@@ -173,10 +194,10 @@ mod tests {
     #[test]
     fn a_mono_device_reads_any_map_as_both_sides() {
         let swapped = OutputDeviceSettings {
-            map: ChannelMap {
+            path_map: PathMapSettings::first(ChannelMap {
                 left: 0b10,
                 right: 0,
-            },
+            }),
             unused: UnusedChannels::Silent,
             ..OutputDeviceSettings::default()
         };
@@ -184,7 +205,7 @@ mod tests {
         assert_eq!(samples(mapper.map(0.5, -0.25), 1), [0.125]);
 
         let empty = OutputDeviceSettings {
-            map: ChannelMap { left: 0, right: 0 },
+            path_map: PathMapSettings::first(ChannelMap { left: 0, right: 0 }),
             ..swapped
         };
         let (mut mapper, _) = mapped_device(empty, 1);
@@ -202,10 +223,10 @@ mod tests {
     #[test]
     fn channels_past_the_maximum_are_unused() {
         let all = OutputDeviceSettings {
-            map: ChannelMap {
+            path_map: PathMapSettings::first(ChannelMap {
                 left: 0xff,
                 right: 0,
-            },
+            }),
             ..OutputDeviceSettings::default()
         };
         let (mut mapper, _) = mapped_device(all, 10);
@@ -289,10 +310,10 @@ mod tests {
 
         // Swap the sides and silence the rest.
         let swapped = OutputDeviceSettings {
-            map: ChannelMap {
+            path_map: PathMapSettings::first(ChannelMap {
                 left: 0b10,
                 right: 0b01,
-            },
+            }),
             unused: UnusedChannels::Silent,
             ..OutputDeviceSettings::default()
         };
@@ -322,10 +343,10 @@ mod tests {
     #[test]
     fn meters_hold_each_channels_block_peak() {
         let settings = OutputDeviceSettings {
-            map: ChannelMap {
+            path_map: PathMapSettings::first(ChannelMap {
                 left: 0b001,
                 right: 0b100,
-            },
+            }),
             unused: UnusedChannels::Silent,
             ..OutputDeviceSettings::default()
         };
@@ -365,17 +386,17 @@ mod tests {
         let settings = OutputDeviceSettings {
             level_db: 40.0,
             mute: false,
-            map: ChannelMap {
+            path_map: PathMapSettings::first(ChannelMap {
                 left: 0b1100,
                 right: 0b0011,
-            },
+            }),
             unused: UnusedChannels::Silent,
         };
         controls.set(&settings);
         let next = DeviceControls::new();
         next.adopt_settings_from(&controls);
         let (map, unused, gain) = next.load();
-        assert_eq!(map, settings.map);
+        assert_eq!(map, settings.map(0));
         assert_eq!(unused, UnusedChannels::Silent);
         assert_eq!(gain, 10.0f32.powf(DEVICE_LEVEL_MAX_DB / 20.0));
         next.set(&OutputDeviceSettings {
@@ -406,6 +427,81 @@ mod tests {
         let next = DeviceControls::new();
         next.adopt_settings_from(&controls);
         assert_eq!(next.path_map(2), ChannelMap::default());
+    }
+
+    #[test]
+    fn unreached_channels_copy_the_paths_mapped_to_the_device() {
+        use crate::audio::path::{LiveSlots, PathState};
+        let live = LiveSlots::from_states([
+            PathState::Active,
+            PathState::Active,
+            PathState::Inactive,
+            PathState::Inactive,
+        ]);
+        let mut frames = [[0.0f32; 2]; MAX_PATHS];
+        frames[0] = [0.5, -0.25];
+        frames[1] = [0.25, 0.75];
+        let run = |settings: OutputDeviceSettings| {
+            let controls = DeviceControls::new();
+            controls.set(&settings);
+            let mut mapper = DeviceMapper::new(4);
+            mapper.begin_paths(&controls, RAMP, live);
+            samples(mapper.map_paths(&frames), 4)
+        };
+        // Path 1 is routed nowhere: Out 3/4 copy path 0 only.
+        let mut settings = OutputDeviceSettings::default();
+        settings.path_map[1] = PathMapSettings::unrouted();
+        assert_eq!(run(settings), [0.5, -0.25, 0.125, 0.125]);
+        assert_eq!(settings.playing_channels(4, [true, true, false, false]), 4);
+        // Path 1 on Out 3 only: Out 4 copies both (mono of each, summed).
+        settings.path_map[1].map = ChannelMap {
+            left: 0b0100,
+            right: 0,
+        };
+        assert_eq!(run(settings), [0.5, -0.25, 0.25, 0.125 + 0.5]);
+        // No path reaches the device: every channel copies every path.
+        settings.path_map[0] = PathMapSettings::unrouted();
+        settings.path_map[1] = PathMapSettings::unrouted();
+        assert_eq!(run(settings), [0.625; 4]);
+        settings.unused = UnusedChannels::Silent;
+        assert_eq!(run(settings), [0.0; 4]);
+        assert_eq!(settings.playing_channels(4, [true, true, false, false]), 0);
+    }
+
+    #[test]
+    fn path_entries_save_compactly_and_old_maps_load_as_path_one() {
+        let old: OutputDeviceSettings =
+            ron::from_str("(level_db:-3.0,map:(left:4,right:8),unused:silent)").unwrap();
+        assert_eq!(old.map(0), ChannelMap { left: 4, right: 8 });
+        assert_eq!(old.path_map[1], PathMapSettings::default());
+        assert_eq!(old.level_db, -3.0);
+
+        let mut settings = OutputDeviceSettings::default();
+        settings.path_map[1] = PathMapSettings {
+            map: ChannelMap { left: 1, right: 0 },
+            level_db: -6.0,
+            invert: true,
+            trim_ms: 1.5,
+        };
+        let text = ron::to_string(&settings).unwrap();
+        assert!(!text.contains(",map:("), "no legacy map: {text}");
+        let back: OutputDeviceSettings = ron::from_str(&text).unwrap();
+        assert_eq!(back, settings);
+        // Trailing default entries are left out.
+        let text = ron::to_string(&OutputDeviceSettings::default()).unwrap();
+        assert!(text.contains("path_map:[]"), "{text}");
+
+        // Reordered for saving: slot 2 becomes entry 1.
+        settings.path_map[2].level_db = -9.0;
+        let saved = settings.with_path_order(&[0, 2]);
+        assert_eq!(saved.path_map[1].level_db, -9.0);
+        assert_eq!(saved.path_map[2], PathMapSettings::default());
+        // Out-of-range levels and trims are clamped.
+        settings.path_map[1].level_db = 40.0;
+        settings.path_map[1].trim_ms = f32::NAN;
+        let clean = settings.sanitized();
+        assert_eq!(clean.path_map[1].level_db, PATH_LEVEL_MAX_DB);
+        assert_eq!(clean.path_map[1].trim_ms, 0.0);
     }
 
     #[test]
@@ -488,7 +584,7 @@ mod tests {
     #[test]
     fn silent_mono_device_with_an_empty_map_is_silent() {
         let settings = OutputDeviceSettings {
-            map: ChannelMap { left: 0, right: 0 },
+            path_map: PathMapSettings::first(ChannelMap { left: 0, right: 0 }),
             unused: UnusedChannels::Silent,
             ..OutputDeviceSettings::default()
         };
@@ -585,30 +681,49 @@ mod tests {
         assert!(!map(0, 0).reaches_any(8));
     }
 
+    /// Path 0 alone.
+    const ONE_PATH: [bool; MAX_PATHS] = [true, false, false, false];
+
     #[test]
     fn playing_channels_count_reached_and_copied_ones() {
         let settings = |map, unused| OutputDeviceSettings {
-            map,
+            path_map: PathMapSettings::first(map),
             unused,
             ..OutputDeviceSettings::default()
         };
         let copy = UnusedChannels::MonoCopy;
         let silent = UnusedChannels::Silent;
-        assert_eq!(settings(ChannelMap::default(), copy).playing_channels(2), 2);
-        assert_eq!(settings(ChannelMap::default(), copy).playing_channels(4), 4);
         assert_eq!(
-            settings(ChannelMap::default(), silent).playing_channels(4),
+            settings(ChannelMap::default(), copy).playing_channels(2, ONE_PATH),
             2
         );
-        assert_eq!(settings(map(0b0100, 0b1000), silent).playing_channels(4), 2);
-        assert_eq!(settings(map(0, 0), silent).playing_channels(4), 0);
-        assert_eq!(settings(map(0, 0), copy).playing_channels(4), 4);
-        assert_eq!(settings(map(0b0100, 0), silent).playing_channels(1), 1);
-        assert_eq!(settings(map(0, 0), silent).playing_channels(1), 0);
+        assert_eq!(
+            settings(ChannelMap::default(), copy).playing_channels(4, ONE_PATH),
+            4
+        );
+        assert_eq!(
+            settings(ChannelMap::default(), silent).playing_channels(4, ONE_PATH),
+            2
+        );
+        assert_eq!(
+            settings(map(0b0100, 0b1000), silent).playing_channels(4, ONE_PATH),
+            2
+        );
+        assert_eq!(settings(map(0, 0), silent).playing_channels(4, ONE_PATH), 0);
+        assert_eq!(settings(map(0, 0), copy).playing_channels(4, ONE_PATH), 4);
+        assert_eq!(
+            settings(map(0b0100, 0), silent).playing_channels(1, ONE_PATH),
+            1
+        );
+        assert_eq!(settings(map(0, 0), silent).playing_channels(1, ONE_PATH), 0);
         let muted = OutputDeviceSettings {
             mute: true,
             ..OutputDeviceSettings::default()
         };
-        assert_eq!(muted.playing_channels(2), 2, "mute is not routing");
+        assert_eq!(
+            muted.playing_channels(2, ONE_PATH),
+            2,
+            "mute is not routing"
+        );
     }
 }

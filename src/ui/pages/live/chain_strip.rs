@@ -13,13 +13,13 @@ use crate::ui::widgets::{card_fixed, micro_label};
 
 impl RigWerkApp {
     pub(crate) fn chain_strip(&mut self, ui: &mut egui::Ui, width: f32) {
-        let views = self.engine.plugin_views();
+        let views = self.engine.plugin_views(self.selected_path);
         let stages = live_chain_entries(
             self.input_gain,
-            &self.eqs[EqSlot::Pre.index()],
+            &self.path().mix.eqs[EqSlot::Pre.index()],
             &views,
-            &self.gate,
-            &self.eqs[EqSlot::Post.index()],
+            &self.path().mix.gate,
+            &self.path().mix.eqs[EqSlot::Post.index()],
             self.output_gain,
             self.mute,
         );

@@ -9,11 +9,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::bridge::run_bridge;
-use super::eq::{EqSettings, EqSlot};
-use super::gate::GateSettings;
 #[cfg(target_os = "linux")]
 use super::linux::pipewire;
 use super::output_map::OutputDeviceSettings;
+use super::path::{PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
 use super::shared::FollowerPlan;
 use super::shared::Shared;
@@ -151,18 +150,6 @@ impl AudioEngine {
         self.shared.set_cushion(mode, manual_ms);
     }
 
-    /// Sets one of the built-in EQs.  Takes effect immediately, also while the
-    /// bridge runs; calling it with unchanged settings costs nothing.
-    pub fn set_eq(&self, slot: EqSlot, settings: EqSettings) {
-        self.shared.set_eq(slot, settings);
-    }
-
-    /// Sets the built-in noise gate.  Takes effect immediately, also while the
-    /// bridge runs; unchanged settings cost nothing.
-    pub fn set_gate(&self, settings: GateSettings) {
-        self.shared.set_gate(settings);
-    }
-
     pub fn set_gains(&self, input_db: f32, output_db: f32) {
         let in_gain = 10.0f32.powf(input_db / 20.0);
         let out_gain = 10.0f32.powf(output_db / 20.0);
@@ -174,21 +161,63 @@ impl AudioEngine {
             .store(out_gain.to_bits(), Ordering::Relaxed);
     }
 
-    pub fn set_mix(
-        &self,
-        mute: bool,
-        monitor: bool,
-        mono: bool,
-        input_channels: [bool; 2],
-        output_channels: [bool; 2],
-        drift: bool,
-    ) {
-        self.shared
-            .set_mix(mute, monitor, mono, input_channels, output_channels, drift);
+    /// Master mute, monitor, input channel enable and drift steering.
+    pub fn set_master(&self, mute: bool, monitor: bool, input_channels: [bool; 2], drift: bool) {
+        self.shared.set_master(mute, monitor, input_channels, drift);
     }
 
-    pub fn set_routes(&self, routes: [[bool; 4]; 2]) {
-        self.shared.set_routes(routes);
+    /// Sets one path's routing, mono, enable, EQs, gate, level, mute and
+    /// solo.  Live, ramped; unchanged settings cost nothing.  Ignored for a
+    /// slot that is not active.
+    pub fn set_path_mix(&self, slot: usize, mix: &PathMix) {
+        let path = self.shared.path(slot);
+        if path.state() == PathState::Active {
+            path.set_mix(mix);
+        }
+    }
+
+    /// Puts a path with these settings and plugins into `slot` and makes it
+    /// active (used when a session or patch is loaded).  The plugins are
+    /// restored, not opened.
+    pub fn restore_path(&self, slot: usize, mix: &PathMix, plugins: Vec<PluginPref>) {
+        if slot < MAX_PATHS {
+            self.shared.restore_path(slot, mix, plugins);
+        }
+    }
+
+    /// Adds an empty, muted path in a free slot, live.  Returns the slot.
+    pub fn add_path(&self) -> Option<usize> {
+        self.shared.add_path()
+    }
+
+    /// Adds a muted copy of path `source` (chain, plugins with their state)
+    /// in a free slot, live.  Returns the slot.  The caller copies the
+    /// device maps.
+    pub fn duplicate_path(&self, source: usize) -> Option<usize> {
+        self.shared.duplicate_path(source)
+    }
+
+    /// Removes path `slot` with a short fade-out.  `false` for the last
+    /// active path or a slot that is not active.
+    pub fn remove_path(&self, slot: usize) -> bool {
+        self.shared.remove_path(slot)
+    }
+
+    /// Where path slot `slot` is in its life.
+    pub(crate) fn path_state(&self, slot: usize) -> PathState {
+        self.shared.path(slot).state()
+    }
+
+    /// Path `slot`'s plugin chain latency in samples (bypassed inserts
+    /// count).
+    pub fn path_latency_samples(&self, slot: usize) -> u32 {
+        self.shared.path(slot).latency_samples()
+    }
+
+    /// Path `slot`'s meters: the last block's peaks after its chain, before
+    /// the path level and the master.
+    pub fn path_meters(&self, slot: usize) -> (f32, f32) {
+        self.shared.path(slot).meters()
     }
 
     /// Sets the clock device's channel map, level and mute (sanitized here).
@@ -346,73 +375,89 @@ impl AudioEngine {
         self.state = EngineState::Preview;
     }
 
-    /// The plugin insert chain as the UI needs it.
-    pub fn plugin_views(&self) -> Arc<[PluginView]> {
-        self.shared.plugin_views()
+    /// Path `path`'s plugin insert chain as the UI needs it.
+    pub fn plugin_views(&self, path: usize) -> Arc<[PluginView]> {
+        self.shared.path(path).plugin_views()
     }
 
-    /// Serves CLAP main-thread callbacks and timers from the UI loop.
+    /// Serves CLAP main-thread callbacks and timers from the UI loop, and
+    /// finishes path removals.
     pub fn service_plugins(&self) {
+        self.shared.service_paths();
         self.shared.service_plugins();
     }
 
-    pub fn plugin_prefs(&self) -> Vec<PluginPref> {
-        self.shared.plugin_prefs()
+    /// Path `path`'s insert chain as it should be saved, with fresh plugin
+    /// state.
+    pub fn plugin_prefs(&self, path: usize) -> Vec<PluginPref> {
+        self.shared.path(path).plugin_prefs()
     }
 
-    /// Restores the saved chain without opening any plugin.
-    pub fn restore_plugins(&self, plugins: Vec<PluginPref>) {
-        self.shared.restore_plugins(plugins);
+    /// Restores path `path`'s saved chain without opening any plugin.
+    #[cfg(test)]
+    pub fn restore_plugins(&self, path: usize, plugins: Vec<PluginPref>) {
+        self.shared.path(path).restore_plugins(plugins);
     }
 
-    pub fn add_plugin(&self, plugin: PluginPref) -> Result<(), String> {
-        self.shared.add_plugin(plugin)
+    // `push_slot` hands a mismatched slot back so it can be dropped unlocked.
+    #[allow(clippy::result_large_err)]
+    pub fn add_plugin(&self, path: usize, plugin: PluginPref) -> Result<(), String> {
+        self.shared.path(path).add_plugin(plugin)
     }
 
-    pub fn remove_plugin(&self, index: usize) {
-        self.shared.remove_plugin(index);
+    pub fn remove_plugin(&self, path: usize, index: usize) {
+        self.shared.path(path).remove_plugin(index);
     }
 
-    pub fn move_plugin(&self, index: usize, delta: isize) {
-        self.shared.move_plugin(index, delta);
+    pub fn move_plugin(&self, path: usize, index: usize, delta: isize) {
+        self.shared.path(path).move_plugin(index, delta);
     }
 
-    pub fn set_plugin_bypass(&self, index: usize, bypass: bool) {
-        self.shared.set_plugin_bypass(index, bypass);
+    pub fn set_plugin_bypass(&self, path: usize, index: usize, bypass: bool) {
+        self.shared.path(path).set_plugin_bypass(index, bypass);
     }
 
-    pub fn set_plugin_mix(&self, index: usize, mix: f32) {
-        self.shared.set_plugin_mix(index, mix);
+    pub fn set_plugin_mix(&self, path: usize, index: usize, mix: f32) {
+        self.shared.path(path).set_plugin_mix(index, mix);
     }
 
     /// Opens a saved insert on demand so its controls can be edited.
-    pub fn ensure_plugin_loaded(&self, index: usize) {
-        self.shared.ensure_plugin_loaded(index);
+    pub fn ensure_plugin_loaded(&self, path: usize, index: usize) {
+        self.shared.path(path).ensure_plugin_loaded(index);
     }
 
     /// The loaded plugin behind one insert, for its own editor window.
-    pub fn plugin_handle(&self, index: usize) -> Option<super::plugins::PluginHandle> {
-        self.shared.plugin_handle(index)
+    pub fn plugin_handle(&self, path: usize, index: usize) -> Option<super::plugins::PluginHandle> {
+        self.shared.path(path).plugin_handle(index)
     }
 
     /// Copies control values back after the plugin's own editor changed them.
-    pub fn sync_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        self.shared.sync_plugin_parameters(index)
+    pub fn sync_plugin_parameters(&self, path: usize, index: usize) -> Result<(), String> {
+        self.shared.path(path).sync_plugin_parameters(index)
     }
 
     /// Copies the editor's last changes back and marks the insert's saved
     /// state for capture, when its editor closes.
-    pub fn finish_plugin_editor(&self, index: usize) {
-        let _ = self.shared.sync_plugin_parameters(index);
-        self.shared.mark_plugin_state_stale(index);
+    pub fn finish_plugin_editor(&self, path: usize, index: usize) {
+        let controls = self.shared.path(path);
+        let _ = controls.sync_plugin_parameters(index);
+        controls.mark_plugin_state_stale(index);
     }
 
-    pub fn set_plugin_parameter(&self, index: usize, id: u32, value: f64) -> Result<(), String> {
-        self.shared.set_plugin_parameter(index, id, value)
+    pub fn set_plugin_parameter(
+        &self,
+        path: usize,
+        index: usize,
+        id: u32,
+        value: f64,
+    ) -> Result<(), String> {
+        self.shared
+            .path(path)
+            .set_plugin_parameter(index, id, value)
     }
 
-    pub fn reset_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        self.shared.reset_plugin_parameters(index)
+    pub fn reset_plugin_parameters(&self, path: usize, index: usize) -> Result<(), String> {
+        self.shared.path(path).reset_plugin_parameters(index)
     }
 
     /// Swaps in a fresh session that inherits the settings which outlive a

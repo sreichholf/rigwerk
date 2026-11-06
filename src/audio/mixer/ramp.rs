@@ -59,6 +59,11 @@ impl Ramp {
         }
     }
 
+    /// Whether the ramp rests on `value` (its last sample was `value`).
+    pub(crate) fn is_settled_at(&self, value: f32) -> bool {
+        self.current == value && self.target == value
+    }
+
     /// Moves one sample and returns the value to apply.  Once the target is
     /// reached it returns exactly the target for the rest of the block, so a
     /// settled ramp adds no noise to the audio.

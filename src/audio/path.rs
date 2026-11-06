@@ -8,20 +8,92 @@
 //! so removing one path never moves the chains of the others, and a removed
 //! path can keep running while it fades out.  Every path splits off where
 //! the chain starts, after the clock side (ring, resampler, drift); see
-//! `mixer::PathProcessor` for the realtime half.  Today only slot 0 is
-//! active.
+//! `mixer::PathProcessor` for the realtime half.
+//!
+//! # Lifecycle
+//!
+//! Paths are added, duplicated and removed live, from the UI thread, without
+//! restarting the bridge ([`Shared`](super::shared::Shared)`::add_path`,
+//! `duplicate_path`, `remove_path`):
+//! - add and duplicate take a free ([`PathState::Inactive`]) slot, set it up
+//!   while the mixer still skips it, then make it active.  That bumps the
+//!   slot's generation, so the mixer starts its chain fresh, fading the
+//!   path in.  Both start muted, so the sum never jumps, and the mixer
+//!   keeps a path silent while its restored plugins are not open yet.
+//! - remove moves the slot to [`PathState::FadingOut`].  The mixer keeps
+//!   running it with its path gain ramping to silence and then moves it to
+//!   [`PathState::Inactive`] itself (one compare-exchange, from the audio
+//!   thread).  With no bridge running, the UI thread finishes the removal
+//!   (`Shared::service_paths`), and releases the slot's plugins.
+//! - at least one path is always active.
+//!
+//! # Level, mute, solo
+//!
+//! Each path has a level (dB), a mute and a solo, applied after its chain
+//! and before the master, as one ramped gain.  If any active path is
+//! soloed, only soloed paths sound.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use std::time::Instant;
+
 use super::clap::{ClapPlugin, HostState};
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
+use super::output_map::{path_level_gain, sanitize_path_level};
 use super::plugins::{PluginChain, PluginHandle, PluginPref, PluginView, Vst3Service};
 
 /// Most signal paths a session can hold.  Every per-path array (controls,
 /// processors, device maps) is this long; only the active ones run.
 pub const MAX_PATHS: usize = 4;
+
+/// The settings of one path the UI owns and pushes: input routing, mono,
+/// channel enable, the two EQs, the gate, and the path level, mute and
+/// solo.  The plugin chain is kept in the engine ([`PathControls`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PathMix {
+    /// The 2 × 4 input routing (input × tap).  Only taps 1/2 (the path's
+    /// L/R) are used; 3/4 are kept for the stored layout.
+    pub routes: [[bool; 4]; 2],
+    pub mono: bool,
+    /// Channel enable for the path's L and R.
+    pub output_enabled: [bool; 2],
+    /// The EQs before and after the inserts, indexed by [`EqSlot`].
+    pub eqs: [EqSettings; 2],
+    pub gate: GateSettings,
+    /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
+    pub level_db: f32,
+    pub mute: bool,
+    pub solo: bool,
+}
+
+impl Default for PathMix {
+    fn default() -> Self {
+        Self {
+            routes: [[true, false, false, false], [false, true, false, false]],
+            mono: false,
+            output_enabled: [true, true],
+            eqs: [EqSettings::default(), EqSettings::default()],
+            gate: GateSettings::default(),
+            level_db: 0.0,
+            mute: false,
+            solo: false,
+        }
+    }
+}
+
+impl PathMix {
+    /// Every value in range (EQ, gate and level).
+    pub fn sanitized(self) -> Self {
+        Self {
+            eqs: self.eqs.map(EqSettings::sanitized),
+            gate: self.gate.sanitized(),
+            level_db: sanitize_path_level(self.level_db),
+            ..self
+        }
+    }
+}
 
 /// Where one path slot is in its life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +159,15 @@ impl LiveSlots {
     pub(crate) fn contains(&self, slot: usize) -> bool {
         self.iter().any(|live| live == slot)
     }
+
+    /// The live slots as one flag per slot.
+    pub(crate) fn mask(&self) -> [bool; MAX_PATHS] {
+        let mut mask = [false; MAX_PATHS];
+        for slot in self.iter() {
+            mask[slot] = true;
+        }
+        mask
+    }
 }
 
 /// A CLAP plugin and its host state, as `service_plugins` services them.
@@ -122,6 +203,16 @@ pub(crate) struct PathControls {
     /// path's chain (EQ and gate state, ramps) fresh instead of carrying
     /// over whatever the slot played before.
     generation: AtomicU64,
+    /// Path level as a linear gain (`f32` bits), mute and solo.
+    level_gain: AtomicU32,
+    level_db: AtomicU32,
+    mute: AtomicBool,
+    solo: AtomicBool,
+    /// When the UI removed this path (UI thread only; the audio thread
+    /// never takes it).  Lets the UI finish a fade no mixer is running.
+    removed_at: Mutex<Option<Instant>>,
+    /// The slot's plugins still need releasing after a removal.
+    retired: AtomicBool,
     /// Block peaks of the path's output (`f32` bits), before the master.
     meter_l: AtomicU32,
     meter_r: AtomicU32,
@@ -184,6 +275,12 @@ impl PathControls {
             output_enabled: [AtomicBool::new(true), AtomicBool::new(true)],
             state: AtomicU8::new(PathState::Inactive as u8),
             generation: AtomicU64::new(0),
+            level_gain: AtomicU32::new(1.0f32.to_bits()),
+            level_db: AtomicU32::new(0.0f32.to_bits()),
+            mute: AtomicBool::new(false),
+            solo: AtomicBool::new(false),
+            removed_at: Mutex::new(None),
+            retired: AtomicBool::new(false),
             meter_l: AtomicU32::new(0.0f32.to_bits()),
             meter_r: AtomicU32::new(0.0f32.to_bits()),
             plugin_services: Mutex::new(Arc::from(Vec::new())),
@@ -222,6 +319,9 @@ impl PathControls {
         for (to, from) in self.output_enabled.iter().zip(&previous.output_enabled) {
             copy_bool(to, from);
         }
+        self.set_level_db(previous.level_db());
+        copy_bool(&self.mute, &previous.mute);
+        copy_bool(&self.solo, &previous.solo);
         // A fade-out does not outlive its session.
         self.set_state(match previous.state() {
             PathState::Active => PathState::Active,
@@ -237,15 +337,21 @@ impl PathControls {
             let settings = previous.gate.lock().unwrap_or_else(PoisonError::into_inner);
             self.set_gate(*settings);
         }
-        // Capture the old instances' state on this (UI) thread first, so the
-        // rebuilt chain reopens with what the person set since the last save.
-        previous.capture_plugin_states();
-        let plugins = previous
-            .plugins
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .prefs();
-        self.restore_plugins(plugins);
+        // Only an active path carries its chain over; a removed one starts
+        // the new session empty.  Capture the old instances' state on this
+        // (UI) thread first, so the rebuilt chain reopens with what the
+        // person set since the last save.
+        if previous.state() == PathState::Active {
+            previous.capture_plugin_states();
+            let plugins = previous
+                .plugins
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .prefs();
+            self.restore_plugins(plugins);
+        } else {
+            self.restore_plugins(Vec::new());
+        }
     }
 
     pub(crate) fn state(&self) -> PathState {
@@ -278,6 +384,149 @@ impl PathControls {
         self.generation.load(Ordering::Acquire)
     }
 
+    /// Ends a fade-out: called by the mixer once the path's gain reached
+    /// silence.  A path the UI restored meanwhile stays active.
+    pub(crate) fn finish_fade(&self) {
+        let _ = self.state.compare_exchange(
+            PathState::FadingOut as u8,
+            PathState::Inactive as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    /// Starts removing this path (UI thread): it fades out, then goes
+    /// inactive.
+    pub(crate) fn begin_removal(&self) {
+        *self
+            .removed_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        self.retired.store(true, Ordering::Release);
+        self.set_state(PathState::FadingOut);
+    }
+
+    /// Forgets a removal (the slot is being reused or restored).
+    pub(crate) fn clear_removal(&self) {
+        *self
+            .removed_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.retired.store(false, Ordering::Release);
+    }
+
+    /// Pretends the removal started `ago` earlier, for the overdue path.
+    #[cfg(test)]
+    pub(crate) fn backdate_removal(&self, ago: std::time::Duration) {
+        if let Some(at) = self
+            .removed_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            *at -= ago;
+        }
+    }
+
+    /// Whether some insert was restored but not opened yet (lock-free).
+    /// The mixer keeps such a path silent until the UI thread opens it.
+    pub(crate) fn chain_pending(&self) -> bool {
+        self.chain_unopened.load(Ordering::Relaxed)
+    }
+
+    /// When [`Self::begin_removal`] ran, while the path is fading out.
+    pub(crate) fn removed_at(&self) -> Option<Instant> {
+        *self
+            .removed_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Releases a removed path's plugins once its fade is over (UI thread).
+    /// Returns whether anything was released.
+    pub(crate) fn release_if_retired(&self) -> bool {
+        if self.state() != PathState::Inactive || !self.retired.load(Ordering::Acquire) {
+            return false;
+        }
+        self.clear_removal();
+        self.restore_plugins(Vec::new());
+        true
+    }
+
+    /// Sets every UI-owned setting at once.
+    pub(crate) fn set_mix(&self, mix: &PathMix) {
+        self.set_routes(mix.routes);
+        self.set_mono(mix.mono);
+        self.set_output_enabled(mix.output_enabled);
+        for slot in EqSlot::ALL {
+            self.set_eq(slot, mix.eqs[slot.index()]);
+        }
+        self.set_gate(mix.gate);
+        self.set_level_db(mix.level_db);
+        self.set_mute(mix.mute);
+        self.set_solo(mix.solo);
+    }
+
+    /// The UI-owned settings as stored now.
+    pub(crate) fn mix(&self) -> PathMix {
+        let mut routes = [[false; 4]; 2];
+        for (input, row) in routes.iter_mut().enumerate() {
+            for (tap, on) in row.iter_mut().enumerate() {
+                *on = self.route(input, tap);
+            }
+        }
+        let eq = |slot: EqSlot| {
+            *self.eq[slot.index()]
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        };
+        PathMix {
+            routes,
+            mono: self.mono.load(Ordering::Relaxed),
+            output_enabled: [
+                self.output_enabled[0].load(Ordering::Relaxed),
+                self.output_enabled[1].load(Ordering::Relaxed),
+            ],
+            eqs: [eq(EqSlot::Pre), eq(EqSlot::Post)],
+            gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
+            level_db: self.level_db(),
+            mute: self.muted(),
+            solo: self.soloed(),
+        }
+    }
+
+    pub(crate) fn set_level_db(&self, level_db: f32) {
+        let level_db = sanitize_path_level(level_db);
+        self.level_db.store(level_db.to_bits(), Ordering::Relaxed);
+        self.level_gain
+            .store(path_level_gain(level_db).to_bits(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn level_db(&self) -> f32 {
+        f32::from_bits(self.level_db.load(Ordering::Relaxed))
+    }
+
+    /// The path level as a linear gain: exactly 1.0 at 0 dB.
+    pub(crate) fn level_gain(&self) -> f32 {
+        f32::from_bits(self.level_gain.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set_mute(&self, mute: bool) {
+        self.mute.store(mute, Ordering::Relaxed);
+    }
+
+    pub(crate) fn muted(&self) -> bool {
+        self.mute.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_solo(&self, solo: bool) {
+        self.solo.store(solo, Ordering::Relaxed);
+    }
+
+    pub(crate) fn soloed(&self) -> bool {
+        self.solo.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn set_routes(&self, routes: [[bool; 4]; 2]) {
         for (input, row) in routes.iter().enumerate() {
             for (output, enabled) in row.iter().enumerate() {
@@ -302,7 +551,6 @@ impl PathControls {
 
     /// The path meters: the last block's peaks after the path's own chain,
     /// before the master.
-    #[cfg_attr(not(test), allow(dead_code))] // Shown once the UI has path entries.
     pub(crate) fn meters(&self) -> (f32, f32) {
         (
             f32::from_bits(self.meter_l.load(Ordering::Relaxed)),
@@ -382,8 +630,6 @@ impl PathControls {
 
     /// The latency in samples this path's insert chain should add (see
     /// [`PluginChain::latency_samples`]).  Lock-free, for the audio thread.
-    // Read by the alignment engine (P3).
-    #[allow(dead_code)]
     pub(crate) fn latency_samples(&self) -> u32 {
         self.latency.load(Ordering::Acquire)
     }

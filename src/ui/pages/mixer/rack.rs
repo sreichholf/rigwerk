@@ -39,7 +39,7 @@ pub(super) enum RackAction {
 
 impl RigWerkApp {
     pub(crate) fn mixer_rack(&mut self, ui: &mut egui::Ui) {
-        let views = self.engine.plugin_views();
+        let views = self.engine.plugin_views(self.selected_path);
         let devices = self.output_device_rows();
         self.chain_selected = self
             .chain_selected
@@ -156,14 +156,17 @@ impl RigWerkApp {
                     self.remove_plugin(index);
                     self.chain_selected = self
                         .chain_selected
-                        .after_removal(index, self.engine.plugin_views().len());
+                        .after_removal(index, self.engine.plugin_views(self.selected_path).len());
                 }
                 RackAction::Move(index, delta) => {
                     self.move_plugin(index, delta);
                     if let ChainSelection::Plugin(current) = self.chain_selected {
                         let target = (current as isize + delta).clamp(
                             0,
-                            self.engine.plugin_views().len().saturating_sub(1) as isize,
+                            self.engine
+                                .plugin_views(self.selected_path)
+                                .len()
+                                .saturating_sub(1) as isize,
                         ) as usize;
                         if current == index {
                             self.chain_selected = ChainSelection::Plugin(target);
@@ -173,7 +176,7 @@ impl RigWerkApp {
                 RackAction::OpenPlugins => {
                     self.plugin_insert_at = self
                         .chain_selected
-                        .plugin_insert_at(self.engine.plugin_views().len());
+                        .plugin_insert_at(self.engine.plugin_views(self.selected_path).len());
                     self.page = Page::Plugins;
                 }
                 RackAction::OpenLive => self.page = Page::Live,
@@ -192,12 +195,12 @@ impl RigWerkApp {
         pane_head(ui, "SIGNAL CHAIN", Some("plugs reorder only"));
         ui.add_space(8.0);
 
-        let (pre_summary, pre_on) = eq_summary(&self.eqs[EqSlot::Pre.index()]);
-        let (post_summary, post_on) = eq_summary(&self.eqs[EqSlot::Post.index()]);
-        let (gate_text, gate_on) = gate_summary(&self.gate);
+        let (pre_summary, pre_on) = eq_summary(&self.path().mix.eqs[EqSlot::Pre.index()]);
+        let (post_summary, post_on) = eq_summary(&self.path().mix.eqs[EqSlot::Post.index()]);
+        let (gate_text, gate_on) = gate_summary(&self.path().mix.gate);
         let input_summary = format!("{:+.1} dB · gain", self.input_gain);
         let output_summary = output_summary(self.output_gain, self.mute, devices.len());
-        let gate_pre = self.gate.slot == GateSlot::Pre;
+        let gate_pre = self.path().mix.gate.slot == GateSlot::Pre;
 
         let chain_scroll_h = (ui.available_height() - 36.0).max(160.0);
         egui::ScrollArea::vertical()

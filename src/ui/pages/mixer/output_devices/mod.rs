@@ -299,7 +299,11 @@ impl RigWerkApp {
                 if !self.pipewire_followers_enabled() {
                     return;
                 }
-                self.followers.push(FollowerPref::virtual_out());
+                let mut follower = FollowerPref::virtual_out();
+                // A new device plays what the clock device plays, path by
+                // path, instead of every path summed on its default map.
+                follower.settings.path_map = self.clock_device.path_map;
+                self.followers.push(follower);
             }
             #[cfg(target_os = "windows")]
             {
@@ -318,6 +322,11 @@ impl RigWerkApp {
                     name: VIRTUAL_OUT_NAME.to_owned(),
                     virtual_out: true,
                     publish: true,
+                    // Plays what the clock device plays, path by path.
+                    settings: crate::audio::OutputDeviceSettings {
+                        path_map: self.clock_device.path_map,
+                        ..Default::default()
+                    },
                     ..FollowerPref::default()
                 });
             }
@@ -358,10 +367,15 @@ impl RigWerkApp {
                     return;
                 }
             }
+            let settings = crate::audio::OutputDeviceSettings {
+                path_map: self.clock_device.path_map,
+                ..Default::default()
+            };
             self.followers.push(FollowerPref {
                 id: device.id,
                 backend: device.backend,
                 name: device.name,
+                settings,
                 ..FollowerPref::default()
             });
         }

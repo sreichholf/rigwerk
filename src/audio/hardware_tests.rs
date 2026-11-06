@@ -112,7 +112,7 @@ fn hardware_bridge() {
     println!("output: {} [{}]", output.name, output.backend);
 
     let mut engine = AudioEngine::new(48_000);
-    engine.set_mix(true, false, false, [true, true], [true, true], true);
+    engine.set_master(true, false, [true, true], true);
     // RIGWERK_CUSHION: safe (default), low, or a manual size in ms.
     match std::env::var("RIGWERK_CUSHION").as_deref() {
         Ok("low") => engine.set_cushion(super::CushionMode::LowLatency, 10.0),
@@ -127,8 +127,13 @@ fn hardware_bridge() {
         for band in eq.bands.iter_mut() {
             band.gain_db = 6.0;
         }
-        engine.set_eq(super::EqSlot::Pre, eq);
-        engine.set_eq(super::EqSlot::Post, eq);
+        engine.set_path_mix(
+            0,
+            &super::PathMix {
+                eqs: [eq, eq],
+                ..super::PathMix::default()
+            },
+        );
     }
     engine.start(StartConfig {
         asio_clsid: input.asio_clsid,

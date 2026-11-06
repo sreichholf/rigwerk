@@ -3,22 +3,30 @@
 //! and device settings, the signal paths and what each side really runs at.
 //!
 //! Everything a path owns (routing, mono, channel enable, EQs, gate, plugin
-//! chain) lives in [`PathControls`], one per path in [`Shared::paths`].  The
-//! older accessors here (`set_eq`, `add_plugin`, ...) act on path 0.
+//! chain, level, mute, solo) lives in [`PathControls`], one per path slot in
+//! [`Shared::paths`].  Paths are added, duplicated and removed here, live
+//! (see the `path` module docs).  The older accessors (`set_eq`, `set_mix`,
+//! ...) act on path 0 and are kept for tests.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Sentinel for [`Shared::path_delay_ns`]: no PipeWire path delay sampled yet.
 const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(test)]
 use super::eq::{EqSettings, EqSlot};
 use super::follower::FollowerBus;
+#[cfg(test)]
 use super::gate::GateSettings;
 use super::output_map::{DeviceControls, OutputDeviceSettings, MAX_FOLLOWERS};
-use super::path::{LiveSlots, PathControls, PathState, MAX_PATHS};
-use super::plugins::{PluginPref, PluginView};
+use super::path::{LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
+use super::plugins::PluginPref;
+#[cfg(test)]
+use super::plugins::PluginView;
 use super::scope::ScopeLane;
 use super::types::{CushionMode, Snapshot};
 
@@ -252,25 +260,135 @@ impl Shared {
         self.paths.iter().filter(|path| path.state().is_live())
     }
 
-    /// Path 0, which every pre-path accessor below acts on.
+    /// Path 0, which the pre-path test accessors below act on.
+    #[cfg(test)]
     fn main_path(&self) -> &PathControls {
         &self.paths[0]
     }
 
+    /// Path `slot`'s controls.  `slot` must be below [`MAX_PATHS`]; the
+    /// app only hands out slots in range.
+    pub(crate) fn path(&self, slot: usize) -> &PathControls {
+        debug_assert!(slot < MAX_PATHS, "path slot {slot} out of range");
+        &self.paths[slot]
+    }
+
+    /// Whether some active path (not one fading out) is soloed.
+    pub(crate) fn any_solo(&self) -> bool {
+        self.paths
+            .iter()
+            .any(|path| path.state() == PathState::Active && path.soloed())
+    }
+
+    /// How many paths are active (removed paths still fading out do not
+    /// count).
+    pub(crate) fn active_path_count(&self) -> usize {
+        self.paths
+            .iter()
+            .filter(|path| path.state() == PathState::Active)
+            .count()
+    }
+
+    /// The first inactive slot: its fade-out (if any) is over.  Its old
+    /// plugins may still wait for `service_paths` to release them;
+    /// `restore_path` replaces them either way.
+    fn free_slot(&self) -> Option<usize> {
+        self.paths
+            .iter()
+            .position(|path| path.state() == PathState::Inactive)
+    }
+
+    /// Puts a path into `slot` with these settings and plugins and makes it
+    /// active.  A slot that was inactive starts its chain fresh; an active
+    /// one keeps playing and moves to the new settings with the usual
+    /// ramps.  The plugins are restored, not opened: an open bridge opens
+    /// them on the next `service_plugins`.  Call it from the UI thread.
+    pub(crate) fn restore_path(&self, slot: usize, mix: &PathMix, plugins: Vec<PluginPref>) {
+        let path = self.path(slot);
+        // Set up before the mixer can see the slot.
+        path.clear_removal();
+        path.reset_meters();
+        path.set_mix(mix);
+        path.restore_plugins(plugins);
+        path.set_state(PathState::Active);
+    }
+
+    /// Adds an empty path (default routing and EQs, no plugins, muted) in
+    /// the first free slot, live.  `None` when every slot is taken.
+    pub(crate) fn add_path(&self) -> Option<usize> {
+        let slot = self.free_slot()?;
+        let mix = PathMix {
+            mute: true,
+            ..PathMix::default()
+        };
+        self.restore_path(slot, &mix, Vec::new());
+        Some(slot)
+    }
+
+    /// Adds a copy of path `source` in the first free slot: routing, mono,
+    /// enable, EQs, gate, level and the plugin chain with each plugin's
+    /// current state.  The copy starts muted and not soloed.  The device
+    /// maps are the caller's (the app copies them).  Call it from the UI
+    /// thread; the copied plugins open there too, on the next
+    /// `service_plugins` while a bridge runs.
+    pub(crate) fn duplicate_path(&self, source: usize) -> Option<usize> {
+        let from = self.paths.get(source)?;
+        if from.state() != PathState::Active {
+            return None;
+        }
+        let slot = self.free_slot()?;
+        let mix = PathMix {
+            mute: true,
+            solo: false,
+            ..from.mix()
+        };
+        // Captures fresh plugin state first.
+        let plugins = from.plugin_prefs();
+        self.restore_path(slot, &mix, plugins);
+        Some(slot)
+    }
+
+    /// Removes path `slot`: it fades out and then goes inactive.  Refused
+    /// (`false`) for the last active path, or a slot that is not active.
+    pub(crate) fn remove_path(&self, slot: usize) -> bool {
+        let Some(path) = self.paths.get(slot) else {
+            return false;
+        };
+        if path.state() != PathState::Active || self.active_path_count() <= 1 {
+            return false;
+        }
+        path.begin_removal();
+        true
+    }
+
+    /// UI-thread upkeep for removed paths: finishes a fade no mixer runs
+    /// (no bridge, or one that stalled for `REMOVAL_TIMEOUT`), and releases
+    /// the plugins of paths whose fade is over.
+    pub(crate) fn service_paths(&self) {
+        const REMOVAL_TIMEOUT: Duration = Duration::from_millis(500);
+        let running = self.running.load(Ordering::Relaxed);
+        for path in &self.paths {
+            if path.state() == PathState::FadingOut {
+                let overdue = path
+                    .removed_at()
+                    .is_none_or(|at| at.elapsed() >= REMOVAL_TIMEOUT);
+                if !running || overdue {
+                    path.finish_fade();
+                }
+            }
+            path.release_if_retired();
+        }
+    }
+
     /// Applies new EQ settings to path 0; unchanged settings cost nothing.
+    #[cfg(test)]
     pub(crate) fn set_eq(&self, slot: EqSlot, settings: EqSettings) {
         self.main_path().set_eq(slot, settings);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_gate(&self, settings: GateSettings) {
         self.main_path().set_gate(settings);
-    }
-
-    /// Replaces path 0's saved insert list without loading anything.
-    /// Plugins are opened when the bridge starts (or when one is added in
-    /// the UI).
-    pub(crate) fn restore_plugins(&self, prefs: Vec<PluginPref>) {
-        self.main_path().restore_plugins(prefs);
     }
 
     /// Opens any unloaded slots (and reloads them when the rate changed)
@@ -304,68 +422,6 @@ impl Shared {
         }
     }
 
-    // `push_slot` hands a mismatched slot back so it can be dropped unlocked.
-    #[allow(clippy::result_large_err)]
-    pub(crate) fn add_plugin(&self, pref: PluginPref) -> Result<(), String> {
-        self.main_path().add_plugin(pref)
-    }
-
-    pub(crate) fn remove_plugin(&self, index: usize) {
-        self.main_path().remove_plugin(index);
-    }
-
-    pub(crate) fn move_plugin(&self, index: usize, delta: isize) {
-        self.main_path().move_plugin(index, delta);
-    }
-
-    pub(crate) fn set_plugin_bypass(&self, index: usize, bypass: bool) {
-        self.main_path().set_plugin_bypass(index, bypass);
-    }
-
-    pub(crate) fn set_plugin_mix(&self, index: usize, mix: f32) {
-        self.main_path().set_plugin_mix(index, mix);
-    }
-
-    pub(crate) fn ensure_plugin_loaded(&self, index: usize) {
-        self.main_path().ensure_plugin_loaded(index);
-    }
-
-    /// The loaded plugin behind one insert, for its own editor window.
-    pub(crate) fn plugin_handle(&self, index: usize) -> Option<super::plugins::PluginHandle> {
-        self.main_path().plugin_handle(index)
-    }
-
-    /// Copies control values back after the plugin's own editor changed them.
-    pub(crate) fn sync_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        self.main_path().sync_plugin_parameters(index)
-    }
-
-    pub(crate) fn set_plugin_parameter(
-        &self,
-        index: usize,
-        id: u32,
-        value: f64,
-    ) -> Result<(), String> {
-        self.main_path().set_plugin_parameter(index, id, value)
-    }
-
-    pub(crate) fn reset_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        self.main_path().reset_plugin_parameters(index)
-    }
-
-    /// Path 0's insert views as last published.  Never takes the chain
-    /// lock, so drawing the UI cannot make the audio callback pass a block
-    /// dry.
-    pub(crate) fn plugin_views(&self) -> Arc<[PluginView]> {
-        self.main_path().plugin_views()
-    }
-
-    /// Bumped on every publish of [`Self::plugin_views`].
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn plugin_views_version(&self) -> u64 {
-        self.main_path().plugin_views_version()
-    }
-
     /// Runs the CLAP main-thread callbacks and timers of every live path
     /// once per UI frame, then follows the device rate and drains plugins
     /// a bridge thread deferred.
@@ -378,17 +434,6 @@ impl Shared {
         // handled on this thread, which is the UI thread.
         self.align_plugins_to_output_rate();
         super::plugins::drain_deferred_plugins();
-    }
-
-    /// Marks one insert's saved state as out of date (its editor closed).
-    pub(crate) fn mark_plugin_state_stale(&self, index: usize) {
-        self.main_path().mark_plugin_state_stale(index);
-    }
-
-    /// Path 0's insert chain as it should be saved, with fresh plugin
-    /// state.  Call it from the UI thread.
-    pub(crate) fn plugin_prefs(&self) -> Vec<PluginPref> {
-        self.main_path().plugin_prefs()
     }
 
     pub(crate) fn reset(&self) {
@@ -629,27 +674,21 @@ impl Shared {
         }
     }
 
-    pub(crate) fn set_mix(
+    /// The master and bridge-wide switches: master mute, monitor, input
+    /// channel enable and drift steering.  Per-path settings go through
+    /// [`PathControls::set_mix`].
+    pub(crate) fn set_master(
         &self,
         mute: bool,
         monitor: bool,
-        mono: bool,
         input_channels: [bool; 2],
-        output_channels: [bool; 2],
         drift: bool,
     ) {
         self.mute.store(mute, Ordering::Relaxed);
         self.monitor.store(monitor, Ordering::Relaxed);
-        self.main_path().set_mono(mono);
         self.input_enabled[0].store(input_channels[0], Ordering::Relaxed);
         self.input_enabled[1].store(input_channels[1], Ordering::Relaxed);
-        self.main_path().set_output_enabled(output_channels);
         self.drift_enabled.store(drift, Ordering::Relaxed);
-    }
-
-    /// Sets path 0's input routing.
-    pub(crate) fn set_routes(&self, routes: [[bool; 4]; 2]) {
-        self.main_path().set_routes(routes);
     }
 
     /// How many follower slots are live (≤ [`MAX_FOLLOWERS`]).
@@ -896,6 +935,86 @@ impl Shared {
             path_delay_ms: self.path_delay_ms(),
             direct: self.direct.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// Path 0 accessors from before paths existed, for tests.
+#[cfg(test)]
+impl Shared {
+    /// Replaces path 0's saved insert list without loading anything.
+    pub(crate) fn restore_plugins(&self, prefs: Vec<PluginPref>) {
+        self.main_path().restore_plugins(prefs);
+    }
+
+    // `push_slot` hands a mismatched slot back so it can be dropped unlocked.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn add_plugin(&self, pref: PluginPref) -> Result<(), String> {
+        self.main_path().add_plugin(pref)
+    }
+
+    pub(crate) fn remove_plugin(&self, index: usize) {
+        self.main_path().remove_plugin(index);
+    }
+
+    pub(crate) fn move_plugin(&self, index: usize, delta: isize) {
+        self.main_path().move_plugin(index, delta);
+    }
+
+    pub(crate) fn set_plugin_bypass(&self, index: usize, bypass: bool) {
+        self.main_path().set_plugin_bypass(index, bypass);
+    }
+
+    pub(crate) fn set_plugin_mix(&self, index: usize, mix: f32) {
+        self.main_path().set_plugin_mix(index, mix);
+    }
+
+    pub(crate) fn ensure_plugin_loaded(&self, index: usize) {
+        self.main_path().ensure_plugin_loaded(index);
+    }
+
+    /// The loaded plugin behind one insert, for its own editor window.
+    pub(crate) fn plugin_handle(&self, index: usize) -> Option<super::plugins::PluginHandle> {
+        self.main_path().plugin_handle(index)
+    }
+
+    pub(crate) fn set_plugin_parameter(
+        &self,
+        index: usize,
+        id: u32,
+        value: f64,
+    ) -> Result<(), String> {
+        self.main_path().set_plugin_parameter(index, id, value)
+    }
+
+    /// Path 0's insert views as last published.  Never takes the chain
+    /// lock, so drawing the UI cannot make the audio callback pass a block
+    /// dry.
+    pub(crate) fn plugin_views(&self) -> Arc<[PluginView]> {
+        self.main_path().plugin_views()
+    }
+
+    /// Bumped on every publish of [`Self::plugin_views`].
+    pub(crate) fn plugin_views_version(&self) -> u64 {
+        self.main_path().plugin_views_version()
+    }
+
+    pub(crate) fn set_mix(
+        &self,
+        mute: bool,
+        monitor: bool,
+        mono: bool,
+        input_channels: [bool; 2],
+        output_channels: [bool; 2],
+        drift: bool,
+    ) {
+        self.set_master(mute, monitor, input_channels, drift);
+        self.main_path().set_mono(mono);
+        self.main_path().set_output_enabled(output_channels);
+    }
+
+    /// Sets path 0's input routing.
+    pub(crate) fn set_routes(&self, routes: [[bool; 4]; 2]) {
+        self.main_path().set_routes(routes);
     }
 }
 

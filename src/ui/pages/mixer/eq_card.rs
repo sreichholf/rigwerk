@@ -49,7 +49,7 @@ fn hz_from_log_slider(previous_hz: f32, position: f32, min_hz: f32, max_hz: f32)
 impl RigWerkApp {
     /// EQ controls for the Mixer inspector (curve on top, compact band rows).
     pub(crate) fn eq_inspector(&mut self, ui: &mut egui::Ui, slot: EqSlot) {
-        let current = self.eqs[slot.index()];
+        let current = self.path().mix.eqs[slot.index()];
         let mut eq = current;
         let rate = if self.engine.state == EngineState::Running && self.snapshot.output_rate > 0 {
             self.snapshot.output_rate
@@ -254,8 +254,8 @@ impl RigWerkApp {
             } else if eq == current.flat() && current != current.flat() {
                 self.push_log(format!("{name} reset to flat."), AMBER);
             }
-            self.eqs[slot.index()] = eq;
-            self.engine.set_eq(slot, eq);
+            self.path_mut().mix.eqs[slot.index()] = eq;
+            self.push_paths_to_engine();
         }
     }
 }

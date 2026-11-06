@@ -6,14 +6,22 @@
 //!    skips it and takes the frame straight from the graph buffers.
 //! 2. The split: that one stereo frame goes into every live path slot
 //!    ([`PathProcessor`]: routing, EQs, gate, plugin inserts).
-//! 3. The master (level, mute, monitor) scales each path's frame.
-//! 4. The sum: each device mapper maps every live path with that path's
-//!    channel map and adds them per channel, then applies the device level
-//!    and mute.  A plain stereo sum of the paths feeds the master meters
-//!    and the scope.
+//! 3. The path gain: level, mute, solo and a removed path's fade-out, as
+//!    one ramp per path.  If any active path is soloed, the others fall
+//!    silent.  A path that goes live while the mixer plays fades in from
+//!    silence (only the mixer's first block adopts the gains outright), and
+//!    a path whose plugins were restored but not opened yet stays silent
+//!    rather than playing dry.  A removed path whose fade reached silence is
+//!    moved to inactive here, at the end of the block.
+//! 4. The master (level, mute, monitor) scales each path's frame.
+//! 5. The sum: each device mapper maps every live path with that path's
+//!    channel map, level and polarity on that device and adds them per
+//!    channel, then applies the device level and mute.  A plain stereo sum
+//!    of the paths feeds the master meters and the scope.
 //!
-//! Today only slot 0 is live, and it is bit-identical to the chain before
-//! paths existed.
+//! One path at 0 dB (path and device level), unmuted, normal polarity is
+//! bit-identical to the chain before paths existed: every unity gain is a
+//! copy, not a multiply.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -22,7 +30,7 @@ use super::denormal::DenormalGuard;
 use super::eq::{EqSlot, Equalizer};
 use super::gate::{GateSlot, NoiseGate};
 use super::output_map::{DeviceFrame, DeviceMapper, MAX_FOLLOWERS};
-use super::path::{LiveSlots, PathControls, MAX_PATHS};
+use super::path::{LiveSlots, PathControls, PathState, MAX_PATHS};
 use super::resampler::FrameResampler;
 use super::shared::Shared;
 
@@ -95,6 +103,10 @@ pub(crate) struct PathProcessor {
     /// The slot generation this chain was started for.  A different one in
     /// the controls means the slot was (re)activated: start fresh.
     generation: u64,
+    /// Path level, mute, solo and the removal fade as one gain.
+    gain: Ramp,
+    /// The slot was being removed when this block began.
+    fading: bool,
 }
 
 impl PathProcessor {
@@ -111,6 +123,8 @@ impl PathProcessor {
             controls_adopted: false,
             plan: BlockPlan::default(),
             generation: 0,
+            gain: Ramp::new(1.0),
+            fading: false,
         }
     }
 
@@ -153,15 +167,42 @@ impl PathProcessor {
 
     /// Picks up every UI change made since the last block and decides which
     /// built-in stages run in it.  The first block snaps to the settings;
-    /// after that a change takes `ramp_samples`.
-    fn begin_block(&mut self, controls: &PathControls, rate: u32, ramp_samples: f32) {
+    /// after that a change takes `ramp_samples`.  `any_solo`: some active
+    /// path is soloed, so this one sounds only if it is too.  `fade_in`:
+    /// the mixer is already playing, so a path that just went live starts
+    /// at silence and ramps up instead of snapping to its level.
+    fn begin_block(
+        &mut self,
+        controls: &PathControls,
+        rate: u32,
+        ramp_samples: f32,
+        any_solo: bool,
+        fade_in: bool,
+    ) {
         let generation = controls.generation();
         if generation != self.generation {
             self.restart(rate, generation);
         }
         self.follow_eq(controls, rate);
         self.follow_gate(controls, rate);
+        let adopted = self.controls_adopted;
         self.follow_controls(controls, ramp_samples);
+        self.fading = controls.state() == PathState::FadingOut;
+        // A chain whose plugins are still being opened (a path just added,
+        // duplicated or restored) stays silent rather than playing dry.
+        let silent = self.fading
+            || controls.muted()
+            || (any_solo && !controls.soloed())
+            || controls.chain_pending();
+        let gain = if silent { 0.0 } else { controls.level_gain() };
+        if adopted {
+            self.gain.set_target(gain, ramp_samples);
+        } else if fade_in {
+            self.gain.snap(0.0);
+            self.gain.set_target(gain, ramp_samples);
+        } else {
+            self.gain.snap(gain);
+        }
         self.plan = BlockPlan {
             pre_eq: self.eq[EqSlot::Pre.index()].active(),
             post_eq: self.eq[EqSlot::Post.index()].active(),
@@ -468,9 +509,18 @@ impl OutputMixer {
     fn begin_block(&mut self, shared: &Shared, frames: usize) {
         let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
         self.live = shared.live_slots();
+        let any_solo = shared.any_solo();
+        // Only the mixer's first block adopts the path gains outright.
+        let fade_in = self.gain_adopted;
         for slot in self.live.iter() {
             let path = &mut self.paths[slot];
-            path.begin_block(&shared.paths[slot], self.output_rate, samples);
+            path.begin_block(
+                &shared.paths[slot],
+                self.output_rate,
+                samples,
+                any_solo,
+                fade_in,
+            );
             path.reserve_block(frames);
         }
         let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
@@ -536,7 +586,15 @@ impl OutputMixer {
             // the first path's frame itself, so one path passes bit for bit.
             let mut sum: Option<[f32; 4]> = None;
             for slot in live.iter() {
-                let mut out = self.paths[slot].block[index];
+                let path = &mut self.paths[slot];
+                let mut out = path.block[index];
+                // Path level, mute, solo and fade; unity copies.
+                let path_gain = path.gain.next();
+                if path_gain != 1.0 {
+                    for value in out.iter_mut() {
+                        *value *= path_gain;
+                    }
+                }
                 for value in out.iter_mut() {
                     *value *= gain;
                 }
@@ -569,6 +627,14 @@ impl OutputMixer {
             self.followers[index].end_block(&shared.followers[index]);
         }
         shared.note_follower_producer_block(frames);
+        // A removed path that has faded to silence by the end of this block
+        // stops running from the next one.
+        for slot in live.iter() {
+            let path = &self.paths[slot];
+            if path.fading && path.gain.is_settled_at(0.0) {
+                shared.paths[slot].finish_fade();
+            }
+        }
     }
 
     /// Like [`Self::render_direct`], but each finished frame is handed over
@@ -879,7 +945,7 @@ mod tests {
     use super::super::eq::{EqSettings, EqSlot};
     use super::super::output::write_frame;
     use super::super::output_map::{
-        old_write_frame, ChannelMap, OutputDeviceSettings, UnusedChannels,
+        old_write_frame, ChannelMap, OutputDeviceSettings, PathMapSettings, UnusedChannels,
     };
     use super::super::shared::Shared;
     use super::super::types::CushionMode;
@@ -1165,10 +1231,10 @@ mod tests {
         let gain = 10.0f32.powf(-6.0 / 20.0);
         shared.clock_device.set(&OutputDeviceSettings {
             level_db: -6.0,
-            map: ChannelMap {
+            path_map: crate::audio::PathMapSettings::first(ChannelMap {
                 left: 0b10,
                 right: 0b01,
-            },
+            }),
             ..OutputDeviceSettings::default()
         });
         let out = render_device(&mut mixer, &shared, 600);
@@ -1500,10 +1566,10 @@ mod tests {
                 }
                 20 => shared.clock_device.set(&OutputDeviceSettings {
                     level_db: -3.0,
-                    map: ChannelMap {
+                    path_map: crate::audio::PathMapSettings::first(ChannelMap {
                         left: 0b1010,
                         right: 0b0101,
-                    },
+                    }),
                     unused: UnusedChannels::Silent,
                     ..OutputDeviceSettings::default()
                 }),
@@ -1550,17 +1616,17 @@ mod tests {
         let followers = [
             OutputDeviceSettings {
                 level_db: -6.0,
-                map: ChannelMap {
+                path_map: crate::audio::PathMapSettings::first(ChannelMap {
                     left: 0b10,
                     right: 0b01,
-                },
+                }),
                 ..OutputDeviceSettings::default()
             },
             OutputDeviceSettings {
-                map: ChannelMap {
+                path_map: crate::audio::PathMapSettings::first(ChannelMap {
                     left: 0b11,
                     right: 0,
-                },
+                }),
                 unused: UnusedChannels::Silent,
                 ..OutputDeviceSettings::default()
             },
@@ -1678,31 +1744,41 @@ mod tests {
         };
         assert_eq!(render(&mut mixer, &shared, 16)[0], [0.5, -0.25, 0.0, 0.0]);
 
-        // A second slot plays the same input: the sum doubles, on the taps
-        // and on the device.
+        // A second slot plays the same input: it fades in, then the sum
+        // doubles, on the taps and on the device.
         shared.paths[1].set_state(PathState::Active);
-        assert_eq!(render(&mut mixer, &shared, 16)[0], [1.0, -0.5, 0.0, 0.0]);
+        let out = render(&mut mixer, &shared, 400);
+        assert!(out[0][0] > 0.5 && out[0][0] < 0.51, "{:?}", out[0]);
+        assert!(largest_step(&out) < 0.5 / 100.0);
+        assert_eq!(out[399], [1.0, -0.5, 0.0, 0.0]);
         assert!(device(&mut mixer, &shared)
             .iter()
             .all(|f| *f == [1.0, -0.5]));
-        // Removing slot 0 keeps it running through its fade-out; slot 1
-        // stays where it is.
+        // Removing slot 0 keeps it running through its fade-out, after
+        // which the mixer makes it inactive; slot 1 stays where it is.
         shared.paths[0].set_state(PathState::FadingOut);
-        assert_eq!(render(&mut mixer, &shared, 16)[0], [1.0, -0.5, 0.0, 0.0]);
-        shared.paths[0].set_state(PathState::Inactive);
+        let out = render(&mut mixer, &shared, 400);
+        assert!(out[0][0] > 0.99, "{:?}", out[0]);
+        assert_eq!(out[399], [0.5, -0.25, 0.0, 0.0]);
+        assert_eq!(shared.paths[0].state(), PathState::Inactive);
         assert_eq!(render(&mut mixer, &shared, 16)[0], [0.5, -0.25, 0.0, 0.0]);
         assert!(device(&mut mixer, &shared)
             .iter()
             .all(|f| *f == [0.5, -0.25]));
 
         // Slot 0 comes back with mono changed while it was off: a fresh
-        // chain adopts the setting at once instead of ramping to it.
+        // chain adopts the setting at once instead of ramping to it (every
+        // tap gets the same mono share while the path fades in).
         shared.paths[0].set_mono(true);
         let generation = shared.paths[0].generation();
         shared.paths[0].set_state(PathState::Active);
         assert_eq!(shared.paths[0].generation(), generation + 1);
-        let out = render(&mut mixer, &shared, 16);
-        assert_eq!(out[0], [0.625, -0.125, 0.125, 0.125]);
+        let out = render(&mut mixer, &shared, 400);
+        let share = out[0][2];
+        assert!(share > 0.0 && share < 0.01, "fades in: {:?}", out[0]);
+        assert_eq!(out[0][3], share);
+        assert!((out[0][0] - 0.5 - share).abs() < 1.0e-6);
+        assert_eq!(out[399], [0.625, -0.125, 0.125, 0.125]);
     }
 
     #[test]
@@ -1768,5 +1844,279 @@ mod tests {
             0,
             "direct mode must not fill generic follower rings"
         );
+    }
+
+    /// A steady mixer with a second path in slot 1 (EQs bypassed, playing
+    /// the same input) on a `channels`-channel clock device.
+    fn two_path_mixer(signal: (f32, f32), channels: usize) -> (OutputMixer, Shared) {
+        use super::super::path::PathMix;
+        let (_, shared) = steady_mixer(signal);
+        let bypassed = EqSettings {
+            enabled: false,
+            ..EqSettings::default()
+        };
+        let mix = PathMix {
+            eqs: [bypassed, bypassed],
+            ..PathMix::default()
+        };
+        shared.restore_path(1, &mix, Vec::new());
+        (OutputMixer::new(48_000, channels), shared)
+    }
+
+    /// `frames` frames of the clock device, as one block.
+    fn device_frames(
+        mixer: &mut OutputMixer,
+        shared: &Shared,
+        channels: usize,
+        frames: usize,
+    ) -> Vec<Vec<f32>> {
+        let mut out = vec![vec![0.0f32; channels]; frames];
+        mixer.render(shared, frames, |index, mapped| {
+            for (channel, sample) in out[index].iter_mut().enumerate() {
+                *sample = mapped.sample(channel);
+            }
+        });
+        out
+    }
+
+    fn largest_device_step(out: &[Vec<f32>], channel: usize) -> f32 {
+        out.windows(2)
+            .map(|pair| (pair[1][channel] - pair[0][channel]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    fn device_with(paths: &[(usize, PathMapSettings)]) -> OutputDeviceSettings {
+        let mut settings = OutputDeviceSettings::default();
+        for (slot, entry) in paths {
+            settings.path_map[*slot] = *entry;
+        }
+        settings
+    }
+
+    #[test]
+    fn two_paths_add_up_where_their_maps_meet() {
+        let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 4);
+        // Path 0 on Out 1/2, path 1's L on Out 1 and its R on Out 4.
+        shared.clock_device.set(&device_with(&[(
+            1,
+            PathMapSettings {
+                map: ChannelMap {
+                    left: 0b0001,
+                    right: 0b1000,
+                },
+                ..PathMapSettings::default()
+            },
+        )]));
+        let out = device_frames(&mut mixer, &shared, 4, 32);
+        // Out 1 sums both L; Out 2 is path 0's R; Out 3 is reached by no
+        // path, so it gets the mono copy of both paths mapped here; Out 4 is
+        // path 1's R.
+        assert_eq!(out[31], [1.0, -0.25, 0.25, -0.25]);
+    }
+
+    #[test]
+    fn level_and_polarity_apply_per_path_and_device() {
+        let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
+        let gain = 10.0f32.powf(-6.0 / 20.0);
+        shared.clock_device.set(&device_with(&[
+            (
+                0,
+                PathMapSettings {
+                    level_db: -6.0,
+                    ..PathMapSettings::default()
+                },
+            ),
+            (
+                1,
+                PathMapSettings {
+                    invert: true,
+                    ..PathMapSettings::default()
+                },
+            ),
+        ]));
+        // Follower 0 keeps both paths at unity, normal polarity.
+        let plan = super::super::shared::FollowerPlan {
+            count: 1,
+            ..Default::default()
+        };
+        shared.set_followers(&[OutputDeviceSettings::default()], &plan, &[]);
+        // The duplex graph maps the followers in this mixer.
+        shared.direct.store(true, Ordering::Relaxed);
+        let mut clock = Vec::new();
+        let mut follower = Vec::new();
+        mixer.render_direct_devices(&shared, &[0.5; 64], &[-0.25; 64], |device, _, mapped| {
+            let frame = [mapped.sample(0), mapped.sample(1)];
+            if device == 0 {
+                clock.push(frame);
+            } else {
+                follower.push(frame);
+            }
+        });
+        assert_eq!(clock[63], [0.5 * gain - 0.5, -0.25 * gain + 0.25]);
+        assert_eq!(follower[63], [1.0, -0.5]);
+        assert_eq!(shared.clock_device.path_gain(1), -1.0);
+    }
+
+    #[test]
+    fn a_polarity_flip_ramps_through_zero_without_a_click() {
+        let (mut mixer, shared) = two_path_mixer((0.5, 0.5), 2);
+        let _adopted = device_frames(&mut mixer, &shared, 2, 16);
+        shared.clock_device.set(&device_with(&[(
+            1,
+            PathMapSettings {
+                invert: true,
+                ..PathMapSettings::default()
+            },
+        )]));
+        let out = device_frames(&mut mixer, &shared, 2, 600);
+        assert_eq!(
+            out[0][0],
+            1.0 - 1.0 / 288.0,
+            "the first sample barely moves"
+        );
+        assert!(out.iter().any(|frame| frame[0].abs() < 0.01), "passes zero");
+        assert_eq!(out[599], [0.0, 0.0]);
+        assert!(largest_device_step(&out, 0) < 1.0 / 100.0);
+    }
+
+    #[test]
+    fn solo_silences_the_other_paths_with_a_ramp() {
+        let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
+        assert_eq!(render(&mut mixer, &shared, 16)[15], [1.0, -0.5, 0.0, 0.0]);
+        shared.paths[1].set_solo(true);
+        assert!(shared.any_solo());
+        let out = render(&mut mixer, &shared, 600);
+        assert!(out[0][0] > 0.99);
+        assert_eq!(out[599], [0.5, -0.25, 0.0, 0.0]);
+        assert!(largest_step(&out) < 0.5 / 100.0);
+        // Soloing both is the same as soloing none.
+        shared.paths[0].set_solo(true);
+        assert_eq!(render(&mut mixer, &shared, 600)[599], [1.0, -0.5, 0.0, 0.0]);
+        // A path fading out does not keep the others silent by its solo.
+        shared.paths[0].set_solo(false);
+        assert!(shared.remove_path(1));
+        assert!(!shared.any_solo());
+        let out = render(&mut mixer, &shared, 600);
+        assert_eq!(out[599], [0.5, -0.25, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn path_mute_and_level_ramp_without_a_click() {
+        let (mut mixer, shared) = two_path_mixer((0.8, 0.8), 2);
+        let _adopted = render(&mut mixer, &shared, 16);
+        shared.paths[1].set_mute(true);
+        let muted = render_blocks(&mut mixer, &shared, 2);
+        assert!(muted[0][0] > 1.59);
+        assert_eq!(muted.last().unwrap()[0], 0.8);
+        assert!(
+            largest_step(&muted) < 0.8 / 100.0,
+            "{}",
+            largest_step(&muted)
+        );
+
+        shared.paths[1].set_mute(false);
+        shared.paths[1].set_level_db(-6.0);
+        let gain = 10.0f32.powf(-6.0 / 20.0);
+        let back = render_blocks(&mut mixer, &shared, 2);
+        assert!(largest_step(&back) < 0.8 / 100.0);
+        assert_eq!(back.last().unwrap()[0], 0.8 + 0.8 * gain);
+        // The path meters stay before the path level.
+        assert_eq!(shared.paths[1].meters(), (0.8, 0.8));
+    }
+
+    #[test]
+    fn a_removed_path_fades_out_and_then_goes_inactive() {
+        use super::super::path::PathState;
+        let (mut mixer, shared) = two_path_mixer((0.8, 0.8), 2);
+        let _adopted = render(&mut mixer, &shared, 16);
+        assert!(shared.remove_path(0));
+        assert_eq!(shared.paths[0].state(), PathState::FadingOut);
+        assert!(!shared.remove_path(1), "the last active path stays");
+        let out = render_blocks(&mut mixer, &shared, 2);
+        assert!(out[0][0] > 1.59);
+        assert_eq!(out.last().unwrap()[0], 0.8);
+        assert!(largest_step(&out) < 0.8 / 100.0);
+        assert_eq!(shared.paths[0].state(), PathState::Inactive);
+        // A stalled fade (no block ran) is finished by the UI thread.
+        assert!(!shared.remove_path(1));
+        let added = shared.add_path().expect("slot 0 is free again");
+        assert_eq!(added, 0);
+        assert!(shared.remove_path(added));
+        shared.service_paths();
+        assert_eq!(shared.paths[added].state(), PathState::Inactive);
+        // With a bridge running, the UI waits for the mixer, and only
+        // finishes a fade that is overdue.
+        shared.running.store(true, Ordering::Relaxed);
+        let added = shared.add_path().unwrap();
+        assert!(shared.remove_path(added));
+        shared.service_paths();
+        assert_eq!(shared.paths[added].state(), PathState::FadingOut);
+        shared.paths[added].backdate_removal(std::time::Duration::from_secs(1));
+        shared.service_paths();
+        assert_eq!(shared.paths[added].state(), PathState::Inactive);
+    }
+
+    #[test]
+    fn a_duplicate_starts_muted_and_copies_the_chain() {
+        use super::super::gate::GateSettings;
+        let _main = super::super::shared::tests::claim_main_thread();
+        let fake = crate::audio::clap::tests::fake_plugin_for_test;
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        shared.set_routes([[false, true, false, false], [true, false, false, false]]);
+        let gate = GateSettings {
+            threshold_db: -50.0,
+            ..GateSettings::default()
+        };
+        shared.set_gate(gate);
+        shared.paths[0].set_level_db(-3.0);
+        shared.paths[0].edit_chain(|chain| chain.insert_clap_for_test(fake(false)));
+        let before = render(&mut mixer, &shared, 64);
+
+        let copy = shared.duplicate_path(0).expect("a free slot");
+        assert_eq!(copy, 1);
+        let duplicate = &shared.paths[copy];
+        assert!(duplicate.muted() && !duplicate.soloed());
+        let mix = duplicate.mix();
+        assert_eq!(mix.routes, shared.paths[0].mix().routes);
+        assert_eq!(mix.gate, gate);
+        assert_eq!(mix.level_db, -3.0);
+        let plugins = duplicate.plugins.lock().unwrap().prefs();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins, shared.paths[0].plugin_prefs());
+        // Added muted: the sum does not move.
+        let after = render(&mut mixer, &shared, 64);
+        assert_eq!(after[63], before[63]);
+    }
+
+    #[test]
+    fn a_new_path_stays_silent_until_its_plugins_open_then_fades_in() {
+        use super::super::path::PathMix;
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        let _adopted = render(&mut mixer, &shared, 16);
+        let bypassed = EqSettings {
+            enabled: false,
+            ..EqSettings::default()
+        };
+        let mix = PathMix {
+            eqs: [bypassed, bypassed],
+            ..PathMix::default()
+        };
+        let pending = crate::audio::PluginPref {
+            path: "missing.vst3".to_owned(),
+            name: "Missing".to_owned(),
+            ..crate::audio::PluginPref::default()
+        };
+        shared.restore_path(1, &mix, vec![pending]);
+        assert!(shared.paths[1].chain_pending());
+        let waiting = render(&mut mixer, &shared, 400);
+        assert!(waiting.iter().all(|frame| *frame == [0.5, -0.25, 0.0, 0.0]));
+        // The UI thread tries to open it (here it fails, so the insert is
+        // left out): the path fades in instead of jumping.
+        shared.paths[1].ensure_plugin_loaded(0);
+        assert!(!shared.paths[1].chain_pending());
+        let out = render(&mut mixer, &shared, 400);
+        assert!(out[0][0] > 0.5 && out[0][0] < 0.51, "{:?}", out[0]);
+        assert!(largest_step(&out) < 0.5 / 100.0);
+        assert_eq!(out[399], [1.0, -0.5, 0.0, 0.0]);
     }
 }
