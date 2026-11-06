@@ -176,6 +176,11 @@ pub struct RigWerkApp {
     /// Output device shown on Signal Routing (not persisted; apart from the
     /// Mixer's selection).
     pub(crate) routing_device: usize,
+    /// Path slot the Signal Routing presets set (page-local; falls back to
+    /// the selected path).
+    pub(crate) routing_preset_path: Option<usize>,
+    /// The routing card applied last, for "Custom · edited from <card>".
+    pub(crate) routing_last_card: Option<crate::app::cards::Card>,
     /// Where the next Plugins-page add should land (`None` = append).
     pub(crate) plugin_insert_at: Option<usize>,
     pub(crate) meter_in_l: f32,
@@ -655,6 +660,8 @@ impl RigWerkApp {
                 },
             ),
             routing_device: 0,
+            routing_preset_path: None,
+            routing_last_card: None,
             plugin_insert_at: None,
             meter_in_l: 0.0,
             meter_in_r: 0.0,
@@ -869,6 +876,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         eq_edit: EqSlot::Pre,
         chain_selected: crate::ui::pages::mixer::chain::ChainSelection::PreEq,
         routing_device: 0,
+        routing_preset_path: None,
+        routing_last_card: None,
         plugin_insert_at: None,
         meter_in_l: 0.0,
         meter_in_r: 0.0,

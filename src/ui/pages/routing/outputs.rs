@@ -1,9 +1,15 @@
-//! Layer ② of Signal Routing: which device channels play the finished mix.
+//! Layer ② of Signal Routing: which device channels play each path.
 //!
 //! The device list is the Mixer's (`output_device_rows`), in the same order.
 //! The page keeps its own selected device (`routing_device`); "Open in
 //! Mixer" selects that device there. Followers and RigWerk Out appear when
 //! they are in the session.
+//!
+//! With one path the matrix is today's Mix L / Mix R onto the device's
+//! channels.  With several, it has one row pair per path in the path's
+//! colour (cells in one column add up), a sum block per path (level and
+//! polarity on this device; trim and alignment wait for P3), and the
+//! routing warnings (`RigWerkApp::routing_warnings`).
 
 use eframe::egui;
 use egui::{
@@ -11,23 +17,29 @@ use egui::{
     Stroke, Vec2,
 };
 
+use crate::app::cards::{Card, RoutingWarning, RoutingWarningKind};
+use crate::app::paths::PathInfo;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{
-    ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, UnusedChannels,
-    MAX_OUTPUT_CHANNELS,
+    ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
+    UnusedChannels, MAX_OUTPUT_CHANNELS,
 };
 use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::pages::mixer::output_devices::{block, device_state, OutputDeviceRow};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
+    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, DIM, GREEN, MUTED, RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    card, clock_tag, fit_text, horizontal_line, micro_label, mono, paint_tag, row_info,
-    show_focus_ring, tab_button_sized, tag_width,
+    card, clock_tag, fit_text, horizontal_line, micro_label, mono, paint_tag, path_chip,
+    path_level_text, path_toggle, row_info, show_focus_ring, tab_button_sized, tag_width,
 };
 
-use super::{column_header, layer_badge, matrix_cell, row_header, CELL, ROW_HEADER_W};
+use super::paths::level_stepper;
+use super::{
+    column_header, layer_badge, matrix_cell, path_output_cell, path_row_header, row_header, CELL,
+    ROW_HEADER_W,
+};
 
 /// Below this card width the device list sits above the selected device's
 /// matrix instead of beside it.
@@ -158,12 +170,27 @@ pub(crate) fn preset_active(map: ChannelMap, preset: MapPreset, channels: usize)
 }
 
 /// What the page asks the app to do after drawing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum RoutingAction {
     /// Show this device's map on this page only.
     Select(usize),
     /// Go to the Mixer with this device selected.
     OpenInMixer(usize),
+    /// Set up paths and routing from a card.
+    ApplyCard(Card),
+    /// Add an empty, muted path.
+    AddPath,
+    /// Add a muted copy of this path slot.
+    DuplicatePath(usize),
+    /// Remove this path slot (it fades out).
+    RemovePath(usize),
+    /// Make the presets on this page set this path slot's map.
+    PresetPath(usize),
+    /// Go to the Mixer on this path slot.
+    OpenPathInMixer(usize),
+    PathMute(usize, bool),
+    PathSolo(usize, bool),
+    PathLevel(usize, f32),
 }
 
 /// A preset button, named for screen readers as "<label> preset".
@@ -276,6 +303,37 @@ pub(crate) fn device_summary_row(
     context: &str,
 ) -> bool {
     let summary = map_summary(&row.settings, path, row.channels);
+    let state_color = if summary.silent && state == EngineState::Running {
+        AMBER
+    } else {
+        device_state(row, state).1
+    };
+    let line = DeviceLine {
+        color: if summary.silent { AMBER } else { MUTED },
+        text: summary.text,
+        dots: Vec::new(),
+    };
+    device_row(ui, row, &line, state_color, selected, context)
+}
+
+/// The detail line of a device row: its text and colour, and the colour
+/// dots of the paths that play there (several paths only).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DeviceLine {
+    pub(crate) text: String,
+    pub(crate) color: Color32,
+    pub(crate) dots: Vec<Color32>,
+}
+
+/// Paints one device row: state dot, name, tag, then `line`.
+fn device_row(
+    ui: &mut egui::Ui,
+    row: &OutputDeviceRow,
+    line: &DeviceLine,
+    state_color: Color32,
+    selected: bool,
+    context: &str,
+) -> bool {
     let name_font = FontId::new(ts(11.0), FontFamily::Proportional);
     let detail_font = FontId::new(ts(8.5), FontFamily::Monospace);
     let (rect, response) =
@@ -304,11 +362,6 @@ pub(crate) fn device_summary_row(
         ),
         egui::StrokeKind::Inside,
     );
-    let state_color = if summary.silent && state == EngineState::Running {
-        AMBER
-    } else {
-        device_state(row, state).1
-    };
     let dot = egui::pos2(rect.left() + 14.0, rect.top() + 15.0);
     ui.painter()
         .circle_filled(dot, 4.0, with_alpha(state_color, 60));
@@ -343,32 +396,98 @@ pub(crate) fn device_summary_row(
             tag_color,
         );
     }
+    let mut detail_x = text_x;
+    for color in &line.dots {
+        ui.painter()
+            .circle_filled(egui::pos2(detail_x + 3.5, rect.top() + 31.0), 3.5, *color);
+        detail_x += 10.0;
+    }
+    if !line.dots.is_empty() {
+        detail_x += 2.0;
+    }
     let detail = fit_text(
         ui,
-        &summary.text,
+        &line.text,
         &detail_font,
-        (text_right - text_x).max(20.0),
+        (text_right - detail_x).max(20.0),
     );
     ui.painter().text(
-        egui::pos2(text_x, rect.top() + 31.0),
+        egui::pos2(detail_x, rect.top() + 31.0),
         Align2::LEFT_CENTER,
         detail,
         detail_font,
-        if summary.silent { AMBER } else { MUTED },
+        line.color,
     );
 
     show_focus_ring(ui, &response, rect, 8);
-    let response = response.on_hover_text(format!("{} · {}", row.name, summary.text));
+    let response = response.on_hover_text(format!("{} · {}", row.name, line.text));
     row_info(
         &response,
         egui::Role::Button,
         ui.is_enabled(),
         format!("{} {context}", row.name),
         Some(selected),
-        Some(summary.text),
+        Some(line.text.clone()),
     );
     ui.add_space(2.0);
     response.clicked()
+}
+
+/// Whether to offer Silent / Mono copy with several paths: on any device
+/// with more than two channels, and whenever a channel is reached by none
+/// of `slots`.
+pub(crate) fn shows_unused_choice_paths(
+    settings: &OutputDeviceSettings,
+    slots: &[usize],
+    channels: usize,
+) -> bool {
+    channels > 2
+        || (0..channels.min(MAX_OUTPUT_CHANNELS)).any(|channel| {
+            slots
+                .iter()
+                .all(|&slot| settings.map(slot).sides_at(channels, channel) == (false, false))
+        })
+}
+
+/// "Out 1, Out 2" for 0-based channels.
+pub(crate) fn channel_list(channels: &[usize]) -> String {
+    channels
+        .iter()
+        .map(|channel| format!("Out {}", channel + 1))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The red (Sum) or amber (Shift) banner over a device's matrix.
+fn warning_banner(ui: &mut egui::Ui, warning: &RoutingWarning, device: &str) {
+    let (color, title, body) = match warning.kind {
+        RoutingWarningKind::Sum => (
+            RED,
+            format!(
+                "Paths add up unaligned on {device} ({}).",
+                channel_list(&warning.channels)
+            ),
+            "They arrive at different times and can comb filter (thin, hollow sound). Until alignment lands, keep summed paths on separate channels or devices.",
+        ),
+        RoutingWarningKind::Shift => (
+            AMBER,
+            format!("Paths are not aligned on {device}."),
+            "Nothing adds up here, so there's no comb filter, but the channels arrive at different times.",
+        ),
+    };
+    egui::Frame::new()
+        .fill(with_alpha(color, 14))
+        .stroke(Stroke::new(1.0, with_alpha(color, 80)))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(RichText::new(title).size(ts(10.5)).color(color).strong());
+                ui.label(RichText::new(body).size(ts(10.5)).color(MUTED));
+            });
+        });
 }
 
 /// Shown under the title when nothing is routed but Mono copy fills every
@@ -403,6 +522,45 @@ fn nothing_routed_banner(ui: &mut egui::Ui, device: &str) {
         });
 }
 
+/// One edit of the selected device's settings, asked for while drawing and
+/// applied after it ([`RigWerkApp::apply_map_edit`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MapEdit {
+    /// Turn one matrix cell of a path on or off.
+    Cell {
+        slot: usize,
+        side: MixSide,
+        channel: usize,
+        on: bool,
+    },
+    /// A preset: the path's whole map.
+    Map { slot: usize, map: ChannelMap },
+    /// The path's level on the device; `commit` on a ± click or at the end
+    /// of a drag (only then is it logged).
+    Level {
+        slot: usize,
+        level_db: f32,
+        commit: bool,
+    },
+    /// The path's polarity on the device.
+    Invert { slot: usize, invert: bool },
+    /// What the device's unreached channels play.
+    Unused(UnusedChannels),
+}
+
+/// The paths whose own map reaches some channel of a `channels`-channel
+/// device with these settings.
+fn paths_reaching<'a>(
+    settings: &OutputDeviceSettings,
+    channels: usize,
+    infos: &'a [PathInfo],
+) -> Vec<&'a PathInfo> {
+    infos
+        .iter()
+        .filter(|info| settings.map(info.slot).reaches_any(channels))
+        .collect()
+}
+
 impl RigWerkApp {
     /// The stored settings of output device `index` (0 = clock, then followers).
     fn output_settings_mut(&mut self, index: usize) -> Option<&mut OutputDeviceSettings> {
@@ -422,6 +580,217 @@ impl RigWerkApp {
                 self.chain_selected = ChainSelection::OutputDevice(index);
                 self.page = Page::Mixer;
             }
+            RoutingAction::ApplyCard(card) => {
+                if !self.apply_card(card) {
+                    self.push_log(
+                        format!("{}: no free path slot yet, try again.", card.label()),
+                        AMBER,
+                    );
+                }
+            }
+            RoutingAction::AddPath => {
+                let _ = self.add_path();
+            }
+            RoutingAction::DuplicatePath(slot) => {
+                let _ = self.duplicate_path(slot);
+            }
+            RoutingAction::RemovePath(slot) => {
+                let _ = self.remove_path(slot);
+            }
+            RoutingAction::PresetPath(slot) => self.routing_preset_path = Some(slot),
+            RoutingAction::OpenPathInMixer(slot) => {
+                if self.select_path(slot) {
+                    if let ChainSelection::OutputDevice(_) = self.chain_selected {
+                        self.chain_selected = ChainSelection::PreEq;
+                    }
+                    self.page = Page::Mixer;
+                }
+            }
+            RoutingAction::PathMute(slot, mute) => self.set_path_mute(slot, mute),
+            RoutingAction::PathSolo(slot, solo) => self.set_path_solo(slot, solo),
+            RoutingAction::PathLevel(slot, level_db) => self.set_path_level(slot, level_db),
+        }
+    }
+
+    /// Applies one edit of output device `device` and logs it: map edits
+    /// with the device's new map, level only when committed, polarity on
+    /// its own line.
+    pub(crate) fn apply_map_edit(&mut self, device: usize, edit: MapEdit) {
+        let Some(row) = self.output_device_rows().into_iter().nth(device) else {
+            return;
+        };
+        let multi = self.path_count() > 1;
+        let path_name = |app: &Self, slot: usize| {
+            app.paths
+                .get(slot)
+                .and_then(Option::as_ref)
+                .map_or_else(String::new, |path| path.name.clone())
+        };
+        let edit_entry = |app: &mut Self, slot: usize, change: &dyn Fn(&mut PathMapSettings)| {
+            let Some(mut entry) = app.device_path_map(device, slot) else {
+                return false;
+            };
+            change(&mut entry);
+            app.set_device_path_map(device, slot, entry);
+            true
+        };
+        match edit {
+            MapEdit::Cell {
+                slot,
+                side,
+                channel,
+                on,
+            } => {
+                if !edit_entry(self, slot, &|entry| entry.map.set(side, channel, on)) {
+                    return;
+                }
+                self.log_map(device, &row.name, row.channels, slot, multi);
+            }
+            MapEdit::Map { slot, map } => {
+                if !edit_entry(self, slot, &|entry| entry.map = map) {
+                    return;
+                }
+                self.log_map(device, &row.name, row.channels, slot, multi);
+            }
+            MapEdit::Level {
+                slot,
+                level_db,
+                commit,
+            } => {
+                if !edit_entry(self, slot, &|entry| entry.level_db = level_db) || !commit {
+                    return;
+                }
+                let level = self
+                    .device_path_map(device, slot)
+                    .map_or(level_db, |entry| entry.level_db);
+                self.push_log(
+                    format!(
+                        "{} level on {}: {}.",
+                        path_name(self, slot),
+                        row.name,
+                        path_level_text(level)
+                    ),
+                    TEAL,
+                );
+            }
+            MapEdit::Invert { slot, invert } => {
+                if !edit_entry(self, slot, &|entry| entry.invert = invert) {
+                    return;
+                }
+                self.push_log(
+                    format!(
+                        "{} polarity on {}: {}.",
+                        path_name(self, slot),
+                        row.name,
+                        if invert { "flipped" } else { "normal" }
+                    ),
+                    if invert { AMBER } else { TEAL },
+                );
+            }
+            MapEdit::Unused(mode) => {
+                if let Some(settings) = self.output_settings_mut(device) {
+                    settings.unused = mode;
+                }
+                self.push_log(
+                    format!(
+                        "{}: unused channels {}.",
+                        row.name,
+                        match mode {
+                            UnusedChannels::Silent => "silent",
+                            UnusedChannels::MonoCopy => "play a mono copy",
+                        }
+                    ),
+                    TEAL,
+                );
+            }
+        }
+    }
+
+    /// Logs path `slot`'s map on a device after an edit.
+    fn log_map(&mut self, device: usize, name: &str, channels: usize, slot: usize, multi: bool) {
+        let Some(settings) = self.device_settings().get(device).copied().copied() else {
+            return;
+        };
+        let summary = map_summary(&settings, slot, channels);
+        let prefix = match self.paths.get(slot).and_then(Option::as_ref) {
+            Some(path) if multi => format!("{name}: {}", path.name),
+            _ => name.to_owned(),
+        };
+        self.push_log(
+            format!("{prefix}: {}.", summary.text),
+            if summary.silent { AMBER } else { TEAL },
+        );
+    }
+
+    /// What a device's list row says with several paths: an unaligned sum
+    /// first, then silence, the one path that plays there, or "N paths"
+    /// (amber while they are not aligned) with the slowest path's latency.
+    pub(crate) fn device_paths_line(
+        &self,
+        device: usize,
+        row: &OutputDeviceRow,
+        infos: &[PathInfo],
+    ) -> DeviceLine {
+        let reaching = paths_reaching(&row.settings, row.channels, infos);
+        let dots = reaching.iter().map(|info| info.colour).collect();
+        let warning = self
+            .routing_warnings(device)
+            .first()
+            .map(|warning| warning.kind);
+        if warning == Some(RoutingWarningKind::Sum) {
+            return DeviceLine {
+                text: "unaligned sum · comb filter".to_owned(),
+                color: RED,
+                dots,
+            };
+        }
+        match reaching.as_slice() {
+            [] => {
+                let summary = map_summary(&row.settings, infos[0].slot, row.channels);
+                DeviceLine {
+                    color: if summary.silent { AMBER } else { MUTED },
+                    text: summary.text,
+                    dots,
+                }
+            }
+            [info] => DeviceLine {
+                text: format!(
+                    "{} · {}",
+                    info.name,
+                    map_summary(&row.settings, info.slot, row.channels).text
+                ),
+                color: MUTED,
+                dots,
+            },
+            several => {
+                let channels = row.channels.min(MAX_OUTPUT_CHANNELS);
+                let summed = (0..channels).any(|channel| {
+                    several
+                        .iter()
+                        .filter(|info| {
+                            row.settings.map(info.slot).sides_at(channels, channel)
+                                != (false, false)
+                        })
+                        .count()
+                        > 1
+                });
+                let slowest = several
+                    .iter()
+                    .fold(0.0_f32, |slowest, info| slowest.max(info.latency_ms));
+                DeviceLine {
+                    text: format!(
+                        "{} paths{} · {slowest:.1} ms",
+                        several.len(),
+                        if summed { " · summed" } else { "" }
+                    ),
+                    color: if warning == Some(RoutingWarningKind::Shift) {
+                        AMBER
+                    } else {
+                        MUTED
+                    },
+                    dots,
+                }
+            }
         }
     }
 
@@ -430,20 +799,22 @@ impl RigWerkApp {
         &mut self,
         ui: &mut egui::Ui,
         width: f32,
+        infos: &[PathInfo],
         actions: &mut Vec<RoutingAction>,
     ) {
         let rows = self.output_device_rows();
         let selected = selected_device(self.routing_device, rows.len());
+        let mut edits = Vec::new();
         card(ui, CARD, BORDER, |ui| {
             let inner = width - 32.0;
             ui.set_width(inner);
             if inner < OUTPUTS_STACK_BELOW {
-                self.routing_device_list(ui, &rows, selected, actions);
+                self.routing_device_list(ui, &rows, selected, infos, actions);
                 ui.add_space(10.0);
                 horizontal_line(ui, BORDER_SOFT);
                 ui.add_space(10.0);
                 if let Some(row) = rows.get(selected) {
-                    self.routing_device_map(ui, row, selected);
+                    self.routing_device_map(ui, row, selected, infos, actions, &mut edits);
                 }
                 return;
             }
@@ -456,7 +827,7 @@ impl RigWerkApp {
                     Layout::top_down(Align::LEFT),
                     |ui| {
                         ui.set_width(list_w);
-                        self.routing_device_list(ui, &rows, selected, actions);
+                        self.routing_device_list(ui, &rows, selected, infos, actions);
                     },
                 );
                 ui.add_space(gap - ui.spacing().item_spacing.x);
@@ -466,23 +837,28 @@ impl RigWerkApp {
                     |ui| {
                         ui.set_width(map_w);
                         if let Some(row) = rows.get(selected) {
-                            self.routing_device_map(ui, row, selected);
+                            self.routing_device_map(ui, row, selected, infos, actions, &mut edits);
                         }
                     },
                 );
             });
         });
+        for edit in edits {
+            self.apply_map_edit(selected, edit);
+        }
     }
 
     fn routing_device_list(
-        &mut self,
+        &self,
         ui: &mut egui::Ui,
         rows: &[OutputDeviceRow],
         selected: usize,
+        infos: &[PathInfo],
         actions: &mut Vec<RoutingAction>,
     ) {
         let state = self.engine.state;
-        let path = self.selected_path;
+        let multi = infos.len() > 1;
+        let path = infos.first().map_or(0, |info| info.slot);
         let live = self.live_path_mask();
         let playing: usize = rows
             .iter()
@@ -492,7 +868,14 @@ impl RigWerkApp {
         // ~240–300 px, so a single row overlaps "MIX -> OUTPUTS".
         ui.horizontal(|ui| {
             layer_badge(ui, 2, BLUE);
-            ui.label(micro_label("MIX -> OUTPUTS", BLUE));
+            ui.label(micro_label(
+                if multi {
+                    "PATHS -> OUTPUTS"
+                } else {
+                    "MIX -> OUTPUTS"
+                },
+                BLUE,
+            ));
         });
         ui.label(mono(
             super::patch_count_label(rows.len(), playing),
@@ -500,16 +883,34 @@ impl RigWerkApp {
             9.5,
         ));
         ui.add_space(6.0);
-        // Followers join this list in steps 2 and 3 (see `output_device_rows`).
         for (index, row) in rows.iter().enumerate() {
-            if device_summary_row(
-                ui,
-                row,
-                path,
-                index == selected,
-                state,
-                "in routing outputs",
-            ) {
+            let clicked = if multi {
+                let line = self.device_paths_line(index, row, infos);
+                // While running, a warning colours the state dot too.
+                let state_color = if state == EngineState::Running && line.color != MUTED {
+                    line.color
+                } else {
+                    device_state(row, state).1
+                };
+                device_row(
+                    ui,
+                    row,
+                    &line,
+                    state_color,
+                    index == selected,
+                    "in routing outputs",
+                )
+            } else {
+                device_summary_row(
+                    ui,
+                    row,
+                    path,
+                    index == selected,
+                    state,
+                    "in routing outputs",
+                )
+            };
+            if clicked {
                 actions.push(RoutingAction::Select(index));
             }
         }
@@ -531,16 +932,39 @@ impl RigWerkApp {
         }
     }
 
-    /// The selected device: title, presets, its matrix with meters, the
-    /// unused-channel choice and notes.
-    fn routing_device_map(&mut self, ui: &mut egui::Ui, row: &OutputDeviceRow, index: usize) {
+    /// The path the presets set: the page's own choice while that path
+    /// lives, else the selected path.
+    fn routing_preset_slot(&self, infos: &[PathInfo]) -> usize {
+        self.routing_preset_path
+            .filter(|&slot| infos.iter().any(|info| info.slot == slot))
+            .or_else(|| {
+                infos
+                    .iter()
+                    .find(|info| info.selected)
+                    .map(|info| info.slot)
+            })
+            .or_else(|| infos.first().map(|info| info.slot))
+            .unwrap_or(0)
+    }
+
+    /// The selected device: title, warnings, presets, its matrix (one row
+    /// pair per path) with meters, the sum block, the unused-channel choice
+    /// and notes.  Edits go to `edits`.
+    fn routing_device_map(
+        &self,
+        ui: &mut egui::Ui,
+        row: &OutputDeviceRow,
+        index: usize,
+        infos: &[PathInfo],
+        actions: &mut Vec<RoutingAction>,
+        edits: &mut Vec<MapEdit>,
+    ) {
         let channels = row.channels;
-        // The existing page edits the selected path's map on each device.
-        let path = self.selected_path;
-        let Some(settings) = self.output_settings_mut(index).copied() else {
-            return;
-        };
-        let mut changed = settings;
+        let multi = infos.len() > 1;
+        // Presets (and the single-path matrix) edit this path.
+        let path = self.routing_preset_slot(infos);
+        let slots: Vec<usize> = infos.iter().map(|info| info.slot).collect();
+        let settings = row.settings;
 
         ui.horizontal(|ui| {
             let title_font = FontId::new(ts(16.0), FontFamily::Proportional);
@@ -572,11 +996,24 @@ impl RigWerkApp {
         ));
         ui.add_space(8.0);
 
-        let summary = map_summary(&settings, path, channels);
-        if summary.silent {
+        let reaching = paths_reaching(&settings, channels, infos);
+        let (silent, nothing_routed) = if multi {
+            let none = reaching.is_empty();
+            (none && settings.unused == UnusedChannels::Silent, none)
+        } else {
+            let summary = map_summary(&settings, path, channels);
+            (summary.silent, summary.nothing_routed)
+        };
+        if multi {
+            for warning in self.routing_warnings(index) {
+                warning_banner(ui, &warning, &row.name);
+                ui.add_space(8.0);
+            }
+        }
+        if silent {
             nothing_routed_banner(ui, &row.name);
             ui.add_space(8.0);
-        } else if summary.nothing_routed {
+        } else if nothing_routed {
             ui.label(
                 RichText::new(MONO_COPY_ONLY_NOTE)
                     .size(ts(10.5))
@@ -588,11 +1025,32 @@ impl RigWerkApp {
         ui.horizontal_wrapped(|ui| {
             ui.label(micro_label("PRESETS", DIM));
             ui.add_space(4.0);
+            if multi {
+                // Which path the presets set (this page only).
+                for info in infos {
+                    let chip = path_chip(
+                        ui,
+                        info.colour,
+                        &info.name,
+                        info.mute,
+                        info.slot == path,
+                        160.0,
+                    )
+                    .on_hover_text(format!("Presets set {}'s map here", info.name));
+                    if chip.clicked() {
+                        actions.push(RoutingAction::PresetPath(info.slot));
+                    }
+                }
+                ui.add_space(4.0);
+            }
             for &preset in MapPreset::available(channels) {
                 let result = settings.map(path).with_preset(preset, channels);
                 let active = preset_active(settings.map(path), preset, channels);
                 if preset_button(ui, preset.label(channels), active) {
-                    changed.path_map[path].map = result;
+                    edits.push(MapEdit::Map {
+                        slot: path,
+                        map: result,
+                    });
                 }
             }
         });
@@ -609,17 +1067,55 @@ impl RigWerkApp {
                     }
                 });
                 ui.add_space(2.0);
-                for (side, name) in [(MixSide::L, "Mix L"), (MixSide::R, "Mix R")] {
-                    ui.horizontal(|ui| {
-                        row_header(ui, name, "after master", AMBER);
-                        for channel in 0..channels {
-                            let on = settings.map(path).routes(side, channel);
-                            if output_cell(ui, on, side, channel) {
-                                changed.path_map[path].map.set(side, channel, !on);
-                            }
-                        }
+                let mut cell = |slot: usize, side: MixSide, channel: usize, on: bool| {
+                    edits.push(MapEdit::Cell {
+                        slot,
+                        side,
+                        channel,
+                        on,
                     });
-                    ui.add_space(5.0);
+                };
+                if multi {
+                    for (position, info) in infos.iter().enumerate() {
+                        for (side, letter) in [(MixSide::L, "L"), (MixSide::R, "R")] {
+                            ui.horizontal(|ui| {
+                                path_row_header(
+                                    ui,
+                                    &format!("{} {letter}", info.name),
+                                    &format!("path {} · after path level", position + 1),
+                                    info.colour,
+                                    info.audible,
+                                );
+                                for channel in 0..channels {
+                                    let on = settings.map(info.slot).routes(side, channel);
+                                    if path_output_cell(
+                                        ui,
+                                        on,
+                                        &info.name,
+                                        letter,
+                                        channel,
+                                        info.colour,
+                                    ) {
+                                        cell(info.slot, side, channel, !on);
+                                    }
+                                }
+                            });
+                            ui.add_space(5.0);
+                        }
+                    }
+                } else {
+                    for (side, name) in [(MixSide::L, "Mix L"), (MixSide::R, "Mix R")] {
+                        ui.horizontal(|ui| {
+                            row_header(ui, name, "after master", AMBER);
+                            for channel in 0..channels {
+                                let on = settings.map(path).routes(side, channel);
+                                if output_cell(ui, on, side, channel) {
+                                    cell(path, side, channel, !on);
+                                }
+                            }
+                        });
+                        ui.add_space(5.0);
+                    }
                 }
                 ui.horizontal(|ui| {
                     let (rect, _) =
@@ -632,7 +1128,9 @@ impl RigWerkApp {
                         DIM,
                     );
                     for channel in 0..channels {
-                        let (left, right) = settings.map(path).sides_at(channels, channel);
+                        let reached = slots.iter().any(|&slot| {
+                            settings.map(slot).sides_at(channels, channel) != (false, false)
+                        });
                         let (level, peak) = if index == 0 {
                             (
                                 self.meter_out_channels[channel],
@@ -649,13 +1147,23 @@ impl RigWerkApp {
                         } else {
                             (0.0, 0.0)
                         };
-                        channel_meter(ui, left || right, settings.unused, level, peak);
+                        channel_meter(ui, reached, settings.unused, level, peak);
                     }
                 });
             });
         ui.add_space(8.0);
 
-        if shows_unused_choice(&settings, path, channels) {
+        if multi && !reaching.is_empty() {
+            sum_block(ui, row, &settings, &reaching, edits);
+            ui.add_space(8.0);
+        }
+
+        let unused_choice = if multi {
+            shows_unused_choice_paths(&settings, &slots, channels)
+        } else {
+            shows_unused_choice(&settings, path, channels)
+        };
+        if unused_choice {
             block(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(micro_label("UNUSED CHANNELS", DIM));
@@ -666,8 +1174,9 @@ impl RigWerkApp {
                     ] {
                         if tab_button_sized(ui, label, settings.unused == mode, BLUE, 9.5)
                             .clicked()
+                            && settings.unused != mode
                         {
-                            changed.unused = mode;
+                            edits.push(MapEdit::Unused(mode));
                         }
                     }
                     ui.add_space(6.0);
@@ -683,6 +1192,10 @@ impl RigWerkApp {
             ui.add_space(8.0);
         }
 
+        if multi && reaching.len() > 1 {
+            ui.add(egui::Label::new(RichText::new(SUM_NOTE).size(ts(10.0)).color(MUTED)).wrap());
+            ui.add_space(4.0);
+        }
         if channels == 1 {
             ui.add(
                 egui::Label::new(RichText::new(MONO_DEVICE_NOTE).size(ts(10.0)).color(MUTED))
@@ -696,32 +1209,158 @@ impl RigWerkApp {
                     .wrap(),
             );
         }
+    }
+}
 
-        if changed != settings {
-            if let Some(stored) = self.output_settings_mut(index) {
-                *stored = changed;
-            }
-            let summary = map_summary(&changed, path, channels);
-            self.push_log(
-                format!("{}: {}.", row.name, summary.text),
-                if summary.silent { AMBER } else { TEAL },
-            );
+/// Under the sum block when several paths play on one device.
+pub(crate) const SUM_NOTE: &str =
+    "Cells in one column add up. Master level and mute (Mixer -> Output) act after the sum.";
+
+/// The sum block: per path on this device, its level and polarity; trim
+/// and the alignment delay come with alignment.  Then the latency line.
+fn sum_block(
+    ui: &mut egui::Ui,
+    row: &OutputDeviceRow,
+    settings: &OutputDeviceSettings,
+    reaching: &[&PathInfo],
+    edits: &mut Vec<MapEdit>,
+) {
+    block(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(micro_label(
+                &format!("SUM ON {}", row.name.to_uppercase()),
+                BLUE,
+            ));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(mono("ALIGN · AFTER ALIGNMENT", DIM, 8.5))
+                    .on_hover_text("Per-device alignment comes in a later version.");
+            });
+        });
+        ui.add_space(6.0);
+        egui::ScrollArea::horizontal()
+            .id_salt(("routing_sum_scroll", row.name.as_str()))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                egui::Grid::new(("routing_sum", row.name.as_str()))
+                    .num_columns(5)
+                    .spacing([16.0, 8.0])
+                    .show(ui, |ui| {
+                        for header in ["PATH", "LEVEL HERE", "POLARITY", "TRIM", "ALIGNMENT"] {
+                            ui.label(micro_label(header, DIM));
+                        }
+                        ui.end_row();
+                        for info in reaching {
+                            sum_row(ui, row, settings.path_map[info.slot], info, edits);
+                            ui.end_row();
+                        }
+                    });
+            });
+        ui.add_space(6.0);
+        horizontal_line(ui, BORDER_SOFT);
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(latency_line(&row.name, reaching))
+                    .size(ts(10.0))
+                    .color(MUTED),
+            )
+            .wrap(),
+        );
+    });
+}
+
+/// One path's row in the sum block.
+fn sum_row(
+    ui: &mut egui::Ui,
+    row: &OutputDeviceRow,
+    entry: PathMapSettings,
+    info: &PathInfo,
+    edits: &mut Vec<MapEdit>,
+) {
+    ui.horizontal(|ui| {
+        let (dot, _) = ui.allocate_exact_size(Vec2::new(8.0, 18.0), Sense::hover());
+        ui.painter().circle_filled(dot.center(), 4.0, info.colour);
+        ui.label(RichText::new(&info.name).size(ts(10.5)).color(TEXT));
+        ui.label(mono(format!("{:.1} ms", info.latency_ms), DIM, 8.5));
+    });
+    if let Some(step) = level_stepper(
+        ui,
+        entry.level_db,
+        &format!("{} level on {}", info.name, row.name),
+    ) {
+        edits.push(MapEdit::Level {
+            slot: info.slot,
+            level_db: step.level_db,
+            commit: step.commit,
+        });
+    }
+    if path_toggle(
+        ui,
+        "ø",
+        entry.invert,
+        AMBER,
+        &format!("Flip polarity of {} on {}", info.name, row.name),
+        "Flip this path's polarity on this device",
+    ) {
+        edits.push(MapEdit::Invert {
+            slot: info.slot,
+            invert: !entry.invert,
+        });
+    }
+    let _ = ui
+        .add_enabled(
+            false,
+            egui::Button::new(mono(format!("{:+.1} ms", entry.trim_ms), DIM, 9.0))
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::new(1.0, BORDER_SOFT))
+                .corner_radius(CornerRadius::same(6))
+                .min_size(Vec2::new(70.0, 22.0)),
+        )
+        .on_disabled_hover_text("Trim (±5 ms) applies after alignment");
+    ui.label(mono("after alignment", DIM, 9.0));
+}
+
+/// The latency line under the sum: what each path adds, and how far apart
+/// they arrive until alignment exists.
+pub(crate) fn latency_line(device: &str, reaching: &[&PathInfo]) -> String {
+    let parts: Vec<String> = reaching
+        .iter()
+        .map(|info| format!("{} {:.1} ms", info.name, info.latency_ms))
+        .collect();
+    let mut text = format!(
+        "Latency: {device} plays each path as its chain finishes ({}).",
+        parts.join(" · ")
+    );
+    if reaching.len() > 1 {
+        let (min, max) = reaching
+            .iter()
+            .fold((f32::INFINITY, 0.0_f32), |(min, max), info| {
+                (min.min(info.latency_ms), max.max(info.latency_ms))
+            });
+        let spread = (max - min).max(0.0);
+        if spread >= 0.05 {
+            text.push_str(&format!(" Up to {spread:.1} ms apart: no alignment yet."));
+        } else {
+            text.push_str(" No alignment yet: a plugin that adds latency shifts its path.");
         }
     }
+    text
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        device_summary_row, map_summary, output_cell, preset_active, selected_device,
-        shows_unused_choice, RoutingAction,
+        channel_list, device_summary_row, latency_line, map_summary, output_cell, preset_active,
+        selected_device, shows_unused_choice, shows_unused_choice_paths, MapEdit, RoutingAction,
     };
+    use crate::app::cards::Card;
     use crate::app::{blank_app, Page};
     use crate::audio::{
         ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, UnusedChannels,
     };
     use crate::ui::pages::mixer::chain::ChainSelection;
     use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
+    use crate::ui::theme::{AMBER, RED};
     use crate::ui::widgets::{accesskit_frame, node_named};
     use eframe::egui::{self, accesskit::Toggled};
 
@@ -926,5 +1565,227 @@ mod tests {
         }
         let open = node_named(&tree, "Open in Mixer");
         assert_eq!(open.role(), egui::Role::Button);
+    }
+
+    fn has_node(tree: &egui::accesskit::TreeUpdate, name: &str) -> bool {
+        tree.nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some(name))
+    }
+
+    #[test]
+    fn one_path_keeps_the_page_plain() {
+        let mut app = blank_app();
+        let tree = accesskit_frame(|ui| app.routing_page(ui));
+        let single = node_named(&tree, "Single path card");
+        assert_eq!(single.toggled(), Some(Toggled::True));
+        assert!(node_named(&tree, "Blend clean card").is_disabled());
+        assert!(node_named(&tree, "Dual-amp card").is_disabled());
+        assert!(!node_named(&tree, "Dry L / Wet R card").is_disabled());
+        for name in [
+            "Mute Main",
+            "Open Main in Mixer",
+            "Duplicate Main",
+            "Add path",
+        ] {
+            let _ = node_named(&tree, name);
+        }
+        for name in ["Remove Main", "Main L to Out 1", "Presets for Main"] {
+            assert!(!has_node(&tree, name), "{name} only with several paths");
+        }
+    }
+
+    #[test]
+    fn several_paths_get_a_row_pair_each_and_their_own_controls() {
+        let mut app = blank_app();
+        assert!(app.apply_card(Card::DryWet));
+        let tree = accesskit_frame(|ui| app.routing_page(ui));
+        assert_eq!(
+            node_named(&tree, "Dry L / Wet R card").toggled(),
+            Some(Toggled::True)
+        );
+        for name in [
+            "Route input 1 to Main L",
+            "Route input 1 to Path 2 R",
+            "Path 2 R to Out 2",
+            "Remove Path 2",
+            "Solo Path 2",
+        ] {
+            let _ = node_named(&tree, name);
+        }
+        let on = node_named(&tree, "Main L to Out 1");
+        assert_eq!(on.toggled(), Some(Toggled::True));
+        let off = node_named(&tree, "Main R to Out 2");
+        assert_eq!(off.toggled(), Some(Toggled::False));
+        assert!(!has_node(&tree, "Mix L to Out 1"));
+    }
+
+    #[test]
+    fn path_actions_apply_after_drawing() {
+        let mut app = blank_app();
+        app.apply_routing_action(RoutingAction::AddPath);
+        assert_eq!(app.path_count(), 2);
+        let second = app.path_slots()[1];
+        app.apply_routing_action(RoutingAction::PathMute(second, false));
+        app.apply_routing_action(RoutingAction::PathSolo(second, true));
+        app.apply_routing_action(RoutingAction::PathLevel(second, -3.0));
+        let info = app.path_infos()[1].clone();
+        assert!(!info.mute && info.solo);
+        assert_eq!(info.level_db, -3.0);
+        app.apply_routing_action(RoutingAction::DuplicatePath(second));
+        assert_eq!(app.path_count(), 3);
+
+        app.page = Page::Routing;
+        app.chain_selected = ChainSelection::OutputDevice(0);
+        app.apply_routing_action(RoutingAction::OpenPathInMixer(0));
+        assert!(app.page == Page::Mixer);
+        assert_eq!(app.selected_path, 0);
+        assert_eq!(app.chain_selected, ChainSelection::PreEq);
+
+        app.apply_routing_action(RoutingAction::PresetPath(second));
+        assert_eq!(app.routing_preset_path, Some(second));
+        assert_eq!(
+            app.selected_path, 0,
+            "presets leave the shared selection alone"
+        );
+        app.apply_routing_action(RoutingAction::RemovePath(second));
+        assert_eq!(app.path_count(), 2);
+        app.apply_routing_action(RoutingAction::ApplyCard(Card::Single));
+        assert_eq!(app.current_card(), Some(Card::Single));
+    }
+
+    #[test]
+    fn device_rows_name_their_paths_and_warn() {
+        let mut app = blank_app();
+        assert!(app.apply_card(Card::DryWet));
+        let infos = app.path_infos();
+        let line = |app: &crate::app::RigWerkApp| {
+            let rows = app.output_device_rows();
+            app.device_paths_line(0, &rows[0], &infos)
+        };
+        let shift = line(&app);
+        assert_eq!(shift.text, "2 paths · 0.0 ms");
+        assert_eq!(shift.color, AMBER);
+        assert_eq!(shift.dots, vec![infos[0].colour, infos[1].colour]);
+
+        // Both on L/R: they add up.
+        app.clock_device.path_map[infos[0].slot].map = ChannelMap::default();
+        app.clock_device.path_map[infos[1].slot].map = ChannelMap::default();
+        let sum = line(&app);
+        assert_eq!(sum.text, "unaligned sum · comb filter");
+        assert_eq!(sum.color, RED);
+
+        // Only the second path plays here.
+        app.clock_device.path_map[infos[0].slot].map = ChannelMap { left: 0, right: 0 };
+        let one = line(&app);
+        assert_eq!(one.text, "Path 2 · L/R");
+        assert_eq!(one.dots, vec![infos[1].colour]);
+    }
+
+    #[test]
+    fn the_unused_choice_counts_every_path() {
+        let mut settings = with_map(0b01, 0, SILENT);
+        settings.path_map[1] = crate::audio::PathMapSettings::unrouted();
+        assert!(shows_unused_choice_paths(&settings, &[0, 1], 2));
+        settings.path_map[1].map = ChannelMap {
+            left: 0,
+            right: 0b10,
+        };
+        assert!(!shows_unused_choice_paths(&settings, &[0, 1], 2));
+        assert!(shows_unused_choice_paths(&settings, &[0, 1], 4));
+    }
+
+    #[test]
+    fn the_latency_line_says_how_far_apart_paths_arrive() {
+        let mut app = blank_app();
+        assert!(app.apply_card(Card::DryWet));
+        let mut infos = app.path_infos();
+        let one = latency_line("Scarlett", &[&infos[0]]);
+        assert_eq!(
+            one,
+            "Latency: Scarlett plays each path as its chain finishes (Main 0.0 ms)."
+        );
+        infos[1].latency_ms = 1.3;
+        let two = latency_line("Scarlett", &[&infos[0], &infos[1]]);
+        assert!(
+            two.ends_with("Up to 1.3 ms apart: no alignment yet."),
+            "{two}"
+        );
+        assert_eq!(channel_list(&[0, 2]), "Out 1, Out 3");
+    }
+
+    #[test]
+    fn sum_edits_write_their_own_slot_sanitized() {
+        let mut app = blank_app();
+        assert!(app.apply_card(Card::DryWet));
+        let second = app.path_slots()[1];
+        let before = app.clock_device.path_map[0];
+        app.apply_map_edit(
+            0,
+            MapEdit::Level {
+                slot: second,
+                level_db: 40.0,
+                commit: true,
+            },
+        );
+        assert_eq!(app.clock_device.path_map[second].level_db, 6.0, "clamped");
+        app.apply_map_edit(
+            0,
+            MapEdit::Invert {
+                slot: second,
+                invert: true,
+            },
+        );
+        assert!(app.clock_device.path_map[second].invert);
+        assert_eq!(app.clock_device.path_map[0], before, "other slot untouched");
+        assert!(app
+            .log
+            .iter()
+            .any(|entry| entry.text.contains("Path 2 level on")));
+        assert!(app
+            .log
+            .iter()
+            .any(|entry| entry.text.contains("Path 2 polarity on")));
+    }
+
+    #[test]
+    fn a_drag_logs_only_when_it_ends() {
+        let mut app = blank_app();
+        assert!(app.apply_card(Card::DryWet));
+        let logged = app.log.len();
+        for level_db in [-1.0, -2.0, -3.0] {
+            app.apply_map_edit(
+                0,
+                MapEdit::Level {
+                    slot: 0,
+                    level_db,
+                    commit: false,
+                },
+            );
+        }
+        assert_eq!(app.log.len(), logged);
+        assert_eq!(app.clock_device.path_map[0].level_db, -3.0);
+    }
+
+    #[test]
+    fn a_matrix_edit_makes_the_routing_custom() {
+        let mut app = blank_app();
+        assert!(app.apply_card(Card::DryWet));
+        assert_eq!(app.current_card(), Some(Card::DryWet));
+        app.apply_map_edit(
+            0,
+            MapEdit::Cell {
+                slot: 0,
+                side: MixSide::R,
+                channel: 1,
+                on: true,
+            },
+        );
+        assert_eq!(app.current_card(), None);
+        assert_eq!(app.routing_last_card, Some(Card::DryWet));
+        assert_eq!(
+            super::super::paths::custom_label(app.routing_last_card),
+            "Custom · edited from Dry L / Wet R"
+        );
     }
 }

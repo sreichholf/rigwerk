@@ -17,7 +17,8 @@ use crate::ui::theme::{
     with_alpha, AMBER, BORDER_SOFT, CARD_RAISED, DIM, GREEN, MUTED, RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    colour_swatch, db_slider, fit_text, meter_row, micro_label, mono, path_chip,
+    colour_swatch, db_slider, fit_text, meter_row, micro_label, mono, path_chip, path_level_text,
+    path_toggle,
 };
 
 /// Names of [`PATH_COLOURS`], for screen readers and hover text.
@@ -246,33 +247,6 @@ fn colour_swatches(ui: &mut egui::Ui, info: &PathInfo, actions: &mut Vec<PathAct
     });
 }
 
-/// A toggle in the style of the Output stage's MUTE button.
-fn toggle(ui: &mut egui::Ui, label: &str, on: bool, colour: Color32, hint: &str) -> bool {
-    ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .size(ts(9.0))
-                .color(if on { colour } else { DIM }),
-        )
-        .fill(if on {
-            with_alpha(colour, 22)
-        } else {
-            Color32::TRANSPARENT
-        })
-        .stroke(Stroke::new(
-            1.0,
-            if on {
-                with_alpha(colour, 55)
-            } else {
-                BORDER_SOFT
-            },
-        ))
-        .corner_radius(CornerRadius::same(6)),
-    )
-    .on_hover_text(hint)
-    .clicked()
-}
-
 /// The path meters as drawn: smoothed level and held peak, L then R.
 pub(super) struct PathMeters {
     pub(super) level: [f32; 2],
@@ -303,20 +277,24 @@ pub(super) fn path_inspector(
         ui.label(RichText::new(title).font(font).color(TEXT).strong())
             .on_hover_text(&info.name);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if toggle(
+            let label = if info.solo { "SOLOED" } else { "SOLO" };
+            if path_toggle(
                 ui,
-                if info.solo { "SOLOED" } else { "SOLO" },
+                label,
                 info.solo,
                 AMBER,
+                label,
                 "While any path is soloed, only soloed paths sound.",
             ) {
                 actions.push(PathAction::Solo(info.slot, !info.solo));
             }
-            if toggle(
+            let label = if info.mute { "MUTED" } else { "MUTE" };
+            if path_toggle(
                 ui,
-                if info.mute { "MUTED" } else { "MUTE" },
+                label,
                 info.mute,
                 RED,
+                label,
                 "Silence this path on every device. The other paths keep playing.",
             ) {
                 actions.push(PathAction::Mute(info.slot, !info.mute));
@@ -329,7 +307,7 @@ pub(super) fn path_inspector(
             .color(DIM),
     );
     ui.add_space(12.0);
-    ui.label(mono(format!("{:+.1} dB", info.level_db), TEXT, 12.0));
+    ui.label(mono(path_level_text(info.level_db), TEXT, 12.0));
     let mut level = info.level_db;
     if db_slider(
         ui,

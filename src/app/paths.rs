@@ -502,7 +502,6 @@ impl RigWerkApp {
         settings.map(slot).reaches_any(self.device_channels(device))
     }
 
-    #[allow(dead_code)] // For the Signal Routing page (U2).
     /// Path `slot`'s map, level, polarity and trim on output device
     /// `device` (0 = clock device, then followers).
     pub(crate) fn device_path_map(&self, device: usize, slot: usize) -> Option<PathMapSettings> {
@@ -510,7 +509,6 @@ impl RigWerkApp {
         settings.path_map.get(slot).copied()
     }
 
-    #[allow(dead_code)] // For the Signal Routing page (U2).
     /// Sets path `slot`'s map, level, polarity and trim on output device
     /// `device` (0 = clock device, then followers).  Live, crossfaded.
     pub(crate) fn set_device_path_map(

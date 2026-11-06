@@ -13,9 +13,6 @@
 //! ([`RoutingWarningKind::Sum`], red), and two paths on different channels
 //! of one device shift the image ([`RoutingWarningKind::Shift`], amber).
 
-// The Signal Routing page (U2) builds on all of this.
-#![allow(dead_code)]
-
 use crate::app::RigWerkApp;
 use crate::audio::{ChannelMap, PathMapSettings, MAX_PATHS};
 use crate::ui::theme::TEAL;
@@ -192,6 +189,7 @@ impl RigWerkApp {
         }
         self.push_paths_to_engine();
         self.push_devices_to_engine();
+        self.routing_last_card = Some(card);
         self.push_log(format!("Routing card: {}.", card.label()), TEAL);
         true
     }

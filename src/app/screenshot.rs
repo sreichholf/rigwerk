@@ -24,6 +24,9 @@ impl RigWerkApp {
             return;
         }
         self.frames += 1;
+        if self.frames == 1 && self.screenshot.is_some() {
+            self.apply_screenshot_routing();
+        }
         let Some(job) = &mut self.screenshot else {
             return;
         };
@@ -73,5 +76,26 @@ impl RigWerkApp {
             });
         }
         ctx.request_repaint();
+    }
+
+    /// Test hook for screenshots of Signal Routing:
+    /// `RIGWERK_ROUTING_SETUP=drywet` applies the Dry L / Wet R card;
+    /// `sum3` adds a third path (a copy of the first, playing) on top of it,
+    /// routed L/R on the clock device, so two paths add up there.
+    fn apply_screenshot_routing(&mut self) {
+        let setup = std::env::var("RIGWERK_ROUTING_SETUP").unwrap_or_default();
+        if !matches!(setup.as_str(), "drywet" | "sum3")
+            || !self.apply_card(crate::app::cards::Card::DryWet)
+        {
+            return;
+        }
+        if setup == "sum3" {
+            let first = self.path_slots()[0];
+            if let Some(copy) = self.duplicate_path(first) {
+                self.set_path_mute(copy, false);
+                self.clock_device.path_map[copy].map = crate::audio::ChannelMap::default();
+                self.select_path(first);
+            }
+        }
     }
 }
