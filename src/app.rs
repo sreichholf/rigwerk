@@ -668,6 +668,7 @@ impl RigWerkApp {
             app.output_channels,
             app.drift,
         );
+        app.engine.set_clock_device(&app.clock_device);
         app.engine.set_cushion(app.cushion_mode, app.cushion_ms);
         for slot in EqSlot::ALL {
             app.engine.set_eq(slot, app.eqs[slot.index()]);

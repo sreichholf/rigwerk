@@ -231,6 +231,9 @@ pub(crate) fn run_asio_output_loop(
         let _ = ready.send(Err(error.clone()));
         return Err(error);
     }
+    // At most 4 outputs for now: the device map sees this count, and more
+    // would start the mono copy on outputs 5+ of big interfaces.  Extra ASIO
+    // outputs come with step 4.
     let output_channels = (counts.out as usize).min(4);
 
     let buffer = driver
@@ -263,8 +266,9 @@ pub(crate) fn run_asio_output_loop(
         channel_ids.push(id);
     }
 
-    let mut mixer = OutputMixer::new(rate);
+    let mut mixer = OutputMixer::new(rate, output_channels);
     mixer.follow_source_rate(&shared);
+    mixer.publish_device_channels(&shared);
     mixer.prepare(buffer_frames.max(1) as usize);
 
     let buffers: Vec<[*mut c_void; 2]> = match unsafe {

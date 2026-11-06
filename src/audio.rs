@@ -83,7 +83,7 @@ pub(crate) use linux::hotplug;
 pub(crate) use linux::native::{is_native_id, node_latency_frames};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
-// Most of it is first read by the engine and the routing page in step 1b.
+// Most of it is first read by the Mixer and Signal Routing pages (1c/1d).
 #[allow(unused_imports)]
 pub use output_map::{
     ChannelMap, MixSide, OutputDeviceSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB,

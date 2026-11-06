@@ -134,6 +134,7 @@ impl RigWerkApp {
             self.drift,
         );
         self.engine.set_routes(self.routes);
+        self.engine.set_clock_device(&self.clock_device);
         self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
         for slot in EqSlot::ALL {
             self.engine.set_eq(slot, self.eqs[slot.index()]);

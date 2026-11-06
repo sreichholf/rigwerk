@@ -448,8 +448,11 @@ fn run_graph(
 
     let _playback_listener = if let Some(stream) = playback.as_ref() {
         let state_shared = Arc::clone(&shared);
-        let mut mixer = OutputMixer::new(output_rate);
+        // The playback stream is always negotiated as F32LE stereo (FL/FR,
+        // see `enum_format`), so the device map applies to two channels.
+        let mut mixer = OutputMixer::new(output_rate, 2);
         mixer.follow_source_rate(&shared);
+        mixer.publish_device_channels(&shared);
         mixer.prepare(PREPARED_BLOCK);
         let data = PlaybackData {
             shared: Arc::clone(&shared),
@@ -487,12 +490,13 @@ fn run_graph(
                         data.shared
                             .output_step_frames
                             .store(frames as u32, Ordering::Relaxed);
-                        data.mixer.render(&data.shared, frames, |index, sample| {
+                        data.mixer.render(&data.shared, frames, |index, mapped| {
                             let start = index * 8;
                             if start + 8 <= bytes.len() {
-                                bytes[start..start + 4].copy_from_slice(&sample[0].to_le_bytes());
+                                bytes[start..start + 4]
+                                    .copy_from_slice(&mapped.sample(0).to_le_bytes());
                                 bytes[start + 4..start + 8]
-                                    .copy_from_slice(&sample[1].to_le_bytes());
+                                    .copy_from_slice(&mapped.sample(1).to_le_bytes());
                             }
                         });
                         frames

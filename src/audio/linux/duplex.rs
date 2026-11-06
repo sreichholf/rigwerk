@@ -400,14 +400,14 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
             shared,
             &scratch_l[..count],
             &scratch_r[..count],
-            |index, sample| {
+            |index, mapped| {
                 let at = offset + index;
                 // SAFETY: a non-null DSP output buffer holds `frames` samples.
                 if !out_l.is_null() {
-                    unsafe { *out_l.add(at) = sample[0] };
+                    unsafe { *out_l.add(at) = mapped.sample(0) };
                 }
                 if !out_r.is_null() {
-                    unsafe { *out_r.add(at) = sample[1] };
+                    unsafe { *out_r.add(at) = mapped.sample(1) };
                 }
             },
         );
@@ -498,8 +498,11 @@ impl Filter {
             unsafe { pw_sys::pw_filter_new(core.as_raw_ptr(), name.as_ptr(), props.into_raw()) };
         let raw = NonNull::new(raw).ok_or_else(|| "pw_filter_new failed".to_owned())?;
 
-        let mut mixer = OutputMixer::new(rate);
+        // Two output ports (FL/FR), so the device map applies to two
+        // channels.
+        let mut mixer = OutputMixer::new(rate, 2);
         mixer.prepare(MAX_FRAMES);
+        mixer.publish_device_channels(&shared);
         let mut state = Box::new(StateData {
             shared: Arc::clone(&shared),
             error: Arc::clone(&observed.error),

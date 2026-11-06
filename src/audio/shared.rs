@@ -14,6 +14,7 @@ use super::clap::{ClapPlugin, HostState};
 
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
+use super::output_map::DeviceControls;
 use super::plugins::{PluginChain, PluginPref, PluginView};
 use super::types::{CushionMode, Snapshot};
 
@@ -167,6 +168,9 @@ pub(crate) struct Shared {
     pub(crate) input_enabled: [AtomicBool; 2],
     pub(crate) output_enabled: [AtomicBool; 2],
     pub(crate) routes: [AtomicBool; 8],
+    /// The clock device's channel map, level and mute (applied after the
+    /// master) and its per-channel meters.
+    pub(crate) clock_device: DeviceControls,
     pub(crate) drift_enabled: AtomicBool,
     /// Set while input and output run in one PipeWire graph callback (the
     /// duplex node).  The ring, cushion and drift steering are then unused.
@@ -264,6 +268,7 @@ impl Shared {
                 AtomicBool::new(false),
                 AtomicBool::new(false),
             ],
+            clock_device: DeviceControls::new(),
             drift_enabled: AtomicBool::new(true),
             direct: AtomicBool::new(false),
             status: Mutex::new("Waiting".to_owned()),
@@ -326,6 +331,8 @@ impl Shared {
             }
         }
         self.set_routes(routes);
+        self.clock_device
+            .adopt_settings_from(&previous.clock_device);
         self.cushion_mode.store(
             previous.cushion_mode.load(Ordering::Relaxed),
             Ordering::Relaxed,
@@ -760,6 +767,7 @@ impl Shared {
         self.in_r.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.out_l.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.out_r.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.clock_device.reset();
         self.scope_in.clear();
         self.scope_out.clear();
         self.underruns.store(0, Ordering::Relaxed);
@@ -1093,6 +1101,8 @@ impl Shared {
             in_r: f32::from_bits(self.in_r.load(Ordering::Relaxed)),
             out_l: f32::from_bits(self.out_l.load(Ordering::Relaxed)),
             out_r: f32::from_bits(self.out_r.load(Ordering::Relaxed)),
+            out_channels: self.clock_device.meters(),
+            output_channels: self.clock_device.channels(),
             underruns: self.underruns.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
             input_frames: self.input_frames.load(Ordering::Relaxed),
