@@ -69,14 +69,24 @@ impl RigWerkApp {
             ("—".to_owned(), "")
         };
         let path_ms = self.latency_ms();
-        let path_hint =
-            "RigWerk path only (block + cushion + output step). What you can tune here.";
+        let path_hint = if self.engine.state == EngineState::Running && self.snapshot.direct {
+            "RigWerk path only (input block + output step; the duplex node has no cushion)."
+        } else {
+            "RigWerk path only (block + cushion + output step). What you can tune here."
+        };
         let buffer_fill = if self.engine.state == EngineState::Preview {
             0.38 + (ui.input(|input| input.time) as f32 * 0.8).sin() * 0.04
         } else {
             self.snapshot.ring_fill
         };
-        let buffer_pct = format!("{}", (buffer_fill * 100.0).round() as i32);
+        // The PipeWire duplex node runs both sides in one graph cycle, so
+        // there is no ring to fill.
+        let direct = self.engine.state == EngineState::Running && self.snapshot.direct;
+        let buffer_pct = if direct {
+            "—".to_owned()
+        } else {
+            format!("{}", (buffer_fill * 100.0).round() as i32)
+        };
         let underruns = self.snapshot.underruns;
 
         // When the graph/device delay is known: PATH + HEARD on top, BUFFER +

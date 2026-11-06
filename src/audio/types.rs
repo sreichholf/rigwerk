@@ -234,6 +234,9 @@ pub struct Snapshot {
     /// when PipeWire reports it. `None` on non-PipeWire outputs or before the
     /// first timing sample. Bluetooth A2DP often lands around 100–200 ms here.
     pub path_delay_ms: Option<f32>,
+    /// True when input and output run in one PipeWire graph callback (the
+    /// duplex node): there is no ring, cushion or drift correction.
+    pub direct: bool,
 }
 
 /// How the cushion between input and output (the ring buffer's fill target)

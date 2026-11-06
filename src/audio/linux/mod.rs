@@ -7,6 +7,8 @@
 
 pub(crate) mod alsa;
 #[cfg(target_os = "linux")]
+pub(crate) mod duplex;
+#[cfg(target_os = "linux")]
 pub(crate) mod hotplug;
 #[cfg(target_os = "linux")]
 pub(crate) mod native;

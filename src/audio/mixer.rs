@@ -426,25 +426,163 @@ impl OutputMixer {
         self.drift_ppm
     }
 
+    /// Picks up every UI change made since the last block and decides which
+    /// built-in stages run in it.  Shared by the ring path and the direct path.
+    fn begin_block(&mut self, shared: &Shared) -> BlockPlan {
+        self.follow_eq(shared);
+        self.follow_gate(shared);
+        self.follow_controls(shared);
+        BlockPlan {
+            pre_eq: self.eq[EqSlot::Pre.index()].active(),
+            post_eq: self.eq[EqSlot::Post.index()].active(),
+            gate_pre: self.gate.active() && self.gate.settings().slot == GateSlot::Pre,
+            gate_post: self.gate.active() && self.gate.settings().slot == GateSlot::Post,
+        }
+    }
+
+    /// The per-frame front of the chain for one input frame: routing, channel
+    /// enable and mono (with their ramps), then the pre EQ and a PRE gate.
+    /// The result waits in `block` for the plugin inserts.
+    #[inline]
+    fn stage_front(&mut self, index: usize, left: f32, right: f32, plan: &BlockPlan) {
+        // Routing, channel enable and mono move with the ramps, before
+        // the EQ and the inserts, which is where those controls act.
+        let mut out = self.ramps.next_input(left, right);
+        // The chain on the master mix (taps 1/2), in order: pre EQ, optional
+        // PRE gate, plugin inserts, optional POST gate, post EQ, then the
+        // output level and mute.  Built-ins are per-sample → no added latency.
+        if plan.pre_eq {
+            (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
+        }
+        if plan.gate_pre {
+            (out[0], out[1]) = self.gate.process(out[0], out[1]);
+        }
+        self.block[index] = out;
+    }
+
+    /// The rest of the chain for a block that `stage_front` filled: plugin
+    /// inserts, POST gate, post EQ, the output level, meters and scope.  Each
+    /// finished frame goes to `write`, and the frame counter advances.
+    fn finish_block(
+        &mut self,
+        shared: &Shared,
+        frames: usize,
+        plan: &BlockPlan,
+        mut write: impl FnMut(usize, [f32; 4]),
+    ) {
+        if shared.has_plugins() {
+            let mut left = std::mem::take(&mut self.plugin_l);
+            let mut right = std::mem::take(&mut self.plugin_r);
+            if left.len() < frames {
+                left.resize(frames, 0.0);
+                right.resize(frames, 0.0);
+            }
+            for index in 0..frames {
+                left[index] = self.block[index][0];
+                right[index] = self.block[index][1];
+            }
+            shared.process_plugins(&mut left, &mut right, frames);
+            for index in 0..frames {
+                self.block[index][0] = left[index];
+                self.block[index][1] = right[index];
+            }
+            self.plugin_l = left;
+            self.plugin_r = right;
+        }
+
+        // A plugin may have cleared flush-to-zero; the POST gate and post EQ
+        // still decay into silence and need it.  Dropped before the caller's
+        // guard, so the thread's original mode still comes back last.
+        let _post_denormals = DenormalGuard::new();
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        // POST gate (if selected), post EQ, then the output stage last.
+        for index in 0..frames {
+            let mut out = self.block[index];
+            if plan.gate_post {
+                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+            }
+            if plan.post_eq {
+                (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
+            }
+            // Mute, monitor and the level are one ramp, so any of them can move
+            // without a step.  One call per frame keeps it aligned with the
+            // input ramps above.
+            let gain = self.ramps.next_output_gain();
+            for value in out.iter_mut() {
+                *value *= gain;
+            }
+            peak_l = peak_l.max(out[0].abs());
+            peak_r = peak_r.max(out[1].abs());
+            shared.push_scope_out(out[0], out[1]);
+            write(index, out);
+        }
+
+        shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
+        shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
+        shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Follows the graph rate on the direct path, where input and output run
+    /// in the same callback at one rate.  Cheap and allocation-free, so it can
+    /// run on the audio thread: the EQ and gate redesign their coefficients on
+    /// the next block and the control ramps take the new rate.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn set_direct_rate(&mut self, rate: u32) {
+        let rate = rate.max(1);
+        if rate == self.output_rate {
+            return;
+        }
+        self.output_rate = rate;
+        self.source_rate = rate;
+        // Version 0 is never published, so the next block re-reads both and
+        // `update` redesigns them for the new rate.
+        self.eq_version = [0; 2];
+        self.gate_version = 0;
+    }
+
+    /// Renders one block straight from an input block that arrived in the
+    /// same graph cycle: no ring, no cushion, no priming, no drift steering
+    /// and no rate conversion, because both sides share one clock and rate.
+    /// Everything after the ring read is the same chain as [`Self::render`].
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn render_direct(
+        &mut self,
+        shared: &Shared,
+        input_left: &[f32],
+        input_right: &[f32],
+        write: impl FnMut(usize, [f32; 4]),
+    ) {
+        // The same flush-to-zero mode as `render`, for the EQ, gate and
+        // inserts of this block.
+        let _denormals = DenormalGuard::new();
+        let frames = input_left.len().min(input_right.len());
+        let plan = self.begin_block(shared);
+        if self.block.len() < frames {
+            self.block.resize(frames, [0.0; 4]);
+        }
+        for index in 0..frames {
+            self.stage_front(index, input_left[index], input_right[index], &plan);
+        }
+        self.finish_block(shared, frames, &plan, write);
+        // There is no clock offset to report on a single clock.
+        self.drift_ppm = 0.0;
+        shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
+    }
+
     /// Renders `frames` output frames, handing each one to `write` as four
     /// tap values.
     pub(crate) fn render(
         &mut self,
         shared: &Shared,
         frames: usize,
-        mut write: impl FnMut(usize, [f32; 4]),
+        write: impl FnMut(usize, [f32; 4]),
     ) {
         // Decaying EQ and gate states must not drop into the slow subnormal
         // range; the inserts run inside this block and get the same mode.
         let _denormals = DenormalGuard::new();
         self.follow_source_rate(shared);
-        self.follow_eq(shared);
-        self.follow_gate(shared);
-        self.follow_controls(shared);
-        let pre_eq = self.eq[EqSlot::Pre.index()].active();
-        let post_eq = self.eq[EqSlot::Post.index()].active();
-        let gate_pre = self.gate.active() && self.gate.settings().slot == GateSlot::Pre;
-        let gate_post = self.gate.active() && self.gate.settings().slot == GateSlot::Post;
+        let plan = self.begin_block(shared);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
         // The ring holds input frames; one output block drains this many.
         // The very first block is skipped: a host fills its whole buffer once
@@ -505,8 +643,6 @@ impl OutputMixer {
             self.resampling = needs_resample;
         }
 
-        let mut peak_l = 0.0f32;
-        let mut peak_r = 0.0f32;
         let mut missed = false;
         let fade_step = 1.0 / (DROPOUT_FADE_SECONDS * self.output_rate as f32).max(1.0);
         if self.block.len() < frames {
@@ -557,68 +693,10 @@ impl OutputMixer {
                 }
                 (frame.0 * self.fade_gain, frame.1 * self.fade_gain)
             };
-            // Routing, channel enable and mono move with the ramps, before
-            // the EQ and the inserts, which is where those controls act.
-            let mut out = self.ramps.next_input(left, right);
-            // The chain on the master mix (taps 1/2), in order: pre EQ, optional
-            // PRE gate, plugin inserts, optional POST gate, post EQ, then the
-            // output level and mute.  Built-ins are per-sample → no added latency.
-            if pre_eq {
-                (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
-            }
-            if gate_pre {
-                (out[0], out[1]) = self.gate.process(out[0], out[1]);
-            }
-            self.block[index] = out;
+            self.stage_front(index, left, right, &plan);
         }
+        self.finish_block(shared, frames, &plan, write);
 
-        if shared.has_plugins() {
-            let mut left = std::mem::take(&mut self.plugin_l);
-            let mut right = std::mem::take(&mut self.plugin_r);
-            if left.len() < frames {
-                left.resize(frames, 0.0);
-                right.resize(frames, 0.0);
-            }
-            for index in 0..frames {
-                left[index] = self.block[index][0];
-                right[index] = self.block[index][1];
-            }
-            shared.process_plugins(&mut left, &mut right, frames);
-            for index in 0..frames {
-                self.block[index][0] = left[index];
-                self.block[index][1] = right[index];
-            }
-            self.plugin_l = left;
-            self.plugin_r = right;
-        }
-
-        // A plugin may have cleared flush-to-zero; the POST gate and post EQ
-        // still decay into silence and need it.  Dropped before the outer
-        // guard, so the thread's original mode still comes back last.
-        let _post_denormals = DenormalGuard::new();
-        // POST gate (if selected), post EQ, then the output stage last.
-        for index in 0..frames {
-            let mut out = self.block[index];
-            if gate_post {
-                (out[0], out[1]) = self.gate.process(out[0], out[1]);
-            }
-            if post_eq {
-                (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
-            }
-            // Mute, monitor and the level are one ramp, so any of them can move
-            // without a step.  One call per frame keeps it aligned with the
-            // input ramps above.
-            let gain = self.ramps.next_output_gain();
-            for value in out.iter_mut() {
-                *value *= gain;
-            }
-            peak_l = peak_l.max(out[0].abs());
-            peak_r = peak_r.max(out[1].abs());
-            shared.push_scope_out(out[0], out[1]);
-            write(index, out);
-        }
-
-        shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
         if missed {
             shared.underruns.fetch_add(1, Ordering::Relaxed);
             // Grow the target and rebuild the cushion instead of stuttering
@@ -637,8 +715,6 @@ impl OutputMixer {
             shared.relax_target();
             self.stable_since = Instant::now();
         }
-        shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
-        shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
         // Report the ratio trim the resampler actually ran with, not a
         // synthetic frame count.
         shared
@@ -666,6 +742,14 @@ fn fade_up(gain: f32, step: f32) -> f32 {
     } else {
         next
     }
+}
+
+/// Which built-in stages run in one block, decided once at its start.
+struct BlockPlan {
+    pre_eq: bool,
+    post_eq: bool,
+    gate_pre: bool,
+    gate_post: bool,
 }
 
 pub(crate) fn route_frame(left: f32, right: f32, routes: &[[f32; 4]; 2]) -> [f32; 4] {
@@ -773,6 +857,115 @@ mod tests {
 
     fn store_gain(shared: &Shared, gain: f32) {
         shared.output_gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// A varied stereo signal, so the comparison sees the whole chain move.
+    fn test_signal(frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let left = (0..frames)
+            .map(|n| (n as f32 * 0.031).sin() * 0.6)
+            .collect();
+        let right = (0..frames)
+            .map(|n| (n as f32 * 0.017).cos() * 0.4)
+            .collect();
+        (left, right)
+    }
+
+    /// Settings that exercise routing, mono, both EQs and a level ramp.
+    fn busy_settings(shared: &Shared) {
+        shared.set_source_rate(48_000);
+        shared.set_cushion(CushionMode::Manual, 2.0);
+        shared.set_mix(false, true, false, [true, true], [true, true], false);
+        shared.set_routes([[true, false, true, false], [false, true, false, true]]);
+        let mut pre = EqSettings::default();
+        pre.bands[1].gain_db = 6.0;
+        let mut post = EqSettings::default();
+        post.bands[3].gain_db = -4.0;
+        shared.set_eq(EqSlot::Pre, pre);
+        shared.set_eq(EqSlot::Post, post);
+        store_gain(shared, 0.8);
+    }
+
+    #[test]
+    fn the_direct_path_matches_the_ring_path_at_one_clock() {
+        let frames = 256;
+        let blocks = 6;
+        let (left, right) = test_signal(frames * blocks);
+
+        // Ring path: each block's input is pushed just before it renders, as
+        // a capture callback in the same cycle would.  The 2 ms cushion is
+        // below one block, so priming ends at once, nothing is purged and
+        // every frame comes straight through.
+        let ring_shared = Shared::new(48_000);
+        busy_settings(&ring_shared);
+        let mut ring_mixer = OutputMixer::new(48_000);
+        ring_mixer.prepare(frames);
+
+        let direct_shared = Shared::new(48_000);
+        busy_settings(&direct_shared);
+        let mut direct_mixer = OutputMixer::new(48_000);
+        direct_mixer.prepare(frames);
+
+        for block in 0..blocks {
+            if block == 3 {
+                // A level change mid-run must ramp identically on both.
+                store_gain(&ring_shared, 0.3);
+                store_gain(&direct_shared, 0.3);
+            }
+            let span = block * frames..(block + 1) * frames;
+            for (l, r) in left[span.clone()].iter().zip(&right[span.clone()]) {
+                ring_shared.push_frame(*l, *r);
+            }
+            let ring = render(&mut ring_mixer, &ring_shared, frames);
+            let mut direct = vec![[0.0f32; 4]; frames];
+            direct_mixer.render_direct(
+                &direct_shared,
+                &left[span.clone()],
+                &right[span],
+                |index, frame| direct[index] = frame,
+            );
+            assert_eq!(ring, direct, "block {block} differs");
+        }
+        assert_eq!(
+            ring_shared.frames.load(Ordering::Relaxed),
+            direct_shared.frames.load(Ordering::Relaxed)
+        );
+        assert_eq!(ring_shared.underruns.load(Ordering::Relaxed), 0);
+        assert_eq!(direct_shared.underruns.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            ring_shared.out_l.load(Ordering::Relaxed),
+            direct_shared.out_l.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn the_direct_path_follows_a_new_graph_rate() {
+        let shared = Shared::new(48_000);
+        busy_settings(&shared);
+        let mut mixer = OutputMixer::new(48_000);
+        mixer.prepare(128);
+        let (left, right) = test_signal(128);
+        mixer.render_direct(&shared, &left, &right, |_, _| {});
+        mixer.set_direct_rate(44_100);
+        let mut at_new_rate = vec![[0.0f32; 4]; 128];
+        mixer.render_direct(&shared, &left, &right, |index, frame| {
+            at_new_rate[index] = frame
+        });
+
+        // A mixer built at 44.1 kHz from the start, after the same history.
+        let reference_shared = Shared::new(44_100);
+        busy_settings(&reference_shared);
+        let mut reference = OutputMixer::new(44_100);
+        reference.prepare(128);
+        reference.render_direct(&reference_shared, &left, &right, |_, _| {});
+        let mut expected = vec![[0.0f32; 4]; 128];
+        reference.render_direct(&reference_shared, &left, &right, |index, frame| {
+            expected[index] = frame
+        });
+        // The filter state differs (it ran at another rate), so compare the
+        // tail, after the EQ memory has mostly converged, loosely.
+        for (got, want) in at_new_rate[96..].iter().zip(&expected[96..]) {
+            assert!((got[0] - want[0]).abs() < 0.05, "{got:?} vs {want:?}");
+        }
     }
 
     #[test]

@@ -294,7 +294,11 @@ impl RigWerkApp {
         let output_rate = pick(self.snapshot.output_rate, planned_output_rate).max(1) as f32;
         let output_step = pick(self.snapshot.output_step_frames, self.output_buffer as u32) as f32;
         let input_block = pick(self.snapshot.input_block_frames, self.buffer_size as u32) as f32;
-        let target = if running && self.snapshot.target_frames > 0 {
+        // The PipeWire duplex node has no bridge buffer: input and output
+        // run in the same graph cycle.
+        let target = if running && self.snapshot.direct {
+            0
+        } else if running && self.snapshot.target_frames > 0 {
             self.snapshot.target_frames
         } else {
             self.buffer_size * 2

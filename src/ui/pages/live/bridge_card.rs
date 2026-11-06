@@ -28,7 +28,16 @@ impl RigWerkApp {
                 .color(TEXT)
                 .strong(),
         );
-        ui.label(RichText::new("Async ring buffer").size(ts(9.5)).color(DIM));
+        let direct = self.engine.state == EngineState::Running && self.snapshot.direct;
+        ui.label(
+            RichText::new(if direct {
+                "One PipeWire node · no bridge buffer"
+            } else {
+                "Async ring buffer"
+            })
+            .size(ts(9.5))
+            .color(DIM),
+        );
         ui.add_space(9.0);
 
         // The mode row decides this.  A narrow card gives the waveform's spare
@@ -45,7 +54,9 @@ impl RigWerkApp {
         draw_mini_scope(ui, rect, samples, self.engine.state == EngineState::Running);
 
         ui.add_space(9.0);
-        let fill = if self.engine.state == EngineState::Running {
+        let fill = if direct {
+            0.0
+        } else if self.engine.state == EngineState::Running {
             self.snapshot.ring_fill
         } else if self.engine.state == EngineState::Preview {
             0.38 + (ctx.input(|i| i.time) as f32 * 0.8).sin() * 0.04
@@ -114,6 +125,7 @@ impl RigWerkApp {
                     self.snapshot.target_frames as f32 / self.snapshot.input_rate as f32 * 1000.0
                 });
                 let text = match live {
+                    _ if running && self.snapshot.direct => "none · duplex node".to_owned(),
                     Some(ms) => format!("{} smp · {ms:.1} ms", self.snapshot.target_frames),
                     None => "—".to_owned(),
                 };
