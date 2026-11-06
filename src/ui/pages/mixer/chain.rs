@@ -19,6 +19,8 @@ pub(crate) enum ChainSelection {
     Output,
     /// One output device under the master; 0 is the clock device.
     OutputDevice(usize),
+    /// The add-output-device list under the Output stage.
+    AddOutput,
 }
 
 impl ChainSelection {
@@ -50,6 +52,7 @@ impl ChainSelection {
     pub(crate) fn clamp_output(self, device_count: usize) -> Self {
         match self {
             Self::OutputDevice(index) if index >= device_count => Self::Output,
+            Self::AddOutput if device_count == 0 => Self::Output,
             other => other,
         }
     }
@@ -239,7 +242,9 @@ pub(crate) fn live_chain_entries(
 pub(crate) fn stage_color(selection: ChainSelection) -> Color32 {
     match selection {
         ChainSelection::Input => TEAL,
-        ChainSelection::Output | ChainSelection::OutputDevice(_) => BLUE,
+        ChainSelection::Output | ChainSelection::OutputDevice(_) | ChainSelection::AddOutput => {
+            BLUE
+        }
         ChainSelection::PreEq
         | ChainSelection::PostEq
         | ChainSelection::Gate

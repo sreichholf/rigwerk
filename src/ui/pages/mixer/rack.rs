@@ -374,7 +374,10 @@ impl RigWerkApp {
     ) {
         pane_head(
             ui,
-            if matches!(self.chain_selected, ChainSelection::OutputDevice(_)) {
+            if matches!(
+                self.chain_selected,
+                ChainSelection::OutputDevice(_) | ChainSelection::AddOutput
+            ) {
                 "INSPECTOR · OUTPUT DEVICE"
             } else {
                 "INSPECTOR"
@@ -414,10 +417,13 @@ impl RigWerkApp {
                                         ChainSelection::OutputDevice(index) => {
                                             match devices.get(index) {
                                                 Some(row) => {
-                                                    self.clock_device_inspector(ui, row, actions)
+                                                    self.output_device_inspector(ui, row, actions)
                                                 }
                                                 None => self.output_inspector(ui, devices, select),
                                             }
+                                        }
+                                        ChainSelection::AddOutput => {
+                                            self.add_output_inspector(ui);
                                         }
                                         ChainSelection::Plugins => {
                                             plugins_group_inspector(ui, views, actions);

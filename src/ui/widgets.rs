@@ -11,7 +11,8 @@ use crate::audio::DeviceItem;
 use crate::ui::icons::{paint_icon, Icon};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, MUTED, TEAL, TEXT,
+    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, TEAL,
+    TEXT,
 };
 
 pub(crate) fn card<R>(
@@ -915,6 +916,14 @@ pub(crate) fn clock_tag(ui: &mut egui::Ui) {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
     paint_tag(ui, rect.left_center(), "CLOCK", BLUE);
     let _ = response.on_hover_text("The chain runs on this device's callback.");
+}
+
+/// The VIRTUAL tag for RigWerk Out.
+pub(crate) fn virtual_tag(ui: &mut egui::Ui) {
+    let width = tag_width(ui, "VIRTUAL");
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
+    paint_tag(ui, rect.left_center(), "VIRTUAL", GREEN);
+    let _ = response.on_hover_text("A virtual source other apps can capture.");
 }
 
 /// `text` shortened with "…" until it fits `max_width` in `font`.
