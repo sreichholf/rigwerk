@@ -533,7 +533,7 @@ mod tests {
         app.gate = GateSettings::default();
         app.apply_preset(0);
         assert_eq!(app.gate, gate);
-        assert_eq!(app.engine.shared.try_gate(), Some(gate));
+        assert_eq!(app.engine.shared.paths[0].try_gate(), Some(gate));
     }
 
     #[test]

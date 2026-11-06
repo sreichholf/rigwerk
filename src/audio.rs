@@ -17,6 +17,7 @@
 //! - `engine`: the handle the UI uses to start, stop and tune the bridge.
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
 //! - `shared`: the ring buffer, cushion and meters both sides share.
+//! - `path`: one signal path's controls (routing, EQs, gate, inserts).
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
 //! - `mixer` / `resampler`: turning ring frames into output frames.
@@ -43,6 +44,7 @@ mod input;
 mod mixer;
 mod output;
 mod output_map;
+mod path;
 mod plugins;
 mod resampler;
 mod ring;

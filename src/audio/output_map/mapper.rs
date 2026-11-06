@@ -3,16 +3,47 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use super::super::mixer::Ramp;
+use super::super::path::{LiveSlots, MAX_PATHS};
 use super::types::{
     channel_weights, level_gain, ChannelMap, OutputDeviceSettings, UnusedChannels,
     MAX_OUTPUT_CHANNELS,
 };
 
-/// One output device's settings as the audio callback reads them, plus its
-/// per-channel meters.  The UI stores, the callback loads once per block.
-pub(crate) struct DeviceControls {
+/// One path's channel map on one device, as the callback reads it.
+struct PathMap {
     left: AtomicU8,
     right: AtomicU8,
+}
+
+impl PathMap {
+    fn new(map: ChannelMap) -> Self {
+        Self {
+            left: AtomicU8::new(map.left),
+            right: AtomicU8::new(map.right),
+        }
+    }
+
+    fn store(&self, map: ChannelMap) {
+        self.left.store(map.left, Ordering::Relaxed);
+        self.right.store(map.right, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> ChannelMap {
+        ChannelMap {
+            left: self.left.load(Ordering::Relaxed),
+            right: self.right.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// One output device's settings as the audio callback reads them, plus its
+/// per-channel meters.  The UI stores, the callback loads once per block.
+///
+/// Each signal path slot has its own channel map on the device; level, mute
+/// and the unused-channel rule belong to the device.  Only path 0's map can
+/// be set so far.
+pub(crate) struct DeviceControls {
+    maps: [PathMap; MAX_PATHS],
     silent: AtomicBool,
     /// Linear level gain (`f32` bits), already clamped.
     gain: AtomicU32,
@@ -30,8 +61,7 @@ pub(crate) struct DeviceControls {
 impl DeviceControls {
     pub(crate) fn new() -> Self {
         let controls = Self {
-            left: AtomicU8::new(0),
-            right: AtomicU8::new(0),
+            maps: std::array::from_fn(|_| PathMap::new(ChannelMap::default())),
             silent: AtomicBool::new(false),
             gain: AtomicU32::new(1.0f32.to_bits()),
             mute: AtomicBool::new(false),
@@ -42,10 +72,10 @@ impl DeviceControls {
         controls
     }
 
+    /// Stores the device settings; `settings.map` is path 0's map.
     pub(crate) fn set(&self, settings: &OutputDeviceSettings) {
         let settings = settings.sanitized();
-        self.left.store(settings.map.left, Ordering::Relaxed);
-        self.right.store(settings.map.right, Ordering::Relaxed);
+        self.maps[0].store(settings.map);
         self.silent
             .store(settings.unused == UnusedChannels::Silent, Ordering::Relaxed);
         self.gain
@@ -55,14 +85,12 @@ impl DeviceControls {
 
     /// Copies the settings (not the meters) of a previous session.
     pub(crate) fn adopt_settings_from(&self, previous: &Self) {
-        let copy_u8 = |to: &AtomicU8, from: &AtomicU8| {
-            to.store(from.load(Ordering::Relaxed), Ordering::Relaxed);
-        };
         let copy_bool = |to: &AtomicBool, from: &AtomicBool| {
             to.store(from.load(Ordering::Relaxed), Ordering::Relaxed);
         };
-        copy_u8(&self.left, &previous.left);
-        copy_u8(&self.right, &previous.right);
+        for (to, from) in self.maps.iter().zip(&previous.maps) {
+            to.store(from.load());
+        }
         copy_bool(&self.silent, &previous.silent);
         copy_bool(&self.mute, &previous.mute);
         self.gain
@@ -95,12 +123,21 @@ impl DeviceControls {
             .store(channels.min(u32::MAX as usize) as u32, Ordering::Relaxed);
     }
 
-    /// The map, unused mode and effective gain (0 when muted) right now.
-    pub(crate) fn load(&self) -> (ChannelMap, UnusedChannels, f32) {
-        let map = ChannelMap {
-            left: self.left.load(Ordering::Relaxed),
-            right: self.right.load(Ordering::Relaxed),
-        };
+    /// One path's channel map on this device right now.
+    pub(crate) fn path_map(&self, path: usize) -> ChannelMap {
+        self.maps[path].load()
+    }
+
+    /// Path 0's map, the unused mode and the effective gain (0 when muted)
+    /// right now.
+    #[cfg(test)]
+    pub(super) fn load(&self) -> (ChannelMap, UnusedChannels, f32) {
+        let (unused, gain) = self.load_device();
+        (self.path_map(0), unused, gain)
+    }
+
+    /// The unused mode and the effective gain (0 when muted) right now.
+    fn load_device(&self) -> (UnusedChannels, f32) {
         let unused = if self.silent.load(Ordering::Relaxed) {
             UnusedChannels::Silent
         } else {
@@ -111,7 +148,7 @@ impl DeviceControls {
         } else {
             f32::from_bits(self.gain.load(Ordering::Relaxed))
         };
-        (map, unused, gain)
+        (unused, gain)
     }
 }
 
@@ -145,18 +182,22 @@ impl DeviceFrame {
 /// Sized for its channel count when the stream opens; fixed arrays, so the
 /// callback never allocates.
 ///
-/// Per block: [`Self::begin_block`] reads the controls once and points the
-/// ramps at them, [`Self::map`] runs per frame, [`Self::end_block`] publishes
+/// Per block: [`Self::begin_paths`] reads the controls once and points the
+/// ramps at them, [`Self::map_paths`] runs per frame, [`Self::end_block`] publishes
 /// the meters.  Every weight and the device gain move over the same ramp as
 /// the mixer's routes, so a map, level or mute change crossfades.  Settled
 /// weights are exactly 0 or 1 and the gain exactly its target, so the
 /// default settings write the very samples the output always wrote.
 pub(crate) struct DeviceMapper {
     channels: usize,
-    /// Weights of `[L, R, (L + R) / 2]` per channel slot.
-    weights: [[Ramp; 3]; SLOTS],
+    /// Weights of `[L, R, (L + R) / 2]` per path slot and channel slot.
+    /// Only the live paths' ramps move.
+    weights: [[[Ramp; 3]; SLOTS]; MAX_PATHS],
     pub(super) gain: Ramp,
     adopted: bool,
+    /// The paths mapped in this block, and in the one before (a path that
+    /// just went live adopts its weights instead of ramping from stale ones).
+    live: LiveSlots,
     frame: DeviceFrame,
     peaks: [f32; MAX_OUTPUT_CHANNELS],
 }
@@ -165,9 +206,10 @@ impl DeviceMapper {
     pub(crate) fn new(channels: usize) -> Self {
         Self {
             channels,
-            weights: [[Ramp::new(0.0); 3]; SLOTS],
+            weights: [[[Ramp::new(0.0); 3]; SLOTS]; MAX_PATHS],
             gain: Ramp::new(1.0),
             adopted: false,
+            live: LiveSlots::default(),
             frame: DeviceFrame {
                 samples: [0.0; SLOTS],
                 channels,
@@ -184,22 +226,39 @@ impl DeviceMapper {
         (0..mapped).chain(extra)
     }
 
-    /// Reads the controls for this block.  The first block adopts them
-    /// directly; later changes take `ramp_samples` samples.
+    /// Path 0 alone, as every caller before paths existed (and the generic
+    /// followers, which map the finished stereo mix).
     pub(crate) fn begin_block(&mut self, controls: &DeviceControls, ramp_samples: f32) {
-        let (map, unused, gain) = controls.load();
-        for slot in self.slots() {
-            // The shared slot is channel MAX_OUTPUT_CHANNELS, which no map
-            // reaches.
-            let targets = channel_weights(map, unused, self.channels, slot);
-            for (ramp, target) in self.weights[slot].iter_mut().zip(targets) {
-                if self.adopted {
-                    ramp.set_target(target, ramp_samples);
-                } else {
-                    ramp.snap(target);
+        self.begin_paths(controls, ramp_samples, LiveSlots::main());
+    }
+
+    /// Reads the controls for this block, for the `live` path slots.  The
+    /// first block (and a path that just went live) adopts them directly;
+    /// later changes take `ramp_samples` samples.
+    pub(crate) fn begin_paths(
+        &mut self,
+        controls: &DeviceControls,
+        ramp_samples: f32,
+        live: LiveSlots,
+    ) {
+        let (unused, gain) = controls.load_device();
+        for path in live.iter() {
+            let ramp = self.adopted && self.live.contains(path);
+            let map = controls.path_map(path);
+            for slot in self.slots() {
+                // The shared slot is channel MAX_OUTPUT_CHANNELS, which no
+                // map reaches.
+                let targets = channel_weights(map, unused, self.channels, slot);
+                for (weight, target) in self.weights[path][slot].iter_mut().zip(targets) {
+                    if ramp {
+                        weight.set_target(target, ramp_samples);
+                    } else {
+                        weight.snap(target);
+                    }
                 }
             }
         }
+        self.live = live;
         if self.adopted {
             self.gain.set_target(gain, ramp_samples);
         } else {
@@ -209,22 +268,36 @@ impl DeviceMapper {
         self.peaks = [0.0; MAX_OUTPUT_CHANNELS];
     }
 
-    /// Maps one frame of the finished mix (after the master) onto the
-    /// device's channels.
-    #[inline]
+    /// Path 0 alone: maps one stereo frame with path 0's map.
     pub(crate) fn map(&mut self, left: f32, right: f32) -> &DeviceFrame {
-        let sources = [left, right, (left + right) * 0.5];
+        let mut frames = [[0.0; 2]; MAX_PATHS];
+        frames[0] = [left, right];
+        self.map_paths(&frames)
+    }
+
+    /// Maps one frame of every live path (each after the master) onto the
+    /// device's channels and sums them per channel: this is the sum of the
+    /// paths.  Slots that are not live are ignored.  One live path gives
+    /// exactly its own mapped frame.
+    #[inline]
+    pub(crate) fn map_paths(&mut self, frames: &[[f32; 2]; MAX_PATHS]) -> &DeviceFrame {
+        let mut sources = [[0.0f32; 3]; MAX_PATHS];
+        for path in self.live.iter() {
+            let [left, right] = frames[path];
+            sources[path] = [left, right, (left + right) * 0.5];
+        }
         let gain = self.gain.next();
         // Unity copies, so 0 dB never touches a sample in any FP mode.
         let level = |value: f32| if gain == 1.0 { value } else { value * gain };
         let mapped = self.channels.min(MAX_OUTPUT_CHANNELS);
         for channel in 0..mapped {
-            let value = level(blend(&mut self.weights[channel], sources));
+            let value = level(sum_paths(&mut self.weights, self.live, channel, &sources));
             self.frame.samples[channel] = value;
             self.peaks[channel] = self.peaks[channel].max(value.abs());
         }
         if self.channels > MAX_OUTPUT_CHANNELS {
-            self.frame.samples[EXTRA] = level(blend(&mut self.weights[EXTRA], sources));
+            self.frame.samples[EXTRA] =
+                level(sum_paths(&mut self.weights, self.live, EXTRA, &sources));
         }
         &self.frame
     }
@@ -241,6 +314,24 @@ impl DeviceMapper {
             meter.store(peak.to_bits(), Ordering::Relaxed);
         }
     }
+}
+
+/// One channel slot summed over the live paths.  The sum starts from the
+/// first path's value itself, so one path passes bit for bit; no live path
+/// is silence (+0).
+#[inline]
+fn sum_paths(
+    weights: &mut [[[Ramp; 3]; SLOTS]; MAX_PATHS],
+    live: LiveSlots,
+    slot: usize,
+    sources: &[[f32; 3]; MAX_PATHS],
+) -> f32 {
+    let mut value: Option<f32> = None;
+    for path in live.iter() {
+        let term = blend(&mut weights[path][slot], sources[path]);
+        value = Some(value.map_or(term, |sum| sum + term));
+    }
+    value.unwrap_or(0.0)
 }
 
 /// Advances one slot's three weight ramps and mixes the sources with them.

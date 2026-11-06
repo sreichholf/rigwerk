@@ -1,6 +1,19 @@
-//! Turning the ring into output frames: routing, gain, drift trimming,
-//! underrun recovery, rate conversion and the built-in EQ, shared by every
-//! output path.
+//! Turning the ring into output frames, shared by every playback backend.
+//!
+//! The order, per frame:
+//! 1. The clock side (ring, underrun recovery, drift trimming, rate
+//!    conversion) runs once in [`OutputMixer`].  The PipeWire duplex path
+//!    skips it and takes the frame straight from the graph buffers.
+//! 2. The split: that one stereo frame goes into every live path slot
+//!    ([`PathProcessor`]: routing, EQs, gate, plugin inserts).
+//! 3. The master (level, mute, monitor) scales each path's frame.
+//! 4. The sum: each device mapper maps every live path with that path's
+//!    channel map and adds them per channel, then applies the device level
+//!    and mute.  A plain stereo sum of the paths feeds the master meters
+//!    and the scope.
+//!
+//! Today only slot 0 is live, and it is bit-identical to the chain before
+//! paths existed.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -9,13 +22,14 @@ use super::denormal::DenormalGuard;
 use super::eq::{EqSlot, Equalizer};
 use super::gate::{GateSlot, NoiseGate};
 use super::output_map::{DeviceFrame, DeviceMapper, MAX_FOLLOWERS};
+use super::path::{LiveSlots, PathControls, MAX_PATHS};
 use super::resampler::FrameResampler;
 use super::shared::Shared;
 
 pub(crate) mod ramp;
 
 pub(crate) use ramp::Ramp;
-use ramp::{fade_down, fade_up, MixRamps, CONTROL_RAMP_SECONDS, DROPOUT_FADE_SECONDS};
+use ramp::{fade_down, fade_up, PathRamps, CONTROL_RAMP_SECONDS, DROPOUT_FADE_SECONDS};
 
 /// The most drift steering may trim the conversion ratio.  500 ppm is under
 /// one cent of pitch.  Real clock offsets between two interfaces are a few
@@ -51,10 +65,229 @@ pub(crate) fn take_ring_frame(shared: &Shared, missed: &mut bool, last: (f32, f3
     }
 }
 
+/// The chain of one signal path, from the split to the sum: routing,
+/// channel enable and mono (ramped), the pre EQ, a PRE gate, the plugin
+/// inserts, a POST gate and the post EQ.  [`OutputMixer`] owns one per
+/// possible path, preallocated, and runs only the active ones; every path
+/// gets the same stereo frame from the clock side.
+pub(crate) struct PathProcessor {
+    /// One block of this path's taps, kept between callbacks so the plugin
+    /// inserts can work on the whole block without allocating.
+    block: Vec<[f32; 4]>,
+    plugin_l: Vec<f32>,
+    plugin_r: Vec<f32>,
+    /// The two built-in EQs (pre and post inserts), and the settings version
+    /// each was last updated from.
+    eq: [Equalizer; 2],
+    eq_version: [u64; 2],
+    /// Built-in noise gate and the settings version it was last updated from.
+    gate: NoiseGate,
+    gate_version: u64,
+    /// Per-sample ramps for routing, channel enable and mono.  A control
+    /// read once per block would step; these move over a few milliseconds
+    /// instead.
+    ramps: PathRamps,
+    /// The first block adopts the live settings directly.  Later blocks ramp
+    /// toward them, so opening the bridge does not fade in from the defaults.
+    controls_adopted: bool,
+    /// Which built-in stages run in the current block.
+    plan: BlockPlan,
+    /// The slot generation this chain was started for.  A different one in
+    /// the controls means the slot was (re)activated: start fresh.
+    generation: u64,
+}
+
+impl PathProcessor {
+    fn new(rate: u32) -> Self {
+        Self {
+            block: Vec::new(),
+            plugin_l: Vec::new(),
+            plugin_r: Vec::new(),
+            eq: [Equalizer::new(rate), Equalizer::new(rate)],
+            eq_version: [0; 2],
+            gate: NoiseGate::new(rate),
+            gate_version: 0,
+            ramps: PathRamps::new(),
+            controls_adopted: false,
+            plan: BlockPlan::default(),
+            generation: 0,
+        }
+    }
+
+    /// Starts the chain over for a newly activated slot: fresh EQ and gate
+    /// state, settings re-read, and ramps that adopt the settings instead of
+    /// moving from whatever the slot played before.  No allocation; the
+    /// block scratch is kept.
+    fn restart(&mut self, rate: u32, generation: u64) {
+        self.eq = [Equalizer::new(rate), Equalizer::new(rate)];
+        self.gate = NoiseGate::new(rate);
+        self.invalidate_settings();
+        self.ramps = PathRamps::new();
+        self.controls_adopted = false;
+        self.generation = generation;
+    }
+
+    /// Grows the per-block scratch outside the callback.
+    fn prepare(&mut self, frames: usize) {
+        self.reserve_block(frames);
+        if self.plugin_l.len() < frames {
+            self.plugin_l.resize(frames, 0.0);
+            self.plugin_r.resize(frames, 0.0);
+        }
+    }
+
+    /// Makes room for one block.  Only a host that hands over a larger block
+    /// than prepared allocates here, once.
+    fn reserve_block(&mut self, frames: usize) {
+        if self.block.len() < frames {
+            self.block.resize(frames, [0.0; 4]);
+        }
+    }
+
+    /// Forgets which settings the EQs and gate were built from, so the next
+    /// block redesigns them (for a new rate).  Version 0 is never published.
+    fn invalidate_settings(&mut self) {
+        self.eq_version = [0; 2];
+        self.gate_version = 0;
+    }
+
+    /// Picks up every UI change made since the last block and decides which
+    /// built-in stages run in it.  The first block snaps to the settings;
+    /// after that a change takes `ramp_samples`.
+    fn begin_block(&mut self, controls: &PathControls, rate: u32, ramp_samples: f32) {
+        let generation = controls.generation();
+        if generation != self.generation {
+            self.restart(rate, generation);
+        }
+        self.follow_eq(controls, rate);
+        self.follow_gate(controls, rate);
+        self.follow_controls(controls, ramp_samples);
+        self.plan = BlockPlan {
+            pre_eq: self.eq[EqSlot::Pre.index()].active(),
+            post_eq: self.eq[EqSlot::Post.index()].active(),
+            gate_pre: self.gate.active() && self.gate.settings().slot == GateSlot::Pre,
+            gate_post: self.gate.active() && self.gate.settings().slot == GateSlot::Post,
+        };
+    }
+
+    /// Points the routing, enable and mono ramps at this block's settings.
+    fn follow_controls(&mut self, controls: &PathControls, ramp_samples: f32) {
+        let coefficient = |flag: bool| if flag { 1.0 } else { 0.0 };
+        let mut routes = [[0.0f32; 4]; 2];
+        for (input, row) in routes.iter_mut().enumerate() {
+            for (tap, coefficient_out) in row.iter_mut().enumerate() {
+                *coefficient_out = coefficient(controls.route(input, tap));
+            }
+        }
+        let enabled = [
+            coefficient(controls.output_enabled[0].load(Ordering::Relaxed)),
+            coefficient(controls.output_enabled[1].load(Ordering::Relaxed)),
+        ];
+        let mono = coefficient(controls.mono.load(Ordering::Relaxed));
+        if self.controls_adopted {
+            self.ramps.set_targets(&routes, enabled, mono, ramp_samples);
+        } else {
+            self.ramps.snap(&routes, enabled, mono);
+            self.controls_adopted = true;
+        }
+    }
+
+    /// Picks up EQ changes made in the UI since the last block.
+    fn follow_eq(&mut self, controls: &PathControls, rate: u32) {
+        for slot in EqSlot::ALL {
+            let index = slot.index();
+            let version = controls.eq_version(slot);
+            if version == self.eq_version[index] {
+                continue;
+            }
+            if let Some(settings) = controls.try_eq(slot) {
+                self.eq[index].update(settings, rate);
+                self.eq_version[index] = version;
+            }
+        }
+    }
+
+    /// Picks up gate changes made in the UI since the last block.
+    fn follow_gate(&mut self, controls: &PathControls, rate: u32) {
+        let version = controls.gate_version();
+        if version == self.gate_version {
+            return;
+        }
+        if let Some(settings) = controls.try_gate() {
+            self.gate.update(settings, rate);
+            self.gate_version = version;
+        }
+    }
+
+    /// The per-frame front of the chain for one input frame: routing, channel
+    /// enable and mono (with their ramps), then the pre EQ and a PRE gate.
+    /// The result waits in `block` for the plugin inserts.
+    #[inline]
+    fn stage_front(&mut self, index: usize, left: f32, right: f32) {
+        // Routing, channel enable and mono move with the ramps, before
+        // the EQ and the inserts, which is where those controls act.
+        let mut out = self.ramps.next_input(left, right);
+        // The chain on the path's mix (taps 1/2), in order: pre EQ, optional
+        // PRE gate, plugin inserts, optional POST gate, post EQ.  Built-ins
+        // are per-sample → no added latency.
+        if self.plan.pre_eq {
+            (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
+        }
+        if self.plan.gate_pre {
+            (out[0], out[1]) = self.gate.process(out[0], out[1]);
+        }
+        self.block[index] = out;
+    }
+
+    /// Runs the plugin inserts over a block that `stage_front` filled.
+    fn run_inserts(&mut self, controls: &PathControls, frames: usize) {
+        if !controls.has_plugins() {
+            return;
+        }
+        let mut left = std::mem::take(&mut self.plugin_l);
+        let mut right = std::mem::take(&mut self.plugin_r);
+        if left.len() < frames {
+            left.resize(frames, 0.0);
+            right.resize(frames, 0.0);
+        }
+        for index in 0..frames {
+            left[index] = self.block[index][0];
+            right[index] = self.block[index][1];
+        }
+        controls.process_plugins(&mut left, &mut right, frames);
+        for index in 0..frames {
+            self.block[index][0] = left[index];
+            self.block[index][1] = right[index];
+        }
+        self.plugin_l = left;
+        self.plugin_r = right;
+    }
+
+    /// The rest of the path after the inserts: the POST gate and the post
+    /// EQ, in place, then the path meters.
+    fn finish_block(&mut self, controls: &PathControls, frames: usize) {
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        for out in &mut self.block[..frames] {
+            if self.plan.gate_post {
+                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+            }
+            if self.plan.post_eq {
+                (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
+            }
+            peak_l = peak_l.max(out[0].abs());
+            peak_r = peak_r.max(out[1].abs());
+        }
+        controls.store_meters(peak_l, peak_r);
+    }
+}
+
 /// Turns the ring into output frames for any playback path (cpal, ASIO,
-/// REAL-style WASAPI or PipeWire): routing, gain, drift trimming, underrun
-/// recovery, conversion from whatever rate the input really runs at, and
-/// last the output device's channel map, level and mute.
+/// REAL-style WASAPI or PipeWire): underrun recovery, drift trimming and
+/// conversion from whatever rate the input really runs at (the clock side,
+/// once), then each active signal path ([`PathProcessor`]), the sum, the
+/// master level and mute, and last each output device's channel map, level
+/// and mute.
 pub(crate) struct OutputMixer {
     output_rate: u32,
     source_rate: u32,
@@ -93,30 +326,24 @@ pub(crate) struct OutputMixer {
     /// it and the 1:1 bypass resets it, so it never replays stale history.
     resampling: bool,
     stable_since: Instant,
-    /// One output block, kept between callbacks so the VST3 inserts can work
-    /// on the finished stereo mix without allocating.
-    block: Vec<[f32; 4]>,
-    plugin_l: Vec<f32>,
-    plugin_r: Vec<f32>,
-    /// The two built-in EQs (pre and post inserts), and the settings version
-    /// each was last updated from.
-    eq: [Equalizer; 2],
-    eq_version: [u64; 2],
-    /// Built-in noise gate and the settings version it was last updated from.
-    gate: NoiseGate,
-    gate_version: u64,
-    /// Per-sample ramps for routing, channel enable, mono and the output
-    /// level.  A control read once per block would step; these move over a
-    /// few milliseconds instead.
-    ramps: MixRamps,
-    /// The first block adopts the live settings directly.  Later blocks ramp
-    /// toward them, so opening the bridge does not fade in from the defaults.
-    controls_adopted: bool,
+    /// One chain per path slot; only the `live` ones run.
+    paths: [PathProcessor; MAX_PATHS],
+    /// The slots that run in the current block, read once at its start.
+    live: LiveSlots,
+    /// Each live path's frame after the master, handed to the device maps.
+    frames: PathFrames,
+    /// The master: mute, monitor and the output level folded into one
+    /// effective gain, ramped per sample so they compose without a step.
+    gain: Ramp,
+    /// The first block adopts the live master gain directly.
+    gain_adopted: bool,
     /// The clock device's channel map, level and mute, after the master.
     device: DeviceMapper,
     /// Follower devices (stereo port pairs on PipeWire).  Only the first
-    /// `shared.follower_count()` slots are written each block.
+    /// `live_followers` slots are written each block.
     followers: [DeviceMapper; MAX_FOLLOWERS],
+    /// `shared.follower_count()` as read at the start of the block.
+    live_followers: usize,
 }
 
 impl OutputMixer {
@@ -140,18 +367,15 @@ impl OutputMixer {
             drift_error: None,
             resampling: false,
             stable_since: Instant::now(),
-            block: Vec::new(),
-            plugin_l: Vec::new(),
-            plugin_r: Vec::new(),
-            eq: [Equalizer::new(output_rate), Equalizer::new(output_rate)],
-            eq_version: [0; 2],
-            gate: NoiseGate::new(output_rate),
-            gate_version: 0,
-            ramps: MixRamps::new(),
-            controls_adopted: false,
+            paths: std::array::from_fn(|_| PathProcessor::new(output_rate)),
+            live: LiveSlots::default(),
+            frames: [[0.0; 2]; MAX_PATHS],
+            gain: Ramp::new(1.0),
+            gain_adopted: false,
             device: DeviceMapper::new(device_channels),
             // PipeWire followers are always a stereo port pair for now.
             followers: std::array::from_fn(|_| DeviceMapper::new(2)),
+            live_followers: 0,
         }
     }
 
@@ -170,82 +394,14 @@ impl OutputMixer {
         }
     }
 
-    /// Grows the per-block scratch while the bridge is still opening, so the
-    /// first callback (and the first block after a plugin is added) never has
-    /// to allocate.  A host that later hands over a larger block still works;
-    /// that one block then grows the scratch.
+    /// Grows the per-block scratch of every path while the bridge is still
+    /// opening, so the first callback (and the first block after a plugin or
+    /// a path is added) never has to allocate.  A host that later hands
+    /// over a larger block still works; that one block then grows the
+    /// scratch.
     pub(crate) fn prepare(&mut self, frames: usize) {
-        if self.block.len() < frames {
-            self.block.resize(frames, [0.0; 4]);
-        }
-        if self.plugin_l.len() < frames {
-            self.plugin_l.resize(frames, 0.0);
-            self.plugin_r.resize(frames, 0.0);
-        }
-    }
-
-    /// Points every mix ramp at the settings for this block.  The first block
-    /// snaps, so a bridge opens at the current mix; after that a change takes
-    /// [`CONTROL_RAMP_SECONDS`], however long the block itself is.
-    fn follow_controls(&mut self, shared: &Shared) {
-        let coefficient = |flag: bool| if flag { 1.0 } else { 0.0 };
-        let mut routes = [[0.0f32; 4]; 2];
-        for (input, row) in routes.iter_mut().enumerate() {
-            for (output, coefficient_out) in row.iter_mut().enumerate() {
-                *coefficient_out =
-                    coefficient(shared.routes[input * 4 + output].load(Ordering::Relaxed));
-            }
-        }
-        let enabled = [
-            coefficient(shared.output_enabled[0].load(Ordering::Relaxed)),
-            coefficient(shared.output_enabled[1].load(Ordering::Relaxed)),
-        ];
-        let mono = coefficient(shared.mono.load(Ordering::Relaxed));
-        let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
-        let gain = if silent { 0.0 } else { shared.output_gain() };
-        let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
-        self.device.begin_block(&shared.clock_device, samples);
-        // PipeWire duplex maps followers in this mixer.  Generic followers
-        // own their DeviceMapper on their own stream — leave meters alone.
-        if shared.direct.load(Ordering::Relaxed) {
-            let followers = shared.follower_count();
-            for index in 0..followers {
-                self.followers[index].begin_block(&shared.followers[index], samples);
-            }
-        }
-        if self.controls_adopted {
-            self.ramps
-                .set_targets(&routes, enabled, mono, gain, samples);
-        } else {
-            self.ramps.snap(&routes, enabled, mono, gain);
-            self.controls_adopted = true;
-        }
-    }
-
-    /// Picks up EQ changes made in the UI since the last block.
-    fn follow_eq(&mut self, shared: &Shared) {
-        for slot in EqSlot::ALL {
-            let index = slot.index();
-            let version = shared.eq_version(slot);
-            if version == self.eq_version[index] {
-                continue;
-            }
-            if let Some(settings) = shared.try_eq(slot) {
-                self.eq[index].update(settings, self.output_rate);
-                self.eq_version[index] = version;
-            }
-        }
-    }
-
-    /// Picks up gate changes made in the UI since the last block.
-    fn follow_gate(&mut self, shared: &Shared) {
-        let version = shared.gate_version();
-        if version == self.gate_version {
-            return;
-        }
-        if let Some(settings) = shared.try_gate() {
-            self.gate.update(settings, self.output_rate);
-            self.gate_version = version;
+        for path in &mut self.paths {
+            path.prepare(frames);
         }
     }
 
@@ -305,97 +461,101 @@ impl OutputMixer {
         self.drift_ppm
     }
 
-    /// Picks up every UI change made since the last block and decides which
-    /// built-in stages run in it.  Shared by the ring path and the direct path.
-    fn begin_block(&mut self, shared: &Shared) -> BlockPlan {
-        self.follow_eq(shared);
-        self.follow_gate(shared);
-        self.follow_controls(shared);
-        BlockPlan {
-            pre_eq: self.eq[EqSlot::Pre.index()].active(),
-            post_eq: self.eq[EqSlot::Post.index()].active(),
-            gate_pre: self.gate.active() && self.gate.settings().slot == GateSlot::Pre,
-            gate_post: self.gate.active() && self.gate.settings().slot == GateSlot::Post,
+    /// Picks up every UI change made since the last block: which slots
+    /// are live, each live path's chain settings, the master gain and the
+    /// device controls.  Makes room for `frames` in every live path.
+    /// Shared by the ring path and the direct path.
+    fn begin_block(&mut self, shared: &Shared, frames: usize) {
+        let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
+        self.live = shared.live_slots();
+        for slot in self.live.iter() {
+            let path = &mut self.paths[slot];
+            path.begin_block(&shared.paths[slot], self.output_rate, samples);
+            path.reserve_block(frames);
+        }
+        let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
+        let gain = if silent { 0.0 } else { shared.output_gain() };
+        if self.gain_adopted {
+            self.gain.set_target(gain, samples);
+        } else {
+            self.gain.snap(gain);
+            self.gain_adopted = true;
+        }
+        self.device
+            .begin_paths(&shared.clock_device, samples, self.live);
+        // PipeWire duplex maps followers in this mixer.  Generic followers
+        // own their DeviceMapper on their own stream — leave meters alone.
+        self.live_followers = if shared.direct.load(Ordering::Relaxed) {
+            shared.follower_count()
+        } else {
+            0
+        };
+        for index in 0..self.live_followers {
+            self.followers[index].begin_paths(&shared.followers[index], samples, self.live);
         }
     }
 
-    /// The per-frame front of the chain for one input frame: routing, channel
-    /// enable and mono (with their ramps), then the pre EQ and a PRE gate.
-    /// The result waits in `block` for the plugin inserts.
+    /// Splits one input frame into every live path.
     #[inline]
-    fn stage_front(&mut self, index: usize, left: f32, right: f32, plan: &BlockPlan) {
-        // Routing, channel enable and mono move with the ramps, before
-        // the EQ and the inserts, which is where those controls act.
-        let mut out = self.ramps.next_input(left, right);
-        // The chain on the master mix (taps 1/2), in order: pre EQ, optional
-        // PRE gate, plugin inserts, optional POST gate, post EQ, then the
-        // output level and mute.  Built-ins are per-sample → no added latency.
-        if plan.pre_eq {
-            (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
+    fn stage_front(&mut self, index: usize, left: f32, right: f32) {
+        for slot in self.live.iter() {
+            self.paths[slot].stage_front(index, left, right);
         }
-        if plan.gate_pre {
-            (out[0], out[1]) = self.gate.process(out[0], out[1]);
-        }
-        self.block[index] = out;
     }
 
-    /// The rest of the chain for a block that `stage_front` filled: plugin
-    /// inserts, POST gate, post EQ, the output level, meters and scope.  Each
-    /// finished frame goes to `write` with the device mapper, and the frame
-    /// counter advances.
-    fn finish_block(
-        &mut self,
-        shared: &Shared,
-        frames: usize,
-        plan: &BlockPlan,
-        mut write: impl FnMut(&mut DeviceMapper, usize, [f32; 4]),
-    ) {
-        if shared.has_plugins() {
-            let mut left = std::mem::take(&mut self.plugin_l);
-            let mut right = std::mem::take(&mut self.plugin_r);
-            if left.len() < frames {
-                left.resize(frames, 0.0);
-                right.resize(frames, 0.0);
-            }
-            for index in 0..frames {
-                left[index] = self.block[index][0];
-                right[index] = self.block[index][1];
-            }
-            shared.process_plugins(&mut left, &mut right, frames);
-            for index in 0..frames {
-                self.block[index][0] = left[index];
-                self.block[index][1] = right[index];
-            }
-            self.plugin_l = left;
-            self.plugin_r = right;
+    /// The rest of the chain for a block that `stage_front` filled: each
+    /// live path's inserts, POST gate and post EQ, then the master level on
+    /// each path's frame, the meters and the scope.  Each finished frame
+    /// goes to `write` with the clock device's mapper, the live followers'
+    /// mappers, every live path's frame (the mappers sum them) and the
+    /// stereo sum of the paths' taps, and the frame counter advances.
+    fn finish_block(&mut self, shared: &Shared, frames: usize, mut write: impl WriteFrame) {
+        let live = self.live;
+        for slot in live.iter() {
+            self.paths[slot].run_inserts(&shared.paths[slot], frames);
         }
 
-        // A plugin may have cleared flush-to-zero; the POST gate and post EQ
-        // still decay into silence and need it.  Dropped before the caller's
-        // guard, so the thread's original mode still comes back last.
+        // A plugin may have cleared flush-to-zero; the POST gate, post EQ
+        // and the master still decay into silence and need it.  Dropped
+        // before the caller's guard, so the thread's original mode still
+        // comes back last.
         let _post_denormals = DenormalGuard::new();
+        for slot in live.iter() {
+            self.paths[slot].finish_block(&shared.paths[slot], frames);
+        }
+
+        let followers = &mut self.followers[..self.live_followers];
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
-        // POST gate (if selected), post EQ, then the output stage last.
         for index in 0..frames {
-            let mut out = self.block[index];
-            if plan.gate_post {
-                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+            // Mute, monitor and the level are one ramp, so any of them can
+            // move without a step.  It scales each path before the device
+            // maps sum them, so one path is exactly `(x * gain) * weight`.
+            let gain = self.gain.next();
+            // The stereo sum for the meters and the scope.  It starts from
+            // the first path's frame itself, so one path passes bit for bit.
+            let mut sum: Option<[f32; 4]> = None;
+            for slot in live.iter() {
+                let mut out = self.paths[slot].block[index];
+                for value in out.iter_mut() {
+                    *value *= gain;
+                }
+                self.frames[slot] = [out[0], out[1]];
+                sum = Some(match sum {
+                    None => out,
+                    Some(mut sum) => {
+                        for (total, value) in sum.iter_mut().zip(out) {
+                            *total += value;
+                        }
+                        sum
+                    }
+                });
             }
-            if plan.post_eq {
-                (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
-            }
-            // Mute, monitor and the level are one ramp, so any of them can move
-            // without a step.  One call per frame keeps it aligned with the
-            // input ramps above.
-            let gain = self.ramps.next_output_gain();
-            for value in out.iter_mut() {
-                *value *= gain;
-            }
+            let out = sum.unwrap_or([0.0; 4]);
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
-            write(&mut self.device, index, out);
+            write(&mut self.device, followers, index, &self.frames, out);
             // Fan the finished stereo mix out to every active generic
             // follower ring (no-op when duplex / none open).
             shared.push_follower_frames(out[0], out[1]);
@@ -405,9 +565,10 @@ impl OutputMixer {
         shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
         shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
         self.device.end_block(&shared.clock_device);
+        for index in 0..self.live_followers {
+            self.followers[index].end_block(&shared.followers[index]);
+        }
         shared.note_follower_producer_block(frames);
-        // Generic followers publish their own meters; only duplex ends them
-        // here (see finish_block_devices).
     }
 
     /// Like [`Self::render_direct`], but each finished frame is handed over
@@ -421,84 +582,17 @@ impl OutputMixer {
         input_right: &[f32],
         mut write: impl FnMut(usize, usize, &DeviceFrame),
     ) {
-        let _denormals = DenormalGuard::new();
-        let frames = input_left.len().min(input_right.len());
-        let plan = self.begin_block(shared);
-        if self.block.len() < frames {
-            self.block.resize(frames, [0.0; 4]);
-        }
-        for index in 0..frames {
-            self.stage_front(index, input_left[index], input_right[index], &plan);
-        }
-        self.finish_block_devices(shared, frames, &plan, &mut write);
-        self.drift_ppm = 0.0;
-        shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Finishes a block and writes the clock device plus every live follower.
-    fn finish_block_devices(
-        &mut self,
-        shared: &Shared,
-        frames: usize,
-        plan: &BlockPlan,
-        write: &mut impl FnMut(usize, usize, &DeviceFrame),
-    ) {
-        if shared.has_plugins() {
-            let mut left = std::mem::take(&mut self.plugin_l);
-            let mut right = std::mem::take(&mut self.plugin_r);
-            if left.len() < frames {
-                left.resize(frames, 0.0);
-                right.resize(frames, 0.0);
-            }
-            for index in 0..frames {
-                left[index] = self.block[index][0];
-                right[index] = self.block[index][1];
-            }
-            shared.process_plugins(&mut left, &mut right, frames);
-            for index in 0..frames {
-                self.block[index][0] = left[index];
-                self.block[index][1] = right[index];
-            }
-            self.plugin_l = left;
-            self.plugin_r = right;
-        }
-
-        let _post_denormals = DenormalGuard::new();
-        let mut peak_l = 0.0f32;
-        let mut peak_r = 0.0f32;
-        let followers = shared.follower_count();
-        for index in 0..frames {
-            let mut out = self.block[index];
-            if plan.gate_post {
-                (out[0], out[1]) = self.gate.process(out[0], out[1]);
-            }
-            if plan.post_eq {
-                (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
-            }
-            let gain = self.ramps.next_output_gain();
-            for value in out.iter_mut() {
-                *value *= gain;
-            }
-            peak_l = peak_l.max(out[0].abs());
-            peak_r = peak_r.max(out[1].abs());
-            shared.push_scope_out(out[0], out[1]);
-            write(0, index, self.device.map(out[0], out[1]));
-            for follower in 0..followers {
-                write(
-                    follower + 1,
-                    index,
-                    self.followers[follower].map(out[0], out[1]),
-                );
-            }
-        }
-
-        shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
-        shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
-        shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
-        self.device.end_block(&shared.clock_device);
-        for index in 0..followers {
-            self.followers[index].end_block(&shared.followers[index]);
-        }
+        self.render_direct_with(
+            shared,
+            input_left,
+            input_right,
+            |device, followers, index, paths, _| {
+                write(0, index, device.map_paths(paths));
+                for (follower, mapper) in followers.iter_mut().enumerate() {
+                    write(follower + 1, index, mapper.map_paths(paths));
+                }
+            },
+        );
     }
 
     /// Follows the graph rate on the direct path, where input and output run
@@ -513,10 +607,11 @@ impl OutputMixer {
         }
         self.output_rate = rate;
         self.source_rate = rate;
-        // Version 0 is never published, so the next block re-reads both and
-        // `update` redesigns them for the new rate.
-        self.eq_version = [0; 2];
-        self.gate_version = 0;
+        // The next block re-reads every path's EQs and gate and `update`
+        // redesigns them for the new rate.
+        for path in &mut self.paths {
+            path.invalidate_settings();
+        }
     }
 
     /// Renders one block straight from an input block that arrived in the
@@ -532,9 +627,12 @@ impl OutputMixer {
         input_right: &[f32],
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
-        self.render_direct_with(shared, input_left, input_right, |device, index, out| {
-            write(index, device.map(out[0], out[1]))
-        });
+        self.render_direct_with(
+            shared,
+            input_left,
+            input_right,
+            |device, _, index, paths, _| write(index, device.map_paths(paths)),
+        );
     }
 
     /// [`Self::render_direct`] handing over the four mixer taps instead of
@@ -547,7 +645,7 @@ impl OutputMixer {
         input_right: &[f32],
         mut write: impl FnMut(usize, [f32; 4]),
     ) {
-        self.render_direct_with(shared, input_left, input_right, |_, index, out| {
+        self.render_direct_with(shared, input_left, input_right, |_, _, index, _, out| {
             write(index, out)
         });
     }
@@ -558,20 +656,17 @@ impl OutputMixer {
         shared: &Shared,
         input_left: &[f32],
         input_right: &[f32],
-        write: impl FnMut(&mut DeviceMapper, usize, [f32; 4]),
+        write: impl WriteFrame,
     ) {
         // The same flush-to-zero mode as `render`, for the EQ, gate and
         // inserts of this block.
         let _denormals = DenormalGuard::new();
         let frames = input_left.len().min(input_right.len());
-        let plan = self.begin_block(shared);
-        if self.block.len() < frames {
-            self.block.resize(frames, [0.0; 4]);
-        }
+        self.begin_block(shared, frames);
         for index in 0..frames {
-            self.stage_front(index, input_left[index], input_right[index], &plan);
+            self.stage_front(index, input_left[index], input_right[index]);
         }
-        self.finish_block(shared, frames, &plan, write);
+        self.finish_block(shared, frames, write);
         // There is no clock offset to report on a single clock.
         self.drift_ppm = 0.0;
         shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
@@ -586,8 +681,8 @@ impl OutputMixer {
         frames: usize,
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
-        self.render_with(shared, frames, |device, index, out| {
-            write(index, device.map(out[0], out[1]))
+        self.render_with(shared, frames, |device, _, index, paths, _| {
+            write(index, device.map_paths(paths))
         });
     }
 
@@ -600,20 +695,15 @@ impl OutputMixer {
         frames: usize,
         mut write: impl FnMut(usize, [f32; 4]),
     ) {
-        self.render_with(shared, frames, |_, index, out| write(index, out));
+        self.render_with(shared, frames, |_, _, index, _, out| write(index, out));
     }
 
-    fn render_with(
-        &mut self,
-        shared: &Shared,
-        frames: usize,
-        write: impl FnMut(&mut DeviceMapper, usize, [f32; 4]),
-    ) {
+    fn render_with(&mut self, shared: &Shared, frames: usize, write: impl WriteFrame) {
         // Decaying EQ and gate states must not drop into the slow subnormal
         // range; the inserts run inside this block and get the same mode.
         let _denormals = DenormalGuard::new();
         self.follow_source_rate(shared);
-        let plan = self.begin_block(shared);
+        self.begin_block(shared, frames);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
         // The ring holds input frames; one output block drains this many.
         // The very first block is skipped: a host fills its whole buffer once
@@ -676,9 +766,6 @@ impl OutputMixer {
 
         let mut missed = false;
         let fade_step = 1.0 / (DROPOUT_FADE_SECONDS * self.output_rate as f32).max(1.0);
-        if self.block.len() < frames {
-            self.block.resize(frames, [0.0; 4]);
-        }
         for index in 0..frames {
             let (left, right) = if self.priming || self.dropping {
                 // After an underrun: keep fading the held frame down, into
@@ -724,9 +811,9 @@ impl OutputMixer {
                 }
                 (frame.0 * self.fade_gain, frame.1 * self.fade_gain)
             };
-            self.stage_front(index, left, right, &plan);
+            self.stage_front(index, left, right);
         }
-        self.finish_block(shared, frames, &plan, write);
+        self.finish_block(shared, frames, write);
 
         if missed {
             shared.underruns.fetch_add(1, Ordering::Relaxed);
@@ -754,7 +841,22 @@ impl OutputMixer {
     }
 }
 
+/// Each live path slot's stereo frame after the master; other slots are
+/// stale and ignored.
+type PathFrames = [[f32; 2]; MAX_PATHS];
+
+/// Receives one finished frame: the clock device's mapper, the live
+/// followers' mappers, the paths' frames for the mappers to sum, and the
+/// stereo sum of the paths' four taps.
+trait WriteFrame: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathFrames, [f32; 4]) {}
+
+impl<F> WriteFrame for F where
+    F: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathFrames, [f32; 4])
+{
+}
+
 /// Which built-in stages run in one block, decided once at its start.
+#[derive(Clone, Copy, Default)]
 struct BlockPlan {
     pre_eq: bool,
     post_eq: bool,
@@ -1307,6 +1409,300 @@ mod tests {
         let out = render(&mut mixer, &shared, 64);
         assert!(out[0][0] > 0.0 && out[0][0] < 0.05, "{}", out[0][0]);
         assert!(largest_step(&out) < 0.05);
+    }
+
+    /// Folds every output sample (as bits) into one FNV-1a hash.
+    struct Fnv(u64);
+
+    impl Fnv {
+        fn new() -> Self {
+            Self(0xcbf2_9ce4_8422_2325)
+        }
+
+        fn u32(&mut self, value: u32) {
+            for byte in value.to_le_bytes() {
+                self.0 ^= u64::from(byte);
+                self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+
+        fn f32(&mut self, value: f32) {
+            self.u32(value.to_bits());
+        }
+    }
+
+    /// A deterministic, libm-free test signal: a triangle plus LCG noise.
+    struct Source {
+        state: u32,
+        phase: u32,
+    }
+
+    impl Source {
+        fn new() -> Self {
+            Self {
+                state: 0x1234_5678,
+                phase: 0,
+            }
+        }
+
+        fn next(&mut self) -> (f32, f32) {
+            self.state = self
+                .state
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            let noise = (self.state >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+            self.phase = (self.phase + 1) % 200;
+            let triangle = (self.phase as f32 - 100.0).abs() / 100.0 - 0.5;
+            (triangle * 0.9 + noise * 0.2, noise * 0.6 - triangle * 0.3)
+        }
+    }
+
+    /// The ring path through the resampler with drift on, every built-in
+    /// stage, control changes mid-run, a device map crossfade and an
+    /// underrun.  Feeds every device sample and meter into `hash`.
+    fn golden_ring_render(hash: &mut Fnv) {
+        use super::super::gate::{GateSettings, GateSlot};
+        let shared = Shared::new(48_000);
+        shared.set_source_rate(44_100);
+        shared.set_cushion(CushionMode::Manual, 5.0);
+        shared.set_mix(false, true, false, [true, true], [true, true], true);
+        shared.set_routes([[true, false, true, false], [false, true, false, true]]);
+        let mut pre = EqSettings::default();
+        pre.bands[1].gain_db = 6.0;
+        let mut post = EqSettings::default();
+        post.bands[3].gain_db = -4.0;
+        shared.set_eq(EqSlot::Pre, pre);
+        shared.set_eq(EqSlot::Post, post);
+        let mut gate = GateSettings {
+            enabled: true,
+            slot: GateSlot::Pre,
+            threshold_db: -20.0,
+            ..GateSettings::default()
+        };
+        shared.set_gate(gate);
+        store_gain(&shared, 0.8);
+        let channels = 4;
+        let mut mixer = OutputMixer::new(48_000, channels);
+        mixer.publish_device_channels(&shared);
+        mixer.prepare(256);
+        let mut source = Source::new();
+        for _ in 0..400 {
+            let (l, r) = source.next();
+            shared.push_frame(l, r);
+        }
+        for block in 0..48 {
+            match block {
+                8 => shared.set_mix(false, true, true, [true, true], [true, true], true),
+                12 => shared.set_mix(false, true, false, [true, true], [false, true], true),
+                16 => {
+                    gate.slot = GateSlot::Post;
+                    shared.set_gate(gate);
+                }
+                20 => shared.clock_device.set(&OutputDeviceSettings {
+                    level_db: -3.0,
+                    map: ChannelMap {
+                        left: 0b1010,
+                        right: 0b0101,
+                    },
+                    unused: UnusedChannels::Silent,
+                    ..OutputDeviceSettings::default()
+                }),
+                24 => store_gain(&shared, 0.3),
+                28 => shared.set_routes([[false, true, false, false], [true, false, false, true]]),
+                36 => shared.set_mix(true, true, false, [true, true], [true, true], true),
+                40 => shared.set_mix(false, true, false, [true, true], [true, true], false),
+                _ => {}
+            }
+            // Blocks 30 and 31 starve the ring; block 33 catches up.
+            let pushed = match block {
+                30 | 31 => 0,
+                33 => 1_200,
+                _ => 236 + (block % 3),
+            };
+            for _ in 0..pushed {
+                let (l, r) = source.next();
+                shared.push_frame(l, r);
+            }
+            mixer.render(&shared, 256, |_, mapped| {
+                for channel in 0..channels {
+                    hash.f32(mapped.sample(channel));
+                }
+            });
+            hash.u32(shared.out_l.load(Ordering::Relaxed));
+            hash.u32(shared.out_r.load(Ordering::Relaxed));
+            hash.u32(shared.drift_ppm.load(Ordering::Relaxed));
+            for meter in shared.clock_device.meters() {
+                hash.f32(meter);
+            }
+        }
+        let underruns = shared.underruns.load(Ordering::Relaxed);
+        assert!(underruns >= 1, "the scenario must run the ring dry");
+        hash.u32(underruns as u32);
+        hash.u32(shared.frames.load(Ordering::Relaxed) as u32);
+    }
+
+    /// The PipeWire direct path with two followers, each with its own map
+    /// and level, and control changes mid-run.
+    fn golden_direct_render(hash: &mut Fnv) {
+        use super::super::shared::FollowerPlan;
+        let shared = Shared::new(48_000);
+        busy_settings(&shared);
+        let followers = [
+            OutputDeviceSettings {
+                level_db: -6.0,
+                map: ChannelMap {
+                    left: 0b10,
+                    right: 0b01,
+                },
+                ..OutputDeviceSettings::default()
+            },
+            OutputDeviceSettings {
+                map: ChannelMap {
+                    left: 0b11,
+                    right: 0,
+                },
+                unused: UnusedChannels::Silent,
+                ..OutputDeviceSettings::default()
+            },
+        ];
+        let plan = FollowerPlan {
+            count: 2,
+            ..FollowerPlan::default()
+        };
+        shared.set_followers(&followers, &plan, &[]);
+        // The duplex graph maps the followers in this mixer.
+        shared.direct.store(true, Ordering::Relaxed);
+        let mut mixer = OutputMixer::new(48_000, 2);
+        mixer.publish_device_channels(&shared);
+        mixer.publish_follower_channels(&shared);
+        mixer.prepare(128);
+        let mut source = Source::new();
+        for block in 0..32 {
+            match block {
+                6 => store_gain(&shared, 0.5),
+                10 => shared.set_followers(
+                    &[
+                        OutputDeviceSettings {
+                            level_db: -12.0,
+                            ..followers[0]
+                        },
+                        followers[1],
+                    ],
+                    &plan,
+                    &[],
+                ),
+                14 => shared.set_mix(false, true, true, [true, true], [true, true], false),
+                18 => {
+                    let mut pre = EqSettings::default();
+                    pre.bands[0].gain_db = -6.0;
+                    shared.set_eq(EqSlot::Pre, pre);
+                }
+                22 => shared.set_routes([[true, true, false, false], [false, true, true, false]]),
+                _ => {}
+            }
+            let (left, right): (Vec<f32>, Vec<f32>) = (0..128).map(|_| source.next()).unzip();
+            mixer.render_direct_devices(&shared, &left, &right, |device, index, mapped| {
+                hash.u32(device as u32);
+                hash.u32(index as u32);
+                hash.f32(mapped.sample(0));
+                hash.f32(mapped.sample(1));
+            });
+            hash.u32(shared.out_l.load(Ordering::Relaxed));
+            hash.u32(shared.out_r.load(Ordering::Relaxed));
+            for follower in &shared.followers[..2] {
+                for meter in follower.meters() {
+                    hash.f32(meter);
+                }
+            }
+        }
+    }
+
+    /// Output recorded before the chain moved into per-path processors: one
+    /// path must stay bit-identical.  The EQ, gate and resampler designs
+    /// use the platform's libm, so the recorded hashes are only checked on
+    /// the platform they were recorded on.
+    #[test]
+    fn one_path_is_bit_identical_to_the_recorded_output() {
+        let mut ring = Fnv::new();
+        golden_ring_render(&mut ring);
+        let mut direct = Fnv::new();
+        golden_direct_render(&mut direct);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            assert_eq!(ring.0, 0x9837_e736_8542_4c03, "ring path output changed");
+            assert_eq!(
+                direct.0, 0x4fa9_c550_12df_70db,
+                "direct path output changed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plugin_insert_on_path_0_runs_inside_the_mixer() {
+        let _main = super::super::shared::tests::claim_main_thread();
+        let fake = crate::audio::clap::tests::fake_plugin_for_test;
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        shared.paths[0].edit_chain(|chain| chain.insert_clap_for_test(fake(false)));
+        // The same insert run on its own over the same dry block.
+        let reference = Shared::new(48_000);
+        reference.paths[0].edit_chain(|chain| chain.insert_clap_for_test(fake(false)));
+        let mut left = vec![0.5f32; 64];
+        let mut right = vec![-0.25f32; 64];
+        reference.paths[0].process_plugins(&mut left, &mut right, 64);
+
+        let out = render(&mut mixer, &shared, 64);
+        assert_ne!(out[0][0], 0.5, "the insert ran");
+        for (index, frame) in out.iter().enumerate() {
+            assert_eq!([frame[0], frame[1]], [left[index], right[index]]);
+        }
+        let peak = |side: &[f32]| side.iter().fold(0.0f32, |peak, v| peak.max(v.abs()));
+        assert_eq!(shared.paths[0].meters(), (peak(&left), peak(&right)));
+    }
+
+    #[test]
+    fn live_slots_add_up_and_a_reactivated_slot_starts_fresh() {
+        use super::super::path::PathState;
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        let bypassed = EqSettings {
+            enabled: false,
+            ..EqSettings::default()
+        };
+        shared.paths[1].set_eq(EqSlot::Pre, bypassed);
+        shared.paths[1].set_eq(EqSlot::Post, bypassed);
+        let device = |mixer: &mut OutputMixer, shared: &Shared| {
+            let mut out = vec![[0.0f32; 2]; 32];
+            mixer.render(shared, 32, |index, mapped| {
+                out[index] = [mapped.sample(0), mapped.sample(1)];
+            });
+            out
+        };
+        assert_eq!(render(&mut mixer, &shared, 16)[0], [0.5, -0.25, 0.0, 0.0]);
+
+        // A second slot plays the same input: the sum doubles, on the taps
+        // and on the device.
+        shared.paths[1].set_state(PathState::Active);
+        assert_eq!(render(&mut mixer, &shared, 16)[0], [1.0, -0.5, 0.0, 0.0]);
+        assert!(device(&mut mixer, &shared)
+            .iter()
+            .all(|f| *f == [1.0, -0.5]));
+        // Removing slot 0 keeps it running through its fade-out; slot 1
+        // stays where it is.
+        shared.paths[0].set_state(PathState::FadingOut);
+        assert_eq!(render(&mut mixer, &shared, 16)[0], [1.0, -0.5, 0.0, 0.0]);
+        shared.paths[0].set_state(PathState::Inactive);
+        assert_eq!(render(&mut mixer, &shared, 16)[0], [0.5, -0.25, 0.0, 0.0]);
+        assert!(device(&mut mixer, &shared)
+            .iter()
+            .all(|f| *f == [0.5, -0.25]));
+
+        // Slot 0 comes back with mono changed while it was off: a fresh
+        // chain adopts the setting at once instead of ramping to it.
+        shared.paths[0].set_mono(true);
+        let generation = shared.paths[0].generation();
+        shared.paths[0].set_state(PathState::Active);
+        assert_eq!(shared.paths[0].generation(), generation + 1);
+        let out = render(&mut mixer, &shared, 16);
+        assert_eq!(out[0], [0.625, -0.125, 0.125, 0.125]);
     }
 
     #[test]

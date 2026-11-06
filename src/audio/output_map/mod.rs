@@ -18,6 +18,13 @@
 //! With the default map (L → 1, R → 2) and `MonoCopy` this is exactly what
 //! the output has always written: L and R on channels 1 and 2, their average
 //! on every further channel, and the average on a 1-channel device.
+//!
+//! Every device stores one map per signal path slot (`MAX_PATHS`); level,
+//! mute and the unused rule belong to the device.  The mapper maps each
+//! live path's frame (already through the master) with its own map and
+//! adds them up per channel, then applies the device level.  One path
+//! gives exactly its own mapped frame.  Only path 0's map can be set so
+//! far: `OutputDeviceSettings::map` is that map.
 
 mod mapper;
 mod types;
@@ -376,6 +383,29 @@ mod tests {
             ..settings
         });
         assert_eq!(next.load().2, 0.0);
+    }
+
+    #[test]
+    fn live_paths_add_up_on_each_channel_and_others_are_ignored() {
+        use crate::audio::path::{LiveSlots, PathState, MAX_PATHS};
+        let controls = DeviceControls::new();
+        let live = LiveSlots::from_states([
+            PathState::Active,
+            PathState::Inactive,
+            PathState::FadingOut,
+            PathState::Inactive,
+        ]);
+        let mut mapper = DeviceMapper::new(3);
+        mapper.begin_paths(&controls, RAMP, live);
+        let mut frames = [[0.0f32; 2]; MAX_PATHS];
+        frames[0] = [0.5, -0.25];
+        frames[1] = [9.0, 9.0];
+        frames[2] = [0.25, 0.5];
+        let out = samples(mapper.map_paths(&frames), 3);
+        assert_eq!(out, [0.75, 0.25, 0.125 + 0.375]);
+        let next = DeviceControls::new();
+        next.adopt_settings_from(&controls);
+        assert_eq!(next.path_map(2), ChannelMap::default());
     }
 
     #[test]
