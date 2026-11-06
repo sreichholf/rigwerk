@@ -22,7 +22,7 @@ use super::eq::{EqSettings, EqSlot};
 use super::follower::FollowerBus;
 #[cfg(test)]
 use super::gate::GateSettings;
-use super::output_map::{DeviceControls, OutputDeviceSettings, MAX_FOLLOWERS};
+use super::output_map::{DeviceControls, DeviceFrame, OutputDeviceSettings, MAX_FOLLOWERS};
 use super::path::{LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
 use super::plugins::PluginPref;
 #[cfg(test)]
@@ -749,17 +749,24 @@ impl Shared {
         &self.follower_ring_active[index.min(MAX_FOLLOWERS - 1)]
     }
 
-    /// Pushes one finished stereo frame into every active generic follower
-    /// ring.  No-op on the PipeWire duplex path (`direct`).
-    pub(crate) fn push_follower_frames(&self, left: f32, right: f32) {
-        if self.direct.load(Ordering::Relaxed) {
-            return;
-        }
-        let count = self.follower_count();
-        for index in 0..count {
-            if self.follower_ring_active[index].load(Ordering::Acquire) {
-                self.follower_buses[index].push_frame(left, right);
-            }
+    /// Whether the clock callback maps generic follower `index` for its
+    /// ring: a follower stream drains it, and this is not the PipeWire
+    /// duplex graph (which plays the followers in-graph).  Read once per
+    /// block; the ring is laid out for the device before this turns true.
+    pub(crate) fn feeds_follower(&self, index: usize) -> bool {
+        !self.direct.load(Ordering::Relaxed)
+            && self.follower_ring_active(index).load(Ordering::Acquire)
+    }
+
+    /// Pushes follower `index`'s finished device frame (its own sum of the
+    /// paths, aligned, mapped and levelled) into its ring, while a stream
+    /// still drains it and the ring is still the one laid out at the start
+    /// of the block (`generation`, see [`FollowerBus::generation`]).
+    pub(crate) fn push_follower_frame(&self, index: usize, generation: u64, frame: &DeviceFrame) {
+        if self.follower_ring_active(index).load(Ordering::Relaxed)
+            && self.follower_bus(index).generation() == generation
+        {
+            self.follower_bus(index).push_frame(frame);
         }
     }
 

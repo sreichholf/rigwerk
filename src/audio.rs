@@ -21,8 +21,9 @@
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
 //! - `mixer` / `resampler`: turning ring frames into output frames.
-//! - `follower`: generic multi-output (finished mix → own ring + cpal stream).
-//! - `ring`: lock-free stereo SPSC used by the clock bridge and followers.
+//! - `follower`: generic multi-output (each follower mixed and mapped on the
+//!   clock callback → own ring + cpal stream).
+//! - `ring`: lock-free multi-lane SPSC ring for each generic follower.
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
 //! - `output_map`: per-device level, mute and channel map.

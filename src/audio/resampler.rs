@@ -63,6 +63,37 @@ fn bessel_i0(x: f64) -> f64 {
     sum
 }
 
+/// One source frame the resampler can carry: the clock bridge's stereo pair,
+/// or a generic follower's device lanes.
+pub(crate) trait ResampleFrame: Copy {
+    /// The all-zero frame.
+    const SILENCE: Self;
+    /// `self += sample * coefficient` on the first `lanes` lanes.  A stereo
+    /// pair always has both.
+    fn add_scaled(&mut self, sample: &Self, coefficient: f32, lanes: usize);
+}
+
+impl ResampleFrame for (f32, f32) {
+    const SILENCE: Self = (0.0, 0.0);
+
+    #[inline]
+    fn add_scaled(&mut self, sample: &Self, coefficient: f32, _lanes: usize) {
+        self.0 += sample.0 * coefficient;
+        self.1 += sample.1 * coefficient;
+    }
+}
+
+impl<const N: usize> ResampleFrame for [f32; N] {
+    const SILENCE: Self = [0.0; N];
+
+    #[inline]
+    fn add_scaled(&mut self, sample: &Self, coefficient: f32, lanes: usize) {
+        for (out, value) in self.iter_mut().zip(sample).take(lanes) {
+            *out += value * coefficient;
+        }
+    }
+}
+
 /// A power-of-two history that holds the whole window plus the frames fetched
 /// ahead of it.
 fn history_len(taps: usize) -> usize {
@@ -82,7 +113,11 @@ fn history_len(taps: usize) -> usize {
 /// resampler is created, so neither `configure` for such a rate nor `next`
 /// allocates.  The nominal 1:1 case is left to the caller's bypass unless a
 /// drift correction is applied.
-pub(crate) struct FrameResampler {
+///
+/// The frame type is the stereo pair by default; a generic follower runs one
+/// over its device lanes (`[f32; N]`, only the first [`Self::set_lanes`]
+/// lanes computed).
+pub(crate) struct FrameResampler<F: ResampleFrame = (f32, f32)> {
     /// Source frames per output frame at the nominal rates.
     base_step: f64,
     /// The step actually used, including the drift correction.
@@ -98,7 +133,9 @@ pub(crate) struct FrameResampler {
     /// row one sample early.
     kernel: Vec<f32>,
     /// The source frames around the read position, as a power-of-two ring.
-    history: Vec<(f32, f32)>,
+    history: Vec<F>,
+    /// Lanes of `F` that carry signal (ignored for the stereo pair).
+    lanes: usize,
     mask: i64,
     /// Absolute source index of the next frame to fetch.
     next_index: i64,
@@ -107,7 +144,7 @@ pub(crate) struct FrameResampler {
     started: bool,
 }
 
-impl FrameResampler {
+impl<F: ResampleFrame> FrameResampler<F> {
     pub(crate) fn new(source_rate: u32, output_rate: u32) -> Self {
         // Reserve for the longest kernel any source up to 192 kHz needs at
         // this output rate (downsampling from the fastest source is the
@@ -123,6 +160,7 @@ impl FrameResampler {
             half: 0,
             kernel: Vec::with_capacity((PHASES + 1) * most_taps),
             history: Vec::with_capacity(history_len(most_taps)),
+            lanes: usize::MAX,
             mask: 0,
             next_index: 0,
             read_pos: 0.0,
@@ -145,7 +183,7 @@ impl FrameResampler {
         self.kernel.resize((PHASES + 1) * self.taps, 0.0);
         let history = history_len(self.taps);
         self.history.clear();
-        self.history.resize(history, (0.0, 0.0));
+        self.history.resize(history, F::SILENCE);
         self.mask = history as i64 - 1;
         self.build_kernel(source_rate, output_rate);
         self.set_correction_ppm(0.0);
@@ -170,6 +208,12 @@ impl FrameResampler {
         self.step = self.base_step * (1.0 + self.correction_ppm as f64 * 1e-6);
     }
 
+    /// Computes only the first `lanes` lanes of each frame from now on (the
+    /// others come out silent).
+    pub(crate) fn set_lanes(&mut self, lanes: usize) {
+        self.lanes = lanes;
+    }
+
     /// Forgets the history.  The next output starts at the next source frame.
     pub(crate) fn reset(&mut self) {
         self.read_pos = 0.0;
@@ -177,7 +221,7 @@ impl FrameResampler {
         self.started = false;
     }
 
-    pub(crate) fn next(&mut self, mut fetch: impl FnMut() -> (f32, f32)) -> (f32, f32) {
+    pub(crate) fn next(&mut self, mut fetch: impl FnMut() -> F) -> F {
         if !self.started {
             // Hold the first frame for the history the read position starts
             // inside of, so the first output is that frame rather than a step
@@ -212,18 +256,15 @@ impl FrameResampler {
         let second_row = &self.kernel[(first_phase + 1) * taps..(first_phase + 2) * taps];
 
         let first_frame = index - (half - 1);
-        let mut left = 0.0f32;
-        let mut right = 0.0f32;
+        let mut out = F::SILENCE;
         for (tap, (first, second)) in first_row.iter().zip(second_row).enumerate() {
-            let (left_sample, right_sample) =
-                self.history[((first_frame + tap as i64) & self.mask) as usize];
+            let sample = &self.history[((first_frame + tap as i64) & self.mask) as usize];
             let coefficient = first + (second - first) * blend;
-            left += left_sample * coefficient;
-            right += right_sample * coefficient;
+            out.add_scaled(sample, coefficient, self.lanes);
         }
 
         self.read_pos = position + self.step;
-        (left, right)
+        out
     }
 
     /// Builds the Kaiser-windowed sinc table for the current `taps`, with the
@@ -371,7 +412,7 @@ mod tests {
 
     #[test]
     fn resampler_skips_the_kernel_only_at_an_untrimmed_1_to_1_ratio() {
-        let mut resampler = FrameResampler::new(48_000, 48_000);
+        let mut resampler: FrameResampler = FrameResampler::new(48_000, 48_000);
         assert!(!resampler.active());
         resampler.set_correction_ppm(250.0);
         assert!(resampler.active());
@@ -475,12 +516,39 @@ mod tests {
 
     #[test]
     fn a_rate_change_reuses_the_reserved_kernel_storage() {
-        let mut resampler = FrameResampler::new(48_000, 44_100);
+        let mut resampler: FrameResampler = FrameResampler::new(48_000, 44_100);
         let kernel = resampler.kernel.as_ptr();
         let history = resampler.history.as_ptr();
         // The worst case the storage is sized for: downsampling from 192 kHz.
         resampler.configure(192_000, 44_100);
         assert_eq!(kernel, resampler.kernel.as_ptr());
         assert_eq!(history, resampler.history.as_ptr());
+    }
+
+    #[test]
+    fn lane_frames_resample_like_the_stereo_pair() {
+        let mut stereo = FrameResampler::new(44_100, 48_000);
+        let mut lanes: FrameResampler<[f32; 4]> = FrameResampler::new(44_100, 48_000);
+        lanes.set_lanes(3);
+        stereo.set_correction_ppm(120.0);
+        lanes.set_correction_ppm(120.0);
+        let (mut left, mut right) = (sine(44_100, 997.0), sine(44_100, 3_001.0));
+        let source: Vec<(f32, f32)> = (0..5_000).map(|_| (left().0, right().0)).collect();
+        let (mut stereo_at, mut lanes_at) = (0usize, 0usize);
+        for _ in 0..4_096 {
+            let pair = stereo.next(|| {
+                stereo_at += 1;
+                source[stereo_at - 1]
+            });
+            let frame = lanes.next(|| {
+                lanes_at += 1;
+                let (l, r) = source[lanes_at - 1];
+                [l, r, l - r, 1.0]
+            });
+            assert_eq!(frame[0].to_bits(), pair.0.to_bits());
+            assert_eq!(frame[1].to_bits(), pair.1.to_bits());
+            // Lanes past the count stay silent.
+            assert_eq!(frame[3], 0.0);
+        }
     }
 }

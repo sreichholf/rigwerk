@@ -1,14 +1,17 @@
-//! Map-only playback for one generic follower: ring → resampler → drift →
-//! channel map.  No EQ, gate, plugins or master gain — those already ran on
-//! the clock device's callback.
+//! Playback for one generic follower: ring → resampler → drift → device.
+//! No EQ, gate, plugins, master, sum or channel map — the clock device's
+//! callback already ran those and pushed the follower's finished device
+//! channels into its ring.  This side only crosses the clock: it follows the
+//! fill, converts the rate and fades around an underrun, on every lane.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::super::denormal::DenormalGuard;
-use super::super::mixer::ramp::{fade_down, fade_up, CONTROL_RAMP_SECONDS, DROPOUT_FADE_SECONDS};
-use super::super::output_map::{DeviceFrame, DeviceMapper};
+use super::super::mixer::ramp::{fade_down, fade_up, DROPOUT_FADE_SECONDS};
+use super::super::output_map::{frame_lanes, DeviceFrame};
 use super::super::resampler::FrameResampler;
+use super::super::ring::LaneFrame;
 use super::super::shared::Shared;
 
 /// Same drift gains as [`super::super::mixer::OutputMixer`].
@@ -18,19 +21,19 @@ const DRIFT_FILTER_SECONDS: f32 = 0.5;
 const DRIFT_KP: f32 = 0.06;
 const DRIFT_KI: f32 = 0.0012;
 
+const SILENCE: LaneFrame = [0.0; super::super::output_map::FRAME_LANES];
+
 fn take_follower_frame(
     shared: &Shared,
     slot: usize,
     missed: &mut bool,
-    last: (f32, f32),
-) -> (f32, f32) {
-    match shared.follower_bus(slot).pop_frame() {
-        Some(pair) => pair,
-        None => {
-            *missed = true;
-            last
-        }
+    last: &LaneFrame,
+) -> LaneFrame {
+    let mut frame = *last;
+    if !shared.follower_bus(slot).pop_frame(&mut frame) {
+        *missed = true;
     }
+    frame
 }
 
 /// Turns one follower ring into device frames.
@@ -38,10 +41,13 @@ pub(crate) struct FollowerMixer {
     slot: usize,
     output_rate: u32,
     source_rate: u32,
-    resampler: FrameResampler,
-    last: (f32, f32),
+    /// The device's channel count, and the ring lanes that carry them.
+    channels: usize,
+    lanes: usize,
+    resampler: FrameResampler<LaneFrame>,
+    last: LaneFrame,
     fade_gain: f32,
-    held: (f32, f32),
+    held: LaneFrame,
     played: bool,
     dropping: bool,
     priming: bool,
@@ -51,20 +57,25 @@ pub(crate) struct FollowerMixer {
     drift_error: Option<f32>,
     resampling: bool,
     stable_since: Instant,
-    device: DeviceMapper,
 }
 
 impl FollowerMixer {
     pub(crate) fn new(slot: usize, output_rate: u32, device_channels: usize) -> Self {
         let output_rate = output_rate.max(1);
+        let channels = device_channels.max(1);
+        let lanes = frame_lanes(channels);
+        let mut resampler = FrameResampler::new(output_rate, output_rate);
+        resampler.set_lanes(lanes);
         Self {
             slot,
             output_rate,
             source_rate: output_rate,
-            resampler: FrameResampler::new(output_rate, output_rate),
-            last: (0.0, 0.0),
+            channels,
+            lanes,
+            resampler,
+            last: SILENCE,
             fade_gain: 1.0,
-            held: (0.0, 0.0),
+            held: SILENCE,
             played: false,
             dropping: false,
             priming: true,
@@ -74,12 +85,13 @@ impl FollowerMixer {
             drift_error: None,
             resampling: false,
             stable_since: Instant::now(),
-            device: DeviceMapper::new(device_channels),
         }
     }
 
+    /// Publishes the device's channel count for the UI (the meters come from
+    /// the clock side's mapper for this slot).
     pub(crate) fn publish_channels(&self, shared: &Shared) {
-        self.device.publish_channels(&shared.followers[self.slot]);
+        shared.followers[self.slot].set_channels(self.channels);
     }
 
     pub(crate) fn follow_source_rate(&mut self, shared: &Shared) {
@@ -103,12 +115,6 @@ impl FollowerMixer {
             self.drift_integral = 0.0;
             self.drift_error = None;
         }
-    }
-
-    fn begin_device(&mut self, shared: &Shared) {
-        let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
-        self.device
-            .begin_block(&shared.followers[self.slot], samples);
     }
 
     fn steer_drift(&mut self, shared: &Shared, target: usize, seconds: f32, drift: bool) -> f32 {
@@ -149,7 +155,6 @@ impl FollowerMixer {
     ) {
         let _denormals = DenormalGuard::new();
         self.follow_source_rate(shared);
-        self.begin_device(shared);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
         let block_source_frames =
             (frames as u64 * self.source_rate as u64).div_ceil(self.output_rate as u64) as usize;
@@ -165,8 +170,9 @@ impl FollowerMixer {
             let excess_line = target * 2 + block_source_frames;
             let fill = shared.follower_bus(self.slot).ring_frames();
             if fill > excess_line {
+                let mut skipped = SILENCE;
                 for _ in 0..fill - target {
-                    if shared.follower_bus(self.slot).pop_frame().is_none() {
+                    if !shared.follower_bus(self.slot).pop_frame(&mut skipped) {
                         break;
                     }
                 }
@@ -190,29 +196,29 @@ impl FollowerMixer {
         let mut missed = false;
         let fade_step = 1.0 / (DROPOUT_FADE_SECONDS * self.output_rate as f32).max(1.0);
         let slot = self.slot;
+        let lanes = self.lanes;
         for index in 0..frames {
-            let (left, right) = if self.priming || self.dropping {
-                self.fade_gain = if self.held == (0.0, 0.0) {
+            let (frame, gain) = if self.priming || self.dropping {
+                self.fade_gain = if self.held[..lanes].iter().all(|value| *value == 0.0) {
                     0.0
                 } else {
                     fade_down(self.fade_gain, fade_step)
                 };
-                let out = (self.held.0 * self.fade_gain, self.held.1 * self.fade_gain);
                 if self.priming
                     && self.fade_gain == 0.0
                     && shared.follower_bus(slot).ring_frames() >= target
                 {
                     self.priming = false;
                 }
-                out
+                (self.held, self.fade_gain)
             } else {
                 let last = self.last;
                 let mut dry = false;
                 let frame = if needs_resample {
                     self.resampler
-                        .next(|| take_follower_frame(shared, slot, &mut dry, last))
+                        .next(|| take_follower_frame(shared, slot, &mut dry, &last))
                 } else {
-                    take_follower_frame(shared, slot, &mut dry, last)
+                    take_follower_frame(shared, slot, &mut dry, &last)
                 };
                 self.last = frame;
                 if dry {
@@ -226,11 +232,17 @@ impl FollowerMixer {
                         self.fade_gain = fade_up(self.fade_gain, fade_step);
                     }
                 }
-                (frame.0 * self.fade_gain, frame.1 * self.fade_gain)
+                (frame, self.fade_gain)
             };
-            write(index, self.device.map(left, right));
+            let mut out = frame;
+            for value in &mut out[..lanes] {
+                *value *= gain;
+            }
+            write(
+                index,
+                &DeviceFrame::from_lanes(&out[..lanes], self.channels),
+            );
         }
-        self.device.end_block(&shared.followers[self.slot]);
 
         let bus = shared.follower_bus(self.slot);
         if missed {

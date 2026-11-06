@@ -131,6 +131,7 @@ pub(crate) struct LiveSlots {
 
 impl LiveSlots {
     /// Just slot 0: the one path every session has had so far.
+    #[cfg(test)]
     pub(crate) fn main() -> Self {
         Self {
             slots: [0; MAX_PATHS],

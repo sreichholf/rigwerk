@@ -46,7 +46,9 @@
 mod mapper;
 mod types;
 
-pub(crate) use mapper::{DeviceControls, DeviceFrame, DeviceMapper};
+pub(crate) use mapper::{
+    frame_lanes, DeviceControls, DeviceFrame, DeviceMapper, SLOTS as FRAME_LANES,
+};
 pub(crate) use types::path_level_gain;
 pub use types::{
     sanitize_path_level, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,

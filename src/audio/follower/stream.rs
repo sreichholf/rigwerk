@@ -41,7 +41,10 @@ pub(crate) fn open_follower(
     let rate = config.sample_rate();
     let requested = clamp_output_buffer(&config, buffer_frames);
 
+    // The ring-active flag is off until this returns, so the clock side is
+    // not feeding the ring while it is laid out for this device.
     let bus = shared.follower_bus(slot);
+    bus.set_device_channels(channels);
     bus.reset_playback();
     bus.set_source_rate(shared.output_rate.load(Ordering::Relaxed).max(rate));
     bus.set_target_frames(super::super::shared::initial_target(buffer_frames));

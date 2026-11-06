@@ -176,7 +176,15 @@ impl DeviceControls {
 /// [`MAX_OUTPUT_CHANNELS`] gets: those channels are never reached, so they
 /// all carry the same unused-channel value.
 const EXTRA: usize = MAX_OUTPUT_CHANNELS;
-const SLOTS: usize = MAX_OUTPUT_CHANNELS + 1;
+/// Samples a [`DeviceFrame`] holds: one per mapped channel plus the shared
+/// slot.  A generic follower's ring carries this many lanes at most.
+pub(crate) const SLOTS: usize = MAX_OUTPUT_CHANNELS + 1;
+
+/// How many lanes carry every channel of a `channels`-channel device: one
+/// per channel up to [`MAX_OUTPUT_CHANNELS`], then the shared slot.
+pub(crate) fn frame_lanes(channels: usize) -> usize {
+    channels.min(SLOTS)
+}
 
 /// One mapped device frame: what each device channel plays.
 pub(crate) struct DeviceFrame {
@@ -194,6 +202,24 @@ impl DeviceFrame {
         } else {
             self.samples[channel.min(EXTRA)]
         }
+    }
+
+    /// The frame as lanes, [`frame_lanes`] of them for its channel count;
+    /// lane `n` is channel `n`, the last lane of a device with more than
+    /// [`MAX_OUTPUT_CHANNELS`] channels is the shared slot.
+    #[inline]
+    pub(crate) fn lanes(&self) -> &[f32] {
+        &self.samples[..frame_lanes(self.channels)]
+    }
+
+    /// Rebuilds a frame for a `channels`-channel device from its lanes (see
+    /// [`Self::lanes`]).  Missing lanes read silence.
+    #[inline]
+    pub(crate) fn from_lanes(lanes: &[f32], channels: usize) -> Self {
+        let mut samples = [0.0; SLOTS];
+        let count = frame_lanes(channels).min(lanes.len());
+        samples[..count].copy_from_slice(&lanes[..count]);
+        Self { samples, channels }
     }
 }
 
@@ -243,6 +269,17 @@ impl DeviceMapper {
         }
     }
 
+    /// Follows a device whose channel count changed (a generic follower's
+    /// stream reopened on another device).  Fixed storage, so this is safe
+    /// in the callback; the next block adopts the controls outright.
+    pub(crate) fn set_channels(&mut self, channels: usize) {
+        if channels != self.channels {
+            self.channels = channels;
+            self.frame.channels = channels;
+            self.adopted = false;
+        }
+    }
+
     /// Channel slots this device uses: one per channel up to the maximum,
     /// plus the shared slot when it has more.
     fn slots(&self) -> std::iter::Chain<std::ops::Range<usize>, std::option::IntoIter<usize>> {
@@ -251,8 +288,8 @@ impl DeviceMapper {
         (0..mapped).chain(extra)
     }
 
-    /// Path 0 alone, as every caller before paths existed (and the generic
-    /// followers, which map the finished stereo mix).
+    /// Path 0 alone, as every caller before paths existed.
+    #[cfg(test)]
     pub(crate) fn begin_block(&mut self, controls: &DeviceControls, ramp_samples: f32) {
         self.begin_paths(controls, ramp_samples, LiveSlots::main());
     }
@@ -301,6 +338,7 @@ impl DeviceMapper {
     }
 
     /// Path 0 alone: maps one stereo frame with path 0's map.
+    #[cfg(test)]
     pub(crate) fn map(&mut self, left: f32, right: f32) -> &DeviceFrame {
         let mut frames = [[0.0; 2]; MAX_PATHS];
         frames[0] = [left, right];

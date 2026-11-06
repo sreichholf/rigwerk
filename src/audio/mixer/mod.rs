@@ -380,11 +380,17 @@ pub(crate) struct OutputMixer {
     gain_adopted: bool,
     /// The clock device's channel map, level and mute, after the master.
     device: DeviceMapper,
-    /// Follower devices (stereo port pairs on PipeWire).  Only the first
-    /// `live_followers` slots are written each block.
+    /// Follower devices: stereo port pairs on the PipeWire duplex graph,
+    /// or a generic follower's device channels, mapped here and pushed into
+    /// its ring.  Only the first `live_followers` slots are written each
+    /// block.
     followers: [DeviceMapper; MAX_FOLLOWERS],
     /// `shared.follower_count()` as read at the start of the block.
     live_followers: usize,
+    /// The generic followers whose rings this block feeds (ring path only;
+    /// see [`Shared::feeds_follower`]), with the ring's layout generation
+    /// as read at the start of the block.
+    feeding: [Option<u64>; MAX_FOLLOWERS],
 }
 
 impl OutputMixer {
@@ -414,9 +420,11 @@ impl OutputMixer {
             gain: Ramp::new(1.0),
             gain_adopted: false,
             device: DeviceMapper::new(device_channels),
-            // PipeWire followers are always a stereo port pair for now.
+            // A PipeWire follower is a stereo port pair; a generic follower
+            // takes its device's count when its ring starts.
             followers: std::array::from_fn(|_| DeviceMapper::new(2)),
             live_followers: 0,
+            feeding: [None; MAX_FOLLOWERS],
         }
     }
 
@@ -426,7 +434,9 @@ impl OutputMixer {
         self.device.publish_channels(&shared.clock_device);
     }
 
-    /// Publishes each live follower's channel count (stereo today).
+    /// Publishes each live follower's channel count as this mixer maps it:
+    /// a stereo port pair on the PipeWire duplex graph.  (A generic
+    /// follower's stream publishes its device's count when it opens.)
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn publish_follower_channels(&self, shared: &Shared) {
         let count = shared.follower_count();
@@ -533,14 +543,20 @@ impl OutputMixer {
         }
         self.device
             .begin_paths(&shared.clock_device, samples, self.live);
-        // PipeWire duplex maps followers in this mixer.  Generic followers
-        // own their DeviceMapper on their own stream — leave meters alone.
-        self.live_followers = if shared.direct.load(Ordering::Relaxed) {
-            shared.follower_count()
-        } else {
-            0
-        };
+        // Every follower is summed and mapped here, like the clock device:
+        // in-graph on the PipeWire duplex path, otherwise for a generic
+        // follower's ring.  One without a running stream maps nothing and
+        // its meters read 0.
+        self.live_followers = shared.follower_count();
         for index in 0..self.live_followers {
+            let feeding = shared.feeds_follower(index);
+            self.feeding[index] = feeding.then(|| shared.follower_bus(index).generation());
+            let channels = if feeding {
+                shared.follower_bus(index).device_channels()
+            } else {
+                2
+            };
+            self.followers[index].set_channels(channels);
             self.followers[index].begin_paths(&shared.followers[index], samples, self.live);
         }
     }
@@ -614,9 +630,6 @@ impl OutputMixer {
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
             write(&mut self.device, followers, index, &self.frames, out);
-            // Fan the finished stereo mix out to every active generic
-            // follower ring (no-op when duplex / none open).
-            shared.push_follower_frames(out[0], out[1]);
         }
 
         shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
@@ -764,7 +777,7 @@ impl OutputMixer {
         self.render_with(shared, frames, |_, _, index, _, out| write(index, out));
     }
 
-    fn render_with(&mut self, shared: &Shared, frames: usize, write: impl WriteFrame) {
+    fn render_with(&mut self, shared: &Shared, frames: usize, mut write: impl WriteFrame) {
         // Decaying EQ and gate states must not drop into the slow subnormal
         // range; the inserts run inside this block and get the same mode.
         let _denormals = DenormalGuard::new();
@@ -879,7 +892,17 @@ impl OutputMixer {
             };
             self.stage_front(index, left, right);
         }
-        self.finish_block(shared, frames, write);
+        // Each generic follower gets its own sum of the paths, mapped onto
+        // its device channels, through its ring (see `follower`).
+        let feeding = self.feeding;
+        self.finish_block(shared, frames, |device, followers, index, paths, out| {
+            write(device, followers, index, paths, out);
+            for (slot, mapper) in followers.iter_mut().enumerate() {
+                if let Some(generation) = feeding[slot] {
+                    shared.push_follower_frame(slot, generation, mapper.map_paths(paths));
+                }
+            }
+        });
 
         if missed {
             shared.underruns.fetch_add(1, Ordering::Relaxed);
@@ -1818,22 +1841,32 @@ mod tests {
             &plan,
             &[(CushionMode::Manual, 10.0)],
         );
+        shared.follower_bus(0).set_device_channels(2);
+        shared.follower_bus(0).reset_playback();
         shared
             .follower_ring_active(0)
             .store(true, Ordering::Relaxed);
-        shared.follower_bus(0).reset_playback();
         shared
             .follower_bus(0)
             .set_cushion(CushionMode::Manual, 10.0);
         shared.follower_bus(0).set_source_rate(48_000);
 
         let frames = 64;
-        let _ = render(&mut mixer, &shared, frames);
+        let mut clock = Vec::new();
+        mixer.render(&shared, frames, |_, mapped| {
+            clock.push([mapped.sample(0), mapped.sample(1)]);
+        });
         assert_eq!(
             shared.follower_bus(0).ring_frames(),
             frames,
             "every finished clock frame should land in the follower ring"
         );
+        // Default maps on both: the follower carries what the clock plays.
+        let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
+        for expected in &clock {
+            assert!(shared.follower_bus(0).pop_frame(&mut frame));
+            assert_eq!([frame[0], frame[1]], *expected);
+        }
 
         // Duplex path must not push (in-graph fan-out owns followers).
         shared.direct.store(true, Ordering::Relaxed);
@@ -1844,6 +1877,65 @@ mod tests {
             0,
             "direct mode must not fill generic follower rings"
         );
+    }
+
+    #[test]
+    fn a_generic_follower_gets_its_own_sum_of_the_paths() {
+        use super::super::shared::{FollowerLink, FollowerPlan};
+        use super::super::types::CushionMode;
+
+        let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
+        // The clock device plays path 0 only; the 4-channel follower plays
+        // path 0 on Out 1/2 and path 1, inverted, on Out 3/4.
+        shared
+            .clock_device
+            .set(&device_with(&[(1, PathMapSettings::unrouted())]));
+        let follower = device_with(&[(
+            1,
+            PathMapSettings {
+                map: ChannelMap {
+                    left: 0b0100,
+                    right: 0b1000,
+                },
+                invert: true,
+                ..PathMapSettings::default()
+            },
+        )]);
+        let mut plan = FollowerPlan {
+            count: 1,
+            ..FollowerPlan::default()
+        };
+        plan.slots[0] = FollowerLink {
+            device_id: "test:follower".to_owned(),
+            ..FollowerLink::default()
+        };
+        shared.set_followers(&[follower], &plan, &[(CushionMode::Safe, 10.0)]);
+        let bus = shared.follower_bus(0);
+        bus.set_device_channels(4);
+        bus.reset_playback();
+        shared
+            .follower_ring_active(0)
+            .store(true, Ordering::Relaxed);
+
+        let clock = device_frames(&mut mixer, &shared, 2, 600);
+        assert_eq!(clock[599], vec![0.5, -0.25]);
+        assert_eq!(bus.ring_frames(), 600);
+        let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
+        for _ in 0..600 {
+            assert!(bus.pop_frame(&mut frame));
+        }
+        assert_eq!(frame[..4], [0.5, -0.25, -0.5, 0.25]);
+        // The clock side publishes the follower's meters, per channel.
+        assert_eq!(shared.followers[0].meters()[..4], [0.5, 0.25, 0.5, 0.25]);
+
+        // A follower whose stream stopped is not mapped: its ring stays put
+        // and its meters fall to 0.
+        shared
+            .follower_ring_active(0)
+            .store(false, Ordering::Relaxed);
+        let _ = device_frames(&mut mixer, &shared, 2, 64);
+        assert_eq!(bus.ring_frames(), 0);
+        assert_eq!(shared.followers[0].meters()[..4], [0.0; 4]);
     }
 
     /// A steady mixer with a second path in slot 1 (EQs bypassed, playing

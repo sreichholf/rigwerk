@@ -56,6 +56,14 @@ capture ─▶ [ring + resampler + drift, only when clocks differ]
 - **Sum matrix** replaces the single `DeviceMapper::map(l, r)`: per device,
   per active path, a 2 × channels map (as today) plus a level and a
   polarity. One path with level 0 dB is bit-identical to today (test it).
+- **Generic followers are summed on the clock callback too.** The ALSA /
+  cpal / WASAPI followers run on their own streams and clocks. Their sum
+  (and later their alignment taps) is per device, so the clock callback
+  maps every follower with its own `DeviceMapper`, as it does for the
+  clock device and the PipeWire duplex followers, and pushes the finished
+  device channels into the follower's ring. The follower stream only
+  crosses the clock (ring, resampler, drift, dropout fade) on N channels.
+  See `src/audio/follower/mod.rs`.
 - **Direct path budget.** In duplex mode every path has to fit in one graph
   quantum. Diagnostics shows the time per path; an overload names the path.
 
