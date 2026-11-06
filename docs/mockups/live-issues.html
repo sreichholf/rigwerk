@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RigWerk · Live Issues strip mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  /* Tokens mirror src/ui/theme.rs */
+  :root {
+    --bg: #080b11;
+    --card: #10151f;
+    --card-raised: #151b28;
+    --card-deep: #0c1019;
+    --border: #222a39;
+    --border-soft: #1b222f;
+    --hover: #1b2331;
+    --text: #e8edf6;
+    --muted: #8b97ab;
+    --dim: #74859f;
+    --teal: #38ddbf;
+    --teal-dark: #104e48;
+    --blue: #70a7ff;
+    --amber: #ffb85b;
+    --red: #ff7070;
+    --green: #60d890;
+    --font: "Ubuntu", "Segoe UI", system-ui, sans-serif;
+    --mono: "Hack", "DejaVu Sans Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #05070b; color: var(--text); font-family: var(--font); font-weight: 300; font-size: 13px; }
+  button { font: inherit; color: inherit; }
+
+  .mock-bar {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    padding: 10px 16px; background: #11161f; border-bottom: 1px solid #2a3344;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .mock-bar strong { color: var(--text); font-weight: 400; font-family: var(--font); font-size: 13px; }
+  .mock-group { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .mock-group > span { margin-right: 4px; }
+  .mock-group button {
+    background: transparent; border: 1px solid #2a3344; border-radius: 5px; padding: 4px 9px; cursor: pointer; color: var(--muted);
+  }
+  .mock-group button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); background: rgba(255,184,91,.08); }
+  .mock-note { color: var(--dim); max-width: 520px; line-height: 1.4; }
+
+  .app {
+    display: grid; grid-template-columns: 232px 1fr;
+    width: 1440px; min-height: 980px; margin: 0 auto;
+    background: var(--bg); border-bottom: 1px solid #2a3344;
+  }
+  .sidebar { padding: 20px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .brand { display: flex; gap: 10px; align-items: center; margin-bottom: 28px; }
+  .brand-mark {
+    width: 36px; height: 36px; border-radius: 9px; border: 1px solid var(--teal-dark);
+    background: #0d1d1c; display: grid; place-items: center; color: var(--teal); font-size: 16px;
+  }
+  .brand .t { font-size: 18px; letter-spacing: .02em; }
+  .brand .s { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .nav-item {
+    display: flex; gap: 12px; align-items: center; padding: 7px 10px; border-radius: 8px;
+    border: 0; background: transparent; text-align: left; position: relative; color: inherit; cursor: default;
+  }
+  .nav-item .ic { width: 18px; color: var(--muted); font-size: 13px; text-align: center; }
+  .nav-item .n { font-size: 15px; line-height: 1.1; }
+  .nav-item .d { font-size: 9.5px; color: var(--muted); }
+  .nav-item.on { background: var(--card-deep); }
+  .nav-item.on::before {
+    content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 3px;
+    border-radius: 2px; background: var(--teal);
+  }
+  .nav-item.on .ic, .nav-item.on .d { color: var(--teal); }
+  .nav-item .badge {
+    margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    display: grid; place-items: center; font-family: var(--mono); font-size: 10px;
+  }
+  .nav-item .badge.amber { color: var(--amber); background: rgba(255,184,91,.12); border: 1px solid rgba(255,184,91,.35); }
+  .nav-item .badge.red { color: var(--red); background: rgba(255,112,112,.12); border: 1px solid rgba(255,112,112,.4); }
+
+  .main { padding: 20px 26px 30px 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; }
+  .header h1 { margin: 0; font-weight: 300; font-size: 32px; }
+  .header p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+  .hdr-r { display: flex; gap: 12px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+  .pill.run { color: var(--teal); border-color: var(--teal-dark); }
+  .start {
+    background: transparent; color: var(--red); border: 1px solid rgba(255,112,112,.45);
+    border-radius: 7px; padding: 8px 16px; font-size: 14px; cursor: default;
+  }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+  .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+  .lbl.teal { color: var(--teal); } .lbl.blue { color: var(--blue); } .lbl.amber { color: var(--amber); }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--muted); } .dim { color: var(--dim); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sp { flex: 1; }
+  .tg {
+    display: inline-flex; align-items: center; border: 1px solid var(--border); background: var(--card-deep);
+    border-radius: 6px; padding: 5px 10px; font-size: 11px; color: var(--muted); white-space: nowrap;
+  }
+  .tg.on { color: var(--teal); border-color: var(--teal-dark); background: #0d1d1c; }
+  .tg.on.blue { color: var(--blue); border-color: #2a4677; background: #0f1830; }
+  .tg.on.amber { color: var(--amber); border-color: rgba(255,184,91,.4); background: #241a0c; }
+  .btn {
+    background: var(--card-deep); border: 1px solid var(--border); border-radius: 7px;
+    padding: 6px 12px; font-size: 12px; cursor: pointer; color: var(--text);
+  }
+  .btn.teal { color: var(--teal); border-color: rgba(56,221,191,.35); background: rgba(56,221,191,.08); }
+  .btn.amber { color: var(--amber); border-color: rgba(255,184,91,.4); background: rgba(255,184,91,.08); }
+  .btn.ghost { color: var(--muted); }
+  .btn:hover { background: var(--hover); }
+  .select {
+    display: flex; justify-content: space-between; align-items: center;
+    border: 1px solid var(--border); background: var(--card-deep); border-radius: 8px;
+    padding: 9px 12px; font-size: 14px;
+  }
+  .select::after { content: "▾"; color: var(--muted); }
+  .field {
+    border: 1px solid var(--border); background: var(--card-deep); border-radius: 6px;
+    padding: 6px 10px; font-family: var(--mono); font-size: 12px;
+  }
+  .kv { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); }
+  .kv b { font-family: var(--mono); font-weight: 400; color: var(--text); font-size: 12px; }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.45; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.ok { background: var(--teal); } .dot.warn { background: var(--amber); }
+  .dot.bad { background: var(--red); } .dot.idle { background: var(--dim); }
+
+  /* ── Issues strip (the proposal) ── */
+  .issues {
+    border-radius: 12px; border: 1px solid var(--border); background: var(--card);
+    overflow: hidden;
+  }
+  .issues[data-sev="high"] { border-color: rgba(255,112,112,.45); }
+  .issues[data-sev="medium"] { border-color: rgba(255,184,91,.4); }
+  .issues-h {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 14px;
+    cursor: pointer; user-select: none;
+  }
+  .issues:not(.collapsed):not([data-sev="none"]) .issues-h {
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .issues-h:hover { background: var(--hover); }
+  .issues-h .chev {
+    width: 18px; height: 18px; display: grid; place-items: center;
+    color: var(--muted); font-family: var(--mono); font-size: 12px; transition: transform .15s;
+  }
+  .issues.collapsed .issues-h .chev { transform: rotate(-90deg); }
+  .issues-h .title {
+    font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim);
+  }
+  .issues[data-sev="high"] .issues-h .title { color: var(--red); }
+  .issues[data-sev="medium"] .issues-h .title { color: var(--amber); }
+  .issues-h .count {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px;
+  }
+  .issues-h .count.err { color: var(--red); border-color: rgba(255,112,112,.4); }
+  .issues-h .count.warn { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .issues[data-sev="none"] .count { display: none; }
+  .issues-h .summary { font-size: 12.5px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .issues-h .summary b { color: var(--text); font-weight: 400; }
+  .issues-filters {
+    display: flex; gap: 4px; align-items: center; margin-left: 4px;
+  }
+  .issues-filters .fg {
+    border: 1px solid var(--border); background: var(--card-deep); color: var(--muted);
+    border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+  }
+  .issues-filters .fg[aria-pressed="true"] { color: var(--text); border-color: #3a465c; background: var(--hover); }
+  .issues-filters .fg.err[aria-pressed="true"] { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .issues-filters .fg.warn[aria-pressed="true"] { color: var(--amber); border-color: rgba(255,184,91,.4); background: #241a0c; }
+  .issues-body { display: flex; flex-direction: column; }
+  .issues.collapsed .issues-body { display: none; }
+  .issue {
+    display: grid;
+    grid-template-columns: 64px 1fr auto;
+    gap: 12px; align-items: center;
+    padding: 10px 14px; border-top: 1px solid var(--border-soft);
+  }
+  .issue:first-of-type { border-top: 0; }
+  .issue .sev {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .04em;
+    border-radius: 4px; padding: 3px 6px; border: 1px solid; width: fit-content;
+  }
+  .issue .sev.error { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .issue .sev.warning { color: var(--amber); border-color: rgba(255,184,91,.4); background: #241a0c; }
+  .issue .body { min-width: 0; }
+  .issue .body .t { font-size: 13px; line-height: 1.3; }
+  .issue .body .s { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.35; }
+  .issue .body .where {
+    margin-top: 4px; font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+  }
+  .issue .acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  .issue.focus {
+    background: linear-gradient(90deg, rgba(255,184,91,.06), transparent 55%);
+  }
+  .issues[data-sev="high"] .issue.focus {
+    background: linear-gradient(90deg, rgba(255,112,112,.07), transparent 55%);
+  }
+  .empty-filter {
+    padding: 12px 14px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--border-soft);
+  }
+  .clear-state {
+    padding: 10px 14px; display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 13px;
+  }
+  .clear-state .ok { color: var(--green); font-family: var(--mono); font-size: 11px; }
+
+  /* Live cards (simplified) */
+  .live-row { display: grid; grid-template-columns: 1fr 22px 0.78fr 22px 1fr; align-items: stretch; gap: 0; }
+  .conn { display: grid; place-items: center; color: var(--border); font-size: 18px; }
+  .lc { padding: 16px; display: flex; flex-direction: column; gap: 10px; min-height: 300px; }
+  .lc.raised { background: var(--card-raised); border-color: rgba(255,184,91,.28); }
+  .meter { display: flex; gap: 10px; align-items: center; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .meter .bar { flex: 1; height: 4px; background: var(--card-deep); border-radius: 2px; position: relative; overflow: hidden; }
+  .meter .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--blue); opacity: .85; }
+  .driver {
+    display: flex; gap: 8px; align-items: center; font-family: var(--mono); font-size: 11px; color: var(--muted);
+    padding-top: 4px; border-top: 1px solid var(--border-soft); margin-top: 2px;
+  }
+  .driver .ask {
+    margin-left: auto; border: 1px solid rgba(255,184,91,.35); background: rgba(255,184,91,.06);
+    color: var(--amber); border-radius: 6px; padding: 3px 8px; font-size: 10.5px; cursor: pointer;
+  }
+  .driver.checked .ask { display: none; }
+  .inline-warn {
+    font-size: 11px; color: var(--amber); line-height: 1.35; padding: 2px 0;
+  }
+  .ghost-warn {
+    border: 1px dashed rgba(255,184,91,.35); border-radius: 8px; padding: 8px 10px;
+    font-size: 11px; color: var(--dim); font-style: italic;
+  }
+
+  .chainstrip { display: flex; gap: 6px; align-items: center; padding: 14px 16px; }
+  .cs { border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; min-width: 110px; background: var(--card-deep); }
+  .cs .k { font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+  .cs .v { font-size: 12.5px; margin-top: 2px; }
+  .cs.out { border-color: #2a4677; } .cs.out .k { color: var(--blue); }
+  .arrow { color: var(--muted); font-family: var(--mono); }
+
+  .bottom { display: grid; grid-template-columns: 1.6fr 1fr; gap: 10px; }
+  .scope, .health { padding: 14px 16px; min-height: 180px; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .tile { border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; }
+  .tile .v { font-family: var(--mono); font-size: 18px; margin-top: 6px; color: var(--teal); }
+  .tile .v.amber { color: var(--amber); } .tile .v.red { color: var(--red); }
+  .activity {
+    display: flex; gap: 10px; align-items: center; padding: 10px 15px; font-size: 12px; color: var(--muted);
+  }
+  .activity .lbl { margin-right: 2px; }
+  .legend {
+    margin-top: 4px; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 10px;
+    color: var(--muted); font-size: 12.5px; line-height: 1.5;
+  }
+  .legend b { color: var(--text); font-weight: 400; }
+  .toast {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+    background: #241a0c; border: 1px solid rgba(255,184,91,.5); color: var(--amber);
+    padding: 10px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="mock-bar">
+  <strong>Live · Issues strip</strong>
+  <div class="mock-group">
+    <span>scenario</span>
+    <button data-sc="clear" aria-pressed="false">Clear</button>
+    <button data-sc="quantum" aria-pressed="false">Quantum misfit</button>
+    <button data-sc="driver" aria-pressed="false">Driver unchecked</button>
+    <button data-sc="multi" aria-pressed="true">Multi</button>
+    <button data-sc="silent" aria-pressed="false">Sink silent</button>
+    <button data-sc="xrun" aria-pressed="false">Xrun stress</button>
+  </div>
+  <div class="mock-group">
+    <span>compare</span>
+    <button data-mode="proposed" aria-pressed="true">Proposed strip</button>
+    <button data-mode="today" aria-pressed="false">Today (inline)</button>
+  </div>
+  <span class="mock-note">Collapsible strip · filter All / Warnings / Errors. Cards keep facts only.</span>
+</div>
+
+<div class="app" id="app"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const DEV = "Scarlett 2i2 USB";
+const SCENARIOS = {
+  clear: {
+    label: "Clear",
+    sev: "none",
+    issues: [],
+    driverChecked: true,
+    driverText: "48.0 kHz · 64 smp · 1.3 ms",
+    driverTone: "ok",
+    mode: "Low latency · 64 smp · 1.3 ms",
+    modeTone: "ok",
+    underruns: 0,
+    inlineQuantum: null,
+  },
+  quantum: {
+    label: "Quantum misfit",
+    sev: "medium",
+    issues: [{
+      id: "quantum",
+      sev: "warning",
+      title: "Graph block and output period do not line up",
+      detail: "ALSA period 128 frames does not divide the PipeWire quantum (64). Clocks can xrun.",
+      where: "OUTPUT · Out clock",
+      primary: { label: "Set buffer to 64", action: "buffer64" },
+      secondary: { label: "Show on Output", action: "focus-output" },
+    }],
+    driverChecked: true,
+    driverText: "48.0 kHz · 128 smp · 2.7 ms",
+    driverTone: "warn",
+    mode: "block 64 smp · 1.3 ms",
+    modeTone: "warn",
+    underruns: 0,
+    inlineQuantum: "The ALSA period (128 frames) does not divide the PipeWire quantum (64 frames), so the two clocks do not line up and can xrun…",
+  },
+  driver: {
+    label: "Driver unchecked",
+    sev: "medium",
+    issues: [{
+      id: "driver",
+      sev: "warning",
+      title: "Output driver not checked yet",
+      detail: "Ask the sound system which rate and step this output allows. Opens no audio.",
+      where: "OUTPUT · Driver",
+      primary: { label: "Check driver", action: "check-driver" },
+      secondary: { label: "Dismiss", action: "dismiss-driver" },
+    }],
+    driverChecked: false,
+    driverText: "no reading yet",
+    driverTone: "idle",
+    mode: "Low latency · smallest ALSA period",
+    modeTone: "warn",
+    underruns: 0,
+    inlineQuantum: null,
+  },
+  multi: {
+    label: "Multi",
+    sev: "high",
+    issues: [
+      {
+        id: "silent",
+        sev: "error",
+        title: "Output went silent under low latency",
+        detail: "Still sending audio; sink monitor is near silence.",
+        where: "OUTPUT · Low latency",
+        primary: { label: "Use safer latency", action: "safer" },
+        secondary: { label: "Show", action: "focus-output" },
+      },
+      {
+        id: "quantum",
+        sev: "warning",
+        title: "Graph block and output period do not line up",
+        detail: "Period 128 does not divide quantum 64.",
+        where: "OUTPUT · Out clock",
+        primary: { label: "Set buffer to 64", action: "buffer64" },
+        secondary: { label: "Show", action: "focus-output" },
+      },
+      {
+        id: "driver",
+        sev: "warning",
+        title: "Output driver not checked yet",
+        detail: "Confirm the driver’s real step before trusting MODE.",
+        where: "OUTPUT · Driver",
+        primary: { label: "Check driver", action: "check-driver" },
+        secondary: { label: "Dismiss", action: "dismiss-driver" },
+      },
+    ],
+    driverChecked: false,
+    driverText: "no reading yet",
+    driverTone: "idle",
+    mode: "block 64 smp · 1.3 ms",
+    modeTone: "warn",
+    underruns: 0,
+    inlineQuantum: "The ALSA period (128 frames) does not divide the PipeWire quantum (64 frames)…",
+  },
+  silent: {
+    label: "Sink silent",
+    sev: "high",
+    issues: [{
+      id: "silent",
+      sev: "error",
+      title: "Output went silent under low latency",
+      detail: "RigWerk is still sending audio; the sink monitor is near silence. Raise buffer, or turn off Low latency.",
+      where: "OUTPUT · Low latency",
+      primary: { label: "Use safer latency", action: "safer" },
+      secondary: { label: "Show on Output", action: "focus-output" },
+    }],
+    driverChecked: true,
+    driverText: "48.0 kHz · 64 smp · 1.3 ms",
+    driverTone: "ok",
+    mode: "Low latency · 64 smp · 1.3 ms",
+    modeTone: "ok",
+    underruns: 0,
+    inlineQuantum: null,
+  },
+  xrun: {
+    label: "Xrun stress",
+    sev: "medium",
+    issues: [{
+      id: "xrun",
+      sev: "warning",
+      title: "Audio is dropping out on this output",
+      detail: "Several underruns since Low latency was turned on. Raise the buffer, or turn Low latency off.",
+      where: "OUTPUT · Low latency",
+      primary: { label: "Use safer latency", action: "safer" },
+      secondary: { label: "Open health", action: "focus-health" },
+    }],
+    driverChecked: true,
+    driverText: "48.0 kHz · 64 smp · 1.3 ms",
+    driverTone: "ok",
+    mode: "Low latency · 64 smp · 1.3 ms",
+    modeTone: "ok",
+    underruns: 7,
+    inlineQuantum: null,
+  },
+};
+
+let S = {
+  scenario: "multi",
+  mode: "proposed", // proposed | today
+  dismissed: new Set(),
+  focus: null, // output | health | null
+  open: true, // strip body expanded
+  filter: "all", // all | warnings | errors
+};
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast.h);
+  toast.h = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+function activeIssues() {
+  const base = SCENARIOS[S.scenario];
+  return base.issues.filter((i) => !S.dismissed.has(i.id));
+}
+
+function isError(issue) { return issue.sev === "error"; }
+function isWarning(issue) { return issue.sev === "warning"; }
+
+function filteredIssues(issues) {
+  if (S.filter === "errors") return issues.filter(isError);
+  if (S.filter === "warnings") return issues.filter(isWarning);
+  return issues;
+}
+
+function stripSev(issues) {
+  if (!issues.length) return "none";
+  if (issues.some(isError)) return "high";
+  return "medium";
+}
+
+function countLabel(n, singular) {
+  return `${n} ${singular}${n === 1 ? "" : "s"}`;
+}
+
+function issuesStrip(issues) {
+  const sev = stripSev(issues);
+  if (S.mode === "today") {
+    return `<div class="legend"><b>Today:</b> no shared strip. Quantum text sits under the OUTPUT picker; driver status is a second amber cue on the DRIVER line; MODE may also go amber. Same problem, three places.</div>`;
+  }
+  if (!issues.length) {
+    return `<div class="issues" data-sev="none">
+      <div class="clear-state"><span class="ok">OK</span> No issues · bridge path looks healthy</div>
+    </div>`;
+  }
+
+  const errors = issues.filter(isError).length;
+  const warnings = issues.filter(isWarning).length;
+  const shown = filteredIssues(issues);
+  const collapsed = !S.open;
+  const top = issues.find(isError) || issues[0];
+  const summary = collapsed
+    ? `<span class="summary"><b>${top.title}</b>${issues.length > 1 ? ` · +${issues.length - 1} more` : ""}</span>`
+    : `<span class="summary">${countLabel(errors, "error")} · ${countLabel(warnings, "warning")}</span>`;
+
+  const filters = `
+    <div class="issues-filters" data-stop>
+      <button class="fg" data-filter="all" aria-pressed="${S.filter === "all"}">All</button>
+      <button class="fg warn" data-filter="warnings" aria-pressed="${S.filter === "warnings"}">Warnings${warnings ? ` ${warnings}` : ""}</button>
+      <button class="fg err" data-filter="errors" aria-pressed="${S.filter === "errors"}">Errors${errors ? ` ${errors}` : ""}</button>
+    </div>`;
+
+  const body = shown.length
+    ? shown.map((issue, idx) => {
+        const focused = (S.focus === "output" && issue.where.startsWith("OUTPUT"))
+          || (S.focus === "health" && issue.where.includes("health"));
+        return `<div class="issue ${idx === 0 || focused ? "focus" : ""}">
+          <div class="sev ${issue.sev}">${issue.sev === "error" ? "ERROR" : "WARNING"}</div>
+          <div class="body">
+            <div class="t">${issue.title}</div>
+            <div class="s">${issue.detail}</div>
+            <div class="where">${issue.where}</div>
+          </div>
+          <div class="acts">
+            ${issue.secondary ? `<button class="btn ghost" data-act="${issue.secondary.action}" data-id="${issue.id}">${issue.secondary.label}</button>` : ""}
+            <button class="btn ${issue.sev === "error" ? "amber" : "teal"}" data-act="${issue.primary.action}" data-id="${issue.id}">${issue.primary.label}</button>
+          </div>
+        </div>`;
+      }).join("")
+    : `<div class="empty-filter">No ${S.filter} in this list.</div>`;
+
+  return `<div class="issues ${collapsed ? "collapsed" : ""}" data-sev="${sev}">
+    <div class="issues-h" data-act="toggle-open" title="${collapsed ? "Expand issues" : "Collapse issues"}">
+      <span class="chev">▾</span>
+      <span class="dot ${sev === "high" ? "bad" : "warn"}"></span>
+      <span class="title">Issues</span>
+      <span class="count ${errors ? "err" : "warn"}">${issues.length}</span>
+      ${summary}
+      <span class="sp"></span>
+      ${filters}
+    </div>
+    <div class="issues-body">${body}</div>
+  </div>`;
+}
+
+function outputCard(sc) {
+  const showInline = S.mode === "today" && sc.inlineQuantum;
+  const showGhost = S.mode === "proposed" && sc.inlineQuantum;
+  const driverCls = sc.driverChecked ? "driver checked" : "driver";
+  const focus = S.focus === "output" ? ' style="outline:1px solid rgba(255,184,91,.45); outline-offset:2px"' : "";
+  return `<div class="card lc"${focus}>
+    <div class="row"><span class="lbl blue">Output</span><span class="sp"></span>
+      <span class="tg on blue">PIPEWIRE</span><span class="tg">SYS</span>
+    </div>
+    <div class="select">${DEV}</div>
+    ${showInline ? `<div class="inline-warn">${sc.inlineQuantum}</div>` : ""}
+    ${showGhost ? `<div class="ghost-warn">moved to Issues ↑ · card stays about the device</div>` : ""}
+    <div class="row">
+      <span class="tg">OUT 1</span><span class="tg">OUT 2</span>
+      <span class="sp"></span>
+      <span class="tg on amber">Low latency</span>
+      <span class="tg">mute</span>
+    </div>
+    <div class="kv">OUT CLOCK <span class="row"><span class="field">48 kHz ▾</span><span class="field">128 smp ▾</span></span></div>
+    <div class="kv">LEVEL <b>−1.5 dB</b></div>
+    <div class="meter"><span>L</span><div class="bar"><i style="width:42%"></i></div></div>
+    <div class="meter"><span>R</span><div class="bar"><i style="width:38%"></i></div></div>
+    <div class="${driverCls}">
+      <span class="lbl">Driver</span>
+      <span class="dot ${sc.driverTone === "ok" ? "ok" : sc.driverTone === "warn" ? "warn" : "idle"}"></span>
+      <span>${sc.driverText}</span>
+      ${sc.driverChecked ? "" : `<button class="ask" data-act="check-driver">Check driver</button>`}
+    </div>
+  </div>`;
+}
+
+function render() {
+  const sc = SCENARIOS[S.scenario];
+  const issues = activeIssues();
+  const navBadge = issues.length
+    ? `<span class="badge ${stripSev(issues) === "high" ? "red" : "amber"}">${issues.length}</span>`
+    : "";
+
+  document.querySelectorAll("[data-sc]").forEach((b) => {
+    b.setAttribute("aria-pressed", b.dataset.sc === S.scenario ? "true" : "false");
+  });
+  document.querySelectorAll("[data-mode]").forEach((b) => {
+    b.setAttribute("aria-pressed", b.dataset.mode === S.mode ? "true" : "false");
+  });
+
+  document.getElementById("app").innerHTML = `
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">R</div>
+        <div><div class="t">RigWerk</div><div class="s">Independent clocks</div></div>
+      </div>
+      <button class="nav-item on"><span class="ic">∿</span><span><div class="n">Live</div><div class="d">Bridge</div></span>${navBadge}</button>
+      <button class="nav-item"><span class="ic">▣</span><span><div class="n">Mixer</div><div class="d">Chain</div></span></button>
+      <button class="nav-item"><span class="ic">⇄</span><span><div class="n">Routing</div><div class="d">Matrix</div></span></button>
+      <button class="nav-item"><span class="ic">☰</span><span><div class="n">Diagnostics</div><div class="d">Log</div></span></button>
+    </aside>
+    <main class="main">
+      <div class="header">
+        <div>
+          <h1>Live Bridge</h1>
+          <p>A short path from guitar cable to speakers.</p>
+        </div>
+        <div class="hdr-r">
+          <span class="pill run">Running</span>
+          <button class="start">Stop bridge</button>
+        </div>
+      </div>
+
+      ${issuesStrip(issues)}
+
+      <div class="live-row">
+        <div class="card lc">
+          <div class="row"><span class="lbl teal">Input</span><span class="sp"></span><span class="tg on">PIPEWIRE</span><span class="tg">SYS</span></div>
+          <div class="select">Scarlett 2i2 USB</div>
+          <div class="kv">IN CLOCK <span class="row"><span class="field">48 kHz ▾</span><span class="field">64 smp ▾</span></span></div>
+          <div class="kv">GAIN <b>+0.0 dB</b></div>
+          <div class="meter"><span>L</span><div class="bar"><i style="width:48%;background:var(--teal)"></i></div></div>
+          <div class="meter"><span>R</span><div class="bar"><i style="width:40%;background:var(--teal)"></i></div></div>
+          <div class="driver checked"><span class="lbl">Driver</span><span class="dot ok"></span><span>48.0 kHz · 64 smp</span></div>
+        </div>
+        <div class="conn">·</div>
+        <div class="card lc raised">
+          <div class="row"><span class="lbl amber">Bridge</span><span class="sp"></span><span class="dot ok"></span></div>
+          <div style="font-size:14px">PipeWire duplex · direct</div>
+          <div class="kv">BUFFER <b style="color:var(--dim)">—</b></div>
+          <div class="kv">DRIFT <b style="color:var(--teal)">AUTO</b></div>
+          <div class="kv">UNDERRUNS <b style="color:${sc.underruns ? "var(--amber)" : "var(--text)"}">${sc.underruns}</b></div>
+          <div class="lbl" style="margin-top:4px">Cushion</div>
+          <div class="row"><span class="tg">Safe</span><span class="tg on amber">Low latency</span><span class="tg">Manual</span></div>
+        </div>
+        <div class="conn">·</div>
+        ${outputCard(sc)}
+      </div>
+
+      <div class="card chainstrip">
+        <span class="lbl teal" style="margin-right:6px">Chain</span>
+        <div class="cs"><div class="k" style="color:var(--teal)">INPUT</div><div class="v">+0.0 dB</div></div><span class="arrow">→</span>
+        <div class="cs"><div class="k">PRE EQ</div><div class="v">flat</div></div><span class="arrow">→</span>
+        <div class="cs"><div class="k">PLUGINS</div><div class="v">0</div></div><span class="arrow">→</span>
+        <div class="cs"><div class="k">GATE</div><div class="v">off</div></div><span class="arrow">→</span>
+        <div class="cs out"><div class="k">OUTPUT</div><div class="v">−1.5 dB</div></div>
+        <span class="sp"></span><button class="btn">Open mixer</button>
+      </div>
+
+      <div class="bottom">
+        <div class="card scope">
+          <div class="lbl">Level preview</div>
+          <div style="height:90px;margin-top:10px;border:1px solid var(--border-soft);border-radius:8px;background:var(--card-deep)"></div>
+        </div>
+        <div class="card health"${S.focus === "health" ? ' style="outline:1px solid rgba(255,184,91,.45); outline-offset:2px"' : ""}>
+          <div class="lbl">Bridge health</div>
+          <div class="tiles">
+            <div class="tile"><div class="k">Path</div><div class="v">2.7<small>ms</small></div></div>
+            <div class="tile"><div class="k">Mode</div><div class="v ${sc.modeTone === "warn" ? "amber" : ""}" style="font-size:13px;line-height:1.25;margin-top:10px">${sc.mode}</div></div>
+            <div class="tile"><div class="k">Buffer</div><div class="v amber">—</div></div>
+            <div class="tile"><div class="k">Underruns</div><div class="v ${sc.underruns ? "red" : ""}">${sc.underruns}</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card activity">
+        <span class="lbl">Recent activity</span>
+        <span class="mono dim">09:58</span>
+        <span class="dot idle"></span>
+        <span>Bridge running · ${DEV}</span>
+        <span class="sp"></span>
+        <button class="btn teal">Open diagnostics</button>
+      </div>
+
+      <div class="legend">
+        <b>Strip:</b> click the header (or ▾) to collapse to one line.
+        Filters: <b>All</b> / <b>Warnings</b> / <b>Errors</b>.
+        Try <b>Multi</b>, collapse it, then filter Errors.
+        Activity log stays history at the bottom.
+      </div>
+    </main>`;
+}
+
+document.addEventListener("click", (e) => {
+  const sc = e.target.closest("[data-sc]");
+  if (sc) {
+    S.scenario = sc.dataset.sc;
+    S.dismissed = new Set();
+    S.focus = null;
+    S.filter = "all";
+    S.open = true;
+    return render();
+  }
+  const mode = e.target.closest("[data-mode]");
+  if (mode) {
+    S.mode = mode.dataset.mode;
+    S.focus = null;
+    return render();
+  }
+  const filter = e.target.closest("[data-filter]");
+  if (filter) {
+    e.stopPropagation();
+    S.filter = filter.dataset.filter;
+    S.open = true;
+    return render();
+  }
+  // Clicks inside the filter group shouldn't toggle collapse.
+  if (e.target.closest("[data-stop]")) return;
+
+  const act = e.target.closest("[data-act]");
+  if (!act) return;
+  const a = act.dataset.act;
+  const id = act.dataset.id;
+  if (a === "toggle-open") {
+    S.open = !S.open;
+    return render();
+  }
+  if (a === "focus-output") { S.focus = "output"; S.open = true; toast("Highlight Output card"); return render(); }
+  if (a === "focus-health") { S.focus = "health"; S.open = true; toast("Highlight Health card"); return render(); }
+  if (a === "check-driver") {
+    S.dismissed.add("driver");
+    toast("Driver check started · reading replaces the issue");
+    return render();
+  }
+  if (a === "dismiss-driver") {
+    S.dismissed.add("driver");
+    toast("Dismissed · Check driver remains on the DRIVER line");
+    return render();
+  }
+  if (a === "buffer64") {
+    S.dismissed.add("quantum");
+    toast("Buffer set to 64 · issue clears when quantum fits");
+    return render();
+  }
+  if (a === "safer") {
+    if (id) S.dismissed.add(id);
+    toast("Safer latency applied · Low latency cleared");
+    return render();
+  }
+});
+
+render();
+</script>
+</body>
+</html>
