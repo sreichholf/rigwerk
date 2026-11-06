@@ -19,11 +19,10 @@ use crate::ui::theme::{
     RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    arrow_button, db_slider, ellipsize, hinted_tab, meter_row, micro_label, mono, styled_slider,
+    arrow_button, db_slider, hinted_tab, meter_row, micro_label, mono, styled_slider,
 };
 
 const ROW_H: f32 = 58.0;
-const INSERT_H: f32 = 44.0;
 const PANE_HEAD_H: f32 = 36.0;
 const PANE_PAD_X: f32 = 14.0;
 
@@ -130,8 +129,9 @@ impl RigWerkApp {
                 RackAction::Configure(index) => self.open_plugin_editor(index),
                 RackAction::Remove(index) => {
                     self.remove_plugin(index);
-                    self.chain_selected =
-                        self.chain_selected.clamp(self.engine.plugin_views().len());
+                    self.chain_selected = self
+                        .chain_selected
+                        .after_removal(index, self.engine.plugin_views().len());
                 }
                 RackAction::Move(index, delta) => {
                     self.move_plugin(index, delta);
@@ -592,8 +592,16 @@ fn insert_row(
     } else {
         with_alpha(AMBER, 40)
     };
+    // Size the card from the two text lines it holds (plus the gap the
+    // vertical stack below puts between them), so neither spills out of it.
+    let pad = Vec2::new(8.0, 6.0);
+    let title_font = FontId::new(ts(11.5), FontFamily::Proportional);
+    let mix_font = FontId::new(ts(9.5), FontFamily::Proportional);
+    let text_h = ui.fonts_mut(|fonts| fonts.row_height(&title_font) + fonts.row_height(&mix_font))
+        + ui.spacing().item_spacing.y;
+    let row_h = (text_h + pad.y * 2.0).max(ui.spacing().interact_size.y + pad.y * 2.0);
     let (rect, row_response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), INSERT_H), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(8),
@@ -611,29 +619,28 @@ fn insert_row(
     );
     let mut child = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink2(Vec2::new(8.0, 6.0)))
+            .max_rect(rect.shrink2(pad))
             .layout(Layout::left_to_right(Align::Center)),
     );
-    child.horizontal(|ui| {
+    // `horizontal_centered` spans the full inner height; plain `horizontal`
+    // starts as one interact-height line centred in the row, which pushes
+    // the two-line stack below the card.
+    child.horizontal_centered(|ui| {
         let (grip_rect, grip_response) =
             ui.allocate_exact_size(Vec2::new(14.0, 18.0), Sense::hover());
         paint_grip(ui, grip_rect.center(), DIM);
         let _ = grip_response.on_hover_text("Use the arrows to reorder");
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(format!("{:02} {}", index + 1, ellipsize(&view.name, 22)))
-                    .size(ts(11.5))
-                    .color(if view.bypass { DIM } else { TEXT })
-                    .strong(),
-            )
-            .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));
-            ui.label(
-                RichText::new(format!("mix {}%", (view.mix * 100.0).round() as i32))
-                    .size(ts(9.5))
-                    .color(DIM),
-            );
-        });
+        // Controls first, from the right edge, so the title gets whatever
+        // width is left and is truncated to it instead of running under them.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if remove_button(ui)
+                .on_hover_text("Remove this insert")
+                .clicked()
+            {
+                actions.push(RackAction::Remove(index));
+                controls_clicked = true;
+            }
+            ui.separator();
             if arrow_button(ui, false, MUTED)
                 .on_hover_text("Move later in the chain")
                 .clicked()
@@ -663,9 +670,48 @@ fn insert_row(
                 actions.push(RackAction::Bypass(index, !bypass));
                 controls_clicked = true;
             }
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{:02} {}", index + 1, view.name))
+                            .font(title_font.clone())
+                            .color(if view.bypass { DIM } else { TEXT })
+                            .strong(),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("mix {}%", (view.mix * 100.0).round() as i32))
+                            .font(mix_font.clone())
+                            .color(DIM),
+                    )
+                    .truncate(),
+                );
+            });
         });
     });
     row_response.clicked() && !controls_clicked
+}
+
+/// The "×" that removes an insert: dim until hovered, then red, since it is
+/// the one destructive control on the row.
+fn remove_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(4), with_alpha(RED, 30));
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        FontId::new(ts(13.0), FontFamily::Proportional),
+        if hovered { RED } else { DIM },
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn plugins_group_inspector(ui: &mut egui::Ui, views: &[PluginView], actions: &mut Vec<RackAction>) {

@@ -288,12 +288,26 @@ impl RigWerkApp {
     }
 
     pub(crate) fn remove_plugin(&mut self, index: usize) {
+        // Editors are tied to a position in the chain: close the removed
+        // insert's, and let a later insert's follow it as it slides up.
+        match self.plugin_gui.as_ref().map(|gui| gui.index) {
+            Some(open) if open == index => self.plugin_gui = None,
+            Some(open) if open > index => {
+                if let Some(gui) = self.plugin_gui.as_mut() {
+                    gui.index = open - 1;
+                }
+            }
+            _ => {}
+        }
         self.engine.remove_plugin(index);
-        // The panel is tied to a position in the chain, so close it rather
-        // than let it show whichever insert slid into that position.
-        self.plugin_editor = None;
-        self.plugin_gui = None;
-        self.plugin_param_filter.clear();
+        self.plugin_editor = match self.plugin_editor {
+            Some(open) if open == index => None,
+            Some(open) if open > index => Some(open - 1),
+            other => other,
+        };
+        if self.plugin_editor.is_none() {
+            self.plugin_param_filter.clear();
+        }
         self.push_log("Plugin insert removed.", AMBER);
     }
 
