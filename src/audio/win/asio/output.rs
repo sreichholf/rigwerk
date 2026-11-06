@@ -20,6 +20,7 @@ use super::samples::write_asio_sample;
 use super::ASIO_OUTPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
 use crate::audio::devices::pick_input_config;
+use crate::audio::follower::FollowerOutputs;
 use crate::audio::input::{make_input_stream, open_input_device};
 
 pub(crate) fn run_asio_output_bridge(
@@ -49,6 +50,7 @@ pub(crate) fn run_asio_output_bridge(
         // Two drivers keep two clocks, so the input rate is only known after
         // its driver opens.  That is the one path where the output mixer may
         // still design its filter on the first callback; see REVIEW-FIXES.md.
+        let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
         shared.set_status("Opening ASIO input…");
         run_asio_input_only(
             input_clsid,
@@ -57,7 +59,9 @@ pub(crate) fn run_asio_output_bridge(
             output_rate,
             &shared,
             &stop,
+            || followers.sync(&shared),
         )?;
+        drop(followers);
         drop(worker);
     } else {
         // Open the input first and publish its real rate, so the ASIO output
@@ -100,9 +104,12 @@ pub(crate) fn run_asio_output_bridge(
             output_channels
         ));
 
+        let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
         while !stop.load(Ordering::Relaxed) {
+            followers.sync(&shared);
             thread::sleep(Duration::from_millis(20));
         }
+        drop(followers);
         drop(input_stream);
         drop(worker);
     }
@@ -231,10 +238,10 @@ pub(crate) fn run_asio_output_loop(
         let _ = ready.send(Err(error.clone()));
         return Err(error);
     }
-    // At most 4 outputs for now: the device map sees this count, and more
-    // would start the mono copy on outputs 5+ of big interfaces.  Extra ASIO
-    // outputs come with step 4.
-    let output_channels = (counts.out as usize).min(4);
+    // Cap at the map's addressable width so routing layer ② can reach every
+    // open channel.  Unused channels follow the clock device's unused mode
+    // (Silent vs MonoCopy).
+    let output_channels = (counts.out as usize).min(crate::audio::MAX_OUTPUT_CHANNELS);
 
     let buffer = driver
         .buffer_size()
@@ -328,9 +335,11 @@ pub(crate) fn run_asio_output_loop(
         return Ok(());
     }
 
-    let wait = wait_for_callbacks(registration.signal(), || {
-        worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed)
-    });
+    let wait = wait_for_callbacks(
+        registration.signal(),
+        || worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed),
+        || {},
+    );
     match wait {
         CallbackWait::Stopped => {}
         CallbackWait::Reset | CallbackWait::Failed => {

@@ -53,10 +53,9 @@ pub(crate) fn run_asio_duplex_bridge(
         return Err("The ASIO driver has no output channels".to_owned());
     }
     let input_channels = (counts.in_ as usize).min(2);
-    // At most 4 outputs for now: the device map sees this count, and more
-    // would start the mono copy on outputs 5+ of big interfaces.  Extra ASIO
-    // outputs come with step 4.
-    let output_channels = (counts.out as usize).min(4);
+    // Cap at the map's addressable width so routing layer ② can reach every
+    // open channel.  Unused channels follow the clock device's unused mode.
+    let output_channels = (counts.out as usize).min(crate::audio::MAX_OUTPUT_CHANNELS);
 
     let buffer = driver
         .buffer_size()
@@ -151,13 +150,19 @@ pub(crate) fn run_asio_duplex_bridge(
         input_channels, output_channels, buffer_frames, rate
     ));
 
-    let wait = wait_for_callbacks(registration.signal(), || stop.load(Ordering::Relaxed));
+    let mut followers = crate::audio::follower::FollowerOutputs::new(config.output_buffer, rate);
+    let wait = wait_for_callbacks(
+        registration.signal(),
+        || stop.load(Ordering::Relaxed),
+        || followers.sync(&shared),
+    );
     match wait {
         CallbackWait::Stopped => {}
         CallbackWait::Reset | CallbackWait::Failed => {
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.clear();
+            drop(followers);
             return Err(if matches!(wait, CallbackWait::Reset) {
                 DRIVER_RESET_MESSAGE
             } else {
@@ -169,6 +174,7 @@ pub(crate) fn run_asio_duplex_bridge(
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.abandon();
+            drop(followers);
             shared.set_device_lost(
                 "The ASIO driver stopped responding — the interface may have been unplugged"
                     .to_owned(),
@@ -176,6 +182,7 @@ pub(crate) fn run_asio_duplex_bridge(
             return Ok(());
         }
     }
+    drop(followers);
 
     let _ = driver.stop();
     let _ = driver.dispose_buffers();

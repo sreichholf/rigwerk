@@ -12,6 +12,7 @@ use super::callback::{
 };
 use super::ASIO_INPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
+use crate::audio::follower::FollowerOutputs;
 use crate::audio::output::open_output;
 
 pub(crate) fn run_asio_bridge(
@@ -151,13 +152,19 @@ pub(crate) fn run_asio_bridge(
         output.channels
     ));
 
-    let wait = wait_for_callbacks(registration.signal(), || stop.load(Ordering::Relaxed));
+    let mut followers = FollowerOutputs::new(config.output_buffer, output.rate);
+    let wait = wait_for_callbacks(
+        registration.signal(),
+        || stop.load(Ordering::Relaxed),
+        || followers.sync(&shared),
+    );
     match wait {
         CallbackWait::Stopped => {}
         CallbackWait::Reset | CallbackWait::Failed => {
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.clear();
+            drop(followers);
             return Err(if matches!(wait, CallbackWait::Reset) {
                 DRIVER_RESET_MESSAGE
             } else {
@@ -169,6 +176,7 @@ pub(crate) fn run_asio_bridge(
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.abandon();
+            drop(followers);
             shared.set_device_lost(
                 "The ASIO input stopped responding — the interface may have been unplugged"
                     .to_owned(),
@@ -180,6 +188,7 @@ pub(crate) fn run_asio_bridge(
     let _ = driver.stop();
     let _ = driver.dispose_buffers();
     registration.clear();
+    drop(followers);
     drop(output);
     Ok(())
 }
@@ -191,6 +200,7 @@ pub(crate) fn run_asio_input_only(
     output_rate: u32,
     shared: &Arc<Shared>,
     stop: &Arc<AtomicBool>,
+    mut tick: impl FnMut(),
 ) -> Result<(), String> {
     use azo::driver::Driver;
     use azo::dto::ChannelId;
@@ -294,7 +304,11 @@ pub(crate) fn run_asio_input_only(
         rate_path(rate, output_rate)
     ));
 
-    let wait = wait_for_callbacks(registration.signal(), || stop.load(Ordering::Relaxed));
+    let wait = wait_for_callbacks(
+        registration.signal(),
+        || stop.load(Ordering::Relaxed),
+        &mut tick,
+    );
     match wait {
         CallbackWait::Stopped => {}
         CallbackWait::Reset | CallbackWait::Failed => {

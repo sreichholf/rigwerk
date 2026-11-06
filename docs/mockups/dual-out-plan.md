@@ -32,9 +32,8 @@ switches platform and scenario). `dual-out-endpoints.html` (A–D) is history.
     sink; PipeWire keeps the devices in step. RigWerk Out = a node with a
     virtual source `media.class`.
   - Linux ALSA `hw:` clock device: needs generic followers (step 3).
-  - Windows second, behind an "experimental" setting: WASAPI followers
-    only, VB-Cable as v1 publish. No ASIO followers (one driver per
-    process). A RigWerk virtual driver (v2) is out of scope.
+  - Windows: WASAPI followers only, VB-Cable (or similar) as publish.
+    No ASIO followers (one driver per process).
 
 ## Steps
 
@@ -103,13 +102,12 @@ With one output device, everything looks and behaves exactly like today.
   stop the bridge.
 - Enable for Linux ALSA first (testable here).
 
-### Step 4: Windows (experimental)
+### Step 4: Windows
 
 - WASAPI shared-mode followers, VB-Cable publish (detected by name), extra
   ASIO output channels on the open driver (routing layer ②).
 - Warn in the add list when a WASAPI endpoint belongs to the open ASIO
   interface (some drivers lock it).
-- Off by default; tested by hand on real hardware before it's on.
 
 ## Rules for every step
 
@@ -137,11 +135,20 @@ With one output device, everything looks and behaves exactly like today.
 - [x] Step 2 · Linux/PipeWire followers and RigWerk Out
   - Duplex filter: preallocated stereo port pairs + live links for PW sinks
   - RigWerk Out: `Audio/Source/Virtual` filter, publish live
-  - Mixer add/remove gated on native PipeWire clock; ALSA hw still disabled (step 3)
+  - Mixer add/remove gated on native PipeWire clock; ALSA hw uses step 3
   - Routing layer ② edits follower/virtual maps; Live has Also playing on + publish banner
   - Open: native two-stream (non-duplex) PW playback does not yet fan out followers; ASIO still ≤4 outs
+- [x] Step 3 · generic followers
+  - `OutputMixer::finish_block` pushes finished stereo into per-follower SPSC rings
+  - `FollowerMixer` + cpal stream per slot; supervisor add/remove/reconnect live
+  - Mixer add enabled on Linux ALSA/cpal clocks; follower cushion UI; RigWerk Out stays PW-only
+  - Open: Windows WASAPI followers (step 4); ASIO still ≤4 outs
 - Related (docs only, not dual-out steps): Live Issues strip — `live-issues-plan.md`,
   mockup `live-issues.html`. Shared Warnings/Errors on Live; remediation must
   name real controls (Low latency, buffer, cushion), including per-follower
   cushion once followers play.
-- [ ] Step 3 · [ ] Step 4
+- [x] Step 4 · Windows
+  - WASAPI shared-mode followers via the generic path; supervisor on ASIO bridges too
+  - VB-Cable publish (name detect → CABLE Input); ASIO open channels up to 8
+  - Soft ASIO/WASAPI conflict hint in the add list
+  - Enabled by default (hand-tested: REAL-style clock + shared-mode headset)

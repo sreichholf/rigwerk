@@ -594,9 +594,23 @@ fn output_devices_round_trip_in_preferences_and_presets() {
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     let back = loaded.preferences.expect("readable");
     assert_eq!(back.clock_device, clock);
-    assert_eq!(back.followers, followers);
     assert_eq!(back.sessions[0].clock_device, clock);
-    assert_eq!(back.sessions[0].followers, followers);
+    #[cfg(target_os = "windows")]
+    {
+        // Virtual-out clears the PipeWire sentinel; rematch fills WASAPI later.
+        assert_eq!(back.followers.len(), followers.len());
+        assert_eq!(back.followers[0], followers[0]);
+        assert!(back.followers[1].virtual_out && back.followers[1].publish);
+        assert!(back.followers[1].id.is_empty());
+        assert_eq!(back.followers[1].name, VIRTUAL_OUT_NAME);
+        assert_eq!(back.sessions[0].followers.len(), followers.len());
+        assert!(back.sessions[0].followers[1].id.is_empty());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert_eq!(back.followers, followers);
+        assert_eq!(back.sessions[0].followers, followers);
+    }
 }
 
 #[test]
@@ -671,7 +685,15 @@ fn virtual_out_and_publish_round_trip() {
     assert_eq!(back.followers.len(), 1);
     assert!(back.followers[0].virtual_out);
     assert!(back.followers[0].publish);
-    assert_eq!(back.followers[0].id, VIRTUAL_OUT_ID);
+    #[cfg(target_os = "windows")]
+    {
+        // PipeWire sentinel is cleared; inventory rematch fills the WASAPI id.
+        assert!(back.followers[0].id.is_empty());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert_eq!(back.followers[0].id, VIRTUAL_OUT_ID);
+    }
     assert_eq!(back.followers[0].name, VIRTUAL_OUT_NAME);
 }
 
@@ -705,5 +727,93 @@ fn a_second_virtual_out_is_dropped() {
     assert!(!preferences.followers[0].virtual_out);
     assert!(preferences.followers[1].virtual_out);
     assert!(preferences.followers[1].publish);
-    assert_eq!(preferences.followers[1].id, VIRTUAL_OUT_ID);
+    #[cfg(target_os = "windows")]
+    {
+        assert!(preferences.followers[1].id.is_empty());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert_eq!(preferences.followers[1].id, VIRTUAL_OUT_ID);
+    }
+}
+
+#[test]
+fn windows_virtual_out_keeps_wasapi_id_through_sanitize() {
+    let pref = FollowerPref {
+        id: "wasapi:{cable-input}".to_owned(),
+        backend: "WASAPI".to_owned(),
+        name: "CABLE Input (VB-Audio Virtual Cable)".to_owned(),
+        virtual_out: true,
+        publish: true,
+        ..FollowerPref::default()
+    }
+    .sanitized();
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(pref.id, "wasapi:{cable-input}");
+        assert_eq!(pref.backend, "WASAPI");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // PipeWire RigWerk Out always uses the sentinel id.
+        assert_eq!(pref.id, VIRTUAL_OUT_ID);
+        assert_eq!(pref.backend, "PipeWire");
+    }
+    assert!(pref.virtual_out && pref.publish);
+    assert_eq!(pref.name, "CABLE Input (VB-Audio Virtual Cable)");
+}
+
+#[test]
+fn windows_virtual_out_drops_pipewire_sentinel_on_sanitize() {
+    let pref = FollowerPref {
+        id: VIRTUAL_OUT_ID.to_owned(),
+        virtual_out: true,
+        publish: true,
+        ..FollowerPref::default()
+    }
+    .sanitized();
+    #[cfg(target_os = "windows")]
+    {
+        assert!(pref.id.is_empty());
+        assert_eq!(pref.backend, "WASAPI");
+        assert_eq!(pref.name, VIRTUAL_OUT_NAME);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert_eq!(pref.id, VIRTUAL_OUT_ID);
+        assert_eq!(pref.backend, "PipeWire");
+    }
+}
+
+#[test]
+fn windows_virtual_out_rematch_binds_vb_cable_from_inventory() {
+    use crate::audio::DeviceItem;
+
+    let cable = DeviceItem {
+        id: "wasapi:{live-cable}".to_owned(),
+        name: "CABLE Input (VB-Audio Virtual Cable)".to_owned(),
+        backend: "WASAPI".to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    };
+    let mut followers = vec![FollowerPref {
+        id: VIRTUAL_OUT_ID.to_owned(),
+        virtual_out: true,
+        publish: true,
+        ..FollowerPref::default()
+    }
+    .sanitized()];
+    rematch_windows_virtual_out(&mut followers, std::slice::from_ref(&cable));
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(followers[0].id, cable.id);
+        assert_eq!(followers[0].backend, "WASAPI");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cable;
+        assert_eq!(followers[0].id, VIRTUAL_OUT_ID);
+    }
 }

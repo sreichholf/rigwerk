@@ -731,6 +731,10 @@ impl RigWerkApp {
         let scan_notes = fresh.notes.clone();
         self.inventory = fresh;
         self.inventory_fingerprint = inventory_fingerprint(&self.inventory);
+        crate::app::settings::rematch_windows_virtual_out(
+            &mut self.followers,
+            &self.inventory.outputs,
+        );
         let restored = restore_saved_devices(&self.inventory, &gate.preferences);
         self.asio_idx = restored.asio_idx;
         self.input_idx = restored.input_idx;

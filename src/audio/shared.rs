@@ -12,6 +12,7 @@ use std::time::Duration;
 use super::clap::{ClapPlugin, HostState};
 
 use super::eq::{EqSettings, EqSlot};
+use super::follower::FollowerBus;
 use super::gate::GateSettings;
 use super::output_map::{DeviceControls, OutputDeviceSettings, MAX_FOLLOWERS};
 use super::plugins::{PluginChain, PluginPref, PluginView};
@@ -20,10 +21,13 @@ use super::types::{CushionMode, Snapshot};
 
 pub(crate) use super::scope::SCOPE_LEN;
 
-/// One follower slot as the PipeWire linker (and the UI) sees it.  Updated
-/// live; the audio callback only reads [`Shared::followers`] controls.
+/// One follower slot as the PipeWire linker / generic supervisor (and the UI)
+/// sees it.  Updated live; the audio callback only reads
+/// [`Shared::followers`] controls and the ring-active flags.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FollowerLink {
+    /// cpal / inventory device id for generic open; empty when virtual.
+    pub(crate) device_id: String,
     /// PipeWire `node.name` to link to, or empty when missing / virtual.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) node_name: String,
@@ -112,6 +116,12 @@ pub(crate) struct Shared {
     /// Per-slot flags the realtime callback can read without the plan lock.
     follower_virtual: [AtomicBool; MAX_FOLLOWERS],
     follower_publish: [AtomicBool; MAX_FOLLOWERS],
+    /// Generic follower rings (finished mix → follower device).  Unused on
+    /// the PipeWire duplex path, which fans out in-graph instead.
+    follower_buses: [FollowerBus; MAX_FOLLOWERS],
+    /// Set by the follower supervisor while a cpal stream is draining the
+    /// slot's ring.  The clock callback only pushes when this is true.
+    follower_ring_active: [AtomicBool; MAX_FOLLOWERS],
     pub(crate) drift_enabled: AtomicBool,
     /// Set while input and output run in one PipeWire graph callback (the
     /// duplex node).  The ring, cushion and drift steering are then unused.
@@ -215,6 +225,8 @@ impl Shared {
             follower_plan: Mutex::new(FollowerPlan::default()),
             follower_virtual: std::array::from_fn(|_| AtomicBool::new(false)),
             follower_publish: std::array::from_fn(|_| AtomicBool::new(false)),
+            follower_buses: std::array::from_fn(|_| FollowerBus::new(sample_rate)),
+            follower_ring_active: std::array::from_fn(|_| AtomicBool::new(false)),
             drift_enabled: AtomicBool::new(true),
             direct: AtomicBool::new(false),
             status: Mutex::new("Waiting".to_owned()),
@@ -736,6 +748,12 @@ impl Shared {
         for follower in &self.followers {
             follower.reset();
         }
+        for bus in &self.follower_buses {
+            bus.reset_playback();
+        }
+        for flag in &self.follower_ring_active {
+            flag.store(false, Ordering::Relaxed);
+        }
         // Keep the plan and count across a session reset: the UI re-pushes
         // them every frame, and clearing here would drop links for a tick.
         self.scope_in.clear();
@@ -975,25 +993,36 @@ impl Shared {
             .min(MAX_FOLLOWERS)
     }
 
-    /// Pushes follower settings and the PipeWire link plan.  Level, mute and
-    /// map take effect on the next block; add/remove updates links on the
-    /// next main-loop tick.  Not part of the bridge signature.
-    pub(crate) fn set_followers(&self, settings: &[OutputDeviceSettings], plan: &FollowerPlan) {
+    /// Pushes follower settings, cushions and the link / open plan.  Level,
+    /// mute and map take effect on the next block; add/remove updates
+    /// PipeWire links or generic streams on the next main-loop tick.  Not
+    /// part of the bridge signature.
+    pub(crate) fn set_followers(
+        &self,
+        settings: &[OutputDeviceSettings],
+        plan: &FollowerPlan,
+        cushions: &[(CushionMode, f32)],
+    ) {
         let count = settings.len().min(plan.count).min(MAX_FOLLOWERS);
         for (index, slot) in settings.iter().take(count).enumerate() {
             self.followers[index].set(slot);
             // PipeWire followers are stereo port pairs; publish the count so
             // the UI has meters as soon as the follower is added live.
+            // Generic followers overwrite this when their stream opens.
             if self.followers[index].channels() == 0 {
                 self.followers[index].set_channels(2);
             }
             let link = &plan.slots[index];
             self.follower_virtual[index].store(link.virtual_out, Ordering::Relaxed);
             self.follower_publish[index].store(link.publish, Ordering::Relaxed);
+            if let Some(&(mode, ms)) = cushions.get(index) {
+                self.follower_buses[index].set_cushion(mode, ms);
+            }
         }
         for index in count..MAX_FOLLOWERS {
             self.follower_virtual[index].store(false, Ordering::Relaxed);
             self.follower_publish[index].store(false, Ordering::Relaxed);
+            self.follower_ring_active[index].store(false, Ordering::Relaxed);
         }
         self.follower_count.store(count, Ordering::Relaxed);
         if let Ok(mut current) = self.follower_plan.lock() {
@@ -1001,6 +1030,45 @@ impl Shared {
                 slots: plan.slots.clone(),
                 count,
             };
+        }
+    }
+
+    /// The playback bus for one generic follower slot.
+    pub(crate) fn follower_bus(&self, index: usize) -> &FollowerBus {
+        &self.follower_buses[index.min(MAX_FOLLOWERS - 1)]
+    }
+
+    /// Whether the clock callback should push finished frames into this
+    /// follower's ring.
+    pub(crate) fn follower_ring_active(&self, index: usize) -> &AtomicBool {
+        &self.follower_ring_active[index.min(MAX_FOLLOWERS - 1)]
+    }
+
+    /// Pushes one finished stereo frame into every active generic follower
+    /// ring.  No-op on the PipeWire duplex path (`direct`).
+    pub(crate) fn push_follower_frames(&self, left: f32, right: f32) {
+        if self.direct.load(Ordering::Relaxed) {
+            return;
+        }
+        let count = self.follower_count();
+        for index in 0..count {
+            if self.follower_ring_active[index].load(Ordering::Acquire) {
+                self.follower_buses[index].push_frame(left, right);
+            }
+        }
+    }
+
+    /// Notes the clock output's block size on every active follower bus so
+    /// their cushions size themselves from the producer step.
+    pub(crate) fn note_follower_producer_block(&self, frames: usize) {
+        if self.direct.load(Ordering::Relaxed) {
+            return;
+        }
+        let count = self.follower_count();
+        for index in 0..count {
+            if self.follower_ring_active[index].load(Ordering::Relaxed) {
+                self.follower_buses[index].note_input_block(frames);
+            }
         }
     }
 
@@ -1611,11 +1679,13 @@ mod tests {
             ..FollowerPlan::default()
         };
         plan.slots[0] = FollowerLink {
+            device_id: "ALSA:hw:CARD=1,DEV=0".to_owned(),
             node_name: "speakers".to_owned(),
             virtual_out: false,
             publish: false,
         };
         plan.slots[1] = FollowerLink {
+            device_id: String::new(),
             node_name: String::new(),
             virtual_out: true,
             publish: true,
@@ -1630,14 +1700,20 @@ mod tests {
                 OutputDeviceSettings::default(),
             ],
             &plan,
+            &[(CushionMode::LowLatency, 10.0), (CushionMode::Safe, 10.0)],
         );
         assert_eq!(shared.follower_count(), 2);
         assert_eq!(shared.snapshot().follower_count, 2);
         let live = shared.follower_plan();
         assert_eq!(live.slots[0].node_name, "speakers");
+        assert_eq!(live.slots[0].device_id, "ALSA:hw:CARD=1,DEV=0");
         assert!(live.slots[1].virtual_out && live.slots[1].publish);
+        assert_eq!(
+            shared.follower_bus(0).cushion_mode(),
+            CushionMode::LowLatency
+        );
 
-        shared.set_followers(&[], &FollowerPlan::default());
+        shared.set_followers(&[], &FollowerPlan::default(), &[]);
         assert_eq!(shared.follower_count(), 0);
         assert!(shared.follower_plan().slots[0].node_name.is_empty());
     }

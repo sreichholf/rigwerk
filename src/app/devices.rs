@@ -742,6 +742,10 @@ impl RigWerkApp {
 
         self.inventory = fresh;
         self.inventory_fingerprint = inventory_fingerprint(&self.inventory);
+        crate::app::settings::rematch_windows_virtual_out(
+            &mut self.followers,
+            &self.inventory.outputs,
+        );
         self.asio_idx = device_index(&self.inventory.asio, &asio_id, &asio_backend, &asio_name)
             .unwrap_or_else(|| default_index(&self.inventory.asio));
         self.input_idx = match (&input_id, &input_name) {

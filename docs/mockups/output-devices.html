@@ -243,7 +243,6 @@
     <button data-mock="scenario" data-v="missing" aria-pressed="false">Device missing</button>
     <button data-mock="scenario" data-v="stopped" aria-pressed="false">Bridge stopped</button>
   </div>
-  <div class="mock-group" id="mock-driver"><label><input type="checkbox" id="driver-installed" /> RigWerk Virtual driver installed (Win v2)</label></div>
   <div class="mock-group"><button id="mock-reset">reset</button></div>
 </div>
 
@@ -287,9 +286,8 @@
     <li>Clock device missing → bridge can't start (as today). Follower missing → bridge runs without it; row stays in the session.</li>
   </ul></div>
   <div class="n"><h3>Windows publish</h3><ul>
-    <li><b>v1</b>: RigWerk renders into an installed cable (VB-Cable). Row says <b>Publish → VB-Cable</b>; apps pick <b>CABLE Output</b>. The cable is greyed in the add list while Publish uses it.</li>
-    <li><b>v2</b>: with the RigWerk Virtual driver it becomes <b>RigWerk Out</b>, renameable.</li>
-    <li>Neither present: the Virtual entry is greyed with the reason; Live shows "Not publishing".</li>
+    <li>RigWerk renders into an installed cable (VB-Cable today). Row says <b>Publish → VB-Cable</b>; apps pick <b>CABLE Output</b>. The cable is greyed in the add list while Publish uses it.</li>
+    <li>No cable installed: the Virtual entry is greyed with the reason; Live shows "Not publishing".</li>
   </ul></div>
   <div class="n"><h3>Concept review questions</h3><ul>
     <li><b>Enum</b>: <code>Output</code> stays the master; add <code>OutputDevice(n)</code> like <code>Plugin(n)</code>, plus an add state.</li>
@@ -342,7 +340,6 @@ const HEALTH = {
 
 let S;
 function initial() {
-  const win = document.getElementById("driver-installed")?.checked;
   const base = {
     view: S?.view ?? "mixer",
     platform: S?.platform ?? "linux",
@@ -372,8 +369,7 @@ function dev(id, clock, db, extra = {}) {
   return { ...c, clock, db, mute: false, cushion: "Safe", ...extra };
 }
 
-const viaDriver = () => S.platform === "windows" && document.getElementById("driver-installed").checked;
-const virtName = (d) => (S.platform === "windows" && !viaDriver() ? "Publish → VB-Cable" : d.name);
+const virtName = (d) => (S.platform === "windows" ? "Publish → VB-Cable" : d.name);
 const running = () => S.scenario !== "stopped";
 const clockDev = () => S.devices.find((d) => d.clock);
 const fmtDb = (db) => (db > 0 ? "+" : db < 0 ? "−" : "+") + Math.abs(db).toFixed(1) + " dB";
@@ -390,14 +386,13 @@ function devState(d) {
   return { cls: "ok", text: "running" };
 }
 function devSub(d) {
-  if (d.virtual) return S.platform === "linux" ? "PIPEWIRE · source node" : viaDriver() ? "RIGWERK VIRTUAL DRIVER" : "VIA VB-CABLE · v1";
+  if (d.virtual) return S.platform === "linux" ? "PIPEWIRE · source node" : "VIA VB-CABLE";
   return `${d.backend} · ${d.ch} CH`;
 }
 
 // ───────────── render ─────────────
 function render() {
   document.querySelectorAll("[data-mock]").forEach((b) => b.setAttribute("aria-pressed", String(S[b.dataset.mock] === b.dataset.v)));
-  document.getElementById("mock-driver").style.display = S.platform === "windows" ? "" : "none";
   document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("on", n.dataset.nav === S.view));
   const c = clockDev();
   const followers = S.devices.length - 1;
@@ -599,32 +594,27 @@ function inspFollower(d, i) {
 
 function inspVirtual(d, i) {
   const linux = S.platform === "linux";
-  const installed = true;
-  const cable = !linux && !viaDriver();
+  const cable = !linux;
   const c = clockDev();
   const status = cable
-    ? `<div class="banner amber"><span class="sp"><b>Publishing through VB-Cable (v1).</b> RigWerk plays the mix into <b>CABLE Input</b>; other apps capture <b>CABLE Output (VB-Audio)</b>. There is no "RigWerk Out" device on this PC.</span><button class="btn plain">Setup Guide</button></div>`
-    : linux
-    ? `<div class="banner green"><span class="sp"><b>Published as a PipeWire source.</b> Other apps (OBS, Discord, a DAW) see <b>${d.name}</b> as a capture device while the bridge runs.</span></div>`
-    : installed
-      ? `<div class="banner green"><span class="sp"><b>RigWerk Virtual driver ready.</b> Other apps see <b>${d.name}</b> as a recording device.</span></div>`
-      : "";
+    ? `<div class="banner amber"><span class="sp"><b>Publishing through VB-Cable.</b> RigWerk plays the mix into <b>CABLE Input</b>; other apps capture <b>CABLE Output (VB-Audio)</b>. There is no "RigWerk Out" device on this PC.</span><button class="btn plain">Setup Guide</button></div>`
+    : `<div class="banner green"><span class="sp"><b>Published as a PipeWire source.</b> Other apps (OBS, Discord, a DAW) see <b>${d.name}</b> as a capture device while the bridge runs.</span></div>`;
   const clockNote = linux && c.backend === "PIPEWIRE"
     ? "Runs in the PipeWire graph with the clock device: no conversion, no extra cushion."
     : cable ? `A WASAPI render client on the cable. Follows <b>${c.name}</b> through its own buffer, like any other follower.`
     : `Follows <b>${c.name}</b> through its own buffer, like any other follower.`;
   return `<div class="insp-h">INSPECTOR · OUTPUT DEVICE</div>
     <div class="insp-title"><div><h2>${virtName(d)} <span class="tag virt">VIRTUAL</span></h2><p>${cable ? "Plays the finished mix into an installed cable for other apps to capture." : "Endpoint RigWerk creates · the finished mix for other apps to capture."}</p></div>
-      <div class="row"><button class="tg ${d.publish && installed ? "on" : ""}" data-publish="${i}" ${installed ? "" : "disabled"}>${d.publish && installed ? "PUBLISHED" : "OFF"}</button></div></div>
+      <div class="row"><button class="tg ${d.publish ? "on" : ""}" data-publish="${i}">${d.publish ? "PUBLISHED" : "OFF"}</button></div></div>
     ${status}
     <div class="grid2">
       <div class="blk">
         <div class="blk-h"><span class="lbl blue">Endpoint</span><span class="tag live">LIVE</span></div>
-        ${linux ? "" : `<div class="kv">Via <span class="row"><span class="tg ${cable ? "on blue" : ""}">VB-Cable</span><span class="tg ${cable ? "" : "on blue"} ${viaDriver() ? "" : "off"}" title="${viaDriver() ? "" : "RigWerk Virtual driver not installed"}">RigWerk driver</span></span></div>`}
+        ${linux ? "" : `<div class="kv">Via <span class="row"><span class="tg on blue">VB-Cable</span></span></div>`}
         <div class="kv">Name <span class="field" style="min-width:180px;${cable ? "color:var(--muted)" : ""}">${cable ? "CABLE Output (fixed)" : d.name}</span></div>
         <div class="kv">Channels <b>2 · stereo</b></div>
         <div class="kv">Shows up as <b>${linux ? "Audio/Source · Virtual" : "Recording device"}</b></div>
-        <div class="note">${cable ? "The cable's name belongs to its driver; RigWerk can't rename it. Install RigWerk Virtual (v2) for a named endpoint." : "No device picker: RigWerk owns this endpoint. Renaming re-publishes it; apps already capturing may need to re-pick it."}</div>
+        <div class="note">${cable ? "The cable's name belongs to its driver; RigWerk can't rename it." : "No device picker: RigWerk owns this endpoint. Renaming re-publishes it; apps already capturing may need to re-pick it."}</div>
       </div>
       <div class="blk">
         <div class="blk-h"><span class="lbl">Clock</span></div>
@@ -633,7 +623,7 @@ function inspVirtual(d, i) {
         <div class="note">Can't be the clock device: nothing plays it in real time.</div>
       </div>
     </div>
-    <div class="blk"><div class="blk-h"><span class="lbl">Health</span><span class="mono muted" style="font-size:11px">${!installed ? "not published" : running() ? "live" : "bridge stopped"}</span></div>${installed ? healthTiles(d) : `<div class="note">—</div>`}</div>
+    <div class="blk"><div class="blk-h"><span class="lbl">Health</span><span class="mono muted" style="font-size:11px">${!d.publish ? "not published" : running() ? "live" : "bridge stopped"}</span></div>${d.publish ? healthTiles(d) : `<div class="note">—</div>`}</div>
     ${levelBlock(d, i, "SEND LEVEL")}
     <div class="blk"><div class="actions"><span class="note sp">Removes the endpoint. Apps capturing it lose their input.</span><button class="btn danger" data-remove="${i}">Remove <span class="tag live" style="margin-left:6px">LIVE</span></button></div></div>`;
 }
@@ -649,7 +639,7 @@ function inspAdd() {
     else if (have.has(d.id)) why = "already added";
     else if (S.platform === "windows" && d.backend === "ASIO") why = `one ASIO driver at a time · ${c.backend === "ASIO" ? c.name : "pick it as clock device instead"} is open`;
     else if (d.sameAs && have.has(d.sameAs)) why = "same hardware as GP-5 Analog Stereo";
-    else if (d.id === "vbc" && have.has("virt") && !viaDriver()) why = "used by Publish (VB-Cable)";
+    else if (d.id === "vbc" && have.has("virt")) why = "used by Publish (VB-Cable)";
     return { d, why };
   });
   const groups = linux ? ["PIPEWIRE", "ALSA"] : ["WASAPI", "ASIO"];
@@ -665,7 +655,7 @@ function inspAdd() {
         </div>`).join("")}</div>`).join("")}
       <div class="dl-h" style="color:var(--green)">Virtual</div>
       <div class="dl"><div class="dl-i ${virtWhy ? "dis" : ""}" ${virtWhy ? "" : `data-add="virt"`}>
-        <span class="rd" style="border-color:var(--green)"></span><span><div class="n">${linux || viaDriver() ? "RigWerk Out" : "Publish → VB-Cable"}</div><div class="s">${linux ? "PIPEWIRE SOURCE · created by RigWerk" : viaDriver() ? "RIGWERK VIRTUAL DRIVER" : "VB-CABLE DETECTED · RIGWERK DRIVER NOT INSTALLED"}</div></span>
+        <span class="rd" style="border-color:var(--green)"></span><span><div class="n">${linux ? "RigWerk Out" : "Publish → VB-Cable"}</div><div class="s">${linux ? "PIPEWIRE SOURCE · created by RigWerk" : "VB-CABLE · OTHER APPS CAPTURE CABLE OUTPUT"}</div></span>
         <span class="why">${virtWhy || "publish the mix to other apps"}</span></div></div>
     </div>
     <div class="note">Greyed devices say why. Same-device channel pairs (e.g. Out 3/4) come with Signal Routing.</div>`;
@@ -685,9 +675,9 @@ function renderLive() {
     ? `<div class="banner" style="border:1px dashed var(--border)"><span class="sp muted">Not publishing. Other apps can't capture the mix.</span><button class="btn blue" data-goto-add>Publish…</button></div>`
     : !pub.publish
       ? `<div class="banner" style="border:1px solid var(--border)"><span class="sp muted"><b>${virtName(pub)}</b> is off.</span><button class="tg" data-publish="${S.devices.indexOf(pub)}">Publish</button></div>`
-      : S.platform === "windows" && !viaDriver()
+      : S.platform === "windows"
         ? `<div class="banner amber"><span class="sp"><b>Published via VB-Cable</b> · apps capture <b>CABLE Output (VB-Audio)</b> · ${r ? kHz(c.rate) : "starts with the bridge"}</span><button class="tg on" data-publish="${S.devices.indexOf(pub)}">ON</button><button class="btn plain" data-goto="${S.devices.indexOf(pub)}">Details</button></div>`
-        : `<div class="banner green"><span class="sp"><b>Published · ${pub.name}</b> · ${S.platform === "linux" ? "PipeWire source" : "RigWerk Virtual"} · ${r ? kHz(c.rate) : "starts with the bridge"}</span><button class="tg on" data-publish="${S.devices.indexOf(pub)}">ON</button><button class="btn plain" data-goto="${S.devices.indexOf(pub)}">Details</button></div>`;
+        : `<div class="banner green"><span class="sp"><b>Published · ${pub.name}</b> · PipeWire source · ${r ? kHz(c.rate) : "starts with the bridge"}</span><button class="tg on" data-publish="${S.devices.indexOf(pub)}">ON</button><button class="btn plain" data-goto="${S.devices.indexOf(pub)}">Details</button></div>`;
   document.getElementById("page").innerHTML = `
     <div style="display:flex;flex-direction:column;gap:16px">
     ${pubLine}
@@ -787,11 +777,8 @@ document.addEventListener("click", (e) => {
   if ((x = el("[data-goto]"))) { S.view = "mixer"; S.sel = +x.dataset.goto; return render(); }
   if ((x = el("[data-sel]"))) { const v = x.dataset.sel; S.sel = v === "master" || v === "add" ? v : +v; return render(); }
 });
-document.getElementById("driver-installed").addEventListener("change", () => { S = initial(); render(); });
-
 const q = new URLSearchParams(location.search);
 S = { view: q.get("view") || "mixer", platform: q.get("platform") || "linux", scenario: q.get("scenario") || "normal" };
-if (q.get("driver") === "1") document.getElementById("driver-installed").checked = true;
 S = initial();
 const sel = q.get("sel");
 if (sel) S.sel = sel === "master" || sel === "add" ? sel : +sel;

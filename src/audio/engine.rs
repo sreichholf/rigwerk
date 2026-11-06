@@ -198,10 +198,15 @@ impl AudioEngine {
         self.shared.clock_device.set(settings);
     }
 
-    /// Sets follower levels, mutes, maps and the PipeWire link plan.  Live:
-    /// not part of the bridge signature.
-    pub fn set_followers(&self, settings: &[OutputDeviceSettings], plan: &FollowerPlan) {
-        self.shared.set_followers(settings, plan);
+    /// Sets follower levels, mutes, maps, cushions and the link / open plan.
+    /// Live: not part of the bridge signature.
+    pub fn set_followers(
+        &self,
+        settings: &[OutputDeviceSettings],
+        plan: &FollowerPlan,
+        cushions: &[(crate::audio::CushionMode, f32)],
+    ) {
+        self.shared.set_followers(settings, plan, cushions);
     }
 
     /// Advances the session's observed state.  This is where a stuck start, a

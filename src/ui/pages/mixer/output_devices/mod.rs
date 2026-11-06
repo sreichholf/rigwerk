@@ -1,8 +1,8 @@
 //! Output devices under the master Output stage: their rows in the chain, the
 //! device list in the master inspector and the per-device inspectors.
 //!
-//! PipeWire clock device: followers and RigWerk Out can be added live.
-//! ALSA `hw:` clock: add stays disabled until step 3 (generic followers).
+//! PipeWire clock device: followers and RigWerk Out can be added live (in-graph).
+//! ALSA / other cpal clock: generic followers on their own streams (step 3).
 
 mod rows;
 
@@ -12,11 +12,13 @@ use rows::{chain_device_row, device_level_block, list_device_row, mute_button, t
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Stroke, Vec2};
 
-use crate::app::settings::{rate_label, FollowerPref};
+use crate::app::settings::{
+    cushion_from_pref, cushion_to_pref, rate_label, FollowerPref, CUSHION_MS_MAX, CUSHION_MS_MIN,
+};
 use crate::app::RigWerkApp;
 use crate::audio::{
-    EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS,
-    MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    CushionMode, EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
+    MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::pages::mixer::rack::RackAction;
@@ -27,11 +29,11 @@ use crate::ui::widgets::{
     virtual_tag,
 };
 
-/// Why "+ add output device" is greyed out when the clock is not PipeWire.
-pub(crate) const ADD_DEVICE_HINT_ALSA: &str =
-    "Followers need a PipeWire clock device (generic followers come later)";
 /// At the follower cap.
 pub(crate) const ADD_DEVICE_HINT_FULL: &str = "Four followers is the maximum for now";
+/// Soft warn when adding a WASAPI follower while the clock is ASIO.
+pub(crate) const ASIO_WASAPI_CONFLICT_HINT: &str =
+    "ASIO may have locked this card — Windows can refuse the stream as in use";
 
 /// One output device as the Mixer lists it.
 #[derive(Clone, Debug)]
@@ -55,8 +57,8 @@ pub(crate) struct OutputDeviceRow {
 
 /// Channels to show for a device: what its open stream reported, else what
 /// the device scan found, else stereo; never more than the map can address.
-// An ASIO scan may report more than 4 channels, but a running ASIO stream
-// opens at most 4, so the count can drop when the bridge starts.
+// An ASIO scan may report a stub channel count; a running ASIO stream
+// publishes the real open count (capped at MAX_OUTPUT_CHANNELS).
 pub(crate) fn device_channel_count(reported: u32, inventory: usize) -> usize {
     let channels = if reported > 0 {
         reported as usize
@@ -111,7 +113,8 @@ pub(crate) fn device_row_value(row: &OutputDeviceRow, state: EngineState) -> Str
 }
 
 impl RigWerkApp {
-    /// Whether the clock device is a native PipeWire node (followers enabled).
+    /// Whether the clock device is a native PipeWire node (in-graph followers
+    /// and RigWerk Out).
     pub(crate) fn pipewire_followers_enabled(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -123,15 +126,25 @@ impl RigWerkApp {
         }
     }
 
+    /// Whether followers can be added for the current clock.
+    pub(crate) fn followers_enabled(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "windows"))
+    }
+
     /// Why add is disabled, or `None` when it is enabled.
     pub(crate) fn add_output_disabled_reason(&self) -> Option<&'static str> {
-        if !self.pipewire_followers_enabled() {
-            Some(ADD_DEVICE_HINT_ALSA)
+        if !self.followers_enabled() {
+            Some("Extra output devices are not available on this platform")
         } else if self.followers.len() >= MAX_FOLLOWERS {
             Some(ADD_DEVICE_HINT_FULL)
         } else {
             None
         }
+    }
+
+    /// Clock device is an ASIO driver (followers are still WASAPI-only).
+    pub(crate) fn clock_is_asio(&self) -> bool {
+        self.selected_output().asio_clsid.is_some()
     }
 
     /// The output devices under the master, clock device first, then followers.
@@ -277,11 +290,42 @@ impl RigWerkApp {
         if self.add_output_disabled_reason().is_some() {
             return;
         }
-        if device_id == VIRTUAL_OUT_ID {
+        if device_id == VIRTUAL_OUT_ID || device_id.starts_with("vbcable:") {
             if self.followers.iter().any(|f| f.virtual_out) {
                 return;
             }
-            self.followers.push(FollowerPref::virtual_out());
+            #[cfg(target_os = "linux")]
+            {
+                if !self.pipewire_followers_enabled() {
+                    return;
+                }
+                self.followers.push(FollowerPref::virtual_out());
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let Some(cable) = self
+                    .inventory
+                    .outputs
+                    .iter()
+                    .find(|device| crate::audio::is_vb_cable_render(&device.name))
+                    .cloned()
+                else {
+                    return;
+                };
+                self.followers.push(FollowerPref {
+                    id: cable.id,
+                    backend: cable.backend,
+                    name: VIRTUAL_OUT_NAME.to_owned(),
+                    virtual_out: true,
+                    publish: true,
+                    ..FollowerPref::default()
+                });
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                let _ = device_id;
+                return;
+            }
         } else {
             if self.followers.iter().any(|f| f.id == device_id)
                 || self.selected_output().id == device_id
@@ -298,9 +342,21 @@ impl RigWerkApp {
                 return;
             };
             #[cfg(target_os = "linux")]
-            if crate::audio::linux_node_name(&device.id).is_none() {
-                // Step 2 only plays PipeWire-sink followers.
-                return;
+            {
+                let pw_clock = self.pipewire_followers_enabled();
+                let is_pw = crate::audio::linux_node_name(&device.id).is_some();
+                // PipeWire clock: only PW sinks (in-graph).  ALSA/cpal clock:
+                // only generic (non-native) devices on their own streams.
+                if pw_clock != is_pw {
+                    return;
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // WASAPI shared-mode followers only (no ASIO / DS / MME).
+                if device.asio_clsid.is_some() || !device.backend.eq_ignore_ascii_case("WASAPI") {
+                    return;
+                }
             }
             self.followers.push(FollowerPref {
                 id: device.id,
@@ -378,9 +434,11 @@ impl RigWerkApp {
         }
     }
 
-    /// Add-output list: PipeWire sinks not already used, plus RigWerk Out.
+    /// Add-output list: PipeWire / ALSA on Linux, WASAPI (+ VB-Cable) on Windows.
     pub(super) fn add_output_inspector(&mut self, ui: &mut egui::Ui) {
         let clock_name = self.selected_output().name.clone();
+        let pw_clock = self.pipewire_followers_enabled();
+        let asio_clock = self.clock_is_asio();
         ui.label(
             RichText::new("Add output device")
                 .size(ts(16.0))
@@ -399,6 +457,14 @@ impl RigWerkApp {
             ui.label(RichText::new(reason).size(ts(11.0)).color(AMBER));
             return;
         }
+        if asio_clock {
+            ui.label(
+                RichText::new(ASIO_WASAPI_CONFLICT_HINT)
+                    .size(ts(11.0))
+                    .color(AMBER),
+            );
+            ui.add_space(8.0);
+        }
         let clock_id = self.selected_output().id.clone();
         let used: std::collections::HashSet<String> = self
             .followers
@@ -407,6 +473,12 @@ impl RigWerkApp {
             .chain(std::iter::once(clock_id.clone()))
             .collect();
         let has_virtual = self.followers.iter().any(|f| f.virtual_out);
+        let vb_cable = self
+            .inventory
+            .outputs
+            .iter()
+            .find(|device| crate::audio::is_vb_cable_render(&device.name))
+            .cloned();
         let mut candidates: Vec<(String, String, String, bool)> = {
             #[cfg(target_os = "linux")]
             {
@@ -414,7 +486,10 @@ impl RigWerkApp {
                     .outputs
                     .iter()
                     .filter_map(|device| {
-                        crate::audio::linux_node_name(&device.id)?;
+                        let is_pw = crate::audio::linux_node_name(&device.id).is_some();
+                        if pw_clock != is_pw {
+                            return None;
+                        }
                         Some((
                             device.id.clone(),
                             device.name.clone(),
@@ -424,16 +499,47 @@ impl RigWerkApp {
                     })
                     .collect()
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "windows")]
             {
-                let _ = &used;
+                self.inventory
+                    .outputs
+                    .iter()
+                    .filter_map(|device| {
+                        if device.asio_clsid.is_some()
+                            || !device.backend.eq_ignore_ascii_case("WASAPI")
+                        {
+                            return None;
+                        }
+                        // VB-Cable is offered under VIRTUAL, not as a plain follower.
+                        if crate::audio::is_vb_cable_render(&device.name) {
+                            return None;
+                        }
+                        Some((
+                            device.id.clone(),
+                            device.name.clone(),
+                            format!("{} · {} CH", device.backend.to_uppercase(), device.channels),
+                            used.contains(&device.id),
+                        ))
+                    })
+                    .collect()
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                let _ = (&used, pw_clock);
                 Vec::new()
             }
         };
         candidates.sort_by_key(|a| a.1.to_lowercase());
 
         block(ui, |ui| {
-            ui.label(micro_label("PIPEWIRE", BLUE));
+            let section = if pw_clock {
+                "PIPEWIRE"
+            } else if cfg!(target_os = "windows") {
+                "WASAPI"
+            } else {
+                "DEVICES"
+            };
+            ui.label(micro_label(section, BLUE));
             ui.add_space(4.0);
             let mut picked = None;
             for (id, name, detail, disabled) in &candidates {
@@ -449,6 +555,9 @@ impl RigWerkApp {
                     .corner_radius(CornerRadius::same(7))
                     .min_size(Vec2::new(ui.available_width(), 40.0)),
                 );
+                if asio_clock && !disabled {
+                    response.clone().on_hover_text(ASIO_WASAPI_CONFLICT_HINT);
+                }
                 if response.clicked() {
                     picked = Some(id.clone());
                 }
@@ -457,36 +566,77 @@ impl RigWerkApp {
             if let Some(id) = picked {
                 self.add_follower_device(&id);
             }
-            ui.add_space(8.0);
-            ui.label(micro_label("VIRTUAL", GREEN));
-            ui.add_space(4.0);
-            let virt = ui.add_enabled(
-                !has_virtual,
-                egui::Button::new(
-                    RichText::new(format!(
-                        "{VIRTUAL_OUT_NAME}\nPIPEWIRE SOURCE · created by RigWerk"
-                    ))
-                    .size(ts(11.0))
-                    .color(TEXT),
-                )
-                .fill(with_alpha(GREEN, 10))
-                .stroke(Stroke::new(1.0, with_alpha(GREEN, 45)))
-                .corner_radius(CornerRadius::same(7))
-                .min_size(Vec2::new(ui.available_width(), 40.0)),
-            );
-            if has_virtual {
-                virt.on_disabled_hover_text("already added");
-            } else if virt.clicked() {
-                self.add_follower_device(VIRTUAL_OUT_ID);
+            if pw_clock {
+                ui.add_space(8.0);
+                ui.label(micro_label("VIRTUAL", GREEN));
+                ui.add_space(4.0);
+                let virt = ui.add_enabled(
+                    !has_virtual,
+                    egui::Button::new(
+                        RichText::new(format!(
+                            "{VIRTUAL_OUT_NAME}\nPIPEWIRE SOURCE · created by RigWerk"
+                        ))
+                        .size(ts(11.0))
+                        .color(TEXT),
+                    )
+                    .fill(with_alpha(GREEN, 10))
+                    .stroke(Stroke::new(1.0, with_alpha(GREEN, 45)))
+                    .corner_radius(CornerRadius::same(7))
+                    .min_size(Vec2::new(ui.available_width(), 40.0)),
+                );
+                if has_virtual {
+                    virt.on_disabled_hover_text("already added");
+                } else if virt.clicked() {
+                    self.add_follower_device(VIRTUAL_OUT_ID);
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                ui.add_space(8.0);
+                ui.label(micro_label("PUBLISH", GREEN));
+                ui.add_space(4.0);
+                let has_cable = vb_cable.is_some();
+                let virt = ui.add_enabled(
+                    has_cable && !has_virtual,
+                    egui::Button::new(
+                        RichText::new(if has_cable {
+                            format!(
+                                "{VIRTUAL_OUT_NAME}\nVB-CABLE · other apps capture CABLE Output"
+                            )
+                        } else {
+                            format!("{VIRTUAL_OUT_NAME}\nInstall VB-Audio Cable to publish")
+                        })
+                        .size(ts(11.0))
+                        .color(TEXT),
+                    )
+                    .fill(with_alpha(GREEN, 10))
+                    .stroke(Stroke::new(1.0, with_alpha(GREEN, 45)))
+                    .corner_radius(CornerRadius::same(7))
+                    .min_size(Vec2::new(ui.available_width(), 40.0)),
+                );
+                if has_virtual {
+                    virt.on_disabled_hover_text("already added");
+                } else if !has_cable {
+                    virt.on_disabled_hover_text(
+                        "Install VB-Audio Virtual Cable, then refresh devices.",
+                    );
+                } else if virt.clicked() {
+                    self.add_follower_device(VIRTUAL_OUT_ID);
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = vb_cable;
             }
         });
     }
 
-    /// Follower inspector: level, mute, remove; health handled by PipeWire.
+    /// Follower inspector: level, mute, remove; PW health or generic cushion.
     pub(super) fn follower_device_inspector(&mut self, ui: &mut egui::Ui, row: &OutputDeviceRow) {
         let Some(follower) = row.follower_index else {
             return;
         };
+        let pipewire = self.pipewire_followers_enabled();
         ui.horizontal(|ui| {
             ui.label(RichText::new(&row.name).size(ts(16.0)).color(TEXT).strong());
             ui.label(
@@ -504,9 +654,13 @@ impl RigWerkApp {
             });
         });
         ui.label(
-            RichText::new("Follower · plays the finished mix. Handled by PipeWire.")
-                .size(ts(11.0))
-                .color(DIM),
+            RichText::new(if pipewire {
+                "Follower · plays the finished mix. Handled by PipeWire."
+            } else {
+                "Follower · plays the finished mix on its own clock."
+            })
+            .size(ts(11.0))
+            .color(DIM),
         );
         if row.missing {
             ui.add_space(8.0);
@@ -519,20 +673,24 @@ impl RigWerkApp {
             );
         }
         ui.add_space(12.0);
-        block(ui, |ui| {
-            ui.label(micro_label("HEALTH", BLUE));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Handled by PipeWire")
-                    .size(ts(12.0))
-                    .color(GREEN),
-            );
-            ui.label(
-                RichText::new("Same graph clock as the clock device · no ring or cushion.")
-                    .size(ts(10.5))
-                    .color(MUTED),
-            );
-        });
+        if pipewire {
+            block(ui, |ui| {
+                ui.label(micro_label("HEALTH", BLUE));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Handled by PipeWire")
+                        .size(ts(12.0))
+                        .color(GREEN),
+                );
+                ui.label(
+                    RichText::new("Same graph clock as the clock device · no ring or cushion.")
+                        .size(ts(10.5))
+                        .color(MUTED),
+                );
+            });
+        } else {
+            self.follower_cushion_block(ui, follower);
+        }
         ui.add_space(10.0);
         if let Some(pref) = self.followers.get_mut(follower) {
             device_level_block(
@@ -565,6 +723,53 @@ impl RigWerkApp {
                     }
                 });
             });
+        });
+    }
+
+    /// Cushion controls for a generic (non-PipeWire) follower.
+    fn follower_cushion_block(&mut self, ui: &mut egui::Ui, follower: usize) {
+        let Some(pref) = self.followers.get_mut(follower) else {
+            return;
+        };
+        let mut mode = cushion_from_pref(pref.cushion_mode);
+        block(ui, |ui| {
+            ui.label(micro_label("CUSHION", BLUE));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Own ring between the mix and this device. Absorb clock drift here.")
+                    .size(ts(10.5))
+                    .color(MUTED),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                for (option, label) in [
+                    (CushionMode::Safe, "Safe"),
+                    (CushionMode::LowLatency, "Low latency"),
+                    (CushionMode::Manual, "Manual"),
+                ] {
+                    if ui
+                        .selectable_label(mode == option, RichText::new(label).size(ts(10.0)))
+                        .clicked()
+                    {
+                        mode = option;
+                    }
+                }
+            });
+            if mode != cushion_from_pref(pref.cushion_mode) {
+                pref.cushion_mode = cushion_to_pref(mode);
+            }
+            if mode == CushionMode::Manual {
+                ui.add_space(4.0);
+                let mut ms = pref.cushion_ms;
+                let response = ui.add(
+                    egui::Slider::new(&mut ms, CUSHION_MS_MIN..=CUSHION_MS_MAX)
+                        .suffix(" ms")
+                        .show_value(true),
+                );
+                if response.changed() {
+                    pref.cushion_ms = ms;
+                }
+            }
         });
     }
 
@@ -615,42 +820,66 @@ impl RigWerkApp {
                 }
             });
         });
+        let pipewire = self.pipewire_followers_enabled();
         ui.label(
-            RichText::new("Endpoint RigWerk creates · the finished mix for other apps to capture.")
-                .size(ts(11.0))
-                .color(DIM),
+            RichText::new(if pipewire {
+                "Endpoint RigWerk creates · the finished mix for other apps to capture."
+            } else {
+                "Plays into VB-Cable Input · other apps capture CABLE Output."
+            })
+            .size(ts(11.0))
+            .color(DIM),
         );
         ui.add_space(12.0);
         block(ui, |ui| {
             ui.label(micro_label("ENDPOINT", BLUE));
             ui.add_space(4.0);
+            let published = self.followers.get(follower).is_some_and(|f| f.publish);
             ui.label(
-                RichText::new(if self.followers.get(follower).is_some_and(|f| f.publish) {
-                    "Published as a PipeWire source. Other apps see RigWerk Out while the bridge runs."
+                RichText::new(if pipewire {
+                    if published {
+                        "Published as a PipeWire source. Other apps see RigWerk Out while the bridge runs."
+                    } else {
+                        "Not publishing. Other apps can't capture the mix."
+                    }
+                } else if published {
+                    "Playing into VB-Cable. Other apps should pick CABLE Output."
                 } else {
-                    "Not publishing. Other apps can't capture the mix."
+                    "Publish is off. VB-Cable is silent until you turn it on."
                 })
                 .size(ts(11.0))
                 .color(MUTED),
             );
-            ui.label(mono("Audio/Source/Virtual · 2 CH", DIM, 9.5));
+            ui.label(mono(
+                if pipewire {
+                    "Audio/Source/Virtual · 2 CH"
+                } else {
+                    "WASAPI · VB-Audio Cable Input"
+                },
+                DIM,
+                9.5,
+            ));
         });
         ui.add_space(10.0);
-        block(ui, |ui| {
-            ui.label(micro_label("HEALTH", BLUE));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Handled by PipeWire")
-                    .size(ts(12.0))
-                    .color(GREEN),
-            );
-        });
+        if pipewire {
+            block(ui, |ui| {
+                ui.label(micro_label("HEALTH", BLUE));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Handled by PipeWire")
+                        .size(ts(12.0))
+                        .color(GREEN),
+                );
+            });
+        } else {
+            self.follower_cushion_block(ui, follower);
+        }
         ui.add_space(10.0);
         if let Some(pref) = self.followers.get_mut(follower) {
             device_level_block(
                 ui,
                 &mut pref.settings,
-                2,
+                row.channels.max(2),
                 &self.meter_follower_channels[follower],
                 &self.peak_follower_channels[follower],
             );

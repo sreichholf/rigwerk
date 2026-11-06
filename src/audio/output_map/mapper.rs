@@ -96,7 +96,7 @@ impl DeviceControls {
     }
 
     /// The map, unused mode and effective gain (0 when muted) right now.
-    pub(super) fn load(&self) -> (ChannelMap, UnusedChannels, f32) {
+    pub(crate) fn load(&self) -> (ChannelMap, UnusedChannels, f32) {
         let map = ChannelMap {
             left: self.left.load(Ordering::Relaxed),
             right: self.right.load(Ordering::Relaxed),

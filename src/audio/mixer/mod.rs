@@ -12,7 +12,7 @@ use super::output_map::{DeviceFrame, DeviceMapper, MAX_FOLLOWERS};
 use super::resampler::FrameResampler;
 use super::shared::Shared;
 
-mod ramp;
+pub(crate) mod ramp;
 
 pub(crate) use ramp::Ramp;
 use ramp::{fade_down, fade_up, MixRamps, CONTROL_RAMP_SECONDS, DROPOUT_FADE_SECONDS};
@@ -205,9 +205,13 @@ impl OutputMixer {
         let gain = if silent { 0.0 } else { shared.output_gain() };
         let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
         self.device.begin_block(&shared.clock_device, samples);
-        let followers = shared.follower_count();
-        for index in 0..followers {
-            self.followers[index].begin_block(&shared.followers[index], samples);
+        // PipeWire duplex maps followers in this mixer.  Generic followers
+        // own their DeviceMapper on their own stream — leave meters alone.
+        if shared.direct.load(Ordering::Relaxed) {
+            let followers = shared.follower_count();
+            for index in 0..followers {
+                self.followers[index].begin_block(&shared.followers[index], samples);
+            }
         }
         if self.controls_adopted {
             self.ramps
@@ -392,16 +396,18 @@ impl OutputMixer {
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
             write(&mut self.device, index, out);
+            // Fan the finished stereo mix out to every active generic
+            // follower ring (no-op when duplex / none open).
+            shared.push_follower_frames(out[0], out[1]);
         }
 
         shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
         shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
         shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
         self.device.end_block(&shared.clock_device);
-        let followers = shared.follower_count();
-        for index in 0..followers {
-            self.followers[index].end_block(&shared.followers[index]);
-        }
+        shared.note_follower_producer_block(frames);
+        // Generic followers publish their own meters; only duplex ends them
+        // here (see finish_block_devices).
     }
 
     /// Like [`Self::render_direct`], but each finished frame is handed over
@@ -1318,5 +1324,53 @@ mod tests {
         // The third tap was carrying the left input and fades toward the average.
         let mid = out[out.len() / 2];
         assert!(mid[2] > 0.125 && mid[2] < 0.5);
+    }
+
+    #[test]
+    fn the_ring_path_pushes_finished_frames_into_active_follower_rings() {
+        use super::super::shared::{FollowerLink, FollowerPlan};
+        use super::super::types::CushionMode;
+
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        shared.set_output(48_000, 64, "test");
+        let mut plan = FollowerPlan {
+            count: 1,
+            ..FollowerPlan::default()
+        };
+        plan.slots[0] = FollowerLink {
+            device_id: "test:follower".to_owned(),
+            ..FollowerLink::default()
+        };
+        shared.set_followers(
+            &[OutputDeviceSettings::default()],
+            &plan,
+            &[(CushionMode::Manual, 10.0)],
+        );
+        shared
+            .follower_ring_active(0)
+            .store(true, Ordering::Relaxed);
+        shared.follower_bus(0).reset_playback();
+        shared
+            .follower_bus(0)
+            .set_cushion(CushionMode::Manual, 10.0);
+        shared.follower_bus(0).set_source_rate(48_000);
+
+        let frames = 64;
+        let _ = render(&mut mixer, &shared, frames);
+        assert_eq!(
+            shared.follower_bus(0).ring_frames(),
+            frames,
+            "every finished clock frame should land in the follower ring"
+        );
+
+        // Duplex path must not push (in-graph fan-out owns followers).
+        shared.direct.store(true, Ordering::Relaxed);
+        shared.follower_bus(0).reset_playback();
+        let _ = render(&mut mixer, &shared, frames);
+        assert_eq!(
+            shared.follower_bus(0).ring_frames(),
+            0,
+            "direct mode must not fill generic follower rings"
+        );
     }
 }
