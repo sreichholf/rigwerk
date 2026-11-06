@@ -21,6 +21,7 @@ use crate::ui::theme::{
 };
 use crate::ui::widgets::{
     arrow_button, db_slider, hinted_tab, meter_row, micro_label, mono, styled_slider,
+    visible_remaining_height,
 };
 
 const ROW_H: f32 = 58.0;
@@ -49,7 +50,9 @@ impl RigWerkApp {
         let mut actions: Vec<RackAction> = Vec::new();
         let mut select: Option<ChainSelection> = None;
         let total = ui.available_width();
-        let height = (ui.available_height() - 8.0).max(420.0);
+        // Fill the visible viewport only — available_height inside the outer
+        // page ScrollArea is unbounded and was forcing a tall empty scrollbar.
+        let height = (visible_remaining_height(ui) - 8.0).max(360.0);
         let chain_w = (total * 0.32).clamp(280.0, 340.0);
 
         ui.horizontal(|ui| {

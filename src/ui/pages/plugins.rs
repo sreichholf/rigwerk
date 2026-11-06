@@ -17,7 +17,7 @@ use crate::ui::theme::{
 };
 use crate::ui::widgets::{
     card_fixed, ellipsize, ghost_button, horizontal_line, micro_label, mono, row_info,
-    show_focus_ring, status_dot, styled_slider,
+    show_focus_ring, status_dot, styled_slider, visible_remaining_height,
 };
 
 fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -> bool {
@@ -661,115 +661,133 @@ impl RigWerkApp {
         let mut add_index: Option<usize> = None;
         let mut add_path = false;
         let mut open_mixer = false;
-        let card_h = (ui.available_height() - 8.0).max(480.0);
+        // Visible viewport only — available_height in the outer page scroll is
+        // unbounded and was stretching this card into a pointless scrollbar.
+        let card_h = (visible_remaining_height(ui) - 8.0).max(360.0);
+        // Hairline + gaps + label + path row, kept out of the library scroll.
+        const ADD_PATH_H: f32 = 72.0;
 
         card_fixed(ui, CARD, BORDER, card_h, |ui| {
             ui.set_width(total - 32.0);
-            ui.horizontal(|ui| {
-                ui.label(micro_label("PLUGIN LIBRARY", TEAL));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Open mixer").size(ts(9.5)).color(TEAL),
-                            )
-                            .fill(with_alpha(TEAL, 14))
-                            .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
-                            .corner_radius(CornerRadius::same(7)),
-                        )
-                        .on_hover_text("Reorder, bypass and mix inserts on the Mixer rack")
-                        .clicked()
-                    {
-                        open_mixer = true;
-                    }
-                    ui.add_space(8.0);
-                    ui.label(mono(format!("{} SHOWN", filtered.len()), DIM, 8.5));
-                });
-            });
-            ui.add_space(3.0);
-            ui.label(
-                RichText::new(
-                    "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the Mixer insert chain. Edit inserts on the Mixer page — prefer each plugin's own interface when it has one.",
-                )
-                .size(ts(9.5))
-                .color(MUTED),
-            );
-            ui.add_space(7.0);
-            horizontal_line(ui, BORDER_SOFT);
-            ui.add_space(6.0);
-            let view_height = (card_h - 150.0).max(280.0);
-            egui::ScrollArea::vertical()
-                .id_salt("plugin_library_scroll")
-                .max_height(view_height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    if scanning && filtered.is_empty() {
-                        ui.add_space(24.0);
-                        ui.horizontal(|ui| {
-                            status_dot(ui, AMBER);
-                            ui.label(
-                                RichText::new("Scanning VST3 and CLAP folders…")
-                                    .size(ts(10.0))
-                                    .color(MUTED),
-                            );
-                        });
-                    } else if filtered.is_empty() {
-                        ui.add_space(20.0);
-                        ui.label(
-                            RichText::new("No plugins found here yet.")
-                                .size(ts(10.5))
-                                .color(MUTED)
-                                .strong(),
-                        );
+            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), ADD_PATH_H),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        horizontal_line(ui, BORDER_SOFT);
+                        ui.add_space(7.0);
+                        ui.label(micro_label("ADD FROM PATH", DIM));
                         ui.add_space(3.0);
-                        ui.label(
-                            RichText::new(
-                                "Install a .vst3 or .clap plugin in its standard folder, or add one by path below, then rescan.",
-                            )
-                            .size(ts(9.5))
-                            .color(DIM),
-                        );
-                    } else {
-                        let in_chain = |candidate: &PluginCandidate| {
-                            views.iter().any(|view| {
-                                view.path == candidate.path.to_string_lossy().into_owned()
-                                    && view.format == candidate.format
-                                    && view.class_id == candidate.class_id
-                            })
-                        };
-                        for (index, candidate) in filtered.iter().enumerate() {
-                            if library_row(ui, candidate, in_chain(candidate)) {
-                                add_index = Some(index);
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [ui.available_width() - 58.0, 26.0],
+                                egui::TextEdit::singleline(&mut self.plugin_browser.path_input)
+                                    .hint_text("/path/to/MyEffect.vst3 or MyEffect.clap")
+                                    .text_color(TEXT),
+                            );
+                            if ui
+                                .add_sized(
+                                    [50.0, 26.0],
+                                    egui::Button::new(
+                                        RichText::new("Add").size(ts(10.0)).color(TEAL),
+                                    )
+                                    .fill(with_alpha(TEAL, 14))
+                                    .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
+                                    .corner_radius(CornerRadius::same(7)),
+                                )
+                                .clicked()
+                            {
+                                add_path = true;
                             }
-                            ui.add_space(4.0);
-                        }
-                    }
-                });
-            ui.add_space(7.0);
-            horizontal_line(ui, BORDER_SOFT);
-            ui.add_space(7.0);
-            ui.label(micro_label("ADD FROM PATH", DIM));
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [ui.available_width() - 58.0, 26.0],
-                    egui::TextEdit::singleline(&mut self.plugin_browser.path_input)
-                        .hint_text("/path/to/MyEffect.vst3 or MyEffect.clap")
-                        .text_color(TEXT),
+                        });
+                    },
                 );
-                if ui
-                    .add_sized(
-                        [50.0, 26.0],
-                        egui::Button::new(RichText::new("Add").size(ts(10.0)).color(TEAL))
-                            .fill(with_alpha(TEAL, 14))
-                            .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
-                            .corner_radius(CornerRadius::same(7)),
-                    )
-                    .clicked()
-                {
-                    add_path = true;
-                }
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(micro_label("PLUGIN LIBRARY", TEAL));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Open mixer").size(ts(9.5)).color(TEAL),
+                                    )
+                                    .fill(with_alpha(TEAL, 14))
+                                    .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
+                                    .corner_radius(CornerRadius::same(7)),
+                                )
+                                .on_hover_text(
+                                    "Reorder, bypass and mix inserts on the Mixer rack",
+                                )
+                                .clicked()
+                            {
+                                open_mixer = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.label(mono(format!("{} SHOWN", filtered.len()), DIM, 8.5));
+                        });
+                    });
+                    ui.add_space(3.0);
+                    ui.label(
+                        RichText::new(
+                            "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the Mixer insert chain. Edit inserts on the Mixer page — prefer each plugin's own interface when it has one.",
+                        )
+                        .size(ts(9.5))
+                        .color(MUTED),
+                    );
+                    ui.add_space(7.0);
+                    horizontal_line(ui, BORDER_SOFT);
+                    ui.add_space(6.0);
+                    let view_height = ui.available_height().max(120.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("plugin_library_scroll")
+                        .max_height(view_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if scanning && filtered.is_empty() {
+                                ui.add_space(24.0);
+                                ui.horizontal(|ui| {
+                                    status_dot(ui, AMBER);
+                                    ui.label(
+                                        RichText::new("Scanning VST3 and CLAP folders…")
+                                            .size(ts(10.0))
+                                            .color(MUTED),
+                                    );
+                                });
+                            } else if filtered.is_empty() {
+                                ui.add_space(20.0);
+                                ui.label(
+                                    RichText::new("No plugins found here yet.")
+                                        .size(ts(10.5))
+                                        .color(MUTED)
+                                        .strong(),
+                                );
+                                ui.add_space(3.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Install a .vst3 or .clap plugin in its standard folder, or add one by path below, then rescan.",
+                                    )
+                                    .size(ts(9.5))
+                                    .color(DIM),
+                                );
+                            } else {
+                                let in_chain = |candidate: &PluginCandidate| {
+                                    views.iter().any(|view| {
+                                        view.path
+                                            == candidate.path.to_string_lossy().into_owned()
+                                            && view.format == candidate.format
+                                            && view.class_id == candidate.class_id
+                                    })
+                                };
+                                for (index, candidate) in filtered.iter().enumerate() {
+                                    if library_row(ui, candidate, in_chain(candidate)) {
+                                        add_index = Some(index);
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                            }
+                        });
+                });
             });
         });
 

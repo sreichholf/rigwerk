@@ -30,6 +30,16 @@ pub(crate) fn card<R>(
         .inner
 }
 
+/// Height left below the cursor inside the current clip rect.
+///
+/// Page bodies live in an outer [`egui::ScrollArea`] whose content
+/// `available_height` is effectively unbounded. Using that for min heights
+/// stretches the page and forces a scrollbar. Prefer this when a panel should
+/// fill the visible viewport instead.
+pub(crate) fn visible_remaining_height(ui: &egui::Ui) -> f32 {
+    (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0)
+}
+
 /// A [`card`] with an exact outer height, so cards sharing a row always line
 /// up.  The inside keeps the same 15 px margin as `card`; content that does
 /// not fit is clipped instead of stretching the frame.
