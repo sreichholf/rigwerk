@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::super::clap::{HostState, AUDIO_PORTS_CHANGED};
-use super::load::{host_has_editor, host_parameters, load_plugin, PluginHandle};
+use super::load::{host_has_editor, host_parameters, load_plugin, PluginHandle, Vst3Service};
 use super::pref::{PluginParamView, PluginPref, PluginView};
 
 pub(crate) struct Slot {
@@ -18,6 +18,9 @@ pub(crate) struct Slot {
     /// A CLAP plugin's callback state, so its main-thread work can run
     /// without the chain lock or the instance lock.
     pub(crate) clap_host: Option<Arc<HostState>>,
+    /// A VST3 plugin's main-thread servicing and its latency, the
+    /// counterpart of `clap_host`.
+    pub(crate) vst3: Option<Arc<Vst3Service>>,
     /// Whether `pref.state` may no longer describe the live plugin: it was
     /// missing or did not restore, or a control changed since.  The next
     /// preference save captures a fresh blob.
@@ -58,6 +61,7 @@ impl Slot {
             parameters: Vec::new(),
             has_editor: false,
             clap_host: None,
+            vst3: None,
             state_stale: false,
             built_rate: None,
             #[cfg(test)]
@@ -78,13 +82,18 @@ impl Slot {
             Ok((plugin, state_current)) => {
                 let parameters = host_parameters(&plugin);
                 let has_editor = host_has_editor(&plugin);
-                let clap_host = match &plugin {
-                    PluginHandle::Clap(clap) => Some(
-                        clap.lock()
-                            .unwrap_or_else(|poison| poison.into_inner())
-                            .host(),
+                let (clap_host, vst3) = match &plugin {
+                    PluginHandle::Clap(clap) => (
+                        Some(
+                            clap.lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .host(),
+                        ),
+                        None,
                     ),
-                    PluginHandle::Vst3(_) => None,
+                    PluginHandle::Vst3(plugin) => {
+                        (None, Some(Arc::new(Vst3Service::new(Arc::clone(plugin)))))
+                    }
                 };
                 Self {
                     pref,
@@ -93,6 +102,7 @@ impl Slot {
                     parameters,
                     has_editor,
                     clap_host,
+                    vst3,
                     state_stale: !state_current,
                     built_rate: Some(sample_rate),
                     #[cfg(test)]
@@ -123,6 +133,44 @@ impl Slot {
         self.clap_host
             .as_ref()
             .is_some_and(|host| host.ports_changed())
+    }
+
+    /// The latency in samples this insert adds to the chain, as the plugin
+    /// last reported it.  Lock-free (atomics only), so the audio thread may
+    /// call it.
+    ///
+    /// A bypassed insert still counts: bypass only skips the processing,
+    /// while the alignment around the chain is sized for the plugin's
+    /// latency, so toggling bypass never moves the alignment (and never
+    /// makes the paths jump against each other).  An insert that is not
+    /// loaded, failed, or lost its ports to a rescan counts 0: it stays out
+    /// of the chain until it is loaded again.
+    ///
+    /// The number is the delay the insert *should* add, not what it adds
+    /// today: whenever the chain skips the insert (bypass, mix at 0, a
+    /// missed try-lock, a CLAP restart's passthrough) the signal is not
+    /// delayed at all.  The alignment package (P3) replaces each skip with
+    /// a delay of this length.  Values are clamped to
+    /// [`super::MAX_ALIGN`] where they are read.
+    pub(crate) fn latency_samples(&self) -> u32 {
+        if self.plugin.is_none() || self.error.is_some() || self.ports_changed() {
+            return 0;
+        }
+        if let Some(host) = &self.clap_host {
+            host.latency()
+        } else if let Some(vst3) = &self.vst3 {
+            vst3.latency()
+        } else {
+            0
+        }
+    }
+
+    /// Tells a VST3 insert's service that the plugin was just edited, so it
+    /// looks for restart requests for a while (see [`Vst3Service::nudge`]).
+    pub(crate) fn nudge_vst3(&self) {
+        if let Some(vst3) = &self.vst3 {
+            vst3.nudge();
+        }
     }
 
     /// The first error the slot should show: a load/processing failure, or a
@@ -170,6 +218,7 @@ impl Slot {
             parameters: self.parameters.clone(),
             has_editor: self.plugin.is_some() && self.has_editor,
             instance: self.plugin.as_ref().map(PluginHandle::instance_id),
+            latency: self.latency_samples(),
         }
     }
 }

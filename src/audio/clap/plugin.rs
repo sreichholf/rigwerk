@@ -5,6 +5,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clap_sys::events::{
     clap_event_header, clap_event_param_value, clap_input_events, clap_output_events,
@@ -14,6 +15,7 @@ use clap_sys::ext::audio_ports::{clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS};
 use clap_sys::ext::gui::{
     clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32,
 };
+use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
     clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN,
     CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
@@ -26,7 +28,7 @@ use clap_sys::process::{clap_process, CLAP_PROCESS_ERROR};
 use clap_sys::string_sizes::CLAP_NAME_SIZE;
 use clap_sys::version::CLAP_VERSION;
 
-use crate::audio::plugins::{PluginParamView, Restore};
+use crate::audio::plugins::{clamp_latency, PluginParamView, Restore};
 
 use super::host::{
     host_get_extension, host_request_callback, host_request_process, host_request_restart,
@@ -41,6 +43,10 @@ use super::state::StateReader;
 /// side: plugins get set up with this size, so it must stay a block size that
 /// fixed-buffer effects can handle, and longer bridge blocks are split.
 pub(super) const MAX_BLOCK: usize = 512;
+
+/// How long a restart waits for an audio callback before the main thread
+/// takes the stream for stopped and restarts the plugin itself.
+pub(super) const RESTART_STALL: Duration = Duration::from_millis(200);
 
 /// One CLAP parameter, cached while the plugin is loaded.
 #[derive(Clone, Debug)]
@@ -198,6 +204,7 @@ pub(crate) struct ClapPlugin {
     pub(super) gui_ext: *const clap_plugin_gui,
     pub(super) timer_ext: *const clap_plugin_timer_support,
     pub(super) state_ext: *const clap_plugin_state,
+    pub(super) latency_ext: *const clap_plugin_latency,
     pub(super) cached_params: Vec<ClapParam>,
     /// One buffer per declared audio port, set up just before activation.
     pub(super) inputs: PortBuffers,
@@ -210,6 +217,9 @@ pub(crate) struct ClapPlugin {
     pub(super) max_block: usize,
     pub(super) steady_time: i64,
     pub(super) started: bool,
+    /// While a restart waits for the audio thread to stop processing: the
+    /// block count and the time the main thread first saw it waiting.
+    pub(super) restart_wait: Option<(u64, Instant)>,
     pub(super) editor_open: bool,
     pub(super) has_editor: bool,
 }
@@ -273,6 +283,7 @@ impl ClapPlugin {
         let timer_ext = extension::<clap_plugin_timer_support>(plugin, CLAP_EXT_TIMER_SUPPORT);
         let audio_ports_ext = extension::<clap_plugin_audio_ports>(plugin, CLAP_EXT_AUDIO_PORTS);
         let state_ext = extension::<clap_plugin_state>(plugin, CLAP_EXT_STATE);
+        let latency_ext = extension::<clap_plugin_latency>(plugin, CLAP_EXT_LATENCY);
 
         let rate = if sample_rate == 0 {
             48_000.0
@@ -291,6 +302,7 @@ impl ClapPlugin {
             gui_ext,
             timer_ext,
             state_ext,
+            latency_ext,
             cached_params: Vec::new(),
             inputs: PortBuffers::default(),
             outputs: PortBuffers::default(),
@@ -302,6 +314,7 @@ impl ClapPlugin {
             max_block: block,
             steady_time: 0,
             started: false,
+            restart_wait: None,
             editor_open: false,
             has_editor: false,
         };
@@ -347,6 +360,12 @@ impl ClapPlugin {
         plugin.inputs = PortBuffers::new(&layout.inputs, layout.main_input, block);
         plugin.outputs = PortBuffers::new(&layout.outputs, layout.main_output, block);
         plugin.activate()?;
+        plugin.query_latency();
+        // The first value goes out with the views of the new insert.
+        plugin
+            .host_state
+            .latency_unseen
+            .store(false, Ordering::Relaxed);
         // `start_processing` is an audio-thread call in CLAP; the first
         // `process` makes it (see `process`).
         plugin.refresh_parameters();
@@ -436,6 +455,88 @@ impl ClapPlugin {
         }
         self.instance.active = true;
         Ok(())
+    }
+
+    /// Reads `clap_plugin_latency.get` into [`HostState::latency`].  CLAP
+    /// allows the call on the main thread while the plugin is active; an
+    /// inactive plugin (or one without the extension) reports 0.
+    pub(super) fn query_latency(&mut self) {
+        // Cleared first, so a change reported during the call is read again.
+        self.host_state
+            .latency_changed
+            .store(false, Ordering::Release);
+        let latency = if self.instance.active {
+            unsafe { self.latency_ext.as_ref() }
+                .and_then(|latency| latency.get)
+                .map_or(0, |get| unsafe { get(self.plugin) })
+        } else {
+            0
+        };
+        let latency = clamp_latency(latency);
+        if self.host_state.latency.swap(latency, Ordering::AcqRel) != latency {
+            self.host_state
+                .latency_unseen
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// The latency in samples the plugin reported at its last activation.
+    #[cfg(test)]
+    pub(crate) fn latency_samples(&self) -> u32 {
+        self.host_state.latency()
+    }
+
+    /// Deactivates and reactivates the plugin for `request_restart`, then
+    /// reads its latency again.  Main thread only, and only once processing
+    /// has stopped: `process` stops it on the audio thread when it sees the
+    /// request.  A failed activation leaves the plugin inactive, so the next
+    /// `process` reports it and the insert shows the error.
+    pub(super) fn restart(&mut self) {
+        self.restart_wait = None;
+        self.host_state
+            .restart_requested
+            .store(false, Ordering::Release);
+        if self.instance.active {
+            if let Some(deactivate) = unsafe { (*self.plugin).deactivate } {
+                unsafe { deactivate(self.plugin) };
+            }
+            self.instance.active = false;
+        }
+        // The plugin may change its latency (and call `latency.changed`)
+        // inside `activate`; it is read once activation is done.
+        let _ = self.activate();
+        self.query_latency();
+    }
+
+    /// Calls `stop_processing` if processing was started.  It is an
+    /// audio-thread call: the caller is either the audio thread, or holds
+    /// the instance lock while no audio callback runs (the stream stopped,
+    /// or the plugin is being destroyed), which makes it the audio thread
+    /// for that call.
+    pub(super) fn stop_processing(&mut self) {
+        if !self.started {
+            return;
+        }
+        let _audio_thread = AudioThreadScope::enter();
+        if let Some(stop) = unsafe { (*self.plugin).stop_processing } {
+            unsafe { stop(self.plugin) };
+        }
+        self.started = false;
+    }
+
+    /// Whether the audio callback stopped calling `process` while a restart
+    /// waits for it.  The first call notes the block count; once it has not
+    /// moved for [`RESTART_STALL`], the stream is taken to be stopped.
+    pub(super) fn audio_stalled(&mut self) -> bool {
+        let blocks = self.host_state.blocks.load(Ordering::Relaxed);
+        let now = Instant::now();
+        match self.restart_wait {
+            Some((seen, since)) if seen == blocks => now.duration_since(since) >= RESTART_STALL,
+            _ => {
+                self.restart_wait = Some((blocks, now));
+                false
+            }
+        }
     }
 
     /// Starts processing.  CLAP marks `start_processing` as an audio-thread
@@ -700,6 +801,16 @@ impl ClapPlugin {
         frames: usize,
         mix: f32,
     ) -> Result<(), &'static str> {
+        self.host_state.blocks.fetch_add(1, Ordering::Relaxed);
+        if self.host_state.restart_requested.load(Ordering::Acquire) {
+            // The plugin asked to be restarted.  `stop_processing` is an
+            // audio-thread call, so it is made here; the main thread then
+            // deactivates and reactivates the plugin (`service_pending`).
+            // Until then the insert passes the block through unprocessed:
+            // usually one UI frame, a few tens of ms.
+            self.stop_processing();
+            return Ok(());
+        }
         if !self.instance.active {
             return Err("The CLAP plugin is not active.");
         }
@@ -900,8 +1011,22 @@ impl ClapPlugin {
         self.editor_open = false;
     }
 
-    /// The parameter flush and rescan the plugin asked for.  These read and
-    /// write the instance's cached parameters and event list.
+    /// The parameter flush and rescan, restart and latency re-read the
+    /// plugin asked for.  These read and write the instance's cached
+    /// parameters and event list, or change its activation, so they run
+    /// under the instance lock on the main thread.
+    ///
+    /// A restart waits until the audio thread has stopped processing (see
+    /// `process`), which passes blocks through dry until the next UI frame
+    /// services it.  A plugin that has not processed yet restarts right
+    /// away.  If the stream stopped while the plugin was started, no audio
+    /// callback will stop it: once no block has run for [`RESTART_STALL`]
+    /// the main thread stops it itself (under the instance lock) and
+    /// restarts, so the request neither hangs nor keeps the main thread
+    /// try-locking the instance every frame.
+    ///
+    /// `latency.changed` outside a restart (which CLAP does not allow while
+    /// active, but some plugins do anyway) just re-reads the value.
     pub(crate) fn service_pending(&mut self) {
         if self
             .host_state
@@ -912,6 +1037,15 @@ impl ClapPlugin {
         }
         if self.host_state.params_rescan.swap(false, Ordering::Relaxed) {
             self.refresh_parameters();
+        }
+        if self.host_state.restart_requested.load(Ordering::Acquire)
+            && (!self.started || self.audio_stalled())
+        {
+            self.stop_processing();
+            self.restart();
+        }
+        if self.host_state.latency_changed.load(Ordering::Acquire) {
+            self.query_latency();
         }
     }
 }
@@ -929,11 +1063,9 @@ impl Drop for ClapPlugin {
         target.timer_ext = ptr::null();
         drop(target);
         self.close_editor();
-        if self.started {
-            if let Some(stop) = unsafe { (*self.plugin).stop_processing } {
-                unsafe { stop(self.plugin) };
-            }
-        }
+        // No audio callback can be inside the plugin: it holds the last
+        // reference, and the instance lock is gone with it.
+        self.stop_processing();
         // The fields finish the teardown: `instance` deactivates and destroys
         // the plugin, then the host goes and the module is released (see the
         // field order on the struct).

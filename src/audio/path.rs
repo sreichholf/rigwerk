@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use super::clap::{ClapPlugin, HostState};
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
-use super::plugins::{PluginChain, PluginHandle, PluginPref, PluginView};
+use super::plugins::{PluginChain, PluginHandle, PluginPref, PluginView, Vst3Service};
 
 /// Most signal paths a session can hold.  Every per-path array (controls,
 /// processors, device maps) is this long; only the active ones run.
@@ -92,6 +92,10 @@ impl LiveSlots {
 /// A CLAP plugin and its host state, as `service_plugins` services them.
 type ClapService = (Arc<HostState>, Arc<Mutex<ClapPlugin>>);
 
+/// The service lists a publish replaces; dropped after the chain lock is
+/// released, since they may hold the last reference to a removed plugin.
+type StaleServices = (Arc<[ClapService]>, Arc<[Arc<Vst3Service>]>);
+
 /// Armed by `edit_chain` around the edit itself.  If the edit panics, the
 /// chain mutex is poisoned and no later edit publishes again, so the
 /// published views and CLAP services are cleared here instead of being left
@@ -128,6 +132,10 @@ pub(crate) struct PathControls {
     /// extra references are gone before the chain hands its slots to the
     /// deferred queue, and the main thread's drain is always the last owner.
     pub(super) plugin_services: Mutex<Arc<[ClapService]>>,
+    /// The VST3 plugins `service_plugins` services (restart requests and
+    /// latency), published the same way and declared here for the same
+    /// reason.
+    vst3_services: Mutex<Arc<[Arc<Vst3Service>]>>,
     /// The insert views the UI draws.  Republished by every chain edit while
     /// that edit still holds the chain lock, and read without it.  This lock
     /// is separate from the chain's and the audio thread never takes it, so
@@ -145,6 +153,9 @@ pub(crate) struct PathControls {
     /// The plugin insert chain and a cheap "is anything enabled?" flag so
     /// the audio callback skips the lock when no effects are loaded.
     pub(super) plugins: Mutex<PluginChain>,
+    /// The chain's total latency ([`PluginChain::latency_handle`]), read
+    /// without the chain lock.
+    latency: Arc<AtomicU32>,
     plugin_active: AtomicUsize,
     /// The two built-in EQs (pre and post inserts).  Each version counter
     /// lets the audio callback notice a change without taking the lock.
@@ -176,12 +187,14 @@ impl PathControls {
             meter_l: AtomicU32::new(0.0f32.to_bits()),
             meter_r: AtomicU32::new(0.0f32.to_bits()),
             plugin_services: Mutex::new(Arc::from(Vec::new())),
+            vst3_services: Mutex::new(Arc::from(Vec::new())),
             plugin_views: Mutex::new(Arc::from(Vec::new())),
             plugin_views_version: AtomicU64::new(0),
             plugin_views_dirty: AtomicBool::new(false),
             published_ports_changed: AtomicUsize::new(0),
             chain_rate: AtomicU32::new(chain.rate()),
             chain_unopened: AtomicBool::new(false),
+            latency: chain.latency_handle(),
             plugins: Mutex::new(chain),
             plugin_active: AtomicUsize::new(0),
             eq: [
@@ -349,7 +362,7 @@ impl PathControls {
 
     /// Runs one edit under the chain lock and republishes what the UI and
     /// the audio flag read from it before releasing the lock.  `None` when
-    /// the chain is poisoned.  The replaced CLAP service list is dropped
+    /// the chain is poisoned.  The replaced service lists are dropped
     /// only after the lock is released: it may hold the last reference to a
     /// plugin the edit removed.
     pub(super) fn edit_chain<R>(&self, edit: impl FnOnce(&mut PluginChain) -> R) -> Option<R> {
@@ -365,6 +378,14 @@ impl PathControls {
         };
         drop(stale);
         Some(result)
+    }
+
+    /// The latency in samples this path's insert chain should add (see
+    /// [`PluginChain::latency_samples`]).  Lock-free, for the audio thread.
+    // Read by the alignment engine (P3).
+    #[allow(dead_code)]
+    pub(crate) fn latency_samples(&self) -> u32 {
+        self.latency.load(Ordering::Acquire)
     }
 
     /// What a poisoned chain looks like to every reader: no inserts, nothing
@@ -388,14 +409,21 @@ impl PathControls {
                 .unwrap_or_else(PoisonError::into_inner),
             Arc::from(Vec::new()),
         );
-        drop(services);
+        let vst3 = std::mem::replace(
+            &mut *self
+                .vst3_services
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            Arc::from(Vec::new()),
+        );
+        drop((services, vst3));
     }
 
-    /// Publishes the views, the CLAP service list and the cheap flags for
-    /// `chain`.  The caller holds the chain lock.  Hands back the previous
-    /// service list, which the caller drops after unlocking.
+    /// Publishes the views, the CLAP and VST3 service lists and the cheap
+    /// flags for `chain`.  The caller holds the chain lock.  Hands back the
+    /// previous service lists, which the caller drops after unlocking.
     #[must_use]
-    fn publish_plugins(&self, chain: &PluginChain) -> Arc<[ClapService]> {
+    fn publish_plugins(&self, chain: &PluginChain) -> StaleServices {
         self.plugin_active.store(chain.active(), Ordering::Relaxed);
         self.chain_rate.store(chain.rate(), Ordering::Relaxed);
         self.chain_unopened
@@ -404,18 +432,27 @@ impl PathControls {
             .store(chain.ports_changed_count(), Ordering::Relaxed);
         let views: Arc<[PluginView]> = chain.views().into();
         let services: Arc<[ClapService]> = chain.clap_services().into();
+        let vst3: Arc<[Arc<Vst3Service>]> = chain.vst3_services().into();
         *self
             .plugin_views
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = views;
         self.plugin_views_version.fetch_add(1, Ordering::Release);
-        std::mem::replace(
+        let stale_clap = std::mem::replace(
             &mut *self
                 .plugin_services
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
             services,
-        )
+        );
+        let stale_vst3 = std::mem::replace(
+            &mut *self
+                .vst3_services
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            vst3,
+        );
+        (stale_clap, stale_vst3)
     }
 
     /// Replaces the saved insert list without loading anything.  Plugins are
@@ -592,10 +629,10 @@ impl PathControls {
         self.plugin_views_version.load(Ordering::Acquire)
     }
 
-    /// Runs this path's CLAP main-thread callbacks and timers once per UI
-    /// frame, outside the chain lock: a plugin's timer can do arbitrary
-    /// work.  The plugins come from the published list, so a quiet frame
-    /// takes no chain lock at all.
+    /// Runs this path's CLAP main-thread callbacks and timers, and the VST3
+    /// restart requests, once per UI frame, outside the chain lock: a
+    /// plugin's timer can do arbitrary work.  The plugins come from the
+    /// published lists, so a quiet frame takes no chain lock at all.
     pub(crate) fn service_plugins(&self) {
         let services = Arc::clone(
             &self
@@ -603,8 +640,21 @@ impl PathControls {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         );
+        let vst3 = Arc::clone(
+            &self
+                .vst3_services
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        let mut latency_changed = false;
         for (host, plugin) in services.iter() {
             super::plugins::service_clap(host, plugin);
+            // Taken from the host rather than the call's result, so a change
+            // an open editor's own service picked up counts here too.
+            latency_changed |= host.take_latency_change();
+        }
+        for service in vst3.iter() {
+            latency_changed |= service.service();
         }
         // An insert failed on the audio thread, or a CLAP plugin changed its
         // ports since the last publish: rebuild the views here, on the UI
@@ -614,12 +664,16 @@ impl PathControls {
             .filter(|(host, _)| host.ports_changed())
             .count();
         let dirty = self.plugin_views_dirty.swap(false, Ordering::AcqRel);
-        if dirty || ports_changed != self.published_ports_changed.load(Ordering::Relaxed) {
-            self.edit_chain(|_| ());
+        if dirty
+            || latency_changed
+            || ports_changed != self.published_ports_changed.load(Ordering::Relaxed)
+        {
+            // Also refreshes the chain's latency total.
+            self.edit_chain(PluginChain::refresh_latency);
         }
         // Dropped outside the chain lock, on this thread, in case a removal
         // left it as the last reference to a plugin.
-        drop(services);
+        drop((services, vst3));
     }
 
     /// Captures the opaque state of every loaded plugin whose saved blob is

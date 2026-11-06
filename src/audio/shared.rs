@@ -1239,6 +1239,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_plugin_latency_change_republishes_the_views() {
+        use crate::audio::clap::tests::{
+            fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
+        };
+        let _main = claim_main_thread();
+        let shared = super::Shared::new(48_000);
+        shared.paths[0]
+            .edit_chain(|chain| chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64)));
+        assert_eq!(shared.plugin_views()[0].latency, 64);
+        assert_eq!(shared.paths[0].latency_samples(), 64);
+        // A quiet frame publishes nothing.
+        let version = shared.paths[0].plugin_views_version();
+        shared.service_plugins();
+        assert_eq!(shared.paths[0].plugin_views_version(), version);
+
+        // The plugin restarts with a new latency (it has not processed, so
+        // the main thread restarts it right away).
+        restart_fake_with_latency_for_test(8);
+        shared.service_plugins();
+        assert_eq!(shared.plugin_views()[0].latency, 8);
+        assert_eq!(shared.paths[0].latency_samples(), 8);
+    }
+
+    #[test]
     fn a_panicking_edit_clears_what_it_published() {
         let _main = claim_main_thread();
         let shared = super::Shared::new(48_000);

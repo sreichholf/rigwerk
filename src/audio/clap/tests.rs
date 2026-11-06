@@ -122,6 +122,24 @@ pub(crate) fn fake_plugin_for_test(fail_process: bool) -> ClapPlugin {
     fake::load("fake").expect("load the fake plugin")
 }
 
+/// A loaded fake CLAP effect (as [`fake_plugin_for_test`]) that reports
+/// `latency` samples through `clap_plugin_latency`.
+pub(crate) fn fake_plugin_with_latency_for_test(latency: u32) -> ClapPlugin {
+    const MAIN: u32 = clap_sys::ext::audio_ports::CLAP_AUDIO_PORT_IS_MAIN;
+    fake::reset(fake::Fail::Nothing);
+    fake::set_latency(latency);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    fake::load("fake").expect("load the fake plugin")
+}
+
+/// Makes the fake plugin loaded last on this thread ask for a restart
+/// (`clap_host.request_restart`) and report `latency` once reactivated,
+/// the way CLAP lets a plugin change its latency while active.
+pub(crate) fn restart_fake_with_latency_for_test(latency: u32) {
+    fake::set_next_latency(latency);
+    fake::request_restart();
+}
+
 /// Makes `plugin` report a channel-count change, as a real plugin does
 /// through `clap_host_audio_ports.rescan`.
 pub(crate) fn rescan_ports_for_test(plugin: &ClapPlugin) {
@@ -147,6 +165,8 @@ mod fake {
     use clap_sys::ext::audio_ports::{
         clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS,
     };
+    use clap_sys::ext::latency::{clap_host_latency, clap_plugin_latency, CLAP_EXT_LATENCY};
+    use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK};
     use clap_sys::factory::plugin_factory::clap_plugin_factory;
     use clap_sys::host::clap_host;
     use clap_sys::id::CLAP_INVALID_ID;
@@ -182,6 +202,38 @@ mod fake {
         static PORTS_DECLARED: RefCell<Option<DeclaredPorts>> =
             const { RefCell::new(None) };
         static SEEN: RefCell<Option<Seen>> = const { RefCell::new(None) };
+        /// The latency the fake reports; `None` leaves out the extension.
+        static LATENCY: Cell<Option<u32>> = const { Cell::new(None) };
+        /// A latency the fake switches to at its next `activate`, telling
+        /// the host through `latency.changed` as CLAP asks.
+        static NEXT_LATENCY: Cell<Option<u32>> = const { Cell::new(None) };
+        /// The host of the instance created last, for the helpers that
+        /// act as that plugin.
+        static HOST: Cell<*const clap_host> = const { Cell::new(ptr::null()) };
+    }
+
+    /// One fake instance's lifecycle, kept in `plugin_data` so several
+    /// fakes on one thread are checked separately.
+    struct Instance {
+        host: *const clap_host,
+        active: Cell<bool>,
+        processing: Cell<bool>,
+    }
+
+    fn instance<'a>(plugin: *const clap_plugin) -> &'a Instance {
+        unsafe { &*((*plugin).plugin_data as *const Instance) }
+    }
+
+    /// Asks the host's `thread_check` whether this is the audio thread.
+    fn on_audio_thread(host: *const clap_host) -> bool {
+        let host_ref = unsafe { host.as_ref() }.expect("a host");
+        let get = host_ref.get_extension.expect("host get_extension");
+        let ext =
+            unsafe { get(host, CLAP_EXT_THREAD_CHECK.as_ptr()) } as *const clap_host_thread_check;
+        let check = unsafe { ext.as_ref() }
+            .and_then(|ext| ext.is_audio_thread)
+            .expect("the host offers thread_check");
+        unsafe { check(host) }
     }
 
     fn log(event: &'static str) {
@@ -196,6 +248,8 @@ mod fake {
         FAIL.with(|fail| fail.set(step));
         LOG.with(|log| log.borrow_mut().clear());
         SEEN.with(|seen| seen.borrow_mut().take());
+        LATENCY.with(|latency| latency.set(None));
+        NEXT_LATENCY.with(|latency| latency.set(None));
         // `NoAudioPorts` declares the extension with no ports at all.
         PORTS_DECLARED.with(|ports| {
             *ports.borrow_mut() = (step == Fail::NoAudioPorts).then(|| (Vec::new(), Vec::new()));
@@ -234,6 +288,7 @@ mod fake {
     ) -> *const clap_plugin {
         log("create");
         assert!(!host.is_null());
+        HOST.with(|cell| cell.set(host));
         if failing(Fail::CreateNull) {
             return ptr::null();
         }
@@ -242,15 +297,20 @@ mod fake {
         } else {
             Some(plugin_init as unsafe extern "C" fn(*const clap_plugin) -> bool)
         };
+        let state = Box::into_raw(Box::new(Instance {
+            host,
+            active: Cell::new(false),
+            processing: Cell::new(false),
+        }));
         Box::into_raw(Box::new(clap_plugin {
             desc: ptr::null(),
-            plugin_data: ptr::null_mut(),
+            plugin_data: state.cast(),
             init,
             destroy: Some(plugin_destroy),
             activate: Some(plugin_activate),
             deactivate: Some(plugin_deactivate),
-            start_processing: None,
-            stop_processing: None,
+            start_processing: Some(plugin_start_processing),
+            stop_processing: Some(plugin_stop_processing),
             reset: None,
             process: Some(plugin_process),
             get_extension: Some(plugin_get_extension),
@@ -265,22 +325,107 @@ mod fake {
 
     unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
         log("destroy");
-        drop(unsafe { Box::from_raw(plugin as *mut clap_plugin) });
+        let plugin = unsafe { Box::from_raw(plugin as *mut clap_plugin) };
+        drop(unsafe { Box::from_raw(plugin.plugin_data as *mut Instance) });
     }
 
     unsafe extern "C" fn plugin_activate(
-        _plugin: *const clap_plugin,
+        plugin: *const clap_plugin,
         _rate: f64,
         _min: u32,
         _max: u32,
     ) -> bool {
         log("activate");
-        !failing(Fail::Activate)
+        let state = instance(plugin);
+        assert!(!state.active.get(), "activate while active");
+        if failing(Fail::Activate) {
+            return false;
+        }
+        if let Some(next) = NEXT_LATENCY.with(|latency| latency.take()) {
+            LATENCY.with(|latency| latency.set(Some(next)));
+            tell_host_latency_changed();
+        }
+        state.active.set(true);
+        true
     }
 
-    unsafe extern "C" fn plugin_deactivate(_plugin: *const clap_plugin) {
+    unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin) {
         log("deactivate");
+        let state = instance(plugin);
+        // CLAP: [main-thread & active & !processing].
+        assert!(state.active.get(), "deactivate while inactive");
+        assert!(!state.processing.get(), "deactivate while processing");
+        state.active.set(false);
     }
+
+    unsafe extern "C" fn plugin_start_processing(plugin: *const clap_plugin) -> bool {
+        log("start_processing");
+        let state = instance(plugin);
+        // CLAP: [audio-thread & active & !processing].
+        assert!(state.active.get(), "start_processing while inactive");
+        assert!(!state.processing.get(), "start_processing twice");
+        assert!(
+            on_audio_thread(state.host),
+            "start_processing off the audio thread"
+        );
+        state.processing.set(true);
+        true
+    }
+
+    unsafe extern "C" fn plugin_stop_processing(plugin: *const clap_plugin) {
+        log("stop_processing");
+        let state = instance(plugin);
+        // CLAP: [audio-thread & active & processing].
+        assert!(state.active.get(), "stop_processing while inactive");
+        assert!(state.processing.get(), "stop_processing while stopped");
+        assert!(
+            on_audio_thread(state.host),
+            "stop_processing off the audio thread"
+        );
+        state.processing.set(false);
+    }
+
+    /// Makes the fake report `latency` (with the extension) from now on.
+    pub(super) fn set_latency(latency: u32) {
+        LATENCY.with(|cell| cell.set(Some(latency)));
+    }
+
+    /// Makes the fake switch to `latency` at its next activation.
+    pub(super) fn set_next_latency(latency: u32) {
+        NEXT_LATENCY.with(|cell| cell.set(Some(latency)));
+    }
+
+    /// Calls `clap_host_latency.changed` the way a plugin does: through
+    /// the extension the host hands out.
+    pub(super) fn tell_host_latency_changed() {
+        let host = HOST.with(Cell::get);
+        let host_ref = unsafe { host.as_ref() }.expect("the fake was created");
+        let get = host_ref.get_extension.expect("host get_extension");
+        let ext = unsafe { get(host, CLAP_EXT_LATENCY.as_ptr()) } as *const clap_host_latency;
+        let changed = unsafe { ext.as_ref() }
+            .and_then(|ext| ext.changed)
+            .expect("the host offers latency.changed");
+        unsafe { changed(host) };
+    }
+
+    /// Calls `clap_host.request_restart` the way a plugin does.
+    pub(super) fn request_restart() {
+        let host = HOST.with(Cell::get);
+        let host_ref = unsafe { host.as_ref() }.expect("the fake was created");
+        let request = host_ref.request_restart.expect("host request_restart");
+        unsafe { request(host) };
+    }
+
+    unsafe extern "C" fn latency_get(plugin: *const clap_plugin) -> u32 {
+        log("latency.get");
+        // CLAP: [main-thread & active].
+        assert!(instance(plugin).active.get(), "latency.get while inactive");
+        LATENCY.with(Cell::get).unwrap_or(0)
+    }
+
+    static LATENCY_EXT: clap_plugin_latency = clap_plugin_latency {
+        get: Some(latency_get),
+    };
 
     unsafe extern "C" fn plugin_get_extension(
         _plugin: *const clap_plugin,
@@ -289,6 +434,9 @@ mod fake {
         let id = unsafe { CStr::from_ptr(id) };
         if id == CLAP_EXT_AUDIO_PORTS && PORTS_DECLARED.with(|ports| ports.borrow().is_some()) {
             return (&PORTS as *const clap_plugin_audio_ports).cast();
+        }
+        if id == CLAP_EXT_LATENCY && LATENCY.with(Cell::get).is_some() {
+            return (&LATENCY_EXT as *const clap_plugin_latency).cast();
         }
         ptr::null()
     }
@@ -332,9 +480,14 @@ mod fake {
     /// port pointing at the wrong memory shows up) and fills each output
     /// channel with `10 * port + channel + 1`.
     unsafe extern "C" fn plugin_process(
-        _plugin: *const clap_plugin,
+        plugin: *const clap_plugin,
         process: *const clap_process,
     ) -> clap_process_status {
+        let state = instance(plugin);
+        // CLAP: [audio-thread & active & processing].
+        assert!(state.active.get(), "process while inactive");
+        assert!(state.processing.get(), "process before start_processing");
+        assert!(on_audio_thread(state.host), "process off the audio thread");
         let process = unsafe { &*process };
         let frames = process.frames_count as usize;
         let inputs = unsafe {
@@ -1060,4 +1213,133 @@ fn loads_a_real_clap_effect() {
         .process(&mut left, &mut right, 128, 1.0)
         .expect("process a block");
     assert!(left.iter().any(|sample| (*sample - 0.125).abs() < 0.001));
+}
+
+#[test]
+fn the_latency_is_read_once_the_plugin_is_active() {
+    let plugin = fake_plugin_with_latency_for_test(64);
+    assert_eq!(plugin.latency_samples(), 64);
+    assert_eq!(plugin.host().latency(), 64);
+    // `latency.get` came after `activate` (the fake asserts it is active).
+    let events = fake::events();
+    let activate = events.iter().position(|event| *event == "activate");
+    let get = events.iter().position(|event| *event == "latency.get");
+    assert!(activate < get, "{events:?}");
+
+    let plain = fake_plugin_for_test(false);
+    assert_eq!(plain.latency_samples(), 0);
+    assert_eq!(fake::count("latency.get"), 0);
+}
+
+/// CLAP only lets the latency change inside `activate` or through a
+/// restart, but some plugins call `latency.changed` while active; the
+/// value is read again all the same.
+#[test]
+fn a_latency_change_while_active_is_read_again() {
+    let plugin = fake_plugin_with_latency_for_test(64);
+    let host = plugin.host();
+    let plugin = std::sync::Mutex::new(plugin);
+    // Nothing pending: servicing does not touch the instance.
+    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+
+    fake::set_latency(32);
+    fake::tell_host_latency_changed();
+    // Only a flag so far; the value is read on the main thread.
+    assert_eq!(host.latency(), 64);
+    assert!(crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(host.latency(), 32);
+    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(fake::count("deactivate"), 0, "no restart was asked for");
+}
+
+#[test]
+fn a_restart_stops_on_the_audio_thread_then_reactivates_on_the_main_thread() {
+    let plugin = fake_plugin_with_latency_for_test(64);
+    let host = plugin.host();
+    let plugin = std::sync::Mutex::new(plugin);
+    let mut left = vec![0.5f32; 16];
+    let mut right = vec![0.5f32; 16];
+    let process = |left: &mut [f32], right: &mut [f32]| {
+        plugin
+            .lock()
+            .expect("plugin lock")
+            .process(left, right, 16, 1.0)
+    };
+    assert!(process(&mut left, &mut right).is_ok());
+    assert!(fake::seen().is_some());
+    assert_eq!(fake::count("start_processing"), 1);
+
+    // A mode switch: the new latency applies at the next activation.
+    fake::set_next_latency(128);
+    fake::request_restart();
+
+    // Still processing, so the main thread waits for the audio thread.
+    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(fake::count("deactivate"), 0);
+    assert_eq!(host.latency(), 64);
+
+    // The audio thread stops processing and passes the block through.
+    left.fill(0.5);
+    assert!(process(&mut left, &mut right).is_ok());
+    assert!(fake::seen().is_none(), "the plugin was not processed");
+    assert!(left.iter().all(|sample| *sample == 0.5));
+    assert_eq!(fake::count("stop_processing"), 1);
+
+    // The main thread restarts it and reads the new latency.
+    assert!(crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(host.latency(), 128);
+    assert_eq!(fake::count("deactivate"), 1);
+    assert_eq!(fake::count("activate"), 2);
+    assert!(!host.lifecycle_pending());
+
+    // Processing starts again.
+    assert!(process(&mut left, &mut right).is_ok());
+    assert!(fake::seen().is_some());
+    assert_eq!(fake::count("start_processing"), 2);
+}
+
+#[test]
+fn a_restart_before_the_first_block_happens_right_away() {
+    let plugin = fake_plugin_with_latency_for_test(16);
+    let host = plugin.host();
+    let plugin = std::sync::Mutex::new(plugin);
+    fake::set_next_latency(48);
+    fake::request_restart();
+    assert!(crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(host.latency(), 48);
+    assert_eq!(fake::count("stop_processing"), 0);
+    assert_eq!(fake::count("deactivate"), 1);
+}
+
+#[test]
+fn a_restart_runs_on_the_main_thread_once_the_stream_has_stopped() {
+    let plugin = fake_plugin_with_latency_for_test(64);
+    let host = plugin.host();
+    let plugin = std::sync::Mutex::new(plugin);
+    let mut left = vec![0.5f32; 16];
+    let mut right = vec![0.5f32; 16];
+    // Started, then the stream stops: no audio callback will stop it.
+    assert!(plugin
+        .lock()
+        .expect("plugin lock")
+        .process(&mut left, &mut right, 16, 1.0)
+        .is_ok());
+    fake::set_next_latency(256);
+    fake::request_restart();
+    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(fake::count("deactivate"), 0);
+    std::thread::sleep(super::plugin::RESTART_STALL + std::time::Duration::from_millis(50));
+    assert!(crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(host.latency(), 256);
+    // Stopped (as the audio thread, which the fake checks) before the
+    // deactivation.
+    assert_eq!(fake::count("stop_processing"), 1);
+    assert_eq!(fake::count("deactivate"), 1);
+    assert!(!host.lifecycle_pending());
+}
+
+#[test]
+fn a_huge_latency_is_clamped() {
+    let plugin = fake_plugin_with_latency_for_test(u32::MAX);
+    assert_eq!(plugin.latency_samples(), crate::audio::plugins::MAX_ALIGN);
 }

@@ -225,6 +225,7 @@ impl RigWerkApp {
         let format = view.format;
         let error = view.error.clone();
         let bypass = view.bypass;
+        let latency = view.latency_label();
         let has_editor = view.has_editor;
         let parameters = view.parameters.clone();
         let gui_is_open = self
@@ -298,8 +299,13 @@ impl RigWerkApp {
                         } else {
                             format!("{vendor} · {category}")
                         };
+                        // The latency stays visible however long the rest is.
+                        let detail = match &latency {
+                            Some(latency) => format!("{} {latency}", ellipsize(&detail, 40)),
+                            None => ellipsize(&detail, 52),
+                        };
                         ui.label(
-                            RichText::new(ellipsize(&detail, 52))
+                            RichText::new(detail)
                                 .size(ts(9.2))
                                 .color(DIM),
                         );

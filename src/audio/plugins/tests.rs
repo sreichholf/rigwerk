@@ -181,3 +181,74 @@ fn a_port_change_is_visible_without_processing_a_block() {
     assert!(!slot.ports_changed());
     assert!(slot.resolved_error().is_none());
 }
+
+#[test]
+fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
+    use super::super::clap::tests::{
+        fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
+    };
+    use super::{service_clap, PluginChain};
+    use std::sync::atomic::Ordering;
+
+    let mut chain = PluginChain::new(48_000);
+    let total = chain.latency_handle();
+    chain.insert_clap_for_test(fake_plugin_with_latency_for_test(16));
+    chain.insert_clap_for_test(fake_plugin_with_latency_for_test(32));
+    // The fake loaded last is the one `restart_fake_with_latency_for_test` moves.
+    chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64));
+    // A saved insert that was never opened.
+    assert!(chain
+        .push_slot(Slot::empty(PluginPref::default()), 48_000)
+        .is_ok());
+    assert_eq!(chain.latency_samples(), 112);
+    assert_eq!(total.load(Ordering::Acquire), 112);
+
+    // Bypass keeps the latency, so the alignment does not move.
+    chain.set_bypass(1, true);
+    assert_eq!(chain.latency_samples(), 112);
+    // A failed insert is out of the chain.
+    chain.slot_mut_for_test(0).error = Some("Processing failed".to_owned());
+    assert_eq!(chain.latency_samples(), 96);
+
+    let views = chain.views();
+    let latencies: Vec<u32> = views.iter().map(|view| view.latency).collect();
+    assert_eq!(latencies, vec![0, 32, 64, 0]);
+    assert_eq!(views[2].latency_label().as_deref(), Some("· 64 smp"));
+    assert_eq!(views[3].latency_label(), None);
+
+    let mut left = vec![0.0f32; 32];
+    let mut right = vec![0.0f32; 32];
+    let services = chain.clap_services();
+    let service_all = || {
+        services
+            .iter()
+            .map(|(host, plugin)| service_clap(host, plugin))
+            .fold(false, |any, changed| any | changed)
+    };
+    // The failure set above (outside an edit) reaches the atomic with the
+    // first block, which asks for a republish; the next block does not.
+    assert!(chain.process(&mut left, &mut right, 32));
+    assert_eq!(total.load(Ordering::Acquire), 96);
+    assert!(!chain.process(&mut left, &mut right, 32));
+
+    // The last fake switches modes the CLAP way: it asks for a restart and
+    // reports the new latency when reactivated.
+    restart_fake_with_latency_for_test(8);
+    // The audio thread stops it first; the latency has not moved yet.
+    assert!(!chain.process(&mut left, &mut right, 32));
+    // The main thread restarts it and reads the new value.
+    assert!(service_all());
+    assert_eq!(chain.latency_samples(), 40);
+    // The next block publishes it and asks for the views to be rebuilt,
+    // so the stale `· 64 smp` label goes.
+    assert!(chain.process(&mut left, &mut right, 32));
+    assert_eq!(total.load(Ordering::Acquire), 40);
+    assert_eq!(chain.views()[2].latency, 8);
+    assert!(!chain.process(&mut left, &mut right, 32));
+
+    // Destroy the plugins here rather than through the chain's deferred
+    // teardown, which another test's main-thread claim could trigger.
+    drop(services);
+    drop(chain.restore(Vec::new()));
+    assert_eq!(total.load(Ordering::Acquire), 0);
+}

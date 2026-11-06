@@ -1,5 +1,6 @@
 //! The master insert chain.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
 use vst3_host::AudioBuffers;
@@ -7,7 +8,7 @@ use vst3_host::AudioBuffers;
 use super::super::clap::{ClapPlugin, HostState};
 use super::load::{
     host_reset_parameters, host_set_parameter, merge_synced_params, Capture, PluginHandle,
-    StateRequest, MAX_BLOCK,
+    StateRequest, Vst3Service, MAX_BLOCK,
 };
 #[cfg(test)]
 use super::pref::PluginFormat;
@@ -25,12 +26,21 @@ pub(crate) struct ReloadPlan {
 /// each loaded plugin, so an edit or an open editor skips that processing for
 /// a block instead of stalling the callback; UI paths may still block on the
 /// chain lock.
+///
+/// Latency: every insert reports the samples it delays the signal by (VST3
+/// `getLatencySamples`, CLAP `latency.get`, read after each activation and
+/// again when the plugin reports a change).  The chain total, bypassed
+/// inserts included (see [`Slot::latency_samples`]), is
+/// [`Self::latency_samples`], and is also kept in an atomic
+/// ([`Self::latency_handle`]) that readers outside the chain lock can load.
 pub(crate) struct PluginChain {
     slots: Vec<Slot>,
     buffers: AudioBuffers,
     dry_l: Vec<f32>,
     dry_r: Vec<f32>,
     sample_rate: u32,
+    /// [`Self::latency_samples`] as last published.
+    latency: Arc<AtomicU32>,
 }
 
 impl PluginChain {
@@ -46,16 +56,58 @@ impl PluginChain {
             dry_l: vec![0.0; MAX_BLOCK],
             dry_r: vec![0.0; MAX_BLOCK],
             sample_rate: rate,
+            latency: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// The latency in samples the chain *should* have: the sum over its
+    /// inserts (see [`Slot::latency_samples`]).  A bypassed insert still
+    /// counts (so bypass does not move the alignment); one that is not
+    /// loaded or failed counts 0.  Atomics only, so the audio thread may
+    /// call it under the chain lock.
+    ///
+    /// This is not the delay the chain has today: an insert skipped for a
+    /// block (bypass, mix at 0, a missed try-lock, a CLAP restart's
+    /// passthrough) adds none.  Each skip has to be replaced by a delay of
+    /// that insert's latency, which the alignment package (P3) adds.
+    pub(crate) fn latency_samples(&self) -> u32 {
+        self.slots
+            .iter()
+            .map(Slot::latency_samples)
+            .fold(0u32, u32::saturating_add)
+    }
+
+    /// The chain total as an atomic, for readers that do not hold the chain
+    /// lock (the audio thread's alignment, for one).  It is refreshed on
+    /// every edit and every processed block, so a plugin that changes its
+    /// latency on the main thread shows up by the next block.
+    pub(crate) fn latency_handle(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.latency)
+    }
+
+    /// Publishes the latency total after a change made outside the chain
+    /// lock (a plugin restarted on the main thread), without waiting for
+    /// the next processed block.
+    pub(crate) fn refresh_latency(&mut self) {
+        self.publish_latency();
+    }
+
+    /// Stores [`Self::latency_samples`] in the shared atomic and returns
+    /// whether that changed it.  Allocation and lock free.
+    fn publish_latency(&self) -> bool {
+        let total = self.latency_samples();
+        self.latency.swap(total, Ordering::AcqRel) != total
     }
 
     /// Replaces the slots and hands the old ones back, so the caller can
     /// drop (and destroy) them after releasing the chain lock.
     pub(crate) fn restore(&mut self, prefs: Vec<PluginPref>) -> Vec<Slot> {
-        std::mem::replace(
+        let old = std::mem::replace(
             &mut self.slots,
             prefs.into_iter().map(Slot::empty).collect(),
-        )
+        );
+        self.publish_latency();
+        old
     }
 
     /// Builds a fully opened slot without holding the chain lock.  Add it with
@@ -82,6 +134,7 @@ impl PluginChain {
             return Err(slot);
         }
         self.slots.push(slot);
+        self.publish_latency();
         Ok(())
     }
 
@@ -134,6 +187,7 @@ impl PluginChain {
             old.push(std::mem::replace(&mut self.slots[index], slot));
         }
         self.apply_rate(rate);
+        self.publish_latency();
         Ok(old)
     }
 
@@ -169,6 +223,13 @@ impl PluginChain {
         slot.clap_host = Some(host);
         slot.built_rate = Some(self.sample_rate);
         self.slots.push(slot);
+        self.publish_latency();
+    }
+
+    /// Mutable access to one slot, for tests that put it in a state.
+    #[cfg(test)]
+    pub(crate) fn slot_mut_for_test(&mut self, index: usize) -> &mut Slot {
+        &mut self.slots[index]
     }
 
     pub(crate) fn rate(&self) -> u32 {
@@ -205,7 +266,9 @@ impl PluginChain {
     /// the chain lock: destroying a plugin can take a while, and the audio
     /// callback passes the chain through dry whenever it cannot get the lock.
     pub(crate) fn remove(&mut self, index: usize) -> Option<Slot> {
-        (index < self.slots.len()).then(|| self.slots.remove(index))
+        let removed = (index < self.slots.len()).then(|| self.slots.remove(index));
+        self.publish_latency();
+        removed
     }
 
     pub(crate) fn move_slot(&mut self, index: usize, delta: isize) {
@@ -235,7 +298,9 @@ impl PluginChain {
         let rate = self.sample_rate;
         if let Some(slot) = self.slots.get_mut(index) {
             slot.ensure_loaded(rate);
+            slot.nudge_vst3();
         }
+        self.publish_latency();
     }
 
     /// The plugin instance behind one slot, shared with the window that may
@@ -255,6 +320,16 @@ impl PluginChain {
                 }
                 _ => None,
             })
+            .collect()
+    }
+
+    /// The VST3 plugins that need main-thread servicing (restart requests
+    /// and latency changes).  The caller runs [`Vst3Service::service`] on
+    /// the UI thread after releasing the chain lock.
+    pub(crate) fn vst3_services(&self) -> Vec<Arc<Vst3Service>> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.vst3.clone())
             .collect()
     }
 
@@ -292,6 +367,7 @@ impl PluginChain {
         slot.parameters = parameters;
         // The editor is open and can change more than parameters.
         slot.state_stale = true;
+        slot.nudge_vst3();
     }
 
     /// The loaded plugins whose state should be captured now: those whose
@@ -347,6 +423,7 @@ impl PluginChain {
         if let Some(slot) = self.slots.get_mut(index) {
             if slot.plugin.is_some() {
                 slot.state_stale = true;
+                slot.nudge_vst3();
             }
         }
     }
@@ -362,7 +439,12 @@ impl PluginChain {
         let Some(slot) = self.slots.get_mut(index) else {
             return Err("That insert is no longer in the chain".to_owned());
         };
-        slot.load_if_needed(rate);
+        if slot.load_if_needed(rate) {
+            self.publish_latency();
+        }
+        let Some(slot) = self.slots.get_mut(index) else {
+            return Err("That insert is no longer in the chain".to_owned());
+        };
         let Some(plugin) = slot.plugin.as_ref() else {
             return Err(slot
                 .error
@@ -400,6 +482,7 @@ impl PluginChain {
             slot.pref.params.push(PluginParamPref { id, value });
         }
         slot.state_stale = true;
+        slot.nudge_vst3();
         Ok(())
     }
 
@@ -410,7 +493,12 @@ impl PluginChain {
         let Some(slot) = self.slots.get_mut(index) else {
             return Err("That insert is no longer in the chain".to_owned());
         };
-        slot.load_if_needed(rate);
+        if slot.load_if_needed(rate) {
+            self.publish_latency();
+        }
+        let Some(slot) = self.slots.get_mut(index) else {
+            return Err("That insert is no longer in the chain".to_owned());
+        };
         let Some(plugin) = slot.plugin.as_ref() else {
             return Err(slot
                 .error
@@ -420,6 +508,7 @@ impl PluginChain {
         slot.parameters = host_reset_parameters(plugin)?;
         slot.pref.params.clear();
         slot.state_stale = true;
+        slot.nudge_vst3();
         Ok(())
     }
 
@@ -428,10 +517,19 @@ impl PluginChain {
     /// plugin that fails is left in the chain with its error so the person can
     /// see why it is silent.
     ///
-    /// Returns whether a slot gained an error in this block, so the caller
-    /// can ask the UI thread to republish the insert views (the audio thread
-    /// does not build them itself).
+    /// Returns whether a slot gained an error in this block, or the chain
+    /// latency changed, so the caller can ask the UI thread to republish
+    /// the insert views (the audio thread does not build them itself).
+    ///
+    /// Also refreshes [`Self::latency_handle`], so a latency change made on
+    /// the main thread (outside the chain lock) reaches it by the next block.
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
+        let failed = self.process_inserts(left, right, frames);
+        let latency_changed = self.publish_latency();
+        failed || latency_changed
+    }
+
+    fn process_inserts(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
             return false;

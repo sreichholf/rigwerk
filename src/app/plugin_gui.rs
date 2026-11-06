@@ -247,8 +247,10 @@ impl ClapGuiWindow {
         }
         // Timers and `on_main_thread` (where most editors repaint) run
         // without the instance lock, so the audio callback keeps processing
-        // this insert while the editor is busy.
-        crate::audio::service_clap(&self.host, &self.plugin);
+        // this insert while the editor is busy.  A latency change it picks
+        // up stays flagged on the host, so the path's `service_plugins`
+        // still republishes the insert views; the result is not needed here.
+        let _ = crate::audio::service_clap(&self.host, &self.plugin);
         if self.host.take_gui_closed() {
             return true;
         }

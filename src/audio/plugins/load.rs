@@ -1,11 +1,14 @@
 //! Plugin handles, loading, state capture, and host parameter helpers.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::time::Instant;
 
 use vst3_host::{Plugin, Vst3Host};
 
 use super::super::clap::{ClapPlugin, HostState, StateSave};
+use super::clamp_latency;
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginPref, PluginState};
 
 /// A loaded plugin is shared between the audio callback (which processes it)
@@ -62,16 +65,130 @@ pub(crate) fn read_plugin_parameters(handle: &PluginHandle) -> Option<Vec<Plugin
 }
 
 /// Runs one CLAP plugin's main-thread work.  Callbacks and timers run without
-/// any lock; only a pending flush or rescan takes the instance lock, and only
-/// when the audio callback is not holding it.
-pub(crate) fn service_clap(host: &HostState, plugin: &Mutex<ClapPlugin>) {
+/// any lock; only a pending flush, rescan, restart or latency re-read takes
+/// the instance lock, and only when the audio callback is not holding it.
+///
+/// Returns whether the plugin's latency changed, so the caller can
+/// republish the insert views (see [`super::PluginView::latency`]).
+pub(crate) fn service_clap(host: &HostState, plugin: &Mutex<ClapPlugin>) -> bool {
+    let before = host.latency();
     if !host.service_main_thread() {
-        return;
+        return false;
     }
     match plugin.try_lock() {
         Ok(mut plugin) => plugin.service_pending(),
         Err(TryLockError::Poisoned(poison)) => poison.into_inner().service_pending(),
         Err(TryLockError::WouldBlock) => {}
+    }
+    host.latency() != before
+}
+
+/// How often [`Vst3Service::service`] looks for `restartComponent` requests
+/// while it has a reason to.  VST3 offers no lock-free way to peek at them,
+/// and every look try-locks the instance the audio callback also try-locks
+/// (a collision makes the callback skip the insert for a block).
+const VST3_POLL_MS: u64 = 250;
+
+/// How long after a parameter edit, editor sync or load the service keeps
+/// looking.  A plugin raises `kLatencyChanged` in response to such an edit
+/// (a mode switch, an oversampling toggle, a preset); with no edit there is
+/// nothing to look for.  An open editor syncs every 250 ms, so it keeps the
+/// window open for as long as it is shown.
+const VST3_POLL_WINDOW_MS: u64 = 2_000;
+
+/// Milliseconds since the first call, for the poll window atomics.
+fn now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// A VST3 insert's main-thread work: `restartComponent` requests, and the
+/// latency read after each activation.  Kept on the slot (like a CLAP
+/// plugin's [`HostState`]) so the poll window survives a republish.
+pub(crate) struct Vst3Service {
+    pub(crate) plugin: Arc<Mutex<Plugin>>,
+    /// `IAudioProcessor::getLatencySamples`, as last read.  Lock-free, so
+    /// the audio thread may read it.
+    latency: AtomicU32,
+    /// Until when (see [`now_ms`]) the service looks for requests.
+    poll_until: AtomicU64,
+    /// When it may look next.
+    next_poll: AtomicU64,
+    /// Whether a failed `service_host_requests` was logged already.
+    error_logged: AtomicBool,
+}
+
+impl Vst3Service {
+    /// Reads the latency of a freshly loaded (set up and activated) plugin.
+    pub(crate) fn new(plugin: Arc<Mutex<Plugin>>) -> Self {
+        let latency = plugin
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .latency_samples();
+        let service = Self {
+            plugin,
+            latency: AtomicU32::new(clamp_latency(latency)),
+            poll_until: AtomicU64::new(0),
+            next_poll: AtomicU64::new(0),
+            error_logged: AtomicBool::new(false),
+        };
+        // Some plugins settle their latency right after loading.
+        service.nudge();
+        service
+    }
+
+    pub(crate) fn latency(&self) -> u32 {
+        self.latency.load(Ordering::Acquire)
+    }
+
+    /// Opens the poll window: something just changed the plugin (a control,
+    /// a reset, an editor sync, a load), so it may raise a restart request.
+    pub(crate) fn nudge(&self) {
+        self.poll_until
+            .store(now_ms() + VST3_POLL_WINDOW_MS, Ordering::Relaxed);
+    }
+
+    /// Applies the plugin's `restartComponent` requests and re-reads its
+    /// latency, but only inside the poll window (see [`Self::nudge`]) and at
+    /// most every [`VST3_POLL_MS`]; otherwise it does nothing.  Call it on
+    /// the UI thread, which loaded the plugin and is its VST3 control
+    /// thread.  For `kLatencyChanged` (and `kIoChanged`)
+    /// `service_host_requests` stops processing, deactivates, re-reads
+    /// `getLatencySamples` and reactivates, as VST3 requires.  The instance
+    /// is only try-locked, so a busy audio callback or editor just moves the
+    /// work to a later poll.
+    ///
+    /// Returns whether the latency changed, so the caller can republish the
+    /// insert views.
+    pub(crate) fn service(&self) -> bool {
+        let now = now_ms();
+        if now > self.poll_until.load(Ordering::Relaxed)
+            || now < self.next_poll.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        self.next_poll.store(now + VST3_POLL_MS, Ordering::Relaxed);
+        let mut plugin = match self.plugin.try_lock() {
+            Ok(plugin) => plugin,
+            Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        match plugin.service_host_requests() {
+            Ok(flags) if flags.reload_component() => {
+                eprintln!("[plugins] a VST3 plugin asked to be reloaded; remove and add it again");
+            }
+            Ok(_) => {}
+            // The latency may still have changed (the request can fail
+            // halfway through the restart), so it is read either way.
+            Err(error) => {
+                if !self.error_logged.swap(true, Ordering::Relaxed) {
+                    eprintln!("[plugins] a VST3 restart request failed: {error}");
+                }
+            }
+        }
+        let latency = clamp_latency(plugin.latency_samples());
+        drop(plugin);
+        self.latency.swap(latency, Ordering::AcqRel) != latency
     }
 }
 

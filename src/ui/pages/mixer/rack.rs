@@ -745,9 +745,14 @@ fn insert_row(
                 .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));
                 ui.add(
                     egui::Label::new(
-                        RichText::new(format!("mix {}%", (view.mix * 100.0).round() as i32))
-                            .font(mix_font.clone())
-                            .color(DIM),
+                        RichText::new(match view.latency_label() {
+                            Some(latency) => {
+                                format!("mix {}% {latency}", (view.mix * 100.0).round() as i32)
+                            }
+                            None => format!("mix {}%", (view.mix * 100.0).round() as i32),
+                        })
+                        .font(mix_font.clone())
+                        .color(DIM),
                     )
                     .truncate(),
                 );
