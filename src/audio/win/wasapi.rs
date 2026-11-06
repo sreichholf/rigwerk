@@ -407,9 +407,10 @@ unsafe fn run(
     let mmcss = AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index).ok();
 
     let channels = session.info.channels;
-    let mut mixer = OutputMixer::new(session.info.rate);
+    let mut mixer = OutputMixer::new(session.info.rate, channels);
     // Design the filter before the loop starts, not during an audio step.
     mixer.follow_source_rate(&shared);
+    mixer.publish_device_channels(&shared);
     mixer.prepare(session.buffer_frames.max(1) as usize);
     // Keep exactly one step queued.  The host hands us a much larger buffer
     // (about two steps), but filling it would add its whole size to the
@@ -454,8 +455,11 @@ unsafe fn run(
         };
         let samples =
             std::slice::from_raw_parts_mut(data.cast::<f32>(), frames as usize * channels);
-        mixer.render(&shared, frames as usize, |index, out| {
-            write_frame(&mut samples[index * channels..(index + 1) * channels], out);
+        mixer.render(&shared, frames as usize, |index, mapped| {
+            write_frame(
+                &mut samples[index * channels..(index + 1) * channels],
+                mapped,
+            );
         });
         if let Err(error) = session.render.ReleaseBuffer(frames, 0) {
             report_failure(&shared, &error);

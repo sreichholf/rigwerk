@@ -1,6 +1,8 @@
 //! The public vocabulary of the audio side: devices, inventory, engine
 //! state, live snapshot, cushion mode and the bridge's start settings.
 
+use super::output_map::{MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS};
+
 pub const DEMO_ASIO_ID: &str = "demo:asio";
 pub const DEMO_INPUT_ID: &str = "demo:input";
 pub const DEMO_OUTPUT_ID: &str = "demo:output";
@@ -203,6 +205,19 @@ pub struct Snapshot {
     pub in_r: f32,
     pub out_l: f32,
     pub out_r: f32,
+    /// Block peak per clock-device channel, after its channel map and level.
+    /// Channels the device does not have read 0.
+    pub out_channels: [f32; MAX_OUTPUT_CHANNELS],
+    /// The clock device's real channel count (0 until its first block).
+    pub output_channels: u32,
+    /// How many followers the engine currently maps (≤ [`MAX_FOLLOWERS`]).
+    #[allow(dead_code)] // Exposed for Live / Mixer follower summaries.
+    pub follower_count: usize,
+    /// Block peak per follower channel, after that follower's map and level.
+    #[allow(dead_code)] // Wired for follower meters in the Mixer inspectors.
+    pub follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+    /// Each follower's real channel count (0 until published).
+    pub follower_channel_counts: [u32; MAX_FOLLOWERS],
     pub underruns: u64,
     /// Frames the input callback dropped because the ring was full.
     #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.

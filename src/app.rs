@@ -26,12 +26,12 @@ use crate::app::devices::{
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
     cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
-    preferences_backup_key, store_preferences, unique_presets, Preferences, Preset,
+    preferences_backup_key, store_preferences, unique_presets, FollowerPref, Preferences, Preset,
     PREFERENCES_KEY, PREFERENCES_SCHEMA,
 };
 use crate::audio::{
     self, AudioEngine, CushionMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
-    Snapshot,
+    OutputDeviceSettings, Snapshot, MAX_OUTPUT_CHANNELS,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -68,6 +68,13 @@ pub(crate) fn initial_page() -> Page {
         "diagnostics" => Page::Diagnostics,
         _ => Page::Live,
     }
+}
+
+/// Test hook for screenshots of a Mixer stage: `RIGWERK_MIXER_STAGE=output`
+/// (or `device` for the clock device). Normal launches open the last EQ.
+fn initial_mixer_stage() -> Option<crate::ui::pages::mixer::chain::ChainSelection> {
+    let key = std::env::var("RIGWERK_MIXER_STAGE").ok()?;
+    crate::ui::pages::mixer::chain::ChainSelection::from_key(&key.to_lowercase())
 }
 
 /// The page to open on launch: the one left open last time, unless a
@@ -151,10 +158,18 @@ pub struct RigWerkApp {
     pub(crate) eqs: [EqSettings; 2],
     /// Built-in noise gate (PRE or POST inserts; default POST).
     pub(crate) gate: GateSettings,
+    /// Level, mute and channel map of the clock device (the selected output),
+    /// pushed to the engine every frame.
+    pub(crate) clock_device: OutputDeviceSettings,
+    /// Extra output devices. Stored only; nothing plays them yet.
+    pub(crate) followers: Vec<FollowerPref>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
     /// Selected stage in the Mixer rack / Live chain strip.
     pub(crate) chain_selected: crate::ui::pages::mixer::chain::ChainSelection,
+    /// Output device shown on Signal Routing (not persisted; apart from the
+    /// Mixer's selection).
+    pub(crate) routing_device: usize,
     /// Where the next Plugins-page add should land (`None` = append).
     pub(crate) plugin_insert_at: Option<usize>,
     pub(crate) meter_in_l: f32,
@@ -165,6 +180,10 @@ pub struct RigWerkApp {
     pub(crate) peak_in_r: f32,
     pub(crate) peak_out_l: f32,
     pub(crate) peak_out_r: f32,
+    /// Smoothed meter and peak per clock-device channel, from
+    /// [`Snapshot::out_channels`].
+    pub(crate) meter_out_channels: [f32; MAX_OUTPUT_CHANNELS],
+    pub(crate) peak_out_channels: [f32; MAX_OUTPUT_CHANNELS],
     /// Decimated capture/playback waveform for the Live scope.
     pub(crate) scope_in: Vec<f32>,
     pub(crate) scope_out: Vec<f32>,
@@ -494,6 +513,8 @@ impl eframe::App for RigWerkApp {
             gate: self.gate,
             plugins: self.engine.plugin_prefs(),
             prefer_plugin_interface: self.prefer_plugin_interface,
+            clock_device: self.clock_device,
+            followers: self.followers.clone(),
         };
         store_preferences(storage, &preferences, &mut self.preferences_backup);
     }
@@ -572,6 +593,17 @@ impl RigWerkApp {
             cushion_ms: preferences.cushion_ms,
             eqs: [preferences.eq.sanitized(), preferences.eq_post.sanitized()],
             gate: preferences.gate.sanitized(),
+            clock_device: preferences.clock_device.sanitized(),
+            followers: {
+                let mut followers: Vec<_> = preferences
+                    .followers
+                    .iter()
+                    .cloned()
+                    .map(FollowerPref::sanitized)
+                    .collect();
+                followers.truncate(crate::audio::MAX_FOLLOWERS);
+                followers
+            },
             eq_edit: if preferences.eq_edit == 1 {
                 EqSlot::Post
             } else {
@@ -584,6 +616,7 @@ impl RigWerkApp {
                     EqSlot::Pre
                 },
             ),
+            routing_device: 0,
             plugin_insert_at: None,
             routes: preferences.routes,
             meter_in_l: 0.0,
@@ -594,6 +627,8 @@ impl RigWerkApp {
             peak_in_r: 0.0,
             peak_out_l: 0.0,
             peak_out_r: 0.0,
+            meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
+            peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
             scope_in: vec![0.0; audio::SCOPE_LEN],
             scope_out: vec![0.0; audio::SCOPE_LEN],
             snapshot: Snapshot::default(),
@@ -645,6 +680,9 @@ impl RigWerkApp {
                 preferences: preferences.clone(),
             }),
         };
+        if let Some(stage) = initial_mixer_stage() {
+            app.select_chain(stage);
+        }
         app.engine.set_gains(app.input_gain, app.output_gain);
         app.engine.set_mix(
             app.mute,
@@ -654,6 +692,7 @@ impl RigWerkApp {
             app.output_channels,
             app.drift,
         );
+        app.engine.set_clock_device(&app.clock_device);
         app.engine.set_cushion(app.cushion_mode, app.cushion_ms);
         for slot in EqSlot::ALL {
             app.engine.set_eq(slot, app.eqs[slot.index()]);
@@ -902,8 +941,11 @@ pub(crate) fn blank_app() -> RigWerkApp {
         cushion_ms: 10.0,
         eqs: [EqSettings::default(), EqSettings::default()],
         gate: GateSettings::default(),
+        clock_device: OutputDeviceSettings::default(),
+        followers: Vec::new(),
         eq_edit: EqSlot::Pre,
         chain_selected: crate::ui::pages::mixer::chain::ChainSelection::PreEq,
+        routing_device: 0,
         plugin_insert_at: None,
         meter_in_l: 0.0,
         meter_in_r: 0.0,
@@ -913,6 +955,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         peak_in_r: 0.0,
         peak_out_l: 0.0,
         peak_out_r: 0.0,
+        meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
+        peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
         scope_in: vec![0.0; audio::SCOPE_LEN],
         scope_out: vec![0.0; audio::SCOPE_LEN],
         snapshot: Snapshot::default(),
@@ -967,9 +1011,12 @@ mod tests {
 
     use eframe::App;
 
+    use super::settings::FollowerPref;
     use super::settings::{load_preferences, Preferences, Preset, PREFERENCES_KEY};
     use super::{blank_app, repaint_interval, restore_saved_devices, ACTIVE_REPAINT, IDLE_REPAINT};
-    use crate::audio::{self, DeviceItem, EngineState, Inventory};
+    use crate::audio::{
+        self, ChannelMap, DeviceItem, EngineState, Inventory, OutputDeviceSettings, UnusedChannels,
+    };
 
     #[derive(Default)]
     struct MemoryStorage(HashMap<String, String>);
@@ -1086,6 +1133,30 @@ mod tests {
             "{:?}",
             app.log.iter().map(|entry| &entry.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn save_writes_the_output_devices() {
+        let mut app = blank_app();
+        app.clock_device = OutputDeviceSettings {
+            level_db: -9.0,
+            mute: true,
+            map: ChannelMap {
+                left: 0b0101,
+                right: 0b0110,
+            },
+            unused: UnusedChannels::Silent,
+        };
+        app.followers = vec![FollowerPref {
+            id: "hw:Phones".to_owned(),
+            backend: "ALSA".to_owned(),
+            name: "Phones".to_owned(),
+            cushion_mode: 1,
+            ..FollowerPref::default()
+        }];
+        let (_, saved) = save_text(&mut app);
+        assert_eq!(saved.clock_device, app.clock_device);
+        assert_eq!(saved.followers, app.followers);
     }
 
     #[test]

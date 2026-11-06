@@ -163,7 +163,11 @@ impl RigWerkApp {
         ui.add_space(9.0);
         ui.horizontal(|ui| {
             ui.label(mono(
-                format!("v0.2 · {}", self.inventory.os.to_lowercase()),
+                format!(
+                    "v{} · {}",
+                    env!("CARGO_PKG_VERSION"),
+                    self.inventory.os.to_lowercase()
+                ),
                 DIM,
                 9.0,
             ));
@@ -196,7 +200,7 @@ impl RigWerkApp {
             ),
             Page::Routing => (
                 "Signal Routing".to_owned(),
-                "Choose exactly where each input channel lands.".to_owned(),
+                "Choose exactly where each channel lands.".to_owned(),
             ),
             Page::Devices => (
                 "Devices".to_owned(),

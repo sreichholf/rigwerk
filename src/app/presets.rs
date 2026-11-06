@@ -41,6 +41,8 @@ impl RigWerkApp {
             cushion_mode: cushion_to_pref(self.cushion_mode),
             cushion_ms: self.cushion_ms,
             plugins: self.engine.plugin_prefs(),
+            clock_device: self.clock_device,
+            followers: self.followers.clone(),
         };
         if preset.name.is_empty() {
             self.push_log("Give the patch a name before saving.", AMBER);
@@ -120,6 +122,8 @@ impl RigWerkApp {
         if let Some(gate) = preset.gate {
             self.gate = gate.sanitized();
         }
+        self.clock_device = preset.clock_device;
+        self.followers = preset.followers.clone();
         self.engine.set_gains(self.input_gain, self.output_gain);
         self.engine.set_mix(
             self.mute,
@@ -130,6 +134,7 @@ impl RigWerkApp {
             self.drift,
         );
         self.engine.set_routes(self.routes);
+        self.engine.set_clock_device(&self.clock_device);
         self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
         for slot in EqSlot::ALL {
             self.engine.set_eq(slot, self.eqs[slot.index()]);
@@ -515,6 +520,60 @@ mod tests {
         app.apply_preset(0);
         assert_eq!(app.gate, gate);
         assert_eq!(app.engine.shared.try_gate(), Some(gate));
+    }
+
+    #[test]
+    fn presets_carry_the_output_devices() {
+        use crate::app::settings::FollowerPref;
+        use crate::audio::{ChannelMap, OutputDeviceSettings, UnusedChannels};
+
+        let mut app = test_app();
+        let clock = OutputDeviceSettings {
+            level_db: -4.5,
+            mute: true,
+            map: ChannelMap {
+                left: 0b0011,
+                right: 0b1100,
+            },
+            unused: UnusedChannels::Silent,
+        };
+        let followers = vec![
+            FollowerPref {
+                id: "hw:Phones".to_owned(),
+                backend: "ALSA".to_owned(),
+                name: "Phones".to_owned(),
+                cushion_mode: 2,
+                cushion_ms: 15.0,
+                ..FollowerPref::default()
+            },
+            FollowerPref {
+                id: "hw:Monitor".to_owned(),
+                name: "Monitor".to_owned(),
+                ..FollowerPref::default()
+            },
+        ];
+        app.session_name = "Two outs".to_owned();
+        app.clock_device = clock;
+        app.followers = followers.clone();
+
+        app.save_preset();
+        assert_eq!(app.sessions[0].clock_device, clock);
+        assert_eq!(app.sessions[0].followers, followers);
+
+        app.clock_device = OutputDeviceSettings::default();
+        app.followers.clear();
+        app.apply_preset(0);
+        assert_eq!(app.clock_device, clock);
+        assert_eq!(app.followers, followers);
+
+        // An older patch without them brings back today's output.
+        app.sessions.push(crate::app::settings::Preset {
+            name: "Old".to_owned(),
+            ..crate::app::settings::Preset::default()
+        });
+        app.apply_preset(1);
+        assert_eq!(app.clock_device, OutputDeviceSettings::default());
+        assert!(app.followers.is_empty());
     }
 
     #[test]

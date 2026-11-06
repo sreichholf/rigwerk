@@ -1,7 +1,7 @@
 //! The output card: device, REAL-style, output clock, level and meters.
 
 use eframe::egui;
-use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke};
+use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
 use crate::app::devices::is_wrapper_driver;
 use crate::app::settings::{rate_label, BUFFERS, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB, RATES};
@@ -16,8 +16,36 @@ use crate::ui::widgets::{
     channel_chip, db_slider, device_selector, ellipsize, meter_row, micro_label, mono, source_tab,
 };
 
+/// Height reserved at the bottom of the Live Output card for Also playing on.
+/// One compact row: label, follower chips, + add — so 3–6 devices fit without
+/// a second line. Tall enough for the chip/+ add button baselines.
+fn also_playing_strip_height() -> f32 {
+    // hairline + gap + button row (egui text buttons need ~30 px) + bottom pad
+    1.0 + 6.0 + 30.0 + 4.0
+}
+
 impl RigWerkApp {
     pub(crate) fn output_card(&mut self, ui: &mut egui::Ui) {
+        // Pin the Also playing on row to the bottom so a long body cannot
+        // clip the follower chips.
+        let strip_h = also_playing_strip_height();
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), strip_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_min_width(ui.available_width());
+                    self.also_playing_on(ui);
+                },
+            );
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.set_min_width(ui.available_width());
+                self.output_card_body(ui);
+            });
+        });
+    }
+
+    fn output_card_body(&mut self, ui: &mut egui::Ui) {
         let low_label = self.inventory.low_latency_label.clone();
         let quantum_problem = self.quantum_problem();
         // Keep the tab on the selected output's side, unless the person has
@@ -291,6 +319,82 @@ impl RigWerkApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(micro_label(&backend_label, BLUE))
                     .on_hover_text(self.output_mode_text());
+            });
+        });
+    }
+
+    /// One row under the Output card: label, follower chips, then + add.
+    pub(crate) fn also_playing_on(&mut self, ui: &mut egui::Ui) {
+        use crate::app::Page;
+        use crate::ui::pages::mixer::chain::ChainSelection;
+        use crate::ui::widgets::horizontal_line;
+
+        let rows = self.output_device_rows();
+        let followers: Vec<_> = rows.into_iter().filter(|row| !row.clock).collect();
+        horizontal_line(ui, BORDER_SOFT);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+            ui.label(micro_label("ALSO PLAYING ON", MUTED));
+            // Chips sit in the middle; + add stays on the right.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let add = ui.add_enabled(
+                    self.add_output_disabled_reason().is_none(),
+                    egui::Button::new(RichText::new("+ add").size(ts(9.5)).color(BLUE))
+                        .fill(with_alpha(BLUE, 14))
+                        .stroke(Stroke::new(1.0, with_alpha(BLUE, 45)))
+                        .corner_radius(CornerRadius::same(6))
+                        .min_size(Vec2::new(0.0, 24.0)),
+                );
+                if let Some(reason) = self.add_output_disabled_reason() {
+                    add.on_disabled_hover_text(reason);
+                } else if add.clicked() {
+                    self.chain_selected = ChainSelection::AddOutput;
+                    self.page = Page::Mixer;
+                }
+                ui.add_space(2.0);
+                // Remaining width, left-to-right so names read naturally.
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                    if followers.is_empty() {
+                        ui.label(RichText::new("clock only").size(ts(9.5)).color(MUTED));
+                        return;
+                    }
+                    // Short chips so about six still fit beside + add.
+                    let name_chars = match followers.len() {
+                        1 => 18,
+                        2 => 14,
+                        3 => 11,
+                        _ => 9,
+                    };
+                    for (offset, row) in followers.iter().enumerate() {
+                        let index = offset + 1; // clock is 0
+                        let tip = if row.virtual_out {
+                            format!("{} · virtual · open in Mixer", row.name)
+                        } else if row.missing {
+                            format!("{} · missing · open in Mixer", row.name)
+                        } else {
+                            format!("{} · open in Mixer", row.name)
+                        };
+                        let response = ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(ellipsize(&row.name, name_chars))
+                                        .size(ts(9.5))
+                                        .color(TEXT),
+                                )
+                                .fill(with_alpha(TEXT, 4))
+                                .stroke(Stroke::new(1.0, BORDER_SOFT))
+                                .corner_radius(CornerRadius::same(6))
+                                .min_size(Vec2::new(0.0, 24.0)),
+                            )
+                            .on_hover_text(tip);
+                        if response.clicked() {
+                            self.chain_selected = ChainSelection::OutputDevice(index);
+                            self.page = Page::Mixer;
+                        }
+                    }
+                });
             });
         });
     }

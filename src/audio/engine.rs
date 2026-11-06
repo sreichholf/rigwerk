@@ -13,7 +13,9 @@ use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 #[cfg(target_os = "linux")]
 use super::linux::pipewire;
+use super::output_map::OutputDeviceSettings;
 use super::plugins::{PluginPref, PluginView};
+use super::shared::FollowerPlan;
 use super::shared::Shared;
 use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
 
@@ -187,6 +189,19 @@ impl AudioEngine {
 
     pub fn set_routes(&self, routes: [[bool; 4]; 2]) {
         self.shared.set_routes(routes);
+    }
+
+    /// Sets the clock device's channel map, level and mute (sanitized here).
+    /// Takes effect immediately with a short crossfade, also while the
+    /// bridge runs.
+    pub fn set_clock_device(&self, settings: &OutputDeviceSettings) {
+        self.shared.clock_device.set(settings);
+    }
+
+    /// Sets follower levels, mutes, maps and the PipeWire link plan.  Live:
+    /// not part of the bridge signature.
+    pub fn set_followers(&self, settings: &[OutputDeviceSettings], plan: &FollowerPlan) {
+        self.shared.set_followers(settings, plan);
     }
 
     /// Advances the session's observed state.  This is where a stuck start, a

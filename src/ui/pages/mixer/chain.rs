@@ -15,7 +15,12 @@ pub(crate) enum ChainSelection {
     Plugin(usize),
     Gate,
     PostEq,
+    /// The master stage: master level and mute, and the device list.
     Output,
+    /// One output device under the master; 0 is the clock device.
+    OutputDevice(usize),
+    /// The add-output-device list under the Output stage.
+    AddOutput,
 }
 
 impl ChainSelection {
@@ -41,6 +46,29 @@ impl ChainSelection {
             Self::Plugin(index) if index >= plugin_count => Self::Plugin(plugin_count - 1),
             other => other,
         }
+    }
+
+    /// Keep an output device index inside the device list.
+    pub(crate) fn clamp_output(self, device_count: usize) -> Self {
+        match self {
+            Self::OutputDevice(index) if index >= device_count => Self::Output,
+            Self::AddOutput if device_count == 0 => Self::Output,
+            other => other,
+        }
+    }
+
+    /// The stage a `RIGWERK_MIXER_STAGE` key names (screenshots and checks).
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "input" => Self::Input,
+            "pre_eq" => Self::PreEq,
+            "plugins" => Self::Plugins,
+            "gate" => Self::Gate,
+            "post_eq" => Self::PostEq,
+            "output" => Self::Output,
+            "device" => Self::OutputDevice(0),
+            _ => return None,
+        })
     }
 
     /// The selection after the insert at `removed` left the chain, with
@@ -103,6 +131,20 @@ pub(crate) fn gate_summary(gate: &GateSettings) -> (String, bool) {
     } else {
         (format!("on · {slot}"), true)
     }
+}
+
+/// The Output (master) row's summary: master level, or muted, and how many
+/// output devices play the mix.
+pub(crate) fn output_summary(output_gain: f32, mute: bool, devices: usize) -> String {
+    let level = if mute {
+        "muted".to_owned()
+    } else {
+        format!("{output_gain:+.1} dB")
+    };
+    format!(
+        "{level} · {devices} device{}",
+        if devices == 1 { "" } else { "s" }
+    )
 }
 
 pub(crate) fn plugin_group_summary(views: &[PluginView]) -> (String, bool) {
@@ -200,7 +242,9 @@ pub(crate) fn live_chain_entries(
 pub(crate) fn stage_color(selection: ChainSelection) -> Color32 {
     match selection {
         ChainSelection::Input => TEAL,
-        ChainSelection::Output => BLUE,
+        ChainSelection::Output | ChainSelection::OutputDevice(_) | ChainSelection::AddOutput => {
+            BLUE
+        }
         ChainSelection::PreEq
         | ChainSelection::PostEq
         | ChainSelection::Gate
@@ -219,7 +263,7 @@ pub(crate) fn bypassed_color(live: bool, accent: Color32) -> Color32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{live_chain_entries, ChainSelection};
+    use super::{live_chain_entries, output_summary, ChainSelection};
     use crate::audio::{EqSettings, EqSlot, GateSettings, GateSlot};
 
     #[test]
@@ -277,6 +321,51 @@ mod tests {
             ChainSelection::Plugins.after_removal(0, 1),
             ChainSelection::Plugins
         );
+    }
+
+    #[test]
+    fn output_device_selection_falls_back_to_the_master() {
+        assert_eq!(
+            ChainSelection::OutputDevice(0).clamp_output(1),
+            ChainSelection::OutputDevice(0)
+        );
+        assert_eq!(
+            ChainSelection::OutputDevice(1).clamp_output(1),
+            ChainSelection::Output
+        );
+        assert_eq!(ChainSelection::Gate.clamp_output(0), ChainSelection::Gate);
+        // The insert clamp leaves output devices alone.
+        assert_eq!(
+            ChainSelection::OutputDevice(0).clamp(0),
+            ChainSelection::OutputDevice(0)
+        );
+        assert_eq!(ChainSelection::OutputDevice(0).plugin_insert_at(2), None);
+        assert_eq!(ChainSelection::OutputDevice(0).eq_slot(), None);
+    }
+
+    #[test]
+    fn stage_keys_name_the_mixer_stages() {
+        assert_eq!(
+            ChainSelection::from_key("output"),
+            Some(ChainSelection::Output)
+        );
+        assert_eq!(
+            ChainSelection::from_key("device"),
+            Some(ChainSelection::OutputDevice(0))
+        );
+        assert_eq!(
+            ChainSelection::from_key("post_eq"),
+            Some(ChainSelection::PostEq)
+        );
+        assert_eq!(ChainSelection::from_key("clock"), None);
+        assert_eq!(ChainSelection::from_key("nope"), None);
+    }
+
+    #[test]
+    fn output_summary_shows_master_level_and_device_count() {
+        assert_eq!(output_summary(-1.5, false, 1), "-1.5 dB · 1 device");
+        assert_eq!(output_summary(0.0, false, 3), "+0.0 dB · 3 devices");
+        assert_eq!(output_summary(-1.5, true, 1), "muted · 1 device");
     }
 
     #[test]

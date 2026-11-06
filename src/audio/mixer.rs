@@ -8,6 +8,7 @@ use std::time::Instant;
 use super::denormal::DenormalGuard;
 use super::eq::{EqSlot, Equalizer};
 use super::gate::{GateSlot, NoiseGate};
+use super::output_map::{DeviceFrame, DeviceMapper, MAX_FOLLOWERS};
 use super::resampler::FrameResampler;
 use super::shared::Shared;
 
@@ -45,14 +46,14 @@ const CONTROL_RAMP_SECONDS: f32 = 0.006;
 /// The remaining step is kept between callbacks, so a ramp that spans several
 /// blocks keeps its slope instead of restarting at every block boundary.
 #[derive(Clone, Copy)]
-struct Ramp {
+pub(super) struct Ramp {
     current: f32,
     target: f32,
     step: f32,
 }
 
 impl Ramp {
-    fn new(value: f32) -> Self {
+    pub(super) fn new(value: f32) -> Self {
         Self {
             current: value,
             target: value,
@@ -61,7 +62,7 @@ impl Ramp {
     }
 
     /// Adopts a value without moving: used for the first block of a mixer.
-    fn snap(&mut self, target: f32) {
+    pub(super) fn snap(&mut self, target: f32) {
         self.current = target;
         self.target = target;
         self.step = 0.0;
@@ -69,7 +70,7 @@ impl Ramp {
 
     /// Points the ramp at `target`; the move takes `samples` samples.  A
     /// target that did not change leaves a ramp that is still moving alone.
-    fn set_target(&mut self, target: f32, samples: f32) {
+    pub(super) fn set_target(&mut self, target: f32, samples: f32) {
         if target == self.target {
             return;
         }
@@ -92,7 +93,7 @@ impl Ramp {
     /// Moves one sample and returns the value to apply.  Once the target is
     /// reached it returns exactly the target for the rest of the block, so a
     /// settled ramp adds no noise to the audio.
-    fn next(&mut self) -> f32 {
+    pub(super) fn next(&mut self) -> f32 {
         if self.current != self.target {
             let next = self.current + self.step;
             if (self.step > 0.0 && next >= self.target) || (self.step < 0.0 && next <= self.target)
@@ -206,9 +207,10 @@ pub(crate) fn take_ring_frame(shared: &Shared, missed: &mut bool, last: (f32, f3
     }
 }
 
-/// Turns the ring into output frames for any playback path (cpal, ASIO or
-/// REAL-style WASAPI): routing, gain, drift trimming, underrun recovery and
-/// conversion from whatever rate the input really runs at.
+/// Turns the ring into output frames for any playback path (cpal, ASIO,
+/// REAL-style WASAPI or PipeWire): routing, gain, drift trimming, underrun
+/// recovery, conversion from whatever rate the input really runs at, and
+/// last the output device's channel map, level and mute.
 pub(crate) struct OutputMixer {
     output_rate: u32,
     source_rate: u32,
@@ -266,10 +268,16 @@ pub(crate) struct OutputMixer {
     /// The first block adopts the live settings directly.  Later blocks ramp
     /// toward them, so opening the bridge does not fade in from the defaults.
     controls_adopted: bool,
+    /// The clock device's channel map, level and mute, after the master.
+    device: DeviceMapper,
+    /// Follower devices (stereo port pairs on PipeWire).  Only the first
+    /// `shared.follower_count()` slots are written each block.
+    followers: [DeviceMapper; MAX_FOLLOWERS],
 }
 
 impl OutputMixer {
-    pub(crate) fn new(output_rate: u32) -> Self {
+    /// A mixer for an output device with `device_channels` channels.
+    pub(crate) fn new(output_rate: u32, device_channels: usize) -> Self {
         let output_rate = output_rate.max(1);
         Self {
             output_rate,
@@ -297,6 +305,24 @@ impl OutputMixer {
             gate_version: 0,
             ramps: MixRamps::new(),
             controls_adopted: false,
+            device: DeviceMapper::new(device_channels),
+            // PipeWire followers are always a stereo port pair for now.
+            followers: std::array::from_fn(|_| DeviceMapper::new(2)),
+        }
+    }
+
+    /// Publishes the output device's channel count.  Call when the stream
+    /// opens, outside the callback, so the snapshot has it at once.
+    pub(crate) fn publish_device_channels(&self, shared: &Shared) {
+        self.device.publish_channels(&shared.clock_device);
+    }
+
+    /// Publishes each live follower's channel count (stereo today).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn publish_follower_channels(&self, shared: &Shared) {
+        let count = shared.follower_count();
+        for index in 0..count {
+            self.followers[index].publish_channels(&shared.followers[index]);
         }
     }
 
@@ -334,6 +360,11 @@ impl OutputMixer {
         let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
         let gain = if silent { 0.0 } else { shared.output_gain() };
         let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
+        self.device.begin_block(&shared.clock_device, samples);
+        let followers = shared.follower_count();
+        for index in 0..followers {
+            self.followers[index].begin_block(&shared.followers[index], samples);
+        }
         if self.controls_adopted {
             self.ramps
                 .set_targets(&routes, enabled, mono, gain, samples);
@@ -462,13 +493,14 @@ impl OutputMixer {
 
     /// The rest of the chain for a block that `stage_front` filled: plugin
     /// inserts, POST gate, post EQ, the output level, meters and scope.  Each
-    /// finished frame goes to `write`, and the frame counter advances.
+    /// finished frame goes to `write` with the device mapper, and the frame
+    /// counter advances.
     fn finish_block(
         &mut self,
         shared: &Shared,
         frames: usize,
         plan: &BlockPlan,
-        mut write: impl FnMut(usize, [f32; 4]),
+        mut write: impl FnMut(&mut DeviceMapper, usize, [f32; 4]),
     ) {
         if shared.has_plugins() {
             let mut left = std::mem::take(&mut self.plugin_l);
@@ -515,12 +547,108 @@ impl OutputMixer {
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
-            write(index, out);
+            write(&mut self.device, index, out);
         }
 
         shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
         shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
         shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
+        self.device.end_block(&shared.clock_device);
+        let followers = shared.follower_count();
+        for index in 0..followers {
+            self.followers[index].end_block(&shared.followers[index]);
+        }
+    }
+
+    /// Like [`Self::render_direct`], but each finished frame is handed over
+    /// once per live device: index 0 is the clock device, then each follower.
+    /// Used by the PipeWire duplex/native multi-sink path.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn render_direct_devices(
+        &mut self,
+        shared: &Shared,
+        input_left: &[f32],
+        input_right: &[f32],
+        mut write: impl FnMut(usize, usize, &DeviceFrame),
+    ) {
+        let _denormals = DenormalGuard::new();
+        let frames = input_left.len().min(input_right.len());
+        let plan = self.begin_block(shared);
+        if self.block.len() < frames {
+            self.block.resize(frames, [0.0; 4]);
+        }
+        for index in 0..frames {
+            self.stage_front(index, input_left[index], input_right[index], &plan);
+        }
+        self.finish_block_devices(shared, frames, &plan, &mut write);
+        self.drift_ppm = 0.0;
+        shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Finishes a block and writes the clock device plus every live follower.
+    fn finish_block_devices(
+        &mut self,
+        shared: &Shared,
+        frames: usize,
+        plan: &BlockPlan,
+        write: &mut impl FnMut(usize, usize, &DeviceFrame),
+    ) {
+        if shared.has_plugins() {
+            let mut left = std::mem::take(&mut self.plugin_l);
+            let mut right = std::mem::take(&mut self.plugin_r);
+            if left.len() < frames {
+                left.resize(frames, 0.0);
+                right.resize(frames, 0.0);
+            }
+            for index in 0..frames {
+                left[index] = self.block[index][0];
+                right[index] = self.block[index][1];
+            }
+            shared.process_plugins(&mut left, &mut right, frames);
+            for index in 0..frames {
+                self.block[index][0] = left[index];
+                self.block[index][1] = right[index];
+            }
+            self.plugin_l = left;
+            self.plugin_r = right;
+        }
+
+        let _post_denormals = DenormalGuard::new();
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        let followers = shared.follower_count();
+        for index in 0..frames {
+            let mut out = self.block[index];
+            if plan.gate_post {
+                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+            }
+            if plan.post_eq {
+                (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
+            }
+            let gain = self.ramps.next_output_gain();
+            for value in out.iter_mut() {
+                *value *= gain;
+            }
+            peak_l = peak_l.max(out[0].abs());
+            peak_r = peak_r.max(out[1].abs());
+            shared.push_scope_out(out[0], out[1]);
+            write(0, index, self.device.map(out[0], out[1]));
+            for follower in 0..followers {
+                write(
+                    follower + 1,
+                    index,
+                    self.followers[follower].map(out[0], out[1]),
+                );
+            }
+        }
+
+        shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
+        shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
+        shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
+        self.device.end_block(&shared.clock_device);
+        for index in 0..followers {
+            self.followers[index].end_block(&shared.followers[index]);
+        }
     }
 
     /// Follows the graph rate on the direct path, where input and output run
@@ -545,13 +673,42 @@ impl OutputMixer {
     /// same graph cycle: no ring, no cushion, no priming, no drift steering
     /// and no rate conversion, because both sides share one clock and rate.
     /// Everything after the ring read is the same chain as [`Self::render`].
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// Each frame reaches `write` mapped onto the device's channels.
+    #[allow(dead_code)] // Single-device direct path; duplex fans out via devices.
     pub(crate) fn render_direct(
         &mut self,
         shared: &Shared,
         input_left: &[f32],
         input_right: &[f32],
-        write: impl FnMut(usize, [f32; 4]),
+        mut write: impl FnMut(usize, &DeviceFrame),
+    ) {
+        self.render_direct_with(shared, input_left, input_right, |device, index, out| {
+            write(index, device.map(out[0], out[1]))
+        });
+    }
+
+    /// [`Self::render_direct`] handing over the four mixer taps instead of
+    /// the device frame.
+    #[cfg(test)]
+    fn render_direct_taps(
+        &mut self,
+        shared: &Shared,
+        input_left: &[f32],
+        input_right: &[f32],
+        mut write: impl FnMut(usize, [f32; 4]),
+    ) {
+        self.render_direct_with(shared, input_left, input_right, |_, index, out| {
+            write(index, out)
+        });
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn render_direct_with(
+        &mut self,
+        shared: &Shared,
+        input_left: &[f32],
+        input_right: &[f32],
+        write: impl FnMut(&mut DeviceMapper, usize, [f32; 4]),
     ) {
         // The same flush-to-zero mode as `render`, for the EQ, gate and
         // inserts of this block.
@@ -570,13 +727,37 @@ impl OutputMixer {
         shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
     }
 
-    /// Renders `frames` output frames, handing each one to `write` as four
-    /// tap values.
+    /// Renders `frames` output frames, handing each one to `write` mapped
+    /// onto the device's channels.  The backend only copies the frame into
+    /// its own buffer layout and sample format.
     pub(crate) fn render(
         &mut self,
         shared: &Shared,
         frames: usize,
-        write: impl FnMut(usize, [f32; 4]),
+        mut write: impl FnMut(usize, &DeviceFrame),
+    ) {
+        self.render_with(shared, frames, |device, index, out| {
+            write(index, device.map(out[0], out[1]))
+        });
+    }
+
+    /// [`Self::render`] handing over the four mixer taps (only 0/1 carry the
+    /// processed mix) instead of the device frame.
+    #[cfg(test)]
+    fn render_taps(
+        &mut self,
+        shared: &Shared,
+        frames: usize,
+        mut write: impl FnMut(usize, [f32; 4]),
+    ) {
+        self.render_with(shared, frames, |_, index, out| write(index, out));
+    }
+
+    fn render_with(
+        &mut self,
+        shared: &Shared,
+        frames: usize,
+        write: impl FnMut(&mut DeviceMapper, usize, [f32; 4]),
     ) {
         // Decaying EQ and gate states must not drop into the slow subnormal
         // range; the inserts run inside this block and get the same mode.
@@ -765,6 +946,10 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::super::eq::{EqSettings, EqSlot};
+    use super::super::output::write_frame;
+    use super::super::output_map::{
+        old_write_frame, ChannelMap, OutputDeviceSettings, UnusedChannels,
+    };
     use super::super::shared::Shared;
     use super::super::types::CushionMode;
     use super::{route_frame, OutputMixer, Ramp, CONTROL_RAMP_SECONDS};
@@ -846,12 +1031,12 @@ mod tests {
         for _ in 0..5_000 {
             shared.push_frame(signal.0, signal.1);
         }
-        (OutputMixer::new(48_000), shared)
+        (OutputMixer::new(48_000, 2), shared)
     }
 
     fn render(mixer: &mut OutputMixer, shared: &Shared, frames: usize) -> Vec<[f32; 4]> {
         let mut out = vec![[0.0f32; 4]; frames];
-        mixer.render(shared, frames, |index, frame| out[index] = frame);
+        mixer.render_taps(shared, frames, |index, frame| out[index] = frame);
         out
     }
 
@@ -897,12 +1082,12 @@ mod tests {
         // every frame comes straight through.
         let ring_shared = Shared::new(48_000);
         busy_settings(&ring_shared);
-        let mut ring_mixer = OutputMixer::new(48_000);
+        let mut ring_mixer = OutputMixer::new(48_000, 2);
         ring_mixer.prepare(frames);
 
         let direct_shared = Shared::new(48_000);
         busy_settings(&direct_shared);
-        let mut direct_mixer = OutputMixer::new(48_000);
+        let mut direct_mixer = OutputMixer::new(48_000, 2);
         direct_mixer.prepare(frames);
 
         for block in 0..blocks {
@@ -917,7 +1102,7 @@ mod tests {
             }
             let ring = render(&mut ring_mixer, &ring_shared, frames);
             let mut direct = vec![[0.0f32; 4]; frames];
-            direct_mixer.render_direct(
+            direct_mixer.render_direct_taps(
                 &direct_shared,
                 &left[span.clone()],
                 &right[span],
@@ -938,27 +1123,156 @@ mod tests {
     }
 
     #[test]
+    fn default_device_settings_write_what_the_output_always_wrote() {
+        let frames = 256;
+        let blocks = 6;
+        let (left, right) = test_signal(frames * blocks);
+        for channels in [1, 2, 4, 8] {
+            // The same chain twice: one hands over the taps, one the mapped
+            // device frame.  A level ramp mid-run must not change that.
+            let taps_shared = Shared::new(48_000);
+            busy_settings(&taps_shared);
+            let mut taps_mixer = OutputMixer::new(48_000, channels);
+            taps_mixer.prepare(frames);
+            let device_shared = Shared::new(48_000);
+            busy_settings(&device_shared);
+            let mut device_mixer = OutputMixer::new(48_000, channels);
+            device_mixer.prepare(frames);
+
+            for block in 0..blocks {
+                if block == 3 {
+                    store_gain(&taps_shared, 0.3);
+                    store_gain(&device_shared, 0.3);
+                }
+                let span = block * frames..(block + 1) * frames;
+                for (l, r) in left[span.clone()].iter().zip(&right[span]) {
+                    taps_shared.push_frame(*l, *r);
+                    device_shared.push_frame(*l, *r);
+                }
+                let taps = render(&mut taps_mixer, &taps_shared, frames);
+                let mut device = vec![0.0f32; frames * channels];
+                device_mixer.render(&device_shared, frames, |index, mapped| {
+                    for channel in 0..channels {
+                        device[index * channels + channel] = mapped.sample(channel);
+                    }
+                });
+                let mut expected = vec![0.0f32; frames * channels];
+                for (frame, tap) in expected.chunks_mut(channels).zip(&taps) {
+                    old_write_frame(frame, tap[0], tap[1]);
+                }
+                let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+                assert_eq!(
+                    bits(&device),
+                    bits(&expected),
+                    "{channels} ch, block {block}"
+                );
+            }
+            // Per-channel meters: channel 1 and 2 carry the master L/R peaks.
+            let meters = device_shared.clock_device.meters();
+            if channels >= 2 {
+                assert_eq!(
+                    meters[0],
+                    f32::from_bits(device_shared.out_l.load(Ordering::Relaxed))
+                );
+                assert_eq!(
+                    meters[1],
+                    f32::from_bits(device_shared.out_r.load(Ordering::Relaxed))
+                );
+            }
+            assert!(meters[..channels].iter().all(|meter| *meter > 0.0));
+            assert!(meters[channels..].iter().all(|meter| *meter == 0.0));
+        }
+    }
+
+    #[test]
+    fn a_ten_channel_device_fills_every_channel_through_write_frame() {
+        let (_, shared) = steady_mixer((0.5, -0.25));
+        let mut mixer = OutputMixer::new(48_000, 10);
+        mixer.publish_device_channels(&shared);
+        assert_eq!(shared.clock_device.channels(), 10);
+        let frames = 64;
+        let mut data = vec![f32::NAN; frames * 10];
+        mixer.render(&shared, frames, |index, mapped| {
+            write_frame(&mut data[index * 10..(index + 1) * 10], mapped);
+        });
+        for frame in data.chunks(10) {
+            let mut expected = [0.0f32; 10];
+            old_write_frame(&mut expected, 0.5, -0.25);
+            assert_eq!(frame, expected);
+        }
+        // Channels 9 and 10 are past the map and get the unused value.
+        shared.clock_device.set(&OutputDeviceSettings {
+            unused: UnusedChannels::Silent,
+            ..OutputDeviceSettings::default()
+        });
+        // 8 blocks of 64 outlast the 6 ms ramp.
+        for _ in 0..8 {
+            mixer.render(&shared, frames, |index, mapped| {
+                write_frame(&mut data[index * 10..(index + 1) * 10], mapped);
+            });
+        }
+        let last = &data[(frames - 1) * 10..];
+        assert_eq!(last[..2], [0.5, -0.25]);
+        assert!(last[2..].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn the_device_map_follows_the_master_and_crossfades() {
+        let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+        let render_device = |mixer: &mut OutputMixer, shared: &Shared, frames: usize| {
+            let mut out = vec![[0.0f32; 2]; frames];
+            mixer.render(shared, frames, |index, mapped| {
+                out[index] = [mapped.sample(0), mapped.sample(1)];
+            });
+            out
+        };
+        store_gain(&shared, 0.5);
+        let adopted = render_device(&mut mixer, &shared, 16);
+        assert_eq!(adopted[0], [0.25, -0.125]);
+
+        // Swap the sides at -6 dB: a crossfade, then the swapped, scaled pair.
+        let gain = 10.0f32.powf(-6.0 / 20.0);
+        shared.clock_device.set(&OutputDeviceSettings {
+            level_db: -6.0,
+            map: ChannelMap {
+                left: 0b10,
+                right: 0b01,
+            },
+            ..OutputDeviceSettings::default()
+        });
+        let out = render_device(&mut mixer, &shared, 600);
+        let step = out
+            .windows(2)
+            .map(|pair| (pair[1][0] - pair[0][0]).abs())
+            .fold(0.0, f32::max);
+        assert!(step < 0.375 / 100.0, "stepped by {step}");
+        assert_eq!(*out.last().unwrap(), [-0.125 * gain, 0.25 * gain]);
+        // The master meters stay before the device stage.
+        assert_eq!(f32::from_bits(shared.out_l.load(Ordering::Relaxed)), 0.25);
+    }
+
+    #[test]
     fn the_direct_path_follows_a_new_graph_rate() {
         let shared = Shared::new(48_000);
         busy_settings(&shared);
-        let mut mixer = OutputMixer::new(48_000);
+        let mut mixer = OutputMixer::new(48_000, 2);
         mixer.prepare(128);
         let (left, right) = test_signal(128);
-        mixer.render_direct(&shared, &left, &right, |_, _| {});
+        mixer.render_direct_taps(&shared, &left, &right, |_, _| {});
         mixer.set_direct_rate(44_100);
         let mut at_new_rate = vec![[0.0f32; 4]; 128];
-        mixer.render_direct(&shared, &left, &right, |index, frame| {
+        mixer.render_direct_taps(&shared, &left, &right, |index, frame| {
             at_new_rate[index] = frame
         });
 
         // A mixer built at 44.1 kHz from the start, after the same history.
         let reference_shared = Shared::new(44_100);
         busy_settings(&reference_shared);
-        let mut reference = OutputMixer::new(44_100);
+        let mut reference = OutputMixer::new(44_100, 2);
         reference.prepare(128);
-        reference.render_direct(&reference_shared, &left, &right, |_, _| {});
+        reference.render_direct_taps(&reference_shared, &left, &right, |_, _| {});
         let mut expected = vec![[0.0f32; 4]; 128];
-        reference.render_direct(&reference_shared, &left, &right, |index, frame| {
+        reference.render_direct_taps(&reference_shared, &left, &right, |index, frame| {
             expected[index] = frame
         });
         // The filter state differs (it ran at another rate), so compare the
@@ -1153,7 +1467,7 @@ mod tests {
         };
         shared.set_eq(EqSlot::Pre, bypassed);
         shared.set_eq(EqSlot::Post, bypassed);
-        let mut mixer = OutputMixer::new(48_000);
+        let mut mixer = OutputMixer::new(48_000, 2);
         // Block 1: nothing has arrived yet.
         let empty = render(&mut mixer, &shared, 64);
         assert!(empty.iter().all(|frame| frame[0] == 0.0));

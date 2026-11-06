@@ -165,16 +165,13 @@ impl AsioCallbackContext {
                 types,
                 mixer,
             } = output;
-            mixer.render(&self.shared, self.frames, |frame, out| {
-                // Same rule as cpal `write_frame`: only the processed stereo
-                // pair is real. Extra ASIO outputs get the L/R average.
-                let rest = (out[0] + out[1]) * 0.5;
+            // The mixer was built for `buffers.len()` channels and maps
+            // the mix onto them; this only converts per channel buffer.
+            // A driver with one output now plays the L/R average (the mono
+            // rule, as on cpal) instead of L alone.
+            mixer.render(&self.shared, self.frames, |frame, mapped| {
                 for (channel, buffer) in buffers.iter().enumerate() {
-                    let value = match channel {
-                        0 => out[0],
-                        1 => out[1],
-                        _ => rest,
-                    };
+                    let value = mapped.sample(channel);
                     let sample_type = types
                         .get(channel)
                         .copied()

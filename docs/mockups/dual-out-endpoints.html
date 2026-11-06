@@ -1,0 +1,1919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RigWerk · Dual-out &amp; virtual endpoint UI mockups</title>
+  <style>
+    :root {
+      --bg: #080b11;
+      --sidebar: #0b0f17;
+      --card: #10151f;
+      --card-raised: #151b28;
+      --card-deep: #0c1019;
+      --border: #222a39;
+      --border-soft: #1b222f;
+      --text: #e8edf6;
+      --muted: #8b97ab;
+      --dim: #74859f;
+      --teal: #38ddbf;
+      --teal-dark: #104e48;
+      --blue: #70a7ff;
+      --amber: #ffb85b;
+      --red: #ff7070;
+      --green: #60d890;
+      --font: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", "SF Mono", ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13.5px;
+    }
+    body {
+      display: grid;
+      grid-template-columns: 196px 1fr;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      background: var(--sidebar);
+      border-right: 1px solid var(--border);
+      padding: 18px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 10px 18px;
+      font-weight: 650;
+      letter-spacing: 0.04em;
+      font-size: 15px;
+    }
+    .brand-mark {
+      width: 22px; height: 22px;
+      border-radius: 6px;
+      background: linear-gradient(145deg, var(--teal), #1a8f7c);
+      box-shadow: 0 0 0 1px rgba(56,221,191,0.35);
+    }
+    .nav { display: flex; flex-direction: column; gap: 2px; }
+    .nav button {
+      all: unset;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      color: var(--muted);
+      cursor: default;
+    }
+    .nav button[aria-current="page"] {
+      background: rgba(56,221,191,0.1);
+      color: var(--text);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.28);
+    }
+    .nav .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--border);
+    }
+    .nav button[aria-current="page"] .dot { background: var(--teal); }
+    .side-foot {
+      margin-top: auto;
+      padding: 12px 10px;
+      color: var(--dim);
+      font-size: 11px;
+      line-height: 1.45;
+      border-top: 1px solid var(--border-soft);
+    }
+
+    .main { display: flex; flex-direction: column; min-width: 0; }
+    .header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px 14px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .header h1 { margin: 0; font-size: 22px; font-weight: 650; }
+    .header p { margin: 4px 0 0; color: var(--dim); font-size: 12.5px; }
+    .pills { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .pill {
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 5px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      background: var(--card);
+    }
+    .pill.ok {
+      color: var(--teal);
+      border-color: rgba(56,221,191,0.35);
+      background: rgba(56,221,191,0.08);
+    }
+    .pill.warn {
+      color: var(--amber);
+      border-color: rgba(255,184,91,0.35);
+      background: rgba(255,184,91,0.08);
+    }
+
+    .chooser {
+      margin: 14px 22px 0;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+    .choice {
+      all: unset;
+      cursor: pointer;
+      display: block;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--card);
+      border: 1px solid var(--border-soft);
+      color: var(--muted);
+      transition: border-color 0.15s, background 0.15s, color 0.15s;
+    }
+    .choice:hover { border-color: var(--border); color: var(--text); }
+    .choice[aria-pressed="true"] {
+      color: var(--text);
+      border-color: rgba(56,221,191,0.45);
+      background: rgba(56,221,191,0.08);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.18);
+    }
+    .choice .tag {
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--teal);
+      font-weight: 650;
+      margin-bottom: 6px;
+    }
+    .choice[aria-pressed="true"] .tag { color: var(--teal); }
+    .choice h2 {
+      margin: 0 0 4px;
+      font-size: 14px;
+      font-weight: 650;
+      color: inherit;
+    }
+    .choice p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--dim);
+    }
+    .choice[aria-pressed="true"] p { color: var(--muted); }
+
+    .note {
+      margin: 10px 22px 0;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+    .note strong { color: var(--text); font-weight: 650; }
+    .note code {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--amber);
+    }
+
+    .page {
+      padding: 14px 22px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
+    }
+
+    .micro {
+      font-size: 10.5px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-weight: 650;
+    }
+    .micro.teal { color: var(--teal); }
+    .micro.blue { color: var(--blue); }
+    .micro.amber { color: var(--amber); }
+    .micro.green { color: var(--green); }
+    .micro.dim { color: var(--dim); }
+
+    .row-3 {
+      display: grid;
+      gap: 12px;
+      align-items: stretch;
+    }
+    .row-3.classic {
+      grid-template-columns: 1fr 12px minmax(220px, 0.72fr) 12px 1fr;
+    }
+    .row-3.split {
+      grid-template-columns: 1fr 12px minmax(200px, 0.68fr) 12px 1.15fr;
+    }
+    .row-3.publish {
+      grid-template-columns: 1fr 12px minmax(220px, 0.72fr) 12px 1fr;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      min-height: 360px;
+    }
+    .card.raised {
+      background: var(--card-raised);
+      border-color: rgba(255,184,91,0.28);
+    }
+    .card.nested {
+      min-height: 0;
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--card-deep);
+      border-color: var(--border-soft);
+    }
+    .card.nested.listen {
+      border-color: rgba(112,167,255,0.35);
+      background: linear-gradient(180deg, rgba(112,167,255,0.06), var(--card-deep));
+    }
+    .card.nested.send {
+      border-color: rgba(96,216,144,0.35);
+      background: linear-gradient(180deg, rgba(96,216,144,0.06), var(--card-deep));
+    }
+    .card.nested.off {
+      opacity: 0.72;
+      border-style: dashed;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .tabs { display: flex; gap: 4px; }
+    .tab {
+      all: unset;
+      cursor: default;
+      font-size: 10.5px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: 6px;
+      color: var(--dim);
+      border: 1px solid transparent;
+    }
+    .tab.on {
+      color: var(--text);
+      border-color: rgba(56,221,191,0.35);
+      background: rgba(56,221,191,0.1);
+    }
+    .tab.on.blue {
+      border-color: rgba(112,167,255,0.4);
+      background: rgba(112,167,255,0.1);
+    }
+
+    .select, .field {
+      width: 100%;
+      padding: 9px 11px;
+      border-radius: 8px;
+      background: var(--card-deep);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font: inherit;
+    }
+    .select { appearance: none; cursor: default; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      padding: 5px 9px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--card-raised);
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+    .chip.on {
+      color: var(--teal);
+      border-color: rgba(56,221,191,0.4);
+      background: rgba(56,221,191,0.1);
+    }
+    .chip.on.blue {
+      color: var(--blue);
+      border-color: rgba(112,167,255,0.45);
+      background: rgba(112,167,255,0.1);
+    }
+    .chip.on.green {
+      color: var(--green);
+      border-color: rgba(96,216,144,0.45);
+      background: rgba(96,216,144,0.1);
+    }
+    .chip.warn {
+      color: var(--amber);
+      border-color: rgba(255,184,91,0.4);
+      background: rgba(255,184,91,0.08);
+    }
+
+    .pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .label {
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--dim);
+      margin-bottom: 4px;
+    }
+    .slider {
+      height: 6px;
+      border-radius: 99px;
+      background: var(--border-soft);
+      position: relative;
+      margin: 6px 0 2px;
+    }
+    .slider > i {
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      border-radius: 99px;
+      width: 52%;
+      background: var(--teal);
+    }
+    .slider.blue > i { background: var(--blue); width: 46%; }
+    .slider.green > i { background: var(--green); width: 40%; }
+    .meter {
+      display: grid;
+      grid-template-columns: 18px 1fr;
+      gap: 6px;
+      align-items: center;
+      font-size: 10.5px;
+      color: var(--dim);
+      font-family: var(--mono);
+    }
+    .bar {
+      height: 7px;
+      border-radius: 99px;
+      background: var(--border-soft);
+      overflow: hidden;
+    }
+    .bar > i {
+      display: block;
+      height: 100%;
+      width: 38%;
+      background: linear-gradient(90deg, var(--teal), #7cf0d8);
+    }
+    .bar.blue > i { width: 44%; background: linear-gradient(90deg, var(--blue), #a8c8ff); }
+    .bar.green > i { width: 31%; background: linear-gradient(90deg, var(--green), #9ee8bc); }
+
+    .connector {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .connector span {
+      width: 100%;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(56,221,191,0.15), var(--teal), rgba(112,167,255,0.15));
+      border-radius: 2px;
+      position: relative;
+    }
+    .connector.blue span {
+      background: linear-gradient(90deg, rgba(255,184,91,0.2), var(--blue));
+    }
+    .connector.split-y {
+      align-self: stretch;
+      position: relative;
+    }
+    .connector.split-y span {
+      position: absolute;
+      left: 0; right: 0;
+      top: 28%;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(255,184,91,0.25), var(--blue));
+    }
+    .connector.split-y::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 28%;
+      bottom: 22%;
+      width: 2px;
+      transform: translateX(-50%);
+      background: linear-gradient(180deg, var(--blue), var(--green));
+      border-radius: 2px;
+    }
+
+    .scope {
+      flex: 1;
+      min-height: 72px;
+      border-radius: 10px;
+      background:
+        linear-gradient(rgba(34,42,57,0.55) 1px, transparent 1px) 0 0 / 100% 16px,
+        linear-gradient(90deg, rgba(34,42,57,0.55) 1px, transparent 1px) 0 0 / 24px 100%,
+        var(--card-deep);
+      border: 1px solid var(--border-soft);
+      display: grid;
+      place-items: center;
+      color: var(--dim);
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      position: relative;
+      overflow: hidden;
+    }
+    .scope svg {
+      position: absolute;
+      inset: 8px;
+      width: calc(100% - 16px);
+      height: calc(100% - 16px);
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+    }
+    .stat {
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      padding: 7px 8px;
+    }
+    .stat .k { font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+    .stat .v { margin-top: 3px; font-family: var(--mono); font-size: 12px; color: var(--text); }
+
+    .seg {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      padding: 3px;
+      border-radius: 8px;
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+    }
+    .seg span {
+      text-align: center;
+      padding: 6px 4px;
+      border-radius: 6px;
+      font-size: 11px;
+      color: var(--dim);
+    }
+    .seg span.on {
+      background: rgba(255,184,91,0.12);
+      color: var(--amber);
+      box-shadow: inset 0 0 0 1px rgba(255,184,91,0.3);
+    }
+
+    .dest-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 360px;
+    }
+    .dest-stack > .card {
+      min-height: 0;
+      flex: 1;
+    }
+
+    .send-strip {
+      margin-top: 2px;
+      padding: 10px 11px;
+      border-radius: 10px;
+      background: rgba(96,216,144,0.06);
+      border: 1px solid rgba(96,216,144,0.28);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .send-strip.off {
+      background: var(--card-deep);
+      border: 1px dashed var(--border);
+      opacity: 0.85;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .toggle {
+      width: 34px; height: 18px;
+      border-radius: 99px;
+      background: var(--border);
+      position: relative;
+      flex: none;
+    }
+    .toggle.on { background: rgba(96,216,144,0.45); }
+    .toggle::after {
+      content: "";
+      position: absolute;
+      top: 2px; left: 2px;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: var(--text);
+      transition: left 0.15s;
+    }
+    .toggle.on::after { left: 18px; background: var(--green); }
+
+    .publish-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 14px;
+      border-radius: 12px;
+      background: linear-gradient(90deg, rgba(56,221,191,0.08), rgba(112,167,255,0.06));
+      border: 1px solid rgba(56,221,191,0.28);
+    }
+    .publish-banner .title {
+      font-weight: 650;
+      font-size: 13px;
+    }
+    .publish-banner .sub {
+      margin-top: 2px;
+      color: var(--dim);
+      font-size: 12px;
+    }
+
+    .chain {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: var(--card);
+      border: 1px solid var(--border-soft);
+      color: var(--muted);
+      font-size: 11.5px;
+    }
+    .chain .node {
+      padding: 5px 8px;
+      border-radius: 7px;
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+      color: var(--text);
+    }
+    .chain .arrow { color: var(--dim); }
+    .chain .node.send { border-color: rgba(96,216,144,0.4); color: var(--green); }
+    .chain .node.listen { border-color: rgba(112,167,255,0.4); color: var(--blue); }
+
+    .platform {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .os-card {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--card);
+      border: 1px solid var(--border);
+    }
+    .os-card h3 {
+      margin: 0 0 6px;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .os-card p {
+      margin: 0;
+      color: var(--dim);
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+
+    .panel { display: none; }
+    .panel.active { display: flex; flex-direction: column; gap: 12px; }
+
+    .view-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .view-tabs button {
+      all: unset;
+      cursor: pointer;
+      padding: 7px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .view-tabs button[aria-pressed="true"] {
+      color: var(--text);
+      border-color: rgba(56,221,191,0.4);
+      background: rgba(56,221,191,0.1);
+    }
+    .view { display: none; flex-direction: column; gap: 12px; }
+    .view.active { display: flex; }
+
+    .rack {
+      display: grid;
+      grid-template-columns: minmax(260px, 320px) 1fr;
+      min-height: 520px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+    .rack-left {
+      background: var(--card-deep);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .rack-right {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      padding: 14px;
+      gap: 10px;
+    }
+    .pane-head {
+      padding: 12px 14px 10px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .pane-head h2 {
+      margin: 0;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 650;
+    }
+    .pane-head .hint { color: var(--dim); font-size: 11.5px; }
+    .rack-scroll {
+      padding: 8px 8px 14px;
+      overflow: auto;
+      flex: 1;
+    }
+    .stage-group {
+      margin: 8px 6px 4px;
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--dim);
+      font-weight: 650;
+    }
+    .stage {
+      all: unset;
+      display: grid;
+      grid-template-columns: 10px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+      margin-bottom: 3px;
+      color: var(--muted);
+    }
+    .stage:hover { background: rgba(255,255,255,0.03); color: var(--text); }
+    .stage[aria-selected="true"] {
+      background: rgba(56,221,191,0.1);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.45);
+      color: var(--text);
+    }
+    .stage .node {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--border);
+    }
+    .stage.teal .node { background: var(--teal); }
+    .stage.amber .node { background: var(--amber); }
+    .stage.blue .node { background: var(--blue); }
+    .stage.green .node { background: var(--green); }
+    .stage .name { font-size: 13px; font-weight: 650; line-height: 1.2; }
+    .stage .summary {
+      margin-top: 2px;
+      font-size: 11px;
+      color: var(--dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .stage .badge {
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 3px 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--dim);
+    }
+    .stage .badge.clock {
+      color: var(--blue);
+      border-color: rgba(112,167,255,0.4);
+    }
+    .stage .badge.pub {
+      color: var(--green);
+      border-color: rgba(96,216,144,0.4);
+    }
+    .stage .badge.off { opacity: 0.7; }
+    .out-group {
+      margin: 2px 0 6px 18px;
+      padding: 4px 0 2px 8px;
+      border-left: 1px dashed rgba(112,167,255,0.3);
+    }
+    .out-row {
+      all: unset;
+      display: grid;
+      grid-template-columns: 14px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      width: 100%;
+      min-height: 44px;
+      padding: 6px 8px;
+      margin: 2px 0;
+      border-radius: 8px;
+      cursor: pointer;
+      color: var(--muted);
+    }
+    .out-row:hover { background: rgba(255,255,255,0.03); color: var(--text); }
+    .out-row[aria-selected="true"] {
+      background: rgba(56,221,191,0.1);
+      box-shadow: inset 0 0 0 1px rgba(56,221,191,0.45);
+      color: var(--text);
+    }
+    .out-row .grip {
+      color: var(--dim);
+      letter-spacing: -1px;
+      font-size: 11px;
+      user-select: none;
+    }
+    .out-row .name { font-size: 12.5px; font-weight: 600; }
+    .out-row .summary { font-size: 10.5px; color: var(--dim); margin-top: 2px; }
+    .out-row .meta {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .out-row .badge {
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 3px 6px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--dim);
+    }
+    .out-row .badge.clock {
+      color: var(--blue);
+      border-color: rgba(112,167,255,0.4);
+    }
+    .out-row .badge.pub {
+      color: var(--green);
+      border-color: rgba(96,216,144,0.4);
+    }
+    .out-row .badge.off { opacity: 0.7; }
+    .out-row .rm {
+      all: unset;
+      cursor: pointer;
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      display: grid;
+      place-items: center;
+      color: var(--dim);
+      font-size: 14px;
+      line-height: 1;
+      border: 1px solid transparent;
+    }
+    .out-row .rm:hover {
+      color: var(--red);
+      background: rgba(255,112,112,0.1);
+      border-color: rgba(255,112,112,0.35);
+    }
+    .out-row .rm:disabled,
+    .out-row .rm[aria-disabled="true"] {
+      opacity: 0.35;
+      cursor: not-allowed;
+      color: var(--dim);
+    }
+    .out-row .rm:disabled:hover,
+    .out-row .rm[aria-disabled="true"]:hover {
+      background: transparent;
+      border-color: transparent;
+      color: var(--dim);
+    }
+    .btn.danger {
+      background: rgba(255,112,112,0.08);
+      border-color: rgba(255,112,112,0.35);
+      color: var(--red);
+    }
+    .btn.danger:hover {
+      border-color: rgba(255,112,112,0.55);
+      background: rgba(255,112,112,0.14);
+    }
+    .remove-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 4px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+    }
+    .remove-bar .hint {
+      margin: 0;
+      color: var(--dim);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .add-out {
+      all: unset;
+      display: block;
+      width: 100%;
+      margin: 4px 0 2px;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px dashed rgba(56,221,191,0.45);
+      color: var(--teal);
+      font-size: 12px;
+      cursor: pointer;
+      text-align: center;
+      background: rgba(56,221,191,0.06);
+    }
+    .add-out:hover {
+      background: rgba(56,221,191,0.12);
+      border-color: rgba(56,221,191,0.7);
+    }
+
+    .mixer-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .mixer-toolbar .micro { color: var(--teal); }
+    .mixer-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      all: unset;
+      cursor: pointer;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: var(--card-raised);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12.5px;
+    }
+    .btn:hover { border-color: rgba(56,221,191,0.45); }
+    .btn.primary {
+      background: rgba(56,221,191,0.12);
+      border-color: rgba(56,221,191,0.4);
+      color: var(--teal);
+    }
+    .btn.primary.blue {
+      background: rgba(112,167,255,0.12);
+      border-color: rgba(112,167,255,0.45);
+      color: var(--blue);
+    }
+
+    .add-sheet {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px;
+      border-radius: 12px;
+      background: rgba(112,167,255,0.06);
+      border: 1px solid rgba(112,167,255,0.35);
+    }
+    .add-sheet.open { display: flex; }
+    .add-sheet h4 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 650;
+    }
+    .add-sheet .hint {
+      margin: 0;
+      color: var(--dim);
+      font-size: 12.5px;
+      line-height: 1.4;
+    }
+    .add-kinds {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .add-kind {
+      all: unset;
+      cursor: pointer;
+      padding: 10px;
+      border-radius: 10px;
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+      color: var(--muted);
+    }
+    .add-kind:hover { border-color: var(--border); color: var(--text); }
+    .add-kind[aria-pressed="true"] {
+      color: var(--text);
+      border-color: rgba(112,167,255,0.5);
+      background: rgba(112,167,255,0.1);
+    }
+    .add-kind .k {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--blue);
+      font-weight: 650;
+      margin-bottom: 4px;
+    }
+    .add-kind .d { font-size: 11.5px; color: var(--dim); line-height: 1.35; }
+    .add-sheet-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 2px;
+    }
+
+    .detail-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .detail-title h3 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+    .detail-title p {
+      margin: 4px 0 0;
+      color: var(--dim);
+      font-size: 12.5px;
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .detail-block {
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--card-deep);
+      border: 1px solid var(--border-soft);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .detail-block.wide { grid-column: 1 / -1; }
+    .role-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .role-row .chip { cursor: default; }
+
+    .live-outs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .live-out {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      border-radius: 10px;
+      background: var(--card);
+      border: 1px solid var(--border-soft);
+      font-size: 12.5px;
+      color: var(--muted);
+    }
+    .live-out.on {
+      color: var(--text);
+      border-color: rgba(112,167,255,0.35);
+      background: rgba(112,167,255,0.06);
+    }
+    .live-out.pub {
+      border-color: rgba(96,216,144,0.35);
+      background: rgba(96,216,144,0.06);
+    }
+    .live-out .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--border);
+    }
+    .live-out.on .dot { background: var(--blue); }
+    .live-out.pub .dot { background: var(--green); }
+    .live-out .meta {
+      color: var(--dim);
+      font-size: 11px;
+      font-family: var(--mono);
+    }
+
+    @media (max-width: 1200px) {
+      .chooser { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 1100px) {
+      body { grid-template-columns: 1fr; }
+      .sidebar { display: none; }
+      .chooser { grid-template-columns: 1fr; }
+      .row-3.classic, .row-3.split, .row-3.publish {
+        grid-template-columns: 1fr;
+      }
+      .connector { display: none; }
+      .platform { grid-template-columns: 1fr; }
+      .rack { grid-template-columns: 1fr; }
+      .detail-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <aside class="sidebar" aria-label="Navigation">
+    <div class="brand"><span class="brand-mark"></span>RIGWERK</div>
+    <nav class="nav" id="app-nav">
+      <button type="button" data-nav="live"><span class="dot"></span>Live Bridge</button>
+      <button type="button" data-nav="mixer" aria-current="page"><span class="dot"></span>Mixer</button>
+      <button type="button"><span class="dot"></span>Plugins</button>
+      <button type="button"><span class="dot"></span>Signal Routing</button>
+      <button type="button"><span class="dot"></span>Devices</button>
+      <button type="button"><span class="dot"></span>Sessions</button>
+      <button type="button"><span class="dot"></span>Setup Guide</button>
+      <button type="button"><span class="dot"></span>Diagnostics</button>
+    </nav>
+    <div class="side-foot">
+      Mockups · dual-out &amp; virtual endpoints<br />
+      D preferred · A / B / C kept
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div>
+        <h1 id="page-title">Mixer</h1>
+        <p id="page-sub">Live stays publish-simple; per-output detail lives on Mixer.</p>
+      </div>
+      <div class="pills">
+        <span class="pill ok">Preferred · D</span>
+        <span class="pill">Scales to N outs</span>
+      </div>
+    </header>
+
+    <div class="chooser" role="tablist" aria-label="Mockup variants">
+      <button class="choice" type="button" role="tab" aria-pressed="true" data-panel="d">
+        <div class="tag">D · Preferred</div>
+        <h2>Output stage → inspector</h2>
+        <p>Same path as EQ: destinations under Output, detail in the right pane.</p>
+      </button>
+      <button class="choice" type="button" role="tab" aria-pressed="false" data-panel="a">
+        <div class="tag">A · Least change</div>
+        <h2>Also send under Output</h2>
+        <p>Breaks down past two destinations.</p>
+      </button>
+      <button class="choice" type="button" role="tab" aria-pressed="false" data-panel="b">
+        <div class="tag">B · Stack</div>
+        <h2>Destinations stack</h2>
+        <p>Same heat problem at 3–4 outs.</p>
+      </button>
+      <button class="choice" type="button" role="tab" aria-pressed="false" data-panel="c">
+        <div class="tag">C · Publish only</div>
+        <h2>Publish RigWerk Out</h2>
+        <p>Right idea on Live — needs Mixer detail.</p>
+      </button>
+    </div>
+
+    <div class="page">
+      <!-- ═══════════════ D ═══════════════ -->
+      <section class="panel active" id="panel-d" role="tabpanel">
+        <div class="note">
+          <strong>D — same Mixer path as EQ.</strong>
+          Live stays C-simple (publish + chips). Destinations hang under the existing
+          <em>Output</em> chain stage — like inserts under Plugins. Select Output or a
+          child destination → the big right inspector (same pane EQ/gate already use)
+          shows that out’s device / clock / level detail.
+        </div>
+
+        <div class="view-tabs" role="tablist" aria-label="Page preview">
+          <button type="button" data-view="mixer" aria-pressed="true">Mixer · Output selected</button>
+          <button type="button" data-view="live" aria-pressed="false">Live · compact C</button>
+        </div>
+
+        <div class="view active" id="view-mixer">
+          <div class="mixer-toolbar">
+            <div class="micro">Mixer · rack</div>
+            <div class="mixer-actions">
+              <button type="button" class="btn">+ Add insert</button>
+              <button type="button" class="btn primary blue" id="btn-add-output" title="Add a listen, send, or publish destination under Output">
+                + Add output
+              </button>
+            </div>
+          </div>
+
+          <div class="rack">
+            <div class="rack-left">
+              <div class="pane-head">
+                <h2>Signal chain</h2>
+                <span class="hint">same as today</span>
+              </div>
+              <div class="rack-scroll">
+                <button type="button" class="stage teal">
+                  <span class="node"></span>
+                  <span>
+                    <div class="name">Input</div>
+                    <div class="summary">+0.0 dB · gain ramp</div>
+                  </span>
+                  <span class="badge">on</span>
+                </button>
+                <button type="button" class="stage amber">
+                  <span class="node"></span>
+                  <span>
+                    <div class="name">Pre EQ</div>
+                    <div class="summary">flat · opens in inspector</div>
+                  </span>
+                  <span class="badge">eq</span>
+                </button>
+                <button type="button" class="stage amber">
+                  <span class="node"></span>
+                  <span>
+                    <div class="name">Plugins · 2</div>
+                    <div class="summary">inserts · reorder</div>
+                  </span>
+                  <span class="badge">fx</span>
+                </button>
+                <button type="button" class="stage amber">
+                  <span class="node"></span>
+                  <span>
+                    <div class="name">Gate</div>
+                    <div class="summary">bypassed · POST</div>
+                  </span>
+                  <span class="badge">gate</span>
+                </button>
+                <button type="button" class="stage amber">
+                  <span class="node"></span>
+                  <span>
+                    <div class="name">Post EQ</div>
+                    <div class="summary">flat · opens in inspector</div>
+                  </span>
+                  <span class="badge">eq</span>
+                </button>
+
+                <button type="button" class="stage blue" data-dest="group" aria-selected="false">
+                  <span class="node"></span>
+                  <span>
+                    <div class="name">Output · 3</div>
+                    <div class="summary">1 clock · 1 send · 1 pub</div>
+                  </span>
+                  <span class="badge clock">out</span>
+                </button>
+                <div class="out-group">
+                  <div class="out-row" data-dest="listen" aria-selected="true" role="button" tabindex="0">
+                    <span class="grip">⠿</span>
+                    <span>
+                      <div class="name">Headphones</div>
+                      <div class="summary">WASAPI · −1.5 dB</div>
+                    </span>
+                    <span class="meta">
+                      <span class="badge clock">clock</span>
+                      <button type="button" class="rm" data-remove="listen" title="Last listen clock — promote another out first" aria-disabled="true">×</button>
+                    </span>
+                  </div>
+                  <div class="out-row" data-dest="publish" aria-selected="false" role="button" tabindex="0">
+                    <span class="grip">⠿</span>
+                    <span>
+                      <div class="name">RigWerk Out</div>
+                      <div class="summary">virtual · published</div>
+                    </span>
+                    <span class="meta">
+                      <span class="badge pub">pub</span>
+                      <button type="button" class="rm" data-remove="publish" title="Remove RigWerk Out">×</button>
+                    </span>
+                  </div>
+                  <div class="out-row" data-dest="speakers" aria-selected="false" role="button" tabindex="0">
+                    <span class="grip">⠿</span>
+                    <span>
+                      <div class="name">Studio monitors</div>
+                      <div class="summary">WASAPI · −6.0 dB</div>
+                    </span>
+                    <span class="meta">
+                      <span class="badge">send</span>
+                      <button type="button" class="rm" data-remove="speakers" title="Remove Studio monitors">×</button>
+                    </span>
+                  </div>
+                  <button type="button" class="add-out" id="chain-add-output">+ Add output</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="rack-right" id="dest-detail">
+              <div class="add-sheet" id="add-sheet" aria-live="polite">
+                <div>
+                  <div class="micro blue">New destination</div>
+                  <h4>Add an output</h4>
+                  <p class="hint">Same entry point as “+ Add insert”: toolbar button, chain footer, or empty Output inspector.</p>
+                </div>
+                <div class="add-kinds" role="group" aria-label="Destination kind">
+                  <button type="button" class="add-kind" data-kind="listen" aria-pressed="true">
+                    <div class="k">Listen</div>
+                    <div class="d">Heard clock · headphones / monitors</div>
+                  </button>
+                  <button type="button" class="add-kind" data-kind="send" aria-pressed="false">
+                    <div class="k">Send</div>
+                    <div class="d">Extra hardware · slave cushion</div>
+                  </button>
+                  <button type="button" class="add-kind" data-kind="publish" aria-pressed="false">
+                    <div class="k">Publish</div>
+                    <div class="d">RigWerk Out / virtual cable</div>
+                  </button>
+                </div>
+                <div class="detail-block" style="padding:0;border:0;background:transparent">
+                  <div class="label">Device</div>
+                  <div class="select">Choose device…</div>
+                  <div class="chips" style="margin-top:8px">
+                    <span class="chip">ASIO</span>
+                    <span class="chip on blue">WASAPI</span>
+                    <span class="chip on green">Virtual</span>
+                  </div>
+                </div>
+                <div class="add-sheet-actions">
+                  <button type="button" class="btn" id="btn-cancel-add">Cancel</button>
+                  <button type="button" class="btn primary blue" id="btn-confirm-add">Add destination</button>
+                </div>
+              </div>
+
+              <div id="dest-editor">
+                <div class="detail-title">
+                  <div>
+                    <div class="micro blue">Inspector · Output</div>
+                    <h3 id="dest-name">Headphones</h3>
+                    <p id="dest-sub">Same right pane as Pre/Post EQ — device, clock, level for the selected destination</p>
+                  </div>
+                  <div class="chips">
+                    <span class="chip on blue" id="dest-role">Listen · clock</span>
+                    <span class="chip">Mute</span>
+                    <button type="button" class="btn primary blue" id="btn-add-output-insp" style="padding:6px 10px;font-size:12px">+ Add output</button>
+                  </div>
+                </div>
+
+                <div class="detail-grid">
+                  <div class="detail-block wide">
+                    <div class="label">Device</div>
+                    <div class="select" id="dest-device">Headphones (Realtek)</div>
+                    <div class="tabs" style="justify-content:flex-start">
+                      <span class="tab">ASIO</span>
+                      <span class="tab on blue">WASAPI</span>
+                    </div>
+                  </div>
+                  <div class="detail-block">
+                    <div class="label">Role</div>
+                    <div class="role-row">
+                      <span class="chip on blue">Listen</span>
+                      <span class="chip">Send</span>
+                      <span class="chip">Publish</span>
+                    </div>
+                    <div style="color:var(--dim);font-size:11.5px;line-height:1.4">
+                      One listen owns the felt clock. Extra rows are sends or the published virtual source.
+                    </div>
+                  </div>
+                  <div class="detail-block">
+                    <div class="label">Clock / buffer</div>
+                    <div class="pair">
+                      <div><div class="label">Rate</div><div class="field">Match input</div></div>
+                      <div><div class="label">Buffer</div><div class="field">128 smp</div></div>
+                    </div>
+                    <div class="chips">
+                      <span class="chip on blue">Low latency</span>
+                      <span class="chip">REAL 3.0 ms</span>
+                    </div>
+                  </div>
+                  <div class="detail-block wide">
+                    <div class="label">Level · −1.5 dB</div>
+                    <div class="slider blue"><i></i></div>
+                    <div class="meter"><span>L</span><div class="bar blue"><i></i></div></div>
+                    <div class="meter"><span>R</span><div class="bar blue"><i style="width:36%"></i></div></div>
+                  </div>
+                  <div class="remove-bar" id="remove-bar">
+                    <p class="hint" id="remove-hint">Same as removing an insert: row × or this button. The last listen clock stays until another out is promoted.</p>
+                    <button type="button" class="btn danger" id="btn-remove-output">Remove output</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="view" id="view-live">
+          <div class="publish-banner">
+            <div>
+              <div class="title">Publish RigWerk Out</div>
+              <div class="sub">Post-mix stereo · Discord / OBS / DAW can capture · detail on Mixer</div>
+            </div>
+            <div class="chips">
+              <span class="chip on green">On · 48 kHz</span>
+              <span class="chip">Open in Mixer</span>
+            </div>
+          </div>
+
+          <div class="row-3 publish">
+            <article class="card" style="min-height:280px">
+              <div class="card-head">
+                <span class="micro teal">Input</span>
+                <div class="tabs"><span class="tab on">ASIO</span><span class="tab">SYS</span></div>
+              </div>
+              <div class="select">Focusrite USB ASIO</div>
+              <div class="chips"><span class="chip on">IN 1</span><span class="chip">IN 2</span></div>
+              <div>
+                <div class="label">Input gain · +0.0 dB</div>
+                <div class="slider"><i></i></div>
+              </div>
+              <div class="meter"><span>L</span><div class="bar"><i></i></div></div>
+            </article>
+            <div class="connector" aria-hidden="true"><span></span></div>
+            <article class="card raised" style="min-height:280px">
+              <div class="card-head">
+                <span class="micro amber">Bridge</span>
+                <span class="chip warn">ring</span>
+              </div>
+              <div style="color:var(--dim);font-size:12px">One mix · N destinations</div>
+              <div class="scope">
+                <svg viewBox="0 0 200 60" preserveAspectRatio="none">
+                  <path d="M0 28 C30 8,50 52,80 30 S130 10,160 36 S185 50,200 24" fill="none" stroke="#70a7ff" stroke-width="1.5" opacity="0.9"/>
+                </svg>
+              </div>
+              <div class="stats">
+                <div class="stat"><div class="k">Buffer</div><div class="v">55%</div></div>
+                <div class="stat"><div class="k">Drift</div><div class="v">+12</div></div>
+                <div class="stat"><div class="k">Outs</div><div class="v">3 / 4</div></div>
+              </div>
+            </article>
+            <div class="connector blue" aria-hidden="true"><span></span></div>
+            <article class="card" style="min-height:280px">
+              <div class="card-head">
+                <span class="micro blue">Listen</span>
+                <span class="chip on blue">clock</span>
+              </div>
+              <div class="select">Headphones (Realtek)</div>
+              <div>
+                <div class="label">Level · −1.5 dB</div>
+                <div class="slider blue"><i></i></div>
+              </div>
+              <div class="meter"><span>L</span><div class="bar blue"><i></i></div></div>
+              <div style="color:var(--dim);font-size:11.5px;margin-top:4px">Full out config → Mixer</div>
+            </article>
+          </div>
+
+          <div>
+            <div class="micro dim" style="margin-bottom:8px">Destinations</div>
+            <div class="live-outs">
+              <div class="live-out on"><span class="dot"></span>Headphones <span class="meta">clock</span></div>
+              <div class="live-out pub"><span class="dot"></span>RigWerk Out <span class="meta">pub</span></div>
+              <div class="live-out on"><span class="dot"></span>Studio monitors <span class="meta">−6 dB</span></div>
+              <button type="button" class="live-out" id="live-add-output" style="border-style:dashed;border-color:rgba(112,167,255,0.45);color:var(--blue);cursor:pointer">
+                <span class="dot" style="background:var(--blue)"></span>+ Add output <span class="meta">opens Mixer</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="platform">
+          <div class="os-card">
+            <h3>Add / remove</h3>
+            <p>Add: toolbar, chain footer, or Live chip → same inspector sheet. Remove: row <em>×</em> (like insert remove) or inspector <em>Remove output</em>. Last listen clock cannot be deleted until another destination is promoted.</p>
+          </div>
+          <div class="os-card">
+            <h3>Reuses Mixer</h3>
+            <p><code>ChainSelection::Output</code> → inspector. Children like plugin inserts — including the familiar remove control on each row.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ A ═══════════════ -->
+      <section class="panel" id="panel-a" role="tabpanel">
+        <div class="note">
+          <strong>A — Also send.</strong>
+          Smallest Live delta. Primary output stays the clock owner (LISTEN).
+          A green SEND strip toggles a second destination from the same mix.
+          Virtual endpoint shows up in the Send device list (Linux node or Windows cable).
+        </div>
+
+        <div class="row-3 classic">
+          <article class="card">
+            <div class="card-head">
+              <span class="micro teal">Input</span>
+              <div class="tabs">
+                <span class="tab on">ASIO</span>
+                <span class="tab">SYS</span>
+              </div>
+            </div>
+            <div class="select">Focusrite USB ASIO</div>
+            <div class="chips">
+              <span class="chip on">IN 1</span>
+              <span class="chip">IN 2</span>
+            </div>
+            <div class="pair">
+              <div><div class="label">Rate</div><div class="field">48.0 kHz</div></div>
+              <div><div class="label">Buffer</div><div class="field">128 smp</div></div>
+            </div>
+            <div>
+              <div class="label">Input gain · +0.0 dB</div>
+              <div class="slider"><i></i></div>
+            </div>
+            <div class="meter"><span>L</span><div class="bar"><i></i></div></div>
+            <div class="meter"><span>R</span><div class="bar"><i style="width:22%"></i></div></div>
+            <div class="chips"><span class="chip">dedicated clock</span></div>
+          </article>
+
+          <div class="connector" aria-hidden="true"><span></span></div>
+
+          <article class="card raised">
+            <div class="card-head">
+              <span class="micro amber">Bridge</span>
+              <span class="chip warn">two clocks</span>
+            </div>
+            <div style="color:var(--dim);font-size:12px">One mix. Async ring when clocks differ.</div>
+            <div class="scope">
+              <svg viewBox="0 0 200 60" preserveAspectRatio="none">
+                <path d="M0 30 C20 10,40 50,60 28 S100 8,120 32 S160 55,200 26" fill="none" stroke="#38ddbf" stroke-width="1.5" opacity="0.85"/>
+              </svg>
+            </div>
+            <div class="stats">
+              <div class="stat"><div class="k">Buffer</div><div class="v">62%</div></div>
+              <div class="stat"><div class="k">Drift</div><div class="v">AUTO</div></div>
+              <div class="stat"><div class="k">Under</div><div class="v">0</div></div>
+            </div>
+            <div class="seg">
+              <span>Safe</span><span class="on">Low</span><span>Manual</span>
+            </div>
+          </article>
+
+          <div class="connector blue" aria-hidden="true"><span></span></div>
+
+          <article class="card">
+            <div class="card-head">
+              <span class="micro blue">Output · listen</span>
+              <div class="tabs">
+                <span class="tab">ASIO</span>
+                <span class="tab on blue">WASAPI</span>
+              </div>
+            </div>
+            <div class="select">Headphones (Realtek)</div>
+            <div class="chips">
+              <span class="chip on blue">OUT 1</span>
+              <span class="chip on blue">OUT 2</span>
+              <span class="chip on blue">Low latency</span>
+            </div>
+            <div>
+              <div class="label">Level · −1.5 dB</div>
+              <div class="slider blue"><i></i></div>
+            </div>
+            <div class="meter"><span>L</span><div class="bar blue"><i></i></div></div>
+            <div class="meter"><span>R</span><div class="bar blue"><i style="width:36%"></i></div></div>
+            <div class="chips"><span class="chip">clock owner · REAL 3.0 ms</span></div>
+
+            <div class="send-strip">
+              <div class="toggle-row">
+                <div>
+                  <div class="micro green">Send</div>
+                  <div style="color:var(--dim);font-size:11.5px;margin-top:2px">Same mix · slave clock</div>
+                </div>
+                <div class="toggle on" title="Send on" aria-hidden="true"></div>
+              </div>
+              <div class="select">RigWerk Out · virtual</div>
+              <div class="chips">
+                <span class="chip on green">published</span>
+                <span class="chip">for Discord / OBS / DAW</span>
+              </div>
+              <div class="meter"><span>Σ</span><div class="bar green"><i></i></div></div>
+            </div>
+          </article>
+        </div>
+
+        <div class="chain">
+          <span class="node">INPUT</span><span class="arrow">→</span>
+          <span class="node">MIX</span><span class="arrow">→</span>
+          <span class="node listen">LISTEN · headphones</span>
+          <span class="arrow">+</span>
+          <span class="node send">SEND · RigWerk Out</span>
+        </div>
+
+        <div class="platform">
+          <div class="os-card">
+            <h3>Windows</h3>
+            <p>Send list includes installed cables (VB-Audio, …) and, later, <code>RigWerk Out</code> if a driver ships. Strip copy: “needs a virtual cable” when none found.</p>
+          </div>
+          <div class="os-card">
+            <h3>Linux</h3>
+            <p>Send can target any sink <em>or</em> the published PipeWire source. Same strip; device row differs.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ B ═══════════════ -->
+      <section class="panel" id="panel-b" role="tabpanel">
+        <div class="note">
+          <strong>B — Destinations stack.</strong>
+          Output becomes a destinations column: LISTEN (required, owns the felt clock) and SEND (optional).
+          Best teaching model for “one mix, two places.” Costs vertical space on Live.
+        </div>
+
+        <div class="row-3 split">
+          <article class="card">
+            <div class="card-head">
+              <span class="micro teal">Input</span>
+              <div class="tabs"><span class="tab on">PIPEWIRE</span><span class="tab">SYS</span></div>
+            </div>
+            <div class="select">Scarlett 2i2</div>
+            <div class="chips"><span class="chip on">IN 1</span><span class="chip">IN 2</span></div>
+            <div class="pair">
+              <div><div class="label">Rate</div><div class="field">48.0 kHz</div></div>
+              <div><div class="label">Buffer</div><div class="field">64 smp</div></div>
+            </div>
+            <div>
+              <div class="label">Input gain · +0.0 dB</div>
+              <div class="slider"><i></i></div>
+            </div>
+            <div class="meter"><span>L</span><div class="bar"><i></i></div></div>
+            <div class="meter"><span>R</span><div class="bar"><i style="width:18%"></i></div></div>
+          </article>
+
+          <div class="connector" aria-hidden="true"><span></span></div>
+
+          <article class="card raised">
+            <div class="card-head">
+              <span class="micro amber">Bridge</span>
+              <span class="chip ok" style="color:var(--teal);border-color:rgba(56,221,191,0.35);background:rgba(56,221,191,0.08)">duplex node</span>
+            </div>
+            <div style="color:var(--dim);font-size:12px">One PipeWire node · no bridge buffer</div>
+            <div class="scope">
+              <svg viewBox="0 0 200 60" preserveAspectRatio="none">
+                <path d="M0 34 C25 20,45 44,70 30 S110 12,140 34 S175 48,200 28" fill="none" stroke="#ffb85b" stroke-width="1.5" opacity="0.9"/>
+              </svg>
+            </div>
+            <div class="stats">
+              <div class="stat"><div class="k">Cushion</div><div class="v">none</div></div>
+              <div class="stat"><div class="k">Drift</div><div class="v">—</div></div>
+              <div class="stat"><div class="k">Path</div><div class="v">2.7 ms</div></div>
+            </div>
+            <div style="color:var(--dim);font-size:11.5px">Fan-out after the mixer · listen owns playback feel</div>
+          </article>
+
+          <div class="connector split-y" aria-hidden="true"><span></span></div>
+
+          <div class="dest-stack">
+            <article class="card nested listen">
+              <div class="card-head">
+                <span class="micro blue">Listen</span>
+                <span class="chip on blue">clock</span>
+              </div>
+              <div class="select">AKG N9 Hybrid</div>
+              <div class="chips">
+                <span class="chip on blue">Low latency</span>
+                <span class="chip">mute</span>
+              </div>
+              <div>
+                <div class="label">Level · −1.5 dB</div>
+                <div class="slider blue"><i></i></div>
+              </div>
+              <div class="meter"><span>L</span><div class="bar blue"><i></i></div></div>
+            </article>
+
+            <article class="card nested send">
+              <div class="card-head">
+                <span class="micro green">Send</span>
+                <div class="toggle on" aria-hidden="true"></div>
+              </div>
+              <div class="select">RigWerk Out</div>
+              <div class="chips">
+                <span class="chip on green">virtual source</span>
+                <span class="chip">OBS / Discord</span>
+              </div>
+              <div>
+                <div class="label">Send level · 0.0 dB</div>
+                <div class="slider green"><i></i></div>
+              </div>
+              <div class="meter"><span>Σ</span><div class="bar green"><i></i></div></div>
+            </article>
+          </div>
+        </div>
+
+        <div class="chain">
+          <span class="node">INPUT</span><span class="arrow">→</span>
+          <span class="node">BRIDGE / MIX</span><span class="arrow">⇉</span>
+          <span class="node listen">LISTEN</span>
+          <span class="node send">SEND</span>
+        </div>
+
+        <div class="platform">
+          <div class="os-card">
+            <h3>Empty send</h3>
+            <p>Dashed card, toggle off, copy: “Add a second destination for streaming or a DAW.” No second cushion UI until enabled.</p>
+          </div>
+          <div class="os-card">
+            <h3>Why this wins</h3>
+            <p>Matches the mental model from the product pitch. Harder to confuse “which device is the clock” than a buried strip.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════ C ═══════════════ -->
+      <section class="panel" id="panel-c" role="tabpanel">
+        <div class="note">
+          <strong>C — Publish first.</strong>
+          Live still has one hardware OUTPUT for listening. A banner (or Devices page twin) publishes
+          <code>RigWerk Out</code> so other apps can capture the post-mix signal. Dual hardware out is a secondary “also to…” chip — not the headline.
+        </div>
+
+        <div class="publish-banner">
+          <div>
+            <div class="title">Publish RigWerk Out</div>
+            <div class="sub">Post-mix stereo source · other apps can capture this while you listen on headphones</div>
+          </div>
+          <div class="chips">
+            <span class="chip on green">On · 48 kHz</span>
+            <span class="chip">Devices → Endpoints</span>
+          </div>
+        </div>
+
+        <div class="row-3 publish">
+          <article class="card">
+            <div class="card-head">
+              <span class="micro teal">Input</span>
+              <div class="tabs"><span class="tab on">ASIO</span><span class="tab">SYS</span></div>
+            </div>
+            <div class="select">Focusrite USB ASIO</div>
+            <div class="chips"><span class="chip on">IN 1</span><span class="chip">IN 2</span></div>
+            <div class="pair">
+              <div><div class="label">Rate</div><div class="field">48.0 kHz</div></div>
+              <div><div class="label">Buffer</div><div class="field">128 smp</div></div>
+            </div>
+            <div>
+              <div class="label">Input gain · +0.0 dB</div>
+              <div class="slider"><i></i></div>
+            </div>
+            <div class="meter"><span>L</span><div class="bar"><i></i></div></div>
+            <div class="meter"><span>R</span><div class="bar"><i style="width:20%"></i></div></div>
+          </article>
+
+          <div class="connector" aria-hidden="true"><span></span></div>
+
+          <article class="card raised">
+            <div class="card-head">
+              <span class="micro amber">Bridge</span>
+              <span class="chip warn">ring</span>
+            </div>
+            <div style="color:var(--dim);font-size:12px">Async ring · ASIO → WASAPI</div>
+            <div class="scope">
+              <svg viewBox="0 0 200 60" preserveAspectRatio="none">
+                <path d="M0 28 C30 8,50 52,80 30 S130 10,160 36 S185 50,200 24" fill="none" stroke="#70a7ff" stroke-width="1.5" opacity="0.9"/>
+              </svg>
+            </div>
+            <div class="stats">
+              <div class="stat"><div class="k">Buffer</div><div class="v">55%</div></div>
+              <div class="stat"><div class="k">Drift</div><div class="v">+12 ppm</div></div>
+              <div class="stat"><div class="k">Under</div><div class="v">0</div></div>
+            </div>
+            <div class="seg"><span class="on">Safe</span><span>Low</span><span>Manual</span></div>
+          </article>
+
+          <div class="connector blue" aria-hidden="true"><span></span></div>
+
+          <article class="card">
+            <div class="card-head">
+              <span class="micro blue">Output</span>
+              <div class="tabs"><span class="tab">ASIO</span><span class="tab on blue">WASAPI</span></div>
+            </div>
+            <div class="select">Headphones (Realtek)</div>
+            <div class="chips">
+              <span class="chip on blue">OUT 1</span>
+              <span class="chip on blue">OUT 2</span>
+              <span class="chip on blue">Low latency</span>
+            </div>
+            <div>
+              <div class="label">Level · −1.5 dB</div>
+              <div class="slider blue"><i></i></div>
+            </div>
+            <div class="meter"><span>L</span><div class="bar blue"><i></i></div></div>
+            <div class="meter"><span>R</span><div class="bar blue"><i style="width:33%"></i></div></div>
+
+            <div class="chips" style="margin-top:4px">
+              <span class="chip on green">also → RigWerk Out</span>
+              <span class="chip">also → Speakers…</span>
+            </div>
+            <div style="color:var(--dim);font-size:11.5px;line-height:1.4">
+              Publishing is global for the running bridge. “Also →” only adds hardware mirrors.
+            </div>
+          </article>
+        </div>
+
+        <div class="chain">
+          <span class="node">INPUT</span><span class="arrow">→</span>
+          <span class="node">MIX</span><span class="arrow">→</span>
+          <span class="node listen">OUTPUT · headphones</span>
+          <span class="arrow">⇢</span>
+          <span class="node send">PUBLISHED · RigWerk Out</span>
+        </div>
+
+        <div class="platform">
+          <div class="os-card">
+            <h3>Windows honesty</h3>
+            <p>Banner states driver status: <em>RigWerk Out ready</em>, or <em>Install RigWerk Virtual</em> / <em>Using VB-Cable</em>. Never imply a WASAPI device exists when it doesn’t.</p>
+          </div>
+          <div class="os-card">
+            <h3>Linux</h3>
+            <p>Banner toggles PipeWire source visibility (media.class Source/Virtual). Duplex node branch can be the publisher when both sides are in-graph.</p>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const choices = document.querySelectorAll(".choice");
+    const panels = {
+      a: document.getElementById("panel-a"),
+      b: document.getElementById("panel-b"),
+      c: document.getElementById("panel-c"),
+      d: document.getElementById("panel-d"),
+    };
+    const title = document.getElementById("page-title");
+    const sub = document.getElementById("page-sub");
+    const destMeta = {
+      listen: {
+        name: "Headphones",
+        sub: "Same right pane as Pre/Post EQ — listen destination owns the felt clock",
+        role: "Listen · clock",
+        device: "Headphones (Realtek)",
+      },
+      publish: {
+        name: "RigWerk Out",
+        sub: "Published virtual source — other apps capture the post-mix signal",
+        role: "Publish",
+        device: "RigWerk Out · virtual",
+      },
+      speakers: {
+        name: "Studio monitors",
+        sub: "Send destination — slave cushion off the listen clock",
+        role: "Send",
+        device: "Studio monitors (WASAPI)",
+      },
+      cable: {
+        name: "CABLE Input",
+        sub: "Third-party virtual cable — off until enabled",
+        role: "Send · off",
+        device: "CABLE Input (VB-Audio)",
+      },
+      group: {
+        name: "Output",
+        sub: "Master output stage — pick a destination child, or add one",
+        role: "4 destinations",
+        device: "Select a destination below Output",
+      },
+    };
+    function setDest(id) {
+      const meta = destMeta[id] || destMeta.listen;
+      document.getElementById("dest-name").textContent = meta.name;
+      document.getElementById("dest-sub").textContent = meta.sub;
+      document.getElementById("dest-role").textContent = meta.role;
+      document.getElementById("dest-device").textContent = meta.device;
+      document.querySelectorAll("[data-dest]").forEach((el) => {
+        el.setAttribute("aria-selected", String(el.dataset.dest === id));
+      });
+      const removeBtn = document.getElementById("btn-remove-output");
+      const removeHint = document.getElementById("remove-hint");
+      const locked = id === "listen" || id === "group";
+      if (removeBtn) {
+        removeBtn.disabled = locked;
+        removeBtn.textContent = locked ? "Can't remove clock" : `Remove ${meta.name}`;
+        removeBtn.title = locked
+          ? "Promote another destination to Listen first"
+          : `Remove ${meta.name} from the Output stage`;
+      }
+      if (removeHint) {
+        removeHint.textContent = locked
+          ? "The listen clock can't be removed until another destination is promoted to Listen. Sends and publish outs use row × or this button — same as Remove insert."
+          : "Same as removing an insert: row × or this button. Stops that destination only; the mix and other outs keep running.";
+      }
+    }
+    function showView(id) {
+      document.querySelectorAll("#panel-d .view-tabs button").forEach((btn) => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.view === id));
+      });
+      document.querySelectorAll("#panel-d .view").forEach((view) => {
+        view.classList.toggle("active", view.id === `view-${id}`);
+      });
+      document.querySelectorAll("#app-nav [data-nav]").forEach((btn) => {
+        if (btn.dataset.nav === id) btn.setAttribute("aria-current", "page");
+        else btn.removeAttribute("aria-current");
+      });
+      if (title && sub) {
+        if (id === "live") {
+          title.textContent = "Live Bridge";
+          sub.textContent = "Publish-simple on Live; jump to Mixer for Output detail.";
+        } else {
+          title.textContent = "Mixer";
+          sub.textContent = "Output stage → inspector, same path as EQ.";
+        }
+      }
+    }
+    function show(id) {
+      if (!panels[id]) id = "d";
+      choices.forEach((other) =>
+        other.setAttribute("aria-pressed", String(other.dataset.panel === id))
+      );
+      Object.entries(panels).forEach(([key, panel]) => {
+        panel.classList.toggle("active", key === id);
+      });
+      const url = new URL(window.location.href);
+      url.searchParams.set("v", id);
+      history.replaceState(null, "", url);
+      if (id === "d") showView("mixer");
+    }
+    choices.forEach((btn) => {
+      btn.addEventListener("click", () => show(btn.dataset.panel));
+    });
+    document.querySelectorAll("#panel-d .view-tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => showView(btn.dataset.view));
+    });
+    const addSheet = document.getElementById("add-sheet");
+    const destEditor = document.getElementById("dest-editor");
+    function openAdd() {
+      show("d");
+      showView("mixer");
+      setDest("group");
+      if (addSheet) addSheet.classList.add("open");
+      if (destEditor) destEditor.style.display = "none";
+    }
+    function closeAdd() {
+      if (addSheet) addSheet.classList.remove("open");
+      if (destEditor) destEditor.style.display = "";
+      setDest("listen");
+    }
+    document.querySelectorAll("#panel-d [data-dest]").forEach((el) => {
+      el.addEventListener("click", (event) => {
+        if (event.target.closest("[data-remove]")) return;
+        closeAdd();
+        setDest(el.dataset.dest);
+      });
+      el.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          closeAdd();
+          setDest(el.dataset.dest);
+        }
+      });
+    });
+    document.querySelectorAll("#panel-d [data-remove]").forEach((btn) => {
+      btn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (btn.getAttribute("aria-disabled") === "true") return;
+        const id = btn.dataset.remove;
+        const row = btn.closest("[data-dest]");
+        if (row) row.remove();
+        const next = document.querySelector("#panel-d .out-row[data-dest]");
+        setDest(next ? next.dataset.dest : "group");
+        const count = document.querySelectorAll("#panel-d .out-row[data-dest]").length;
+        const group = document.querySelector('#panel-d [data-dest="group"] .name');
+        if (group) group.textContent = `Output · ${count}`;
+      });
+    });
+    ["btn-add-output", "chain-add-output", "btn-add-output-insp", "live-add-output"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("click", openAdd);
+    });
+    const cancel = document.getElementById("btn-cancel-add");
+    const confirm = document.getElementById("btn-confirm-add");
+    if (cancel) cancel.addEventListener("click", closeAdd);
+    if (confirm) confirm.addEventListener("click", closeAdd);
+    const removeOutput = document.getElementById("btn-remove-output");
+    if (removeOutput) {
+      removeOutput.addEventListener("click", () => {
+        if (removeOutput.disabled) return;
+        const selected = document.querySelector("#panel-d .out-row[aria-selected='true']");
+        const rm = selected && selected.querySelector("[data-remove]");
+        if (rm) rm.click();
+      });
+    }
+    document.querySelectorAll(".add-kind").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".add-kind").forEach((other) => {
+          other.setAttribute("aria-pressed", String(other === btn));
+        });
+      });
+    });
+    show(new URLSearchParams(window.location.search).get("v") || "d");
+    const initialDest = new URLSearchParams(window.location.search).get("dest") || "speakers";
+    setDest(initialDest);
+    if (new URLSearchParams(window.location.search).get("add") === "1") openAdd();
+  </script>
+</body>
+</html>

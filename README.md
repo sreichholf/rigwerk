@@ -14,8 +14,9 @@ it is ASIO and/or WASAPI. Between them sits an async ring, a short mixer rack
   steers drift instead of forcing one device to follow the other.
 - **Mixer rack.** Pre/post EQ, VST3 + CLAP inserts, and a causal noise gate on
   the master mix.
-- **Honest stereo routing.** Left/Right into Out 1/2 — the pair the engine
-  actually plays.
+- **Two-layer routing.** Inputs onto Mix L/R, then the finished mix onto any
+  device channels, with presets; unused channels stay silent or get a mono
+  copy.
 - **Sessions.** Save the whole patch (devices, gains, routes, EQ, gate,
   plugins) and load it again.
 
@@ -57,6 +58,8 @@ RIGWERK_PAGE=live cargo run --release -- --screenshot docs/screenshots/live.png
 
 `RIGWERK_PAGE` may be `live`, `mixer`, `routing`, `devices`, `sessions`,
 `plugins`, `guide`, or `diagnostics`.
+`RIGWERK_MIXER_STAGE` selects a Mixer stage: `input`, `pre_eq`, `plugins`,
+`gate`, `post_eq`, `output`, or `device` (the clock device).
 
 ## License
 

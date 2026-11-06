@@ -16,6 +16,10 @@ use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER, CARD, CARD_RAISED, DIM, MUTED, RED, TEAL};
 use crate::ui::widgets::{card_fixed, connector, ellipsize, micro_label, mono, status_dot};
 
+/// Shared outer height for the Live Input / Bridge / Output row. Contents
+/// differ, but the frames stay level whenever this row is resized.
+pub(crate) const LIVE_TOP_CARD_H: f32 = 490.0;
+
 impl RigWerkApp {
     pub(crate) fn live_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let total = ui.available_width();
@@ -27,9 +31,9 @@ impl RigWerkApp {
         let bridge_w = usable * 0.26;
         let input_w = (usable - bridge_w) / 2.0;
         let output_w = input_w;
-        // All three cards on this line share one exact height; their contents
-        // differ, but the outer frames no longer do.
-        let card_h = 408.0;
+        // Tall enough for the Output body plus a bottom-pinned Also playing on
+        // strip; Input and Bridge share the same outer height.
+        let card_h = LIVE_TOP_CARD_H;
 
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
@@ -69,7 +73,9 @@ impl RigWerkApp {
             );
         });
 
-        ui.add_space(14.0);
+        ui.add_space(10.0);
+        self.publish_banner(ui, total);
+        ui.add_space(10.0);
         // The full mixer and EQ live on their own page; this line sums them up.
         self.chain_strip(ui, total);
         ui.add_space(14.0);
@@ -104,6 +110,81 @@ impl RigWerkApp {
 
         ui.add_space(11.0);
         self.activity_strip(ui, total);
+    }
+
+    /// Publish status for RigWerk Out: on, off, or missing.
+    pub(crate) fn publish_banner(&mut self, ui: &mut egui::Ui, width: f32) {
+        use crate::audio::VIRTUAL_OUT_NAME;
+        use crate::ui::pages::mixer::chain::ChainSelection;
+        use crate::ui::theme::GREEN;
+
+        let virtual_index = self.followers.iter().position(|f| f.virtual_out);
+        let published = virtual_index
+            .and_then(|index| self.followers.get(index))
+            .is_some_and(|f| f.publish);
+        let (fill, border, text, button) = if published {
+            (
+                with_alpha(GREEN, 14),
+                with_alpha(GREEN, 55),
+                format!("Published · {VIRTUAL_OUT_NAME} · PipeWire source"),
+                "ON",
+            )
+        } else if virtual_index.is_some() {
+            (
+                CARD,
+                BORDER,
+                format!("{VIRTUAL_OUT_NAME} is off."),
+                "Publish",
+            )
+        } else {
+            (
+                CARD,
+                BORDER,
+                "Not publishing. Other apps can't capture the mix.".to_owned(),
+                "Publish…",
+            )
+        };
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(Stroke::new(1.0, border))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_width(width - 32.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(text).size(ts(11.0)).color(MUTED));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let go = ui.add(
+                            egui::Button::new(
+                                RichText::new(button).size(ts(9.5)).color(if published {
+                                    GREEN
+                                } else {
+                                    BLUE
+                                }),
+                            )
+                            .fill(with_alpha(if published { GREEN } else { BLUE }, 14))
+                            .stroke(Stroke::new(
+                                1.0,
+                                with_alpha(if published { GREEN } else { BLUE }, 45),
+                            ))
+                            .corner_radius(CornerRadius::same(7)),
+                        );
+                        if go.clicked() {
+                            if let Some(index) = virtual_index {
+                                if let Some(follower) = self.followers.get_mut(index) {
+                                    if !follower.publish {
+                                        follower.publish = true;
+                                    }
+                                }
+                                self.chain_selected = ChainSelection::OutputDevice(index + 1);
+                            } else {
+                                self.chain_selected = ChainSelection::AddOutput;
+                            }
+                            self.page = Page::Mixer;
+                        }
+                    });
+                });
+            });
     }
 
     pub(crate) fn activity_strip(&mut self, ui: &mut egui::Ui, width: f32) {

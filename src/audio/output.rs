@@ -11,6 +11,7 @@ use super::devices::pick_output_config;
 #[cfg(target_os = "linux")]
 use super::linux::alsa::smallest_output_buffer;
 use super::mixer::OutputMixer;
+use super::output_map::DeviceFrame;
 use super::shared::Shared;
 use super::thread_priority::PromoteOnce;
 #[cfg(target_os = "windows")]
@@ -188,24 +189,12 @@ pub(crate) fn make_output_stream(
     }
 }
 
-/// Writes the processed stereo mix into an interleaved device frame.
-///
-/// Only taps 0/1 go through EQ, gate and inserts. Extra device channels get
-/// the L/R average so a 4-in interface never hears the unused route columns.
-pub(crate) fn write_frame<T: Sample + FromSample<f32>>(frame: &mut [T], out: [f32; 4]) {
-    let left = out[0];
-    let right = out[1];
-    let rest = (left + right) * 0.5;
-    match frame.len() {
-        0 => {}
-        1 => frame[0] = T::from_sample(rest),
-        _ => {
-            frame[0] = T::from_sample(left);
-            frame[1] = T::from_sample(right);
-            for sample in frame.iter_mut().skip(2) {
-                *sample = T::from_sample(rest);
-            }
-        }
+/// Copies a mapped device frame into one interleaved frame of the device
+/// buffer.  The channel map, level and mute were applied by the mixer's
+/// [`DeviceMapper`](super::output_map::DeviceMapper); this only converts.
+pub(crate) fn write_frame<T: Sample + FromSample<f32>>(frame: &mut [T], mapped: &DeviceFrame) {
+    for (channel, sample) in frame.iter_mut().enumerate() {
+        *sample = T::from_sample(mapped.sample(channel));
     }
 }
 
@@ -226,10 +215,11 @@ where
     let error_shared = Arc::clone(&shared);
     let channels = channels.max(1);
     let mut promote = PromoteOnce::default();
-    let mut mixer = OutputMixer::new(config.sample_rate);
+    let mut mixer = OutputMixer::new(config.sample_rate, channels);
     // Design the filter before the stream starts: the first callback must not
     // spend a millisecond building the kernel.
     mixer.follow_source_rate(&shared);
+    mixer.publish_device_channels(&shared);
     // cpal only knows the block size once it calls back; size the scratch for
     // the requested buffer or, with the host's default, for a generous one.
     mixer.prepare(match config.buffer_size {
@@ -249,8 +239,8 @@ where
                 mix_shared
                     .output_step_frames
                     .store(frames as u32, Ordering::Relaxed);
-                mixer.render(&mix_shared, frames, |index, out| {
-                    write_frame(&mut data[index * channels..(index + 1) * channels], out);
+                mixer.render(&mix_shared, frames, |index, mapped| {
+                    write_frame(&mut data[index * channels..(index + 1) * channels], mapped);
                 });
             },
             move |error| {
@@ -269,26 +259,44 @@ where
 
 #[cfg(test)]
 mod tests {
+    use cpal::Sample;
+
+    use super::super::output_map::{DeviceControls, DeviceMapper};
     use super::write_frame;
+
+    /// Maps one frame with the default device settings (L → 1, R → 2, mono
+    /// copy on the rest) and writes it like the cpal callback does.
+    fn written<const N: usize>(left: f32, right: f32) -> [f32; N] {
+        let controls = DeviceControls::new();
+        let mut mapper = DeviceMapper::new(N);
+        mapper.begin_block(&controls, 288.0);
+        let mut frame = [0.0f32; N];
+        write_frame(&mut frame, mapper.map(left, right));
+        frame
+    }
 
     #[test]
     fn write_frame_keeps_the_processed_stereo_pair() {
-        let mut frame = [0.0f32; 2];
-        write_frame(&mut frame, [0.5, -0.25, 0.9, -0.9]);
-        assert_eq!(frame, [0.5, -0.25]);
+        assert_eq!(written::<2>(0.5, -0.25), [0.5, -0.25]);
     }
 
     #[test]
     fn write_frame_fills_extra_channels_from_the_stereo_mix() {
-        let mut frame = [0.0f32; 4];
-        write_frame(&mut frame, [0.5, -0.25, 0.9, -0.9]);
-        assert_eq!(frame, [0.5, -0.25, 0.125, 0.125]);
+        assert_eq!(written::<4>(0.5, -0.25), [0.5, -0.25, 0.125, 0.125]);
     }
 
     #[test]
     fn write_frame_sums_mono_devices() {
-        let mut frame = [0.0f32; 1];
-        write_frame(&mut frame, [0.5, -0.25, 0.9, -0.9]);
-        assert_eq!(frame, [0.125]);
+        assert_eq!(written::<1>(0.5, -0.25), [0.125]);
+    }
+
+    #[test]
+    fn write_frame_converts_to_the_device_format() {
+        let controls = DeviceControls::new();
+        let mut mapper = DeviceMapper::new(2);
+        mapper.begin_block(&controls, 288.0);
+        let mut frame = [0i16; 2];
+        write_frame(&mut frame, mapper.map(0.5, -1.0));
+        assert_eq!(frame, [i16::from_sample(0.5f32), i16::from_sample(-1.0f32)]);
     }
 }

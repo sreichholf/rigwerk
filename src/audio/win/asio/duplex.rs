@@ -53,6 +53,9 @@ pub(crate) fn run_asio_duplex_bridge(
         return Err("The ASIO driver has no output channels".to_owned());
     }
     let input_channels = (counts.in_ as usize).min(2);
+    // At most 4 outputs for now: the device map sees this count, and more
+    // would start the mono copy on outputs 5+ of big interfaces.  Extra ASIO
+    // outputs come with step 4.
     let output_channels = (counts.out as usize).min(4);
 
     let buffer = driver
@@ -114,8 +117,9 @@ pub(crate) fn run_asio_duplex_bridge(
     let (input_buffers, output_buffers) = all_buffers.split_at(input_channels);
     silence_asio_output(output_buffers, &output_types, buffer_frames.max(1) as usize);
 
-    let mut output_state = OutputMixer::new(rate);
+    let mut output_state = OutputMixer::new(rate, output_channels);
     output_state.follow_source_rate(&shared);
+    output_state.publish_device_channels(&shared);
     output_state.prepare(buffer_frames.max(1) as usize);
     let signal = AsioSignal::new();
     let context = AsioCallbackContext::new(

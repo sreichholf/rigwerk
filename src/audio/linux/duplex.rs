@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,6 +46,7 @@ use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::mixer::OutputMixer;
+use crate::audio::output_map::{MAX_FOLLOWERS, VIRTUAL_OUT_NAME};
 use crate::audio::shared::Shared;
 use crate::audio::types::StartConfig;
 
@@ -60,6 +61,86 @@ const MAX_FRAMES: usize = 8192;
 const TICK: Duration = Duration::from_millis(50);
 /// How long a requested link may take to appear before it is asked again.
 const LINK_GRACE: Duration = Duration::from_secs(1);
+/// Input FL/FR, clock output FL/FR, then one stereo pair per follower slot.
+const INPUT_PORTS: usize = 2;
+const CLOCK_OUT: usize = 2;
+const TOTAL_PORTS: usize = INPUT_PORTS + CLOCK_OUT + MAX_FOLLOWERS * 2;
+
+/// Stereo block the duplex callback writes for RigWerk Out; the virtual
+/// source filter reads it.  Seqlock: odd `gen` means a write is in flight.
+struct PublishSlot {
+    gen: AtomicU64,
+    frames: AtomicUsize,
+    left: std::cell::UnsafeCell<[f32; MAX_FRAMES]>,
+    right: std::cell::UnsafeCell<[f32; MAX_FRAMES]>,
+}
+
+// One writer (duplex process) and one reader (virtual process); both on the
+// PipeWire data thread, coordinated by the seqlock.
+unsafe impl Sync for PublishSlot {}
+
+impl PublishSlot {
+    fn new() -> Self {
+        Self {
+            gen: AtomicU64::new(0),
+            frames: AtomicUsize::new(0),
+            left: std::cell::UnsafeCell::new([0.0; MAX_FRAMES]),
+            right: std::cell::UnsafeCell::new([0.0; MAX_FRAMES]),
+        }
+    }
+
+    fn begin_write(&self) {
+        self.gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn write_frame(&self, index: usize, left: f32, right: f32) {
+        if index >= MAX_FRAMES {
+            return;
+        }
+        // SAFETY: begin_write made `gen` odd; the reader spins until even.
+        unsafe {
+            (*self.left.get())[index] = left;
+            (*self.right.get())[index] = right;
+        }
+    }
+
+    fn end_write(&self, frames: usize) {
+        self.frames.store(frames.min(MAX_FRAMES), Ordering::Relaxed);
+        self.gen.fetch_add(1, Ordering::Release);
+    }
+
+    /// Copies up to `max` frames into `out_l`/`out_r`.  Returns how many.
+    /// Spins only briefly: an abandoned odd `gen` (writer never finished)
+    /// must not livelock the virtual source callback.
+    fn read(&self, out_l: &mut [f32], out_r: &mut [f32], max: usize) -> usize {
+        for _ in 0..64 {
+            let start = self.gen.load(Ordering::Acquire);
+            if start & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let frames = self
+                .frames
+                .load(Ordering::Relaxed)
+                .min(max)
+                .min(out_l.len())
+                .min(out_r.len());
+            // SAFETY: `gen` was even; we re-check after the copy.
+            unsafe {
+                ptr::copy_nonoverlapping(self.left.get() as *const f32, out_l.as_mut_ptr(), frames);
+                ptr::copy_nonoverlapping(
+                    self.right.get() as *const f32,
+                    out_r.as_mut_ptr(),
+                    frames,
+                );
+            }
+            if self.gen.load(Ordering::Acquire) == start {
+                return frames;
+            }
+        }
+        0
+    }
+}
 
 /// Why the duplex path did not run.  `Setup` errors happen before any audio
 /// flowed, so the caller can still open the two-stream path instead.
@@ -199,12 +280,14 @@ impl Graph {
 
     /// The links the bridge needs, as (output node, output port, input node,
     /// input port).  Empty until RigWerk's own ports and the device ports
-    /// are all known.
+    /// are all known.  `followers` is `(slot, sink node.name)` for each
+    /// hardware follower that should play; virtual slots are omitted.
     pub(crate) fn wanted_links(
         &self,
         own: u32,
         source: &str,
         sink: &str,
+        followers: &[(usize, &str)],
     ) -> Vec<(u32, u32, u32, u32)> {
         let mut wanted = Vec::new();
         if let Some(source_node) = self.node_by_name(source) {
@@ -215,15 +298,38 @@ impl Graph {
                 }
             }
         }
-        if let Some(sink_node) = self.node_by_name(sink) {
-            let to = map_ports(&self.ports_of(sink_node, false, false), false);
-            for (side, name) in ["output_FL", "output_FR"].iter().enumerate() {
-                if let (Some(out_port), Some(in_port)) = (self.own_port(own, name), to[side]) {
-                    wanted.push((own, out_port, sink_node, in_port));
-                }
+        self.link_sink(&mut wanted, own, sink, ["output_FL", "output_FR"]);
+        for &(slot, name) in followers {
+            if slot >= MAX_FOLLOWERS || name.is_empty() {
+                continue;
             }
+            let ports = [format!("follow_{slot}_FL"), format!("follow_{slot}_FR")];
+            self.link_sink(
+                &mut wanted,
+                own,
+                name,
+                [ports[0].as_str(), ports[1].as_str()],
+            );
         }
         wanted
+    }
+
+    fn link_sink(
+        &self,
+        wanted: &mut Vec<(u32, u32, u32, u32)>,
+        own: u32,
+        sink: &str,
+        port_names: [&str; 2],
+    ) {
+        let Some(sink_node) = self.node_by_name(sink) else {
+            return;
+        };
+        let to = map_ports(&self.ports_of(sink_node, false, false), false);
+        for (side, name) in port_names.iter().enumerate() {
+            if let (Some(out_port), Some(in_port)) = (self.own_port(own, name), to[side]) {
+                wanted.push((own, out_port, sink_node, in_port));
+            }
+        }
     }
 
     fn has_link(&self, output_port: u32, input_port: u32) -> bool {
@@ -295,10 +401,12 @@ impl Graph {
 struct ProcessData {
     shared: Arc<Shared>,
     mixer: OutputMixer,
-    /// `input_FL`, `input_FR`, `output_FL`, `output_FR` port handles.
-    ports: [*mut c_void; 4],
+    /// Input FL/FR, clock output FL/FR, then `follow_{i}_FL/FR`.
+    ports: [*mut c_void; TOTAL_PORTS],
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
+    /// Finished mix for the published RigWerk Out virtual source.
+    publish: Arc<PublishSlot>,
     rate: u32,
     /// The graph rate and quantum the callback last ran with, for the main
     /// loop's status text.
@@ -349,13 +457,17 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         ports,
         scratch_l,
         scratch_r,
+        publish,
         ..
     } = data;
     let shared: &Shared = shared;
     let in_l = buffer(ports[0]);
     let in_r = buffer(ports[1]);
-    let out_l = buffer(ports[2]);
-    let out_r = buffer(ports[3]);
+    // Clock + every preallocated follower pair; unlinked ports stay null.
+    let mut out_bufs = [ptr::null_mut::<f32>(); CLOCK_OUT + MAX_FOLLOWERS * 2];
+    for (slot, out) in out_bufs.iter_mut().enumerate() {
+        *out = buffer(ports[INPUT_PORTS + slot]);
+    }
 
     let has_input = !in_l.is_null() || !in_r.is_null();
     if has_input {
@@ -372,9 +484,16 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     let enabled_r = shared.input_enabled[1].load(Ordering::Relaxed);
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
+    let publish_active = (0..shared.follower_count())
+        .any(|slot| shared.follower_is_virtual(slot) && shared.follower_is_published(slot));
+    if publish_active {
+        publish.begin_write();
+    }
     // A cycle longer than the scratch runs in scratch-sized pieces, so every
-    // output sample of the cycle is written.
+    // output sample of the cycle is written.  The publish slot only keeps the
+    // first MAX_FRAMES; device ports still get the whole cycle.
     let mut offset = 0;
+    let mut published = 0usize;
     while offset < frames {
         let count = (frames - offset).min(MAX_FRAMES);
         for index in 0..count {
@@ -396,22 +515,37 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
             scratch_l[index] = left;
             scratch_r[index] = right;
         }
-        mixer.render_direct(
+        mixer.render_direct_devices(
             shared,
             &scratch_l[..count],
             &scratch_r[..count],
-            |index, sample| {
+            |device, index, mapped| {
                 let at = offset + index;
-                // SAFETY: a non-null DSP output buffer holds `frames` samples.
-                if !out_l.is_null() {
-                    unsafe { *out_l.add(at) = sample[0] };
+                let base = device * 2;
+                if base + 1 < out_bufs.len() {
+                    let out_l = out_bufs[base];
+                    let out_r = out_bufs[base + 1];
+                    // SAFETY: a non-null DSP output buffer holds `frames` samples.
+                    if !out_l.is_null() {
+                        unsafe { *out_l.add(at) = mapped.sample(0) };
+                    }
+                    if !out_r.is_null() {
+                        unsafe { *out_r.add(at) = mapped.sample(1) };
+                    }
                 }
-                if !out_r.is_null() {
-                    unsafe { *out_r.add(at) = sample[1] };
+                if publish_active && device > 0 && published + index < MAX_FRAMES {
+                    let slot = device - 1;
+                    if shared.follower_is_virtual(slot) && shared.follower_is_published(slot) {
+                        publish.write_frame(published + index, mapped.sample(0), mapped.sample(1));
+                    }
                 }
             },
         );
+        published = (published + count).min(MAX_FRAMES);
         offset += count;
+    }
+    if publish_active {
+        publish.end_write(published);
     }
     shared.in_l.store(peak_l.to_bits(), Ordering::Relaxed);
     shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
@@ -476,6 +610,7 @@ impl Filter {
         rate: u32,
         shared: Arc<Shared>,
         observed: &Observed,
+        publish: Arc<PublishSlot>,
     ) -> Result<Self, String> {
         let rate_hint = format!("1/{}", rate.max(1));
         let props = properties(&[
@@ -498,8 +633,11 @@ impl Filter {
             unsafe { pw_sys::pw_filter_new(core.as_raw_ptr(), name.as_ptr(), props.into_raw()) };
         let raw = NonNull::new(raw).ok_or_else(|| "pw_filter_new failed".to_owned())?;
 
-        let mut mixer = OutputMixer::new(rate);
+        // Clock device is stereo; followers get their own stereo port pairs.
+        let mut mixer = OutputMixer::new(rate, 2);
         mixer.prepare(MAX_FRAMES);
+        mixer.publish_device_channels(&shared);
+        mixer.publish_follower_channels(&shared);
         let mut state = Box::new(StateData {
             shared: Arc::clone(&shared),
             error: Arc::clone(&observed.error),
@@ -507,9 +645,10 @@ impl Filter {
         let mut data = Box::new(ProcessData {
             shared,
             mixer,
-            ports: [ptr::null_mut(); 4],
+            ports: [ptr::null_mut(); TOTAL_PORTS],
             scratch_l: vec![0.0; MAX_FRAMES],
             scratch_r: vec![0.0; MAX_FRAMES],
+            publish,
             // Unknown until the first cycle, which then publishes the real
             // graph rate.
             rate: 0,
@@ -539,13 +678,25 @@ impl Filter {
             Box::new(unsafe { std::mem::zeroed() }),
         ];
 
-        let names = [
-            ("input_FL", "FL", spa_sys::SPA_DIRECTION_INPUT),
-            ("input_FR", "FR", spa_sys::SPA_DIRECTION_INPUT),
-            ("output_FL", "FL", spa_sys::SPA_DIRECTION_OUTPUT),
-            ("output_FR", "FR", spa_sys::SPA_DIRECTION_OUTPUT),
+        let mut port_names: Vec<(String, &'static str, u32)> = vec![
+            ("input_FL".to_owned(), "FL", spa_sys::SPA_DIRECTION_INPUT),
+            ("input_FR".to_owned(), "FR", spa_sys::SPA_DIRECTION_INPUT),
+            ("output_FL".to_owned(), "FL", spa_sys::SPA_DIRECTION_OUTPUT),
+            ("output_FR".to_owned(), "FR", spa_sys::SPA_DIRECTION_OUTPUT),
         ];
-        for (index, (port_name, channel, direction)) in names.iter().enumerate() {
+        for slot in 0..MAX_FOLLOWERS {
+            port_names.push((
+                format!("follow_{slot}_FL"),
+                "FL",
+                spa_sys::SPA_DIRECTION_OUTPUT,
+            ));
+            port_names.push((
+                format!("follow_{slot}_FR"),
+                "FR",
+                spa_sys::SPA_DIRECTION_OUTPUT,
+            ));
+        }
+        for (index, (port_name, channel, direction)) in port_names.iter().enumerate() {
             let props = properties(&[
                 ("format.dsp", "32 bit float mono audio"),
                 ("port.name", port_name),
@@ -627,6 +778,167 @@ impl Filter {
     }
 }
 
+/// Process data for the RigWerk Out virtual source filter.
+struct VirtualProcess {
+    publish: Arc<PublishSlot>,
+    ports: [*mut c_void; 2],
+    scratch_l: Vec<f32>,
+    scratch_r: Vec<f32>,
+}
+
+unsafe extern "C" fn on_virtual_process(
+    data: *mut c_void,
+    position: *mut spa_sys::spa_io_position,
+) {
+    let data = unsafe { &mut *(data as *mut VirtualProcess) };
+    if position.is_null() {
+        return;
+    }
+    let _denormals = DenormalGuard::new();
+    let frames = unsafe { (*position).clock.duration as usize };
+    if frames == 0 {
+        return;
+    }
+    let buffer = |port: *mut c_void| unsafe {
+        pw_sys::pw_filter_get_dsp_buffer(port, frames as u32) as *mut f32
+    };
+    let out_l = buffer(data.ports[0]);
+    let out_r = buffer(data.ports[1]);
+    if data.scratch_l.len() < frames {
+        // Cap to the prepared size; a larger quantum writes silence past it.
+        let n = frames.min(MAX_FRAMES);
+        data.scratch_l.resize(n, 0.0);
+        data.scratch_r.resize(n, 0.0);
+    }
+    let want = frames.min(MAX_FRAMES);
+    let got = data.publish.read(
+        &mut data.scratch_l[..want],
+        &mut data.scratch_r[..want],
+        want,
+    );
+    for index in 0..frames {
+        let (left, right) = if index < got {
+            (data.scratch_l[index], data.scratch_r[index])
+        } else {
+            (0.0, 0.0)
+        };
+        if !out_l.is_null() {
+            unsafe { *out_l.add(index) = left };
+        }
+        if !out_r.is_null() {
+            unsafe { *out_r.add(index) = right };
+        }
+    }
+}
+
+/// RigWerk Out: a virtual source other apps can capture.  Created and
+/// destroyed live when publish is toggled.
+struct VirtualSource {
+    raw: NonNull<pw_sys::pw_filter>,
+    _hooks: Box<spa_sys::spa_hook>,
+    _events: Box<pw_sys::pw_filter_events>,
+    _data: Box<VirtualProcess>,
+}
+
+impl Drop for VirtualSource {
+    fn drop(&mut self) {
+        unsafe { pw_sys::pw_filter_destroy(self.raw.as_ptr()) };
+    }
+}
+
+impl VirtualSource {
+    fn new(core: &pw::core::CoreRc, publish: Arc<PublishSlot>) -> Result<Self, String> {
+        let props = properties(&[
+            ("media.type", "Audio"),
+            ("media.class", "Audio/Source/Virtual"),
+            ("media.role", "DSP"),
+            ("node.name", VIRTUAL_OUT_NAME),
+            ("node.description", VIRTUAL_OUT_NAME),
+            ("node.virtual", "true"),
+            ("node.autoconnect", "false"),
+        ]);
+        let name = CString::new(VIRTUAL_OUT_NAME).expect("node name has no NUL");
+        let raw =
+            unsafe { pw_sys::pw_filter_new(core.as_raw_ptr(), name.as_ptr(), props.into_raw()) };
+        let raw =
+            NonNull::new(raw).ok_or_else(|| "pw_filter_new (RigWerk Out) failed".to_owned())?;
+        let mut data = Box::new(VirtualProcess {
+            publish,
+            ports: [ptr::null_mut(); 2],
+            scratch_l: vec![0.0; MAX_FRAMES],
+            scratch_r: vec![0.0; MAX_FRAMES],
+        });
+        for (index, (port_name, channel)) in [("capture_FL", "FL"), ("capture_FR", "FR")]
+            .iter()
+            .enumerate()
+        {
+            let props = properties(&[
+                ("format.dsp", "32 bit float mono audio"),
+                ("port.name", port_name),
+                ("audio.channel", channel),
+            ]);
+            let port = unsafe {
+                pw_sys::pw_filter_add_port(
+                    raw.as_ptr(),
+                    spa_sys::SPA_DIRECTION_OUTPUT,
+                    pw_sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+                    std::mem::size_of::<u64>(),
+                    props.into_raw(),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            if port.is_null() {
+                unsafe { pw_sys::pw_filter_destroy(raw.as_ptr()) };
+                return Err(format!("could not add RigWerk Out port {port_name}"));
+            }
+            data.ports[index] = port;
+        }
+        let mut events = Box::new(pw_sys::pw_filter_events {
+            version: pw_sys::PW_VERSION_FILTER_EVENTS,
+            destroy: None,
+            state_changed: None,
+            io_changed: None,
+            param_changed: None,
+            add_buffer: None,
+            remove_buffer: None,
+            process: Some(on_virtual_process as _),
+            drained: None,
+            command: None,
+        });
+        let mut hook: Box<spa_sys::spa_hook> = Box::new(unsafe { std::mem::zeroed() });
+        unsafe {
+            pw_sys::pw_filter_add_listener(
+                raw.as_ptr(),
+                hook.as_mut(),
+                events.as_mut(),
+                data.as_mut() as *mut VirtualProcess as *mut c_void,
+            );
+        }
+        let filter = Self {
+            raw,
+            _hooks: hook,
+            _events: events,
+            _data: data,
+        };
+        let result = unsafe {
+            pw_sys::pw_filter_connect(
+                filter.raw.as_ptr(),
+                pw_sys::pw_filter_flags_PW_FILTER_FLAG_RT_PROCESS,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(format!(
+                "pw_filter_connect (RigWerk Out) failed: {}",
+                std::io::Error::from_raw_os_error(-result)
+            ));
+        }
+        Ok(filter)
+    }
+}
+
 /// A link RigWerk asked `link-factory` for.  Dropping the proxy before the
 /// link appears abandons it; once it exists it lives as long as this client.
 struct MadeLink {
@@ -696,8 +1008,18 @@ pub(crate) fn run(
         quantum: Arc::new(AtomicU64::new(frames as u64)),
         error: Arc::new(AtomicBool::new(false)),
     };
-    let filter =
-        Rc::new(Filter::new(&core, &latency, rate, Arc::clone(&shared), &observed).map_err(setup)?);
+    let publish = Arc::new(PublishSlot::new());
+    let filter = Rc::new(
+        Filter::new(
+            &core,
+            &latency,
+            rate,
+            Arc::clone(&shared),
+            &observed,
+            Arc::clone(&publish),
+        )
+        .map_err(setup)?,
+    );
     // Only now: a fallback must not start from this path's rates.  The
     // callback publishes the real graph rate on its first cycle, and the
     // timer below re-publishes it, so this guess cannot stick.
@@ -728,12 +1050,15 @@ pub(crate) fn run(
     let made: Rc<RefCell<HashMap<(u32, u32), MadeLink>>> = Rc::default();
     let shown = std::cell::Cell::new((rate, frames as u64));
     let filter_ref = Rc::clone(&filter);
+    let virtual_out: Rc<RefCell<Option<VirtualSource>>> = Rc::default();
 
     let stop_flag = Arc::clone(&stop);
     let loop_quit = mainloop.clone();
     let tick_graph = Rc::clone(&graph);
     let tick_made = Rc::clone(&made);
     let tick_core = core.clone();
+    let tick_virtual = Rc::clone(&virtual_out);
+    let tick_publish = Arc::clone(&publish);
     let seen_rate = Arc::clone(&observed.rate);
     let seen_quantum = Arc::clone(&observed.quantum);
     let error = Arc::clone(&observed.error);
@@ -752,17 +1077,49 @@ pub(crate) fn run(
             shared.note_direct_rate(rate);
             shared.set_output(rate, quantum as u32, mode(rate, quantum));
         }
+        // Create or drop RigWerk Out when publish is toggled live.
+        let want_publish = (0..shared.follower_count())
+            .any(|slot| shared.follower_is_virtual(slot) && shared.follower_is_published(slot));
+        let mut virtual_slot = tick_virtual.borrow_mut();
+        match (want_publish, virtual_slot.is_some()) {
+            (true, false) => match VirtualSource::new(&tick_core, Arc::clone(&tick_publish)) {
+                Ok(source) => *virtual_slot = Some(source),
+                Err(message) => shared.set_status(format!("RigWerk Out: {message}")),
+            },
+            (false, true) => *virtual_slot = None,
+            _ => {}
+        }
+        drop(virtual_slot);
         let Some(own) = filter_ref.node_id() else {
             return;
         };
         let mut graph = tick_graph.borrow_mut();
         let mut made = tick_made.borrow_mut();
+        // Follower add/remove is live: rebuild links whenever the plan moves.
+        let plan = shared.follower_plan();
+        let follower_sinks: Vec<(usize, &str)> = plan
+            .slots
+            .iter()
+            .take(plan.count)
+            .enumerate()
+            .filter(|(_, slot)| !slot.virtual_out && !slot.node_name.is_empty())
+            .map(|(index, slot)| (index, slot.node_name.as_str()))
+            .collect();
         // Nothing changed and no link is still waiting to appear.
         if !graph.dirty && made.values().all(|link| link.seen) {
-            return;
+            // Still re-check when the follower list may have changed: compare
+            // against what we would want now.
+            let wanted = graph.wanted_links(own, &source, &sink, &follower_sinks);
+            let wanted_ports: HashSet<(u32, u32)> =
+                wanted.iter().map(|link| (link.1, link.3)).collect();
+            if made.len() == wanted_ports.len()
+                && made.keys().all(|ports| wanted_ports.contains(ports))
+            {
+                return;
+            }
         }
         graph.dirty = false;
-        let wanted = graph.wanted_links(own, &source, &sink);
+        let wanted = graph.wanted_links(own, &source, &sink, &follower_sinks);
         let wanted_ports: HashSet<(u32, u32)> =
             wanted.iter().map(|link| (link.1, link.3)).collect();
         // Links that are no longer wanted (a device came back with other
@@ -830,8 +1187,9 @@ pub(crate) fn run(
     }
     mainloop.run();
     drop(timer);
-    // Links first, then the node, then the connection.
+    // Links first, then the virtual source, then the node.
     made.borrow_mut().clear();
+    virtual_out.borrow_mut().take();
     drop(filter);
     Ok(())
 }
@@ -931,7 +1289,7 @@ mod tests {
         add_port(&mut graph, 12, 1, false, "input_FL", false);
         add_port(&mut graph, 13, 1, false, "input_FR", false);
         assert_eq!(
-            graph.wanted_links(3, "vsrc", "speakers"),
+            graph.wanted_links(3, "vsrc", "speakers", &[]),
             vec![
                 (1, 10, 3, 30),
                 (1, 11, 3, 31),
@@ -949,7 +1307,7 @@ mod tests {
         add_port(&mut graph, 41, 4, true, "monitor_FL", true);
         add_port(&mut graph, 42, 4, true, "monitor_FR", true);
         assert_eq!(
-            graph.wanted_links(3, "other_sink", "speakers"),
+            graph.wanted_links(3, "other_sink", "speakers", &[]),
             vec![(3, 32, 2, 20), (3, 33, 2, 21)]
         );
         // Plain outputs win over monitor outputs on a source.
@@ -958,7 +1316,7 @@ mod tests {
         add_port(&mut graph, 51, 5, true, "capture_FL", false);
         add_port(&mut graph, 52, 5, true, "capture_FR", false);
         assert_eq!(
-            graph.wanted_links(3, "mixed", "speakers")[..2],
+            graph.wanted_links(3, "mixed", "speakers", &[])[..2],
             [(5, 51, 3, 30), (5, 52, 3, 31)]
         );
     }
@@ -1006,7 +1364,7 @@ mod tests {
         port(&mut graph, 33, 3, "out", "FR", "output_FR", false);
         assert!(graph.dirty);
         assert_eq!(
-            graph.wanted_links(3, "gp5", "speakers"),
+            graph.wanted_links(3, "gp5", "speakers", &[]),
             vec![
                 (1, 10, 3, 30),
                 (1, 11, 3, 31),
@@ -1028,9 +1386,27 @@ mod tests {
         graph.remove_global(11);
         assert!(graph.dirty);
         assert_eq!(
-            graph.wanted_links(3, "gp5", "speakers"),
+            graph.wanted_links(3, "gp5", "speakers", &[]),
             vec![(3, 32, 2, 20), (3, 33, 2, 21)]
         );
+    }
+
+    #[test]
+    fn follower_sinks_link_from_preallocated_port_pairs() {
+        let mut graph = rigwerk_and_sink();
+        add_port(&mut graph, 34, 3, true, "follow_0_FL", false);
+        add_port(&mut graph, 35, 3, true, "follow_0_FR", false);
+        add_node(&mut graph, 6, "phones", "Audio/Sink");
+        add_port(&mut graph, 60, 6, false, "playback_FL", false);
+        add_port(&mut graph, 61, 6, false, "playback_FR", false);
+        let links = graph.wanted_links(3, "missing", "speakers", &[(0, "phones")]);
+        assert!(links.contains(&(3, 32, 2, 20)));
+        assert!(links.contains(&(3, 33, 2, 21)));
+        assert!(links.contains(&(3, 34, 6, 60)));
+        assert!(links.contains(&(3, 35, 6, 61)));
+        // A missing follower stays in the session: no link, bridge keeps going.
+        let only_clock = graph.wanted_links(3, "missing", "speakers", &[(0, "gone")]);
+        assert_eq!(only_clock, vec![(3, 32, 2, 20), (3, 33, 2, 21)]);
     }
 
     /// Runs the real bridge entry point against a live PipeWire daemon.
