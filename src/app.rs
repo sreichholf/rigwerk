@@ -594,12 +594,16 @@ impl RigWerkApp {
             eqs: [preferences.eq.sanitized(), preferences.eq_post.sanitized()],
             gate: preferences.gate.sanitized(),
             clock_device: preferences.clock_device.sanitized(),
-            followers: preferences
-                .followers
-                .iter()
-                .cloned()
-                .map(FollowerPref::sanitized)
-                .collect(),
+            followers: {
+                let mut followers: Vec<_> = preferences
+                    .followers
+                    .iter()
+                    .cloned()
+                    .map(FollowerPref::sanitized)
+                    .collect();
+                followers.truncate(crate::audio::MAX_FOLLOWERS);
+                followers
+            },
             eq_edit: if preferences.eq_edit == 1 {
                 EqSlot::Post
             } else {

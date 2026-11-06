@@ -85,7 +85,7 @@ pub(crate) use linux::native::{is_native_id, node_latency_frames};
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
 pub use output_map::{
     ChannelMap, MapPreset, MixSide, OutputDeviceSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB,
-    DEVICE_LEVEL_MIN_DB, MAX_OUTPUT_CHANNELS,
+    DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 #[cfg(target_os = "windows")]
 pub(crate) use plugins::service_clap;

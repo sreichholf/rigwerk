@@ -5,7 +5,10 @@ use serde::de::{Deserializer, IgnoredAny};
 use serde::Deserialize;
 
 use super::Page;
-use crate::audio::{CushionMode, EqSettings, GateSettings, OutputDeviceSettings, PluginPref};
+use crate::audio::{
+    CushionMode, EqSettings, GateSettings, OutputDeviceSettings, PluginPref, MAX_FOLLOWERS,
+    VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+};
 
 /// The layout version written with the preferences.  Saves from before the
 /// version existed read as 0.  Raise it, and migrate in
@@ -153,20 +156,27 @@ pub(crate) fn cushion_to_pref(mode: CushionMode) -> u8 {
     }
 }
 
-/// An extra output device that plays the finished mix on its own clock.
-/// Stored only; nothing plays followers yet.
+/// An extra output device that plays the finished mix.  On PipeWire it is a
+/// sink linked from the duplex/native node; [`Self::virtual_out`] is the
+/// RigWerk Out source other apps capture.  It is never the clock device.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct FollowerPref {
     /// [`crate::audio::DeviceItem::id`] and its backend; the name is only the
-    /// display fallback.
+    /// display fallback.  Virtual out uses [`VIRTUAL_OUT_ID`].
     pub(crate) id: String,
     pub(crate) backend: String,
     pub(crate) name: String,
     pub(crate) settings: OutputDeviceSettings,
     /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
+    /// Unused on PipeWire followers (the graph keeps them in step).
     pub(crate) cushion_mode: u8,
     pub(crate) cushion_ms: f32,
+    /// RigWerk Out: a virtual source endpoint, not a device picker.
+    pub(crate) virtual_out: bool,
+    /// Whether the virtual source is advertised.  Ignored for hardware
+    /// followers.  Missing on old saves → off.
+    pub(crate) publish: bool,
 }
 
 impl Default for FollowerPref {
@@ -178,20 +188,56 @@ impl Default for FollowerPref {
             settings: OutputDeviceSettings::default(),
             cushion_mode: 0,
             cushion_ms: DEFAULT_CUSHION_MS,
+            virtual_out: false,
+            publish: false,
         }
     }
 }
 
 impl FollowerPref {
+    /// A new RigWerk Out follower, published on.
+    pub(crate) fn virtual_out() -> Self {
+        Self {
+            id: VIRTUAL_OUT_ID.to_owned(),
+            backend: "PipeWire".to_owned(),
+            name: VIRTUAL_OUT_NAME.to_owned(),
+            settings: OutputDeviceSettings::default(),
+            cushion_mode: 1,
+            cushion_ms: DEFAULT_CUSHION_MS,
+            virtual_out: true,
+            publish: true,
+        }
+    }
+
     pub(crate) fn sanitized(mut self) -> Self {
         self.settings = self.settings.sanitized();
         self.cushion_ms = finite_cushion(self.cushion_ms);
+        if self.virtual_out {
+            self.id = VIRTUAL_OUT_ID.to_owned();
+            if self.name.trim().is_empty() {
+                self.name = VIRTUAL_OUT_NAME.to_owned();
+            }
+            if self.backend.trim().is_empty() {
+                self.backend = "PipeWire".to_owned();
+            }
+        }
         self
     }
 }
 
-fn sanitize_followers(followers: &mut [FollowerPref]) {
-    for follower in followers {
+fn sanitize_followers(followers: &mut Vec<FollowerPref>) {
+    let mut seen_virtual = false;
+    followers.retain(|follower| {
+        if follower.virtual_out {
+            if seen_virtual {
+                return false;
+            }
+            seen_virtual = true;
+        }
+        true
+    });
+    followers.truncate(MAX_FOLLOWERS);
+    for follower in followers.iter_mut() {
         *follower = follower.clone().sanitized();
     }
 }
@@ -1243,18 +1289,15 @@ mod tests {
                 },
                 cushion_mode: 2,
                 cushion_ms: 20.0,
+                ..FollowerPref::default()
             },
             FollowerPref {
-                id: "pw:rigwerk-out".to_owned(),
-                backend: "PipeWire".to_owned(),
-                name: "RigWerk Out".to_owned(),
                 settings: OutputDeviceSettings {
                     mute: true,
                     map: ChannelMap { left: 1, right: 1 },
                     ..OutputDeviceSettings::default()
                 },
-                cushion_mode: 1,
-                cushion_ms: DEFAULT_CUSHION_MS,
+                ..FollowerPref::virtual_out()
             },
         ];
         (clock, followers)
@@ -1371,5 +1414,63 @@ mod tests {
         assert!(loaded.preferences.is_none());
         assert!(loaded.backup.is_none());
         assert!(loaded.notices.is_empty());
+    }
+
+    #[test]
+    fn old_followers_without_publish_default_off() {
+        let raw = r#"(followers:[(id:"hw:A",name:"A")])"#;
+        let loaded = load_preferences(Some(raw), BACKUP);
+        let preferences = loaded.preferences.expect("readable");
+        assert_eq!(preferences.followers.len(), 1);
+        assert!(!preferences.followers[0].virtual_out);
+        assert!(!preferences.followers[0].publish);
+    }
+
+    #[test]
+    fn virtual_out_and_publish_round_trip() {
+        let preferences = Preferences {
+            followers: vec![FollowerPref::virtual_out()],
+            ..Preferences::default()
+        };
+        let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+        let back = loaded.preferences.expect("readable");
+        assert_eq!(back.followers.len(), 1);
+        assert!(back.followers[0].virtual_out);
+        assert!(back.followers[0].publish);
+        assert_eq!(back.followers[0].id, VIRTUAL_OUT_ID);
+        assert_eq!(back.followers[0].name, VIRTUAL_OUT_NAME);
+    }
+
+    #[test]
+    fn followers_past_the_cap_are_dropped() {
+        let entries: String = (0..=MAX_FOLLOWERS)
+            .map(|index| format!(r#"(id:"hw:{index}",name:"D{index}")"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let raw = format!("(followers:[{entries}])");
+        let loaded = load_preferences(Some(&raw), BACKUP);
+        let preferences = loaded.preferences.expect("readable");
+        assert_eq!(preferences.followers.len(), MAX_FOLLOWERS);
+        assert_eq!(preferences.followers[0].id, "hw:0");
+        assert_eq!(
+            preferences.followers[MAX_FOLLOWERS - 1].id,
+            format!("hw:{}", MAX_FOLLOWERS - 1)
+        );
+    }
+
+    #[test]
+    fn a_second_virtual_out_is_dropped() {
+        let raw = r#"(followers:[
+            (id:"hw:A",name:"A"),
+            (virtual_out:true,publish:true),
+            (virtual_out:true,publish:false,name:"Other"),
+        ])"#;
+        let loaded = load_preferences(Some(raw), BACKUP);
+        let preferences = loaded.preferences.expect("readable");
+        assert_eq!(preferences.followers.len(), 2);
+        assert!(!preferences.followers[0].virtual_out);
+        assert!(preferences.followers[1].virtual_out);
+        assert!(preferences.followers[1].publish);
+        assert_eq!(preferences.followers[1].id, VIRTUAL_OUT_ID);
     }
 }
