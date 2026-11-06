@@ -17,7 +17,7 @@ use crate::ui::theme::{
 };
 use crate::ui::widgets::{
     card, ellipsize, ghost_button, horizontal_line, micro_label, mono, row_info, show_focus_ring,
-    status_dot, styled_slider, visible_remaining_height,
+    status_dot, styled_slider,
 };
 
 fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -> bool {
@@ -661,10 +661,9 @@ impl RigWerkApp {
         let mut add_index: Option<usize> = None;
         let mut add_path = false;
         let mut open_mixer = false;
-        // Cap at the visible viewport; shrink to the library + footer so a short
-        // list does not leave a tall empty scroll region (outer page ScrollArea
-        // makes available_height unbounded).
-        let max_card_h = (visible_remaining_height(ui) - 8.0).max(360.0);
+        // Cap at the remaining panel height (this page is not inside the page
+        // ScrollArea); shrink to the library + footer for a short list.
+        let max_card_h = (ui.available_height() - 8.0).max(360.0);
         // Header blurb + hairlines ≈ this much above the scroll; keep Add path out of it.
         const LIBRARY_CHROME_H: f32 = 78.0;
         const ADD_PATH_H: f32 = 72.0;

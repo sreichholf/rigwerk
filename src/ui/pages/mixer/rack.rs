@@ -21,7 +21,6 @@ use crate::ui::theme::{
 };
 use crate::ui::widgets::{
     arrow_button, db_slider, hinted_tab, meter_row, micro_label, mono, styled_slider,
-    visible_remaining_height,
 };
 
 const ROW_H: f32 = 58.0;
@@ -50,9 +49,6 @@ impl RigWerkApp {
         let mut actions: Vec<RackAction> = Vec::new();
         let mut select: Option<ChainSelection> = None;
         let total = ui.available_width();
-        // Fill the visible viewport only — available_height inside the outer
-        // page ScrollArea is unbounded and was forcing a tall empty scrollbar.
-        let height = (visible_remaining_height(ui) - 8.0).max(360.0);
         let chain_w = (total * 0.32).clamp(280.0, 340.0);
 
         ui.horizontal(|ui| {
@@ -91,14 +87,16 @@ impl RigWerkApp {
         });
         ui.add_space(8.0);
 
+        // The Mixer is not inside the page ScrollArea, so this is the real
+        // remaining height of the central panel (measured below the header
+        // row; the 2 px leave room for the frame stroke).
+        let height = (ui.available_height() - 2.0).max(360.0);
+
         egui::Frame::new()
             .fill(CARD)
             .stroke(Stroke::new(1.0, BORDER))
             .corner_radius(CornerRadius::same(14))
             .show(ui, |ui| {
-                // Lock height: inside the outer page ScrollArea, available_height is
-                // unbounded. horizontal_top would allocate that infinity and the
-                // inspector ScrollArea would grow without a real content cap.
                 ui.set_height(height);
                 let inspector_w = (total - chain_w - 4.0).max(320.0);
                 ui.allocate_ui_with_layout(
@@ -410,8 +408,10 @@ impl RigWerkApp {
         let body_w = (ui.available_width() - PANE_PAD_X * 2.0).max(200.0);
         ui.horizontal(|ui| {
             ui.add_space(PANE_PAD_X);
+            // Give the scroll area the full pane height to work with; a 0 px
+            // allocation clamps it to egui's 64 px minimum scroll height.
             ui.allocate_ui_with_layout(
-                Vec2::new(body_w, 0.0),
+                Vec2::new(body_w, max_body_h),
                 Layout::top_down(Align::LEFT),
                 |ui| {
                     ui.set_width(body_w);
