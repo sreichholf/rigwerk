@@ -2,8 +2,8 @@
 //!
 //! The device list is the Mixer's (`output_device_rows`), in the same order.
 //! The page keeps its own selected device (`routing_device`); "Open in
-//! Mixer" selects that device there. Only the clock device is listed for
-//! now; followers join in steps 2 and 3.
+//! Mixer" selects that device there. Followers and RigWerk Out appear when
+//! they are in the session.
 
 use eframe::egui;
 use egui::{
@@ -20,7 +20,7 @@ use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::pages::mixer::output_devices::{block, device_state, OutputDeviceRow};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, DIM, MUTED, TEAL, TEXT,
+    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
     card, clock_tag, fit_text, horizontal_line, micro_label, mono, paint_tag, row_info,
@@ -297,7 +297,7 @@ pub(crate) fn device_summary_row(
     let state_color = if summary.silent && state == EngineState::Running {
         AMBER
     } else {
-        device_state(state).1
+        device_state(row, state).1
     };
     let dot = egui::pos2(rect.left() + 14.0, rect.top() + 15.0);
     ui.painter()
@@ -306,11 +306,14 @@ pub(crate) fn device_summary_row(
 
     let text_x = rect.left() + 28.0;
     let text_right = rect.right() - 10.0;
-    let tag_w = if row.clock {
-        tag_width(ui, "CLOCK") + 6.0
+    let (tag, tag_color) = if row.clock {
+        (Some("CLOCK"), BLUE)
+    } else if row.virtual_out {
+        (Some("VIRTUAL"), GREEN)
     } else {
-        0.0
+        (None, BLUE)
     };
+    let tag_w = tag.map_or(0.0, |text| tag_width(ui, text) + 6.0);
     let name = fit_text(
         ui,
         &row.name,
@@ -322,12 +325,12 @@ pub(crate) fn device_summary_row(
     let name_top = rect.top() + 15.0 - name_size.y * 0.5;
     ui.painter()
         .galley(egui::pos2(text_x, name_top), name_galley, TEXT);
-    if row.clock {
+    if let Some(text) = tag {
         paint_tag(
             ui,
             egui::pos2(text_x + name_size.x + 6.0, rect.top() + 15.0),
-            "CLOCK",
-            BLUE,
+            text,
+            tag_color,
         );
     }
     let detail = fit_text(
@@ -391,10 +394,15 @@ fn nothing_routed_banner(ui: &mut egui::Ui, device: &str) {
 }
 
 impl RigWerkApp {
-    /// The stored settings of output device `index`; only the clock device
-    /// (0) has any until followers play.
+    /// The stored settings of output device `index` (0 = clock, then followers).
     fn output_settings_mut(&mut self, index: usize) -> Option<&mut OutputDeviceSettings> {
-        (index == 0).then_some(&mut self.clock_device)
+        if index == 0 {
+            Some(&mut self.clock_device)
+        } else {
+            self.followers
+                .get_mut(index - 1)
+                .map(|follower| &mut follower.settings)
+        }
     }
 
     pub(crate) fn apply_routing_action(&mut self, action: RoutingAction) {
@@ -464,15 +472,21 @@ impl RigWerkApp {
         actions: &mut Vec<RoutingAction>,
     ) {
         let state = self.engine.state;
+        let playing: usize = rows
+            .iter()
+            .map(|row| row.settings.playing_channels(row.channels))
+            .sum();
+        // Title and count on separate lines: the list column is only
+        // ~240–300 px, so a single row overlaps "MIX -> OUTPUTS".
         ui.horizontal(|ui| {
             layer_badge(ui, 2, BLUE);
             ui.label(micro_label("MIX -> OUTPUTS", BLUE));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let count = rows.len();
-                let word = if count == 1 { "DEVICE" } else { "DEVICES" };
-                ui.label(mono(format!("{count} {word}"), DIM, 9.5));
-            });
         });
+        ui.label(mono(
+            super::patch_count_label(rows.len(), playing),
+            DIM,
+            9.5,
+        ));
         ui.add_space(6.0);
         // Followers join this list in steps 2 and 3 (see `output_device_rows`).
         for (index, row) in rows.iter().enumerate() {
@@ -511,6 +525,8 @@ impl RigWerkApp {
             let title_font = FontId::new(ts(16.0), FontFamily::Proportional);
             let tag_w = if row.clock {
                 tag_width(ui, "CLOCK") + ui.spacing().item_spacing.x
+            } else if row.virtual_out {
+                tag_width(ui, "VIRTUAL") + ui.spacing().item_spacing.x
             } else {
                 0.0
             };
@@ -524,6 +540,8 @@ impl RigWerkApp {
                 .on_hover_text(&row.name);
             if row.clock {
                 clock_tag(ui);
+            } else if row.virtual_out {
+                crate::ui::widgets::virtual_tag(ui);
             }
         });
         ui.label(mono(
@@ -594,13 +612,19 @@ impl RigWerkApp {
                     );
                     for channel in 0..channels {
                         let (left, right) = settings.map.sides_at(channels, channel);
-                        channel_meter(
-                            ui,
-                            left || right,
-                            settings.unused,
-                            self.meter_out_channels[channel],
-                            self.peak_out_channels[channel],
-                        );
+                        let (level, peak) = if index == 0 {
+                            (
+                                self.meter_out_channels[channel],
+                                self.peak_out_channels[channel],
+                            )
+                        } else if let Some(meters) = self.snapshot.follower_channels.get(index - 1)
+                        {
+                            let level = meters[channel].abs();
+                            (level, level)
+                        } else {
+                            (0.0, 0.0)
+                        };
+                        channel_meter(ui, left || right, settings.unused, level, peak);
                     }
                 });
             });
@@ -834,6 +858,10 @@ mod tests {
     #[test]
     fn a_device_row_reads_its_map() {
         let row = OutputDeviceRow {
+            virtual_out: false,
+            follower_index: None,
+            missing: false,
+            publish: false,
             name: "Scarlett 4i4".to_owned(),
             backend: "PipeWire".to_owned(),
             channels: 4,

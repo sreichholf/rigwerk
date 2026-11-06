@@ -5,7 +5,7 @@
 //! 2. Mix -> outputs: which device channels play the finished mix, per
 //!    output device ([`outputs`]).
 //!
-//! Plus the Mix card (channel mode, monitoring) and the active patch strip.
+//! Plus the Mix card (channel mode and monitoring).
 
 mod outputs;
 
@@ -20,11 +20,9 @@ use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    card, ellipsize, horizontal_line, micro_label, mono, row_info, show_focus_ring, status_dot,
-    tab_button_sized,
+    card, card_fixed, ellipsize, horizontal_line, micro_label, mono, row_info, show_focus_ring,
+    status_dot, tab_button_sized,
 };
-
-use outputs::RoutingAction;
 
 /// Side-by-side columns need 520 + 280 plus the gap. Below this available
 /// width the Mix card is clipped, so the two cards stack instead.
@@ -40,6 +38,23 @@ pub(crate) const CELL: Vec2 = Vec2::new(58.0, 48.0);
 
 /// Width of a matrix row header (plus the gap before the first cell).
 pub(crate) const ROW_HEADER_W: f32 = 142.0;
+
+/// Shared outer height for Input → Mix and Mix when they sit on one row.
+pub(crate) fn routing_top_row_height(inputs: usize) -> f32 {
+    let rows = inputs.max(1) as f32;
+    // 15 px inset each side, then the taller Input → Mix body.
+    let body = 22.0 // header
+        + 16.0 // subtitle
+        + 10.0
+        + 24.0 // MIX L / MIX R headers
+        + 2.0
+        + rows * (CELL.y + 5.0)
+        + 8.0
+        + 1.0 // hairline
+        + 8.0
+        + 52.0; // tip
+    (body + 30.0).max(300.0)
+}
 
 pub(crate) fn routing_columns_stack(available_width: f32) -> bool {
     available_width < ROUTING_STACK_BELOW
@@ -75,7 +90,7 @@ pub(crate) fn input_channel_caption(backend: &str, name: &str) -> String {
     }
 }
 
-/// "ACTIVE PATCH" header count. Playing channels are those a mix side
+/// Mix → Outputs header count. Playing channels are those a mix side
 /// reaches plus unreached ones under Mono copy, which carry the average
 /// (see `OutputDeviceSettings::playing_channels`).
 pub(crate) fn patch_count_label(devices: usize, channels: usize) -> String {
@@ -234,26 +249,40 @@ impl RigWerkApp {
     pub(crate) fn routing_page(&mut self, ui: &mut egui::Ui) {
         let total = ui.available_width();
         if routing_columns_stack(total) {
-            self.routing_input_card(ui, total);
-            self.routing_mix_card(ui, total);
+            card(ui, CARD, BORDER, |ui| {
+                ui.set_width(total - 32.0);
+                self.routing_input_body(ui);
+            });
+            card(ui, CARD, BORDER, |ui| {
+                ui.set_width(total - 32.0);
+                self.routing_mix_body(ui);
+            });
         } else {
             let left_w = (total * 0.66).clamp(520.0, (total - 288.0).max(520.0));
             let right_w = (total - left_w - 8.0).max(280.0);
+            // Same outer height on both cards so the row stays level.
+            let row_h = routing_top_row_height(self.routes.len());
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(
-                    Vec2::new(left_w, 300.0),
+                    Vec2::new(left_w, row_h),
                     Layout::top_down(Align::LEFT),
                     |ui| {
-                        ui.set_min_size(Vec2::new(left_w, 300.0));
-                        self.routing_input_card(ui, left_w);
+                        ui.set_min_size(Vec2::new(left_w, row_h));
+                        card_fixed(ui, CARD, BORDER, row_h, |ui| {
+                            ui.set_width(left_w - 32.0);
+                            self.routing_input_body(ui);
+                        });
                     },
                 );
                 ui.allocate_ui_with_layout(
-                    Vec2::new(right_w, 300.0),
+                    Vec2::new(right_w, row_h),
                     Layout::top_down(Align::LEFT),
                     |ui| {
-                        ui.set_min_size(Vec2::new(right_w, 300.0));
-                        self.routing_mix_card(ui, right_w);
+                        ui.set_min_size(Vec2::new(right_w, row_h));
+                        card_fixed(ui, CARD, BORDER, row_h, |ui| {
+                            ui.set_width(right_w - 32.0);
+                            self.routing_mix_body(ui);
+                        });
                     },
                 );
             });
@@ -261,188 +290,134 @@ impl RigWerkApp {
 
         let mut actions = Vec::new();
         self.routing_outputs_card(ui, total, &mut actions);
-        self.routing_patch_card(ui, total, &mut actions);
         for action in actions {
             self.apply_routing_action(action);
         }
     }
 
     /// Layer ①: input channels onto Mix L / Mix R.
-    fn routing_input_card(&mut self, ui: &mut egui::Ui, width: f32) {
+    fn routing_input_body(&mut self, ui: &mut egui::Ui) {
         let input = self.active_input();
         let input_caption = input_channel_caption(&input.backend, &input.name);
         let subtitle = format!("{input_caption} -> the mix bus the chain processes");
         let input_count = self.routes.len();
 
-        card(ui, CARD, BORDER, |ui| {
-            ui.set_width(width - 32.0);
-            ui.horizontal(|ui| {
-                layer_badge(ui, 1, TEAL);
-                ui.label(micro_label("INPUT -> MIX", TEAL));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(mono(input_matrix_label(input_count), DIM, 9.5));
-                });
+        ui.horizontal(|ui| {
+            layer_badge(ui, 1, TEAL);
+            ui.label(micro_label("INPUT -> MIX", TEAL));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(mono(input_matrix_label(input_count), DIM, 9.5));
             });
-            ui.label(
-                RichText::new(ellipsize(&subtitle, 72))
-                    .size(ts(10.0))
-                    .color(MUTED),
-            )
-            .on_hover_text(&subtitle);
-            ui.add_space(10.0);
+        });
+        ui.label(
+            RichText::new(ellipsize(&subtitle, 72))
+                .size(ts(10.0))
+                .color(MUTED),
+        )
+        .on_hover_text(&subtitle);
+        ui.add_space(10.0);
 
+        ui.horizontal(|ui| {
+            ui.add_space(ROW_HEADER_W);
+            for name in MIX_COLUMNS {
+                column_header(ui, name, Some("into chain"));
+            }
+        });
+        ui.add_space(2.0);
+
+        for input in 0..input_count {
+            let role = input_channel_role(input);
             ui.horizontal(|ui| {
-                ui.add_space(ROW_HEADER_W);
-                for name in MIX_COLUMNS {
-                    column_header(ui, name, Some("into chain"));
+                row_header(ui, &format!("IN {}", input + 1), role, TEXT);
+                for (side, column) in MIX_COLUMNS.iter().enumerate() {
+                    if route_cell(ui, self.routes[input][side], input, side) {
+                        self.routes[input][side] = !self.routes[input][side];
+                        self.engine.set_routes(self.routes);
+                        let on = self.routes[input][side];
+                        self.push_log(
+                            format!(
+                                "Route {role} -> {column} {}.",
+                                if on { "enabled" } else { "muted" }
+                            ),
+                            if on { TEAL } else { MUTED },
+                        );
+                    }
                 }
             });
-            ui.add_space(2.0);
+            ui.add_space(5.0);
+        }
 
-            for input in 0..input_count {
-                let role = input_channel_role(input);
-                ui.horizontal(|ui| {
-                    row_header(ui, &format!("IN {}", input + 1), role, TEXT);
-                    for (side, column) in MIX_COLUMNS.iter().enumerate() {
-                        if route_cell(ui, self.routes[input][side], input, side) {
-                            self.routes[input][side] = !self.routes[input][side];
-                            self.engine.set_routes(self.routes);
-                            let on = self.routes[input][side];
-                            self.push_log(
-                                format!(
-                                    "Route {role} -> {column} {}.",
-                                    if on { "enabled" } else { "muted" }
-                                ),
-                                if on { TEAL } else { MUTED },
-                            );
-                        }
-                    }
-                });
-                ui.add_space(5.0);
-            }
-
-            ui.add_space(8.0);
-            horizontal_line(ui, BORDER_SOFT);
-            ui.add_space(8.0);
-            ui.horizontal_top(|ui| {
-                ui.label(RichText::new("Tip").size(ts(9.5)).color(AMBER).strong());
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "Mono guitar on IN 1? Route it to both MIX L and MIX R, or use Mono sum. Which input channels are captured is still picked on Live.",
-                        )
-                        .size(ts(10.0))
-                        .color(MUTED),
+        ui.add_space(8.0);
+        horizontal_line(ui, BORDER_SOFT);
+        ui.add_space(8.0);
+        ui.horizontal_top(|ui| {
+            ui.label(RichText::new("Tip").size(ts(9.5)).color(AMBER).strong());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Mono guitar on IN 1? Route it to both MIX L and MIX R, or use Mono sum. Which input channels are captured is still picked on Live.",
                     )
-                    .wrap(),
-                );
-            });
+                    .size(ts(10.0))
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
         });
     }
 
     /// Channel mode and monitoring: what happens on the mix bus.
-    fn routing_mix_card(&mut self, ui: &mut egui::Ui, width: f32) {
-        card(ui, CARD, BORDER, |ui| {
-            ui.set_width(width - 32.0);
-            ui.label(micro_label("MIX", AMBER));
-            ui.add_space(8.0);
-            ui.label(micro_label("CHANNEL MODE", DIM));
-            ui.add_space(4.0);
-            let mut mono = self.mono;
-            ui.horizontal(|ui| {
-                if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
-                    mono = false;
-                }
-                if tab_button_sized(ui, "Mono sum", mono, BLUE, 11.0).clicked() {
-                    mono = true;
-                }
-            });
-            self.mono = mono;
-            ui.add_space(10.0);
-            ui.label(micro_label("MONITORING", DIM));
-            ui.add_space(4.0);
-            ui.checkbox(
-                &mut self.monitor,
-                RichText::new("Direct monitor input")
+    fn routing_mix_body(&mut self, ui: &mut egui::Ui) {
+        ui.label(micro_label("MIX", AMBER));
+        ui.add_space(8.0);
+        ui.label(micro_label("CHANNEL MODE", DIM));
+        ui.add_space(4.0);
+        let mut mono = self.mono;
+        ui.horizontal(|ui| {
+            if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
+                mono = false;
+            }
+            if tab_button_sized(ui, "Mono sum", mono, BLUE, 11.0).clicked() {
+                mono = true;
+            }
+        });
+        self.mono = mono;
+        ui.add_space(10.0);
+        ui.label(micro_label("MONITORING", DIM));
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut self.monitor,
+            RichText::new("Direct monitor input")
+                .size(ts(10.5))
+                .color(MUTED),
+        );
+        ui.add_space(6.0);
+        let mut drift = self.drift;
+        if ui
+            .checkbox(
+                &mut drift,
+                RichText::new("Automatic drift correction")
                     .size(ts(10.5))
                     .color(MUTED),
-            );
-            ui.add_space(6.0);
-            let mut drift = self.drift;
-            if ui
-                .checkbox(
-                    &mut drift,
-                    RichText::new("Automatic drift correction")
-                        .size(ts(10.5))
-                        .color(MUTED),
-                )
-                .changed()
-            {
-                self.drift = drift;
-            }
-            ui.add_space(10.0);
-            horizontal_line(ui, BORDER_SOFT);
-            ui.add_space(8.0);
-            ui.horizontal_top(|ui| {
-                status_dot(ui, TEAL);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "Both layers apply live. Layer 1 shapes what the chain hears; layer 2 only decides which device channels play the finished mix.",
-                        )
-                        .size(ts(9.5))
-                        .color(MUTED),
+            )
+            .changed()
+        {
+            self.drift = drift;
+        }
+        ui.add_space(10.0);
+        horizontal_line(ui, BORDER_SOFT);
+        ui.add_space(8.0);
+        ui.horizontal_top(|ui| {
+            status_dot(ui, TEAL);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Both layers apply live. Layer 1 shapes what the chain hears; layer 2 only decides which device channels play the finished mix.",
                     )
-                    .wrap(),
-                );
-            });
-        });
-    }
-
-    /// The bottom strip: every output device and what it plays.
-    fn routing_patch_card(
-        &mut self,
-        ui: &mut egui::Ui,
-        width: f32,
-        actions: &mut Vec<RoutingAction>,
-    ) {
-        let rows = self.output_device_rows();
-        let selected = outputs::selected_device(self.routing_device, rows.len());
-        let state = self.engine.state;
-        let playing: usize = rows
-            .iter()
-            .map(|row| row.settings.playing_channels(row.channels))
-            .sum();
-        card(ui, CARD, BORDER, |ui| {
-            ui.set_width(width - 32.0);
-            ui.horizontal(|ui| {
-                ui.label(micro_label("ACTIVE PATCH", TEXT));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(mono(patch_count_label(rows.len(), playing), DIM, 9.5));
-                });
-            });
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                let entry_w = ui.available_width().min(340.0);
-                for (index, row) in rows.iter().enumerate() {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(entry_w, 0.0),
-                        Layout::top_down(Align::LEFT),
-                        |ui| {
-                            ui.set_width(entry_w);
-                            if outputs::device_summary_row(
-                                ui,
-                                row,
-                                index == selected,
-                                state,
-                                "in active patch",
-                            ) {
-                                actions.push(RoutingAction::Select(index));
-                            }
-                        },
-                    );
-                }
-            });
+                    .size(ts(9.5))
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
         });
     }
 }
@@ -451,7 +426,7 @@ impl RigWerkApp {
 mod tests {
     use super::{
         input_channel_caption, input_channel_role, input_matrix_label, patch_count_label,
-        routing_columns_stack, MIX_COLUMNS,
+        routing_columns_stack, routing_top_row_height, MIX_COLUMNS,
     };
     use crate::ui::widgets::{accesskit_frame, ellipsize, node_named};
     use eframe::egui::accesskit::Toggled;
@@ -524,5 +499,13 @@ mod tests {
         assert!(routing_columns_stack(1099.0));
         assert!(!routing_columns_stack(1100.0));
         assert!(!routing_columns_stack(1400.0));
+    }
+
+    #[test]
+    fn side_by_side_routing_cards_share_one_height() {
+        let two = routing_top_row_height(2);
+        let four = routing_top_row_height(4);
+        assert!(two >= 300.0);
+        assert!(four > two);
     }
 }
