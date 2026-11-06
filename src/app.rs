@@ -26,12 +26,12 @@ use crate::app::devices::{
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
     cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
-    preferences_backup_key, store_preferences, unique_presets, Preferences, Preset,
+    preferences_backup_key, store_preferences, unique_presets, FollowerPref, Preferences, Preset,
     PREFERENCES_KEY, PREFERENCES_SCHEMA,
 };
 use crate::audio::{
     self, AudioEngine, CushionMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
-    Snapshot,
+    OutputDeviceSettings, Snapshot,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -151,6 +151,11 @@ pub struct RigWerkApp {
     pub(crate) eqs: [EqSettings; 2],
     /// Built-in noise gate (PRE or POST inserts; default POST).
     pub(crate) gate: GateSettings,
+    /// Level, mute and channel map of the clock device (the selected output).
+    /// Stored only; the engine does not read it yet.
+    pub(crate) clock_device: OutputDeviceSettings,
+    /// Extra output devices. Stored only; nothing plays them yet.
+    pub(crate) followers: Vec<FollowerPref>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
     /// Selected stage in the Mixer rack / Live chain strip.
@@ -494,6 +499,8 @@ impl eframe::App for RigWerkApp {
             gate: self.gate,
             plugins: self.engine.plugin_prefs(),
             prefer_plugin_interface: self.prefer_plugin_interface,
+            clock_device: self.clock_device,
+            followers: self.followers.clone(),
         };
         store_preferences(storage, &preferences, &mut self.preferences_backup);
     }
@@ -572,6 +579,13 @@ impl RigWerkApp {
             cushion_ms: preferences.cushion_ms,
             eqs: [preferences.eq.sanitized(), preferences.eq_post.sanitized()],
             gate: preferences.gate.sanitized(),
+            clock_device: preferences.clock_device.sanitized(),
+            followers: preferences
+                .followers
+                .iter()
+                .cloned()
+                .map(FollowerPref::sanitized)
+                .collect(),
             eq_edit: if preferences.eq_edit == 1 {
                 EqSlot::Post
             } else {
@@ -902,6 +916,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         cushion_ms: 10.0,
         eqs: [EqSettings::default(), EqSettings::default()],
         gate: GateSettings::default(),
+        clock_device: OutputDeviceSettings::default(),
+        followers: Vec::new(),
         eq_edit: EqSlot::Pre,
         chain_selected: crate::ui::pages::mixer::chain::ChainSelection::PreEq,
         plugin_insert_at: None,
@@ -967,9 +983,12 @@ mod tests {
 
     use eframe::App;
 
+    use super::settings::FollowerPref;
     use super::settings::{load_preferences, Preferences, Preset, PREFERENCES_KEY};
     use super::{blank_app, repaint_interval, restore_saved_devices, ACTIVE_REPAINT, IDLE_REPAINT};
-    use crate::audio::{self, DeviceItem, EngineState, Inventory};
+    use crate::audio::{
+        self, ChannelMap, DeviceItem, EngineState, Inventory, OutputDeviceSettings, UnusedChannels,
+    };
 
     #[derive(Default)]
     struct MemoryStorage(HashMap<String, String>);
@@ -1086,6 +1105,30 @@ mod tests {
             "{:?}",
             app.log.iter().map(|entry| &entry.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn save_writes_the_output_devices() {
+        let mut app = blank_app();
+        app.clock_device = OutputDeviceSettings {
+            level_db: -9.0,
+            mute: true,
+            map: ChannelMap {
+                left: 0b0101,
+                right: 0b0110,
+            },
+            unused: UnusedChannels::Silent,
+        };
+        app.followers = vec![FollowerPref {
+            id: "hw:Phones".to_owned(),
+            backend: "ALSA".to_owned(),
+            name: "Phones".to_owned(),
+            cushion_mode: 1,
+            ..FollowerPref::default()
+        }];
+        let (_, saved) = save_text(&mut app);
+        assert_eq!(saved.clock_device, app.clock_device);
+        assert_eq!(saved.followers, app.followers);
     }
 
     #[test]

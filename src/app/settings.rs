@@ -5,7 +5,7 @@ use serde::de::{Deserializer, IgnoredAny};
 use serde::Deserialize;
 
 use super::Page;
-use crate::audio::{CushionMode, EqSettings, GateSettings, PluginPref};
+use crate::audio::{CushionMode, EqSettings, GateSettings, OutputDeviceSettings, PluginPref};
 
 /// The layout version written with the preferences.  Saves from before the
 /// version existed read as 0.  Raise it, and migrate in
@@ -82,6 +82,11 @@ pub(crate) struct Preferences {
     /// Open a plugin's own interface directly instead of RigWerk's control
     /// panel, when the plugin has one that can be embedded.
     pub(crate) prefer_plugin_interface: bool,
+    /// Level, mute and channel map of the clock device (`output_id`).
+    pub(crate) clock_device: OutputDeviceSettings,
+    /// Extra output devices.  An entry that cannot be read is skipped.
+    #[serde(deserialize_with = "skip_unreadable")]
+    pub(crate) followers: Vec<FollowerPref>,
 }
 
 impl Default for Preferences {
@@ -126,6 +131,8 @@ impl Default for Preferences {
             gate: GateSettings::default(),
             plugins: Vec::new(),
             prefer_plugin_interface: false,
+            clock_device: OutputDeviceSettings::default(),
+            followers: Vec::new(),
         }
     }
 }
@@ -143,6 +150,49 @@ pub(crate) fn cushion_to_pref(mode: CushionMode) -> u8 {
         CushionMode::Safe => 0,
         CushionMode::LowLatency => 1,
         CushionMode::Manual => 2,
+    }
+}
+
+/// An extra output device that plays the finished mix on its own clock.
+/// Stored only; nothing plays followers yet.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct FollowerPref {
+    /// [`crate::audio::DeviceItem::id`] and its backend; the name is only the
+    /// display fallback.
+    pub(crate) id: String,
+    pub(crate) backend: String,
+    pub(crate) name: String,
+    pub(crate) settings: OutputDeviceSettings,
+    /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
+    pub(crate) cushion_mode: u8,
+    pub(crate) cushion_ms: f32,
+}
+
+impl Default for FollowerPref {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            backend: String::new(),
+            name: String::new(),
+            settings: OutputDeviceSettings::default(),
+            cushion_mode: 0,
+            cushion_ms: DEFAULT_CUSHION_MS,
+        }
+    }
+}
+
+impl FollowerPref {
+    pub(crate) fn sanitized(mut self) -> Self {
+        self.settings = self.settings.sanitized();
+        self.cushion_ms = finite_cushion(self.cushion_ms);
+        self
+    }
+}
+
+fn sanitize_followers(followers: &mut [FollowerPref]) {
+    for follower in followers {
+        *follower = follower.clone().sanitized();
     }
 }
 
@@ -319,6 +369,8 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.eq = preferences.eq.sanitized();
     preferences.eq_post = preferences.eq_post.sanitized();
     preferences.gate = preferences.gate.sanitized();
+    preferences.clock_device = preferences.clock_device.sanitized();
+    sanitize_followers(&mut preferences.followers);
     for preset in &mut preferences.sessions {
         sanitize_preset(preset);
     }
@@ -353,6 +405,8 @@ pub(crate) fn sanitize_preset(preset: &mut Preset) {
     if let Some(gate) = preset.gate.as_mut() {
         *gate = gate.sanitized();
     }
+    preset.clock_device = preset.clock_device.sanitized();
+    sanitize_followers(&mut preset.followers);
 }
 
 pub(crate) fn rate_label(rate: u32) -> String {
@@ -442,6 +496,16 @@ pub(crate) struct Preset {
     /// Older patches have none, which loads as an empty chain.
     #[serde(default, deserialize_with = "skip_unreadable")]
     pub(crate) plugins: Vec<PluginPref>,
+    /// Clock device level, mute and channel map.  Older patches have none,
+    /// which loads as today's output (L → 1, R → 2, mono copy on the rest).
+    /// Applying such a patch resets it on purpose: a patch must restore the
+    /// routing, so this is not an `Option` like the EQs and the gate.
+    pub(crate) clock_device: OutputDeviceSettings,
+    /// Extra output devices.  An entry that cannot be read is skipped.
+    /// Older patches have none; applying one clears the list on purpose,
+    /// for the same reason as [`Self::clock_device`].
+    #[serde(default, deserialize_with = "skip_unreadable")]
+    pub(crate) followers: Vec<FollowerPref>,
 }
 
 impl Default for Preset {
@@ -477,6 +541,8 @@ impl Default for Preset {
             cushion_mode: 0,
             cushion_ms: DEFAULT_CUSHION_MS,
             plugins: Vec::new(),
+            clock_device: OutputDeviceSettings::default(),
+            followers: Vec::new(),
         }
     }
 }
@@ -527,6 +593,26 @@ where
 struct StoredCounts {
     sessions: Vec<IgnoredAny>,
     plugins: Vec<IgnoredAny>,
+    followers: Vec<IgnoredAny>,
+}
+
+/// "1 saved patch(es) and 2 plugin insert(s)": only the lists that lost
+/// entries, or `None` when nothing was skipped.
+fn skipped_summary(sessions: usize, plugins: usize, followers: usize) -> Option<String> {
+    let parts: Vec<String> = [
+        (sessions, "saved patch(es)"),
+        (plugins, "plugin insert(s)"),
+        (followers, "output device(s)"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, what)| format!("{count} {what}"))
+    .collect();
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        [rest @ .., last] => Some(format!("{} and {last}", rest.join(", "))),
+    }
 }
 
 /// The outcome of reading the stored preferences.
@@ -582,10 +668,14 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
         .plugins
         .len()
         .saturating_sub(preferences.plugins.len());
-    if skipped_sessions > 0 || skipped_plugins > 0 {
+    let skipped_followers = counts
+        .followers
+        .len()
+        .saturating_sub(preferences.followers.len());
+    if let Some(skipped) = skipped_summary(skipped_sessions, skipped_plugins, skipped_followers) {
         notices.push(format!(
-            "Skipped {skipped_sessions} saved patch(es) and {skipped_plugins} plugin insert(s) \
-             that could not be read. The original settings are kept as “{backup_key}”."
+            "Skipped {skipped} that could not be read. The original settings are kept as \
+             “{backup_key}”."
         ));
     }
     if preferences.schema_version > PREFERENCES_SCHEMA {
@@ -634,7 +724,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::audio::{GateSlot, PluginFormat};
+    use crate::audio::{ChannelMap, GateSlot, PluginFormat, UnusedChannels};
 
     const BACKUP: &str = "rigwerk-preferences-backup-1";
 
@@ -1130,6 +1220,149 @@ mod tests {
         assert_eq!(page_key(Page::Diagnostics), "diagnostics");
         assert!(page_from_key("diagnostics") == Page::Diagnostics);
         assert!(page_from_key(" Diagnostics ") == Page::Diagnostics);
+    }
+
+    fn output_devices() -> (OutputDeviceSettings, Vec<FollowerPref>) {
+        let clock = OutputDeviceSettings {
+            level_db: -6.0,
+            mute: true,
+            map: ChannelMap {
+                left: 0b0101,
+                right: 0b1010,
+            },
+            unused: UnusedChannels::Silent,
+        };
+        let followers = vec![
+            FollowerPref {
+                id: "hw:Phones".to_owned(),
+                backend: "ALSA".to_owned(),
+                name: "Phones".to_owned(),
+                settings: OutputDeviceSettings {
+                    level_db: -3.0,
+                    ..OutputDeviceSettings::default()
+                },
+                cushion_mode: 2,
+                cushion_ms: 20.0,
+            },
+            FollowerPref {
+                id: "pw:rigwerk-out".to_owned(),
+                backend: "PipeWire".to_owned(),
+                name: "RigWerk Out".to_owned(),
+                settings: OutputDeviceSettings {
+                    mute: true,
+                    map: ChannelMap { left: 1, right: 1 },
+                    ..OutputDeviceSettings::default()
+                },
+                cushion_mode: 1,
+                cushion_ms: DEFAULT_CUSHION_MS,
+            },
+        ];
+        (clock, followers)
+    }
+
+    #[test]
+    fn old_saves_without_output_devices_use_defaults() {
+        let raw = r#"(output_id:"hw:Speaker",output_gain:-6.0,mute:true,sessions:[(name:"Old",output_id:"hw:Speaker")])"#;
+        let loaded = load_preferences(Some(raw), BACKUP);
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+        let preferences = loaded.preferences.expect("readable");
+        let today = OutputDeviceSettings {
+            level_db: 0.0,
+            mute: false,
+            map: ChannelMap {
+                left: 0b01,
+                right: 0b10,
+            },
+            unused: UnusedChannels::MonoCopy,
+        };
+        assert_eq!(OutputDeviceSettings::default(), today);
+        assert_eq!(preferences.clock_device, today);
+        assert!(preferences.followers.is_empty());
+        // The master stays where it was.
+        assert_eq!(preferences.output_gain, -6.0);
+        assert!(preferences.mute);
+        assert_eq!(preferences.sessions[0].clock_device, today);
+        assert!(preferences.sessions[0].followers.is_empty());
+    }
+
+    #[test]
+    fn unknown_unused_channel_mode_reads_as_mono_copy() {
+        let raw = r#"(session_name:"Mine",sample_rate:96000,clock_device:(level_db:-2.0,unused:loud),followers:[(id:"hw:A",settings:(unused:silent))])"#;
+        let loaded = load_preferences(Some(raw), BACKUP);
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+        let preferences = loaded.preferences.expect("readable");
+        assert_eq!(preferences.clock_device.unused, UnusedChannels::MonoCopy);
+        assert_eq!(preferences.clock_device.level_db, -2.0);
+        assert_eq!(
+            preferences.followers[0].settings.unused,
+            UnusedChannels::Silent
+        );
+        assert_eq!(preferences.session_name, "Mine");
+        assert_eq!(preferences.sample_rate, 96_000);
+    }
+
+    #[test]
+    fn output_devices_round_trip_in_preferences_and_presets() {
+        let (clock, followers) = output_devices();
+        let mut session = preset("Two outs");
+        session.clock_device = clock;
+        session.followers = followers.clone();
+        let preferences = Preferences {
+            clock_device: clock,
+            followers: followers.clone(),
+            sessions: vec![session],
+            ..Preferences::default()
+        };
+        let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+        assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+        let back = loaded.preferences.expect("readable");
+        assert_eq!(back.clock_device, clock);
+        assert_eq!(back.followers, followers);
+        assert_eq!(back.sessions[0].clock_device, clock);
+        assert_eq!(back.sessions[0].followers, followers);
+    }
+
+    #[test]
+    fn unreadable_follower_is_skipped_and_the_rest_kept() {
+        let raw = r#"(
+            clock_device:(level_db:NaN,map:(left:3)),
+            sessions:[
+                (name:"Hot",clock_device:(level_db:20.0)),
+                (name:"P",followers:[(id:7),(id:"hw:D",settings:(level_db:-100.0))]),
+            ],
+            followers:[
+                (id:"hw:A",name:"A",settings:(unused:silent)),
+                (id:"hw:B",settings:(mute:"yes")),
+                "junk",
+                (id:"hw:C",cushion_ms:inf),
+            ],
+        )"#;
+        let loaded = load_preferences(Some(raw), BACKUP);
+        let preferences = loaded.preferences.expect("readable");
+        let ids: Vec<_> = preferences
+            .followers
+            .iter()
+            .map(|f| f.id.as_str())
+            .collect();
+        assert_eq!(ids, ["hw:A", "hw:C"]);
+        assert_eq!(
+            preferences.followers[0].settings.unused,
+            UnusedChannels::Silent
+        );
+        assert_eq!(preferences.followers[1].cushion_ms, CUSHION_MS_MAX);
+        assert_eq!(preferences.clock_device.level_db, 0.0);
+        assert_eq!(preferences.clock_device.map.left, 3);
+        assert_eq!(preferences.clock_device.map.right, 0b10);
+        assert_eq!(preferences.sessions[0].clock_device.level_db, 6.0);
+        let session = &preferences.sessions[1].followers;
+        assert_eq!(session.len(), 1);
+        assert_eq!(session[0].settings.level_db, -36.0);
+        assert!(
+            loaded.notices[0].starts_with("Skipped 2 output device(s) that could not be read."),
+            "{}",
+            loaded.notices[0]
+        );
+        assert!(loaded.backup.is_some());
     }
 
     #[test]
