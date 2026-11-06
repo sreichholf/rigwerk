@@ -96,38 +96,54 @@ impl RigWerkApp {
             .stroke(Stroke::new(1.0, BORDER))
             .corner_radius(CornerRadius::same(14))
             .show(ui, |ui| {
-                ui.set_min_height(height);
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(chain_w, height),
-                        Layout::top_down(Align::LEFT),
-                        |ui| {
-                            ui.set_width(chain_w);
-                            ui.painter().rect_filled(
-                                ui.max_rect(),
-                                CornerRadius {
-                                    nw: 14,
-                                    ne: 0,
-                                    sw: 14,
-                                    se: 0,
-                                },
-                                CARD_DEEP,
-                            );
-                            ui.add_space(2.0);
-                            self.chain_pane(ui, &views, &devices, &mut select, &mut actions);
-                        },
-                    );
+                // Lock height: inside the outer page ScrollArea, available_height is
+                // unbounded. horizontal_top would allocate that infinity and the
+                // inspector ScrollArea would grow without a real content cap.
+                ui.set_height(height);
+                let inspector_w = (total - chain_w - 4.0).max(320.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), height),
+                    Layout::left_to_right(Align::Min),
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(chain_w, height),
+                            Layout::top_down(Align::LEFT),
+                            |ui| {
+                                ui.set_width(chain_w);
+                                ui.set_height(height);
+                                ui.painter().rect_filled(
+                                    ui.max_rect(),
+                                    CornerRadius {
+                                        nw: 14,
+                                        ne: 0,
+                                        sw: 14,
+                                        se: 0,
+                                    },
+                                    CARD_DEEP,
+                                );
+                                ui.add_space(2.0);
+                                self.chain_pane(ui, &views, &devices, &mut select, &mut actions);
+                            },
+                        );
 
-                    ui.allocate_ui_with_layout(
-                        Vec2::new((total - chain_w - 4.0).max(320.0), height),
-                        Layout::top_down(Align::LEFT),
-                        |ui| {
-                            ui.set_min_width((total - chain_w - 4.0).max(320.0));
-                            ui.add_space(2.0);
-                            self.inspector_pane(ui, &views, &devices, &mut select, &mut actions);
-                        },
-                    );
-                });
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(inspector_w, height),
+                            Layout::top_down(Align::LEFT),
+                            |ui| {
+                                ui.set_width(inspector_w);
+                                ui.set_height(height);
+                                ui.add_space(2.0);
+                                self.inspector_pane(
+                                    ui,
+                                    &views,
+                                    &devices,
+                                    &mut select,
+                                    &mut actions,
+                                );
+                            },
+                        );
+                    },
+                );
             });
 
         if let Some(selection) = select {
@@ -388,63 +404,53 @@ impl RigWerkApp {
             None,
         );
         ui.add_space(8.0);
-        let body_h = (ui.available_height() - 8.0).max(120.0);
+        // Cap at the pane; shrink to the stage's real content so EQ/gate/etc.
+        // do not leave a tall empty scroll region under the details.
+        let max_body_h = (ui.available_height() - 8.0).max(120.0);
         let body_w = (ui.available_width() - PANE_PAD_X * 2.0).max(200.0);
-        ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), body_h),
-            Layout::top_down(Align::LEFT),
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(PANE_PAD_X);
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(body_w, body_h),
-                        Layout::top_down(Align::LEFT),
-                        |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(PANE_PAD_X);
+            ui.allocate_ui_with_layout(
+                Vec2::new(body_w, 0.0),
+                Layout::top_down(Align::LEFT),
+                |ui| {
+                    ui.set_width(body_w);
+                    egui::ScrollArea::vertical()
+                        .id_salt("mixer_inspector_scroll")
+                        .max_height(max_body_h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
                             ui.set_width(body_w);
-                            egui::ScrollArea::vertical()
-                                .id_salt("mixer_inspector_scroll")
-                                .max_height(body_h)
-                                .auto_shrink([false, true])
-                                .show(ui, |ui| {
-                                    ui.set_width(body_w);
-                                    match self.chain_selected {
-                                        ChainSelection::Input => self.input_inspector(ui),
-                                        ChainSelection::PreEq => self.eq_inspector(ui, EqSlot::Pre),
-                                        ChainSelection::PostEq => {
-                                            self.eq_inspector(ui, EqSlot::Post)
-                                        }
-                                        ChainSelection::Gate => self.gate_inspector(ui),
-                                        ChainSelection::Output => {
-                                            self.output_inspector(ui, devices, select)
-                                        }
-                                        ChainSelection::OutputDevice(index) => {
-                                            match devices.get(index) {
-                                                Some(row) => {
-                                                    self.output_device_inspector(ui, row, actions)
-                                                }
-                                                None => self.output_inspector(ui, devices, select),
-                                            }
-                                        }
-                                        ChainSelection::AddOutput => {
-                                            self.add_output_inspector(ui);
-                                        }
-                                        ChainSelection::Plugins => {
-                                            plugins_group_inspector(ui, views, actions);
-                                        }
-                                        ChainSelection::Plugin(index) => {
-                                            if let Some(view) = views.get(index) {
-                                                plugin_inspector(ui, index, view, actions);
-                                            } else {
-                                                plugins_group_inspector(ui, views, actions);
-                                            }
-                                        }
+                            match self.chain_selected {
+                                ChainSelection::Input => self.input_inspector(ui),
+                                ChainSelection::PreEq => self.eq_inspector(ui, EqSlot::Pre),
+                                ChainSelection::PostEq => self.eq_inspector(ui, EqSlot::Post),
+                                ChainSelection::Gate => self.gate_inspector(ui),
+                                ChainSelection::Output => {
+                                    self.output_inspector(ui, devices, select)
+                                }
+                                ChainSelection::OutputDevice(index) => match devices.get(index) {
+                                    Some(row) => self.output_device_inspector(ui, row, actions),
+                                    None => self.output_inspector(ui, devices, select),
+                                },
+                                ChainSelection::AddOutput => {
+                                    self.add_output_inspector(ui);
+                                }
+                                ChainSelection::Plugins => {
+                                    plugins_group_inspector(ui, views, actions);
+                                }
+                                ChainSelection::Plugin(index) => {
+                                    if let Some(view) = views.get(index) {
+                                        plugin_inspector(ui, index, view, actions);
+                                    } else {
+                                        plugins_group_inspector(ui, views, actions);
                                     }
-                                });
-                        },
-                    );
-                });
-            },
-        );
+                                }
+                            }
+                        });
+                },
+            );
+        });
     }
 
     fn input_inspector(&mut self, ui: &mut egui::Ui) {

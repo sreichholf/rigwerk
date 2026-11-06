@@ -617,10 +617,14 @@ impl RigWerkApp {
                                 self.meter_out_channels[channel],
                                 self.peak_out_channels[channel],
                             )
-                        } else if let Some(meters) = self.snapshot.follower_channels.get(index - 1)
+                        } else if let Some(follower) = index
+                            .checked_sub(1)
+                            .filter(|&follower| follower < self.meter_follower_channels.len())
                         {
-                            let level = meters[channel].abs();
-                            (level, level)
+                            (
+                                self.meter_follower_channels[follower][channel],
+                                self.peak_follower_channels[follower][channel],
+                            )
                         } else {
                             (0.0, 0.0)
                         };

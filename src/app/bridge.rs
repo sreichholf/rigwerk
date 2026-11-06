@@ -278,9 +278,36 @@ impl RigWerkApp {
             let peak = &mut self.peak_out_channels[channel];
             *peak = peak.max(*meter * 0.98).max(0.0);
         }
+        // Followers / RigWerk Out: same smoothing as the clock device.
+        let follower_targets = match self.engine.state {
+            EngineState::Running => self.snapshot.follower_channels,
+            EngineState::Preview => std::array::from_fn(|index| {
+                self.followers
+                    .get(index)
+                    .map(|pref| {
+                        pref.settings
+                            .settled_frame(2, out_l * mute_scale, out_r * mute_scale)
+                    })
+                    .unwrap_or([0.0; audio::MAX_OUTPUT_CHANNELS])
+            }),
+            _ => [[0.0; audio::MAX_OUTPUT_CHANNELS]; audio::MAX_FOLLOWERS],
+        };
+        for (index, meters) in self.meter_follower_channels.iter_mut().enumerate() {
+            for (channel, meter) in meters.iter_mut().enumerate() {
+                let target = follower_targets[index][channel].abs();
+                *meter = smooth(*meter, target);
+                let peak = &mut self.peak_follower_channels[index][channel];
+                *peak = peak.max(*meter * 0.98).max(0.0);
+            }
+        }
         let decay = (-2.3 * dt).exp();
         for peak in &mut self.peak_out_channels {
             *peak *= decay;
+        }
+        for peaks in &mut self.peak_follower_channels {
+            for peak in peaks {
+                *peak *= decay;
+            }
         }
         self.peak_in_l *= decay;
         self.peak_in_r *= decay;

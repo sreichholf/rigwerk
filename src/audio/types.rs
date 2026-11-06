@@ -214,7 +214,6 @@ pub struct Snapshot {
     #[allow(dead_code)] // Exposed for Live / Mixer follower summaries.
     pub follower_count: usize,
     /// Block peak per follower channel, after that follower's map and level.
-    #[allow(dead_code)] // Wired for follower meters in the Mixer inspectors.
     pub follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
     /// Each follower's real channel count (0 until published).
     pub follower_channel_counts: [u32; MAX_FOLLOWERS],

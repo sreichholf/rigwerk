@@ -105,18 +105,13 @@ impl RigWerkApp {
             let color = BAND_COLORS[index];
             let band = &mut eq.bands[index];
             let live = eq.enabled && band.on;
-            ui.allocate_ui_with_layout(
-                Vec2::new(panel_w, 0.0),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_width(panel_w);
-                    egui::Frame::new()
-                        .fill(CARD_RAISED)
-                        .stroke(Stroke::new(1.0, BORDER_SOFT))
-                        .corner_radius(CornerRadius::same(8))
-                        .inner_margin(egui::Margin::symmetric(8, 6))
-                        .show(ui, |ui| {
-                            ui.set_max_width(panel_w - 16.0);
+            egui::Frame::new()
+                .fill(CARD_RAISED)
+                .stroke(Stroke::new(1.0, BORDER_SOFT))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.set_width(panel_w - 16.0);
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(spec.name)
@@ -240,9 +235,7 @@ impl RigWerkApp {
                         band,
                         live,
                     );
-                        });
-                },
-            );
+                });
             ui.add_space(5.0);
         }
 

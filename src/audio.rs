@@ -39,6 +39,7 @@ mod output;
 mod output_map;
 mod plugins;
 mod resampler;
+mod scope;
 mod shared;
 mod thread_priority;
 mod types;
