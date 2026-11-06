@@ -32,9 +32,8 @@ switches platform and scenario). `dual-out-endpoints.html` (A–D) is history.
     sink; PipeWire keeps the devices in step. RigWerk Out = a node with a
     virtual source `media.class`.
   - Linux ALSA `hw:` clock device: needs generic followers (step 3).
-  - Windows second, behind an "experimental" setting: WASAPI followers
-    only, VB-Cable as v1 publish. No ASIO followers (one driver per
-    process). A RigWerk virtual driver (v2) is out of scope.
+  - Windows: WASAPI followers only, VB-Cable (or similar) as publish.
+    No ASIO followers (one driver per process).
 
 ## Steps
 
@@ -103,13 +102,12 @@ With one output device, everything looks and behaves exactly like today.
   stop the bridge.
 - Enable for Linux ALSA first (testable here).
 
-### Step 4: Windows (experimental)
+### Step 4: Windows
 
 - WASAPI shared-mode followers, VB-Cable publish (detected by name), extra
   ASIO output channels on the open driver (routing layer ②).
 - Warn in the add list when a WASAPI endpoint belongs to the open ASIO
   interface (some drivers lock it).
-- Off by default; tested by hand on real hardware before it's on.
 
 ## Rules for every step
 
@@ -149,4 +147,8 @@ With one output device, everything looks and behaves exactly like today.
   mockup `live-issues.html`. Shared Warnings/Errors on Live; remediation must
   name real controls (Low latency, buffer, cushion), including per-follower
   cushion once followers play.
-- [ ] Step 4
+- [x] Step 4 · Windows
+  - WASAPI shared-mode followers via the generic path; supervisor on ASIO bridges too
+  - VB-Cable publish (name detect → CABLE Input); ASIO open channels up to 8
+  - Soft ASIO/WASAPI conflict hint in the add list
+  - Enabled by default (hand-tested: REAL-style clock + shared-mode headset)

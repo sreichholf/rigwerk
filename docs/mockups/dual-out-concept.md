@@ -33,12 +33,9 @@ capture  →  ring + drift only when clocks differ
 
 **Linux.** A first-party node is possible in userspace. Today’s private `RigWerk Capture` / `RigWerk Playback` streams are not advertised as endpoints. The duplex branch publishes one `pw_filter` named `RigWerk` and links it to the chosen source and sink. Publishing means other apps can see a Source (and optionally a Sink into the rack).
 
-**Windows.** A normal app cannot create a WASAPI endpoint. Dual-out is userspace (another render client). A name other apps can pick is either:
+**Windows.** A normal app cannot create a WASAPI endpoint. Dual-out is userspace (another render client). A name other apps can pick means driving an installed virtual cable (VB-Audio and similar): RigWerk plays into the cable’s render side; other apps capture the capture side.
 
-- v1: drive an installed cable (VB-Audio and similar), or
-- v2: a separate signed virtual audio driver (`RigWerk Out`).
-
-The UI must say which of those is true. Never imply a WASAPI device exists when it does not.
+The UI must say when publish uses a cable, and when none is installed. Never imply a WASAPI “RigWerk Out” device exists when it does not.
 
 ## UI that was rejected
 
@@ -56,7 +53,7 @@ Live stays the publish-simple view. Per-destination detail uses the Mixer path t
 
 **Live**
 
-- Publish status for the virtual source (on, rate, or “needs a cable / driver” on Windows).
+- Publish status for the virtual source (on, rate, or “needs a virtual cable” on Windows).
 - The existing Output card stays the **listen** clock (device, level, meters).
 - Other destinations are chips, not cards.
 - `+ Add output` jumps to Mixer and opens the add sheet.
@@ -92,7 +89,7 @@ The last **Listen** clock cannot be removed until another destination is promote
 - Does hanging N destinations under `ChainSelection::Output` fit the chain, or does the enum need `Output(index)` the way plugins are `Plugin(index)`?
 - Is one Listen clock plus N slaves the right clock model, including the PipeWire duplex (no ring) and ASIO duplex (one driver) cases?
 - Session format: today’s preset stores one input and one output. N destinations, roles, and publish-on need a place that old presets still load.
-- Windows copy: cable vs future driver, and what Live shows when neither is present.
+- Windows copy: which cable is publishing, and what Live shows when none is present.
 - Whether Live chips should jump to the selected Mixer child (assumed yes) and whether they need meters.
 - Overload: a chain that cannot keep the buffer should fail safe on every destination, not only the listen clock.
 

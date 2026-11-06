@@ -7,8 +7,8 @@ use super::preset::Preset;
 use super::serde_util::skip_unreadable;
 use crate::app::Page;
 use crate::audio::{
-    CushionMode, EqSettings, GateSettings, OutputDeviceSettings, PluginPref, MAX_FOLLOWERS,
-    VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    CushionMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings, PluginPref,
+    MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 
 pub(crate) const PREFERENCES_SCHEMA: u32 = 1;
@@ -161,7 +161,8 @@ pub(crate) fn cushion_to_pref(mode: CushionMode) -> u8 {
 #[serde(default)]
 pub(crate) struct FollowerPref {
     /// [`crate::audio::DeviceItem::id`] and its backend; the name is only the
-    /// display fallback.  Virtual out uses [`VIRTUAL_OUT_ID`].
+    /// display fallback.  PipeWire RigWerk Out uses [`VIRTUAL_OUT_ID`];
+    /// Windows VB-Cable publish keeps the WASAPI render id.
     pub(crate) id: String,
     pub(crate) backend: String,
     pub(crate) name: String,
@@ -194,6 +195,7 @@ impl Default for FollowerPref {
 
 impl FollowerPref {
     /// A new RigWerk Out follower, published on.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn virtual_out() -> Self {
         Self {
             id: VIRTUAL_OUT_ID.to_owned(),
@@ -211,12 +213,30 @@ impl FollowerPref {
         self.settings = self.settings.sanitized();
         self.cushion_ms = finite_cushion(self.cushion_ms);
         if self.virtual_out {
-            self.id = VIRTUAL_OUT_ID.to_owned();
-            if self.name.trim().is_empty() {
-                self.name = VIRTUAL_OUT_NAME.to_owned();
+            #[cfg(target_os = "windows")]
+            {
+                // VB-Cable publish: keep the WASAPI render id.  Rewriting to
+                // the PipeWire sentinel would stop the supervisor opening it
+                // after preference load or session apply.  Drop the sentinel
+                // from older / cross-platform saves; inventory rematch fills
+                // the live WASAPI id.
+                if self.id == VIRTUAL_OUT_ID {
+                    self.id.clear();
+                }
+                if self.name.trim().is_empty() {
+                    self.name = VIRTUAL_OUT_NAME.to_owned();
+                }
+                if self.backend.trim().is_empty() {
+                    self.backend = "WASAPI".to_owned();
+                }
             }
-            if self.backend.trim().is_empty() {
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.id = VIRTUAL_OUT_ID.to_owned();
                 self.backend = "PipeWire".to_owned();
+                if self.name.trim().is_empty() {
+                    self.name = VIRTUAL_OUT_NAME.to_owned();
+                }
             }
         }
         self
@@ -237,6 +257,45 @@ fn sanitize_followers(followers: &mut Vec<FollowerPref>) {
     followers.truncate(MAX_FOLLOWERS);
     for follower in followers.iter_mut() {
         *follower = follower.clone().sanitized();
+    }
+}
+
+/// Bind Windows VB-Cable publish to the live WASAPI render id from inventory.
+///
+/// Older saves and cross-platform presets may still carry
+/// [`VIRTUAL_OUT_ID`]; a missing or non-WASAPI id also needs a rematch when
+/// CABLE Input is present.
+pub(crate) fn rematch_windows_virtual_out(followers: &mut [FollowerPref], outputs: &[DeviceItem]) {
+    #[cfg(target_os = "windows")]
+    {
+        for follower in followers.iter_mut() {
+            if !follower.virtual_out {
+                continue;
+            }
+            let present = outputs.iter().any(|device| device.id == follower.id);
+            let stale = follower.id.is_empty()
+                || follower.id == VIRTUAL_OUT_ID
+                || !crate::audio::is_generic_follower(&follower.id)
+                || !present;
+            if !stale {
+                continue;
+            }
+            let Some(cable) = outputs
+                .iter()
+                .find(|device| crate::audio::is_vb_cable_render(&device.name))
+            else {
+                continue;
+            };
+            follower.id = cable.id.clone();
+            follower.backend = cable.backend.clone();
+            if follower.name.trim().is_empty() {
+                follower.name = VIRTUAL_OUT_NAME.to_owned();
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (followers, outputs);
     }
 }
 

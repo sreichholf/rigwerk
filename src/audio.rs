@@ -35,6 +35,9 @@ mod devices;
 mod engine;
 mod eq;
 mod follower;
+#[cfg(target_os = "windows")]
+pub(crate) use follower::is_generic_follower;
+pub(crate) use follower::is_vb_cable_render;
 mod gate;
 mod input;
 mod mixer;

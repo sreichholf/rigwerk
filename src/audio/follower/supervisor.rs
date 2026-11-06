@@ -43,10 +43,16 @@ impl FollowerOutputs {
         let wanted: Vec<(usize, String)> = (0..plan.count)
             .filter_map(|slot| {
                 let link = &plan.slots[slot];
-                if link.virtual_out || link.device_id.is_empty() {
+                if link.device_id.is_empty() || !super::is_generic_follower(&link.device_id) {
                     return None;
                 }
-                if !super::is_generic_follower(&link.device_id) {
+                // PipeWire RigWerk Out is in-graph.  Windows VB-Cable publish
+                // is a WASAPI follower that only plays while publish is on.
+                if link.virtual_out {
+                    #[cfg(target_os = "windows")]
+                    if link.publish {
+                        return Some((slot, link.device_id.clone()));
+                    }
                     return None;
                 }
                 Some((slot, link.device_id.clone()))
