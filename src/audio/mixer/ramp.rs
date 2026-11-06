@@ -5,11 +5,11 @@ use super::route_frame;
 /// How long an underrun takes to fade the held frame to silence, and how long
 /// playback takes to fade back in once the cushion has refilled.  Long enough
 /// that neither edge clicks, short enough not to smear the note around it.
-pub(super) const DROPOUT_FADE_SECONDS: f32 = 0.0025;
+pub(crate) const DROPOUT_FADE_SECONDS: f32 = 0.0025;
 
 /// A control change is ramped over this long, whatever block size the host
 /// hands over: long enough to hide the step, short enough to feel immediate.
-pub(super) const CONTROL_RAMP_SECONDS: f32 = 0.006;
+pub(crate) const CONTROL_RAMP_SECONDS: f32 = 0.006;
 
 /// One control value moving linearly to its target, one sample at a time.
 /// The remaining step is kept between callbacks, so a ramp that spans several
@@ -165,7 +165,7 @@ impl MixRamps {
 
 /// One step of the underrun fade-out, snapping to 0 instead of stopping a
 /// rounding error above it.
-pub(super) fn fade_down(gain: f32, step: f32) -> f32 {
+pub(crate) fn fade_down(gain: f32, step: f32) -> f32 {
     let next = gain - step;
     if next < step * 0.5 {
         0.0
@@ -175,7 +175,7 @@ pub(super) fn fade_down(gain: f32, step: f32) -> f32 {
 }
 
 /// One step of the fade-in, snapping to 1 the same way.
-pub(super) fn fade_up(gain: f32, step: f32) -> f32 {
+pub(crate) fn fade_up(gain: f32, step: f32) -> f32 {
     let next = gain + step;
     if next > 1.0 - step * 0.5 {
         1.0

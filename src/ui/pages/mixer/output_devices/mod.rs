@@ -1,8 +1,8 @@
 //! Output devices under the master Output stage: their rows in the chain, the
 //! device list in the master inspector and the per-device inspectors.
 //!
-//! PipeWire clock device: followers and RigWerk Out can be added live.
-//! ALSA `hw:` clock: add stays disabled until step 3 (generic followers).
+//! PipeWire clock device: followers and RigWerk Out can be added live (in-graph).
+//! ALSA / other cpal clock: generic followers on their own streams (step 3).
 
 mod rows;
 
@@ -12,11 +12,13 @@ use rows::{chain_device_row, device_level_block, list_device_row, mute_button, t
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Stroke, Vec2};
 
-use crate::app::settings::{rate_label, FollowerPref};
+use crate::app::settings::{
+    cushion_from_pref, cushion_to_pref, rate_label, FollowerPref, CUSHION_MS_MAX, CUSHION_MS_MIN,
+};
 use crate::app::RigWerkApp;
 use crate::audio::{
-    EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS,
-    MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    CushionMode, EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
+    MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::pages::mixer::rack::RackAction;
@@ -27,9 +29,9 @@ use crate::ui::widgets::{
     virtual_tag,
 };
 
-/// Why "+ add output device" is greyed out when the clock is not PipeWire.
-pub(crate) const ADD_DEVICE_HINT_ALSA: &str =
-    "Followers need a PipeWire clock device (generic followers come later)";
+/// Why "+ add output device" is greyed out off Linux (Windows is step 4).
+pub(crate) const ADD_DEVICE_HINT_PLATFORM: &str =
+    "Extra output devices on Windows come in a later version";
 /// At the follower cap.
 pub(crate) const ADD_DEVICE_HINT_FULL: &str = "Four followers is the maximum for now";
 
@@ -111,7 +113,8 @@ pub(crate) fn device_row_value(row: &OutputDeviceRow, state: EngineState) -> Str
 }
 
 impl RigWerkApp {
-    /// Whether the clock device is a native PipeWire node (followers enabled).
+    /// Whether the clock device is a native PipeWire node (in-graph followers
+    /// and RigWerk Out).
     pub(crate) fn pipewire_followers_enabled(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
@@ -123,10 +126,16 @@ impl RigWerkApp {
         }
     }
 
+    /// Whether followers can be added for the current clock (Linux only for
+    /// now; Windows is step 4).
+    pub(crate) fn followers_enabled(&self) -> bool {
+        cfg!(target_os = "linux")
+    }
+
     /// Why add is disabled, or `None` when it is enabled.
     pub(crate) fn add_output_disabled_reason(&self) -> Option<&'static str> {
-        if !self.pipewire_followers_enabled() {
-            Some(ADD_DEVICE_HINT_ALSA)
+        if !self.followers_enabled() {
+            Some(ADD_DEVICE_HINT_PLATFORM)
         } else if self.followers.len() >= MAX_FOLLOWERS {
             Some(ADD_DEVICE_HINT_FULL)
         } else {
@@ -278,6 +287,9 @@ impl RigWerkApp {
             return;
         }
         if device_id == VIRTUAL_OUT_ID {
+            if !self.pipewire_followers_enabled() {
+                return;
+            }
             if self.followers.iter().any(|f| f.virtual_out) {
                 return;
             }
@@ -298,9 +310,14 @@ impl RigWerkApp {
                 return;
             };
             #[cfg(target_os = "linux")]
-            if crate::audio::linux_node_name(&device.id).is_none() {
-                // Step 2 only plays PipeWire-sink followers.
-                return;
+            {
+                let pw_clock = self.pipewire_followers_enabled();
+                let is_pw = crate::audio::linux_node_name(&device.id).is_some();
+                // PipeWire clock: only PW sinks (in-graph).  ALSA/cpal clock:
+                // only generic (non-native) devices on their own streams.
+                if pw_clock != is_pw {
+                    return;
+                }
             }
             self.followers.push(FollowerPref {
                 id: device.id,
@@ -378,9 +395,11 @@ impl RigWerkApp {
         }
     }
 
-    /// Add-output list: PipeWire sinks not already used, plus RigWerk Out.
+    /// Add-output list: PipeWire sinks (+ RigWerk Out) on a PW clock, or
+    /// other system outputs on an ALSA/cpal clock.
     pub(super) fn add_output_inspector(&mut self, ui: &mut egui::Ui) {
         let clock_name = self.selected_output().name.clone();
+        let pw_clock = self.pipewire_followers_enabled();
         ui.label(
             RichText::new("Add output device")
                 .size(ts(16.0))
@@ -414,7 +433,10 @@ impl RigWerkApp {
                     .outputs
                     .iter()
                     .filter_map(|device| {
-                        crate::audio::linux_node_name(&device.id)?;
+                        let is_pw = crate::audio::linux_node_name(&device.id).is_some();
+                        if pw_clock != is_pw {
+                            return None;
+                        }
                         Some((
                             device.id.clone(),
                             device.name.clone(),
@@ -426,14 +448,17 @@ impl RigWerkApp {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = &used;
+                let _ = (&used, pw_clock);
                 Vec::new()
             }
         };
         candidates.sort_by_key(|a| a.1.to_lowercase());
 
         block(ui, |ui| {
-            ui.label(micro_label("PIPEWIRE", BLUE));
+            ui.label(micro_label(
+                if pw_clock { "PIPEWIRE" } else { "DEVICES" },
+                BLUE,
+            ));
             ui.add_space(4.0);
             let mut picked = None;
             for (id, name, detail, disabled) in &candidates {
@@ -457,36 +482,39 @@ impl RigWerkApp {
             if let Some(id) = picked {
                 self.add_follower_device(&id);
             }
-            ui.add_space(8.0);
-            ui.label(micro_label("VIRTUAL", GREEN));
-            ui.add_space(4.0);
-            let virt = ui.add_enabled(
-                !has_virtual,
-                egui::Button::new(
-                    RichText::new(format!(
-                        "{VIRTUAL_OUT_NAME}\nPIPEWIRE SOURCE · created by RigWerk"
-                    ))
-                    .size(ts(11.0))
-                    .color(TEXT),
-                )
-                .fill(with_alpha(GREEN, 10))
-                .stroke(Stroke::new(1.0, with_alpha(GREEN, 45)))
-                .corner_radius(CornerRadius::same(7))
-                .min_size(Vec2::new(ui.available_width(), 40.0)),
-            );
-            if has_virtual {
-                virt.on_disabled_hover_text("already added");
-            } else if virt.clicked() {
-                self.add_follower_device(VIRTUAL_OUT_ID);
+            if pw_clock {
+                ui.add_space(8.0);
+                ui.label(micro_label("VIRTUAL", GREEN));
+                ui.add_space(4.0);
+                let virt = ui.add_enabled(
+                    !has_virtual,
+                    egui::Button::new(
+                        RichText::new(format!(
+                            "{VIRTUAL_OUT_NAME}\nPIPEWIRE SOURCE · created by RigWerk"
+                        ))
+                        .size(ts(11.0))
+                        .color(TEXT),
+                    )
+                    .fill(with_alpha(GREEN, 10))
+                    .stroke(Stroke::new(1.0, with_alpha(GREEN, 45)))
+                    .corner_radius(CornerRadius::same(7))
+                    .min_size(Vec2::new(ui.available_width(), 40.0)),
+                );
+                if has_virtual {
+                    virt.on_disabled_hover_text("already added");
+                } else if virt.clicked() {
+                    self.add_follower_device(VIRTUAL_OUT_ID);
+                }
             }
         });
     }
 
-    /// Follower inspector: level, mute, remove; health handled by PipeWire.
+    /// Follower inspector: level, mute, remove; PW health or generic cushion.
     pub(super) fn follower_device_inspector(&mut self, ui: &mut egui::Ui, row: &OutputDeviceRow) {
         let Some(follower) = row.follower_index else {
             return;
         };
+        let pipewire = self.pipewire_followers_enabled();
         ui.horizontal(|ui| {
             ui.label(RichText::new(&row.name).size(ts(16.0)).color(TEXT).strong());
             ui.label(
@@ -504,9 +532,13 @@ impl RigWerkApp {
             });
         });
         ui.label(
-            RichText::new("Follower · plays the finished mix. Handled by PipeWire.")
-                .size(ts(11.0))
-                .color(DIM),
+            RichText::new(if pipewire {
+                "Follower · plays the finished mix. Handled by PipeWire."
+            } else {
+                "Follower · plays the finished mix on its own clock."
+            })
+            .size(ts(11.0))
+            .color(DIM),
         );
         if row.missing {
             ui.add_space(8.0);
@@ -519,20 +551,24 @@ impl RigWerkApp {
             );
         }
         ui.add_space(12.0);
-        block(ui, |ui| {
-            ui.label(micro_label("HEALTH", BLUE));
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Handled by PipeWire")
-                    .size(ts(12.0))
-                    .color(GREEN),
-            );
-            ui.label(
-                RichText::new("Same graph clock as the clock device · no ring or cushion.")
-                    .size(ts(10.5))
-                    .color(MUTED),
-            );
-        });
+        if pipewire {
+            block(ui, |ui| {
+                ui.label(micro_label("HEALTH", BLUE));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Handled by PipeWire")
+                        .size(ts(12.0))
+                        .color(GREEN),
+                );
+                ui.label(
+                    RichText::new("Same graph clock as the clock device · no ring or cushion.")
+                        .size(ts(10.5))
+                        .color(MUTED),
+                );
+            });
+        } else {
+            self.follower_cushion_block(ui, follower);
+        }
         ui.add_space(10.0);
         if let Some(pref) = self.followers.get_mut(follower) {
             device_level_block(
@@ -565,6 +601,53 @@ impl RigWerkApp {
                     }
                 });
             });
+        });
+    }
+
+    /// Cushion controls for a generic (non-PipeWire) follower.
+    fn follower_cushion_block(&mut self, ui: &mut egui::Ui, follower: usize) {
+        let Some(pref) = self.followers.get_mut(follower) else {
+            return;
+        };
+        let mut mode = cushion_from_pref(pref.cushion_mode);
+        block(ui, |ui| {
+            ui.label(micro_label("CUSHION", BLUE));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Own ring between the mix and this device. Absorb clock drift here.")
+                    .size(ts(10.5))
+                    .color(MUTED),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                for (option, label) in [
+                    (CushionMode::Safe, "Safe"),
+                    (CushionMode::LowLatency, "Low latency"),
+                    (CushionMode::Manual, "Manual"),
+                ] {
+                    if ui
+                        .selectable_label(mode == option, RichText::new(label).size(ts(10.0)))
+                        .clicked()
+                    {
+                        mode = option;
+                    }
+                }
+            });
+            if mode != cushion_from_pref(pref.cushion_mode) {
+                pref.cushion_mode = cushion_to_pref(mode);
+            }
+            if mode == CushionMode::Manual {
+                ui.add_space(4.0);
+                let mut ms = pref.cushion_ms;
+                let response = ui.add(
+                    egui::Slider::new(&mut ms, CUSHION_MS_MIN..=CUSHION_MS_MAX)
+                        .suffix(" ms")
+                        .show_value(true),
+                );
+                if response.changed() {
+                    pref.cushion_ms = ms;
+                }
+            }
         });
     }
 

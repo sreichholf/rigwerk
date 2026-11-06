@@ -20,6 +20,8 @@
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
 //! - `mixer` / `resampler`: turning ring frames into output frames.
+//! - `follower`: generic multi-output (finished mix → own ring + cpal stream).
+//! - `ring`: lock-free stereo SPSC used by the clock bridge and followers.
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
 //! - `output_map`: per-device level, mute and channel map.
@@ -32,6 +34,7 @@ mod denormal;
 mod devices;
 mod engine;
 mod eq;
+mod follower;
 mod gate;
 mod input;
 mod mixer;
@@ -39,6 +42,7 @@ mod output;
 mod output_map;
 mod plugins;
 mod resampler;
+mod ring;
 mod scope;
 mod shared;
 mod thread_priority;

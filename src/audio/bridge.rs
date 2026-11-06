@@ -9,6 +9,7 @@ use std::time::Duration;
 use cpal::traits::StreamTrait;
 
 use super::devices::pick_input_config;
+use super::follower::FollowerOutputs;
 use super::input::{make_input_stream, open_input_device};
 use super::output::open_output;
 use super::shared::{initial_target, Shared};
@@ -101,9 +102,16 @@ pub(crate) fn run_bridge(
         output.channels
     ));
 
+    // Generic followers: own cpal streams, synced live from the plan.
+    // PipeWire duplex never reaches this path; ASIO / native PW return above.
+    let mut followers = FollowerOutputs::new(config.output_buffer, output.rate);
+    followers.sync(&shared);
+
     while !stop.load(Ordering::Relaxed) {
+        followers.sync(&shared);
         thread::sleep(Duration::from_millis(20));
     }
+    drop(followers);
     drop(input_stream);
     drop(output);
     Ok(())

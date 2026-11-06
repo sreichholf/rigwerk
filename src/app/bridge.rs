@@ -388,19 +388,25 @@ impl RigWerkApp {
         (frames > 0 && rate > 0).then(|| (frames, frames as f32 / rate as f32 * 1000.0))
     }
 
-    /// Pushes follower settings and the PipeWire link plan into the engine.
-    /// Live: not part of the bridge signature.
+    /// Pushes follower settings, cushions and the link / open plan into the
+    /// engine.  Live: not part of the bridge signature.
     pub(crate) fn push_followers_to_engine(&self) {
+        use crate::app::settings::cushion_from_pref;
         use crate::audio::{FollowerLink, FollowerPlan, MAX_FOLLOWERS};
 
         let count = self.followers.len().min(MAX_FOLLOWERS);
         let mut settings = Vec::with_capacity(count);
+        let mut cushions = Vec::with_capacity(count);
         let mut plan = FollowerPlan {
             count,
             ..FollowerPlan::default()
         };
         for (index, follower) in self.followers.iter().take(count).enumerate() {
             settings.push(follower.settings);
+            cushions.push((
+                cushion_from_pref(follower.cushion_mode),
+                follower.cushion_ms,
+            ));
             let node_name = if follower.virtual_out {
                 String::new()
             } else {
@@ -417,12 +423,17 @@ impl RigWerkApp {
                 }
             };
             plan.slots[index] = FollowerLink {
+                device_id: if follower.virtual_out {
+                    String::new()
+                } else {
+                    follower.id.clone()
+                },
                 node_name,
                 virtual_out: follower.virtual_out,
                 publish: follower.publish,
             };
         }
-        self.engine.set_followers(&settings, &plan);
+        self.engine.set_followers(&settings, &plan, &cushions);
     }
 
     /// How the output runs right now, or how it will try to run.

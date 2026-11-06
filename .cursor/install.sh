@@ -23,6 +23,7 @@ sudo apt-get install -y --no-install-recommends \
   pipewire-alsa \
   pipewire-bin \
   pipewire-pulse \
+  libpipewire-0.3-dev \
   wireplumber
 
 # Login shells (install, start, and the agent) source /etc/profile.d.
