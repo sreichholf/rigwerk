@@ -215,11 +215,11 @@ fn cushion_modes_fit(ui: &egui::Ui) -> bool {
 
 /// Full waveform, or the shorter one used when the mode row does not fit.
 ///
-/// The live cards are 408 px with a 15 px inset, 378 px of room.  On a narrow
-/// card the title wraps and a second tab row (or the manual slider under an
-/// unclipped mode control) would be cut off by `card_fixed`.  Giving back 52 px
-/// of the 76 px trace keeps Safe / Low latency / Manual and the manual size
-/// slider inside that inset.
+/// The live cards share [`crate::ui::pages::live::LIVE_TOP_CARD_H`] with a
+/// 15 px inset.  On a narrow card the title wraps and a second tab row (or
+/// the manual slider under an unclipped mode control) would be cut off by
+/// `card_fixed`.  Giving back 52 px of the 76 px trace keeps Safe / Low
+/// latency / Manual and the manual size slider inside that inset.
 fn bridge_scope_height(modes_fit: bool) -> f32 {
     if modes_fit {
         76.0
@@ -291,8 +291,8 @@ mod tests {
     use crate::ui::theme::{self, ts, AMBER, DIM, MUTED, TEXT};
     use crate::ui::widgets::{metric_inline, micro_label, mono, progress_line, status_dot};
 
-    /// Inner height of the live row cards: 408 px outer, 15 px inset each side.
-    const CARD_INNER_H: f32 = 408.0 - 30.0;
+    /// Inner height of the live row cards: shared outer height, 15 px inset each side.
+    const CARD_INNER_H: f32 = crate::ui::pages::live::LIVE_TOP_CARD_H - 30.0;
     /// Inner width of the bridge card at the 1040 px minimum window.
     const NARROW_W: f32 = 150.0;
 

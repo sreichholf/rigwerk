@@ -81,7 +81,8 @@ With one output device, everything looks and behaves exactly like today.
     its matrix with real channel count, presets (Stereo 1/2, 3/4,
     1/2 + 3/4, Mono to all, Swap, Clear), unused-channel option,
     per-channel meters, "nothing routed" warning.
-  - Active patch summary.
+  - Device / playing-channel count lives on the Mix → Outputs header
+    (no separate Active Patch strip — that duplicated the device list).
 
 ### Step 2: Linux/PipeWire followers and RigWerk Out
 
@@ -132,5 +133,15 @@ With one output device, everything looks and behaves exactly like today.
   - Re-take `docs/screenshots/routing.png` and `mixer.png` on real hardware.
   - Live chain strip's OUTPUT chip shows only the master level.
   - A missing clock device has no own state in the Mixer row (it shows the bridge state).
-  - ASIO opens at most 4 outputs; PipeWire paths are fixed stereo (steps 2 and 4).
-- [ ] Step 2 · [ ] Step 3 · [ ] Step 4
+  - ASIO opens at most 4 outputs (step 4).
+- [x] Step 2 · Linux/PipeWire followers and RigWerk Out
+  - Duplex filter: preallocated stereo port pairs + live links for PW sinks
+  - RigWerk Out: `Audio/Source/Virtual` filter, publish live
+  - Mixer add/remove gated on native PipeWire clock; ALSA hw still disabled (step 3)
+  - Routing layer ② edits follower/virtual maps; Live has Also playing on + publish banner
+  - Open: native two-stream (non-duplex) PW playback does not yet fan out followers; ASIO still ≤4 outs
+- Related (docs only, not dual-out steps): Live Issues strip — `live-issues-plan.md`,
+  mockup `live-issues.html`. Shared Warnings/Errors on Live; remediation must
+  name real controls (Low latency, buffer, cushion), including per-follower
+  cushion once followers play.
+- [ ] Step 3 · [ ] Step 4
