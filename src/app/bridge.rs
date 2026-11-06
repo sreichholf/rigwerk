@@ -42,6 +42,7 @@ impl RigWerkApp {
         self.sample_rate.hash(&mut hasher);
         self.buffer_size.hash(&mut hasher);
         self.low_latency_output.hash(&mut hasher);
+        self.wasapi_output_mode.hash(&mut hasher);
         self.output_rate.hash(&mut hasher);
         self.output_buffer.hash(&mut hasher);
         hasher.finish()
@@ -87,6 +88,19 @@ impl RigWerkApp {
         let pipewire_low_latency = self.low_latency_output && audio::is_pipewire_device(&output);
         #[cfg(not(target_os = "linux"))]
         let pipewire_low_latency = false;
+        let clock_host = output.asio_clsid.is_none();
+        #[cfg(target_os = "windows")]
+        let (real_style_output, exclusive_output) = if clock_host {
+            match self.wasapi_output_mode {
+                audio::WasapiOutputMode::Shared => (false, false),
+                audio::WasapiOutputMode::RealStyle => (true, false),
+                audio::WasapiOutputMode::Exclusive => (false, true),
+            }
+        } else {
+            (false, false)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let (real_style_output, exclusive_output) = (self.low_latency_output && clock_host, false);
         let config = StartConfig {
             asio_clsid: input.asio_clsid,
             input_id: if input.asio_clsid.is_some() {
@@ -101,7 +115,8 @@ impl RigWerkApp {
             output_rate: (self.output_rate > 0).then_some(self.output_rate),
             output_buffer: self.output_buffer,
             asio_wrapper: input.asio_clsid.is_some() && is_wrapper_driver(&input),
-            real_style_output: self.low_latency_output && output.asio_clsid.is_none(),
+            real_style_output,
+            exclusive_output,
             pipewire_low_latency,
         };
         self.push_log(
@@ -456,19 +471,35 @@ impl RigWerkApp {
         }
         if self.selected_output().asio_clsid.is_some() {
             "ASIO output · driver buffer".to_owned()
-        } else if self.low_latency_output {
-            if cfg!(target_os = "windows") {
-                "REAL-style: the driver's smallest step, one step queued (normal output if refused)"
-                    .to_owned()
-            } else {
-                format!(
-                    "Low latency: PipeWire {}-frame quantum, ALSA's smallest usable period (normal output buffer if refused)",
-                    audio::PIPEWIRE_LOW_QUANTUM
-                )
+        } else if cfg!(target_os = "windows") {
+            match self.wasapi_output_mode {
+                audio::WasapiOutputMode::Exclusive => {
+                    "Exclusive: driver's smallest exclusive period, this device only (shared output buffer if refused)"
+                        .to_owned()
+                }
+                audio::WasapiOutputMode::RealStyle => {
+                    "REAL-style: the driver's smallest shared step, one step queued (normal output if refused)"
+                        .to_owned()
+                }
+                audio::WasapiOutputMode::Shared => {
+                    format!("Shared output · {} smp buffer", self.output_buffer)
+                }
             }
+        } else if self.low_latency_output {
+            format!(
+                "Low latency: PipeWire {}-frame quantum, ALSA's smallest usable period (normal output buffer if refused)",
+                audio::PIPEWIRE_LOW_QUANTUM
+            )
         } else {
             format!("Standard output · {} smp buffer", self.output_buffer)
         }
+    }
+
+    /// Apply a Windows WASAPI clock mode and keep the legacy bool aligned
+    /// (`true` only for REAL-style, matching old saves).
+    pub(crate) fn set_wasapi_output_mode(&mut self, mode: audio::WasapiOutputMode) {
+        self.wasapi_output_mode = mode;
+        self.low_latency_output = matches!(mode, audio::WasapiOutputMode::RealStyle);
     }
 }
 
@@ -496,9 +527,47 @@ mod tests {
         app.use_asio_input = false;
         app.output_gain = 0.0;
         app.low_latency_output = false;
+        app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
         app.output_rate = 48_000;
         app.session_name = String::new();
         app
+    }
+
+    #[test]
+    fn set_wasapi_output_mode_keeps_the_legacy_bool_aligned() {
+        let mut app = latency_app();
+        app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Shared);
+        assert!(!app.low_latency_output);
+        app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::RealStyle);
+        assert!(app.low_latency_output);
+        app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Exclusive);
+        assert!(!app.low_latency_output);
+        assert_eq!(
+            app.wasapi_output_mode,
+            crate::audio::WasapiOutputMode::Exclusive
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn planned_output_mode_text_names_each_wasapi_choice() {
+        let mut app = latency_app();
+        app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Shared);
+        assert!(
+            app.output_mode_text().contains("Shared"),
+            "{}",
+            app.output_mode_text()
+        );
+        app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::RealStyle);
+        assert!(
+            app.output_mode_text().contains("REAL-style"),
+            "{}",
+            app.output_mode_text()
+        );
+        app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Exclusive);
+        let text = app.output_mode_text();
+        assert!(text.contains("Exclusive"), "{text}");
+        assert!(text.contains("this device only"), "{text}");
     }
 
     #[test]

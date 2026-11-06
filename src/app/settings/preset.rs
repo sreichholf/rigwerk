@@ -5,7 +5,7 @@ use super::preferences::{
     DEFAULT_SAMPLE_RATE,
 };
 use super::serde_util::skip_unreadable;
-use crate::audio::{EqSettings, GateSettings, OutputDeviceSettings, PluginPref};
+use crate::audio::{EqSettings, GateSettings, OutputDeviceSettings, PluginPref, WasapiOutputMode};
 
 /// A saved patch.  Every field has a default, so a patch saved by an older or
 /// newer version (or with a field missing) still loads.
@@ -50,8 +50,12 @@ pub(crate) struct Preset {
     pub(crate) mute: bool,
     pub(crate) monitor: bool,
     pub(crate) drift: bool,
-    /// REAL-style / low-latency output. The preference kept this name.
+    /// Linux low-latency / legacy Windows REAL-style switch.
     pub(crate) low_latency_output: bool,
+    /// Windows WASAPI clock mode. Missing on older patches → derived from
+    /// [`Self::low_latency_output`].
+    #[serde(default)]
+    pub(crate) wasapi_output_mode: Option<WasapiOutputMode>,
     pub(crate) routes: [[bool; 4]; 2],
     /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
     pub(crate) cushion_mode: u8,
@@ -101,6 +105,7 @@ impl Default for Preset {
             monitor: true,
             drift: true,
             low_latency_output: true,
+            wasapi_output_mode: Some(WasapiOutputMode::RealStyle),
             routes: [[true, false, false, false], [false, true, false, false]],
             cushion_mode: 0,
             cushion_ms: DEFAULT_CUSHION_MS,

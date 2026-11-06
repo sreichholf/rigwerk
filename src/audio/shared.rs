@@ -826,6 +826,21 @@ impl Shared {
             .store(step_frames, Ordering::Relaxed);
         self.scope_out.set_rate(rate);
         self.set_output_mode(mode);
+        // Size the cushion from the device step as soon as it is known.  Exclusive
+        // (and large REAL-style) wakes drain a full step each time; waiting for the
+        // mixer's second block to call note_output_block leaves the target at the
+        // input-side initial guess and underruns into the fade ("helicopter").
+        if step_frames > 0 {
+            let source = match self.source_rate.load(Ordering::Relaxed) {
+                0 => rate.max(1),
+                source => source,
+            };
+            let out = rate.max(1);
+            let source_step = (step_frames as u64 * source as u64)
+                .div_ceil(out as u64)
+                .max(1) as usize;
+            self.note_output_block(source_step);
+        }
     }
 
     /// Sets the starting cushion for a new bridge.
@@ -1241,6 +1256,8 @@ pub(crate) fn initial_target(buffer_frames: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use crate::audio::CushionMode;
 
     /// A bridge like the BT-W3 case: 128-sample input, 480-sample output step.
@@ -1291,6 +1308,22 @@ mod tests {
         assert_eq!(shared.target_frames(), 1216);
         shared.relax_target();
         assert_eq!(shared.target_frames(), 1152);
+    }
+
+    #[test]
+    fn set_output_lifts_the_safe_cushion_for_a_large_exclusive_step() {
+        // Bridge opens output before input has filled anything; exclusive may
+        // wake with a 10 ms (or larger) GetBufferSize.  The cushion must already
+        // cover two of those steps or the first audible block underruns.
+        let shared = super::Shared::new(48_000);
+        shared.set_cushion(CushionMode::Safe, 10.0);
+        shared.set_source_rate(48_000);
+        shared.set_target_frames(super::initial_target(128));
+        shared.note_input_block(128);
+        assert_eq!(shared.target_frames(), 256);
+        shared.set_output(48_000, 480, "Exclusive · test");
+        assert_eq!(shared.target_frames(), 960);
+        assert_eq!(shared.output_step_frames.load(Ordering::Relaxed), 480);
     }
 
     #[test]

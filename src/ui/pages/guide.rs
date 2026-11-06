@@ -251,7 +251,7 @@ impl RigWerkApp {
         let (latency_title, latency_text) = if cfg!(target_os = "windows") {
             (
                 "LATENCY OPTIONS",
-                "On a system-host output, the low latency switch runs the WASAPI device at the smallest step its driver allows and queues only that one step, so other apps keep playing. The OUTPUT card's DRIVER line checks the selected driver as soon as the app opens and again when devices change; click \"check again\" after installing a driver. Many drivers only offer their 10 ms default in shared mode; that is the driver's limit, not a RigWerk setting, and the MODE line says so when it applies. Windows' in-box \"High Definition Audio Device\" driver often allows about 3 ms instead. Choose an ASIO output when you want the driver's own low-latency buffer.",
+                "On a WASAPI clock output, pick Shared (normal buffer), REAL-style (smallest shared engine step, other apps keep playing), or Exclusive (this device alone at its exclusive period — often lower than shared, but other apps go silent on that endpoint). ASIO outputs ignore those three and use the driver's own buffer. The OUTPUT card's DRIVER line checks the selected shared-mode driver as soon as the app opens and again when devices change; click \"check again\" after installing a driver. Many drivers only offer their 10 ms default in shared mode; that is the driver's limit, and the MODE line says so when it applies. Windows' in-box \"High Definition Audio Device\" driver often allows about 3 ms shared. If Exclusive is refused, RigWerk falls back to shared output with the chosen buffer.",
             )
         } else {
             (

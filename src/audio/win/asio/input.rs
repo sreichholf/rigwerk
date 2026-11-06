@@ -57,6 +57,7 @@ pub(crate) fn run_asio_bridge(
         &shared,
         config.output_buffer,
         config.real_style_output,
+        config.exclusive_output,
     ) {
         Ok(opened) => opened,
         Err(error) if asio_wrapper => {

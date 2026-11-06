@@ -277,6 +277,45 @@ impl CushionMode {
     }
 }
 
+/// How the Windows WASAPI clock device opens.  Followers stay shared.
+///
+/// Older preferences only stored a `low_latency_output` bool; `true` maps to
+/// [`Self::RealStyle`], `false` to [`Self::Shared`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WasapiOutputMode {
+    /// Normal shared cpal stream with the chosen `output_buffer`.
+    Shared,
+    /// Shared IAudioClient3 at the driver's smallest engine step (REAL-style).
+    RealStyle,
+    /// Exclusive mode on the clock device only; other apps cannot play there.
+    Exclusive,
+}
+
+impl WasapiOutputMode {
+    pub fn from_low_latency(low_latency: bool) -> Self {
+        if low_latency {
+            Self::RealStyle
+        } else {
+            Self::Shared
+        }
+    }
+
+    /// Short UI label for the OUTPUT card control.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "Shared",
+            Self::RealStyle => "REAL-style",
+            Self::Exclusive => "Exclusive",
+        }
+    }
+
+    /// Whether this mode asks for a low-latency attempt (not plain Shared).
+    pub fn wants_low_latency(self) -> bool {
+        !matches!(self, Self::Shared)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StartConfig {
     /// Set when the input is an ASIO driver (Windows only).
@@ -294,7 +333,7 @@ pub struct StartConfig {
     /// Output side rate; `None` follows whatever rate the input really runs at.
     pub output_rate: Option<u32>,
     /// Output side buffer in frames, used whenever the output is not running
-    /// REAL-style (ASIO playback, or a WASAPI driver that refused).
+    /// REAL-style or exclusive (ASIO playback, or a WASAPI driver that refused).
     pub output_buffer: usize,
     /// A wrapper driver (ASIO4ALL and friends) does not name its hardware, so
     /// playback errors get an extra hint about sharing one sound card.
@@ -303,7 +342,12 @@ pub struct StartConfig {
     /// REAL-style output: open WASAPI outputs through IAudioClient3 at the
     /// smallest engine step the driver allows.  If the driver refuses, the
     /// output falls back to a normal shared stream with `output_buffer`.
+    /// Ignored when [`Self::exclusive_output`] is set.
     pub real_style_output: bool,
+    /// WASAPI exclusive mode for the clock device only.  On refuse, falls back
+    /// to shared cpal with `output_buffer` (not REAL-style).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub exclusive_output: bool,
     /// Linux: ask PipeWire for its low quantum while the bridge runs.  The
     /// quantum is released as soon as the bridge stops.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

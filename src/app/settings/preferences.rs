@@ -8,7 +8,7 @@ use super::serde_util::skip_unreadable;
 use crate::app::Page;
 use crate::audio::{
     CushionMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings, PluginPref,
-    MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    WasapiOutputMode, MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 
 pub(crate) const PREFERENCES_SCHEMA: u32 = 1;
@@ -58,9 +58,14 @@ pub(crate) struct Preferences {
     pub(crate) mute: bool,
     pub(crate) drift: bool,
     pub(crate) monitor: bool,
-    /// REAL-style output (the setting kept its older name so saved
-    /// preferences carry over).
+    /// Linux low-latency output, and the pre-exclusive Windows REAL-style
+    /// switch.  Kept so older saves and Linux prefs round-trip.  On Windows
+    /// the authoritative choice is [`Self::wasapi_output_mode`].
     pub(crate) low_latency_output: bool,
+    /// Windows WASAPI clock mode.  Missing on older saves → derived from
+    /// [`Self::low_latency_output`] in [`sanitize_preferences`].
+    #[serde(default)]
+    pub(crate) wasapi_output_mode: Option<WasapiOutputMode>,
     pub(crate) routes: [[bool; 4]; 2],
     /// Output side rate; 0 follows the input.
     pub(crate) output_rate: u32,
@@ -122,6 +127,7 @@ impl Default for Preferences {
             drift: true,
             monitor: true,
             low_latency_output: true,
+            wasapi_output_mode: Some(WasapiOutputMode::RealStyle),
             routes: [[true, false, false, false], [false, true, false, false]],
             output_rate: 0,
             output_buffer: DEFAULT_BUFFER,
@@ -469,6 +475,10 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
         OutputBufferZero::Invalid,
     );
     write_bridge_settings(preferences, settings);
+    migrate_wasapi_output_mode(
+        &mut preferences.wasapi_output_mode,
+        preferences.low_latency_output,
+    );
     preferences.eq = preferences.eq.sanitized();
     preferences.eq_post = preferences.eq_post.sanitized();
     preferences.gate = preferences.gate.sanitized();
@@ -477,6 +487,23 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     for preset in &mut preferences.sessions {
         sanitize_preset(preset);
     }
+}
+
+/// Fills a missing Windows mode from the legacy bool (`true` → REAL-style).
+pub(crate) fn migrate_wasapi_output_mode(
+    mode: &mut Option<WasapiOutputMode>,
+    low_latency_output: bool,
+) {
+    if mode.is_none() {
+        *mode = Some(WasapiOutputMode::from_low_latency(low_latency_output));
+    }
+}
+
+/// The mode to apply on Windows after load / sanitize.
+pub(crate) fn resolved_wasapi_output_mode(preferences: &Preferences) -> WasapiOutputMode {
+    preferences
+        .wasapi_output_mode
+        .unwrap_or_else(|| WasapiOutputMode::from_low_latency(preferences.low_latency_output))
 }
 
 pub(crate) fn sanitize_preset(preset: &mut Preset) {
@@ -499,6 +526,7 @@ pub(crate) fn sanitize_preset(preset: &mut Preset) {
     preset.input_gain = settings.input_gain;
     preset.output_gain = settings.output_gain;
     preset.cushion_ms = settings.cushion_ms;
+    migrate_wasapi_output_mode(&mut preset.wasapi_output_mode, preset.low_latency_output);
     if let Some(eq) = preset.eq.as_mut() {
         *eq = eq.sanitized();
     }

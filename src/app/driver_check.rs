@@ -412,6 +412,10 @@ impl RigWerkApp {
                     block_ms(frames, rate)
                 ));
             }
+        } else if mode.starts_with("Exclusive") {
+            // Exclusive uses the driver's exclusive period, not the chosen
+            // shared output buffer.  A size mismatch is expected and not a
+            // shared-mode mixing note.
         } else if mode.starts_with("Low latency") {
             // Low latency deliberately asks for a different size than the
             // manual output buffer, so a difference is not a surprise here.
@@ -431,7 +435,9 @@ impl RigWerkApp {
                     self.output_buffer
                 )
             };
-            if let Some(reason) = mode.split("REAL-style refused: ").nth(1) {
+            if let Some(reason) = mode.split("Exclusive refused: ").nth(1) {
+                note.push_str(&format!(" Exclusive mode was refused: {reason}."));
+            } else if let Some(reason) = mode.split("REAL-style refused: ").nth(1) {
                 note.push_str(&format!(" REAL-style could not go lower: {reason}."));
             }
             notes.push(note);

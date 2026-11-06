@@ -298,6 +298,7 @@ pub(crate) fn run(
             &shared,
             config.output_buffer,
             config.real_style_output,
+            false,
         )?;
         output_channels = output.channels;
         cpal_output = Some(output);

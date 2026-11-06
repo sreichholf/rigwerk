@@ -141,6 +141,7 @@ fn hardware_bridge() {
         output_buffer: 128,
         asio_wrapper: input.name.to_lowercase().contains("asio4all"),
         real_style_output: true,
+        exclusive_output: false,
         pipewire_low_latency: false,
     });
     let mut ring_seen = 0.0f32;

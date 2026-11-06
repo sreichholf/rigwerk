@@ -24,13 +24,13 @@ use crate::app::devices::{inventory_fingerprint, HeldDevice};
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
     cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
-    preferences_backup_key, store_preferences, unique_presets, FollowerPref, Preferences, Preset,
-    PREFERENCES_KEY, PREFERENCES_SCHEMA,
+    preferences_backup_key, resolved_wasapi_output_mode, store_preferences, unique_presets,
+    FollowerPref, Preferences, Preset, PREFERENCES_KEY, PREFERENCES_SCHEMA,
 };
 use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
     self, AudioEngine, CushionMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
-    OutputDeviceSettings, Snapshot, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
+    OutputDeviceSettings, Snapshot, WasapiOutputMode, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -140,8 +140,12 @@ pub struct RigWerkApp {
     pub(crate) mute: bool,
     pub(crate) drift: bool,
     pub(crate) monitor: bool,
-    /// REAL-style output: smallest WASAPI engine step the driver allows.
+    /// Linux low-latency output (PipeWire quantum / ALSA smallest period).
+    /// On Windows this stays aligned with [`Self::wasapi_output_mode`] for
+    /// older code paths and cross-platform preference saves.
     pub(crate) low_latency_output: bool,
+    /// Windows WASAPI clock device mode (Shared / REAL-style / Exclusive).
+    pub(crate) wasapi_output_mode: crate::audio::WasapiOutputMode,
     pub(crate) routes: [[bool; 4]; 2],
     /// Output side rate (0 follows the input) and buffer.
     pub(crate) output_rate: u32,
@@ -517,6 +521,11 @@ impl eframe::App for RigWerkApp {
             drift: self.drift,
             monitor: self.monitor,
             low_latency_output: self.low_latency_output,
+            wasapi_output_mode: Some(if cfg!(target_os = "windows") {
+                self.wasapi_output_mode
+            } else {
+                WasapiOutputMode::from_low_latency(self.low_latency_output)
+            }),
             routes: self.routes,
             output_rate: self.output_rate,
             output_buffer: self.output_buffer,
@@ -599,7 +608,15 @@ impl RigWerkApp {
             mute: preferences.mute,
             drift: preferences.drift,
             monitor: preferences.monitor,
-            low_latency_output: preferences.low_latency_output,
+            low_latency_output: {
+                let mode = resolved_wasapi_output_mode(&preferences);
+                if cfg!(target_os = "windows") {
+                    matches!(mode, crate::audio::WasapiOutputMode::RealStyle)
+                } else {
+                    preferences.low_latency_output
+                }
+            },
+            wasapi_output_mode: resolved_wasapi_output_mode(&preferences),
             output_rate: preferences.output_rate,
             output_buffer: preferences.output_buffer,
             output_tab_low_latency: preferences.output_tab_low_latency,
@@ -836,6 +853,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         drift: true,
         monitor: true,
         low_latency_output: true,
+        wasapi_output_mode: WasapiOutputMode::RealStyle,
         routes: [[true, false, false, false], [false, true, false, false]],
         output_rate: 0,
         output_buffer: 128,
