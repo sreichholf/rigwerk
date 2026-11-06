@@ -194,6 +194,10 @@ pub struct RigWerkApp {
     /// [`Snapshot::follower_channels`].
     pub(crate) meter_follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
     pub(crate) peak_follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+    /// Per path slot (L, R): after the path's chain, level, mute and solo,
+    /// before the master.  Smoothed and peak-held like the other meters.
+    pub(crate) meter_paths: [[f32; 2]; MAX_PATHS],
+    pub(crate) peak_paths: [[f32; 2]; MAX_PATHS],
     /// Decimated capture/playback waveform for the Live scope.
     pub(crate) scope_in: Vec<f32>,
     pub(crate) scope_out: Vec<f32>,
@@ -663,6 +667,8 @@ impl RigWerkApp {
             meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
             peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
             meter_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+            meter_paths: [[0.0; 2]; MAX_PATHS],
+            peak_paths: [[0.0; 2]; MAX_PATHS],
             peak_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
             scope_in: vec![0.0; audio::SCOPE_LEN],
             scope_out: vec![0.0; audio::SCOPE_LEN],
@@ -875,6 +881,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
         peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
         meter_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+        meter_paths: [[0.0; 2]; MAX_PATHS],
+        peak_paths: [[0.0; 2]; MAX_PATHS],
         peak_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
         scope_in: vec![0.0; audio::SCOPE_LEN],
         scope_out: vec![0.0; audio::SCOPE_LEN],

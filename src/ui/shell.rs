@@ -11,7 +11,7 @@ use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, RED,
     TEAL, TEXT,
 };
-use crate::ui::widgets::{micro_label, mono, nav_item, status_dot, status_pill};
+use crate::ui::widgets::{micro_label, mono, nav_item, nav_path_item, status_dot, status_pill};
 
 impl RigWerkApp {
     pub(crate) fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -40,78 +40,114 @@ impl RigWerkApp {
         ui.add_space(8.0);
 
         let mut target = None;
-        if nav_item(
-            ui,
-            Icon::Wave,
-            "Live Bridge",
-            "Bridge",
-            self.page == Page::Live,
-        ) {
-            target = Some(Page::Live);
-        }
-        if nav_item(
-            ui,
-            Icon::Mixer,
-            "Mixer",
-            "Chain + EQ",
-            self.page == Page::Mixer,
-        ) {
-            target = Some(Page::Mixer);
-        }
-        if nav_item(
-            ui,
-            Icon::Plug,
-            "Plugins",
-            "VST3 + CLAP",
-            self.page == Page::Plugins,
-        ) {
-            target = Some(Page::Plugins);
-        }
-        if nav_item(
-            ui,
-            Icon::Grid,
-            "Signal Routing",
-            "Routing",
-            self.page == Page::Routing,
-        ) {
-            target = Some(Page::Routing);
-        }
-        if nav_item(
-            ui,
-            Icon::Device,
-            "Devices",
-            "Devices",
-            self.page == Page::Devices,
-        ) {
-            target = Some(Page::Devices);
-        }
-        if nav_item(
-            ui,
-            Icon::Layers,
-            "Sessions",
-            "Sessions",
-            self.page == Page::Sessions,
-        ) {
-            target = Some(Page::Sessions);
-        }
-        if nav_item(
-            ui,
-            Icon::Help,
-            "Setup Guide",
-            "Guide",
-            self.page == Page::Guide,
-        ) {
-            target = Some(Page::Guide);
-        }
-        if nav_item(
-            ui,
-            Icon::Log,
-            "Diagnostics",
-            "Log",
-            self.page == Page::Diagnostics,
-        ) {
-            target = Some(Page::Diagnostics);
-        }
+        // The entries scroll when the window is too short for all of them
+        // (four path sub-entries at the minimum height), so the Audio Path
+        // card below stays in view.
+        let nav_h = (ui.available_height() - 170.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .id_salt("sidebar_nav")
+            .max_height(nav_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if nav_item(
+                    ui,
+                    Icon::Wave,
+                    "Live Bridge",
+                    "Bridge",
+                    self.page == Page::Live,
+                ) {
+                    target = Some(Page::Live);
+                }
+                // With several paths, Mixer gets one sub-entry per path, and the
+                // selected path's entry is the highlighted one.
+                let paths = self.path_infos();
+                let several = paths.len() > 1;
+                let mixer_hint = if several {
+                    format!("{} paths", paths.len())
+                } else {
+                    "Chain + EQ".to_owned()
+                };
+                if nav_item(
+                    ui,
+                    Icon::Mixer,
+                    "Mixer",
+                    &mixer_hint,
+                    self.page == Page::Mixer && !several,
+                ) {
+                    target = Some(Page::Mixer);
+                }
+                if several {
+                    for info in &paths {
+                        if nav_path_item(
+                            ui,
+                            info.colour,
+                            &info.name,
+                            &info.summary(),
+                            self.page == Page::Mixer && info.selected,
+                        )
+                        .on_hover_text(format!("Edit path {} in the Mixer", info.name))
+                        .clicked()
+                        {
+                            self.select_path(info.slot);
+                            target = Some(Page::Mixer);
+                        }
+                    }
+                }
+                if nav_item(
+                    ui,
+                    Icon::Plug,
+                    "Plugins",
+                    "VST3 + CLAP",
+                    self.page == Page::Plugins,
+                ) {
+                    target = Some(Page::Plugins);
+                }
+                if nav_item(
+                    ui,
+                    Icon::Grid,
+                    "Signal Routing",
+                    "Routing",
+                    self.page == Page::Routing,
+                ) {
+                    target = Some(Page::Routing);
+                }
+                if nav_item(
+                    ui,
+                    Icon::Device,
+                    "Devices",
+                    "Devices",
+                    self.page == Page::Devices,
+                ) {
+                    target = Some(Page::Devices);
+                }
+                if nav_item(
+                    ui,
+                    Icon::Layers,
+                    "Sessions",
+                    "Sessions",
+                    self.page == Page::Sessions,
+                ) {
+                    target = Some(Page::Sessions);
+                }
+                if nav_item(
+                    ui,
+                    Icon::Help,
+                    "Setup Guide",
+                    "Guide",
+                    self.page == Page::Guide,
+                ) {
+                    target = Some(Page::Guide);
+                }
+                if nav_item(
+                    ui,
+                    Icon::Log,
+                    "Diagnostics",
+                    "Log",
+                    self.page == Page::Diagnostics,
+                ) {
+                    target = Some(Page::Diagnostics);
+                }
+            });
         if let Some(page) = target {
             self.page = page;
         }

@@ -75,6 +75,11 @@ impl RigWerkApp {
             .get(index)
             .map(|view| view.name.clone())
             .unwrap_or_else(|| "Plugin".to_owned());
+        // With several paths the window title says whose insert it is.
+        let name = match self.paths.get(path).and_then(Option::as_ref) {
+            Some(owner) if self.path_count() > 1 => format!("{name} · {}", owner.name),
+            _ => name,
+        };
         let opened = match &handle {
             PluginHandle::Vst3(plugin) => {
                 let mut window = PluginWindow::new(plugin.clone());

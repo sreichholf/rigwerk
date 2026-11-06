@@ -207,8 +207,46 @@ pub(crate) fn nav_item(
     hint: &str,
     selected: bool,
 ) -> bool {
+    nav_row(ui, NavLead::Icon(icon), label, hint, selected).clicked()
+}
+
+/// A sidebar sub-entry for one signal path under Mixer: the path's colour
+/// dot where the icon sits, indented, otherwise the same row as
+/// [`nav_item`].
+pub(crate) fn nav_path_item(
+    ui: &mut egui::Ui,
+    colour: Color32,
+    label: &str,
+    hint: &str,
+    selected: bool,
+) -> egui::Response {
+    nav_row(ui, NavLead::Dot(colour), label, hint, selected)
+}
+
+/// Sub-entries sit this far right of the main entries.
+const NAV_SUB_INDENT: f32 = 26.0;
+
+enum NavLead {
+    Icon(Icon),
+    Dot(Color32),
+}
+
+fn nav_row(
+    ui: &mut egui::Ui,
+    lead: NavLead,
+    label: &str,
+    hint: &str,
+    selected: bool,
+) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
+    let indent = match lead {
+        NavLead::Icon(_) => 0.0,
+        NavLead::Dot(_) => NAV_SUB_INDENT,
+    };
+    // The highlight spans the full row (as the mockup's `.nav-path`); only
+    // the content moves right.
+    let content = Rect::from_min_max(rect.min + Vec2::new(indent, 0.0), rect.max);
     let hover = response.hovered();
     let fill = if selected {
         with_alpha(TEAL, 16)
@@ -225,26 +263,36 @@ pub(crate) fn nav_item(
             TEAL,
         );
     }
-    let icon_rect =
-        Rect::from_center_size(rect.left_center() + Vec2::new(23.0, 0.0), Vec2::splat(18.0));
-    paint_icon(
-        ui.painter(),
-        icon_rect,
-        icon,
-        if selected { TEAL } else { MUTED },
-    );
+    let lead_center = content.left_center() + Vec2::new(23.0, 0.0);
+    match lead {
+        NavLead::Icon(icon) => paint_icon(
+            ui.painter(),
+            Rect::from_center_size(lead_center, Vec2::splat(18.0)),
+            icon,
+            if selected { TEAL } else { MUTED },
+        ),
+        NavLead::Dot(colour) => {
+            ui.painter()
+                .circle_filled(lead_center, 6.0, with_alpha(colour, 50));
+            ui.painter().circle_filled(lead_center, 4.0, colour);
+        }
+    }
+    // Long path names are cut to the row, not run past the sidebar.
+    let text_w = (content.width() - 39.0 - 8.0).max(0.0);
+    let label_font = FontId::new(ts(12.2), FontFamily::Proportional);
+    let hint_font = FontId::new(ts(8.0), FontFamily::Proportional);
     ui.painter().text(
-        rect.left_center() + Vec2::new(39.0, -5.0),
+        content.left_center() + Vec2::new(39.0, -5.0),
         Align2::LEFT_CENTER,
-        label,
-        FontId::new(ts(12.2), FontFamily::Proportional),
+        fit_text(ui, label, &label_font, text_w),
+        label_font,
         if selected { TEXT } else { MUTED },
     );
     ui.painter().text(
-        rect.left_center() + Vec2::new(39.0, 8.0),
+        content.left_center() + Vec2::new(39.0, 8.0),
         Align2::LEFT_CENTER,
-        hint,
-        FontId::new(ts(8.0), FontFamily::Proportional),
+        fit_text(ui, hint, &hint_font, text_w),
+        hint_font,
         if selected { with_alpha(TEAL, 190) } else { DIM },
     );
     show_focus_ring(ui, &response, rect, 9);
@@ -256,7 +304,103 @@ pub(crate) fn nav_item(
         Some(selected),
         Some(hint.to_owned()),
     );
-    response.clicked()
+    response
+}
+
+/// One signal path as a toolbar chip: colour dot and name, at most
+/// `max_width` wide (the name is cut to fit).  The selected path's chip is
+/// filled in its colour.
+pub(crate) fn path_chip(
+    ui: &mut egui::Ui,
+    colour: Color32,
+    name: &str,
+    muted: bool,
+    selected: bool,
+    max_width: f32,
+) -> egui::Response {
+    let font = FontId::new(ts(10.0), FontFamily::Proportional);
+    let text_color = if selected {
+        TEXT
+    } else if muted {
+        DIM
+    } else {
+        MUTED
+    };
+    let text = fit_text(ui, name, &font, (max_width - 32.0).clamp(24.0, 160.0));
+    let galley = ui.painter().layout_no_wrap(text, font, text_color);
+    let size = Vec2::new(galley.size().x + 32.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if selected {
+        with_alpha(colour, 26)
+    } else if response.hovered() {
+        with_alpha(TEXT, 8)
+    } else {
+        CARD_DEEP
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(12), fill);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(12),
+        Stroke::new(
+            1.0,
+            if selected {
+                with_alpha(colour, 120)
+            } else {
+                BORDER_SOFT
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let dot = egui::pos2(rect.left() + 13.0, rect.center().y);
+    if muted {
+        ui.painter()
+            .circle_stroke(dot, 3.5, Stroke::new(1.5, colour));
+    } else {
+        ui.painter().circle_filled(dot, 4.0, colour);
+    }
+    ui.painter().galley(
+        egui::pos2(rect.left() + 23.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        text_color,
+    );
+    show_focus_ring(ui, &response, rect, 12);
+    row_info(
+        &response,
+        egui::Role::Button,
+        ui.is_enabled(),
+        name,
+        Some(selected),
+        muted.then(|| "muted".to_owned()),
+    );
+    response
+}
+
+/// One colour of the path palette as a round swatch; `chosen` rings it.
+pub(crate) fn colour_swatch(
+    ui: &mut egui::Ui,
+    colour: Color32,
+    name: &str,
+    chosen: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    ui.painter().circle_filled(rect.center(), 7.0, colour);
+    if chosen {
+        ui.painter()
+            .circle_stroke(rect.center(), 10.0, Stroke::new(1.5, TEXT));
+    } else if response.hovered() {
+        ui.painter()
+            .circle_stroke(rect.center(), 10.0, Stroke::new(1.0, MUTED));
+    }
+    show_focus_ring(ui, &response, rect, 11);
+    row_info(
+        &response,
+        egui::Role::Button,
+        ui.is_enabled(),
+        name,
+        Some(chosen),
+        None,
+    );
+    response
 }
 
 pub(crate) fn source_tab(ui: &mut egui::Ui, label: &str, selected: bool, color: Color32) -> bool {
@@ -740,7 +884,8 @@ pub(crate) fn test_input(key: Option<egui::Key>) -> egui::RawInput {
 #[cfg(test)]
 mod tests {
     use super::{
-        db_slider, nav_item, node_named, nudge_slider, run_frame, styled_slider, test_input,
+        colour_swatch, db_slider, nav_item, nav_path_item, node_named, nudge_slider, path_chip,
+        run_frame, styled_slider, test_input,
     };
     use crate::ui::icons::Icon;
     use crate::ui::theme::TEAL;
@@ -769,6 +914,26 @@ mod tests {
         assert_eq!(node.role(), egui::Role::Button);
         assert_eq!(node.value(), Some("Bridge"));
         assert_eq!(node.toggled(), Some(Toggled::True));
+    }
+
+    #[test]
+    fn path_rows_expose_their_name_and_state() {
+        let tree = super::accesskit_frame(|ui| {
+            let entry = nav_path_item(ui, TEAL, "Wet", "2 stages · 1.3 ms", false);
+            assert!(!entry.clicked());
+            assert!(!path_chip(ui, TEAL, "Stream", true, true, 200.0).clicked());
+            assert!(!colour_swatch(ui, TEAL, "Teal", true).clicked());
+        });
+        let entry = node_named(&tree, "Wet");
+        assert_eq!(entry.role(), egui::Role::Button);
+        assert_eq!(entry.value(), Some("2 stages · 1.3 ms"));
+        assert_eq!(entry.toggled(), Some(Toggled::False));
+        let chip = node_named(&tree, "Stream");
+        assert_eq!(chip.value(), Some("muted"));
+        assert_eq!(chip.toggled(), Some(Toggled::True));
+        let swatch = node_named(&tree, "Teal");
+        assert_eq!(swatch.role(), egui::Role::Button);
+        assert_eq!(swatch.toggled(), Some(Toggled::True));
     }
 
     #[test]

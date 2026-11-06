@@ -30,7 +30,6 @@ use crate::audio::{
 use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::theme::{AMBER, TEAL};
 
-#[allow(dead_code)] // For the path pages (U1/U2).
 /// The path colours, by [`SignalPath::colour`].
 pub(crate) const PATH_COLOURS: [Color32; MAX_PATHS] = [
     Color32::from_rgb(56, 221, 191),
@@ -50,7 +49,6 @@ pub(crate) struct SignalPath {
 }
 
 impl SignalPath {
-    #[allow(dead_code)] // For the path pages (U1/U2).
     pub(crate) fn colour(&self) -> Color32 {
         PATH_COLOURS[self.colour as usize % MAX_PATHS]
     }
@@ -86,7 +84,6 @@ pub(crate) struct InsertKey {
     pub(crate) insert: usize,
 }
 
-#[allow(dead_code)] // For the path pages (U1/U2).
 /// What the UI shows for one live path (sidebar entry, path chips, cards).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PathInfo {
@@ -114,7 +111,6 @@ pub(crate) struct PathInfo {
     pub(crate) selected: bool,
 }
 
-#[allow(dead_code)] // For the path pages (U1/U2).
 impl PathInfo {
     /// "3 stages · 1.3 ms" (plus " · muted"), the sidebar sub-line.
     pub(crate) fn summary(&self) -> String {
@@ -217,7 +213,6 @@ impl RigWerkApp {
         true
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
     /// What the UI shows for every live path, in display order.
     pub(crate) fn path_infos(&self) -> Vec<PathInfo> {
         let any_solo = self.paths.iter().flatten().any(|path| path.mix.solo);
@@ -263,7 +258,6 @@ impl RigWerkApp {
             .collect()
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
     /// Whether another path fits (a slot is free in the app and the
     /// engine has finished any fade-out there).
     pub(crate) fn can_add_path(&self) -> bool {
@@ -387,7 +381,6 @@ impl RigWerkApp {
         Some(slot)
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
     /// Removes path `slot`: it fades out in the engine (where it played:
     /// its device entries stay until the slot is reused), and its editors
     /// close.  The last path cannot be removed.
@@ -421,7 +414,6 @@ impl RigWerkApp {
         true
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
     pub(crate) fn set_path_level(&mut self, slot: usize, level_db: f32) {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
             path.mix.level_db = sanitize_path_level(level_db);
@@ -434,24 +426,32 @@ impl RigWerkApp {
         }
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
     pub(crate) fn set_path_solo(&mut self, slot: usize, solo: bool) {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
             path.mix.solo = solo;
         }
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
-    pub(crate) fn rename_path(&mut self, slot: usize, name: &str) {
-        if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
-            let name = name.trim();
-            if !name.is_empty() {
+    /// Renames path `slot` to `name`, trimmed.  An empty name, or one
+    /// another live path already uses (ignoring case), is refused: the
+    /// sidebar, chips and routing rows tell paths apart by name.
+    pub(crate) fn rename_path(&mut self, slot: usize, name: &str) -> bool {
+        let name = name.trim();
+        let taken = self.paths.iter().enumerate().any(|(other, path)| {
+            other != slot
+                && path
+                    .as_ref()
+                    .is_some_and(|path| path.name.eq_ignore_ascii_case(name))
+        });
+        match self.paths.get_mut(slot).and_then(Option::as_mut) {
+            Some(path) if !name.is_empty() && !taken => {
                 path.name = name.to_owned();
+                true
             }
+            _ => false,
         }
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
     pub(crate) fn set_path_colour(&mut self, slot: usize, colour: u8) {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
             path.colour = colour % MAX_PATHS as u8;
@@ -489,7 +489,6 @@ impl RigWerkApp {
             .map_or(2, |row| row.channels)
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
     /// Whether path `slot`'s own map reaches some channel of output device
     /// `device` (0 = clock device, then followers).  The mono copy on
     /// unreached channels does not count.
@@ -503,7 +502,7 @@ impl RigWerkApp {
         settings.map(slot).reaches_any(self.device_channels(device))
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
+    #[allow(dead_code)] // For the Signal Routing page (U2).
     /// Path `slot`'s map, level, polarity and trim on output device
     /// `device` (0 = clock device, then followers).
     pub(crate) fn device_path_map(&self, device: usize, slot: usize) -> Option<PathMapSettings> {
@@ -511,7 +510,7 @@ impl RigWerkApp {
         settings.path_map.get(slot).copied()
     }
 
-    #[allow(dead_code)] // For the path pages (U1/U2).
+    #[allow(dead_code)] // For the Signal Routing page (U2).
     /// Sets path `slot`'s map, level, polarity and trim on output device
     /// `device` (0 = clock device, then followers).  Live, crossfaded.
     pub(crate) fn set_device_path_map(
@@ -716,6 +715,13 @@ mod tests {
         assert_ne!(path.colour, app.paths[0].as_ref().unwrap().colour);
         assert_eq!(app.clock_device.path_map[2].level_db, -3.0);
         assert!(app.engine.shared.path(2).muted());
+
+        // Names stay unique (ignoring case); a path may recase its own.
+        assert!(!app.rename_path(2, " main "));
+        assert!(!app.rename_path(2, "  "));
+        assert!(app.rename_path(0, "MAIN"));
+        assert!(app.rename_path(0, "Main"));
+        assert_eq!(app.paths[2].as_ref().unwrap().name, "Main 2");
 
         let infos = app.path_infos();
         assert_eq!(infos.len(), 3);

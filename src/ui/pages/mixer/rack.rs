@@ -5,22 +5,26 @@ use egui::{
     Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Sense, Stroke, Vec2,
 };
 
+use crate::app::paths::PathInfo;
 use crate::app::settings::{
     INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB,
 };
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{EqSlot, GateSlot, PluginView};
 use crate::ui::pages::mixer::chain::{
-    bypassed_color, eq_summary, gate_summary, output_summary, stage_color, ChainSelection,
+    bypassed_color, eq_summary, gate_summary, output_summary, path_summary, stage_color,
+    ChainSelection,
 };
 use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
+use crate::ui::pages::mixer::path_stage::{path_inspector, path_toolbar, PathAction, PathMeters};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED,
     RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    arrow_button, db_slider, hinted_tab, meter_row, micro_label, mono, styled_slider,
+    arrow_button, db_slider, fit_text, hinted_tab, meter_row, micro_label, mono, paint_tag,
+    styled_slider, tag_width,
 };
 
 const ROW_H: f32 = 58.0;
@@ -35,28 +39,65 @@ pub(super) enum RackAction {
     Move(usize, isize),
     OpenPlugins,
     OpenLive,
+    Path(PathAction),
+}
+
+/// The paths as the rack draws them: every live path, and whether the
+/// Path stage, the chips and the `SHARED` tag show (two or more).
+pub(super) struct RackPaths {
+    infos: Vec<PathInfo>,
+    /// Why no path can be added right now, if so.
+    add_blocked: Option<&'static str>,
+}
+
+impl RackPaths {
+    fn several(&self) -> bool {
+        self.infos.len() > 1
+    }
+
+    fn selected(&self) -> Option<&PathInfo> {
+        self.infos.iter().find(|info| info.selected)
+    }
 }
 
 impl RigWerkApp {
     pub(crate) fn mixer_rack(&mut self, ui: &mut egui::Ui) {
         let views = self.engine.plugin_views(self.selected_path);
         let devices = self.output_device_rows();
+        let paths = RackPaths {
+            infos: self.path_infos(),
+            add_blocked: self.add_path_blocker(),
+        };
         self.chain_selected = self
             .chain_selected
             .clamp(views.len())
-            .clamp_output(devices.len());
+            .clamp_output(devices.len())
+            .clamp_path(paths.infos.len());
 
         let mut actions: Vec<RackAction> = Vec::new();
+        let mut path_actions: Vec<PathAction> = Vec::new();
         let mut select: Option<ChainSelection> = None;
         let total = ui.available_width();
         let chain_w = (total * 0.32).clamp(280.0, 340.0);
 
         ui.horizontal(|ui| {
             ui.label(micro_label("MIXER", TEAL));
-            ui.label(
-                RichText::new("Signal chain · inspector for the selected stage")
-                    .size(ts(10.0))
-                    .color(DIM),
+            if !paths.several() {
+                ui.label(
+                    RichText::new("Signal chain · inspector for the selected stage")
+                        .size(ts(10.0))
+                        .color(DIM),
+                );
+            }
+            ui.add_space(4.0);
+            // Keep the counters and "+ Add insert" on the right clear.
+            const RIGHT_W: f32 = 260.0;
+            path_toolbar(
+                ui,
+                &paths.infos,
+                paths.add_blocked,
+                (ui.available_width() - RIGHT_W).max(0.0),
+                &mut path_actions,
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
@@ -120,7 +161,14 @@ impl RigWerkApp {
                                     CARD_DEEP,
                                 );
                                 ui.add_space(2.0);
-                                self.chain_pane(ui, &views, &devices, &mut select, &mut actions);
+                                self.chain_pane(
+                                    ui,
+                                    &views,
+                                    &devices,
+                                    &paths,
+                                    &mut select,
+                                    &mut actions,
+                                );
                             },
                         );
 
@@ -135,6 +183,7 @@ impl RigWerkApp {
                                     ui,
                                     &views,
                                     &devices,
+                                    &paths,
                                     &mut select,
                                     &mut actions,
                                 );
@@ -147,6 +196,7 @@ impl RigWerkApp {
         if let Some(selection) = select {
             self.select_chain(selection);
         }
+        actions.extend(path_actions.into_iter().map(RackAction::Path));
         for action in actions {
             match action {
                 RackAction::Bypass(index, bypass) => self.set_plugin_bypass(index, bypass),
@@ -180,6 +230,7 @@ impl RigWerkApp {
                     self.page = Page::Plugins;
                 }
                 RackAction::OpenLive => self.page = Page::Live,
+                RackAction::Path(action) => self.apply_path_action(action),
             }
         }
     }
@@ -189,10 +240,22 @@ impl RigWerkApp {
         ui: &mut egui::Ui,
         views: &[PluginView],
         devices: &[OutputDeviceRow],
+        paths: &RackPaths,
         select: &mut Option<ChainSelection>,
         actions: &mut Vec<RackAction>,
     ) {
-        pane_head(ui, "SIGNAL CHAIN", Some("plugs reorder only"));
+        // With several paths the chain is the selected path's; say which.
+        let path_stage = paths.selected().filter(|_| paths.several());
+        let title = match path_stage {
+            Some(info) => format!("SIGNAL CHAIN · {}", info.name.to_uppercase()),
+            None => "SIGNAL CHAIN".to_owned(),
+        };
+        pane_head(
+            ui,
+            &title,
+            Some("plugs reorder only"),
+            path_stage.map(|info| info.colour),
+        );
         ui.add_space(8.0);
 
         let (pre_summary, pre_on) = eq_summary(&self.path().mix.eqs[EqSlot::Pre.index()]);
@@ -213,22 +276,24 @@ impl RigWerkApp {
 
                 if stage_row(
                     ui,
-                    ChainSelection::Input,
+                    stage_color(ChainSelection::Input),
                     "Input",
                     &input_summary,
-                    true,
+                    StageState::On,
                     self.chain_selected == ChainSelection::Input,
+                    None,
                 ) {
                     *select = Some(ChainSelection::Input);
                 }
 
                 if stage_row(
                     ui,
-                    ChainSelection::PreEq,
+                    stage_color(ChainSelection::PreEq),
                     "Pre EQ",
                     &pre_summary,
-                    pre_on,
+                    StageState::on_or_bypassed(pre_on),
                     self.chain_selected == ChainSelection::PreEq,
+                    None,
                 ) {
                     *select = Some(ChainSelection::PreEq);
                 }
@@ -236,11 +301,12 @@ impl RigWerkApp {
                 if gate_pre
                     && stage_row(
                         ui,
-                        ChainSelection::Gate,
+                        stage_color(ChainSelection::Gate),
                         "Gate",
                         &gate_text,
-                        gate_on,
+                        StageState::on_or_bypassed(gate_on),
                         self.chain_selected == ChainSelection::Gate,
+                        None,
                     )
                 {
                     *select = Some(ChainSelection::Gate);
@@ -328,11 +394,12 @@ impl RigWerkApp {
                 if !gate_pre
                     && stage_row(
                         ui,
-                        ChainSelection::Gate,
+                        stage_color(ChainSelection::Gate),
                         "Gate",
                         &gate_text,
-                        gate_on,
+                        StageState::on_or_bypassed(gate_on),
                         self.chain_selected == ChainSelection::Gate,
+                        None,
                     )
                 {
                     *select = Some(ChainSelection::Gate);
@@ -340,22 +407,50 @@ impl RigWerkApp {
 
                 if stage_row(
                     ui,
-                    ChainSelection::PostEq,
+                    stage_color(ChainSelection::PostEq),
                     "Post EQ",
                     &post_summary,
-                    post_on,
+                    StageState::on_or_bypassed(post_on),
                     self.chain_selected == ChainSelection::PostEq,
+                    None,
                 ) {
                     *select = Some(ChainSelection::PostEq);
                 }
 
+                if let Some(info) = path_stage {
+                    if stage_row(
+                        ui,
+                        info.colour,
+                        "Path",
+                        &path_summary(info.level_db, info.mute, info.solo),
+                        if info.mute {
+                            StageState::Muted
+                        } else if !info.audible {
+                            StageState::Off
+                        } else {
+                            StageState::On
+                        },
+                        self.chain_selected == ChainSelection::Path,
+                        None,
+                    ) {
+                        *select = Some(ChainSelection::Path);
+                    }
+                }
+
+                // The Output stage is the master after the sum: one for all
+                // paths.
                 if stage_row(
                     ui,
-                    ChainSelection::Output,
+                    stage_color(ChainSelection::Output),
                     "Output",
                     &output_summary,
-                    !self.mute,
+                    if self.mute {
+                        StageState::Muted
+                    } else {
+                        StageState::On
+                    },
                     self.chain_selected == ChainSelection::Output,
+                    path_stage.map(|_| "SHARED"),
                 ) {
                     *select = Some(ChainSelection::Output);
                 }
@@ -373,7 +468,8 @@ impl RigWerkApp {
             ui.add_space(PANE_PAD_X);
             ui.label(
                 RichText::new(format!(
-                    "6 stages · {active} active insert{} · {} output{}",
+                    "{} stages · {active} active insert{} · {} output{}",
+                    if path_stage.is_some() { 7 } else { 6 },
                     if active == 1 { "" } else { "s" },
                     devices.len(),
                     if devices.len() == 1 { "" } else { "s" }
@@ -389,6 +485,7 @@ impl RigWerkApp {
         ui: &mut egui::Ui,
         views: &[PluginView],
         devices: &[OutputDeviceRow],
+        paths: &RackPaths,
         select: &mut Option<ChainSelection>,
         actions: &mut Vec<RackAction>,
     ) {
@@ -402,6 +499,7 @@ impl RigWerkApp {
             } else {
                 "INSPECTOR"
             },
+            None,
             None,
         );
         ui.add_space(8.0);
@@ -429,12 +527,32 @@ impl RigWerkApp {
                                 ChainSelection::PreEq => self.eq_inspector(ui, EqSlot::Pre),
                                 ChainSelection::PostEq => self.eq_inspector(ui, EqSlot::Post),
                                 ChainSelection::Gate => self.gate_inspector(ui),
+                                ChainSelection::Path => match paths.selected() {
+                                    Some(info) => {
+                                        let mut path_actions = Vec::new();
+                                        let meters = PathMeters {
+                                            level: self.meter_paths[info.slot],
+                                            peak: self.peak_paths[info.slot],
+                                        };
+                                        path_inspector(
+                                            ui,
+                                            info,
+                                            &meters,
+                                            paths.add_blocked.is_none(),
+                                            paths.several(),
+                                            &mut path_actions,
+                                        );
+                                        actions
+                                            .extend(path_actions.into_iter().map(RackAction::Path));
+                                    }
+                                    None => self.output_inspector(ui, devices, paths, select),
+                                },
                                 ChainSelection::Output => {
-                                    self.output_inspector(ui, devices, select)
+                                    self.output_inspector(ui, devices, paths, select)
                                 }
                                 ChainSelection::OutputDevice(index) => match devices.get(index) {
                                     Some(row) => self.output_device_inspector(ui, row, actions),
-                                    None => self.output_inspector(ui, devices, select),
+                                    None => self.output_inspector(ui, devices, paths, select),
                                 },
                                 ChainSelection::AddOutput => {
                                     self.add_output_inspector(ui);
@@ -483,10 +601,14 @@ impl RigWerkApp {
         &mut self,
         ui: &mut egui::Ui,
         devices: &[OutputDeviceRow],
+        paths: &RackPaths,
         select: &mut Option<ChainSelection>,
     ) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Output").size(ts(16.0)).color(TEXT).strong());
+            if paths.several() {
+                shared_tag(ui);
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mute = self.mute;
                 if ui
@@ -519,9 +641,13 @@ impl RigWerkApp {
             });
         });
         ui.label(
-            RichText::new("Master stage · the finished mix, sent to every device below.")
-                .size(ts(11.0))
-                .color(DIM),
+            RichText::new(if paths.several() {
+                "Master stage · shared by all paths: their sum, sent to every device below."
+            } else {
+                "Master stage · the finished mix, sent to every device below."
+            })
+            .size(ts(11.0))
+            .color(DIM),
         );
         ui.add_space(12.0);
         ui.label(mono(format!("{:+.1} dB", self.output_gain), TEXT, 12.0));
@@ -557,15 +683,49 @@ impl RigWerkApp {
     }
 }
 
+/// What a stage row's status label says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StageState {
+    On,
+    /// A built-in stage that is switched off.
+    Bypassed,
+    /// A muted path or master.
+    Muted,
+    /// A path that is silent because another path is soloed.
+    Off,
+}
+
+impl StageState {
+    fn on_or_bypassed(on: bool) -> Self {
+        if on {
+            Self::On
+        } else {
+            Self::Bypassed
+        }
+    }
+
+    fn label(self) -> (&'static str, Color32) {
+        match self {
+            Self::On => ("ON", TEAL),
+            Self::Bypassed => ("BYP", DIM),
+            Self::Muted => ("MUTED", RED),
+            Self::Off => ("OFF", DIM),
+        }
+    }
+}
+
+/// One fixed stage of the chain.  `tag` is a small label after the name
+/// (`SHARED` on the Output stage with several paths).
 fn stage_row(
     ui: &mut egui::Ui,
-    selection: ChainSelection,
+    accent: Color32,
     name: &str,
     summary: &str,
-    live: bool,
+    state: StageState,
     selected: bool,
+    tag: Option<&str>,
 ) -> bool {
-    let accent = stage_color(selection);
+    let live = state == StageState::On;
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
     let hovered = response.hovered();
@@ -607,13 +767,21 @@ fn stage_row(
     let stack_h = title_h + stack_gap + summary_h;
     let stack_top = rect.center().y - stack_h * 0.5;
     let text_x = rect.left() + 30.0;
-    ui.painter().text(
+    let name_rect = ui.painter().text(
         egui::pos2(text_x, stack_top),
         egui::Align2::LEFT_TOP,
         name,
         FontId::new(ts(12.5), FontFamily::Proportional),
         if live { TEXT } else { DIM },
     );
+    if let Some(tag) = tag {
+        paint_tag(
+            ui,
+            egui::pos2(name_rect.right() + 8.0, name_rect.center().y),
+            tag,
+            BLUE,
+        );
+    }
     ui.painter().text(
         egui::pos2(text_x, stack_top + title_h + stack_gap),
         egui::Align2::LEFT_TOP,
@@ -622,8 +790,7 @@ fn stage_row(
         DIM,
     );
 
-    let pill = if live { "ON" } else { "BYP" };
-    let pill_color = if live { TEAL } else { DIM };
+    let (pill, pill_color) = state.label();
     ui.painter().text(
         egui::pos2(rect.right() - 22.0, rect.center().y),
         egui::Align2::RIGHT_CENTER,
@@ -944,26 +1111,49 @@ fn plugin_inspector(
     );
 }
 
-fn pane_head(ui: &mut egui::Ui, title: &str, hint: Option<&str>) {
+/// The `SHARED` tag laid out in a row (the Output inspector's title).
+fn shared_tag(ui: &mut egui::Ui) {
+    let width = tag_width(ui, "SHARED");
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
+    paint_tag(ui, rect.left_center(), "SHARED", BLUE);
+    let _ = response.on_hover_text("One master for all paths: it plays their sum.");
+}
+
+/// The pane's title row.  `dot` paints a colour dot in front of the title
+/// (the selected path's colour on the chain pane).  A long title is cut
+/// so it never runs under the hint.
+fn pane_head(ui: &mut egui::Ui, title: &str, hint: Option<&str>, dot: Option<Color32>) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, PANE_HEAD_H), Sense::hover());
-    let inner = rect.shrink2(Vec2::new(PANE_PAD_X, 0.0));
+    let mut inner = rect.shrink2(Vec2::new(PANE_PAD_X, 0.0));
+    if let Some(colour) = dot {
+        ui.painter().circle_filled(
+            egui::pos2(inner.left() + 4.0, inner.center().y),
+            4.0,
+            colour,
+        );
+        inner.min.x += 14.0;
+    }
+    let hint_w = hint.map_or(0.0, |hint| {
+        ui.painter()
+            .text(
+                egui::pos2(inner.right(), inner.center().y),
+                egui::Align2::RIGHT_CENTER,
+                hint,
+                FontId::new(ts(9.5), FontFamily::Proportional),
+                DIM,
+            )
+            .width()
+            + 12.0
+    });
+    let title_font = FontId::new(ts(9.0), FontFamily::Proportional);
     ui.painter().text(
         egui::pos2(inner.left(), inner.center().y),
         egui::Align2::LEFT_CENTER,
-        title,
-        FontId::new(ts(9.0), FontFamily::Proportional),
+        fit_text(ui, title, &title_font, (inner.width() - hint_w).max(0.0)),
+        title_font,
         MUTED,
     );
-    if let Some(hint) = hint {
-        ui.painter().text(
-            egui::pos2(inner.right(), inner.center().y),
-            egui::Align2::RIGHT_CENTER,
-            hint,
-            FontId::new(ts(9.5), FontFamily::Proportional),
-            DIM,
-        );
-    }
     ui.painter().hline(
         inner.x_range(),
         rect.bottom() - 0.5,

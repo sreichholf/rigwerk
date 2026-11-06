@@ -16,11 +16,19 @@ use crate::ui::theme::{
     TEXT,
 };
 use crate::ui::widgets::{
-    card, ellipsize, ghost_button, horizontal_line, micro_label, mono, row_info, show_focus_ring,
-    status_dot, styled_slider,
+    card, ellipsize, fit_text, ghost_button, horizontal_line, micro_label, mono, path_chip,
+    row_info, show_focus_ring, status_dot, styled_slider,
 };
 
-fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -> bool {
+/// One plugin of the library.  `in_chain` is whether the selected path
+/// already holds it; `holders` names every path that does (colour and
+/// name), and is only passed with several paths.
+fn library_row(
+    ui: &mut egui::Ui,
+    candidate: &PluginCandidate,
+    in_chain: bool,
+    holders: &[(Color32, String)],
+) -> bool {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::click());
     let fill = if response.hovered() && !in_chain {
@@ -55,7 +63,7 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
         FontId::new(ts(7.5), FontFamily::Monospace),
         TEAL,
     );
-    ui.painter().text(
+    let name_rect = ui.painter().text(
         rect.left_center() + Vec2::new(40.0, -8.0),
         Align2::LEFT_CENTER,
         ellipsize(&candidate.name, 42),
@@ -67,7 +75,7 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
     } else {
         format!("{} · {}", candidate.vendor, candidate.category)
     };
-    ui.painter().text(
+    let detail_rect = ui.painter().text(
         rect.left_center() + Vec2::new(40.0, 8.0),
         Align2::LEFT_CENTER,
         ellipsize(&detail, 52),
@@ -95,6 +103,34 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
         FontId::new(ts(8.0), FontFamily::Monospace),
         color,
     );
+    // The paths holding this plugin, right to left in front of the pill,
+    // sharing the room the plugin's name and details leave.  Names are cut
+    // to fit; with no room left only the dots show.
+    let mut right = pill.left() - 10.0;
+    let left = name_rect.right().max(detail_rect.right()) + 16.0;
+    if !holders.is_empty() {
+        let font = FontId::new(ts(8.5), FontFamily::Proportional);
+        let share = (right - left) / holders.len() as f32;
+        for (colour, name) in holders.iter().rev() {
+            let text_w = share - 18.0;
+            let text_left = if text_w >= 20.0 {
+                ui.painter()
+                    .text(
+                        egui::pos2(right, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        fit_text(ui, name, &font, text_w),
+                        font.clone(),
+                        MUTED,
+                    )
+                    .left()
+            } else {
+                right
+            };
+            ui.painter()
+                .circle_filled(egui::pos2(text_left - 7.0, rect.center().y), 3.5, *colour);
+            right = text_left - 18.0;
+        }
+    }
     show_focus_ring(ui, &response, rect, 8);
     row_info(
         &response,
@@ -102,7 +138,16 @@ fn library_row(ui: &mut egui::Ui, candidate: &PluginCandidate, in_chain: bool) -
         ui.is_enabled() && !in_chain,
         candidate.name.clone(),
         None,
-        Some(if in_chain { "In chain" } else { "Add" }.to_owned()),
+        Some(if holders.is_empty() {
+            if in_chain { "In chain" } else { "Add" }.to_owned()
+        } else {
+            let names: Vec<&str> = holders.iter().map(|(_, name)| name.as_str()).collect();
+            format!(
+                "{}, on {}",
+                if in_chain { "In chain" } else { "Add" },
+                names.join(", ")
+            )
+        }),
     );
     response.clicked() && !in_chain
 }
@@ -230,6 +275,11 @@ impl RigWerkApp {
         let has_editor = view.has_editor;
         let parameters = view.parameters.clone();
         let gui_is_open = self.plugin_gui.as_ref().is_some_and(|gui| gui.key == key);
+        // With several paths the panel says whose insert it is.
+        let owner = (self.path_count() > 1)
+            .then(|| self.paths.get(key.path).and_then(Option::as_ref))
+            .flatten()
+            .map(|path| (path.colour(), path.name.clone()));
 
         let mut open = true;
         let mut close = false;
@@ -307,6 +357,22 @@ impl RigWerkApp {
                                 .size(ts(9.2))
                                 .color(DIM),
                         );
+                        if let Some((colour, path_name)) = &owner {
+                            ui.horizontal(|ui| {
+                                let (dot, _) =
+                                    ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter().circle_filled(dot.center(), 3.5, *colour);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · insert {:02}",
+                                        ellipsize(path_name, 24),
+                                        index + 1
+                                    ))
+                                    .size(ts(9.2))
+                                    .color(MUTED),
+                                );
+                            });
+                        }
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
@@ -575,6 +641,25 @@ impl RigWerkApp {
 
     pub(crate) fn plugins_page(&mut self, ui: &mut egui::Ui) {
         let views = self.engine.plugin_views(self.selected_path);
+        // With several paths, each library row names the paths holding it,
+        // and a chip row picks the path new inserts go to.
+        let paths = self.path_infos();
+        let several = paths.len() > 1;
+        let path_chains: Vec<(Color32, String, std::sync::Arc<[crate::audio::PluginView]>)> =
+            if several {
+                paths
+                    .iter()
+                    .map(|info| {
+                        (
+                            info.colour,
+                            info.name.clone(),
+                            self.engine.plugin_views(info.slot),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let library = self.plugin_browser.library.clone();
         let scanning = self.plugin_browser.scanning;
         let needle = self.plugin_browser.search.to_lowercase();
@@ -590,9 +675,18 @@ impl RigWerkApp {
             .collect();
 
         let total = ui.available_width();
-        let insert_hint = match self.plugin_insert_at {
-            Some(index) => format!("Next add inserts at position {}.", index + 1),
-            None => "Next add appends to the Mixer insert chain.".to_owned(),
+        let selected_name = paths
+            .iter()
+            .find(|info| info.selected)
+            .map(|info| ellipsize(&info.name, 14))
+            .unwrap_or_default();
+        let insert_hint = match (self.plugin_insert_at, several) {
+            (Some(index), false) => format!("Next add inserts at position {}.", index + 1),
+            (None, false) => "Next add appends to the Mixer insert chain.".to_owned(),
+            (Some(index), true) => {
+                format!("Next add: position {} of {selected_name}.", index + 1)
+            }
+            (None, true) => format!("Next add appends to {selected_name}."),
         };
         ui.horizontal(|ui| {
             ui.label(
@@ -659,6 +753,31 @@ impl RigWerkApp {
                     },
                 ));
             }
+        }
+        let mut select_path = None;
+        if several {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(micro_label("ADD TO PATH", DIM));
+                ui.add_space(4.0);
+                let gap = ui.spacing().item_spacing.x;
+                let chip_w = (ui.available_width() / paths.len() as f32 - gap).max(56.0);
+                for info in &paths {
+                    if path_chip(
+                        ui,
+                        info.colour,
+                        &info.name,
+                        info.mute,
+                        info.selected,
+                        chip_w,
+                    )
+                    .on_hover_text(format!("Add plugins to {}", info.name))
+                    .clicked()
+                    {
+                        select_path = Some(info.slot);
+                    }
+                }
+            });
         }
         ui.add_space(8.0);
 
@@ -743,7 +862,8 @@ impl RigWerkApp {
                             .color(DIM),
                         );
                     } else {
-                        let in_chain = |candidate: &PluginCandidate| {
+                        let holds = |views: &[crate::audio::PluginView],
+                                     candidate: &PluginCandidate| {
                             views.iter().any(|view| {
                                 view.path == candidate.path.to_string_lossy().into_owned()
                                     && view.format == candidate.format
@@ -751,7 +871,12 @@ impl RigWerkApp {
                             })
                         };
                         for (index, candidate) in filtered.iter().enumerate() {
-                            if library_row(ui, candidate, in_chain(candidate)) {
+                            let holders: Vec<(Color32, String)> = path_chains
+                                .iter()
+                                .filter(|(_, _, chain)| holds(chain, candidate))
+                                .map(|(colour, name, _)| (*colour, name.clone()))
+                                .collect();
+                            if library_row(ui, candidate, holds(&views, candidate), &holders) {
                                 add_index = Some(index);
                             }
                             ui.add_space(4.0);
@@ -786,6 +911,9 @@ impl RigWerkApp {
             });
         });
 
+        if let Some(slot) = select_path {
+            self.select_path(slot);
+        }
         if let Some(index) = add_index {
             if let Some(candidate) = filtered.get(index).cloned() {
                 self.add_plugin_candidate(&candidate);
@@ -819,10 +947,28 @@ mod tests {
             category: "Reverb".to_owned(),
         };
         let tree = accesskit_frame(|ui| {
-            assert!(!library_row(ui, &candidate, false));
+            assert!(!library_row(ui, &candidate, false, &[]));
         });
         let node = node_named(&tree, "Room");
         assert_eq!(node.role(), eframe::egui::Role::Button);
         assert_eq!(node.value(), Some("Add"));
+    }
+
+    #[test]
+    fn a_plugin_row_names_the_paths_that_hold_it() {
+        let candidate = PluginCandidate {
+            path: PathBuf::from("amp.clap"),
+            format: PluginFormat::Clap,
+            class_id: None,
+            name: "Amp".to_owned(),
+            vendor: String::new(),
+            category: "Amp".to_owned(),
+        };
+        let holders = [(eframe::egui::Color32::RED, "Wet".to_owned())];
+        let tree = accesskit_frame(|ui| {
+            assert!(!library_row(ui, &candidate, true, &holders));
+        });
+        let node = node_named(&tree, "Amp");
+        assert_eq!(node.value(), Some("In chain, on Wet"));
     }
 }

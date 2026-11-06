@@ -312,7 +312,28 @@ impl RigWerkApp {
                 *peak = peak.max(*meter * 0.98).max(0.0);
             }
         }
+        // Path meters: the engine's peak after the path's chain, times its
+        // level, mute and solo (what the path adds to the sum), before the
+        // master.  Preview has no chain, so the stand-in input goes through.
+        for (slot, gain) in path_gains.into_iter().enumerate() {
+            let (left, right) = match self.engine.state {
+                EngineState::Running => self.engine.path_meters(slot),
+                EngineState::Preview => (in_l, in_r),
+                _ => (0.0, 0.0),
+            };
+            for (side, target) in [left, right].into_iter().enumerate() {
+                let meter = &mut self.meter_paths[slot][side];
+                *meter = smooth(*meter, target.abs() * gain);
+                let peak = &mut self.peak_paths[slot][side];
+                *peak = peak.max(*meter * 0.98).max(0.0);
+            }
+        }
         let decay = (-2.3 * dt).exp();
+        for peaks in &mut self.peak_paths {
+            for peak in peaks {
+                *peak *= decay;
+            }
+        }
         for peak in &mut self.peak_out_channels {
             *peak *= decay;
         }
