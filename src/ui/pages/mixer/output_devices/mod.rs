@@ -539,8 +539,8 @@ impl RigWerkApp {
                 ui,
                 &mut pref.settings,
                 row.channels,
-                &[0.0; MAX_OUTPUT_CHANNELS],
-                &[0.0; MAX_OUTPUT_CHANNELS],
+                &self.meter_follower_channels[follower],
+                &self.peak_follower_channels[follower],
             );
         }
         ui.add_space(10.0);
@@ -651,8 +651,8 @@ impl RigWerkApp {
                 ui,
                 &mut pref.settings,
                 2,
-                &[0.0; MAX_OUTPUT_CHANNELS],
-                &[0.0; MAX_OUTPUT_CHANNELS],
+                &self.meter_follower_channels[follower],
+                &self.peak_follower_channels[follower],
             );
         }
         ui.add_space(10.0);

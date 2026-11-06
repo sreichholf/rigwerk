@@ -30,7 +30,7 @@ use crate::app::settings::{
 use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
     self, AudioEngine, CushionMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
-    OutputDeviceSettings, Snapshot, MAX_OUTPUT_CHANNELS,
+    OutputDeviceSettings, Snapshot, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -183,6 +183,10 @@ pub struct RigWerkApp {
     /// [`Snapshot::out_channels`].
     pub(crate) meter_out_channels: [f32; MAX_OUTPUT_CHANNELS],
     pub(crate) peak_out_channels: [f32; MAX_OUTPUT_CHANNELS],
+    /// Smoothed meter and peak per follower channel, from
+    /// [`Snapshot::follower_channels`].
+    pub(crate) meter_follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+    pub(crate) peak_follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
     /// Decimated capture/playback waveform for the Live scope.
     pub(crate) scope_in: Vec<f32>,
     pub(crate) scope_out: Vec<f32>,
@@ -623,6 +627,8 @@ impl RigWerkApp {
             peak_out_r: 0.0,
             meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
             peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
+            meter_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+            peak_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
             scope_in: vec![0.0; audio::SCOPE_LEN],
             scope_out: vec![0.0; audio::SCOPE_LEN],
             snapshot: Snapshot::default(),
@@ -834,6 +840,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         peak_out_r: 0.0,
         meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
         peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
+        meter_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+        peak_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
         scope_in: vec![0.0; audio::SCOPE_LEN],
         scope_out: vec![0.0; audio::SCOPE_LEN],
         snapshot: Snapshot::default(),
