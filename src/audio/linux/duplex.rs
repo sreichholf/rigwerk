@@ -46,6 +46,7 @@ use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::mixer::OutputMixer;
+use crate::audio::output_map::MAX_FOLLOWERS;
 use crate::audio::shared::Shared;
 use crate::audio::types::StartConfig;
 
@@ -60,6 +61,10 @@ const MAX_FRAMES: usize = 8192;
 const TICK: Duration = Duration::from_millis(50);
 /// How long a requested link may take to appear before it is asked again.
 const LINK_GRACE: Duration = Duration::from_secs(1);
+/// Input FL/FR, clock output FL/FR, then one stereo pair per follower slot.
+const INPUT_PORTS: usize = 2;
+const CLOCK_OUT: usize = 2;
+const TOTAL_PORTS: usize = INPUT_PORTS + CLOCK_OUT + MAX_FOLLOWERS * 2;
 
 /// Why the duplex path did not run.  `Setup` errors happen before any audio
 /// flowed, so the caller can still open the two-stream path instead.
@@ -199,12 +204,14 @@ impl Graph {
 
     /// The links the bridge needs, as (output node, output port, input node,
     /// input port).  Empty until RigWerk's own ports and the device ports
-    /// are all known.
+    /// are all known.  `followers` is `(slot, sink node.name)` for each
+    /// hardware follower that should play; virtual slots are omitted.
     pub(crate) fn wanted_links(
         &self,
         own: u32,
         source: &str,
         sink: &str,
+        followers: &[(usize, &str)],
     ) -> Vec<(u32, u32, u32, u32)> {
         let mut wanted = Vec::new();
         if let Some(source_node) = self.node_by_name(source) {
@@ -215,15 +222,38 @@ impl Graph {
                 }
             }
         }
-        if let Some(sink_node) = self.node_by_name(sink) {
-            let to = map_ports(&self.ports_of(sink_node, false, false), false);
-            for (side, name) in ["output_FL", "output_FR"].iter().enumerate() {
-                if let (Some(out_port), Some(in_port)) = (self.own_port(own, name), to[side]) {
-                    wanted.push((own, out_port, sink_node, in_port));
-                }
+        self.link_sink(&mut wanted, own, sink, ["output_FL", "output_FR"]);
+        for &(slot, name) in followers {
+            if slot >= MAX_FOLLOWERS || name.is_empty() {
+                continue;
             }
+            let ports = [format!("follow_{slot}_FL"), format!("follow_{slot}_FR")];
+            self.link_sink(
+                &mut wanted,
+                own,
+                name,
+                [ports[0].as_str(), ports[1].as_str()],
+            );
         }
         wanted
+    }
+
+    fn link_sink(
+        &self,
+        wanted: &mut Vec<(u32, u32, u32, u32)>,
+        own: u32,
+        sink: &str,
+        port_names: [&str; 2],
+    ) {
+        let Some(sink_node) = self.node_by_name(sink) else {
+            return;
+        };
+        let to = map_ports(&self.ports_of(sink_node, false, false), false);
+        for (side, name) in port_names.iter().enumerate() {
+            if let (Some(out_port), Some(in_port)) = (self.own_port(own, name), to[side]) {
+                wanted.push((own, out_port, sink_node, in_port));
+            }
+        }
     }
 
     fn has_link(&self, output_port: u32, input_port: u32) -> bool {
@@ -295,8 +325,8 @@ impl Graph {
 struct ProcessData {
     shared: Arc<Shared>,
     mixer: OutputMixer,
-    /// `input_FL`, `input_FR`, `output_FL`, `output_FR` port handles.
-    ports: [*mut c_void; 4],
+    /// Input FL/FR, clock output FL/FR, then `follow_{i}_FL/FR`.
+    ports: [*mut c_void; TOTAL_PORTS],
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
     rate: u32,
@@ -354,8 +384,11 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     let shared: &Shared = shared;
     let in_l = buffer(ports[0]);
     let in_r = buffer(ports[1]);
-    let out_l = buffer(ports[2]);
-    let out_r = buffer(ports[3]);
+    // Clock + every preallocated follower pair; unlinked ports stay null.
+    let mut out_bufs = [ptr::null_mut::<f32>(); CLOCK_OUT + MAX_FOLLOWERS * 2];
+    for (slot, out) in out_bufs.iter_mut().enumerate() {
+        *out = buffer(ports[INPUT_PORTS + slot]);
+    }
 
     let has_input = !in_l.is_null() || !in_r.is_null();
     if has_input {
@@ -396,12 +429,18 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
             scratch_l[index] = left;
             scratch_r[index] = right;
         }
-        mixer.render_direct(
+        mixer.render_direct_devices(
             shared,
             &scratch_l[..count],
             &scratch_r[..count],
-            |index, mapped| {
+            |device, index, mapped| {
                 let at = offset + index;
+                let base = device * 2;
+                if base + 1 >= out_bufs.len() {
+                    return;
+                }
+                let out_l = out_bufs[base];
+                let out_r = out_bufs[base + 1];
                 // SAFETY: a non-null DSP output buffer holds `frames` samples.
                 if !out_l.is_null() {
                     unsafe { *out_l.add(at) = mapped.sample(0) };
@@ -498,11 +537,11 @@ impl Filter {
             unsafe { pw_sys::pw_filter_new(core.as_raw_ptr(), name.as_ptr(), props.into_raw()) };
         let raw = NonNull::new(raw).ok_or_else(|| "pw_filter_new failed".to_owned())?;
 
-        // Two output ports (FL/FR), so the device map applies to two
-        // channels.
+        // Clock device is stereo; followers get their own stereo port pairs.
         let mut mixer = OutputMixer::new(rate, 2);
         mixer.prepare(MAX_FRAMES);
         mixer.publish_device_channels(&shared);
+        mixer.publish_follower_channels(&shared);
         let mut state = Box::new(StateData {
             shared: Arc::clone(&shared),
             error: Arc::clone(&observed.error),
@@ -510,7 +549,7 @@ impl Filter {
         let mut data = Box::new(ProcessData {
             shared,
             mixer,
-            ports: [ptr::null_mut(); 4],
+            ports: [ptr::null_mut(); TOTAL_PORTS],
             scratch_l: vec![0.0; MAX_FRAMES],
             scratch_r: vec![0.0; MAX_FRAMES],
             // Unknown until the first cycle, which then publishes the real
@@ -542,13 +581,25 @@ impl Filter {
             Box::new(unsafe { std::mem::zeroed() }),
         ];
 
-        let names = [
-            ("input_FL", "FL", spa_sys::SPA_DIRECTION_INPUT),
-            ("input_FR", "FR", spa_sys::SPA_DIRECTION_INPUT),
-            ("output_FL", "FL", spa_sys::SPA_DIRECTION_OUTPUT),
-            ("output_FR", "FR", spa_sys::SPA_DIRECTION_OUTPUT),
+        let mut port_names: Vec<(String, &'static str, u32)> = vec![
+            ("input_FL".to_owned(), "FL", spa_sys::SPA_DIRECTION_INPUT),
+            ("input_FR".to_owned(), "FR", spa_sys::SPA_DIRECTION_INPUT),
+            ("output_FL".to_owned(), "FL", spa_sys::SPA_DIRECTION_OUTPUT),
+            ("output_FR".to_owned(), "FR", spa_sys::SPA_DIRECTION_OUTPUT),
         ];
-        for (index, (port_name, channel, direction)) in names.iter().enumerate() {
+        for slot in 0..MAX_FOLLOWERS {
+            port_names.push((
+                format!("follow_{slot}_FL"),
+                "FL",
+                spa_sys::SPA_DIRECTION_OUTPUT,
+            ));
+            port_names.push((
+                format!("follow_{slot}_FR"),
+                "FR",
+                spa_sys::SPA_DIRECTION_OUTPUT,
+            ));
+        }
+        for (index, (port_name, channel, direction)) in port_names.iter().enumerate() {
             let props = properties(&[
                 ("format.dsp", "32 bit float mono audio"),
                 ("port.name", port_name),
@@ -760,12 +811,31 @@ pub(crate) fn run(
         };
         let mut graph = tick_graph.borrow_mut();
         let mut made = tick_made.borrow_mut();
+        // Follower add/remove is live: rebuild links whenever the plan moves.
+        let plan = shared.follower_plan();
+        let follower_sinks: Vec<(usize, &str)> = plan
+            .slots
+            .iter()
+            .take(plan.count)
+            .enumerate()
+            .filter(|(_, slot)| !slot.virtual_out && !slot.node_name.is_empty())
+            .map(|(index, slot)| (index, slot.node_name.as_str()))
+            .collect();
         // Nothing changed and no link is still waiting to appear.
         if !graph.dirty && made.values().all(|link| link.seen) {
-            return;
+            // Still re-check when the follower list may have changed: compare
+            // against what we would want now.
+            let wanted = graph.wanted_links(own, &source, &sink, &follower_sinks);
+            let wanted_ports: HashSet<(u32, u32)> =
+                wanted.iter().map(|link| (link.1, link.3)).collect();
+            if made.len() == wanted_ports.len()
+                && made.keys().all(|ports| wanted_ports.contains(ports))
+            {
+                return;
+            }
         }
         graph.dirty = false;
-        let wanted = graph.wanted_links(own, &source, &sink);
+        let wanted = graph.wanted_links(own, &source, &sink, &follower_sinks);
         let wanted_ports: HashSet<(u32, u32)> =
             wanted.iter().map(|link| (link.1, link.3)).collect();
         // Links that are no longer wanted (a device came back with other
@@ -934,7 +1004,7 @@ mod tests {
         add_port(&mut graph, 12, 1, false, "input_FL", false);
         add_port(&mut graph, 13, 1, false, "input_FR", false);
         assert_eq!(
-            graph.wanted_links(3, "vsrc", "speakers"),
+            graph.wanted_links(3, "vsrc", "speakers", &[]),
             vec![
                 (1, 10, 3, 30),
                 (1, 11, 3, 31),
@@ -952,7 +1022,7 @@ mod tests {
         add_port(&mut graph, 41, 4, true, "monitor_FL", true);
         add_port(&mut graph, 42, 4, true, "monitor_FR", true);
         assert_eq!(
-            graph.wanted_links(3, "other_sink", "speakers"),
+            graph.wanted_links(3, "other_sink", "speakers", &[]),
             vec![(3, 32, 2, 20), (3, 33, 2, 21)]
         );
         // Plain outputs win over monitor outputs on a source.
@@ -961,7 +1031,7 @@ mod tests {
         add_port(&mut graph, 51, 5, true, "capture_FL", false);
         add_port(&mut graph, 52, 5, true, "capture_FR", false);
         assert_eq!(
-            graph.wanted_links(3, "mixed", "speakers")[..2],
+            graph.wanted_links(3, "mixed", "speakers", &[])[..2],
             [(5, 51, 3, 30), (5, 52, 3, 31)]
         );
     }
@@ -1009,7 +1079,7 @@ mod tests {
         port(&mut graph, 33, 3, "out", "FR", "output_FR", false);
         assert!(graph.dirty);
         assert_eq!(
-            graph.wanted_links(3, "gp5", "speakers"),
+            graph.wanted_links(3, "gp5", "speakers", &[]),
             vec![
                 (1, 10, 3, 30),
                 (1, 11, 3, 31),
@@ -1031,9 +1101,27 @@ mod tests {
         graph.remove_global(11);
         assert!(graph.dirty);
         assert_eq!(
-            graph.wanted_links(3, "gp5", "speakers"),
+            graph.wanted_links(3, "gp5", "speakers", &[]),
             vec![(3, 32, 2, 20), (3, 33, 2, 21)]
         );
+    }
+
+    #[test]
+    fn follower_sinks_link_from_preallocated_port_pairs() {
+        let mut graph = rigwerk_and_sink();
+        add_port(&mut graph, 34, 3, true, "follow_0_FL", false);
+        add_port(&mut graph, 35, 3, true, "follow_0_FR", false);
+        add_node(&mut graph, 6, "phones", "Audio/Sink");
+        add_port(&mut graph, 60, 6, false, "playback_FL", false);
+        add_port(&mut graph, 61, 6, false, "playback_FR", false);
+        let links = graph.wanted_links(3, "missing", "speakers", &[(0, "phones")]);
+        assert!(links.contains(&(3, 32, 2, 20)));
+        assert!(links.contains(&(3, 33, 2, 21)));
+        assert!(links.contains(&(3, 34, 6, 60)));
+        assert!(links.contains(&(3, 35, 6, 61)));
+        // A missing follower stays in the session: no link, bridge keeps going.
+        let only_clock = graph.wanted_links(3, "missing", "speakers", &[(0, "gone")]);
+        assert_eq!(only_clock, vec![(3, 32, 2, 20), (3, 33, 2, 21)]);
     }
 
     /// Runs the real bridge entry point against a live PipeWire daemon.

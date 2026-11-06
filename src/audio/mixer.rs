@@ -673,7 +673,7 @@ impl OutputMixer {
     /// and no rate conversion, because both sides share one clock and rate.
     /// Everything after the ring read is the same chain as [`Self::render`].
     /// Each frame reaches `write` mapped onto the device's channels.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[allow(dead_code)] // Single-device direct path; duplex fans out via devices.
     pub(crate) fn render_direct(
         &mut self,
         shared: &Shared,

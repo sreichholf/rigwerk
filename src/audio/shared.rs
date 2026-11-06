@@ -1065,6 +1065,11 @@ impl Shared {
         let count = settings.len().min(plan.count).min(MAX_FOLLOWERS);
         for (index, slot) in settings.iter().take(count).enumerate() {
             self.followers[index].set(slot);
+            // PipeWire followers are stereo port pairs; publish the count so
+            // the UI has meters as soon as the follower is added live.
+            if self.followers[index].channels() == 0 {
+                self.followers[index].set_channels(2);
+            }
         }
         self.follower_count.store(count, Ordering::Relaxed);
         if let Ok(mut current) = self.follower_plan.lock() {

@@ -408,6 +408,13 @@ impl DeviceControls {
         self.channels.load(Ordering::Relaxed)
     }
 
+    /// Publishes a known channel count outside the callback (stream open or
+    /// a live follower add).
+    pub(crate) fn set_channels(&self, channels: usize) {
+        self.channels
+            .store(channels.min(u32::MAX as usize) as u32, Ordering::Relaxed);
+    }
+
     /// The map, unused mode and effective gain (0 when muted) right now.
     fn load(&self) -> (ChannelMap, UnusedChannels, f32) {
         let map = ChannelMap {
@@ -545,10 +552,7 @@ impl DeviceMapper {
     /// Publishes the device's channel count.  Called when the stream opens,
     /// outside the callback, so the snapshot has it before the first block.
     pub(crate) fn publish_channels(&self, controls: &DeviceControls) {
-        controls.channels.store(
-            self.channels.min(u32::MAX as usize) as u32,
-            Ordering::Relaxed,
-        );
+        controls.set_channels(self.channels);
     }
 
     /// Publishes this block's per-channel peaks.
