@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RigWerk · Signal routing mockup (E)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  /* Tokens mirror src/ui/theme.rs */
+  :root {
+    --bg: #080b11;
+    --sidebar: #0b0f17;
+    --card: #10151f;
+    --card-raised: #151b28;
+    --card-deep: #0c1019;
+    --border: #222a39;
+    --border-soft: #1b222f;
+    --hover: #1b2331;
+    --text: #e8edf6;
+    --muted: #8b97ab;
+    --dim: #74859f;
+    --teal: #38ddbf;
+    --teal-dark: #104e48;
+    --blue: #70a7ff;
+    --amber: #ffb85b;
+    --red: #ff7070;
+    --green: #60d890;
+    --font: "Ubuntu", "Segoe UI", system-ui, sans-serif;
+    --mono: "Hack", "DejaVu Sans Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #05070b; color: var(--text); font-family: var(--font); font-weight: 300; font-size: 13px; }
+  button { font: inherit; color: inherit; }
+
+  /* ── mockup chrome (not part of the app) ── */
+  .mock-bar {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    padding: 10px 16px; background: #11161f; border-bottom: 1px solid #2a3344;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .mock-bar strong { color: var(--text); font-weight: 400; font-family: var(--font); font-size: 13px; }
+  .mock-group { display: flex; gap: 4px; align-items: center; }
+  .mock-group > span { margin-right: 4px; }
+  .mock-group button {
+    background: transparent; border: 1px solid #2a3344; border-radius: 5px; padding: 4px 9px; cursor: pointer; color: var(--muted);
+  }
+  .mock-group button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); background: rgba(255,184,91,.08); }
+  .mock-group label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
+
+  /* ── app frame ── */
+  .app { display: grid; grid-template-columns: 232px 1fr; width: 1440px; min-height: 1000px; margin: 0 auto; background: var(--bg); border-bottom: 1px solid #2a3344; }
+  .sidebar { background: var(--bg); padding: 20px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .brand { display: flex; gap: 10px; align-items: center; margin-bottom: 28px; }
+  .brand-mark { width: 36px; height: 36px; border-radius: 9px; border: 1px solid var(--teal-dark); background: #0d1d1c; display: grid; place-items: center; color: var(--teal); font-size: 16px; }
+  .brand .t { font-size: 18px; letter-spacing: .02em; }
+  .brand .s { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .ws { color: var(--muted); font-size: 11px; margin: 0 0 10px; }
+  .nav-item { display: flex; gap: 12px; align-items: center; padding: 7px 10px; border-radius: 8px; cursor: pointer; border: 0; background: transparent; text-align: left; position: relative; }
+  .nav-item .ic { width: 18px; color: var(--muted); font-size: 13px; text-align: center; }
+  .nav-item .n { font-size: 15px; line-height: 1.1; }
+  .nav-item .d { font-size: 9.5px; color: var(--muted); }
+  .nav-item.on { background: var(--card-deep); }
+  .nav-item.on::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--teal); }
+  .nav-item.on .ic, .nav-item.on .d { color: var(--teal); }
+  .side-foot { margin-top: auto; }
+  .audio-path { border: 1px solid var(--border); background: var(--card-deep); border-radius: 10px; padding: 14px 12px; }
+  .audio-path .l { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+  .audio-path .p { font-family: var(--mono); font-size: 12px; color: var(--teal); line-height: 1.5; }
+  .audio-path .p b { color: var(--blue); font-weight: 400; }
+  .ver { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .ver span:last-child { border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; font-family: var(--font); }
+
+  .main { padding: 20px 26px 30px 18px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; }
+  .header h1 { margin: 0; font-weight: 300; font-size: 32px; }
+  .header p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+  .hdr-r { display: flex; gap: 12px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .chk { width: 13px; height: 13px; border-radius: 3px; background: var(--card-raised); border: 1px solid var(--border); display: inline-block; vertical-align: middle; margin-right: 4px; }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+  .pill.run { color: var(--teal); border-color: var(--teal-dark); }
+  .pill.warn { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .start { background: var(--teal); color: #05201b; border: 0; border-radius: 7px; padding: 8px 16px; font-size: 14px; font-weight: 400; cursor: pointer; }
+  .start.stop { background: transparent; color: var(--red); border: 1px solid rgba(255,112,112,.45); }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+  .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+  .lbl.teal { color: var(--teal); } .lbl.blue { color: var(--blue); } .lbl.amber { color: var(--amber); }
+  .mono { font-family: var(--mono); }
+  .dim { color: var(--dim); }
+  .muted { color: var(--muted); }
+
+  /* chips / toggles like egui selectable labels */
+  .tg { display: inline-flex; align-items: center; border: 1px solid var(--border); background: var(--card-deep); border-radius: 6px; padding: 5px 10px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .tg.on { color: var(--teal); border-color: var(--teal-dark); background: #0d1d1c; }
+  .tg.on.blue { color: var(--blue); border-color: #2a4677; background: #0f1830; }
+  .tg.on.amber { color: var(--amber); border-color: rgba(255,184,91,.4); background: #241a0c; }
+  .tg.on.red { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .tg[disabled], .tg.off { opacity: .4; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sp { flex: 1; }
+
+  .tag { font-family: var(--mono); font-size: 9.5px; letter-spacing: .03em; border-radius: 4px; padding: 2px 5px; border: 1px solid; white-space: nowrap; }
+  .tag.live { color: var(--teal); border-color: var(--teal-dark); }
+  .tag.restart { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .tag.clock { color: var(--blue); border-color: #2a4677; }
+  .tag.virt { color: var(--green); border-color: rgba(96,216,144,.4); }
+  .tag.miss { color: var(--red); border-color: rgba(255,112,112,.45); }
+
+  .select { display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border); background: var(--card-deep); border-radius: 8px; padding: 9px 12px; font-size: 14px; }
+  .select::after { content: "▾"; color: var(--muted); }
+  .field { border: 1px solid var(--border); background: var(--card-deep); border-radius: 6px; padding: 6px 10px; font-family: var(--mono); font-size: 12px; }
+  .slider { position: relative; height: 4px; border-radius: 2px; background: var(--border); margin: 10px 4px; }
+  .slider i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--blue); }
+  .slider i::after { content: ""; position: absolute; right: -6px; top: -4px; width: 12px; height: 12px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 3px #0f1830; }
+  .slider.off i, .slider.off i::after { background: var(--dim); }
+  .meter { display: flex; gap: 10px; align-items: center; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .meter .bar { flex: 1; height: 4px; background: var(--card-deep); border-radius: 2px; position: relative; overflow: hidden; }
+  .meter .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--blue); opacity: .85; }
+
+  /* ── mixer ── */
+  .mx-top { display: flex; justify-content: space-between; align-items: center; }
+  .mx-top .l { font-size: 11px; color: var(--teal); } .mx-top .l span { color: var(--muted); margin-left: 6px; }
+  .mx-top .r { display: flex; gap: 10px; align-items: center; }
+  .btn { background: var(--card-deep); border: 1px solid var(--border); border-radius: 7px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; color: var(--teal); }
+  .btn.plain { color: var(--text); }
+  .btn.blue { color: var(--blue); }
+  .btn.warn { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .btn.danger { color: var(--red); border-color: rgba(255,112,112,.4); }
+  .btn[disabled] { opacity: .4; cursor: not-allowed; }
+
+  .rack { display: grid; grid-template-columns: 340px 1fr; min-height: 860px; overflow: hidden; }
+  .chain { border-right: 1px solid var(--border-soft); padding: 14px; display: flex; flex-direction: column; }
+  .chain-h { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); margin-bottom: 14px; }
+  .stage { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; padding: 10px 10px; border-radius: 9px; border: 1px solid transparent; cursor: pointer; margin-bottom: 8px; }
+  .stage:hover { background: var(--hover); }
+  .stage.sel { border-color: var(--teal-dark); background: #0e1b1d; }
+  .stage .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+  .stage .n { font-size: 15px; }
+  .stage .s { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .stage .st { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .stage .st.on { color: var(--teal); }
+  .stage .st::after { content: "  ›"; color: var(--muted); }
+  .group-h { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; font-size: 13px; color: var(--amber); }
+  .group-h .c { color: var(--muted); font-size: 11.5px; }
+  .group-h.blue { color: var(--blue); cursor: pointer; border-radius: 9px; border: 1px solid transparent; padding: 10px; }
+  .group-h.blue:hover { background: var(--hover); }
+  .group-h.blue.sel { border-color: #2a4677; background: #0f1830; }
+  .group-h .n2 { font-size: 15px; color: var(--text); }
+  .group-h .s2 { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .children { margin: 2px 0 8px 18px; padding-left: 10px; border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+  .dev { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 9px 10px; border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; cursor: pointer; }
+  .dev:hover { background: var(--hover); }
+  .dev.sel { border-color: #2a4677; background: #0f1830; }
+  .dev .sd { width: 8px; height: 8px; border-radius: 50%; }
+  .sd.ok { background: var(--teal); } .sd.warn { background: var(--amber); } .sd.bad { background: var(--red); } .sd.idle { background: var(--dim); }
+  .dev .n { font-size: 13.5px; display: flex; gap: 6px; align-items: center; }
+  .dev .s { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+  .dev .r { display: flex; gap: 6px; align-items: center; }
+  .dev .lv { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 52px; text-align: right; }
+  .m-btn { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; border: 1px solid var(--border); background: transparent; font-family: var(--mono); font-size: 10.5px; color: var(--muted); cursor: pointer; padding: 0; }
+  .m-btn.on { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .add-row { border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; color: var(--muted); cursor: pointer; background: transparent; text-align: left; }
+  .add-row:hover, .add-row.sel { color: var(--blue); border-color: #2a4677; }
+  .chain-foot { margin-top: 14px; color: var(--muted); font-size: 11.5px; padding-left: 10px; }
+
+  .insp { padding: 14px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .insp-h { font-size: 11px; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); }
+  .insp-title { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .insp-title h2 { margin: 0; font-weight: 300; font-size: 21px; display: flex; gap: 10px; align-items: center; }
+  .insp-title p { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+  .blk { background: var(--card-deep); border: 1px solid var(--border-soft); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .blk-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .kv { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); }
+  .kv b { font-family: var(--mono); font-weight: 400; color: var(--text); font-size: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .tile { border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; }
+  .tile .v { font-family: var(--mono); font-size: 20px; margin-top: 6px; color: var(--teal); }
+  .tile .v small { font-size: 11px; color: var(--muted); margin-left: 2px; }
+  .tile .v.amber { color: var(--amber); } .tile .v.blue { color: var(--blue); } .tile .v.red { color: var(--red); } .tile .v.na { color: var(--dim); }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .note b { color: var(--text); font-weight: 400; }
+  .banner { border-radius: 10px; padding: 12px 14px; display: flex; gap: 12px; align-items: center; font-size: 12.5px; line-height: 1.45; }
+  .banner.red { border: 1px solid rgba(255,112,112,.45); background: #1d0f12; }
+  .banner.amber { border: 1px solid rgba(255,184,91,.4); background: #1d160c; }
+  .banner.green { border: 1px solid rgba(96,216,144,.35); background: #0d1b14; }
+  .actions { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+
+  .dl { display: flex; flex-direction: column; gap: 6px; }
+  .dl-h { font-size: 11px; color: var(--blue); margin: 6px 0 2px; text-transform: uppercase; }
+  .dl-i { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; padding: 9px 12px; cursor: pointer; }
+  .dl-i:hover { background: var(--hover); }
+  .dl-i .rd { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--dim); }
+  .dl-i .n { font-size: 13.5px; } .dl-i .s { font-size: 10.5px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+  .dl-i.dis { opacity: .45; cursor: not-allowed; }
+  .dl-i.dis:hover { background: var(--card); }
+  .why { font-size: 11px; color: var(--muted); text-align: right; max-width: 280px; }
+
+  .mixed-list { display: flex; flex-direction: column; gap: 6px; }
+  .ml-i { display: grid; grid-template-columns: 10px 1fr 90px 80px 70px; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; font-size: 12.5px; cursor: pointer; }
+  .ml-i .mono { font-size: 11px; color: var(--muted); }
+
+  /* ── live ── */
+  .live-row { display: grid; grid-template-columns: 1fr 22px 0.78fr 22px 1fr; align-items: stretch; }
+  .conn { display: grid; place-items: center; color: var(--border); }
+  .lc { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .lc.raised { background: var(--card-raised); }
+  .live-follow { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
+  .lf { display: grid; grid-template-columns: 9px 1fr auto auto; gap: 8px; align-items: center; font-size: 12px; padding: 5px 2px; }
+  .lf .mono { font-size: 10.5px; color: var(--muted); }
+  .chainstrip { display: flex; gap: 6px; align-items: center; padding: 14px 16px; }
+  .cs { border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; min-width: 140px; background: var(--card-deep); }
+  .cs .k { font-family: var(--mono); font-size: 9.5px; color: var(--muted); } .cs .v { font-size: 12.5px; margin-top: 2px; }
+  .cs.out { border-color: #2a4677; } .cs.out .k { color: var(--blue); }
+  .arrow { color: var(--muted); font-family: var(--mono); }
+
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #241a0c; border: 1px solid rgba(255,184,91,.5); color: var(--amber); padding: 10px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+
+  .notes { width: 1440px; margin: 0 auto; padding: 20px 26px 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; background: #05070b; }
+  .notes .n { border: 1px solid #2a3344; border-radius: 10px; padding: 14px; background: #0c1018; }
+  .notes h3 { margin: 0 0 8px; font-weight: 400; font-size: 13px; color: var(--amber); }
+  .notes ul { margin: 0; padding-left: 16px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+  .notes b { color: var(--text); font-weight: 400; }
+  /* ── routing ── */
+  .flow { display: flex; align-items: center; gap: 8px; padding: 12px 16px; flex-wrap: wrap; }
+  .fnode { border: 1px solid var(--border); background: var(--card-deep); border-radius: 7px; padding: 6px 10px; }
+  .fnode .k { font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+  .fnode .v { font-size: 12.5px; margin-top: 2px; }
+  .fnode.in .k { color: var(--teal); } .fnode.mix .k { color: var(--amber); } .fnode.out .k { color: var(--blue); }
+  .fnode.layer { border-style: dashed; }
+  .grid-top { display: grid; grid-template-columns: 1fr 340px; gap: 14px; }
+  .sec { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .sec-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .sec-h .t { font-size: 11px; color: var(--teal); text-transform: uppercase; }
+  .sec-h .t.blue { color: var(--blue); }
+  .sec-h .c { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .mtx { display: grid; gap: 8px; align-items: center; }
+  .rh { border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; padding: 8px 12px; min-height: 48px; display: flex; flex-direction: column; justify-content: center; }
+  .rh .n { font-size: 14px; } .rh .s { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .rh.mix .n { color: var(--amber); }
+  .chh { font-family: var(--mono); font-size: 9.5px; color: var(--dim); text-align: center; line-height: 1.35; }
+  .chh b { display: block; font-weight: 400; color: var(--muted); font-size: 10.5px; }
+  .chh.pair-a b { color: var(--blue); }
+  .cell { width: 58px; height: 48px; border-radius: 8px; border: 1px solid var(--border-soft); background: var(--card-deep); display: grid; place-items: center; cursor: pointer; justify-self: center; position: relative; }
+  .cell:hover { background: #151c27; }
+  .cell i { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #313c4d; }
+  .cell.on { border-color: rgba(56,221,191,.3); background: rgba(56,221,191,.07); }
+  .cell.on i { width: 7px; height: 7px; border: 0; background: var(--teal); box-shadow: 0 0 0 6px rgba(56,221,191,.1); }
+  .cell.dis { cursor: not-allowed; opacity: .35; }
+  .cell .no { position: absolute; bottom: 3px; right: 5px; font-family: var(--mono); font-size: 7.5px; color: #354050; }
+  .vm { width: 58px; height: 34px; justify-self: center; display: flex; gap: 4px; align-items: flex-end; justify-content: center; }
+  .vm i { width: 8px; border-radius: 2px; background: var(--blue); opacity: .85; }
+  .vm i.z { background: var(--border); }
+  .unused { font-family: var(--mono); font-size: 9px; color: var(--dim); text-align: center; }
+  .tip { font-size: 12px; color: var(--muted); border-top: 1px solid var(--border-soft); padding-top: 12px; }
+  .tip b { color: var(--amber); font-weight: 400; }
+  .out-grid { display: grid; grid-template-columns: 300px 1fr; min-height: 470px; }
+  .devlist { border-right: 1px solid var(--border-soft); padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .dv { display: grid; grid-template-columns: 10px 1fr; gap: 10px; align-items: start; padding: 10px; border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; cursor: pointer; }
+  .dv:hover { background: var(--hover); }
+  .dv.sel { border-color: #2a4677; background: #0f1830; }
+  .dv .sd { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+  .dv .n { font-size: 13.5px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .dv .s { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 4px; }
+  .dv .s.warn { color: var(--amber); } .dv .s.bad { color: var(--red); }
+  .dmap { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .patch-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .pl { border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+  .pl .n { font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  .pl .m { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+  .pl .m.warn { color: var(--amber); } .pl .m.bad { color: var(--red); }
+  .ck { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 3px 0; cursor: pointer; }
+  .ck .b { width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 3px; display: grid; place-items: center; font-size: 10px; color: var(--teal); }
+  .scroll-x { overflow-x: auto; padding-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<div class="mock-bar">
+  <strong>Mockup E · signal routing</strong>
+  <div class="mock-group"><span>platform</span>
+    <button data-mock="platform" data-v="linux" aria-pressed="true">Linux</button>
+    <button data-mock="platform" data-v="windows" aria-pressed="false">Windows</button>
+  </div>
+  <div class="mock-group"><span>scenario</span>
+    <button data-mock="scenario" data-v="normal" aria-pressed="true">Normal</button>
+    <button data-mock="scenario" data-v="missing" aria-pressed="false">Device missing</button>
+    <button data-mock="scenario" data-v="stopped" aria-pressed="false">Bridge stopped</button>
+  </div>
+  <div class="mock-group"><button id="mock-reset">reset</button></div>
+  <span>same devices as output-devices.html</span>
+</div>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">∿</div><div><div class="t">RIGWERK</div><div class="s">independent bridge</div></div></div>
+    <div class="ws">WORKSPACE</div>
+    <button class="nav-item" data-nav="live"><span class="ic">ılı</span><span><div class="n">Live Bridge</div><div class="d">Bridge</div></span></button>
+    <button class="nav-item" data-nav="mixer"><span class="ic">⫶</span><span><div class="n">Mixer</div><div class="d">Chain + EQ</div></span></button>
+    <button class="nav-item"><span class="ic">⏚</span><span><div class="n">Plugins</div><div class="d">VST3 + CLAP</div></span></button>
+    <button class="nav-item"><span class="ic">∷</span><span><div class="n">Signal Routing</div><div class="d">Routing</div></span></button>
+    <button class="nav-item"><span class="ic">▣</span><span><div class="n">Devices</div><div class="d">Devices</div></span></button>
+    <button class="nav-item"><span class="ic">☰</span><span><div class="n">Sessions</div><div class="d">Sessions</div></span></button>
+    <button class="nav-item"><span class="ic">?</span><span><div class="n">Setup Guide</div><div class="d">Guide</div></span></button>
+    <button class="nav-item"><span class="ic">≡</span><span><div class="n">Diagnostics</div><div class="d">Log</div></span></button>
+    <div class="side-foot">
+      <div class="audio-path"><div class="l">AUDIO PATH</div><div class="p" id="audio-path"></div></div>
+      <div class="ver"><span id="ver"></span><span>about</span></div>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="header">
+      <div><h1>Signal Routing</h1><p>Choose exactly where each channel lands.</p></div>
+      <div class="hdr-r"><span><span class="chk"></span>auto-start</span><span class="pill" id="h-pill"></span><button class="start" id="h-start"></button></div>
+    </header>
+    <div id="page"></div>
+  </main>
+</div>
+
+<div class="notes">
+  <div class="n"><h3>Two layers, as the engine has them</h3><ul>
+    <li><b>Input → Mix</b>: today's matrix. Its columns said OUT 1/2, but they feed the chain, so they're renamed <b>MIX L / MIX R</b>. Channel mode and monitoring stay beside it.</li>
+    <li><b>Mix → Outputs</b>: new. One small matrix per output device: Mix L/R rows × that device's channels. The chain runs once; this only picks which device channels play the result.</li>
+    <li>The stored 2×4 table's dead columns 3/4 go away; a device's extra channels become real columns.</li>
+  </ul></div>
+  <div class="n"><h3>Per device</h3><ul>
+    <li>Same device list and order as Mixer → Output. Selecting a device here or there selects the same one.</li>
+    <li>Presets cover the usual jobs: <b>1/2</b>, <b>3/4</b>, <b>both pairs</b>, <b>mono to all</b>, <b>swap</b>, <b>clear</b>. Cells handle the rest.</li>
+    <li><b>Unused channels</b>: silent by default. <b>Mono copy</b> is today's behaviour (L/R average on extra channels), kept as an option.</li>
+    <li>Every change here is <span class="tag live">LIVE</span>, crossfaded like today's route changes.</li>
+  </ul></div>
+  <div class="n"><h3>Edge cases</h3><ul>
+    <li><b>Same interface, second pair</b> (headphones on Out 3/4) is a mapping on the clock device, not a second device: no extra clock, no cushion.</li>
+    <li><b>Nothing routed</b> on a device: amber warning; it plays silence.</li>
+    <li><b>Missing device</b>: its map is kept and greyed; it applies again when the device returns.</li>
+    <li><b>Meters</b> are per device channel. Today there's one shared stereo meter; the engine would publish one per device.</li>
+    <li>Not here: per-channel gain, more than the two input channels picked on Live.</li>
+  </ul></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const PLAT = {
+  linux: {
+    path: "PIPEWIRE IN -> <b>PIPEWIRE</b>",
+    inDev: { name: "Scarlett 4i4 USB", backend: "PIPEWIRE", ch: ["Inst 1", "Inst 2"] },
+    devices: [
+      { name: "Scarlett 4i4 USB", backend: "PIPEWIRE", clock: true, ch: ["AUX0", "AUX1", "AUX2", "AUX3"], label: ["Out 1", "Out 2", "Out 3", "Out 4"],
+        hint: "Out 1/2 monitors · Out 3/4 headphones", map: [[1, 0, 1, 0], [0, 1, 0, 1]] },
+      { name: "AKG N9 Hybrid", backend: "PIPEWIRE", ch: ["FL", "FR"], label: ["Left", "Right"], map: [[1, 0], [0, 1]] },
+      { name: "RigWerk Out", virtual: true, backend: "PIPEWIRE", ch: ["FL", "FR"], label: ["Left", "Right"], map: [[1, 0], [0, 1]] },
+    ],
+  },
+  windows: {
+    path: "ASIO IN -> <b>ASIO</b>",
+    inDev: { name: "Focusrite USB ASIO", backend: "ASIO", ch: ["Analogue 1", "Analogue 2"] },
+    devices: [
+      { name: "Focusrite USB ASIO", backend: "ASIO", clock: true, ch: ["Output 1", "Output 2", "Output 3", "Output 4"], label: ["Out 1", "Out 2", "Out 3", "Out 4"],
+        hint: "Output 3/4 is the headphone jack on this unit", map: [[1, 0, 0, 0], [0, 1, 0, 0]] },
+      { name: "Speakers (Realtek)", backend: "WASAPI", ch: ["Front L", "Front R"], label: ["Left", "Right"], map: [[1, 0], [0, 1]] },
+      { name: "Publish → VB-Cable", virtual: true, backend: "WASAPI", ch: ["CABLE L", "CABLE R"], label: ["Left", "Right"], map: [[1, 0], [0, 1]] },
+    ],
+  },
+};
+
+let S;
+function initial(platform = "linux", scenario = "normal") {
+  const p = JSON.parse(JSON.stringify(PLAT[platform]));
+  p.devices.forEach((d) => { d.unused = "silent"; d.missing = false; });
+  if (scenario === "missing") p.devices[1].missing = true;
+  return { platform, scenario, sel: 0, inMap: [[1, 0], [0, 1]], inOn: [true, true], mono: false, direct: true, drift: true, ...p };
+}
+const running = () => S.scenario !== "stopped";
+const routed = (d, c) => d.map[0][c] || d.map[1][c];
+
+function mapSummary(d) {
+  const n = d.ch.length;
+  if (![...Array(n).keys()].some((c) => routed(d, c))) return { text: "nothing routed · plays silence", cls: "warn" };
+  const out = [];
+  for (let c = 0; c < n; c++) {
+    const l = d.map[0][c], r = d.map[1][c];
+    if (c % 2 === 0 && c + 1 < n && l && !r && d.map[1][c + 1] && !d.map[0][c + 1]) { out.push(`${d.label[c]}/${d.label[c + 1].replace("Out ", "")}`.replace("Left/Right", "L/R")); c++; continue; }
+    if (c % 2 === 0 && c + 1 < n && r && !l && d.map[0][c + 1] && !d.map[1][c + 1]) { out.push(`${d.label[c]}/${d.label[c + 1].replace("Out ", "")} swapped`.replace("Left/Right", "L/R")); c++; continue; }
+    if (l && r) out.push(`${d.label[c]}←mono`);
+    else if (l) out.push(`${d.label[c]}←L`);
+    else if (r) out.push(`${d.label[c]}←R`);
+  }
+  return { text: out.join(" · "), cls: "" };
+}
+function devState(d) {
+  if (d.missing) return "bad";
+  if (!running()) return "idle";
+  return mapSummary(d).cls === "warn" ? "warn" : "ok";
+}
+
+function render() {
+  document.querySelectorAll("[data-mock]").forEach((b) => b.setAttribute("aria-pressed", String(S[b.dataset.mock] === b.dataset.v)));
+  document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("on", n.textContent.includes("Signal Routing")));
+  document.getElementById("audio-path").innerHTML = S.path + `<br><span class="muted">+ ${S.devices.length - 1} followers</span>`;
+  document.getElementById("ver").textContent = "v0.3 · " + S.platform;
+  const pill = document.getElementById("h-pill"), st = document.getElementById("h-start");
+  if (running()) {
+    const bad = S.devices.some((d) => d.missing);
+    pill.className = "pill " + (bad ? "warn" : "run"); pill.textContent = bad ? "● Running · 1 device offline" : "● Running";
+    st.className = "start stop"; st.textContent = "Stop bridge";
+  } else { pill.className = "pill"; pill.textContent = "● Ready"; st.className = "start"; st.textContent = "Start bridge"; }
+
+  document.getElementById("page").innerHTML = `<div style="display:flex;flex-direction:column;gap:14px">
+    ${flow()}
+    <div class="grid-top"><div class="card sec">${inputMatrix()}</div><div class="card sec">${mixCard()}</div></div>
+    <div class="card out-grid"><div class="devlist">${devList()}</div><div class="dmap">${deviceMap(S.devices[S.sel])}</div></div>
+    <div class="card sec">${patch()}</div>
+  </div>`;
+}
+
+function flow() {
+  return `<div class="card flow">
+    <span class="lbl" style="margin-right:6px">Signal path</span>
+    <div class="fnode in"><div class="k">INPUT</div><div class="v">${S.inDev.name}</div></div><span class="arrow">-></span>
+    <div class="fnode layer"><div class="k" style="color:var(--teal)">ROUTE ①</div><div class="v">Input → Mix</div></div><span class="arrow">-></span>
+    <div class="fnode mix"><div class="k">MIX L/R</div><div class="v">${S.mono ? "mono sum" : "stereo"}</div></div><span class="arrow">-></span>
+    <div class="fnode mix"><div class="k">CHAIN</div><div class="v">EQ · inserts · gate · once</div></div><span class="arrow">-></span>
+    <div class="fnode out"><div class="k">OUTPUT</div><div class="v">master −1.5 dB</div></div><span class="arrow">-></span>
+    <div class="fnode layer"><div class="k" style="color:var(--blue)">ROUTE ②</div><div class="v">Mix → ${S.devices.length} devices</div></div>
+  </div>`;
+}
+
+function cell(on, label, attrs, dis) {
+  return `<div class="cell ${on ? "on" : ""} ${dis ? "dis" : ""}" ${dis ? "" : attrs} title="${label}"><i></i><span class="no">${label}</span></div>`;
+}
+
+function inputMatrix() {
+  return `<div class="sec-h"><span class="t">① Input → mix</span><span class="c">2 IN -> MIX L/R</span></div>
+    <div class="muted" style="font-size:12.5px;margin-top:-6px">${S.inDev.backend} · ${S.inDev.name} → the mix bus the chain processes</div>
+    <div class="mtx" style="grid-template-columns: 200px 66px 66px 1fr">
+      <span></span><span class="chh"><b>MIX L</b>into chain</span><span class="chh"><b>MIX R</b>into chain</span><span></span>
+      ${S.inDev.ch.map((c, i) => `
+        <div class="rh" style="${S.inOn[i] ? "" : "opacity:.45"}"><div class="n">IN ${i + 1}</div><div class="s">${c}${S.inOn[i] ? "" : " · off on Live"}</div></div>
+        ${[0, 1].map((o) => cell(S.inMap[i][o], `${i + 1}${o === 0 ? "L" : "R"}`, `data-in="${i},${o}"`, !S.inOn[i])).join("")}<span></span>`).join("")}
+    </div>
+    <div class="tip"><b>Tip</b> Mono guitar on IN 1? Route it to both MIX L and MIX R, or use Mono sum. Which input channels are captured is still picked on Live.</div>`;
+}
+
+function mixCard() {
+  const ck = (k, t) => `<div class="ck" data-ck="${k}"><span class="b">${S[k] ? "✓" : ""}</span>${t}</div>`;
+  return `<div class="sec-h"><span class="t" style="color:var(--amber)">Mix</span></div>
+    <div class="lbl">Channel mode</div>
+    <div class="row"><button class="tg ${S.mono ? "" : "on blue"}" data-mono="0">Stereo</button><button class="tg ${S.mono ? "on blue" : ""}" data-mono="1">Mono sum</button></div>
+    <div class="lbl" style="margin-top:4px">Monitoring</div>
+    ${ck("direct", "Direct monitor input")}${ck("drift", "Automatic drift correction")}
+    <div class="note" style="border-top:1px solid var(--border-soft);padding-top:12px">Both layers apply <b>live</b>. Layer ① shapes what the chain hears; layer ② only decides which device channels play the finished mix.</div>`;
+}
+
+function devList() {
+  return `<div class="sec-h" style="margin-bottom:4px"><span class="t blue">② Mix → outputs</span><span class="c">${S.devices.length} DEVICES</span></div>
+    ${S.devices.map((d, i) => {
+      const m = mapSummary(d);
+      const tag = d.clock ? `<span class="tag clock">CLOCK</span>` : d.virtual ? `<span class="tag virt">VIRTUAL</span>` : "";
+      return `<div class="dv ${i === S.sel ? "sel" : ""}" data-sel="${i}"><span class="sd ${devState(d)}"></span><span>
+        <div class="n">${d.name} ${tag}</div>
+        <div class="s ${d.missing ? "bad" : m.cls}">${d.missing ? "missing · map kept" : m.text}</div></span></div>`;
+    }).join("")}
+    <div class="note" style="margin-top:auto">Same devices, same order as Mixer → Output. Add, remove and set levels there.</div>
+    <button class="btn blue" style="align-self:flex-start">Open in Mixer</button>`;
+}
+
+function deviceMap(d) {
+  const n = d.ch.length;
+  const dis = d.missing;
+  const lvl = (c, row) => (running() && !d.missing && d.map[row][c] ? (row === 0 ? 26 : 22) : 0);
+  const meters = d.ch.map((_, c) => {
+    const h = Math.max(lvl(c, 0), lvl(c, 1));
+    const silent = !routed(d, c);
+    return `<div class="vm">${silent ? `<span class="unused">${d.unused === "silent" ? "silent" : "mono copy"}</span>` : `<i style="height:${h || 3}px" class="${h ? "" : "z"}"></i>`}</div>`;
+  }).join("");
+  const presets = [];
+  if (n >= 2) presets.push(["p12", n > 2 ? "Stereo 1/2" : "Stereo"]);
+  if (n >= 4) presets.push(["p34", "Stereo 3/4"], ["pboth", "1/2 + 3/4"]);
+  presets.push(["mono", "Mono to all"], ["swap", "Swap L/R"], ["clear", "Clear"]);
+  const c0 = S.devices[0];
+  return `<div class="insp-title"><div><h2 style="font-weight:300;font-size:21px;margin:0;display:flex;gap:10px;align-items:center">${d.name}
+      ${d.clock ? `<span class="tag clock">CLOCK</span>` : d.virtual ? `<span class="tag virt">VIRTUAL</span>` : `<span class="tag" style="color:var(--muted);border-color:var(--border)">FOLLOWS ${c0.name.toUpperCase()}</span>`}</h2>
+      <p style="margin:6px 0 0;color:var(--muted);font-size:12.5px">${d.backend} · ${n} CH${d.hint ? " · " + d.hint : ""}</p></div>
+      <span class="tag live">LIVE</span></div>
+    ${d.missing ? `<div class="banner red"><span class="sp"><b>Device not found.</b> This map is kept and applies again when it's back.</span></div>` : ""}
+    ${!d.missing && mapSummary(d).cls === "warn" ? `<div class="banner amber"><span class="sp"><b>Nothing routed.</b> ${d.name} is in the session but plays silence. Pick a preset or a cell.</span></div>` : ""}
+    <div class="presets"><span class="lbl" style="margin-right:4px">Presets</span>${presets.map(([k, t]) => `<button class="tg" data-preset="${k}" ${dis ? "disabled" : ""}>${t}</button>`).join("")}</div>
+    <div class="scroll-x"><div class="mtx" style="grid-template-columns: 170px repeat(${n}, 66px) 1fr; ${dis ? "opacity:.5" : ""}">
+      <span></span>${d.ch.map((c, i) => `<span class="chh ${n > 2 && i < 2 ? "" : ""}"><b>${d.label[i].toUpperCase()}</b>${c}</span>`).join("")}<span></span>
+      ${["Mix L", "Mix R"].map((m, row) => `<div class="rh mix"><div class="n">${m}</div><div class="s">after master</div></div>
+        ${d.ch.map((_, c) => cell(d.map[row][c], `${row === 0 ? "L" : "R"}${c + 1}`, `data-out="${row},${c}"`, dis)).join("")}<span></span>`).join("")}
+      <span class="lbl" style="text-align:right;padding-right:10px">Level</span>${meters}<span></span>
+    </div></div>
+    ${n > 2 ? `<div class="blk" style="flex-direction:row;align-items:center;gap:12px"><span class="lbl">Unused channels</span>
+      <button class="tg ${d.unused === "silent" ? "on blue" : ""}" data-unused="silent">Silent</button>
+      <button class="tg ${d.unused === "copy" ? "on blue" : ""}" data-unused="copy">Mono copy</button>
+      <span class="note sp">Channels with no cell set. Mono copy is how RigWerk fills extra channels today.</span></div>` : ""}
+    <div class="note">${d.clock
+      ? "Extra pairs on the clock device cost nothing: same callback, no extra clock or cushion. This is how headphones on Out 3/4 work."
+      : d.virtual ? "Other apps capture these two channels. Swap or mono here if a stream needs it."
+      : `Plays on its own clock through its cushion (set in the Mixer). Routing here doesn't change its latency.`}</div>`;
+}
+
+function patch() {
+  return `<div class="sec-h"><span class="t" style="color:var(--text)">Active patch</span><span class="c">${S.devices.length} DEVICES · ${S.devices.reduce((a, d) => a + d.ch.filter((_, c) => routed(d, c)).length, 0)} CHANNELS PLAYING</span></div>
+    <div class="patch-grid">${S.devices.map((d, i) => {
+      const m = mapSummary(d);
+      return `<div class="pl" data-sel="${i}"><div class="n"><span class="sd ${devState(d)}" style="width:8px;height:8px;border-radius:50%"></span>${d.name}</div>
+        <div class="m ${d.missing ? "bad" : m.cls}">${d.missing ? "missing · " + m.text : m.text}</div></div>`;
+    }).join("")}</div>`;
+}
+
+function preset(d, k) {
+  const n = d.ch.length, z = () => Array(n).fill(0);
+  const L = z(), R = z();
+  if (k === "p12") { L[0] = 1; R[1] = 1; }
+  if (k === "p34") { L[2] = 1; R[3] = 1; }
+  if (k === "pboth") { L[0] = L[2] = 1; R[1] = R[3] = 1; }
+  if (k === "mono") { L.fill(1); R.fill(1); }
+  if (k === "swap") { d.map = [d.map[1], d.map[0]]; return; }
+  d.map = [L, R];
+}
+
+function toast(msg) { const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 1800); }
+
+document.addEventListener("click", (e) => {
+  const el = (s) => e.target.closest(s);
+  let x;
+  if ((x = el("[data-mock]"))) { S = initial(x.dataset.mock === "platform" ? x.dataset.v : S.platform, x.dataset.mock === "scenario" ? x.dataset.v : S.scenario); return render(); }
+  if (el("#mock-reset")) { S = initial(S.platform); return render(); }
+  if (el("#h-start")) { S.scenario = running() ? "stopped" : "normal"; S.devices.forEach((d) => (d.missing = false)); return render(); }
+  if ((x = el("[data-in]"))) { const [i, o] = x.dataset.in.split(",").map(Number); S.inMap[i][o] ^= 1; return render(); }
+  if ((x = el("[data-out]"))) { const [r, c] = x.dataset.out.split(",").map(Number); S.devices[S.sel].map[r][c] ^= 1; return render(); }
+  if ((x = el("[data-preset]"))) { preset(S.devices[S.sel], x.dataset.preset); toast(`${S.devices[S.sel].name}: ${x.textContent} · live`); return render(); }
+  if ((x = el("[data-unused]"))) { S.devices[S.sel].unused = x.dataset.unused; return render(); }
+  if ((x = el("[data-mono]"))) { S.mono = x.dataset.mono === "1"; return render(); }
+  if ((x = el("[data-ck]"))) { S[x.dataset.ck] = !S[x.dataset.ck]; return render(); }
+  if ((x = el("[data-sel]"))) { S.sel = +x.dataset.sel; return render(); }
+});
+
+const q = new URLSearchParams(location.search);
+S = initial(q.get("platform") || "linux", q.get("scenario") || "normal");
+if (q.get("sel")) S.sel = +q.get("sel");
+if (q.get("clear")) S.devices[S.sel].map = S.devices[S.sel].map.map((r) => r.map(() => 0));
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RigWerk · Output devices mockup (E)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  /* Tokens mirror src/ui/theme.rs */
+  :root {
+    --bg: #080b11;
+    --sidebar: #0b0f17;
+    --card: #10151f;
+    --card-raised: #151b28;
+    --card-deep: #0c1019;
+    --border: #222a39;
+    --border-soft: #1b222f;
+    --hover: #1b2331;
+    --text: #e8edf6;
+    --muted: #8b97ab;
+    --dim: #74859f;
+    --teal: #38ddbf;
+    --teal-dark: #104e48;
+    --blue: #70a7ff;
+    --amber: #ffb85b;
+    --red: #ff7070;
+    --green: #60d890;
+    --font: "Ubuntu", "Segoe UI", system-ui, sans-serif;
+    --mono: "Hack", "DejaVu Sans Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #05070b; color: var(--text); font-family: var(--font); font-weight: 300; font-size: 13px; }
+  button { font: inherit; color: inherit; }
+
+  /* ── mockup chrome (not part of the app) ── */
+  .mock-bar {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    padding: 10px 16px; background: #11161f; border-bottom: 1px solid #2a3344;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .mock-bar strong { color: var(--text); font-weight: 400; font-family: var(--font); font-size: 13px; }
+  .mock-group { display: flex; gap: 4px; align-items: center; }
+  .mock-group > span { margin-right: 4px; }
+  .mock-group button {
+    background: transparent; border: 1px solid #2a3344; border-radius: 5px; padding: 4px 9px; cursor: pointer; color: var(--muted);
+  }
+  .mock-group button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); background: rgba(255,184,91,.08); }
+  .mock-group label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
+
+  /* ── app frame ── */
+  .app { display: grid; grid-template-columns: 232px 1fr; width: 1440px; min-height: 1000px; margin: 0 auto; background: var(--bg); border-bottom: 1px solid #2a3344; }
+  .sidebar { background: var(--bg); padding: 20px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .brand { display: flex; gap: 10px; align-items: center; margin-bottom: 28px; }
+  .brand-mark { width: 36px; height: 36px; border-radius: 9px; border: 1px solid var(--teal-dark); background: #0d1d1c; display: grid; place-items: center; color: var(--teal); font-size: 16px; }
+  .brand .t { font-size: 18px; letter-spacing: .02em; }
+  .brand .s { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .ws { color: var(--muted); font-size: 11px; margin: 0 0 10px; }
+  .nav-item { display: flex; gap: 12px; align-items: center; padding: 7px 10px; border-radius: 8px; cursor: pointer; border: 0; background: transparent; text-align: left; position: relative; }
+  .nav-item .ic { width: 18px; color: var(--muted); font-size: 13px; text-align: center; }
+  .nav-item .n { font-size: 15px; line-height: 1.1; }
+  .nav-item .d { font-size: 9.5px; color: var(--muted); }
+  .nav-item.on { background: var(--card-deep); }
+  .nav-item.on::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--teal); }
+  .nav-item.on .ic, .nav-item.on .d { color: var(--teal); }
+  .side-foot { margin-top: auto; }
+  .audio-path { border: 1px solid var(--border); background: var(--card-deep); border-radius: 10px; padding: 14px 12px; }
+  .audio-path .l { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+  .audio-path .p { font-family: var(--mono); font-size: 12px; color: var(--teal); line-height: 1.5; }
+  .audio-path .p b { color: var(--blue); font-weight: 400; }
+  .ver { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .ver span:last-child { border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; font-family: var(--font); }
+
+  .main { padding: 20px 26px 30px 18px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; }
+  .header h1 { margin: 0; font-weight: 300; font-size: 32px; }
+  .header p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+  .hdr-r { display: flex; gap: 12px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .chk { width: 13px; height: 13px; border-radius: 3px; background: var(--card-raised); border: 1px solid var(--border); display: inline-block; vertical-align: middle; margin-right: 4px; }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+  .pill.run { color: var(--teal); border-color: var(--teal-dark); }
+  .pill.warn { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .start { background: var(--teal); color: #05201b; border: 0; border-radius: 7px; padding: 8px 16px; font-size: 14px; font-weight: 400; cursor: pointer; }
+  .start.stop { background: transparent; color: var(--red); border: 1px solid rgba(255,112,112,.45); }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+  .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+  .lbl.teal { color: var(--teal); } .lbl.blue { color: var(--blue); } .lbl.amber { color: var(--amber); }
+  .mono { font-family: var(--mono); }
+  .dim { color: var(--dim); }
+  .muted { color: var(--muted); }
+
+  /* chips / toggles like egui selectable labels */
+  .tg { display: inline-flex; align-items: center; border: 1px solid var(--border); background: var(--card-deep); border-radius: 6px; padding: 5px 10px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .tg.on { color: var(--teal); border-color: var(--teal-dark); background: #0d1d1c; }
+  .tg.on.blue { color: var(--blue); border-color: #2a4677; background: #0f1830; }
+  .tg.on.amber { color: var(--amber); border-color: rgba(255,184,91,.4); background: #241a0c; }
+  .tg.on.red { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .tg[disabled], .tg.off { opacity: .4; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sp { flex: 1; }
+
+  .tag { font-family: var(--mono); font-size: 9.5px; letter-spacing: .03em; border-radius: 4px; padding: 2px 5px; border: 1px solid; white-space: nowrap; }
+  .tag.live { color: var(--teal); border-color: var(--teal-dark); }
+  .tag.restart { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .tag.clock { color: var(--blue); border-color: #2a4677; }
+  .tag.virt { color: var(--green); border-color: rgba(96,216,144,.4); }
+  .tag.miss { color: var(--red); border-color: rgba(255,112,112,.45); }
+
+  .select { display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border); background: var(--card-deep); border-radius: 8px; padding: 9px 12px; font-size: 14px; }
+  .select::after { content: "▾"; color: var(--muted); }
+  .field { border: 1px solid var(--border); background: var(--card-deep); border-radius: 6px; padding: 6px 10px; font-family: var(--mono); font-size: 12px; }
+  .slider { position: relative; height: 4px; border-radius: 2px; background: var(--border); margin: 10px 4px; }
+  .slider i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--blue); }
+  .slider i::after { content: ""; position: absolute; right: -6px; top: -4px; width: 12px; height: 12px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 3px #0f1830; }
+  .slider.off i, .slider.off i::after { background: var(--dim); }
+  .meter { display: flex; gap: 10px; align-items: center; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .meter .bar { flex: 1; height: 4px; background: var(--card-deep); border-radius: 2px; position: relative; overflow: hidden; }
+  .meter .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--blue); opacity: .85; }
+
+  /* ── mixer ── */
+  .mx-top { display: flex; justify-content: space-between; align-items: center; }
+  .mx-top .l { font-size: 11px; color: var(--teal); } .mx-top .l span { color: var(--muted); margin-left: 6px; }
+  .mx-top .r { display: flex; gap: 10px; align-items: center; }
+  .btn { background: var(--card-deep); border: 1px solid var(--border); border-radius: 7px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; color: var(--teal); }
+  .btn.plain { color: var(--text); }
+  .btn.blue { color: var(--blue); }
+  .btn.warn { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .btn.danger { color: var(--red); border-color: rgba(255,112,112,.4); }
+  .btn[disabled] { opacity: .4; cursor: not-allowed; }
+
+  .rack { display: grid; grid-template-columns: 340px 1fr; min-height: 860px; overflow: hidden; }
+  .chain { border-right: 1px solid var(--border-soft); padding: 14px; display: flex; flex-direction: column; }
+  .chain-h { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); margin-bottom: 14px; }
+  .stage { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; padding: 10px 10px; border-radius: 9px; border: 1px solid transparent; cursor: pointer; margin-bottom: 8px; }
+  .stage:hover { background: var(--hover); }
+  .stage.sel { border-color: var(--teal-dark); background: #0e1b1d; }
+  .stage .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+  .stage .n { font-size: 15px; }
+  .stage .s { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .stage .st { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .stage .st.on { color: var(--teal); }
+  .stage .st::after { content: "  ›"; color: var(--muted); }
+  .group-h { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; font-size: 13px; color: var(--amber); }
+  .group-h .c { color: var(--muted); font-size: 11.5px; }
+  .group-h.blue { color: var(--blue); cursor: pointer; border-radius: 9px; border: 1px solid transparent; padding: 10px; }
+  .group-h.blue:hover { background: var(--hover); }
+  .group-h.blue.sel { border-color: #2a4677; background: #0f1830; }
+  .group-h .n2 { font-size: 15px; color: var(--text); }
+  .group-h .s2 { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .children { margin: 2px 0 8px 18px; padding-left: 10px; border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+  .dev { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 9px 10px; border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; cursor: pointer; }
+  .dev:hover { background: var(--hover); }
+  .dev.sel { border-color: #2a4677; background: #0f1830; }
+  .dev .sd { width: 8px; height: 8px; border-radius: 50%; }
+  .sd.ok { background: var(--teal); } .sd.warn { background: var(--amber); } .sd.bad { background: var(--red); } .sd.idle { background: var(--dim); }
+  .dev .n { font-size: 13.5px; display: flex; gap: 6px; align-items: center; }
+  .dev .s { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+  .dev .r { display: flex; gap: 6px; align-items: center; }
+  .dev .lv { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 52px; text-align: right; }
+  .m-btn { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; border: 1px solid var(--border); background: transparent; font-family: var(--mono); font-size: 10.5px; color: var(--muted); cursor: pointer; padding: 0; }
+  .m-btn.on { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .add-row { border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; color: var(--muted); cursor: pointer; background: transparent; text-align: left; }
+  .add-row:hover, .add-row.sel { color: var(--blue); border-color: #2a4677; }
+  .chain-foot { margin-top: 14px; color: var(--muted); font-size: 11.5px; padding-left: 10px; }
+
+  .insp { padding: 14px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .insp-h { font-size: 11px; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); }
+  .insp-title { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .insp-title h2 { margin: 0; font-weight: 300; font-size: 21px; display: flex; gap: 10px; align-items: center; }
+  .insp-title p { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+  .blk { background: var(--card-deep); border: 1px solid var(--border-soft); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .blk-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .kv { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); }
+  .kv b { font-family: var(--mono); font-weight: 400; color: var(--text); font-size: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .tile { border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; }
+  .tile .v { font-family: var(--mono); font-size: 20px; margin-top: 6px; color: var(--teal); }
+  .tile .v small { font-size: 11px; color: var(--muted); margin-left: 2px; }
+  .tile .v.amber { color: var(--amber); } .tile .v.blue { color: var(--blue); } .tile .v.red { color: var(--red); } .tile .v.na { color: var(--dim); }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .note b { color: var(--text); font-weight: 400; }
+  .banner { border-radius: 10px; padding: 12px 14px; display: flex; gap: 12px; align-items: center; font-size: 12.5px; line-height: 1.45; }
+  .banner.red { border: 1px solid rgba(255,112,112,.45); background: #1d0f12; }
+  .banner.amber { border: 1px solid rgba(255,184,91,.4); background: #1d160c; }
+  .banner.green { border: 1px solid rgba(96,216,144,.35); background: #0d1b14; }
+  .actions { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+
+  .dl { display: flex; flex-direction: column; gap: 6px; }
+  .dl-h { font-size: 11px; color: var(--blue); margin: 6px 0 2px; text-transform: uppercase; }
+  .dl-i { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; padding: 9px 12px; cursor: pointer; }
+  .dl-i:hover { background: var(--hover); }
+  .dl-i .rd { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--dim); }
+  .dl-i .n { font-size: 13.5px; } .dl-i .s { font-size: 10.5px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+  .dl-i.dis { opacity: .45; cursor: not-allowed; }
+  .dl-i.dis:hover { background: var(--card); }
+  .why { font-size: 11px; color: var(--muted); text-align: right; max-width: 280px; }
+
+  .mixed-list { display: flex; flex-direction: column; gap: 6px; }
+  .ml-i { display: grid; grid-template-columns: 10px 1fr 90px 80px 70px; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; font-size: 12.5px; cursor: pointer; }
+  .ml-i .mono { font-size: 11px; color: var(--muted); }
+
+  /* ── live ── */
+  .live-row { display: grid; grid-template-columns: 1fr 22px 0.78fr 22px 1fr; align-items: stretch; }
+  .conn { display: grid; place-items: center; color: var(--border); }
+  .lc { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .lc.raised { background: var(--card-raised); }
+  .live-follow { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
+  .lf { display: grid; grid-template-columns: 9px 1fr auto auto; gap: 8px; align-items: center; font-size: 12px; padding: 5px 2px; }
+  .lf .mono { font-size: 10.5px; color: var(--muted); }
+  .chainstrip { display: flex; gap: 6px; align-items: center; padding: 14px 16px; }
+  .cs { border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; min-width: 140px; background: var(--card-deep); }
+  .cs .k { font-family: var(--mono); font-size: 9.5px; color: var(--muted); } .cs .v { font-size: 12.5px; margin-top: 2px; }
+  .cs.out { border-color: #2a4677; } .cs.out .k { color: var(--blue); }
+  .arrow { color: var(--muted); font-family: var(--mono); }
+
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #241a0c; border: 1px solid rgba(255,184,91,.5); color: var(--amber); padding: 10px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+
+  .notes { width: 1440px; margin: 0 auto; padding: 20px 26px 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; background: #05070b; }
+  .notes .n { border: 1px solid #2a3344; border-radius: 10px; padding: 14px; background: #0c1018; }
+  .notes h3 { margin: 0 0 8px; font-weight: 400; font-size: 13px; color: var(--amber); }
+  .notes ul { margin: 0; padding-left: 16px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+  .notes b { color: var(--text); font-weight: 400; }
+</style>
+</head>
+<body>
+
+<div class="mock-bar">
+  <strong>Mockup E · output devices</strong>
+  <div class="mock-group"><span>page</span>
+    <button data-mock="view" data-v="mixer" aria-pressed="true">Mixer</button>
+    <button data-mock="view" data-v="live" aria-pressed="false">Live Bridge</button>
+  </div>
+  <div class="mock-group"><span>platform</span>
+    <button data-mock="platform" data-v="linux" aria-pressed="true">Linux</button>
+    <button data-mock="platform" data-v="windows" aria-pressed="false">Windows</button>
+  </div>
+  <div class="mock-group"><span>scenario</span>
+    <button data-mock="scenario" data-v="normal" aria-pressed="true">Normal</button>
+    <button data-mock="scenario" data-v="missing" aria-pressed="false">Device missing</button>
+    <button data-mock="scenario" data-v="stopped" aria-pressed="false">Bridge stopped</button>
+  </div>
+  <div class="mock-group" id="mock-driver"><label><input type="checkbox" id="driver-installed" /> RigWerk Virtual driver installed (Win v2)</label></div>
+  <div class="mock-group"><button id="mock-reset">reset</button></div>
+</div>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">∿</div><div><div class="t">RIGWERK</div><div class="s">independent bridge</div></div></div>
+    <div class="ws">WORKSPACE</div>
+    <button class="nav-item" data-nav="live"><span class="ic">ılı</span><span><div class="n">Live Bridge</div><div class="d">Bridge</div></span></button>
+    <button class="nav-item" data-nav="mixer"><span class="ic">⫶</span><span><div class="n">Mixer</div><div class="d">Chain + EQ</div></span></button>
+    <button class="nav-item"><span class="ic">⏚</span><span><div class="n">Plugins</div><div class="d">VST3 + CLAP</div></span></button>
+    <button class="nav-item"><span class="ic">∷</span><span><div class="n">Signal Routing</div><div class="d">Routing</div></span></button>
+    <button class="nav-item"><span class="ic">▣</span><span><div class="n">Devices</div><div class="d">Devices</div></span></button>
+    <button class="nav-item"><span class="ic">☰</span><span><div class="n">Sessions</div><div class="d">Sessions</div></span></button>
+    <button class="nav-item"><span class="ic">?</span><span><div class="n">Setup Guide</div><div class="d">Guide</div></span></button>
+    <button class="nav-item"><span class="ic">≡</span><span><div class="n">Diagnostics</div><div class="d">Log</div></span></button>
+    <div class="side-foot">
+      <div class="audio-path"><div class="l">AUDIO PATH</div><div class="p" id="audio-path"></div></div>
+      <div class="ver"><span id="ver"></span><span>about</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="header">
+      <div><h1 id="h-title"></h1><p id="h-sub"></p></div>
+      <div class="hdr-r"><span><span class="chk"></span>auto-start</span><span class="pill" id="h-pill"></span><button class="start" id="h-start"></button></div>
+    </header>
+    <div id="page"></div>
+  </main>
+</div>
+
+<div class="notes">
+  <div class="n"><h3>Model</h3><ul>
+    <li><b>Output</b> stays the master stage: master level + mute, after Post EQ.</li>
+    <li>Below it: the output devices. Exactly one is the <b>clock device</b>. The chain (plugins, gate, EQ) runs on its callback.</li>
+    <li>Every other device <b>follows</b>: own ring, resampler, drift loop, cushion. It plays the finished mix.</li>
+    <li><b>RigWerk Out</b> is a follower too, with an endpoint instead of a device picker. It can't be the clock device.</li>
+  </ul></div>
+  <div class="n"><h3>Live vs. restart</h3><ul>
+    <li><span class="tag live">LIVE</span> add/remove follower, level, mute, cushion, publish on/off.</li>
+    <li><span class="tag restart">RESTARTS BRIDGE</span> clock device swap, clock device's device/rate/buffer.</li>
+    <li>Clock device missing → bridge can't start (as today). Follower missing → bridge runs without it; row stays in the session.</li>
+  </ul></div>
+  <div class="n"><h3>Windows publish</h3><ul>
+    <li><b>v1</b>: RigWerk renders into an installed cable (VB-Cable). Row says <b>Publish → VB-Cable</b>; apps pick <b>CABLE Output</b>. The cable is greyed in the add list while Publish uses it.</li>
+    <li><b>v2</b>: with the RigWerk Virtual driver it becomes <b>RigWerk Out</b>, renameable.</li>
+    <li>Neither present: the Virtual entry is greyed with the reason; Live shows "Not publishing".</li>
+  </ul></div>
+  <div class="n"><h3>Concept review questions</h3><ul>
+    <li><b>Enum</b>: <code>Output</code> stays the master; add <code>OutputDevice(n)</code> like <code>Plugin(n)</code>, plus an add state.</li>
+    <li><b>Clock model</b>: one clock device + N followers, yes. Name it by clock, not "Listen": monitors are listened to too. PipeWire duplex: followers in the same graph need no ring. ASIO: one driver, so followers are WASAPI.</li>
+    <li><b>Overload</b>: the chain runs once on the clock device; if it can't keep up, every follower runs dry together and shows it in its health.</li>
+    <li><b>Sessions</b>: keep today's single output as the clock device; add an optional <code>followers</code> list so old presets load unchanged.</li>
+  </ul></div>
+  <div class="n"><h3>Out of scope here</h3><ul>
+    <li>Channel mapping per device lives on <b>Signal Routing</b> (next round): a device picker above the matrix.</li>
+    <li>Feed point per device (pre/post master): later, with routing.</li>
+    <li>Windows: one ASIO driver per process, so followers are WASAPI (or channels on the open ASIO driver, via Routing).</li>
+  </ul></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const CATALOG = {
+  linux: [
+    { id: "akg", name: "AKG N9 Hybrid", backend: "PIPEWIRE", ch: 2, rate: 48000 },
+    { id: "gp5", name: "GP-5 Analog Stereo", backend: "PIPEWIRE", ch: 2, rate: 44100 },
+    { id: "bt", name: "Creative BT-W3 Pro", backend: "PIPEWIRE", ch: 2, rate: 48000 },
+    { id: "hda", name: "Built-in Audio Analog Stereo", backend: "PIPEWIRE", ch: 2, rate: 48000 },
+    { id: "gp5hw", name: "GP-5, USB Audio · hw", backend: "ALSA", ch: 2, rate: 44100, sameAs: "gp5" },
+  ],
+  windows: [
+    { id: "focus", name: "Focusrite USB ASIO", backend: "ASIO", ch: 4, rate: 48000 },
+    { id: "flex", name: "FlexASIO", backend: "ASIO", ch: 2, rate: 48000 },
+    { id: "spk", name: "Speakers (Realtek)", backend: "WASAPI", ch: 2, rate: 48000 },
+    { id: "hp", name: "Headphones (Realtek)", backend: "WASAPI", ch: 2, rate: 44100 },
+    { id: "lg", name: "LG HDR 4K (NVIDIA HD Audio)", backend: "WASAPI", ch: 2, rate: 48000 },
+    { id: "vbc", name: "CABLE Input (VB-Audio)", backend: "WASAPI", ch: 2, rate: 48000 },
+  ],
+};
+const VIRTUAL = { id: "virt", name: "RigWerk Out", virtual: true, ch: 2 };
+
+const HEALTH = {
+  gp5: { buf: 52, drift: "+12", under: 0, lat: "9.4" },
+  bt: { buf: 61, drift: "−31", under: 1, lat: "38.2" },
+  hda: { buf: 48, drift: "+4", under: 0, lat: "8.1" },
+  gp5hw: { buf: 50, drift: "+11", under: 0, lat: "6.2" },
+  spk: { buf: 55, drift: "+7", under: 0, lat: "12.0" },
+  hp: { buf: 47, drift: "−18", under: 0, lat: "10.6" },
+  lg: { buf: 58, drift: "+22", under: 2, lat: "21.3" },
+  vbc: { buf: 51, drift: "+2", under: 0, lat: "10.0" },
+  virt: { buf: 50, drift: "0", under: 0, lat: "5.3" },
+  akg: { buf: 50, drift: "+9", under: 0, lat: "10.7" },
+  focus: { buf: 50, drift: "+3", under: 0, lat: "5.3" },
+};
+
+let S;
+function initial() {
+  const win = document.getElementById("driver-installed")?.checked;
+  const base = {
+    view: S?.view ?? "mixer",
+    platform: S?.platform ?? "linux",
+    scenario: S?.scenario ?? "normal",
+    sel: "master",
+    master: { db: -1.5, mute: false },
+    clockOpts: { rate: "Match input", buf: "128 smp", low: true },
+  };
+  if (base.platform === "linux") {
+    base.devices = [
+      dev("akg", true, -1.5),
+      dev("gp5", false, -6.0, { cushion: "Safe" }),
+      { ...VIRTUAL, clock: false, db: 0, mute: false, cushion: "Low", publish: true },
+    ];
+  } else {
+    base.devices = [dev("focus", true, 0), dev("spk", false, -6.0, { cushion: "Safe" }),
+      { ...VIRTUAL, clock: false, db: 0, mute: false, cushion: "Low", publish: true }];
+  }
+  if (base.scenario === "missing") {
+    const f = base.devices.find((d) => !d.clock && !d.virtual);
+    if (f) f.missing = true;
+  }
+  return base;
+}
+function dev(id, clock, db, extra = {}) {
+  const c = [...CATALOG.linux, ...CATALOG.windows].find((d) => d.id === id);
+  return { ...c, clock, db, mute: false, cushion: "Safe", ...extra };
+}
+
+const viaDriver = () => S.platform === "windows" && document.getElementById("driver-installed").checked;
+const virtName = (d) => (S.platform === "windows" && !viaDriver() ? "Publish → VB-Cable" : d.name);
+const running = () => S.scenario !== "stopped";
+const clockDev = () => S.devices.find((d) => d.clock);
+const fmtDb = (db) => (db > 0 ? "+" : db < 0 ? "−" : "+") + Math.abs(db).toFixed(1) + " dB";
+const pct = (db) => Math.max(4, Math.min(100, 100 + db * 4));
+const kHz = (r) => (r / 1000).toFixed(1).replace(".0", "") + " kHz";
+
+function devState(d) {
+  if (d.missing) return { cls: "bad", text: "missing" };
+  if (d.virtual && !d.publish) return { cls: "idle", text: "not published" };
+  if (!running()) return { cls: "idle", text: "idle" };
+  if (d.mute) return { cls: "idle", text: "muted" };
+  const h = HEALTH[d.id];
+  if (h && h.under > 0) return { cls: "warn", text: h.under + " underrun" + (h.under > 1 ? "s" : "") };
+  return { cls: "ok", text: "running" };
+}
+function devSub(d) {
+  if (d.virtual) return S.platform === "linux" ? "PIPEWIRE · source node" : viaDriver() ? "RIGWERK VIRTUAL DRIVER" : "VIA VB-CABLE · v1";
+  return `${d.backend} · ${d.ch} CH`;
+}
+
+// ───────────── render ─────────────
+function render() {
+  document.querySelectorAll("[data-mock]").forEach((b) => b.setAttribute("aria-pressed", String(S[b.dataset.mock] === b.dataset.v)));
+  document.getElementById("mock-driver").style.display = S.platform === "windows" ? "" : "none";
+  document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("on", n.dataset.nav === S.view));
+  const c = clockDev();
+  const followers = S.devices.length - 1;
+  document.getElementById("audio-path").innerHTML =
+    S.platform === "linux"
+      ? `PIPEWIRE IN -> <b>PIPEWIRE</b>${followers ? `<br><span class="muted">+ ${followers} follower${followers > 1 ? "s" : ""}</span>` : ""}`
+      : `ASIO IN -> <b>${c.backend}</b>${followers ? `<br><span class="muted">+ ${followers} follower${followers > 1 ? "s" : ""}</span>` : ""}`;
+  document.getElementById("ver").textContent = "v0.3 · " + S.platform;
+  const pill = document.getElementById("h-pill");
+  const start = document.getElementById("h-start");
+  if (running()) {
+    const bad = S.devices.some((d) => devState(d).cls === "bad");
+    pill.className = "pill " + (bad ? "warn" : "run");
+    pill.textContent = bad ? "● Running · 1 device offline" : "● Running";
+    start.className = "start stop"; start.textContent = "Stop bridge";
+  } else {
+    pill.className = "pill"; pill.textContent = "● Ready";
+    start.className = "start"; start.textContent = "Start bridge";
+  }
+  if (S.view === "mixer") renderMixer(); else renderLive();
+}
+
+function renderMixer() {
+  document.getElementById("h-title").textContent = "Mixer";
+  document.getElementById("h-sub").textContent = "Signal chain top to bottom · inspector for the selected stage.";
+  const outCount = S.devices.length;
+  const page = document.getElementById("page");
+  page.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="mx-top"><div class="l">MIXER<span>Signal chain · inspector for the selected stage</span></div>
+        <div class="r"><span class="mono muted" style="font-size:11px">2 INSERTS · ${outCount} OUTPUTS</span><button class="btn">+ Add insert</button></div></div>
+      <div class="card rack">
+        <div class="chain">
+          <div class="chain-h"><span>SIGNAL CHAIN</span><span>plugs reorder only</span></div>
+          ${stage("Input", "+0.0 dB · gain", "ON", true, "#38ddbf")}
+          ${stage("Pre EQ", "flat", "BYP", false, "#74859f")}
+          <div class="group-h"><span>› Plugins · 2</span><span class="c">reorder</span></div>
+          ${stage("Gate", "bypassed · POST", "BYP", false, "#74859f")}
+          ${stage("Post EQ", "flat", "BYP", false, "#74859f")}
+          <div class="group-h blue ${S.sel === "master" ? "sel" : ""}" data-sel="master">
+            <span><div class="n2">Output</div><div class="s2">${S.master.mute ? "muted" : fmtDb(S.master.db)} master · ${outCount} device${outCount > 1 ? "s" : ""}</div></span>
+            <span class="mono" style="font-size:11px;color:${S.master.mute ? "var(--red)" : "var(--teal)"}">${S.master.mute ? "MUTE" : "ON"}  <span class="muted">›</span></span>
+          </div>
+          <div class="children">
+            ${S.devices.map(devRow).join("")}
+            <button class="add-row ${S.sel === "add" ? "sel" : ""}" data-sel="add">+ add output device</button>
+          </div>
+          <div class="chain-foot">6 stages · 2 active inserts · ${outCount} outputs</div>
+        </div>
+        <div class="insp">${inspector()}</div>
+      </div>
+    </div>`;
+}
+function stage(n, s, st, on, color) {
+  return `<div class="stage"><span class="dot" style="background:${color}"></span><span><div class="n">${n}</div><div class="s">${s}</div></span><span class="st ${on ? "on" : ""}">${st}</span></div>`;
+}
+function devRow(d, i) {
+  const st = devState(d);
+  const tag = d.clock ? `<span class="tag clock">CLOCK</span>` : d.virtual ? `<span class="tag virt">VIRTUAL</span>` : "";
+  return `<div class="dev ${S.sel === i ? "sel" : ""}" data-sel="${i}">
+    <span class="sd ${st.cls}" title="${st.text}"></span>
+    <span><div class="n">${d.virtual ? virtName(d) : d.name} ${tag}</div><div class="s">${d.missing ? "missing · kept in session" : st.cls === "warn" ? st.text : devSub(d)}</div></span>
+    <span class="r"><span class="lv">${d.mute ? "muted" : fmtDb(d.db)}</span><button class="m-btn ${d.mute ? "on" : ""}" data-mute="${i}" title="Mute this device (live)">M</button></span>
+  </div>`;
+}
+
+function inspector() {
+  if (S.sel === "master") return inspMaster();
+  if (S.sel === "add") return inspAdd();
+  const d = S.devices[S.sel];
+  if (!d) { S.sel = "master"; return inspMaster(); }
+  if (d.virtual) return inspVirtual(d, S.sel);
+  if (d.clock) return inspClock(d, S.sel);
+  return inspFollower(d, S.sel);
+}
+function levelBlock(d, i, label = "DEVICE LEVEL") {
+  return `<div class="blk">
+    <div class="blk-h"><span class="lbl">${label}</span><span class="row"><span class="tag live">LIVE</span><span class="mono" style="font-size:14px">${fmtDb(d.db)}</span></span></div>
+    <div class="slider ${d.mute ? "off" : ""}"><i style="width:${pct(d.db)}%"></i></div>
+    <div class="meter"><span>L</span><div class="bar"><i style="width:${running() && !d.mute && !d.missing ? 38 : 0}%"></i></div></div>
+    <div class="meter"><span>R</span><div class="bar"><i style="width:${running() && !d.mute && !d.missing ? 33 : 0}%"></i></div></div>
+    <div class="row"><button class="tg ${d.mute ? "on red" : ""}" data-mute="${i}">${d.mute ? "Muted" : "Mute"}</button><span class="note">Trims this device only, after the master level.</span></div>
+  </div>`;
+}
+function healthTiles(d) {
+  const h = HEALTH[d.id] || {};
+  const na = !running() || d.missing || d.mute;
+  const v = (x, cls = "") => (na ? `<div class="v na">—</div>` : `<div class="v ${cls}">${x}</div>`);
+  return `<div class="tiles">
+    <div class="tile"><div class="k">Buffer</div>${v(h.buf + "<small>%</small>", "amber")}</div>
+    <div class="tile"><div class="k">Drift</div>${v(h.drift + "<small>ppm</small>", "blue")}</div>
+    <div class="tile"><div class="k">Underruns</div>${v(h.under, h.under ? "red" : "")}</div>
+    <div class="tile"><div class="k">Latency</div>${v(h.lat + "<small>ms</small>")}</div>
+  </div>`;
+}
+function backendTabs(d, restart) {
+  const opts = S.platform === "linux" ? ["PIPEWIRE", "ALSA"] : ["ASIO", "WASAPI"];
+  return `<div class="row">${opts.map((o) => `<span class="tg ${d.backend === o ? "on blue" : ""}">${o}</span>`).join("")}<span class="sp"></span>${restart ? `<span class="tag restart">RESTARTS BRIDGE</span>` : `<span class="tag live">LIVE</span>`}</div>`;
+}
+
+function inspMaster() {
+  const m = S.master;
+  return `<div class="insp-h">INSPECTOR</div>
+    <div class="insp-title"><div><h2>Output</h2><p>Master stage · the finished mix, sent to every device below.</p></div>
+      <div class="row"><button class="tg ${m.mute ? "on red" : "on"}" data-master-mute>${m.mute ? "MUTED" : "ON"}</button></div></div>
+    <div class="blk">
+      <div class="blk-h"><span class="lbl">Master level</span><span class="row"><span class="tag live">LIVE</span><span class="mono" style="font-size:14px">${fmtDb(m.db)}</span></span></div>
+      <div class="slider ${m.mute ? "off" : ""}"><i style="width:${pct(m.db)}%"></i></div>
+      <div class="meter"><span>L</span><div class="bar"><i style="width:${running() && !m.mute ? 40 : 0}%"></i></div></div>
+      <div class="meter"><span>R</span><div class="bar"><i style="width:${running() && !m.mute ? 35 : 0}%"></i></div></div>
+      <div class="note">Mute here silences <b>every</b> device. Per-device level and mute sit on each device.</div>
+    </div>
+    <div class="blk">
+      <div class="blk-h"><span class="lbl blue">Output devices</span><button class="btn blue" data-sel="add">+ Add output device</button></div>
+      <div class="mixed-list">
+        ${S.devices.map((d, i) => {
+          const st = devState(d);
+          const role = d.clock ? `<span class="tag clock">CLOCK</span>` : d.virtual ? `<span class="tag virt">VIRTUAL</span>` : `<span class="tag" style="color:var(--muted);border-color:var(--border)">FOLLOWS</span>`;
+          return `<div class="ml-i" data-sel="${i}"><span class="sd ${st.cls}" style="width:8px;height:8px;border-radius:50%"></span><span>${d.virtual ? virtName(d) : d.name}</span><span>${role}</span><span class="mono">${d.mute ? "muted" : fmtDb(d.db)}</span><span class="mono">${st.text}</span></div>`;
+        }).join("")}
+      </div>
+      <div class="note">The <b>clock device</b> drives the chain. Every other device follows it through its own buffer and resampler, so each one can drift, fill and underrun on its own.</div>
+    </div>`;
+}
+
+function inspClock(d, i) {
+  const o = S.clockOpts;
+  return `<div class="insp-h">INSPECTOR · OUTPUT DEVICE</div>
+    <div class="insp-title"><div><h2>${d.name} <span class="tag clock">CLOCK</span></h2><p>Clock device · the chain runs on this device's callback.</p></div>
+      <div class="row"><button class="tg ${d.mute ? "on red" : ""}" data-mute="${i}">${d.mute ? "MUTED" : "mute"}</button></div></div>
+    ${d.missing ? "" : ""}
+    <div class="blk">
+      <div class="blk-h"><span class="lbl blue">Device</span>${backendTabs(d, true)}</div>
+      <div class="select">${d.name}</div>
+      <div class="row mono muted" style="font-size:11px">${d.backend} · ${d.ch} CH${d.ch > 2 ? " · channel mapping on Signal Routing" : ""}</div>
+    </div>
+    <div class="grid2">
+      <div class="blk">
+        <div class="blk-h"><span class="lbl">Out clock</span><span class="tag restart">RESTARTS BRIDGE</span></div>
+        <div class="kv">Rate <span class="field">${o.rate} ▾</span></div>
+        <div class="kv">Buffer <span class="field">${o.buf} ▾</span></div>
+        <div class="row"><span class="tg ${o.low ? "on" : ""}">Low latency</span><span class="tg">Check driver</span></div>
+      </div>
+      <div class="blk">
+        <div class="blk-h"><span class="lbl">Clock</span></div>
+        <div class="note">Plugins, gate and EQ run here. Followers convert from <b>${kHz(d.rate)}</b> to their own rate.</div>
+        <div class="kv">Driver <b>${running() ? "block 64 smp · 1.3 ms" : "not running"}</b></div>
+        <div class="note">To move the clock, pick <b>Make clock device</b> on another hardware device.</div>
+      </div>
+    </div>
+    ${levelBlock(d, i)}
+    <div class="blk" style="flex-direction:row;align-items:center;gap:14px">
+      <span class="note sp">The clock device can't be removed. Make another device the clock device first, or pick a different device above.</span>
+      <button class="btn danger" disabled>Remove</button>
+    </div>`;
+}
+
+function inspFollower(d, i) {
+  const c = clockDev();
+  const conv = c.rate === d.rate ? `${kHz(d.rate)} · same rate, drift only` : `${kHz(c.rate)} → ${kHz(d.rate)} · converts`;
+  return `<div class="insp-h">INSPECTOR · OUTPUT DEVICE</div>
+    <div class="insp-title"><div><h2>${d.name} <span class="tag" style="color:var(--muted);border-color:var(--border)">FOLLOWS ${c.name.toUpperCase()}</span></h2>
+      <p>Follower · plays the finished mix on its own clock.</p></div>
+      <div class="row"><button class="tg ${d.mute ? "on red" : ""}" data-mute="${i}">${d.mute ? "MUTED" : "mute"}</button></div></div>
+    ${d.missing ? `<div class="banner red"><span class="sd bad" style="width:8px;height:8px;border-radius:50%;flex:none"></span>
+      <span class="sp"><b>Device not found.</b> The bridge runs without it; it stays in the session and rejoins when it's plugged back in.</span>
+      <button class="btn plain">Pick replacement</button><button class="btn danger" data-remove="${i}">Remove</button></div>` : ""}
+    <div class="blk">
+      <div class="blk-h"><span class="lbl blue">Device</span>${backendTabs(d, false)}</div>
+      <div class="select" style="${d.missing ? "color:var(--red)" : ""}">${d.name}${d.missing ? " · missing" : ""}</div>
+      <div class="row mono muted" style="font-size:11px">${d.backend} · ${d.ch} CH · ${conv}</div>
+    </div>
+    <div class="grid2">
+      <div class="blk">
+        <div class="blk-h"><span class="lbl">Cushion</span><span class="tag live">LIVE</span></div>
+        <div class="row">${["Safe", "Low latency", "Manual"].map((k) => `<button class="tg ${d.cushion === k || (k === "Low latency" && d.cushion === "Low") ? "on amber" : ""}" data-cushion="${i}" data-v="${k === "Low latency" ? "Low" : k}">${k}</button>`).join("")}</div>
+        <div class="note">How much this device buffers against its drift. Same choice as the bridge cushion, per device.</div>
+      </div>
+      <div class="blk">
+        <div class="blk-h"><span class="lbl">Clock</span></div>
+        <div class="kv">Follows <b>${c.name}</b></div>
+        <div class="kv">Drift correction <b>${running() ? "AUTO" : "—"}</b></div>
+        <div class="note">Its latency is higher than the clock device's: ring + cushion + its own buffer.</div>
+      </div>
+    </div>
+    <div class="blk"><div class="blk-h"><span class="lbl">Health</span><span class="mono muted" style="font-size:11px">${running() ? "live" : "bridge stopped"}</span></div>${healthTiles(d)}</div>
+    ${levelBlock(d, i)}
+    <div class="blk">
+      <div class="actions">
+        <span class="note sp">Make this the clock device: the chain moves to its callback and <b>${c.name}</b> becomes a follower.</span>
+        <button class="btn warn" data-make-clock="${i}" ${d.missing ? "disabled" : ""}>Make clock device <span class="tag restart" style="margin-left:6px">RESTARTS</span></button>
+      </div>
+      <div class="actions">
+        <span class="note sp">Removes the device from the session. The others keep playing.</span>
+        <button class="btn danger" data-remove="${i}">Remove <span class="tag live" style="margin-left:6px">LIVE</span></button>
+      </div>
+    </div>`;
+}
+
+function inspVirtual(d, i) {
+  const linux = S.platform === "linux";
+  const installed = true;
+  const cable = !linux && !viaDriver();
+  const c = clockDev();
+  const status = cable
+    ? `<div class="banner amber"><span class="sp"><b>Publishing through VB-Cable (v1).</b> RigWerk plays the mix into <b>CABLE Input</b>; other apps capture <b>CABLE Output (VB-Audio)</b>. There is no "RigWerk Out" device on this PC.</span><button class="btn plain">Setup Guide</button></div>`
+    : linux
+    ? `<div class="banner green"><span class="sp"><b>Published as a PipeWire source.</b> Other apps (OBS, Discord, a DAW) see <b>${d.name}</b> as a capture device while the bridge runs.</span></div>`
+    : installed
+      ? `<div class="banner green"><span class="sp"><b>RigWerk Virtual driver ready.</b> Other apps see <b>${d.name}</b> as a recording device.</span></div>`
+      : "";
+  const clockNote = linux && c.backend === "PIPEWIRE"
+    ? "Runs in the PipeWire graph with the clock device: no conversion, no extra cushion."
+    : cable ? `A WASAPI render client on the cable. Follows <b>${c.name}</b> through its own buffer, like any other follower.`
+    : `Follows <b>${c.name}</b> through its own buffer, like any other follower.`;
+  return `<div class="insp-h">INSPECTOR · OUTPUT DEVICE</div>
+    <div class="insp-title"><div><h2>${virtName(d)} <span class="tag virt">VIRTUAL</span></h2><p>${cable ? "Plays the finished mix into an installed cable for other apps to capture." : "Endpoint RigWerk creates · the finished mix for other apps to capture."}</p></div>
+      <div class="row"><button class="tg ${d.publish && installed ? "on" : ""}" data-publish="${i}" ${installed ? "" : "disabled"}>${d.publish && installed ? "PUBLISHED" : "OFF"}</button></div></div>
+    ${status}
+    <div class="grid2">
+      <div class="blk">
+        <div class="blk-h"><span class="lbl blue">Endpoint</span><span class="tag live">LIVE</span></div>
+        ${linux ? "" : `<div class="kv">Via <span class="row"><span class="tg ${cable ? "on blue" : ""}">VB-Cable</span><span class="tg ${cable ? "" : "on blue"} ${viaDriver() ? "" : "off"}" title="${viaDriver() ? "" : "RigWerk Virtual driver not installed"}">RigWerk driver</span></span></div>`}
+        <div class="kv">Name <span class="field" style="min-width:180px;${cable ? "color:var(--muted)" : ""}">${cable ? "CABLE Output (fixed)" : d.name}</span></div>
+        <div class="kv">Channels <b>2 · stereo</b></div>
+        <div class="kv">Shows up as <b>${linux ? "Audio/Source · Virtual" : "Recording device"}</b></div>
+        <div class="note">${cable ? "The cable's name belongs to its driver; RigWerk can't rename it. Install RigWerk Virtual (v2) for a named endpoint." : "No device picker: RigWerk owns this endpoint. Renaming re-publishes it; apps already capturing may need to re-pick it."}</div>
+      </div>
+      <div class="blk">
+        <div class="blk-h"><span class="lbl">Clock</span></div>
+        <div class="note">${clockNote}</div>
+        <div class="kv">Rate <b>${kHz(c.rate)}</b></div>
+        <div class="note">Can't be the clock device: nothing plays it in real time.</div>
+      </div>
+    </div>
+    <div class="blk"><div class="blk-h"><span class="lbl">Health</span><span class="mono muted" style="font-size:11px">${!installed ? "not published" : running() ? "live" : "bridge stopped"}</span></div>${installed ? healthTiles(d) : `<div class="note">—</div>`}</div>
+    ${levelBlock(d, i, "SEND LEVEL")}
+    <div class="blk"><div class="actions"><span class="note sp">Removes the endpoint. Apps capturing it lose their input.</span><button class="btn danger" data-remove="${i}">Remove <span class="tag live" style="margin-left:6px">LIVE</span></button></div></div>`;
+}
+
+function inspAdd() {
+  const cat = CATALOG[S.platform];
+  const c = clockDev();
+  const have = new Set(S.devices.map((d) => d.id));
+  const linux = S.platform === "linux";
+  const items = cat.map((d) => {
+    let why = "";
+    if (d.id === c.id) why = "clock device";
+    else if (have.has(d.id)) why = "already added";
+    else if (S.platform === "windows" && d.backend === "ASIO") why = `one ASIO driver at a time · ${c.backend === "ASIO" ? c.name : "pick it as clock device instead"} is open`;
+    else if (d.sameAs && have.has(d.sameAs)) why = "same hardware as GP-5 Analog Stereo";
+    else if (d.id === "vbc" && have.has("virt") && !viaDriver()) why = "used by Publish (VB-Cable)";
+    return { d, why };
+  });
+  const groups = linux ? ["PIPEWIRE", "ALSA"] : ["WASAPI", "ASIO"];
+  const virtWhy = have.has("virt") ? "already added" : "";
+  return `<div class="insp-h">INSPECTOR · ADD OUTPUT DEVICE</div>
+    <div class="insp-title"><div><h2>Add output device</h2><p>New devices join as <b>followers</b> of ${c.name}. Adding one is live: the bridge keeps playing.</p></div>
+      <div class="row"><span class="tag live">LIVE</span></div></div>
+    <div class="blk">
+      ${groups.map((g) => `<div class="dl-h">${g}</div><div class="dl">${items.filter((x) => x.d.backend === g).map(({ d, why }) => `
+        <div class="dl-i ${why ? "dis" : ""}" ${why ? "" : `data-add="${d.id}"`}>
+          <span class="rd"></span><span><div class="n">${d.name}</div><div class="s">${d.backend} · ${d.ch} CH · ${kHz(d.rate)}</div></span>
+          <span class="why">${why || (d.rate === c.rate ? "drift only" : `converts ${kHz(c.rate)} → ${kHz(d.rate)}`)}</span>
+        </div>`).join("")}</div>`).join("")}
+      <div class="dl-h" style="color:var(--green)">Virtual</div>
+      <div class="dl"><div class="dl-i ${virtWhy ? "dis" : ""}" ${virtWhy ? "" : `data-add="virt"`}>
+        <span class="rd" style="border-color:var(--green)"></span><span><div class="n">${linux || viaDriver() ? "RigWerk Out" : "Publish → VB-Cable"}</div><div class="s">${linux ? "PIPEWIRE SOURCE · created by RigWerk" : viaDriver() ? "RIGWERK VIRTUAL DRIVER" : "VB-CABLE DETECTED · RIGWERK DRIVER NOT INSTALLED"}</div></span>
+        <span class="why">${virtWhy || "publish the mix to other apps"}</span></div></div>
+    </div>
+    <div class="note">Greyed devices say why. Same-device channel pairs (e.g. Out 3/4) come with Signal Routing.</div>`;
+}
+
+// ───────────── live ─────────────
+function renderLive() {
+  document.getElementById("h-title").textContent = "Live Bridge";
+  document.getElementById("h-sub").textContent = "Any input on one clock. Any output on another.";
+  const c = clockDev();
+  const ci = S.devices.indexOf(c);
+  const fol = S.devices.filter((d) => !d.clock);
+  const worst = fol.filter((d) => !d.missing && !d.mute && (!d.virtual || d.publish)).map((d) => ({ d, h: HEALTH[d.id] })).sort((a, b) => b.h.under - a.h.under || Math.abs(parseInt(b.h.drift.replace("−", "-"))) - Math.abs(parseInt(a.h.drift.replace("−", "-"))))[0];
+  const r = running();
+  const pub = S.devices.find((d) => d.virtual);
+  const pubLine = !pub
+    ? `<div class="banner" style="border:1px dashed var(--border)"><span class="sp muted">Not publishing. Other apps can't capture the mix.</span><button class="btn blue" data-goto-add>Publish…</button></div>`
+    : !pub.publish
+      ? `<div class="banner" style="border:1px solid var(--border)"><span class="sp muted"><b>${virtName(pub)}</b> is off.</span><button class="tg" data-publish="${S.devices.indexOf(pub)}">Publish</button></div>`
+      : S.platform === "windows" && !viaDriver()
+        ? `<div class="banner amber"><span class="sp"><b>Published via VB-Cable</b> · apps capture <b>CABLE Output (VB-Audio)</b> · ${r ? kHz(c.rate) : "starts with the bridge"}</span><button class="tg on" data-publish="${S.devices.indexOf(pub)}">ON</button><button class="btn plain" data-goto="${S.devices.indexOf(pub)}">Details</button></div>`
+        : `<div class="banner green"><span class="sp"><b>Published · ${pub.name}</b> · ${S.platform === "linux" ? "PipeWire source" : "RigWerk Virtual"} · ${r ? kHz(c.rate) : "starts with the bridge"}</span><button class="tg on" data-publish="${S.devices.indexOf(pub)}">ON</button><button class="btn plain" data-goto="${S.devices.indexOf(pub)}">Details</button></div>`;
+  document.getElementById("page").innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:16px">
+    ${pubLine}
+    <div class="live-row">
+      <div class="card lc">
+        <div class="row"><span class="lbl teal">Input</span><span class="sp"></span><span class="tg on">${S.platform === "linux" ? "PIPEWIRE" : "ASIO"}</span><span class="tg">SYS</span></div>
+        <div class="select">${S.platform === "linux" ? "Creative BT-W3 Pro" : "Focusrite USB ASIO"}</div>
+        <div class="row"><span class="tg on">IN 1</span><span class="tg on">IN 2</span><span class="sp"></span><span class="mono" style="font-size:12px">10.7 ms</span></div>
+        <div class="kv">IN CLOCK <span class="row"><span class="field">48.0 kHz ▾</span><span class="field">128 smp ▾</span></span></div>
+        <div class="kv">GAIN <b>+0.0 dB</b></div>
+        <div class="slider" style="--x:1"><i style="width:55%;background:var(--teal)"></i></div>
+        <div class="meter"><span>L</span><div class="bar"><i style="width:${r ? 30 : 0}%;background:var(--teal)"></i></div></div>
+        <div class="meter"><span>R</span><div class="bar"><i style="width:${r ? 26 : 0}%;background:var(--teal)"></i></div></div>
+      </div>
+      <div class="conn">·</div>
+      <div class="card lc raised">
+        <div class="row"><span class="lbl amber">Bridge</span></div>
+        <div style="font-size:14px">One mix, ${S.devices.length} outputs</div>
+        <div class="note" style="margin-top:-6px">Clock: ${c.name}</div>
+        <div class="kv">BUFFER <b style="color:var(--amber)">${r ? "50%" : "0%"}</b></div>
+        <div class="kv">DRIFT <b style="color:var(--teal)">${r ? "AUTO" : "—"}</b></div>
+        <div class="kv">WORST <b>${r && worst ? `${worst.d.name} ${worst.h.drift} ppm` : "—"}</b></div>
+        <div class="kv">UNDERRUNS <b>${r ? fol.reduce((a, d) => a + (d.missing ? 0 : HEALTH[d.id]?.under ?? 0), 0) : 0}</b></div>
+        <div class="lbl" style="margin-top:4px">Cushion</div>
+        <div class="row"><span class="tg on amber">Safe</span><span class="tg">Low latency</span><span class="tg">Manual</span></div>
+      </div>
+      <div class="conn">·</div>
+      <div class="card lc">
+        <div class="row"><span class="lbl blue">Output</span><span class="tag clock">CLOCK</span><span class="sp"></span>${(S.platform === "linux" ? ["PIPEWIRE", "SYS"] : ["ASIO", "SYS"]).map((o, k) => `<span class="tg ${k === 0 ? "on blue" : ""}">${o}</span>`).join("")}</div>
+        <div class="select">${c.name}</div>
+        <div class="kv">OUT CLOCK <span class="row"><span class="field">Match input ▾</span><span class="field">128 smp ▾</span></span></div>
+        <div class="kv">MASTER LEVEL <b>${fmtDb(S.master.db)}</b></div>
+        <div class="slider"><i style="width:${pct(S.master.db)}%"></i></div>
+        <div class="live-follow">
+          <div class="row"><span class="lbl">Also playing on</span><span class="sp"></span><button class="btn blue" data-goto-add style="padding:3px 9px;font-size:11.5px">+ add</button></div>
+          ${fol.length ? fol.map((d) => {
+            const st = devState(d);
+            return `<div class="lf" data-goto="${S.devices.indexOf(d)}" style="cursor:pointer"><span class="sd ${st.cls}" style="width:8px;height:8px;border-radius:50%"></span>
+              <span>${d.virtual ? virtName(d) : d.name} ${d.virtual ? `<span class="tag virt">VIRTUAL</span>` : ""}</span>
+              <span class="mono">${d.mute ? "muted" : fmtDb(d.db)}</span><span class="mono" style="color:${st.cls === "bad" ? "var(--red)" : st.cls === "warn" ? "var(--amber)" : "var(--muted)"}">${st.cls === "ok" ? HEALTH[d.id].drift + " ppm" : st.text}</span></div>`;
+          }).join("") : `<div class="note">Only the clock device. Add a follower from here or the Mixer.</div>`}
+        </div>
+      </div>
+    </div>
+    <div class="card chainstrip">
+      <span class="lbl teal" style="margin-right:6px">Chain</span>
+      <div class="cs"><div class="k" style="color:var(--teal)">INPUT</div><div class="v">+0.0 dB</div></div><span class="arrow">-></span>
+      <div class="cs"><div class="k">PRE EQ</div><div class="v">flat</div></div><span class="arrow">-></span>
+      <div class="cs"><div class="k">PLUGINS</div><div class="v">2</div></div><span class="arrow">-></span>
+      <div class="cs"><div class="k">GATE</div><div class="v">bypassed · POST</div></div><span class="arrow">-></span>
+      <div class="cs"><div class="k">POST EQ</div><div class="v">flat</div></div><span class="arrow">-></span>
+      <div class="cs out" data-goto-master style="cursor:pointer"><div class="k">OUTPUT</div><div class="v">${fmtDb(S.master.db)} · ${S.devices.length} devices</div></div>
+      <span class="sp"></span><button class="btn">Open mixer</button>
+    </div>
+    <div class="note" style="padding:0 4px">Live keeps today's three cards. The Output card is the clock device; followers are a compact list under it. Click one to open it in the Mixer inspector.</div>
+    </div>`;
+}
+
+// ───────────── events ─────────────
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 2200);
+}
+document.addEventListener("click", (e) => {
+  const el = (sel) => e.target.closest(sel);
+  let x;
+  if ((x = el("[data-mock]"))) {
+    S[x.dataset.mock] = x.dataset.v;
+    if (x.dataset.mock !== "view") S = initial();
+    return render();
+  }
+  if (el("#mock-reset")) { S = initial(); return render(); }
+  if ((x = el("[data-nav]"))) { S.view = x.dataset.nav; return render(); }
+  if (el("#h-start")) { S.scenario = running() ? "stopped" : "normal"; S.devices.forEach((d) => (d.missing = false)); return render(); }
+  if ((x = el("[data-mute]"))) { e.stopPropagation(); const d = S.devices[+x.dataset.mute]; d.mute = !d.mute; return render(); }
+  if (el("[data-master-mute]")) { S.master.mute = !S.master.mute; return render(); }
+  if ((x = el("[data-cushion]"))) { S.devices[+x.dataset.cushion].cushion = x.dataset.v; return render(); }
+  if ((x = el("[data-publish]"))) { const d = S.devices[+x.dataset.publish]; d.publish = !d.publish; return render(); }
+  if ((x = el("[data-remove]"))) {
+    const i = +x.dataset.remove; const name = S.devices[i].name;
+    S.devices.splice(i, 1); S.sel = "master"; toast(`${name} removed · bridge kept playing`); return render();
+  }
+  if ((x = el("[data-make-clock]"))) {
+    const i = +x.dataset.makeClock; const old = clockDev();
+    old.clock = false; S.devices[i].clock = true;
+    const [d] = S.devices.splice(i, 1); S.devices.unshift(d); S.sel = 0;
+    toast(`Restarting bridge · ${d.name} is the clock device, ${old.name} follows`); return render();
+  }
+  if ((x = el("[data-add]"))) {
+    const id = x.dataset.add;
+    const d = id === "virt" ? { ...VIRTUAL, clock: false, db: 0, mute: false, cushion: "Low", publish: true } : dev(id, false, -6.0);
+    S.devices.push(d); S.sel = S.devices.length - 1; toast(`${d.name} added · live`); return render();
+  }
+  if (el("[data-goto-add]")) { S.view = "mixer"; S.sel = "add"; return render(); }
+  if (el("[data-goto-master]")) { S.view = "mixer"; S.sel = "master"; return render(); }
+  if ((x = el("[data-goto]"))) { S.view = "mixer"; S.sel = +x.dataset.goto; return render(); }
+  if ((x = el("[data-sel]"))) { const v = x.dataset.sel; S.sel = v === "master" || v === "add" ? v : +v; return render(); }
+});
+document.getElementById("driver-installed").addEventListener("change", () => { S = initial(); render(); });
+
+const q = new URLSearchParams(location.search);
+S = { view: q.get("view") || "mixer", platform: q.get("platform") || "linux", scenario: q.get("scenario") || "normal" };
+if (q.get("driver") === "1") document.getElementById("driver-installed").checked = true;
+S = initial();
+const sel = q.get("sel");
+if (sel) S.sel = sel === "master" || sel === "add" ? sel : +sel;
+render();
+</script>
+</body>
+</html>
