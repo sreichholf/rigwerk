@@ -31,7 +31,7 @@ use crate::app::settings::{
 };
 use crate::audio::{
     self, AudioEngine, CushionMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
-    OutputDeviceSettings, Snapshot,
+    OutputDeviceSettings, Snapshot, MAX_OUTPUT_CHANNELS,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -68,6 +68,13 @@ pub(crate) fn initial_page() -> Page {
         "diagnostics" => Page::Diagnostics,
         _ => Page::Live,
     }
+}
+
+/// Test hook for screenshots of a Mixer stage: `RIGWERK_MIXER_STAGE=output`
+/// (or `device` for the clock device). Normal launches open the last EQ.
+fn initial_mixer_stage() -> Option<crate::ui::pages::mixer::chain::ChainSelection> {
+    let key = std::env::var("RIGWERK_MIXER_STAGE").ok()?;
+    crate::ui::pages::mixer::chain::ChainSelection::from_key(&key.to_lowercase())
 }
 
 /// The page to open on launch: the one left open last time, unless a
@@ -151,8 +158,8 @@ pub struct RigWerkApp {
     pub(crate) eqs: [EqSettings; 2],
     /// Built-in noise gate (PRE or POST inserts; default POST).
     pub(crate) gate: GateSettings,
-    /// Level, mute and channel map of the clock device (the selected output).
-    /// Stored only; the engine does not read it yet.
+    /// Level, mute and channel map of the clock device (the selected output),
+    /// pushed to the engine every frame.
     pub(crate) clock_device: OutputDeviceSettings,
     /// Extra output devices. Stored only; nothing plays them yet.
     pub(crate) followers: Vec<FollowerPref>,
@@ -170,6 +177,10 @@ pub struct RigWerkApp {
     pub(crate) peak_in_r: f32,
     pub(crate) peak_out_l: f32,
     pub(crate) peak_out_r: f32,
+    /// Smoothed meter and peak per clock-device channel, from
+    /// [`Snapshot::out_channels`].
+    pub(crate) meter_out_channels: [f32; MAX_OUTPUT_CHANNELS],
+    pub(crate) peak_out_channels: [f32; MAX_OUTPUT_CHANNELS],
     /// Decimated capture/playback waveform for the Live scope.
     pub(crate) scope_in: Vec<f32>,
     pub(crate) scope_out: Vec<f32>,
@@ -608,6 +619,8 @@ impl RigWerkApp {
             peak_in_r: 0.0,
             peak_out_l: 0.0,
             peak_out_r: 0.0,
+            meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
+            peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
             scope_in: vec![0.0; audio::SCOPE_LEN],
             scope_out: vec![0.0; audio::SCOPE_LEN],
             snapshot: Snapshot::default(),
@@ -659,6 +672,9 @@ impl RigWerkApp {
                 preferences: preferences.clone(),
             }),
         };
+        if let Some(stage) = initial_mixer_stage() {
+            app.select_chain(stage);
+        }
         app.engine.set_gains(app.input_gain, app.output_gain);
         app.engine.set_mix(
             app.mute,
@@ -930,6 +946,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         peak_in_r: 0.0,
         peak_out_l: 0.0,
         peak_out_r: 0.0,
+        meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
+        peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
         scope_in: vec![0.0; audio::SCOPE_LEN],
         scope_out: vec![0.0; audio::SCOPE_LEN],
         snapshot: Snapshot::default(),

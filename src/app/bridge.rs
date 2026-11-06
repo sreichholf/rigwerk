@@ -260,7 +260,27 @@ impl RigWerkApp {
         self.peak_in_r = self.peak_in_r.max(self.meter_in_r * 0.98).max(0.0);
         self.peak_out_l = self.peak_out_l.max(self.meter_out_l * 0.98).max(0.0);
         self.peak_out_r = self.peak_out_r.max(self.meter_out_r * 0.98).max(0.0);
+        // Per clock-device channel, after its map and level. Preview has no
+        // engine reading, so the stand-in L/R goes through the same map.
+        let channel_targets = match self.engine.state {
+            EngineState::Running => self.snapshot.out_channels,
+            EngineState::Preview => self.clock_device.settled_frame(
+                self.selected_output().channels.max(1),
+                out_l * mute_scale,
+                out_r * mute_scale,
+            ),
+            _ => [0.0; audio::MAX_OUTPUT_CHANNELS],
+        };
+        for (channel, meter) in self.meter_out_channels.iter_mut().enumerate() {
+            let target = channel_targets[channel].abs();
+            *meter = smooth(*meter, target);
+            let peak = &mut self.peak_out_channels[channel];
+            *peak = peak.max(*meter * 0.98).max(0.0);
+        }
         let decay = (-2.3 * dt).exp();
+        for peak in &mut self.peak_out_channels {
+            *peak *= decay;
+        }
         self.peak_in_l *= decay;
         self.peak_in_r *= decay;
         self.peak_out_l *= decay;

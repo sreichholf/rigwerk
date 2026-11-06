@@ -83,11 +83,11 @@ pub(crate) use linux::hotplug;
 pub(crate) use linux::native::{is_native_id, node_latency_frames};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
-// Most of it is first read by the Mixer and Signal Routing pages (1c/1d).
+// First read by the Signal Routing page (1d).
 #[allow(unused_imports)]
+pub use output_map::{ChannelMap, MixSide, UnusedChannels};
 pub use output_map::{
-    ChannelMap, MixSide, OutputDeviceSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB,
-    DEVICE_LEVEL_MIN_DB, MAX_OUTPUT_CHANNELS,
+    OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_OUTPUT_CHANNELS,
 };
 #[cfg(target_os = "windows")]
 pub(crate) use plugins::service_clap;

@@ -57,6 +57,8 @@ RIGWERK_PAGE=live cargo run --release -- --screenshot docs/screenshots/live.png
 
 `RIGWERK_PAGE` may be `live`, `mixer`, `routing`, `devices`, `sessions`,
 `plugins`, `guide`, or `diagnostics`.
+`RIGWERK_MIXER_STAGE` selects a Mixer stage: `input`, `pre_eq`, `plugins`,
+`gate`, `post_eq`, `output`, or `device` (the clock device).
 
 ## License
 

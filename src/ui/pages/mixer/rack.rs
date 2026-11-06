@@ -11,8 +11,9 @@ use crate::app::settings::{
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{EqSlot, GateSlot, PluginView};
 use crate::ui::pages::mixer::chain::{
-    bypassed_color, eq_summary, gate_summary, stage_color, ChainSelection,
+    bypassed_color, eq_summary, gate_summary, output_summary, stage_color, ChainSelection,
 };
+use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED,
@@ -26,19 +27,24 @@ const ROW_H: f32 = 58.0;
 const PANE_HEAD_H: f32 = 36.0;
 const PANE_PAD_X: f32 = 14.0;
 
-enum RackAction {
+pub(super) enum RackAction {
     Bypass(usize, bool),
     Mix(usize, f32),
     Configure(usize),
     Remove(usize),
     Move(usize, isize),
     OpenPlugins,
+    OpenLive,
 }
 
 impl RigWerkApp {
     pub(crate) fn mixer_rack(&mut self, ui: &mut egui::Ui) {
         let views = self.engine.plugin_views();
-        self.chain_selected = self.chain_selected.clamp(views.len());
+        let devices = self.output_device_rows();
+        self.chain_selected = self
+            .chain_selected
+            .clamp(views.len())
+            .clamp_output(devices.len());
 
         let mut actions: Vec<RackAction> = Vec::new();
         let mut select: Option<ChainSelection> = None;
@@ -69,9 +75,11 @@ impl RigWerkApp {
                 ui.add_space(8.0);
                 ui.label(mono(
                     format!(
-                        "{} INSERT{}",
+                        "{} INSERT{} · {} OUTPUT{}",
                         views.len(),
-                        if views.len() == 1 { "" } else { "S" }
+                        if views.len() == 1 { "" } else { "S" },
+                        devices.len(),
+                        if devices.len() == 1 { "" } else { "S" }
                     ),
                     DIM,
                     8.5,
@@ -103,7 +111,7 @@ impl RigWerkApp {
                                 CARD_DEEP,
                             );
                             ui.add_space(2.0);
-                            self.chain_pane(ui, &views, &mut select, &mut actions);
+                            self.chain_pane(ui, &views, &devices, &mut select, &mut actions);
                         },
                     );
 
@@ -113,7 +121,7 @@ impl RigWerkApp {
                         |ui| {
                             ui.set_min_width((total - chain_w - 4.0).max(320.0));
                             ui.add_space(2.0);
-                            self.inspector_pane(ui, &views, &mut actions);
+                            self.inspector_pane(ui, &views, &devices, &mut select, &mut actions);
                         },
                     );
                 });
@@ -151,6 +159,7 @@ impl RigWerkApp {
                         .plugin_insert_at(self.engine.plugin_views().len());
                     self.page = Page::Plugins;
                 }
+                RackAction::OpenLive => self.page = Page::Live,
             }
         }
     }
@@ -159,6 +168,7 @@ impl RigWerkApp {
         &mut self,
         ui: &mut egui::Ui,
         views: &[PluginView],
+        devices: &[OutputDeviceRow],
         select: &mut Option<ChainSelection>,
         actions: &mut Vec<RackAction>,
     ) {
@@ -169,11 +179,7 @@ impl RigWerkApp {
         let (post_summary, post_on) = eq_summary(&self.eqs[EqSlot::Post.index()]);
         let (gate_text, gate_on) = gate_summary(&self.gate);
         let input_summary = format!("{:+.1} dB · gain", self.input_gain);
-        let output_summary = if self.mute {
-            "muted".to_owned()
-        } else {
-            format!("{:+.1} dB", self.output_gain)
-        };
+        let output_summary = output_summary(self.output_gain, self.mute, devices.len());
         let gate_pre = self.gate.slot == GateSlot::Pre;
 
         let chain_scroll_h = (ui.available_height() - 36.0).max(160.0);
@@ -333,6 +339,9 @@ impl RigWerkApp {
                 ) {
                     *select = Some(ChainSelection::Output);
                 }
+                ui.indent("output_devices", |ui| {
+                    self.output_device_children(ui, devices, select);
+                });
             });
 
         ui.add_space(8.0);
@@ -344,8 +353,10 @@ impl RigWerkApp {
             ui.add_space(PANE_PAD_X);
             ui.label(
                 RichText::new(format!(
-                    "6 stages · {active} active insert{}",
-                    if active == 1 { "" } else { "s" }
+                    "6 stages · {active} active insert{} · {} output{}",
+                    if active == 1 { "" } else { "s" },
+                    devices.len(),
+                    if devices.len() == 1 { "" } else { "s" }
                 ))
                 .size(ts(10.0))
                 .color(DIM),
@@ -357,9 +368,19 @@ impl RigWerkApp {
         &mut self,
         ui: &mut egui::Ui,
         views: &[PluginView],
+        devices: &[OutputDeviceRow],
+        select: &mut Option<ChainSelection>,
         actions: &mut Vec<RackAction>,
     ) {
-        pane_head(ui, "INSPECTOR", None);
+        pane_head(
+            ui,
+            if matches!(self.chain_selected, ChainSelection::OutputDevice(_)) {
+                "INSPECTOR · OUTPUT DEVICE"
+            } else {
+                "INSPECTOR"
+            },
+            None,
+        );
         ui.add_space(8.0);
         let body_h = (ui.available_height() - 8.0).max(120.0);
         let body_w = (ui.available_width() - PANE_PAD_X * 2.0).max(200.0);
@@ -387,7 +408,17 @@ impl RigWerkApp {
                                             self.eq_inspector(ui, EqSlot::Post)
                                         }
                                         ChainSelection::Gate => self.gate_inspector(ui),
-                                        ChainSelection::Output => self.output_inspector(ui),
+                                        ChainSelection::Output => {
+                                            self.output_inspector(ui, devices, select)
+                                        }
+                                        ChainSelection::OutputDevice(index) => {
+                                            match devices.get(index) {
+                                                Some(row) => {
+                                                    self.clock_device_inspector(ui, row, actions)
+                                                }
+                                                None => self.output_inspector(ui, devices, select),
+                                            }
+                                        }
                                         ChainSelection::Plugins => {
                                             plugins_group_inspector(ui, views, actions);
                                         }
@@ -430,7 +461,12 @@ impl RigWerkApp {
         meter_row(ui, "R", self.meter_in_r, self.peak_in_r, TEAL);
     }
 
-    fn output_inspector(&mut self, ui: &mut egui::Ui) {
+    fn output_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        devices: &[OutputDeviceRow],
+        select: &mut Option<ChainSelection>,
+    ) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Output").size(ts(16.0)).color(TEXT).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -457,6 +493,7 @@ impl RigWerkApp {
                         ))
                         .corner_radius(CornerRadius::same(6)),
                     )
+                    .on_hover_text("Silence every output device without stopping the bridge.")
                     .clicked()
                 {
                     self.mute = !mute;
@@ -464,7 +501,7 @@ impl RigWerkApp {
             });
         });
         ui.label(
-            RichText::new("Anchor stage · monitor level")
+            RichText::new("Master stage · the finished mix, sent to every device below.")
                 .size(ts(11.0))
                 .color(DIM),
         );
@@ -482,6 +519,16 @@ impl RigWerkApp {
         ui.add_space(10.0);
         meter_row(ui, "L", self.meter_out_l, self.peak_out_l, BLUE);
         meter_row(ui, "R", self.meter_out_r, self.peak_out_r, BLUE);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(
+                "Mute here silences every device. Per-device level and mute sit on each device.",
+            )
+            .size(ts(10.5))
+            .color(MUTED),
+        );
+        ui.add_space(12.0);
+        self.output_devices_block(ui, devices, select);
     }
 
     pub(crate) fn select_chain(&mut self, selection: ChainSelection) {

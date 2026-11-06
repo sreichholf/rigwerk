@@ -148,6 +148,35 @@ impl OutputDeviceSettings {
             ..self
         }
     }
+
+    /// One settled frame of a `channels`-channel device under these settings
+    /// (no ramps): what the callback writes once a change has crossfaded.
+    /// Channels past the device or past [`MAX_OUTPUT_CHANNELS`] read 0. For
+    /// the UI, e.g. preview meters; the callback uses [`DeviceMapper`].
+    pub(crate) fn settled_frame(
+        &self,
+        channels: usize,
+        left: f32,
+        right: f32,
+    ) -> [f32; MAX_OUTPUT_CHANNELS] {
+        let gain = if self.mute {
+            0.0
+        } else {
+            level_gain(self.level_db)
+        };
+        let sources = [left, right, (left + right) * 0.5];
+        let mut frame = [0.0; MAX_OUTPUT_CHANNELS];
+        for (channel, sample) in frame.iter_mut().enumerate().take(channels) {
+            let weights = channel_weights(self.map, self.unused, channels, channel);
+            *sample = gain
+                * weights
+                    .iter()
+                    .zip(sources)
+                    .map(|(weight, source)| weight * source)
+                    .sum::<f32>();
+        }
+        frame
+    }
 }
 
 /// Linear gain of a device level in dB.  0 dB is exactly 1.0, so the default
@@ -463,6 +492,43 @@ pub(super) fn old_write_frame(frame: &mut [f32], left: f32, right: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_settled_frame_matches_the_mapper() {
+        let mut map = ChannelMap::default();
+        map.set(MixSide::R, 2, true);
+        map.set(MixSide::L, 3, true);
+        let cases = [
+            OutputDeviceSettings::default(),
+            OutputDeviceSettings {
+                level_db: -6.0,
+                map,
+                unused: UnusedChannels::Silent,
+                ..OutputDeviceSettings::default()
+            },
+            OutputDeviceSettings {
+                mute: true,
+                ..OutputDeviceSettings::default()
+            },
+        ];
+        for settings in cases {
+            for channels in [1, 2, 6] {
+                let controls = DeviceControls::new();
+                controls.set(&settings);
+                let mut mapper = DeviceMapper::new(channels);
+                mapper.begin_block(&controls, 64.0);
+                let mapped = mapper.map(0.5, -0.25);
+                let settled = settings.settled_frame(channels, 0.5, -0.25);
+                for (channel, sample) in settled.iter().enumerate() {
+                    let expected = mapped.sample(channel);
+                    assert!(
+                        (sample - expected).abs() < 1.0e-6,
+                        "{settings:?} {channels} ch, channel {channel}: {sample} != {expected}"
+                    );
+                }
+            }
+        }
+    }
 
     const RAMP: f32 = 288.0;
 

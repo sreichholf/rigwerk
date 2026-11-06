@@ -207,10 +207,8 @@ pub struct Snapshot {
     pub out_r: f32,
     /// Block peak per clock-device channel, after its channel map and level.
     /// Channels the device does not have read 0.
-    #[allow(dead_code)] // Read by the Signal Routing page from step 1d on.
     pub out_channels: [f32; MAX_OUTPUT_CHANNELS],
     /// The clock device's real channel count (0 until its first block).
-    #[allow(dead_code)] // Read by the Signal Routing page from step 1d on.
     pub output_channels: u32,
     pub underruns: u64,
     /// Frames the input callback dropped because the ring was full.
