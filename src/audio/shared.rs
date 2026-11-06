@@ -14,9 +14,27 @@ use super::clap::{ClapPlugin, HostState};
 
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
-use super::output_map::DeviceControls;
+use super::output_map::{DeviceControls, OutputDeviceSettings, MAX_FOLLOWERS};
 use super::plugins::{PluginChain, PluginPref, PluginView};
 use super::types::{CushionMode, Snapshot};
+
+/// One follower slot as the PipeWire linker (and the UI) sees it.  Updated
+/// live; the audio callback only reads [`Shared::followers`] controls.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FollowerLink {
+    /// PipeWire `node.name` to link to, or empty when missing / virtual.
+    pub(crate) node_name: String,
+    pub(crate) virtual_out: bool,
+    /// Virtual source advertised; ignored for hardware followers.
+    pub(crate) publish: bool,
+}
+
+/// The live follower list the duplex/native main loop links from.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FollowerPlan {
+    pub(crate) slots: [FollowerLink; MAX_FOLLOWERS],
+    pub(crate) count: usize,
+}
 
 /// Decimated scope bins shown in the Live page. About 250 ms of audio when
 /// the hop follows the stream rate.
@@ -171,6 +189,14 @@ pub(crate) struct Shared {
     /// The clock device's channel map, level and mute (applied after the
     /// master) and its per-channel meters.
     pub(crate) clock_device: DeviceControls,
+    /// Per-follower map, level, mute and meters.  Only the first
+    /// [`Self::follower_count`] slots are live.
+    pub(crate) followers: [DeviceControls; MAX_FOLLOWERS],
+    /// How many follower slots the mixer and PipeWire linker use right now.
+    follower_count: AtomicUsize,
+    /// Sink names / publish flags the PipeWire main loop links from.  Not
+    /// touched by audio callbacks.
+    follower_plan: Mutex<FollowerPlan>,
     pub(crate) drift_enabled: AtomicBool,
     /// Set while input and output run in one PipeWire graph callback (the
     /// duplex node).  The ring, cushion and drift steering are then unused.
@@ -269,6 +295,9 @@ impl Shared {
                 AtomicBool::new(false),
             ],
             clock_device: DeviceControls::new(),
+            followers: std::array::from_fn(|_| DeviceControls::new()),
+            follower_count: AtomicUsize::new(0),
+            follower_plan: Mutex::new(FollowerPlan::default()),
             drift_enabled: AtomicBool::new(true),
             direct: AtomicBool::new(false),
             status: Mutex::new("Waiting".to_owned()),
@@ -333,6 +362,25 @@ impl Shared {
         self.set_routes(routes);
         self.clock_device
             .adopt_settings_from(&previous.clock_device);
+        let count = previous.follower_count.load(Ordering::Relaxed);
+        self.follower_count.store(count, Ordering::Relaxed);
+        for (to, from) in self.followers.iter().zip(previous.followers.iter()) {
+            to.adopt_settings_from(from);
+        }
+        for index in 0..MAX_FOLLOWERS {
+            let active = index < count;
+            self.follower_virtual[index].store(
+                active && previous.follower_virtual[index].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.follower_publish[index].store(
+                active && previous.follower_publish[index].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
+        if let (Ok(mut to), Ok(from)) = (self.follower_plan.lock(), previous.follower_plan.lock()) {
+            *to = from.clone();
+        }
         self.cushion_mode.store(
             previous.cushion_mode.load(Ordering::Relaxed),
             Ordering::Relaxed,
@@ -768,6 +816,11 @@ impl Shared {
         self.out_l.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.out_r.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.clock_device.reset();
+        for follower in &self.followers {
+            follower.reset();
+        }
+        // Keep the plan and count across a session reset: the UI re-pushes
+        // them every frame, and clearing here would drop links for a tick.
         self.scope_in.clear();
         self.scope_out.clear();
         self.underruns.store(0, Ordering::Relaxed);
@@ -998,6 +1051,38 @@ impl Shared {
         }
     }
 
+    /// How many follower slots are live (≤ [`MAX_FOLLOWERS`]).
+    pub(crate) fn follower_count(&self) -> usize {
+        self.follower_count
+            .load(Ordering::Relaxed)
+            .min(MAX_FOLLOWERS)
+    }
+
+    /// Pushes follower settings and the PipeWire link plan.  Level, mute and
+    /// map take effect on the next block; add/remove updates links on the
+    /// next main-loop tick.  Not part of the bridge signature.
+    pub(crate) fn set_followers(&self, settings: &[OutputDeviceSettings], plan: &FollowerPlan) {
+        let count = settings.len().min(plan.count).min(MAX_FOLLOWERS);
+        for (index, slot) in settings.iter().take(count).enumerate() {
+            self.followers[index].set(slot);
+        }
+        self.follower_count.store(count, Ordering::Relaxed);
+        if let Ok(mut current) = self.follower_plan.lock() {
+            *current = FollowerPlan {
+                slots: plan.slots.clone(),
+                count,
+            };
+        }
+    }
+
+    /// A clone of the live follower plan for the PipeWire linker.
+    pub(crate) fn follower_plan(&self) -> FollowerPlan {
+        self.follower_plan
+            .lock()
+            .map(|plan| plan.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn set_status(&self, text: impl Into<String>) {
         if let Ok(mut status) = self.status.lock() {
             *status = text.into();
@@ -1103,6 +1188,12 @@ impl Shared {
             out_r: f32::from_bits(self.out_r.load(Ordering::Relaxed)),
             out_channels: self.clock_device.meters(),
             output_channels: self.clock_device.channels(),
+            follower_count: self
+                .follower_count
+                .load(Ordering::Relaxed)
+                .min(MAX_FOLLOWERS),
+            follower_channels: std::array::from_fn(|index| self.followers[index].meters()),
+            follower_channel_counts: std::array::from_fn(|index| self.followers[index].channels()),
             underruns: self.underruns.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
             input_frames: self.input_frames.load(Ordering::Relaxed),
@@ -1565,5 +1656,47 @@ mod tests {
             Some(crate::audio::clap::AUDIO_PORTS_CHANGED)
         );
         assert!(!shared.has_plugins());
+    }
+
+    #[test]
+    fn followers_are_pushed_live_and_cleared() {
+        use super::{FollowerLink, FollowerPlan};
+        use crate::audio::output_map::OutputDeviceSettings;
+
+        let shared = super::Shared::new(48_000);
+        let mut plan = FollowerPlan {
+            count: 2,
+            ..FollowerPlan::default()
+        };
+        plan.slots[0] = FollowerLink {
+            node_name: "speakers".to_owned(),
+            virtual_out: false,
+            publish: false,
+        };
+        plan.slots[1] = FollowerLink {
+            node_name: String::new(),
+            virtual_out: true,
+            publish: true,
+        };
+        shared.set_followers(
+            &[
+                OutputDeviceSettings {
+                    level_db: -6.0,
+                    mute: true,
+                    ..OutputDeviceSettings::default()
+                },
+                OutputDeviceSettings::default(),
+            ],
+            &plan,
+        );
+        assert_eq!(shared.follower_count(), 2);
+        assert_eq!(shared.snapshot().follower_count, 2);
+        let live = shared.follower_plan();
+        assert_eq!(live.slots[0].node_name, "speakers");
+        assert!(live.slots[1].virtual_out && live.slots[1].publish);
+
+        shared.set_followers(&[], &FollowerPlan::default());
+        assert_eq!(shared.follower_count(), 0);
+        assert!(shared.follower_plan().slots[0].node_name.is_empty());
     }
 }

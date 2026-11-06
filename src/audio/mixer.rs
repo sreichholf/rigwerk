@@ -8,7 +8,7 @@ use std::time::Instant;
 use super::denormal::DenormalGuard;
 use super::eq::{EqSlot, Equalizer};
 use super::gate::{GateSlot, NoiseGate};
-use super::output_map::{DeviceFrame, DeviceMapper};
+use super::output_map::{DeviceFrame, DeviceMapper, MAX_FOLLOWERS};
 use super::resampler::FrameResampler;
 use super::shared::Shared;
 
@@ -268,8 +268,11 @@ pub(crate) struct OutputMixer {
     /// The first block adopts the live settings directly.  Later blocks ramp
     /// toward them, so opening the bridge does not fade in from the defaults.
     controls_adopted: bool,
-    /// The output device's channel map, level and mute, after the master.
+    /// The clock device's channel map, level and mute, after the master.
     device: DeviceMapper,
+    /// Follower devices (stereo port pairs on PipeWire).  Only the first
+    /// `shared.follower_count()` slots are written each block.
+    followers: [DeviceMapper; MAX_FOLLOWERS],
 }
 
 impl OutputMixer {
@@ -303,6 +306,8 @@ impl OutputMixer {
             ramps: MixRamps::new(),
             controls_adopted: false,
             device: DeviceMapper::new(device_channels),
+            // PipeWire followers are always a stereo port pair for now.
+            followers: std::array::from_fn(|_| DeviceMapper::new(2)),
         }
     }
 
@@ -310,6 +315,14 @@ impl OutputMixer {
     /// opens, outside the callback, so the snapshot has it at once.
     pub(crate) fn publish_device_channels(&self, shared: &Shared) {
         self.device.publish_channels(&shared.clock_device);
+    }
+
+    /// Publishes each live follower's channel count (stereo today).
+    pub(crate) fn publish_follower_channels(&self, shared: &Shared) {
+        let count = shared.follower_count();
+        for index in 0..count {
+            self.followers[index].publish_channels(&shared.followers[index]);
+        }
     }
 
     /// Grows the per-block scratch while the bridge is still opening, so the
@@ -347,6 +360,10 @@ impl OutputMixer {
         let gain = if silent { 0.0 } else { shared.output_gain() };
         let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
         self.device.begin_block(&shared.clock_device, samples);
+        let followers = shared.follower_count();
+        for index in 0..followers {
+            self.followers[index].begin_block(&shared.followers[index], samples);
+        }
         if self.controls_adopted {
             self.ramps
                 .set_targets(&routes, enabled, mono, gain, samples);
@@ -536,6 +553,101 @@ impl OutputMixer {
         shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
         shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
         self.device.end_block(&shared.clock_device);
+        let followers = shared.follower_count();
+        for index in 0..followers {
+            self.followers[index].end_block(&shared.followers[index]);
+        }
+    }
+
+    /// Like [`Self::render_direct`], but each finished frame is handed over
+    /// once per live device: index 0 is the clock device, then each follower.
+    /// Used by the PipeWire duplex/native multi-sink path.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn render_direct_devices(
+        &mut self,
+        shared: &Shared,
+        input_left: &[f32],
+        input_right: &[f32],
+        mut write: impl FnMut(usize, usize, &DeviceFrame),
+    ) {
+        let _denormals = DenormalGuard::new();
+        let frames = input_left.len().min(input_right.len());
+        let plan = self.begin_block(shared);
+        if self.block.len() < frames {
+            self.block.resize(frames, [0.0; 4]);
+        }
+        for index in 0..frames {
+            self.stage_front(index, input_left[index], input_right[index], &plan);
+        }
+        self.finish_block_devices(shared, frames, &plan, &mut write);
+        self.drift_ppm = 0.0;
+        shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Finishes a block and writes the clock device plus every live follower.
+    fn finish_block_devices(
+        &mut self,
+        shared: &Shared,
+        frames: usize,
+        plan: &BlockPlan,
+        write: &mut impl FnMut(usize, usize, &DeviceFrame),
+    ) {
+        if shared.has_plugins() {
+            let mut left = std::mem::take(&mut self.plugin_l);
+            let mut right = std::mem::take(&mut self.plugin_r);
+            if left.len() < frames {
+                left.resize(frames, 0.0);
+                right.resize(frames, 0.0);
+            }
+            for index in 0..frames {
+                left[index] = self.block[index][0];
+                right[index] = self.block[index][1];
+            }
+            shared.process_plugins(&mut left, &mut right, frames);
+            for index in 0..frames {
+                self.block[index][0] = left[index];
+                self.block[index][1] = right[index];
+            }
+            self.plugin_l = left;
+            self.plugin_r = right;
+        }
+
+        let _post_denormals = DenormalGuard::new();
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        let followers = shared.follower_count();
+        for index in 0..frames {
+            let mut out = self.block[index];
+            if plan.gate_post {
+                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+            }
+            if plan.post_eq {
+                (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
+            }
+            let gain = self.ramps.next_output_gain();
+            for value in out.iter_mut() {
+                *value *= gain;
+            }
+            peak_l = peak_l.max(out[0].abs());
+            peak_r = peak_r.max(out[1].abs());
+            shared.push_scope_out(out[0], out[1]);
+            write(0, index, self.device.map(out[0], out[1]));
+            for follower in 0..followers {
+                write(
+                    follower + 1,
+                    index,
+                    self.followers[follower].map(out[0], out[1]),
+                );
+            }
+        }
+
+        shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
+        shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
+        shared.out_r.store(peak_r.to_bits(), Ordering::Relaxed);
+        self.device.end_block(&shared.clock_device);
+        for index in 0..followers {
+            self.followers[index].end_block(&shared.followers[index]);
+        }
     }
 
     /// Follows the graph rate on the direct path, where input and output run

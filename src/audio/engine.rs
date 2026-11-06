@@ -15,6 +15,7 @@ use super::gate::GateSettings;
 use super::linux::pipewire;
 use super::output_map::OutputDeviceSettings;
 use super::plugins::{PluginPref, PluginView};
+use super::shared::FollowerPlan;
 use super::shared::Shared;
 use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
 
@@ -195,6 +196,12 @@ impl AudioEngine {
     /// bridge runs.
     pub fn set_clock_device(&self, settings: &OutputDeviceSettings) {
         self.shared.clock_device.set(settings);
+    }
+
+    /// Sets follower levels, mutes, maps and the PipeWire link plan.  Live:
+    /// not part of the bridge signature.
+    pub fn set_followers(&self, settings: &[OutputDeviceSettings], plan: &FollowerPlan) {
+        self.shared.set_followers(settings, plan);
     }
 
     /// Advances the session's observed state.  This is where a stuck start, a

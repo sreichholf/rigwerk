@@ -172,6 +172,7 @@ impl RigWerkApp {
         );
         self.engine.set_routes(self.routes);
         self.engine.set_clock_device(&self.clock_device);
+        self.push_followers_to_engine();
         for slot in EqSlot::ALL {
             self.engine.set_eq(slot, self.eqs[slot.index()]);
         }
@@ -358,6 +359,43 @@ impl RigWerkApp {
         let frames = self.snapshot.output_step_frames;
         let rate = self.snapshot.output_rate;
         (frames > 0 && rate > 0).then(|| (frames, frames as f32 / rate as f32 * 1000.0))
+    }
+
+    /// Pushes follower settings and the PipeWire link plan into the engine.
+    /// Live: not part of the bridge signature.
+    pub(crate) fn push_followers_to_engine(&self) {
+        use crate::audio::{FollowerLink, FollowerPlan, MAX_FOLLOWERS};
+
+        let count = self.followers.len().min(MAX_FOLLOWERS);
+        let mut settings = Vec::with_capacity(count);
+        let mut plan = FollowerPlan {
+            count,
+            ..FollowerPlan::default()
+        };
+        for (index, follower) in self.followers.iter().take(count).enumerate() {
+            settings.push(follower.settings);
+            let node_name = if follower.virtual_out {
+                String::new()
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    audio::linux_node_name(&follower.id)
+                        .unwrap_or("")
+                        .to_owned()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = &follower.id;
+                    String::new()
+                }
+            };
+            plan.slots[index] = FollowerLink {
+                node_name,
+                virtual_out: follower.virtual_out,
+                publish: follower.publish,
+            };
+        }
+        self.engine.set_followers(&settings, &plan);
     }
 
     /// How the output runs right now, or how it will try to run.
