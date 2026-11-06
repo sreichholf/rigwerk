@@ -74,8 +74,6 @@ impl ChannelMap {
 
     /// Lets `side` reach device channel `channel` (0-based), or stops it.
     /// Channels at or past [`MAX_OUTPUT_CHANNELS`] are ignored.
-    // Used by the routing page from step 1d on.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set(&mut self, side: MixSide, channel: usize, on: bool) {
         if channel >= MAX_OUTPUT_CHANNELS {
             return;
@@ -95,6 +93,103 @@ impl ChannelMap {
     /// Neither side reaches any channel.
     pub fn is_empty(self) -> bool {
         self.left == 0 && self.right == 0
+    }
+
+    /// Which sides (L, R) reach device channel `channel` (0-based) of a
+    /// `channels`-channel device, by the mapping rule in the module docs: a
+    /// 1-channel device is reached by both sides whenever the map is not
+    /// empty.
+    pub fn sides_at(self, channels: usize, channel: usize) -> (bool, bool) {
+        if channels == 1 {
+            let any = !self.is_empty();
+            (any, any)
+        } else {
+            (
+                self.routes(MixSide::L, channel),
+                self.routes(MixSide::R, channel),
+            )
+        }
+    }
+
+    /// Whether any mix side reaches any of a `channels`-channel device's
+    /// channels.  Bits at or past `channels` don't count.
+    pub fn reaches_any(self, channels: usize) -> bool {
+        (0..channels.min(MAX_OUTPUT_CHANNELS)).any(|channel| {
+            let (left, right) = self.sides_at(channels, channel);
+            left || right
+        })
+    }
+
+    /// This map with `preset` applied to a `channels`-channel device.  Only
+    /// channels below `channels` change; bits for channels the device doesn't
+    /// have are kept, so they come back if a bigger device is picked again.
+    pub fn with_preset(self, preset: MapPreset, channels: usize) -> Self {
+        let shown = low_bits(channels);
+        let (left, right) = match preset {
+            MapPreset::Stereo12 => (0b0001, 0b0010),
+            MapPreset::Stereo34 => (0b0100, 0b1000),
+            MapPreset::BothPairs => (0b0101, 0b1010),
+            MapPreset::MonoToAll => (0xFF, 0xFF),
+            MapPreset::Swap => (self.right, self.left),
+            MapPreset::Clear => (0, 0),
+        };
+        Self {
+            left: (self.left & !shown) | (left & shown),
+            right: (self.right & !shown) | (right & shown),
+        }
+    }
+}
+
+/// Bits of the first `channels` device channels.
+fn low_bits(channels: usize) -> u8 {
+    if channels >= MAX_OUTPUT_CHANNELS {
+        u8::MAX
+    } else {
+        (1u8 << channels) - 1
+    }
+}
+
+/// The quick maps the Signal Routing page offers for a device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapPreset {
+    /// L -> 1, R -> 2.
+    Stereo12,
+    /// L -> 3, R -> 4.
+    Stereo34,
+    /// L -> 1 and 3, R -> 2 and 4.
+    BothPairs,
+    /// Both sides on every channel: each plays (L + R) / 2.
+    MonoToAll,
+    /// L and R trade channels.
+    Swap,
+    /// Nothing routed; every channel follows [`UnusedChannels`].
+    Clear,
+}
+
+impl MapPreset {
+    /// The presets that make sense on a `channels`-channel device, in button
+    /// order: the pair presets only where the pairs exist, and on a 1-channel
+    /// device (which plays the average anyway) only Mono to all and Clear.
+    pub fn available(channels: usize) -> &'static [Self] {
+        use MapPreset::*;
+        match channels {
+            0 | 1 => &[MonoToAll, Clear],
+            2 | 3 => &[Stereo12, MonoToAll, Swap, Clear],
+            _ => &[Stereo12, Stereo34, BothPairs, MonoToAll, Swap, Clear],
+        }
+    }
+
+    /// The button text on a `channels`-channel device.
+    pub fn label(self, channels: usize) -> &'static str {
+        match self {
+            Self::Stereo12 if channels == 2 => "Stereo",
+            Self::Stereo12 => "Stereo 1/2",
+            Self::Stereo34 => "Stereo 3/4",
+            Self::BothPairs => "1/2 + 3/4",
+            Self::MonoToAll => "Mono to all",
+            Self::Swap => "Swap L/R",
+            Self::Clear => "Clear",
+        }
     }
 }
 
@@ -149,6 +244,18 @@ impl OutputDeviceSettings {
         }
     }
 
+    /// How many of a `channels`-channel device's channels play the mix:
+    /// those a side reaches, plus the unreached ones under
+    /// [`UnusedChannels::MonoCopy`] (they carry the average).  Level and mute
+    /// don't count: this is about the routing, not about what is audible.
+    pub fn playing_channels(&self, channels: usize) -> usize {
+        (0..channels.min(MAX_OUTPUT_CHANNELS))
+            .filter(|&channel| {
+                channel_weights(self.map, self.unused, channels, channel) != [0.0; 3]
+            })
+            .count()
+    }
+
     /// One settled frame of a `channels`-channel device under these settings
     /// (no ramps): what the callback writes once a change has crossfaded.
     /// Channels past the device or past [`MAX_OUTPUT_CHANNELS`] read 0. For
@@ -199,16 +306,7 @@ fn channel_weights(
     channels: usize,
     channel: usize,
 ) -> [f32; 3] {
-    let (left, right) = if channels == 1 {
-        let any = !map.is_empty();
-        (any, any)
-    } else {
-        (
-            map.routes(MixSide::L, channel),
-            map.routes(MixSide::R, channel),
-        )
-    };
-    match (left, right) {
+    match map.sides_at(channels, channel) {
         (true, false) => [1.0, 0.0, 0.0],
         (false, true) => [0.0, 1.0, 0.0],
         (true, true) => [0.0, 0.0, 1.0],
@@ -934,5 +1032,109 @@ mod tests {
         assert_eq!(controls.channels(), 6);
         controls.reset();
         assert_eq!(controls.channels(), 0);
+    }
+
+    fn map(left: u8, right: u8) -> ChannelMap {
+        ChannelMap { left, right }
+    }
+
+    #[test]
+    fn presets_fit_the_channel_count() {
+        use MapPreset::*;
+        assert_eq!(MapPreset::available(1), &[MonoToAll, Clear]);
+        assert_eq!(MapPreset::available(2), &[Stereo12, MonoToAll, Swap, Clear]);
+        assert_eq!(MapPreset::available(3), &[Stereo12, MonoToAll, Swap, Clear]);
+        for channels in [4, 6, 8] {
+            assert_eq!(
+                MapPreset::available(channels),
+                &[Stereo12, Stereo34, BothPairs, MonoToAll, Swap, Clear]
+            );
+        }
+        assert_eq!(Stereo12.label(2), "Stereo");
+        assert_eq!(Stereo12.label(4), "Stereo 1/2");
+        assert_eq!(BothPairs.label(4), "1/2 + 3/4");
+    }
+
+    #[test]
+    fn presets_set_the_shown_channels() {
+        let default = ChannelMap::default();
+        assert_eq!(default.with_preset(MapPreset::Stereo12, 4), map(0b01, 0b10));
+        assert_eq!(
+            default.with_preset(MapPreset::Stereo34, 4),
+            map(0b0100, 0b1000)
+        );
+        assert_eq!(
+            default.with_preset(MapPreset::BothPairs, 4),
+            map(0b0101, 0b1010)
+        );
+        assert_eq!(
+            default.with_preset(MapPreset::MonoToAll, 4),
+            map(0b1111, 0b1111)
+        );
+        assert_eq!(
+            default.with_preset(MapPreset::MonoToAll, 8),
+            map(0xFF, 0xFF)
+        );
+        assert_eq!(default.with_preset(MapPreset::Swap, 2), map(0b10, 0b01));
+        assert_eq!(default.with_preset(MapPreset::Clear, 2), map(0, 0));
+        assert_eq!(
+            default.with_preset(MapPreset::MonoToAll, 1),
+            map(0b01, 0b11),
+            "only channel 1 changes on a 1-channel device"
+        );
+    }
+
+    #[test]
+    fn presets_keep_channels_the_device_does_not_have() {
+        // Out 3/4 set on a 4-channel interface, now seen as stereo.
+        let wide = map(0b0101, 0b1010);
+        assert_eq!(wide.with_preset(MapPreset::Clear, 2), map(0b0100, 0b1000));
+        assert_eq!(wide.with_preset(MapPreset::Swap, 2), map(0b0110, 0b1001));
+        // Not offered on 2 channels; it would only clear Out 1/2.
+        assert_eq!(
+            wide.with_preset(MapPreset::Stereo34, 2),
+            map(0b0100, 0b1000)
+        );
+    }
+
+    #[test]
+    fn a_mono_device_is_reached_by_any_map() {
+        assert_eq!(map(0b0100, 0).sides_at(1, 0), (true, true));
+        assert_eq!(map(0, 0).sides_at(1, 0), (false, false));
+        assert_eq!(ChannelMap::default().sides_at(2, 1), (false, true));
+        assert!(map(0b0100, 0).reaches_any(1));
+        assert!(
+            !map(0b0100, 0).reaches_any(2),
+            "channel 3 is past the device"
+        );
+        assert!(map(0b0100, 0).reaches_any(4));
+        assert!(!map(0, 0).reaches_any(8));
+    }
+
+    #[test]
+    fn playing_channels_count_reached_and_copied_ones() {
+        let settings = |map, unused| OutputDeviceSettings {
+            map,
+            unused,
+            ..OutputDeviceSettings::default()
+        };
+        let copy = UnusedChannels::MonoCopy;
+        let silent = UnusedChannels::Silent;
+        assert_eq!(settings(ChannelMap::default(), copy).playing_channels(2), 2);
+        assert_eq!(settings(ChannelMap::default(), copy).playing_channels(4), 4);
+        assert_eq!(
+            settings(ChannelMap::default(), silent).playing_channels(4),
+            2
+        );
+        assert_eq!(settings(map(0b0100, 0b1000), silent).playing_channels(4), 2);
+        assert_eq!(settings(map(0, 0), silent).playing_channels(4), 0);
+        assert_eq!(settings(map(0, 0), copy).playing_channels(4), 4);
+        assert_eq!(settings(map(0b0100, 0), silent).playing_channels(1), 1);
+        assert_eq!(settings(map(0, 0), silent).playing_channels(1), 0);
+        let muted = OutputDeviceSettings {
+            mute: true,
+            ..OutputDeviceSettings::default()
+        };
+        assert_eq!(muted.playing_channels(2), 2, "mute is not routing");
     }
 }

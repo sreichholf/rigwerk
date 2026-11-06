@@ -11,7 +11,7 @@ use crate::audio::DeviceItem;
 use crate::ui::icons::{paint_icon, Icon};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, MUTED, TEAL, TEXT,
+    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, MUTED, TEAL, TEXT,
 };
 
 pub(crate) fn card<R>(
@@ -867,6 +867,76 @@ pub(crate) fn device_selector(
         });
     }
     picked
+}
+
+const TAG_FONT: f32 = 7.5;
+const TAG_PAD: Vec2 = Vec2::new(5.0, 2.0);
+
+/// Paints a small outlined tag ("CLOCK") with its left edge centred on
+/// `left_center` and returns its width.
+pub(crate) fn paint_tag(ui: &egui::Ui, left_center: egui::Pos2, text: &str, color: Color32) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        FontId::new(ts(TAG_FONT), FontFamily::Monospace),
+        color,
+    );
+    let size = galley.size() + TAG_PAD * 2.0;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(left_center.x, left_center.y - size.y * 0.5),
+        size,
+    );
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(4), with_alpha(color, 18));
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(4),
+        Stroke::new(1.0, with_alpha(color, 90)),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(rect.min + TAG_PAD, galley, color);
+    size.x
+}
+
+pub(crate) fn tag_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            FontId::new(ts(TAG_FONT), FontFamily::Monospace),
+            DIM,
+        )
+        .size()
+        .x
+        + TAG_PAD.x * 2.0
+}
+
+/// The CLOCK tag as a laid-out widget, for the inspector title.
+pub(crate) fn clock_tag(ui: &mut egui::Ui) {
+    let width = tag_width(ui, "CLOCK");
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
+    paint_tag(ui, rect.left_center(), "CLOCK", BLUE);
+    let _ = response.on_hover_text("The chain runs on this device's callback.");
+}
+
+/// `text` shortened with "…" until it fits `max_width` in `font`.
+pub(crate) fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, max_width: f32) -> String {
+    let width = |candidate: &str| {
+        ui.painter()
+            .layout_no_wrap(candidate.to_owned(), font.clone(), TEXT)
+            .size()
+            .x
+    };
+    if width(text) <= max_width {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    for keep in (0..chars.len()).rev() {
+        let mut candidate: String = chars[..keep].iter().collect();
+        candidate.push('…');
+        if width(&candidate) <= max_width {
+            return candidate;
+        }
+    }
+    "…".to_owned()
 }
 
 #[cfg(test)]

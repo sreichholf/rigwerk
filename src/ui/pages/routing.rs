@@ -1,9 +1,17 @@
-//! Signal Routing: which input reaches which output tap.
+//! Signal Routing, in the two layers the engine has:
+//!
+//! 1. Input -> Mix: which input channel feeds Mix L and Mix R, the bus the
+//!    chain processes (`routes`, columns 0 and 1).
+//! 2. Mix -> outputs: which device channels play the finished mix, per
+//!    output device ([`outputs`]).
+//!
+//! Plus the Mix card (channel mode, monitoring) and the active patch strip.
+
+mod outputs;
 
 use eframe::egui;
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense,
-    Stroke, Vec2,
+    Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Sense, Stroke, Vec2,
 };
 
 use crate::app::RigWerkApp;
@@ -12,33 +20,34 @@ use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    card, ellipsize, horizontal_line, micro_label, mono, route_summary, row_info, show_focus_ring,
-    status_dot, tab_button_sized,
+    card, ellipsize, horizontal_line, micro_label, mono, row_info, show_focus_ring, status_dot,
+    tab_button_sized,
 };
 
+use outputs::RoutingAction;
+
 /// Side-by-side columns need 520 + 280 plus the gap. Below this available
-/// width the patch card is clipped, so the two cards stack instead.
+/// width the Mix card is clipped, so the two cards stack instead.
 pub(crate) const ROUTING_STACK_BELOW: f32 = 1100.0;
 
-/// The tap bars share one stereo output meter. They are not per-tap readings.
-pub(crate) const SHARED_STEREO_METER_LABEL: &str = "SHARED STEREO METER";
+/// Mix sides layer ① feeds. The stored route table is still 2×4 for older
+/// prefs, but only its first two columns mean anything: they are Mix L and
+/// Mix R, the stereo bus the chain processes.
+pub(crate) const MIX_COLUMNS: [&str; 2] = ["MIX L", "MIX R"];
 
-/// Row note while a tap is showing that shared meter.
-pub(crate) const SHARED_TAP_NOTE: &str = "SHARED";
+/// Width and height of one matrix cell, in both layers.
+pub(crate) const CELL: Vec2 = Vec2::new(58.0, 48.0);
 
-/// Taps the mixer actually plays. The stored route table is still 2×4 for
-/// older prefs, but only the first two columns reach EQ, inserts and the
-/// stereo output device — columns 3 and 4 are dead weight in the engine.
-pub(crate) const PLAYBACK_OUTPUTS: usize = 2;
+/// Width of a matrix row header (plus the gap before the first cell).
+pub(crate) const ROW_HEADER_W: f32 = 142.0;
 
 pub(crate) fn routing_columns_stack(available_width: f32) -> bool {
     available_width < ROUTING_STACK_BELOW
 }
 
-/// Route-table size shown in the UI (what you can hear), not the full
-/// stored matrix width.
-pub(crate) fn matrix_size_label(inputs: usize, outputs: usize) -> String {
-    format!("{inputs} IN -> {outputs} OUT")
+/// Size of layer ①: every input row onto the two mix sides.
+pub(crate) fn input_matrix_label(inputs: usize) -> String {
+    format!("{inputs} IN -> MIX L/R")
 }
 
 /// Stereo channel name for a matrix row.
@@ -66,20 +75,34 @@ pub(crate) fn input_channel_caption(backend: &str, name: &str) -> String {
     }
 }
 
-/// Level for one output-tap bar.
-///
-/// The app publishes one stereo output meter, not a meter per tap. A routed
-/// tap shows the louder of those two channels. An unrouted tap shows nothing.
-/// The value does not depend on which tap it is.
-pub(crate) fn shared_tap_level(routed: bool, meter_l: f32, meter_r: f32) -> f32 {
-    if !routed {
-        return 0.0;
-    }
-    meter_l.max(meter_r).clamp(0.0, 1.0)
+/// "ACTIVE PATCH" header count. Playing channels are those a mix side
+/// reaches plus unreached ones under Mono copy, which carry the average
+/// (see `OutputDeviceSettings::playing_channels`).
+pub(crate) fn patch_count_label(devices: usize, channels: usize) -> String {
+    let plural = |count: usize, word: &str| {
+        if count == 1 {
+            format!("{count} {word}")
+        } else {
+            format!("{count} {word}S")
+        }
+    };
+    format!(
+        "{} · {} PLAYING",
+        plural(devices, "DEVICE"),
+        plural(channels, "CHANNEL")
+    )
 }
 
-pub(crate) fn route_cell(ui: &mut egui::Ui, enabled: bool, input: usize, output: usize) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(58.0, 48.0), Sense::click());
+/// One routing cell: a dot when on, the faint `glyph` when off. `name` is
+/// what a screen reader hears; the value says whether it is on.
+pub(crate) fn matrix_cell(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    glyph: &str,
+    name: String,
+    values: (&str, &str),
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(CELL, Sense::click());
     let base = if enabled {
         with_alpha(TEAL, 18)
     } else if response.hovered() {
@@ -114,7 +137,7 @@ pub(crate) fn route_cell(ui: &mut egui::Ui, enabled: bool, input: usize, output:
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
-            format!("{}{}", input + 1, output + 1),
+            glyph,
             FontId::new(ts(7.5), FontFamily::Monospace),
             Color32::from_rgb(53, 64, 80),
         );
@@ -124,52 +147,86 @@ pub(crate) fn route_cell(ui: &mut egui::Ui, enabled: bool, input: usize, output:
         &response,
         egui::Role::CheckBox,
         ui.is_enabled(),
-        format!("Route input {} to output {}", input + 1, output + 1),
+        name,
         Some(enabled),
-        Some(if enabled { "enabled" } else { "muted" }.to_owned()),
+        Some(if enabled { values.0 } else { values.1 }.to_owned()),
     );
     response.clicked()
 }
 
-pub(crate) fn tap_row(
-    ui: &mut egui::Ui,
-    output: usize,
-    active: bool,
-    level: f32,
-    color: Color32,
-    level_note: &str,
-) {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
-    ui.painter().text(
-        rect.left_center() + Vec2::new(2.0, 0.0),
+/// A layer ① cell: input `input` onto mix side `side` (0 = L, 1 = R).
+pub(crate) fn route_cell(ui: &mut egui::Ui, enabled: bool, input: usize, side: usize) -> bool {
+    let letter = if side == 0 { "L" } else { "R" };
+    matrix_cell(
+        ui,
+        enabled,
+        &format!("{}{letter}", input + 1),
+        format!("Route input {} to Mix {letter}", input + 1),
+        ("enabled", "muted"),
+    )
+}
+
+/// A matrix row header: a name and a small caption under it.
+pub(crate) fn row_header(ui: &mut egui::Ui, name: &str, caption: &str, color: Color32) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ROW_HEADER_W, CELL.y), Sense::hover());
+    let _ = response.on_hover_text(format!("{name} · {caption}"));
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, CornerRadius::same(8), CARD_DEEP);
+    painter.text(
+        rect.left_center() + Vec2::new(12.0, -6.0),
         Align2::LEFT_CENTER,
-        format!("OUT {}", output + 1),
-        FontId::new(ts(8.5), FontFamily::Monospace),
-        if active { MUTED } else { DIM },
+        name,
+        FontId::new(ts(11.5), FontFamily::Proportional),
+        color,
     );
-    let bar = Rect::from_min_size(
-        egui::pos2(rect.left() + 58.0, rect.center().y - 2.0),
-        Vec2::new((rect.width() - 106.0).max(20.0), 4.0),
+    painter.text(
+        rect.left_center() + Vec2::new(12.0, 8.0),
+        Align2::LEFT_CENTER,
+        caption,
+        FontId::new(ts(8.5), FontFamily::Proportional),
+        DIM,
     );
+}
+
+/// A column header: a mono name and an optional caption under it.
+pub(crate) fn column_header(ui: &mut egui::Ui, name: &str, caption: Option<&str>) {
+    ui.add_sized(
+        [CELL.x, if caption.is_some() { 28.0 } else { 18.0 }],
+        egui::Label::new(match caption {
+            Some(caption) => {
+                let mut job = egui::text::LayoutJob {
+                    halign: Align::Center,
+                    ..Default::default()
+                };
+                job.append(
+                    name,
+                    0.0,
+                    egui::TextFormat::simple(FontId::new(ts(9.0), FontFamily::Monospace), MUTED),
+                );
+                job.append(
+                    &format!("\n{caption}"),
+                    0.0,
+                    egui::TextFormat::simple(FontId::new(ts(7.5), FontFamily::Monospace), DIM),
+                );
+                egui::WidgetText::from(job)
+            }
+            None => egui::WidgetText::from(mono(name, DIM, 9.0)),
+        })
+        .selectable(false),
+    );
+}
+
+/// A small circled layer number ("1", "2") before a card title.
+pub(crate) fn layer_badge(ui: &mut egui::Ui, number: usize, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
     ui.painter()
-        .rect_filled(bar, CornerRadius::same(2), Color32::from_rgb(25, 32, 44));
-    if active {
-        ui.painter().rect_filled(
-            Rect::from_min_size(
-                bar.min,
-                Vec2::new(bar.width() * level.clamp(0.0, 1.0), bar.height()),
-            ),
-            CornerRadius::same(2),
-            color,
-        );
-    }
+        .circle_stroke(rect.center(), 6.0, Stroke::new(1.0, color));
     ui.painter().text(
-        rect.right_center() + Vec2::new(-2.0, 0.0),
-        Align2::RIGHT_CENTER,
-        if active { level_note } else { "MUTED" },
-        FontId::new(ts(7.0), FontFamily::Monospace),
-        if active { color } else { DIM },
+        rect.center(),
+        Align2::CENTER_CENTER,
+        number.to_string(),
+        FontId::new(ts(8.0), FontFamily::Proportional),
+        color,
     );
 }
 
@@ -177,67 +234,67 @@ impl RigWerkApp {
     pub(crate) fn routing_page(&mut self, ui: &mut egui::Ui) {
         let total = ui.available_width();
         if routing_columns_stack(total) {
-            self.routing_matrix_card(ui, total);
-            self.routing_patch_card(ui, total);
-            return;
+            self.routing_input_card(ui, total);
+            self.routing_mix_card(ui, total);
+        } else {
+            let left_w = (total * 0.66).clamp(520.0, (total - 288.0).max(520.0));
+            let right_w = (total - left_w - 8.0).max(280.0);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(left_w, 300.0),
+                    Layout::top_down(Align::LEFT),
+                    |ui| {
+                        ui.set_min_size(Vec2::new(left_w, 300.0));
+                        self.routing_input_card(ui, left_w);
+                    },
+                );
+                ui.allocate_ui_with_layout(
+                    Vec2::new(right_w, 300.0),
+                    Layout::top_down(Align::LEFT),
+                    |ui| {
+                        ui.set_min_size(Vec2::new(right_w, 300.0));
+                        self.routing_mix_card(ui, right_w);
+                    },
+                );
+            });
         }
 
-        let left_w = (total * 0.66).clamp(520.0, (total - 288.0).max(520.0));
-        let right_w = (total - left_w - 8.0).max(280.0);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                Vec2::new(left_w, 370.0),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_min_size(Vec2::new(left_w, 370.0));
-                    self.routing_matrix_card(ui, left_w);
-                },
-            );
-            ui.allocate_ui_with_layout(
-                Vec2::new(right_w, 370.0),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_min_size(Vec2::new(right_w, 370.0));
-                    self.routing_patch_card(ui, right_w);
-                },
-            );
-        });
+        let mut actions = Vec::new();
+        self.routing_outputs_card(ui, total, &mut actions);
+        self.routing_patch_card(ui, total, &mut actions);
+        for action in actions {
+            self.apply_routing_action(action);
+        }
     }
 
-    fn routing_matrix_card(&mut self, ui: &mut egui::Ui, width: f32) {
+    /// Layer ①: input channels onto Mix L / Mix R.
+    fn routing_input_card(&mut self, ui: &mut egui::Ui, width: f32) {
         let input = self.active_input();
-        let output = self.selected_output();
         let input_caption = input_channel_caption(&input.backend, &input.name);
-        let output_caption = input_channel_caption(&output.backend, &output.name);
-        let path_caption = ellipsize(&format!("{input_caption}  ->  {output_caption}"), 64);
+        let subtitle = format!("{input_caption} -> the mix bus the chain processes");
         let input_count = self.routes.len();
-        // Only the stereo pair the mixer feeds to the device.
-        let output_count = PLAYBACK_OUTPUTS.min(
-            self.routes
-                .first()
-                .map(|row| row.len())
-                .unwrap_or(PLAYBACK_OUTPUTS),
-        );
 
         card(ui, CARD, BORDER, |ui| {
             ui.set_width(width - 32.0);
             ui.horizontal(|ui| {
-                ui.label(micro_label("ROUTING MATRIX", TEAL));
+                layer_badge(ui, 1, TEAL);
+                ui.label(micro_label("INPUT -> MIX", TEAL));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(mono(matrix_size_label(input_count, output_count), DIM, 9.5));
+                    ui.label(mono(input_matrix_label(input_count), DIM, 9.5));
                 });
             });
-            ui.label(RichText::new(&path_caption).size(ts(10.0)).color(MUTED))
-                .on_hover_text(format!("{input_caption}  ->  {output_caption}"));
+            ui.label(
+                RichText::new(ellipsize(&subtitle, 72))
+                    .size(ts(10.0))
+                    .color(MUTED),
+            )
+            .on_hover_text(&subtitle);
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
-                ui.add_space(150.0);
-                for output in 1..=output_count {
-                    ui.add_sized(
-                        [58.0, 18.0],
-                        egui::Label::new(mono(format!("OUT {output}"), DIM, 9.0)),
-                    );
+                ui.add_space(ROW_HEADER_W);
+                for name in MIX_COLUMNS {
+                    column_header(ui, name, Some("into chain"));
                 }
             });
             ui.add_space(2.0);
@@ -245,45 +302,18 @@ impl RigWerkApp {
             for input in 0..input_count {
                 let role = input_channel_role(input);
                 ui.horizontal(|ui| {
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(142.0, 48.0), Sense::hover());
-                    response.on_hover_text(format!("{role} · {input_caption}"));
-                    let painter = ui.painter().with_clip_rect(rect);
-                    painter.rect_filled(rect, CornerRadius::same(8), CARD_DEEP);
-                    painter.text(
-                        rect.left_center() + Vec2::new(12.0, -6.0),
-                        Align2::LEFT_CENTER,
-                        format!("IN {}", input + 1),
-                        FontId::new(ts(11.5), FontFamily::Proportional),
-                        TEXT,
-                    );
-                    painter.text(
-                        rect.left_center() + Vec2::new(12.0, 8.0),
-                        Align2::LEFT_CENTER,
-                        role,
-                        FontId::new(ts(8.5), FontFamily::Proportional),
-                        DIM,
-                    );
-                    for output in 0..output_count {
-                        if route_cell(ui, self.routes[input][output], input, output) {
-                            self.routes[input][output] = !self.routes[input][output];
+                    row_header(ui, &format!("IN {}", input + 1), role, TEXT);
+                    for (side, column) in MIX_COLUMNS.iter().enumerate() {
+                        if route_cell(ui, self.routes[input][side], input, side) {
+                            self.routes[input][side] = !self.routes[input][side];
                             self.engine.set_routes(self.routes);
+                            let on = self.routes[input][side];
                             self.push_log(
                                 format!(
-                                    "Route {} -> OUT {} {}.",
-                                    role,
-                                    output + 1,
-                                    if self.routes[input][output] {
-                                        "enabled"
-                                    } else {
-                                        "muted"
-                                    }
+                                    "Route {role} -> {column} {}.",
+                                    if on { "enabled" } else { "muted" }
                                 ),
-                                if self.routes[input][output] {
-                                    TEAL
-                                } else {
-                                    MUTED
-                                },
+                                if on { TEAL } else { MUTED },
                             );
                         }
                     }
@@ -291,68 +321,42 @@ impl RigWerkApp {
                 ui.add_space(5.0);
             }
 
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             horizontal_line(ui, BORDER_SOFT);
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 ui.label(RichText::new("Tip").size(ts(9.5)).color(AMBER).strong());
-                ui.label(
-                    RichText::new(
-                        "Default is Left->Out 1, Right->Out 2. Flip a cell to send a side to both outs or to mute it.",
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Mono guitar on IN 1? Route it to both MIX L and MIX R, or use Mono sum. Which input channels are captured is still picked on Live.",
+                        )
+                        .size(ts(10.0))
+                        .color(MUTED),
                     )
-                    .size(ts(10.0))
-                    .color(MUTED),
+                    .wrap(),
                 );
             });
-            ui.add_space(9.0);
-            horizontal_line(ui, BORDER_SOFT);
-            ui.add_space(7.0);
-            ui.horizontal(|ui| {
-                ui.label(micro_label("OUTPUT TAPS", DIM));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(mono(SHARED_STEREO_METER_LABEL, DIM, 8.0));
-                });
-            });
-            ui.add_space(3.0);
-            for output in 0..output_count {
-                let active = (0..input_count).any(|input| self.routes[input][output]);
-                let level = shared_tap_level(active, self.meter_out_l, self.meter_out_r);
-                tap_row(
-                    ui,
-                    output,
-                    active,
-                    level,
-                    if output == 0 {
-                        BLUE
-                    } else {
-                        with_alpha(BLUE, 160)
-                    },
-                    SHARED_TAP_NOTE,
-                );
-            }
         });
     }
 
-    fn routing_patch_card(&mut self, ui: &mut egui::Ui, width: f32) {
+    /// Channel mode and monitoring: what happens on the mix bus.
+    fn routing_mix_card(&mut self, ui: &mut egui::Ui, width: f32) {
         card(ui, CARD, BORDER, |ui| {
             ui.set_width(width - 32.0);
-            ui.label(micro_label("ACTIVE PATCH", BLUE));
+            ui.label(micro_label("MIX", AMBER));
             ui.add_space(8.0);
-            route_summary(ui, "SOURCE", &self.active_input().name, TEAL);
-            ui.add_space(6.0);
-            route_summary(ui, "DESTINATION", &self.selected_output().name, BLUE);
-            ui.add_space(12.0);
-            horizontal_line(ui, BORDER_SOFT);
-            ui.add_space(9.0);
             ui.label(micro_label("CHANNEL MODE", DIM));
             ui.add_space(4.0);
             let mut mono = self.mono;
-            if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
-                mono = false;
-            }
-            if tab_button_sized(ui, "Mono sum", mono, BLUE, 11.0).clicked() {
-                mono = true;
-            }
+            ui.horizontal(|ui| {
+                if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
+                    mono = false;
+                }
+                if tab_button_sized(ui, "Mono sum", mono, BLUE, 11.0).clicked() {
+                    mono = true;
+                }
+            });
             self.mono = mono;
             ui.add_space(10.0);
             ui.label(micro_label("MONITORING", DIM));
@@ -363,7 +367,7 @@ impl RigWerkApp {
                     .size(ts(10.5))
                     .color(MUTED),
             );
-            ui.add_space(10.0);
+            ui.add_space(6.0);
             let mut drift = self.drift;
             if ui
                 .checkbox(
@@ -384,13 +388,60 @@ impl RigWerkApp {
                 ui.add(
                     egui::Label::new(
                         RichText::new(
-                            "Routes apply live to the stereo pair of the selected output. The bridge is stereo today - only Out 1 and Out 2 are heard.",
+                            "Both layers apply live. Layer 1 shapes what the chain hears; layer 2 only decides which device channels play the finished mix.",
                         )
-                        .size(ts(9.0))
+                        .size(ts(9.5))
                         .color(MUTED),
                     )
                     .wrap(),
                 );
+            });
+        });
+    }
+
+    /// The bottom strip: every output device and what it plays.
+    fn routing_patch_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        width: f32,
+        actions: &mut Vec<RoutingAction>,
+    ) {
+        let rows = self.output_device_rows();
+        let selected = outputs::selected_device(self.routing_device, rows.len());
+        let state = self.engine.state;
+        let playing: usize = rows
+            .iter()
+            .map(|row| row.settings.playing_channels(row.channels))
+            .sum();
+        card(ui, CARD, BORDER, |ui| {
+            ui.set_width(width - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(micro_label("ACTIVE PATCH", TEXT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(mono(patch_count_label(rows.len(), playing), DIM, 9.5));
+                });
+            });
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                let entry_w = ui.available_width().min(340.0);
+                for (index, row) in rows.iter().enumerate() {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(entry_w, 0.0),
+                        Layout::top_down(Align::LEFT),
+                        |ui| {
+                            ui.set_width(entry_w);
+                            if outputs::device_summary_row(
+                                ui,
+                                row,
+                                index == selected,
+                                state,
+                                "in active patch",
+                            ) {
+                                actions.push(RoutingAction::Select(index));
+                            }
+                        },
+                    );
+                }
             });
         });
     }
@@ -399,10 +450,11 @@ impl RigWerkApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        input_channel_caption, input_channel_role, matrix_size_label, routing_columns_stack,
-        shared_tap_level, PLAYBACK_OUTPUTS, SHARED_STEREO_METER_LABEL, SHARED_TAP_NOTE,
+        input_channel_caption, input_channel_role, input_matrix_label, patch_count_label,
+        routing_columns_stack, MIX_COLUMNS,
     };
-    use crate::ui::widgets::ellipsize;
+    use crate::ui::widgets::{accesskit_frame, ellipsize, node_named};
+    use eframe::egui::accesskit::Toggled;
 
     fn input_row_caption(backend: &str, name: &str) -> String {
         ellipsize(&input_channel_caption(backend, name), 22)
@@ -437,43 +489,33 @@ mod tests {
     }
 
     #[test]
-    fn the_matrix_size_follows_the_heard_taps() {
-        assert_eq!(matrix_size_label(2, PLAYBACK_OUTPUTS), "2 IN -> 2 OUT");
+    fn layer_one_feeds_mix_l_and_mix_r() {
+        assert_eq!(input_matrix_label(2), "2 IN -> MIX L/R");
+        assert_eq!(MIX_COLUMNS, ["MIX L", "MIX R"]);
         assert_eq!(input_channel_role(0), "Left");
         assert_eq!(input_channel_role(1), "Right");
-        assert_eq!(PLAYBACK_OUTPUTS, 2);
-    }
-
-    #[test]
-    fn routed_taps_repeat_the_stereo_meter() {
-        assert_eq!(shared_tap_level(true, 0.4, 0.25), 0.4);
-        assert_eq!(shared_tap_level(true, 0.1, 0.55), 0.55);
-        assert_eq!(
-            shared_tap_level(true, 0.4, 0.25),
-            shared_tap_level(true, 0.4, 0.25)
-        );
-        assert_eq!(shared_tap_level(false, 0.4, 0.9), 0.0);
-        assert_eq!(shared_tap_level(true, 0.0, 0.0), 0.0);
-        assert_eq!(shared_tap_level(true, 1.4, 0.2), 1.0);
-        let heading = SHARED_STEREO_METER_LABEL.to_ascii_uppercase();
-        assert!(heading.contains("SHARED"));
-        assert!(heading.contains("STEREO"));
-        assert!(!heading.contains("LIVE"));
-        assert_eq!(SHARED_TAP_NOTE, "SHARED");
     }
 
     #[test]
     fn a_route_cell_exposes_its_name_and_enabled_value() {
-        use crate::ui::widgets::{accesskit_frame, node_named};
-        use eframe::egui::accesskit::Toggled;
-
         let tree = accesskit_frame(|ui| {
             assert!(!super::route_cell(ui, true, 0, 1));
+            assert!(!super::route_cell(ui, false, 1, 0));
         });
-        let node = node_named(&tree, "Route input 1 to output 2");
+        let node = node_named(&tree, "Route input 1 to Mix R");
         assert_eq!(node.role(), eframe::egui::Role::CheckBox);
         assert_eq!(node.value(), Some("enabled"));
         assert_eq!(node.toggled(), Some(Toggled::True));
+        let off = node_named(&tree, "Route input 2 to Mix L");
+        assert_eq!(off.value(), Some("muted"));
+        assert_eq!(off.toggled(), Some(Toggled::False));
+    }
+
+    #[test]
+    fn the_patch_header_counts_devices_and_playing_channels() {
+        assert_eq!(patch_count_label(1, 2), "1 DEVICE · 2 CHANNELS PLAYING");
+        assert_eq!(patch_count_label(3, 1), "3 DEVICES · 1 CHANNEL PLAYING");
+        assert_eq!(patch_count_label(1, 0), "1 DEVICE · 0 CHANNELS PLAYING");
     }
 
     #[test]

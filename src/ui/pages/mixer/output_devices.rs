@@ -24,7 +24,8 @@ use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    db_slider, meter_row, micro_label, mono, row_info, show_focus_ring, small_fact,
+    clock_tag, db_slider, fit_text, meter_row, micro_label, mono, paint_tag, row_info,
+    show_focus_ring, small_fact, tag_width,
 };
 
 /// Why "+ add output device" is greyed out.
@@ -345,7 +346,7 @@ impl RigWerkApp {
 }
 
 /// A framed block in the output inspectors.
-fn block(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn block(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(CARD_DEEP)
         .stroke(Stroke::new(1.0, BORDER_SOFT))
@@ -357,80 +358,10 @@ fn block(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-const TAG_FONT: f32 = 7.5;
-const TAG_PAD: Vec2 = Vec2::new(5.0, 2.0);
-
-/// Paints a small outlined tag ("CLOCK") with its left edge centred on
-/// `left_center` and returns its width.
-fn paint_tag(ui: &egui::Ui, left_center: egui::Pos2, text: &str, color: Color32) -> f32 {
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        FontId::new(ts(TAG_FONT), FontFamily::Monospace),
-        color,
-    );
-    let size = galley.size() + TAG_PAD * 2.0;
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(left_center.x, left_center.y - size.y * 0.5),
-        size,
-    );
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(4), with_alpha(color, 18));
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(4),
-        Stroke::new(1.0, with_alpha(color, 90)),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().galley(rect.min + TAG_PAD, galley, color);
-    size.x
-}
-
-fn tag_width(ui: &egui::Ui, text: &str) -> f32 {
-    ui.painter()
-        .layout_no_wrap(
-            text.to_owned(),
-            FontId::new(ts(TAG_FONT), FontFamily::Monospace),
-            DIM,
-        )
-        .size()
-        .x
-        + TAG_PAD.x * 2.0
-}
-
-/// The CLOCK tag as a laid-out widget, for the inspector title.
-fn clock_tag(ui: &mut egui::Ui) {
-    let width = tag_width(ui, "CLOCK");
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
-    paint_tag(ui, rect.left_center(), "CLOCK", BLUE);
-    let _ = response.on_hover_text("The chain runs on this device's callback.");
-}
-
 /// Width left for the inspector title's device name after the CLOCK tag and
 /// the MUTE button (and the gaps before them), never below 40 px.
 fn title_name_width(available: f32, tag_w: f32, mute_w: f32, spacing: f32) -> f32 {
     (available - tag_w - mute_w - spacing * 2.0).max(40.0)
-}
-
-/// `text` shortened with "…" until it fits `max_width` in `font`.
-fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, max_width: f32) -> String {
-    let width = |candidate: &str| {
-        ui.painter()
-            .layout_no_wrap(candidate.to_owned(), font.clone(), TEXT)
-            .size()
-            .x
-    };
-    if width(text) <= max_width {
-        return text.to_owned();
-    }
-    let chars: Vec<char> = text.chars().collect();
-    for keep in (0..chars.len()).rev() {
-        let mut candidate: String = chars[..keep].iter().collect();
-        candidate.push('…');
-        if width(&candidate) <= max_width {
-            return candidate;
-        }
-    }
-    "…".to_owned()
 }
 
 /// The device's mute toggle, labelled like the master's.
@@ -730,9 +661,10 @@ fn list_device_row(
 mod tests {
     use super::{
         chain_device_row, device_channel_count, device_level_text, device_row_value, device_state,
-        fit_text, list_device_row, title_name_width, OutputDeviceRow,
+        list_device_row, title_name_width, OutputDeviceRow,
     };
     use crate::audio::{EngineState, OutputDeviceSettings, MAX_OUTPUT_CHANNELS};
+    use crate::ui::widgets::fit_text;
     use crate::ui::widgets::{accesskit_frame, node_named};
     use eframe::egui::{self, accesskit::Toggled};
 

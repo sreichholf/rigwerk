@@ -167,6 +167,9 @@ pub struct RigWerkApp {
     pub(crate) eq_edit: EqSlot,
     /// Selected stage in the Mixer rack / Live chain strip.
     pub(crate) chain_selected: crate::ui::pages::mixer::chain::ChainSelection,
+    /// Output device shown on Signal Routing (not persisted; apart from the
+    /// Mixer's selection).
+    pub(crate) routing_device: usize,
     /// Where the next Plugins-page add should land (`None` = append).
     pub(crate) plugin_insert_at: Option<usize>,
     pub(crate) meter_in_l: f32,
@@ -609,6 +612,7 @@ impl RigWerkApp {
                     EqSlot::Pre
                 },
             ),
+            routing_device: 0,
             plugin_insert_at: None,
             routes: preferences.routes,
             meter_in_l: 0.0,
@@ -937,6 +941,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         followers: Vec::new(),
         eq_edit: EqSlot::Pre,
         chain_selected: crate::ui::pages::mixer::chain::ChainSelection::PreEq,
+        routing_device: 0,
         plugin_insert_at: None,
         meter_in_l: 0.0,
         meter_in_r: 0.0,

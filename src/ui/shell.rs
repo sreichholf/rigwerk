@@ -196,7 +196,7 @@ impl RigWerkApp {
             ),
             Page::Routing => (
                 "Signal Routing".to_owned(),
-                "Choose exactly where each input channel lands.".to_owned(),
+                "Choose exactly where each channel lands.".to_owned(),
             ),
             Page::Devices => (
                 "Devices".to_owned(),

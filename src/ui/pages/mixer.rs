@@ -4,7 +4,7 @@
 pub(crate) mod chain;
 pub(crate) mod eq_card;
 mod gate_card;
-mod output_devices;
+pub(crate) mod output_devices;
 mod rack;
 
 use eframe::egui;
