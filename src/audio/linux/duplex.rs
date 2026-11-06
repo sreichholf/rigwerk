@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,7 +46,7 @@ use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::mixer::OutputMixer;
-use crate::audio::output_map::MAX_FOLLOWERS;
+use crate::audio::output_map::{MAX_FOLLOWERS, VIRTUAL_OUT_NAME};
 use crate::audio::shared::Shared;
 use crate::audio::types::StartConfig;
 
@@ -65,6 +65,82 @@ const LINK_GRACE: Duration = Duration::from_secs(1);
 const INPUT_PORTS: usize = 2;
 const CLOCK_OUT: usize = 2;
 const TOTAL_PORTS: usize = INPUT_PORTS + CLOCK_OUT + MAX_FOLLOWERS * 2;
+
+/// Stereo block the duplex callback writes for RigWerk Out; the virtual
+/// source filter reads it.  Seqlock: odd `gen` means a write is in flight.
+struct PublishSlot {
+    gen: AtomicU64,
+    frames: AtomicUsize,
+    left: std::cell::UnsafeCell<[f32; MAX_FRAMES]>,
+    right: std::cell::UnsafeCell<[f32; MAX_FRAMES]>,
+}
+
+// One writer (duplex process) and one reader (virtual process); both on the
+// PipeWire data thread, coordinated by the seqlock.
+unsafe impl Sync for PublishSlot {}
+
+impl PublishSlot {
+    fn new() -> Self {
+        Self {
+            gen: AtomicU64::new(0),
+            frames: AtomicUsize::new(0),
+            left: std::cell::UnsafeCell::new([0.0; MAX_FRAMES]),
+            right: std::cell::UnsafeCell::new([0.0; MAX_FRAMES]),
+        }
+    }
+
+    fn begin_write(&self) {
+        self.gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn write_frame(&self, index: usize, left: f32, right: f32) {
+        if index >= MAX_FRAMES {
+            return;
+        }
+        // SAFETY: begin_write made `gen` odd; the reader spins until even.
+        unsafe {
+            (*self.left.get())[index] = left;
+            (*self.right.get())[index] = right;
+        }
+    }
+
+    fn end_write(&self, frames: usize) {
+        self.frames.store(frames.min(MAX_FRAMES), Ordering::Relaxed);
+        self.gen.fetch_add(1, Ordering::Release);
+    }
+
+    /// Copies up to `max` frames into `out_l`/`out_r`.  Returns how many.
+    /// Spins only briefly: an abandoned odd `gen` (writer never finished)
+    /// must not livelock the virtual source callback.
+    fn read(&self, out_l: &mut [f32], out_r: &mut [f32], max: usize) -> usize {
+        for _ in 0..64 {
+            let start = self.gen.load(Ordering::Acquire);
+            if start & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let frames = self
+                .frames
+                .load(Ordering::Relaxed)
+                .min(max)
+                .min(out_l.len())
+                .min(out_r.len());
+            // SAFETY: `gen` was even; we re-check after the copy.
+            unsafe {
+                ptr::copy_nonoverlapping(self.left.get() as *const f32, out_l.as_mut_ptr(), frames);
+                ptr::copy_nonoverlapping(
+                    self.right.get() as *const f32,
+                    out_r.as_mut_ptr(),
+                    frames,
+                );
+            }
+            if self.gen.load(Ordering::Acquire) == start {
+                return frames;
+            }
+        }
+        0
+    }
+}
 
 /// Why the duplex path did not run.  `Setup` errors happen before any audio
 /// flowed, so the caller can still open the two-stream path instead.
@@ -329,6 +405,8 @@ struct ProcessData {
     ports: [*mut c_void; TOTAL_PORTS],
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
+    /// Finished mix for the published RigWerk Out virtual source.
+    publish: Arc<PublishSlot>,
     rate: u32,
     /// The graph rate and quantum the callback last ran with, for the main
     /// loop's status text.
@@ -379,6 +457,7 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         ports,
         scratch_l,
         scratch_r,
+        publish,
         ..
     } = data;
     let shared: &Shared = shared;
@@ -405,9 +484,16 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     let enabled_r = shared.input_enabled[1].load(Ordering::Relaxed);
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
+    let publish_active = (0..shared.follower_count())
+        .any(|slot| shared.follower_is_virtual(slot) && shared.follower_is_published(slot));
+    if publish_active {
+        publish.begin_write();
+    }
     // A cycle longer than the scratch runs in scratch-sized pieces, so every
-    // output sample of the cycle is written.
+    // output sample of the cycle is written.  The publish slot only keeps the
+    // first MAX_FRAMES; device ports still get the whole cycle.
     let mut offset = 0;
+    let mut published = 0usize;
     while offset < frames {
         let count = (frames - offset).min(MAX_FRAMES);
         for index in 0..count {
@@ -436,21 +522,30 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
             |device, index, mapped| {
                 let at = offset + index;
                 let base = device * 2;
-                if base + 1 >= out_bufs.len() {
-                    return;
+                if base + 1 < out_bufs.len() {
+                    let out_l = out_bufs[base];
+                    let out_r = out_bufs[base + 1];
+                    // SAFETY: a non-null DSP output buffer holds `frames` samples.
+                    if !out_l.is_null() {
+                        unsafe { *out_l.add(at) = mapped.sample(0) };
+                    }
+                    if !out_r.is_null() {
+                        unsafe { *out_r.add(at) = mapped.sample(1) };
+                    }
                 }
-                let out_l = out_bufs[base];
-                let out_r = out_bufs[base + 1];
-                // SAFETY: a non-null DSP output buffer holds `frames` samples.
-                if !out_l.is_null() {
-                    unsafe { *out_l.add(at) = mapped.sample(0) };
-                }
-                if !out_r.is_null() {
-                    unsafe { *out_r.add(at) = mapped.sample(1) };
+                if publish_active && device > 0 && published + index < MAX_FRAMES {
+                    let slot = device - 1;
+                    if shared.follower_is_virtual(slot) && shared.follower_is_published(slot) {
+                        publish.write_frame(published + index, mapped.sample(0), mapped.sample(1));
+                    }
                 }
             },
         );
+        published = (published + count).min(MAX_FRAMES);
         offset += count;
+    }
+    if publish_active {
+        publish.end_write(published);
     }
     shared.in_l.store(peak_l.to_bits(), Ordering::Relaxed);
     shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
@@ -515,6 +610,7 @@ impl Filter {
         rate: u32,
         shared: Arc<Shared>,
         observed: &Observed,
+        publish: Arc<PublishSlot>,
     ) -> Result<Self, String> {
         let rate_hint = format!("1/{}", rate.max(1));
         let props = properties(&[
@@ -552,6 +648,7 @@ impl Filter {
             ports: [ptr::null_mut(); TOTAL_PORTS],
             scratch_l: vec![0.0; MAX_FRAMES],
             scratch_r: vec![0.0; MAX_FRAMES],
+            publish,
             // Unknown until the first cycle, which then publishes the real
             // graph rate.
             rate: 0,
@@ -681,6 +778,167 @@ impl Filter {
     }
 }
 
+/// Process data for the RigWerk Out virtual source filter.
+struct VirtualProcess {
+    publish: Arc<PublishSlot>,
+    ports: [*mut c_void; 2],
+    scratch_l: Vec<f32>,
+    scratch_r: Vec<f32>,
+}
+
+unsafe extern "C" fn on_virtual_process(
+    data: *mut c_void,
+    position: *mut spa_sys::spa_io_position,
+) {
+    let data = unsafe { &mut *(data as *mut VirtualProcess) };
+    if position.is_null() {
+        return;
+    }
+    let _denormals = DenormalGuard::new();
+    let frames = unsafe { (*position).clock.duration as usize };
+    if frames == 0 {
+        return;
+    }
+    let buffer = |port: *mut c_void| unsafe {
+        pw_sys::pw_filter_get_dsp_buffer(port, frames as u32) as *mut f32
+    };
+    let out_l = buffer(data.ports[0]);
+    let out_r = buffer(data.ports[1]);
+    if data.scratch_l.len() < frames {
+        // Cap to the prepared size; a larger quantum writes silence past it.
+        let n = frames.min(MAX_FRAMES);
+        data.scratch_l.resize(n, 0.0);
+        data.scratch_r.resize(n, 0.0);
+    }
+    let want = frames.min(MAX_FRAMES);
+    let got = data.publish.read(
+        &mut data.scratch_l[..want],
+        &mut data.scratch_r[..want],
+        want,
+    );
+    for index in 0..frames {
+        let (left, right) = if index < got {
+            (data.scratch_l[index], data.scratch_r[index])
+        } else {
+            (0.0, 0.0)
+        };
+        if !out_l.is_null() {
+            unsafe { *out_l.add(index) = left };
+        }
+        if !out_r.is_null() {
+            unsafe { *out_r.add(index) = right };
+        }
+    }
+}
+
+/// RigWerk Out: a virtual source other apps can capture.  Created and
+/// destroyed live when publish is toggled.
+struct VirtualSource {
+    raw: NonNull<pw_sys::pw_filter>,
+    _hooks: Box<spa_sys::spa_hook>,
+    _events: Box<pw_sys::pw_filter_events>,
+    _data: Box<VirtualProcess>,
+}
+
+impl Drop for VirtualSource {
+    fn drop(&mut self) {
+        unsafe { pw_sys::pw_filter_destroy(self.raw.as_ptr()) };
+    }
+}
+
+impl VirtualSource {
+    fn new(core: &pw::core::CoreRc, publish: Arc<PublishSlot>) -> Result<Self, String> {
+        let props = properties(&[
+            ("media.type", "Audio"),
+            ("media.class", "Audio/Source/Virtual"),
+            ("media.role", "DSP"),
+            ("node.name", VIRTUAL_OUT_NAME),
+            ("node.description", VIRTUAL_OUT_NAME),
+            ("node.virtual", "true"),
+            ("node.autoconnect", "false"),
+        ]);
+        let name = CString::new(VIRTUAL_OUT_NAME).expect("node name has no NUL");
+        let raw =
+            unsafe { pw_sys::pw_filter_new(core.as_raw_ptr(), name.as_ptr(), props.into_raw()) };
+        let raw =
+            NonNull::new(raw).ok_or_else(|| "pw_filter_new (RigWerk Out) failed".to_owned())?;
+        let mut data = Box::new(VirtualProcess {
+            publish,
+            ports: [ptr::null_mut(); 2],
+            scratch_l: vec![0.0; MAX_FRAMES],
+            scratch_r: vec![0.0; MAX_FRAMES],
+        });
+        for (index, (port_name, channel)) in [("capture_FL", "FL"), ("capture_FR", "FR")]
+            .iter()
+            .enumerate()
+        {
+            let props = properties(&[
+                ("format.dsp", "32 bit float mono audio"),
+                ("port.name", port_name),
+                ("audio.channel", channel),
+            ]);
+            let port = unsafe {
+                pw_sys::pw_filter_add_port(
+                    raw.as_ptr(),
+                    spa_sys::SPA_DIRECTION_OUTPUT,
+                    pw_sys::pw_filter_port_flags_PW_FILTER_PORT_FLAG_MAP_BUFFERS,
+                    std::mem::size_of::<u64>(),
+                    props.into_raw(),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            if port.is_null() {
+                unsafe { pw_sys::pw_filter_destroy(raw.as_ptr()) };
+                return Err(format!("could not add RigWerk Out port {port_name}"));
+            }
+            data.ports[index] = port;
+        }
+        let mut events = Box::new(pw_sys::pw_filter_events {
+            version: pw_sys::PW_VERSION_FILTER_EVENTS,
+            destroy: None,
+            state_changed: None,
+            io_changed: None,
+            param_changed: None,
+            add_buffer: None,
+            remove_buffer: None,
+            process: Some(on_virtual_process as _),
+            drained: None,
+            command: None,
+        });
+        let mut hook: Box<spa_sys::spa_hook> = Box::new(unsafe { std::mem::zeroed() });
+        unsafe {
+            pw_sys::pw_filter_add_listener(
+                raw.as_ptr(),
+                hook.as_mut(),
+                events.as_mut(),
+                data.as_mut() as *mut VirtualProcess as *mut c_void,
+            );
+        }
+        let filter = Self {
+            raw,
+            _hooks: hook,
+            _events: events,
+            _data: data,
+        };
+        let result = unsafe {
+            pw_sys::pw_filter_connect(
+                filter.raw.as_ptr(),
+                pw_sys::pw_filter_flags_PW_FILTER_FLAG_RT_PROCESS,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(format!(
+                "pw_filter_connect (RigWerk Out) failed: {}",
+                std::io::Error::from_raw_os_error(-result)
+            ));
+        }
+        Ok(filter)
+    }
+}
+
 /// A link RigWerk asked `link-factory` for.  Dropping the proxy before the
 /// link appears abandons it; once it exists it lives as long as this client.
 struct MadeLink {
@@ -750,8 +1008,18 @@ pub(crate) fn run(
         quantum: Arc::new(AtomicU64::new(frames as u64)),
         error: Arc::new(AtomicBool::new(false)),
     };
-    let filter =
-        Rc::new(Filter::new(&core, &latency, rate, Arc::clone(&shared), &observed).map_err(setup)?);
+    let publish = Arc::new(PublishSlot::new());
+    let filter = Rc::new(
+        Filter::new(
+            &core,
+            &latency,
+            rate,
+            Arc::clone(&shared),
+            &observed,
+            Arc::clone(&publish),
+        )
+        .map_err(setup)?,
+    );
     // Only now: a fallback must not start from this path's rates.  The
     // callback publishes the real graph rate on its first cycle, and the
     // timer below re-publishes it, so this guess cannot stick.
@@ -782,12 +1050,15 @@ pub(crate) fn run(
     let made: Rc<RefCell<HashMap<(u32, u32), MadeLink>>> = Rc::default();
     let shown = std::cell::Cell::new((rate, frames as u64));
     let filter_ref = Rc::clone(&filter);
+    let virtual_out: Rc<RefCell<Option<VirtualSource>>> = Rc::default();
 
     let stop_flag = Arc::clone(&stop);
     let loop_quit = mainloop.clone();
     let tick_graph = Rc::clone(&graph);
     let tick_made = Rc::clone(&made);
     let tick_core = core.clone();
+    let tick_virtual = Rc::clone(&virtual_out);
+    let tick_publish = Arc::clone(&publish);
     let seen_rate = Arc::clone(&observed.rate);
     let seen_quantum = Arc::clone(&observed.quantum);
     let error = Arc::clone(&observed.error);
@@ -806,6 +1077,19 @@ pub(crate) fn run(
             shared.note_direct_rate(rate);
             shared.set_output(rate, quantum as u32, mode(rate, quantum));
         }
+        // Create or drop RigWerk Out when publish is toggled live.
+        let want_publish = (0..shared.follower_count())
+            .any(|slot| shared.follower_is_virtual(slot) && shared.follower_is_published(slot));
+        let mut virtual_slot = tick_virtual.borrow_mut();
+        match (want_publish, virtual_slot.is_some()) {
+            (true, false) => match VirtualSource::new(&tick_core, Arc::clone(&tick_publish)) {
+                Ok(source) => *virtual_slot = Some(source),
+                Err(message) => shared.set_status(format!("RigWerk Out: {message}")),
+            },
+            (false, true) => *virtual_slot = None,
+            _ => {}
+        }
+        drop(virtual_slot);
         let Some(own) = filter_ref.node_id() else {
             return;
         };
@@ -903,8 +1187,9 @@ pub(crate) fn run(
     }
     mainloop.run();
     drop(timer);
-    // Links first, then the node, then the connection.
+    // Links first, then the virtual source, then the node.
     made.borrow_mut().clear();
+    virtual_out.borrow_mut().take();
     drop(filter);
     Ok(())
 }

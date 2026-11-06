@@ -23,6 +23,7 @@ use super::types::{CushionMode, Snapshot};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FollowerLink {
     /// PipeWire `node.name` to link to, or empty when missing / virtual.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) node_name: String,
     pub(crate) virtual_out: bool,
     /// Virtual source advertised; ignored for hardware followers.
@@ -197,6 +198,9 @@ pub(crate) struct Shared {
     /// Sink names / publish flags the PipeWire main loop links from.  Not
     /// touched by audio callbacks.
     follower_plan: Mutex<FollowerPlan>,
+    /// Per-slot flags the realtime callback can read without the plan lock.
+    follower_virtual: [AtomicBool; MAX_FOLLOWERS],
+    follower_publish: [AtomicBool; MAX_FOLLOWERS],
     pub(crate) drift_enabled: AtomicBool,
     /// Set while input and output run in one PipeWire graph callback (the
     /// duplex node).  The ring, cushion and drift steering are then unused.
@@ -298,6 +302,8 @@ impl Shared {
             followers: std::array::from_fn(|_| DeviceControls::new()),
             follower_count: AtomicUsize::new(0),
             follower_plan: Mutex::new(FollowerPlan::default()),
+            follower_virtual: std::array::from_fn(|_| AtomicBool::new(false)),
+            follower_publish: std::array::from_fn(|_| AtomicBool::new(false)),
             drift_enabled: AtomicBool::new(true),
             direct: AtomicBool::new(false),
             status: Mutex::new("Waiting".to_owned()),
@@ -1070,6 +1076,13 @@ impl Shared {
             if self.followers[index].channels() == 0 {
                 self.followers[index].set_channels(2);
             }
+            let link = &plan.slots[index];
+            self.follower_virtual[index].store(link.virtual_out, Ordering::Relaxed);
+            self.follower_publish[index].store(link.publish, Ordering::Relaxed);
+        }
+        for index in count..MAX_FOLLOWERS {
+            self.follower_virtual[index].store(false, Ordering::Relaxed);
+            self.follower_publish[index].store(false, Ordering::Relaxed);
         }
         self.follower_count.store(count, Ordering::Relaxed);
         if let Ok(mut current) = self.follower_plan.lock() {
@@ -1080,7 +1093,20 @@ impl Shared {
         }
     }
 
+    /// Whether follower `index` is the virtual RigWerk Out source.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn follower_is_virtual(&self, index: usize) -> bool {
+        index < MAX_FOLLOWERS && self.follower_virtual[index].load(Ordering::Relaxed)
+    }
+
+    /// Whether the virtual source at `index` should be advertised.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn follower_is_published(&self, index: usize) -> bool {
+        index < MAX_FOLLOWERS && self.follower_publish[index].load(Ordering::Relaxed)
+    }
+
     /// A clone of the live follower plan for the PipeWire linker.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn follower_plan(&self) -> FollowerPlan {
         self.follower_plan
             .lock()

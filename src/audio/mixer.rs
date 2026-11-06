@@ -318,6 +318,7 @@ impl OutputMixer {
     }
 
     /// Publishes each live follower's channel count (stereo today).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn publish_follower_channels(&self, shared: &Shared) {
         let count = shared.follower_count();
         for index in 0..count {
