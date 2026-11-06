@@ -314,6 +314,18 @@ impl eframe::App for RigWerkApp {
                 bottom: 18,
             }))
             .show(root, |ui| {
+                // Mixer and Plugins scroll inside their own panes and fill the
+                // remaining height, so they stay outside the page ScrollArea.
+                if matches!(self.page, Page::Mixer | Page::Plugins) {
+                    self.header(ui);
+                    ui.add_space(14.0);
+                    if self.page == Page::Mixer {
+                        self.mixer_page(ui);
+                    } else {
+                        self.plugins_page(ui);
+                    }
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
