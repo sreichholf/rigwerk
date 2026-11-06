@@ -103,11 +103,13 @@ pub(crate) fn os_card(
 }
 
 pub(crate) fn note_card(ui: &mut egui::Ui, title: &str, text: &str, color: Color32, width: f32) {
+    // Tall enough for the latency note and the Windows / Linux path cards.
+    let height = 128.0;
     ui.allocate_ui_with_layout(
-        Vec2::new(width, 96.0),
+        Vec2::new(width, height),
         Layout::top_down(Align::LEFT),
         |ui| {
-            ui.set_min_size(Vec2::new(width, 96.0));
+            ui.set_min_size(Vec2::new(width, height));
             card(ui, CARD_DEEP, BORDER_SOFT, |ui| {
                 ui.set_width(width - 32.0);
                 ui.horizontal(|ui| {
@@ -225,8 +227,8 @@ impl RigWerkApp {
                 "ASIO, WASAPI, DirectSound or MME — on either side.",
                 &[
                     "ASIO driver scan reads the Windows registry",
-                    "ASIO can now be the output as well as the input",
-                    "System-host outputs can stay in shared mode",
+                    "ASIO can be the input, the output, or both",
+                    "WASAPI followers and VB-Cable publish sit beside the clock device",
                 ],
                 half,
                 TEAL,
@@ -237,8 +239,8 @@ impl RigWerkApp {
                 "PipeWire sources and sinks, plus direct ALSA hardware.",
                 &[
                     "Each PipeWire source and sink is its own row",
-                    "hw: and plughw: stay on the low-latency side; pulse and sysdefault do not",
-                    "The ALSA period is checked against the quantum",
+                    "Followers and RigWerk Out join live when the clock is PipeWire",
+                    "hw: and plughw: stay low-latency; the ALSA period is checked against the quantum",
                 ],
                 half,
                 BLUE,
@@ -264,15 +266,15 @@ impl RigWerkApp {
             note_card(
                 ui,
                 "WINDOWS PATH",
-                "ASIO capture and ASIO or system playback are wired end to end. Start the bridge with an interface attached to open the real drivers; with no hardware, the same meters animate in preview.",
+                "ASIO capture with ASIO or system playback is wired end to end. Mixer can add WASAPI followers of the finished mix; Publish plays into VB-Audio Cable when it is installed (other apps capture CABLE Output). Whether one interface can play while its ASIO driver holds it depends on that driver.",
                 GREEN,
                 half,
             );
             note_card(
                 ui,
-                "STILL OPEN",
-                "Whether one interface can play while its ASIO driver holds it depends on the driver. The PipeWire graph quantum is requested with pw-metadata and depends on the desktop's PipeWire settings. A machine without a running PipeWire server falls back to the ALSA pipewire device.",
-                AMBER,
+                "LINUX PATH",
+                "PipeWire is the preferred graph: RigWerk opens its own nodes and can fan the mix to extra sinks plus RigWerk Out. The graph quantum is requested with pw-metadata and follows the desktop's PipeWire settings. Without a PipeWire server, the ALSA pipewire device and direct hw: / plughw: paths remain.",
+                BLUE,
                 half,
             );
         });

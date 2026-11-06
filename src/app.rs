@@ -353,7 +353,7 @@ impl eframe::App for RigWerkApp {
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .fixed_size(Vec2::new(420.0, 300.0))
+                .fixed_size(Vec2::new(420.0, 340.0))
                 .frame(
                     egui::Frame::new()
                         .fill(CARD)
@@ -366,28 +366,32 @@ impl eframe::App for RigWerkApp {
                     ui.heading("RigWerk");
                     ui.label(
                         RichText::new(
-                            "An independent-clock audio bridge. Any input and any output can sit on opposite sides, whether they speak ASIO, WASAPI, DirectSound or MME.",
+                            "An independent-clock audio bridge. Capture and playback keep their own rates; a short ring absorbs the drift. Extra outputs can follow the finished mix.",
                         )
                         .color(MUTED),
                     );
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new(
-                            "ASIO and system-host inputs and outputs are wired on Windows. On Linux, PipeWire is the low-latency backend when ALSA's default plugin is PipeWire, and direct hw: devices are the other low-latency path. PulseAudio stays on the system side. RigWerk compares the ALSA period with the PipeWire quantum and reports a collision instead of hiding it.",
+                            "Windows: ASIO and WASAPI (DirectSound and MME when the host lists them). Mixer can add WASAPI followers; Publish uses an installed virtual cable such as VB-Audio Cable. Linux: PipeWire is the low-latency path (own nodes linked to the source and sink you pick), with direct ALSA hw: available and PulseAudio on the system side. PipeWire clocks can add follower sinks and RigWerk Out. The ALSA period is compared with the PipeWire quantum instead of hiding a mismatch.",
                         )
                         .size(ts(10.5))
                         .color(GREEN),
                     );
                     ui.label(
                         RichText::new(
-                            "Select any input and output; whether one interface can do both jobs at once depends on its driver, so RigWerk reports what the driver says instead of guessing.",
+                            "Pick any listed input and output. Whether one interface can do both jobs at once depends on its driver; RigWerk reports what that driver allows instead of guessing.",
                         )
                         .size(ts(10.0))
                         .color(MUTED),
                     );
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Version 0.2 · preview build · working title").color(DIM),
+                        RichText::new(format!(
+                            "Version {} · preview build",
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .color(DIM),
                     );
                     ui.add_space(8.0);
                     if ui
