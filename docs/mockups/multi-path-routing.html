@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RigWerk · Signal paths mockup (F)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  /* Tokens mirror src/ui/theme.rs */
+  :root {
+    --bg: #080b11;
+    --sidebar: #0b0f17;
+    --card: #10151f;
+    --card-raised: #151b28;
+    --card-deep: #0c1019;
+    --border: #222a39;
+    --border-soft: #1b222f;
+    --hover: #1b2331;
+    --text: #e8edf6;
+    --muted: #8b97ab;
+    --dim: #74859f;
+    --teal: #38ddbf;
+    --teal-dark: #104e48;
+    --blue: #70a7ff;
+    --amber: #ffb85b;
+    --red: #ff7070;
+    --green: #60d890;
+    --font: "Ubuntu", "Segoe UI", system-ui, sans-serif;
+    --mono: "Hack", "DejaVu Sans Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #05070b; color: var(--text); font-family: var(--font); font-weight: 300; font-size: 13px; }
+  button { font: inherit; color: inherit; }
+
+  /* ── mockup chrome (not part of the app) ── */
+  .mock-bar {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    padding: 10px 16px; background: #11161f; border-bottom: 1px solid #2a3344;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .mock-bar strong { color: var(--text); font-weight: 400; font-family: var(--font); font-size: 13px; }
+  .mock-group { display: flex; gap: 4px; align-items: center; }
+  .mock-group > span { margin-right: 4px; }
+  .mock-group button {
+    background: transparent; border: 1px solid #2a3344; border-radius: 5px; padding: 4px 9px; cursor: pointer; color: var(--muted);
+  }
+  .mock-group button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); background: rgba(255,184,91,.08); }
+  .mock-group label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
+
+  /* ── app frame ── */
+  .app { display: grid; grid-template-columns: 232px 1fr; width: 1440px; min-height: 1000px; margin: 0 auto; background: var(--bg); border-bottom: 1px solid #2a3344; }
+  .sidebar { background: var(--bg); padding: 20px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .brand { display: flex; gap: 10px; align-items: center; margin-bottom: 28px; }
+  .brand-mark { width: 36px; height: 36px; border-radius: 9px; border: 1px solid var(--teal-dark); background: #0d1d1c; display: grid; place-items: center; color: var(--teal); font-size: 16px; }
+  .brand .t { font-size: 18px; letter-spacing: .02em; }
+  .brand .s { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .ws { color: var(--muted); font-size: 11px; margin: 0 0 10px; }
+  .nav-item { display: flex; gap: 12px; align-items: center; padding: 7px 10px; border-radius: 8px; cursor: pointer; border: 0; background: transparent; text-align: left; position: relative; }
+  .nav-item .ic { width: 18px; color: var(--muted); font-size: 13px; text-align: center; }
+  .nav-item .n { font-size: 15px; line-height: 1.1; }
+  .nav-item .d { font-size: 9.5px; color: var(--muted); }
+  .nav-item.on { background: var(--card-deep); }
+  .nav-item.on::before { content: ""; position: absolute; left: -4px; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--teal); }
+  .nav-item.on .ic, .nav-item.on .d { color: var(--teal); }
+  .side-foot { margin-top: auto; }
+  .audio-path { border: 1px solid var(--border); background: var(--card-deep); border-radius: 10px; padding: 14px 12px; }
+  .audio-path .l { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+  .audio-path .p { font-family: var(--mono); font-size: 12px; color: var(--teal); line-height: 1.5; }
+  .audio-path .p b { color: var(--blue); font-weight: 400; }
+  .ver { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .ver span:last-child { border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; font-family: var(--font); }
+
+  .main { padding: 20px 26px 30px 18px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; }
+  .header h1 { margin: 0; font-weight: 300; font-size: 32px; }
+  .header p { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+  .hdr-r { display: flex; gap: 12px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .chk { width: 13px; height: 13px; border-radius: 3px; background: var(--card-raised); border: 1px solid var(--border); display: inline-block; vertical-align: middle; margin-right: 4px; }
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+  .pill.run { color: var(--teal); border-color: var(--teal-dark); }
+  .pill.warn { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .start { background: var(--teal); color: #05201b; border: 0; border-radius: 7px; padding: 8px 16px; font-size: 14px; font-weight: 400; cursor: pointer; }
+  .start.stop { background: transparent; color: var(--red); border: 1px solid rgba(255,112,112,.45); }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+  .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+  .lbl.teal { color: var(--teal); } .lbl.blue { color: var(--blue); } .lbl.amber { color: var(--amber); }
+  .mono { font-family: var(--mono); }
+  .dim { color: var(--dim); }
+  .muted { color: var(--muted); }
+
+  /* chips / toggles like egui selectable labels */
+  .tg { display: inline-flex; align-items: center; border: 1px solid var(--border); background: var(--card-deep); border-radius: 6px; padding: 5px 10px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .tg.on { color: var(--teal); border-color: var(--teal-dark); background: #0d1d1c; }
+  .tg.on.blue { color: var(--blue); border-color: #2a4677; background: #0f1830; }
+  .tg.on.amber { color: var(--amber); border-color: rgba(255,184,91,.4); background: #241a0c; }
+  .tg.on.red { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .tg[disabled], .tg.off { opacity: .4; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sp { flex: 1; }
+
+  .tag { font-family: var(--mono); font-size: 9.5px; letter-spacing: .03em; border-radius: 4px; padding: 2px 5px; border: 1px solid; white-space: nowrap; }
+  .tag.live { color: var(--teal); border-color: var(--teal-dark); }
+  .tag.restart { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .tag.clock { color: var(--blue); border-color: #2a4677; }
+  .tag.virt { color: var(--green); border-color: rgba(96,216,144,.4); }
+  .tag.miss { color: var(--red); border-color: rgba(255,112,112,.45); }
+
+  .select { display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border); background: var(--card-deep); border-radius: 8px; padding: 9px 12px; font-size: 14px; }
+  .select::after { content: "▾"; color: var(--muted); }
+  .field { border: 1px solid var(--border); background: var(--card-deep); border-radius: 6px; padding: 6px 10px; font-family: var(--mono); font-size: 12px; }
+  .slider { position: relative; height: 4px; border-radius: 2px; background: var(--border); margin: 10px 4px; }
+  .slider i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--blue); }
+  .slider i::after { content: ""; position: absolute; right: -6px; top: -4px; width: 12px; height: 12px; border-radius: 50%; background: var(--blue); box-shadow: 0 0 0 3px #0f1830; }
+  .slider.off i, .slider.off i::after { background: var(--dim); }
+  .meter { display: flex; gap: 10px; align-items: center; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+  .meter .bar { flex: 1; height: 4px; background: var(--card-deep); border-radius: 2px; position: relative; overflow: hidden; }
+  .meter .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--blue); opacity: .85; }
+
+  /* ── mixer ── */
+  .mx-top { display: flex; justify-content: space-between; align-items: center; }
+  .mx-top .l { font-size: 11px; color: var(--teal); } .mx-top .l span { color: var(--muted); margin-left: 6px; }
+  .mx-top .r { display: flex; gap: 10px; align-items: center; }
+  .btn { background: var(--card-deep); border: 1px solid var(--border); border-radius: 7px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; color: var(--teal); }
+  .btn.plain { color: var(--text); }
+  .btn.blue { color: var(--blue); }
+  .btn.warn { color: var(--amber); border-color: rgba(255,184,91,.4); }
+  .btn.danger { color: var(--red); border-color: rgba(255,112,112,.4); }
+  .btn[disabled] { opacity: .4; cursor: not-allowed; }
+
+  .rack { display: grid; grid-template-columns: 340px 1fr; min-height: 860px; overflow: hidden; }
+  .chain { border-right: 1px solid var(--border-soft); padding: 14px; display: flex; flex-direction: column; }
+  .chain-h { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); margin-bottom: 14px; }
+  .stage { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; padding: 10px 10px; border-radius: 9px; border: 1px solid transparent; cursor: pointer; margin-bottom: 8px; }
+  .stage:hover { background: var(--hover); }
+  .stage.sel { border-color: var(--teal-dark); background: #0e1b1d; }
+  .stage .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); }
+  .stage .n { font-size: 15px; }
+  .stage .s { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .stage .st { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .stage .st.on { color: var(--teal); }
+  .stage .st::after { content: "  ›"; color: var(--muted); }
+  .group-h { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; font-size: 13px; color: var(--amber); }
+  .group-h .c { color: var(--muted); font-size: 11.5px; }
+  .group-h.blue { color: var(--blue); cursor: pointer; border-radius: 9px; border: 1px solid transparent; padding: 10px; }
+  .group-h.blue:hover { background: var(--hover); }
+  .group-h.blue.sel { border-color: #2a4677; background: #0f1830; }
+  .group-h .n2 { font-size: 15px; color: var(--text); }
+  .group-h .s2 { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .children { margin: 2px 0 8px 18px; padding-left: 10px; border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+  .dev { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 9px 10px; border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; cursor: pointer; }
+  .dev:hover { background: var(--hover); }
+  .dev.sel { border-color: #2a4677; background: #0f1830; }
+  .dev .sd { width: 8px; height: 8px; border-radius: 50%; }
+  .sd.ok { background: var(--teal); } .sd.warn { background: var(--amber); } .sd.bad { background: var(--red); } .sd.idle { background: var(--dim); }
+  .dev .n { font-size: 13.5px; display: flex; gap: 6px; align-items: center; }
+  .dev .s { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+  .dev .r { display: flex; gap: 6px; align-items: center; }
+  .dev .lv { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 52px; text-align: right; }
+  .m-btn { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; border: 1px solid var(--border); background: transparent; font-family: var(--mono); font-size: 10.5px; color: var(--muted); cursor: pointer; padding: 0; }
+  .m-btn.on { color: var(--red); border-color: rgba(255,112,112,.45); background: #2a1215; }
+  .add-row { border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; color: var(--muted); cursor: pointer; background: transparent; text-align: left; }
+  .add-row:hover, .add-row.sel { color: var(--blue); border-color: #2a4677; }
+  .chain-foot { margin-top: 14px; color: var(--muted); font-size: 11.5px; padding-left: 10px; }
+
+  .insp { padding: 14px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .insp-h { font-size: 11px; color: var(--muted); padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); }
+  .insp-title { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .insp-title h2 { margin: 0; font-weight: 300; font-size: 21px; display: flex; gap: 10px; align-items: center; }
+  .insp-title p { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+  .blk { background: var(--card-deep); border: 1px solid var(--border-soft); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .blk-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .kv { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); }
+  .kv b { font-family: var(--mono); font-weight: 400; color: var(--text); font-size: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .tile { border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; }
+  .tile .v { font-family: var(--mono); font-size: 20px; margin-top: 6px; color: var(--teal); }
+  .tile .v small { font-size: 11px; color: var(--muted); margin-left: 2px; }
+  .tile .v.amber { color: var(--amber); } .tile .v.blue { color: var(--blue); } .tile .v.red { color: var(--red); } .tile .v.na { color: var(--dim); }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .note b { color: var(--text); font-weight: 400; }
+  .banner { border-radius: 10px; padding: 12px 14px; display: flex; gap: 12px; align-items: center; font-size: 12.5px; line-height: 1.45; }
+  .banner.red { border: 1px solid rgba(255,112,112,.45); background: #1d0f12; }
+  .banner.amber { border: 1px solid rgba(255,184,91,.4); background: #1d160c; }
+  .banner.green { border: 1px solid rgba(96,216,144,.35); background: #0d1b14; }
+  .actions { display: flex; gap: 10px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+
+  .dl { display: flex; flex-direction: column; gap: 6px; }
+  .dl-h { font-size: 11px; color: var(--blue); margin: 6px 0 2px; text-transform: uppercase; }
+  .dl-i { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; padding: 9px 12px; cursor: pointer; }
+  .dl-i:hover { background: var(--hover); }
+  .dl-i .rd { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--dim); }
+  .dl-i .n { font-size: 13.5px; } .dl-i .s { font-size: 10.5px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+  .dl-i.dis { opacity: .45; cursor: not-allowed; }
+  .dl-i.dis:hover { background: var(--card); }
+  .why { font-size: 11px; color: var(--muted); text-align: right; max-width: 280px; }
+
+  .mixed-list { display: flex; flex-direction: column; gap: 6px; }
+  .ml-i { display: grid; grid-template-columns: 10px 1fr 90px 80px 70px; gap: 12px; align-items: center; padding: 8px 10px; border: 1px solid var(--border-soft); background: var(--card); border-radius: 8px; font-size: 12.5px; cursor: pointer; }
+  .ml-i .mono { font-size: 11px; color: var(--muted); }
+
+  /* ── live ── */
+  .live-row { display: grid; grid-template-columns: 1fr 22px 0.78fr 22px 1fr; align-items: stretch; }
+  .conn { display: grid; place-items: center; color: var(--border); }
+  .lc { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .lc.raised { background: var(--card-raised); }
+  .live-follow { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; border-top: 1px solid var(--border-soft); padding-top: 12px; }
+  .lf { display: grid; grid-template-columns: 9px 1fr auto auto; gap: 8px; align-items: center; font-size: 12px; padding: 5px 2px; }
+  .lf .mono { font-size: 10.5px; color: var(--muted); }
+  .chainstrip { display: flex; gap: 6px; align-items: center; padding: 14px 16px; }
+  .cs { border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; min-width: 140px; background: var(--card-deep); }
+  .cs .k { font-family: var(--mono); font-size: 9.5px; color: var(--muted); } .cs .v { font-size: 12.5px; margin-top: 2px; }
+  .cs.out { border-color: #2a4677; } .cs.out .k { color: var(--blue); }
+  .arrow { color: var(--muted); font-family: var(--mono); }
+
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: #241a0c; border: 1px solid rgba(255,184,91,.5); color: var(--amber); padding: 10px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+
+  .notes { width: 1440px; margin: 0 auto; padding: 20px 26px 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; background: #05070b; }
+  .notes .n { border: 1px solid #2a3344; border-radius: 10px; padding: 14px; background: #0c1018; }
+  .notes h3 { margin: 0 0 8px; font-weight: 400; font-size: 13px; color: var(--amber); }
+  .notes ul { margin: 0; padding-left: 16px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+  .notes b { color: var(--text); font-weight: 400; }
+  /* ── routing ── */
+  .flow { display: flex; align-items: center; gap: 8px; padding: 12px 16px; flex-wrap: wrap; }
+  .fnode { border: 1px solid var(--border); background: var(--card-deep); border-radius: 7px; padding: 6px 10px; }
+  .fnode .k { font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+  .fnode .v { font-size: 12.5px; margin-top: 2px; }
+  .fnode.in .k { color: var(--teal); } .fnode.mix .k { color: var(--amber); } .fnode.out .k { color: var(--blue); }
+  .fnode.layer { border-style: dashed; }
+  .grid-top { display: grid; grid-template-columns: 1fr 340px; gap: 14px; }
+  .sec { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .sec-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .sec-h .t { font-size: 11px; color: var(--teal); text-transform: uppercase; }
+  .sec-h .t.blue { color: var(--blue); }
+  .sec-h .c { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .mtx { display: grid; gap: 8px; align-items: center; }
+  .rh { border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; padding: 8px 12px; min-height: 48px; display: flex; flex-direction: column; justify-content: center; }
+  .rh .n { font-size: 14px; } .rh .s { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .rh.mix .n { color: var(--amber); }
+  .chh { font-family: var(--mono); font-size: 9.5px; color: var(--dim); text-align: center; line-height: 1.35; }
+  .chh b { display: block; font-weight: 400; color: var(--muted); font-size: 10.5px; }
+  .chh.pair-a b { color: var(--blue); }
+  .cell { width: 58px; height: 48px; border-radius: 8px; border: 1px solid var(--border-soft); background: var(--card-deep); display: grid; place-items: center; cursor: pointer; justify-self: center; position: relative; }
+  .cell:hover { background: #151c27; }
+  .cell i { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #313c4d; }
+  .cell.on { border-color: rgba(56,221,191,.3); background: rgba(56,221,191,.07); }
+  .cell.on i { width: 7px; height: 7px; border: 0; background: var(--teal); box-shadow: 0 0 0 6px rgba(56,221,191,.1); }
+  .cell.dis { cursor: not-allowed; opacity: .35; }
+  .cell .no { position: absolute; bottom: 3px; right: 5px; font-family: var(--mono); font-size: 7.5px; color: #354050; }
+  .vm { width: 58px; height: 34px; justify-self: center; display: flex; gap: 4px; align-items: flex-end; justify-content: center; }
+  .vm i { width: 8px; border-radius: 2px; background: var(--blue); opacity: .85; }
+  .vm i.z { background: var(--border); }
+  .unused { font-family: var(--mono); font-size: 9px; color: var(--dim); text-align: center; }
+  .tip { font-size: 12px; color: var(--muted); border-top: 1px solid var(--border-soft); padding-top: 12px; }
+  .tip b { color: var(--amber); font-weight: 400; }
+  .out-grid { display: grid; grid-template-columns: 300px 1fr; min-height: 470px; }
+  .devlist { border-right: 1px solid var(--border-soft); padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .dv { display: grid; grid-template-columns: 10px 1fr; gap: 10px; align-items: start; padding: 10px; border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; cursor: pointer; }
+  .dv:hover { background: var(--hover); }
+  .dv.sel { border-color: #2a4677; background: #0f1830; }
+  .dv .sd { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+  .dv .n { font-size: 13.5px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .dv .s { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 4px; }
+  .dv .s.warn { color: var(--amber); } .dv .s.bad { color: var(--red); }
+  .dmap { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .patch-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .pl { border: 1px solid var(--border-soft); background: var(--card-deep); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+  .pl .n { font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  .pl .m { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+  .pl .m.warn { color: var(--amber); } .pl .m.bad { color: var(--red); }
+  .ck { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 3px 0; cursor: pointer; }
+  .ck .b { width: 13px; height: 13px; border: 1px solid var(--border); border-radius: 3px; display: grid; place-items: center; font-size: 10px; color: var(--teal); }
+  .scroll-x { overflow-x: auto; padding-bottom: 4px; }
+
+  /* ── multi-path additions ── */
+  .nav-item.nav-path { padding-left: 26px; }
+  .nav-item.nav-path:hover { background: var(--hover); }
+  .nav-item.nav-path .ic { display: grid; place-items: center; }
+  .pd { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .cards { display: flex; gap: 8px; padding: 12px 16px; align-items: stretch; flex-wrap: wrap; }
+  .cardpick { border: 1px solid var(--border); background: var(--card-deep); border-radius: 9px; padding: 9px 12px; cursor: pointer; min-width: 168px; text-align: left; }
+  .cardpick:hover { background: var(--hover); }
+  .cardpick.on { border-color: var(--teal-dark); background: #0e1b1d; }
+  .cardpick .n { font-size: 13.5px; } .cardpick.on .n { color: var(--teal); }
+  .cardpick .s { font-size: 10.5px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+  .cardpick .glyph { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-top: 6px; letter-spacing: .04em; }
+  .custom { align-self: center; font-family: var(--mono); font-size: 11px; color: var(--amber); border: 1px dashed rgba(255,184,91,.4); border-radius: 6px; padding: 5px 9px; }
+  .fnode.path { border-left-width: 3px; }
+  .paths { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .pc { border: 1px solid var(--border-soft); border-top: 3px solid; background: var(--card-deep); border-radius: 9px; padding: 11px 12px; display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+  .pc.muted-path { opacity: .55; }
+  .pc .h { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .pc .h .n { font-size: 15px; }
+  .pc .chainl { display: flex; gap: 4px; flex-wrap: wrap; }
+  .pc .chainl span { font-family: var(--mono); font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 2px 5px; }
+  .pc .chainl span.empty { border-style: dashed; color: var(--dim); }
+  .pc .kv { font-size: 11.5px; }
+  .pc .foot { display: flex; gap: 6px; align-items: center; }
+  .pc .foot .btn { padding: 4px 9px; font-size: 11.5px; }
+  .m-btn.solo.on { color: var(--amber); border-color: rgba(255,184,91,.45); background: #241a0c; }
+  .stepper { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .stepper button { background: transparent; border: 0; color: var(--muted); padding: 2px 7px; cursor: pointer; font-family: var(--mono); font-size: 11px; }
+  .stepper button:hover { color: var(--text); background: var(--hover); }
+  .stepper b { font-family: var(--mono); font-weight: 400; font-size: 11px; min-width: 58px; text-align: center; color: var(--text); }
+  .pc.add { border: 1px dashed var(--border); border-top: 1px dashed var(--border); background: transparent; justify-content: center; align-items: center; color: var(--muted); cursor: pointer; min-height: 150px; }
+  .pc.add:hover { color: var(--teal); border-color: var(--teal-dark); }
+  .pc.add[disabled] { opacity: .4; cursor: not-allowed; }
+  .grp { font-family: var(--mono); font-size: 10px; text-align: center; border-bottom: 2px solid; padding-bottom: 4px; }
+  .cell.pon i { width: 7px; height: 7px; border: 0; }
+  .rh.prow { border-left: 3px solid; }
+  .rh.prow .n { font-size: 13.5px; }
+  .sumtbl { display: grid; grid-template-columns: 170px 150px 70px 150px 1fr; gap: 8px 12px; align-items: center; font-size: 12px; }
+  .sumtbl .hd { font-size: 10.5px; color: var(--muted); text-transform: uppercase; }
+  .sumtbl .pn { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+  .pol { width: 30px; height: 24px; border-radius: 5px; border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; font-family: var(--mono); font-size: 13px; }
+  .pol.on { color: var(--amber); border-color: rgba(255,184,91,.45); background: #241a0c; }
+  .al { font-family: var(--mono); font-size: 11.5px; }
+  .al.wait { color: var(--blue); } .al.zero { color: var(--dim); } .al.bad { color: var(--red); }
+  .latbar { display: flex; flex-direction: column; gap: 5px; }
+  .lb { display: grid; grid-template-columns: 110px 1fr 70px; gap: 10px; align-items: center; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+  .lb .tr { height: 8px; background: var(--card); border: 1px solid var(--border-soft); border-radius: 3px; position: relative; overflow: hidden; }
+  .lb .tr i { position: absolute; top: 0; bottom: 0; }
+  .lb .tr i.own { opacity: .9; } .lb .tr i.pad { background: repeating-linear-gradient(45deg, #2a4677 0 3px, transparent 3px 6px); }
+  .alignsw { display: flex; gap: 10px; align-items: center; }
+</style>
+</head>
+<body>
+
+<div class="mock-bar">
+  <strong>Mockup F · multiple signal paths</strong>
+  <div class="mock-group"><span>problem</span>
+    <button data-mock="unaligned" aria-pressed="false">alignment off on the selected device</button>
+    <button data-mock="stopped" aria-pressed="false">bridge stopped</button>
+  </div>
+  <div class="mock-group"><button id="mock-reset">reset</button></div>
+  <span>Linux / PipeWire · same devices as signal-routing.html · concept: multi-path-concept.md</span>
+</div>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">∿</div><div><div class="t">RIGWERK</div><div class="s">independent bridge</div></div></div>
+    <div class="ws">WORKSPACE</div>
+    <button class="nav-item"><span class="ic">ılı</span><span><div class="n">Live Bridge</div><div class="d">Bridge</div></span></button>
+    <button class="nav-item"><span class="ic">⫶</span><span><div class="n">Mixer</div><div class="d" id="nav-mixer-d">Chain + EQ</div></span></button>
+    <div id="nav-paths"></div>
+    <button class="nav-item"><span class="ic">⏚</span><span><div class="n">Plugins</div><div class="d">VST3 + CLAP</div></span></button>
+    <button class="nav-item on"><span class="ic">∷</span><span><div class="n">Signal Routing</div><div class="d">Routing</div></span></button>
+    <button class="nav-item"><span class="ic">▣</span><span><div class="n">Devices</div><div class="d">Devices</div></span></button>
+    <button class="nav-item"><span class="ic">☰</span><span><div class="n">Sessions</div><div class="d">Sessions</div></span></button>
+    <button class="nav-item"><span class="ic">?</span><span><div class="n">Setup Guide</div><div class="d">Guide</div></span></button>
+    <button class="nav-item"><span class="ic">≡</span><span><div class="n">Diagnostics</div><div class="d">Log</div></span></button>
+    <div class="side-foot">
+      <div class="audio-path"><div class="l">AUDIO PATH</div><div class="p" id="audio-path"></div></div>
+      <div class="ver"><span>v0.4 · linux</span><span>about</span></div>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="header">
+      <div><h1>Signal Routing</h1><p>Split the input into paths, then choose where each path lands.</p></div>
+      <div class="hdr-r"><span><span class="chk"></span>auto-start</span><span class="pill" id="h-pill"></span><button class="start" id="h-start"></button></div>
+    </header>
+    <div id="page"></div>
+  </main>
+</div>
+
+<div class="notes">
+  <div class="n"><h3>Three layers, as the engine has them</h3><ul>
+    <li><b>① Input → paths</b>: today's 2 × 2 matrix, once per path. Mono guitar into two paths is IN 1 on in both.</li>
+    <li><b>Paths</b>: each one is a full Mixer chain (EQ, inserts, gate, level). Edit a chain in the Mixer: sidebar sub-entry or <b>Open in Mixer</b>.</li>
+    <li><b>② Paths → outputs</b>: per device, one row pair per path. Cells that meet on one channel <b>add up</b>. The sum block sets level, polarity and trim per path on that device.</li>
+    <li>Cards are starting points. Any edit afterwards shows <b>Custom</b>.</li>
+  </ul></div>
+  <div class="n"><h3>Latency</h3><ul>
+    <li>On each device, every path that plays there <b>waits for the slowest one</b>. Hatched = alignment delay.</li>
+    <li>Alignment is <b>per device</b>: in <i>Per-device mixes</i> the stream's limiter doesn't slow the headphones.</li>
+    <li>Muted and un-soloed paths still count, so unmuting never moves the latency.</li>
+    <li>Alignment off: <b style="color:var(--red)">red</b> when unaligned paths add up on one channel (comb filter), amber when they only sit on different channels.</li>
+  </ul></div>
+  <div class="n"><h3>Edges</h3><ul>
+    <li><b>Duplicate</b> copies the chain and its routing <b>muted</b>, so the sum never jumps +6 dB.</li>
+    <li>At most 4 paths. Each one costs its inserts' CPU; on PipeWire duplex all paths share one graph quantum.</li>
+    <li>Master level and mute (Mixer → Output) act after the sum, on every device.</li>
+    <li>Not here: more than two captured channels, sends between paths, a path that feeds another path.</li>
+  </ul></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const COLORS = ["#38ddbf", "#c792ff", "#ffb85b", "#ff8fb1"];
+const MAX_PATHS = 4;
+const DEVICES = [
+  { name: "Scarlett 4i4 USB", clock: true, ch: ["AUX0", "AUX1", "AUX2", "AUX3"], label: ["Out 1", "Out 2", "Out 3", "Out 4"], hint: "Out 1/2 monitors · Out 3/4 headphones", base: 4.7 },
+  { name: "AKG N9 Hybrid", ch: ["FL", "FR"], label: ["Left", "Right"], hint: "follows the Scarlett clock", base: 10.7 },
+  { name: "RigWerk Out", virtual: true, ch: ["FL", "FR"], label: ["Left", "Right"], hint: "virtual source for OBS / Discord", base: 4.7 },
+];
+
+const z = (n) => Array(n).fill(0);
+function m(n, l, r) { const L = z(n), R = z(n); l.forEach((c) => (L[c] = 1)); r.forEach((c) => (R[c] = 1)); return [L, R]; }
+const st = (n) => (n === 4 ? m(4, [0, 2], [1, 3]) : m(2, [0], [1]));
+const none = (n) => m(n, [], []);
+const STEREO_IN = [[1, 0], [0, 1]];
+const MONO_IN = [[1, 1], [0, 0]];
+const P = (name, chain, lat, extra = {}) => ({ name, chain, lat, level: 0, mute: false, solo: false, ...extra });
+
+const CARDS = {
+  single: {
+    title: "Single path", sub: "today · one chain", glyph: "IN ─ A ─ OUT",
+    paths: [P("Main", ["Pre EQ", "Comp", "Post EQ"], 0)], inMap: [STEREO_IN],
+    maps: (n) => [st(n)],
+  },
+  drywet: {
+    title: "Dry L / Wet R", sub: "split · no sum", glyph: "A ─ L   B ─ R",
+    paths: [P("Dry", ["Pre EQ"], 0), P("Wet", ["Chorus", "Delay", "Reverb"], 1.3)], inMap: [MONO_IN, MONO_IN],
+    maps: (n, d) => d === 2 ? [st(n), st(n)] : n === 4 ? [m(4, [0, 2], []), m(4, [], [1, 3])] : [m(2, [0], []), m(2, [], [1])],
+  },
+  blend: {
+    title: "Blend clean", sub: "sum · clean under drive", glyph: "A ┐\nB ┴ L/R",
+    paths: [P("Clean", ["Pre EQ", "Comp"], 0), P("Drive", ["Amp sim", "Cab IR"], 2.7)], inMap: [MONO_IN, MONO_IN],
+    maps: (n) => [st(n), st(n)], sum: (p) => (p === 0 ? { lvl: -6 } : {}),
+  },
+  dualamp: {
+    title: "Dual-amp", sub: "sum · two amps", glyph: "A ┐\nB ┴ L/R",
+    paths: [P("Amp A", ["Amp sim A", "Cab IR 1"], 2.7), P("Amp B", ["Amp sim B", "Cab IR 2"], 5.3)], inMap: [MONO_IN, MONO_IN],
+    maps: (n) => [st(n), st(n)], sum: (p) => (p === 1 ? { pol: true } : {}),
+  },
+  perdevice: {
+    title: "Per-device mixes", sub: "each device own path", glyph: "A ─ dev 1  B ─ dev 2",
+    paths: [P("Main", ["Pre EQ", "Comp", "Reverb", "Post EQ"], 0), P("Stream", ["Gate", "Comp", "Limiter"], 1.5)], inMap: [STEREO_IN, STEREO_IN],
+    maps: (n, d) => (d === 2 ? [none(n), st(n)] : [st(n), none(n)]),
+  },
+};
+
+let S;
+function initial(card = "blend") {
+  const c = CARDS[card];
+  const paths = c.paths.map((p, i) => ({ ...JSON.parse(JSON.stringify(p)), color: COLORS[i] }));
+  const devices = DEVICES.map((d, di) => ({
+    ...d, align: true,
+    maps: JSON.parse(JSON.stringify(c.maps(d.ch.length, di))),
+    sum: paths.map((_, p) => ({ lvl: 0, pol: false, trim: 0, ...(c.sum ? c.sum(p) : {}) })),
+  }));
+  return { card, custom: false, running: true, sel: 0, paths, inMap: JSON.parse(JSON.stringify(c.inMap)), devices };
+}
+
+const fmt = (v, u = " ms") => (v === 0 ? "0.0" : (v > 0 ? "+" : "") + v.toFixed(1)) + u;
+const db = (v) => (v <= -60 ? "−∞ dB" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(1) + " dB");
+const routedP = (d, p, c) => d.maps[p][0][c] || d.maps[p][1][c];
+const usedOn = (d) => S.paths.map((_, p) => p).filter((p) => d.ch.some((_, c) => routedP(d, p, c)));
+const anySolo = () => S.paths.some((p) => p.solo);
+const audible = (p) => !S.paths[p].mute && (!anySolo() || S.paths[p].solo);
+
+function analyze(d) {
+  const used = usedOn(d);
+  const lats = used.map((p) => S.paths[p].lat);
+  const max = lats.length ? Math.max(...lats) : 0;
+  const delay = {};
+  used.forEach((p) => (delay[p] = (d.align ? max - S.paths[p].lat : 0) + d.sum[p].trim));
+  const arrive = (p) => S.paths[p].lat + delay[p];
+  const comb = [], shift = [];
+  d.ch.forEach((_, c) => {
+    const here = used.filter((p) => routedP(d, p, c));
+    if (here.length > 1 && new Set(here.map((p) => arrive(p).toFixed(2))).size > 1) comb.push(c);
+  });
+  if (!comb.length && new Set(used.map((p) => arrive(p).toFixed(2))).size > 1) shift.push(1);
+  const total = d.base + (used.length ? Math.max(...used.map(arrive)) : 0);
+  const sums = d.ch.filter((_, c) => used.filter((p) => routedP(d, p, c)).length > 1).length;
+  return { used, max, delay, comb, shift: shift.length > 0, total, sums };
+}
+
+function render() {
+  document.querySelector('[data-mock="unaligned"]').setAttribute("aria-pressed", String(!S.devices[S.sel].align));
+  document.querySelector('[data-mock="stopped"]').setAttribute("aria-pressed", String(!S.running));
+  document.getElementById("nav-paths").innerHTML = S.paths.length > 1
+    ? S.paths.map((p, i) => `<button class="nav-item nav-path" data-open="${i}"><span class="ic"><span class="pd" style="background:${p.color}"></span></span><span><div class="n">${p.name}</div><div class="d">${p.chain.length} stages · ${p.lat.toFixed(1)} ms${p.mute ? " · muted" : ""}</div></span></button>`).join("")
+    : "";
+  document.getElementById("nav-mixer-d").textContent = S.paths.length > 1 ? `${S.paths.length} paths` : "Chain + EQ";
+  document.getElementById("audio-path").innerHTML = `PIPEWIRE IN -> <b>PIPEWIRE</b><br><span class="muted">${S.paths.length} path${S.paths.length > 1 ? "s" : ""} · + ${S.devices.length - 1} followers</span>`;
+  const pill = document.getElementById("h-pill"), btn = document.getElementById("h-start");
+  const bad = S.devices.some((d) => analyze(d).comb.length);
+  if (S.running) {
+    pill.className = "pill " + (bad ? "warn" : "run"); pill.textContent = bad ? "● Running · unaligned sum" : "● Running";
+    btn.className = "start stop"; btn.textContent = "Stop bridge";
+  } else { pill.className = "pill"; pill.textContent = "● Ready"; btn.className = "start"; btn.textContent = "Start bridge"; }
+
+  document.getElementById("page").innerHTML = `<div style="display:flex;flex-direction:column;gap:14px">
+    ${cards()}
+    ${flow()}
+    <div class="grid-top" style="grid-template-columns: 1fr"><div class="card sec">${inputMatrix()}</div></div>
+    <div class="card sec">${pathCards()}</div>
+    <div class="card out-grid"><div class="devlist">${devList()}</div><div class="dmap">${deviceMap(S.devices[S.sel], S.sel)}</div></div>
+  </div>`;
+}
+
+function cards() {
+  return `<div class="card cards"><span class="lbl" style="align-self:center;margin-right:6px">Start from</span>
+    ${Object.entries(CARDS).map(([k, c]) => `<button class="cardpick ${!S.custom && S.card === k ? "on" : ""}" data-card="${k}">
+      <div class="n">${c.title}</div><div class="s">${c.sub}</div></button>`).join("")}
+    ${S.custom ? `<span class="custom">Custom · edited from ${CARDS[S.card].title}</span>` : ""}
+    <span class="sp"></span>
+    <span class="note" style="align-self:center;max-width:250px">A card sets up paths and routing. It never deletes inserts; missing paths are added.</span>
+  </div>`;
+}
+
+function flow() {
+  const maxAdd = Math.max(...S.devices.map((d) => analyze(d).max));
+  return `<div class="card flow">
+    <span class="lbl" style="margin-right:6px">Signal path</span>
+    <div class="fnode in"><div class="k">INPUT</div><div class="v">Scarlett 4i4 USB</div></div><span class="arrow">-></span>
+    <div class="fnode layer"><div class="k" style="color:var(--teal)">ROUTE ①</div><div class="v">Input → ${S.paths.length} path${S.paths.length > 1 ? "s" : ""}</div></div><span class="arrow">-></span>
+    <div style="display:flex;flex-direction:column;gap:4px">${S.paths.map((p) => `<div class="fnode path" style="border-left-color:${p.color};padding:3px 9px"><div class="v" style="font-size:12px;margin:0">${p.name} <span class="mono dim" style="font-size:10px">${p.chain.length} stages · ${p.lat.toFixed(1)} ms</span></div></div>`).join("")}</div><span class="arrow">-></span>
+    <div class="fnode layer"><div class="k" style="color:var(--blue)">ALIGN</div><div class="v">${maxAdd ? "up to +" + maxAdd.toFixed(1) + " ms" : "nothing to align"}</div></div><span class="arrow">-></span>
+    <div class="fnode layer"><div class="k" style="color:var(--blue)">ROUTE ②</div><div class="v">Paths → ${S.devices.length} devices</div></div><span class="arrow">-></span>
+    <div class="fnode out"><div class="k">MASTER</div><div class="v">−1.5 dB · shared</div></div>
+  </div>`;
+}
+
+function cell(on, label, attrs, color, dis) {
+  return `<div class="cell ${on ? "on pon" : ""} ${dis ? "dis" : ""}" ${dis ? "" : attrs} title="${label}" style="${on ? `border-color:${color}55;background:${color}12` : ""}"><i style="${on ? `background:${color};box-shadow:0 0 0 6px ${color}1a` : ""}"></i><span class="no">${label}</span></div>`;
+}
+
+function inputMatrix() {
+  const n = S.paths.length;
+  return `<div class="sec-h"><span class="t">① Input → paths</span><span class="c">2 IN -> ${n} × L/R</span></div>
+    <div class="muted" style="font-size:12.5px;margin-top:-6px">PIPEWIRE · Scarlett 4i4 USB → each path's own L/R, before its chain</div>
+    <div class="scroll-x"><div class="mtx" style="grid-template-columns: 200px repeat(${n}, 66px 66px 18px) 1fr">
+      <span></span>${S.paths.map((p) => `<span class="grp" style="grid-column: span 2;color:${p.color};border-color:${p.color}">${p.name.toUpperCase()}</span><span></span>`).join("")}<span></span>
+      <span></span>${S.paths.map(() => `<span class="chh"><b>L</b></span><span class="chh"><b>R</b></span><span></span>`).join("")}<span></span>
+      ${[0, 1].map((i) => `<div class="rh"><div class="n">IN ${i + 1}</div><div class="s">${i === 0 ? "Inst 1 · guitar" : "Inst 2"}</div></div>
+        ${S.paths.map((p, pi) => [0, 1].map((o) => cell(S.inMap[pi][i][o], `${i + 1}${o ? "R" : "L"}`, `data-in="${pi},${i},${o}"`, p.color)).join("") + "<span></span>").join("")}<span></span>`).join("")}
+    </div></div>
+    <div class="tip"><b>Tip</b> Mono guitar on IN 1? Route it to L and R of every path that should hear it. Mono sum per path is in that path's Mixer input stage.</div>`;
+}
+
+function pathCards() {
+  const full = S.paths.length >= MAX_PATHS;
+  return `<div class="sec-h"><span class="t" style="color:var(--amber)">Paths</span><span class="c">${S.paths.length} / ${MAX_PATHS} · EACH A FULL MIXER CHAIN</span></div>
+    <div class="paths">
+      ${S.paths.map((p, i) => `<div class="pc ${audible(i) ? "" : "muted-path"}" style="border-top-color:${p.color}">
+        <div class="h"><span class="n" style="display:flex;gap:8px;align-items:center"><span class="pd" style="background:${p.color}"></span>${p.name}</span>
+          <span class="row" style="gap:4px"><button class="m-btn ${p.mute ? "on" : ""}" data-mute="${i}" title="mute">M</button><button class="m-btn solo ${p.solo ? "on" : ""}" data-solo="${i}" title="solo">S</button></span></div>
+        <div class="chainl">${p.chain.length ? p.chain.map((c) => `<span>${c}</span>`).join("") : `<span class="empty">empty chain</span>`}</div>
+        <div class="kv">Latency <b>${p.lat.toFixed(1)} ms</b></div>
+        <div class="kv">Path level <span class="stepper"><button data-plvl="${i},-1">−</button><b>${db(p.level)}</b><button data-plvl="${i},1">+</button></span></div>
+        <div class="foot"><button class="btn" data-open="${i}">Open in Mixer</button><button class="btn plain" data-dup="${i}" ${full ? "disabled" : ""}>Duplicate</button><span class="sp"></span>
+          ${S.paths.length > 1 ? `<button class="m-btn" data-rm="${i}" title="remove path">×</button>` : ""}</div>
+      </div>`).join("")}
+      ${full ? "" : `<button class="pc add" data-add="1"><span style="font-size:20px">+</span><span>Add path</span><span class="mono dim" style="font-size:10px">empty chain · added muted</span></button>`}
+    </div>`;
+}
+
+function devList() {
+  return `<div class="sec-h" style="margin-bottom:4px"><span class="t blue">② Paths → outputs</span><span class="c">${S.devices.length} DEVICES</span></div>
+    ${S.devices.map((d, i) => {
+      const a = analyze(d);
+      const tag = d.clock ? `<span class="tag clock">CLOCK</span>` : d.virtual ? `<span class="tag virt">VIRTUAL</span>` : "";
+      const dots = a.used.map((p) => `<span class="pd" style="background:${S.paths[p].color}"></span>`).join("");
+      const state = !S.running ? "idle" : a.comb.length ? "bad" : !a.used.length || a.shift ? "warn" : "ok";
+      const line = !a.used.length ? "nothing routed · plays silence"
+        : a.comb.length ? "unaligned sum · comb filter"
+        : `${a.used.length} path${a.used.length > 1 ? "s" : ""}${a.sums ? " · summed" : ""} · ${a.total.toFixed(1)} ms`;
+      return `<div class="dv ${i === S.sel ? "sel" : ""}" data-sel="${i}"><span class="sd ${state}"></span><span>
+        <div class="n">${d.name} ${tag}</div>
+        <div class="s ${a.comb.length ? "bad" : !a.used.length || a.shift ? "warn" : ""}" style="display:flex;gap:6px;align-items:center">${dots}${line}</div></span></div>`;
+    }).join("")}
+    <div class="note" style="margin-top:auto">Same devices as Mixer → Output. Device level, mute and cushion stay there.</div>
+    <button class="btn blue" style="align-self:flex-start">Open in Mixer</button>`;
+}
+
+function deviceMap(d, di) {
+  const n = d.ch.length, a = analyze(d);
+  const meters = d.ch.map((_, c) => {
+    const on = S.running && S.paths.some((_, p) => routedP(d, p, c) && audible(p));
+    const any = S.paths.some((_, p) => routedP(d, p, c));
+    return `<div class="vm">${any ? `<i style="height:${on ? 24 + (c % 2) * 3 : 3}px" class="${on ? "" : "z"}"></i>` : `<span class="unused">silent</span>`}</div>`;
+  }).join("");
+  const rows = S.paths.map((p, pi) => ["L", "R"].map((side, row) => `<div class="rh prow" style="border-left-color:${p.color};${audible(pi) ? "" : "opacity:.5"}"><div class="n">${p.name} ${side}</div><div class="s">path ${pi + 1} · after path level</div></div>
+      ${d.ch.map((_, c) => cell(d.maps[pi][row][c], `${side}${c + 1}`, `data-cell="${pi},${row},${c}"`, p.color)).join("")}<span></span>`).join("")).join("");
+  const banner = a.comb.length
+    ? `<div class="banner red"><span class="sp"><b>Unaligned paths add up on ${a.comb.map((c) => d.label[c]).join(", ")}.</b> They arrive at different times and comb filter (thin, hollow sound). Turn alignment on, or trim by hand.</span><button class="btn danger" data-align="1">Align paths</button></div>`
+    : !a.used.length ? `<div class="banner amber"><span class="sp"><b>Nothing routed.</b> ${d.name} plays silence. Pick a card or set a cell.</span></div>`
+    : a.shift ? `<div class="banner amber"><span class="sp"><b>Paths are not aligned.</b> Nothing adds up here, so there's no comb filter, but the channels arrive at different times.</span></div>` : "";
+  const sum = a.used.length ? `<div class="blk">
+      <div class="blk-h"><span class="lbl blue">Sum on ${d.name}</span>
+        <span class="alignsw"><span class="note">Align paths</span><button class="tg ${d.align ? "on blue" : ""}" data-align="1">On</button><button class="tg ${d.align ? "" : "on red"}" data-align="0">Off</button></span></div>
+      <div class="sumtbl">
+        <span class="hd">Path</span><span class="hd">Level here</span><span class="hd">Polarity</span><span class="hd">Trim</span><span class="hd">Alignment</span>
+        ${a.used.map((p) => {
+          const s = d.sum[p], dl = a.delay[p];
+          return `<span class="pn"><span class="pd" style="background:${S.paths[p].color}"></span>${S.paths[p].name}<span class="mono dim" style="font-size:10px">${S.paths[p].lat.toFixed(1)} ms</span></span>
+          <span class="stepper"><button data-lvl="${p},-1">−</button><b>${db(s.lvl)}</b><button data-lvl="${p},1">+</button></span>
+          <button class="pol ${s.pol ? "on" : ""}" data-pol="${p}" title="flip polarity">ø</button>
+          <span class="stepper"><button data-trim="${p},-1">−</button><b>${fmt(s.trim)}</b><button data-trim="${p},1">+</button></span>
+          <span class="al ${!d.align && a.comb.length ? "bad" : dl > 0 ? "wait" : "zero"}">${dl > 0 ? "waits " + dl.toFixed(1) + " ms" : d.align && a.used.length > 1 && S.paths[p].lat === a.max ? "slowest · sets the pace" : "no delay"}</span>`;
+        }).join("")}
+      </div>
+      ${latBars(d, a)}
+    </div>` : "";
+  return `<div class="insp-title"><div><h2 style="font-weight:300;font-size:21px;margin:0;display:flex;gap:10px;align-items:center">${d.name}
+      ${d.clock ? `<span class="tag clock">CLOCK</span>` : d.virtual ? `<span class="tag virt">VIRTUAL</span>` : `<span class="tag" style="color:var(--muted);border-color:var(--border)">FOLLOWER</span>`}</h2>
+      <p style="margin:6px 0 0;color:var(--muted);font-size:12.5px">PIPEWIRE · ${n} CH · ${d.hint}</p></div>
+      <span class="tag live">LIVE</span></div>
+    ${banner}
+    <div class="scroll-x"><div class="mtx" style="grid-template-columns: 190px repeat(${n}, 66px) 1fr">
+      <span></span>${d.ch.map((c, i) => `<span class="chh"><b>${d.label[i].toUpperCase()}</b>${c}</span>`).join("")}<span></span>
+      ${rows}
+      <span class="lbl" style="text-align:right;padding-right:10px">Level</span>${meters}<span></span>
+    </div></div>
+    ${sum}
+    <div class="note">${a.sums ? `Cells in one column <b>add up</b>. ` : ""}${d.clock ? "Extra pairs on the clock device are free: same callback, no extra clock." : d.virtual ? "Other apps capture this. A path just for the stream (gate, limiter) keeps its latency off your monitors." : "Plays on its own clock through its cushion; alignment comes on top of it."}</div>`;
+}
+
+function latBars(d, a) {
+  const tot = Math.max(...a.used.map((p) => S.paths[p].lat + a.delay[p]), 0.1);
+  const scale = (v) => (v / Math.max(tot, 6)) * 100;
+  return `<div class="latbar" style="border-top:1px solid var(--border-soft);padding-top:10px">
+    ${a.used.map((p) => {
+      const own = S.paths[p].lat, pad = Math.max(a.delay[p], 0);
+      return `<div class="lb"><span>${S.paths[p].name}</span><span class="tr"><i class="own" style="left:0;width:${scale(own)}%;background:${S.paths[p].color}"></i><i class="pad" style="left:${scale(own)}%;width:${scale(pad)}%"></i></span><span style="text-align:right">${(own + pad).toFixed(1)} ms</span></div>`;
+    }).join("")}
+    <div class="kv" style="margin-top:4px"><span>${d.name} plays <b>${a.total.toFixed(1)} ms</b> after the input: ${d.base.toFixed(1)} ms bridge + ${(a.total - d.base).toFixed(1)} ms ${a.used.length > 1 && d.align ? "slowest path" : "path"}</span>
+      ${a.used.length > 1 && d.align && a.max > 0 ? `<span class="mono" style="color:var(--blue)">every path here waits for ${S.paths[a.used.find((p) => S.paths[p].lat === a.max)].name}</span>` : ""}</div>
+  </div>`;
+}
+
+function toast(msg) { const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 2200); }
+const edited = () => (S.custom = true);
+
+function addPath(from) {
+  const i = S.paths.length;
+  const src = from === undefined ? null : S.paths[from];
+  S.paths.push(src ? { ...JSON.parse(JSON.stringify(src)), name: src.name + " 2", color: COLORS[i], mute: true, solo: false }
+    : P(`Path ${i + 1}`, [], 0, { color: COLORS[i], mute: true }));
+  S.inMap.push(JSON.parse(JSON.stringify(src ? S.inMap[from] : STEREO_IN)));
+  S.devices.forEach((d) => {
+    d.maps.push(src ? JSON.parse(JSON.stringify(d.maps[from])) : none(d.ch.length));
+    d.sum.push(src ? { ...d.sum[from] } : { lvl: 0, pol: false, trim: 0 });
+  });
+  // Keep colours unique after removals.
+  S.paths.forEach((p, k) => (p.color = COLORS[k]));
+  edited();
+  toast(src ? `${src.name} duplicated · added muted, unmute when ready` : `Path ${i + 1} added · empty and muted`);
+}
+function removePath(i) {
+  const name = S.paths[i].name;
+  S.paths.splice(i, 1); S.inMap.splice(i, 1);
+  S.devices.forEach((d) => { d.maps.splice(i, 1); d.sum.splice(i, 1); });
+  S.paths.forEach((p, k) => (p.color = COLORS[k]));
+  edited(); toast(`${name} removed`);
+}
+
+document.addEventListener("click", (e) => {
+  const el = (s) => e.target.closest(s);
+  let x;
+  if ((x = el("[data-mock]"))) {
+    if (x.dataset.mock === "unaligned") S.devices[S.sel].align = !S.devices[S.sel].align;
+    else S.running = !S.running;
+    return render();
+  }
+  if (el("#mock-reset")) { S = initial(S.card); return render(); }
+  if (el("#h-start")) { S.running = !S.running; return render(); }
+  if ((x = el("[data-card]"))) { const sel = S.sel; S = initial(x.dataset.card); S.sel = sel; toast(`${CARDS[x.dataset.card].title} · paths and routing set up · live`); return render(); }
+  if ((x = el("[data-in]"))) { const [p, i, o] = x.dataset.in.split(",").map(Number); S.inMap[p][i][o] ^= 1; edited(); return render(); }
+  if ((x = el("[data-cell]"))) { const [p, r, c] = x.dataset.cell.split(",").map(Number); S.devices[S.sel].maps[p][r][c] ^= 1; edited(); return render(); }
+  if ((x = el("[data-mute]"))) { const p = S.paths[+x.dataset.mute]; p.mute = !p.mute; return render(); }
+  if ((x = el("[data-solo]"))) { const p = S.paths[+x.dataset.solo]; p.solo = !p.solo; return render(); }
+  if ((x = el("[data-plvl]"))) { const [p, s] = x.dataset.plvl.split(",").map(Number); S.paths[p].level = Math.max(-60, Math.min(6, S.paths[p].level + s)); edited(); return render(); }
+  if ((x = el("[data-lvl]"))) { const [p, s] = x.dataset.lvl.split(",").map(Number); const v = S.devices[S.sel].sum[p]; v.lvl = Math.max(-60, Math.min(6, v.lvl + s * 1.5)); edited(); return render(); }
+  if ((x = el("[data-pol]"))) { const v = S.devices[S.sel].sum[+x.dataset.pol]; v.pol = !v.pol; edited(); return render(); }
+  if ((x = el("[data-trim]"))) { const [p, s] = x.dataset.trim.split(",").map(Number); const v = S.devices[S.sel].sum[p]; v.trim = Math.round(Math.max(-5, Math.min(5, v.trim + s * 0.1)) * 10) / 10; edited(); return render(); }
+  if ((x = el("[data-align]"))) { S.devices[S.sel].align = x.dataset.align === "1"; return render(); }
+  if ((x = el("[data-dup]"))) { if (S.paths.length < MAX_PATHS) addPath(+x.dataset.dup); return render(); }
+  if ((x = el("[data-add]"))) { if (S.paths.length < MAX_PATHS) addPath(); return render(); }
+  if ((x = el("[data-rm]"))) { removePath(+x.dataset.rm); return render(); }
+  if ((x = el("[data-open]"))) { toast(`Mixer opens on path ${S.paths[+x.dataset.open].name}`); return; }
+  if ((x = el("[data-sel]"))) { S.sel = +x.dataset.sel; return render(); }
+});
+
+const q = new URLSearchParams(location.search);
+S = initial(CARDS[q.get("card")] ? q.get("card") : "blend");
+if (q.get("sel")) S.sel = +q.get("sel");
+if (q.get("unaligned")) S.devices[S.sel].align = false;
+render();
+</script>
+</body>
+</html>
