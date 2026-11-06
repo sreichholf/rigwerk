@@ -11,6 +11,7 @@ pub(crate) mod plugins;
 pub(crate) mod presets;
 pub(crate) mod screenshot;
 pub(crate) mod settings;
+pub(crate) mod startup;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -19,16 +20,14 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{Align2, Color32, Margin, RichText, Vec2};
 
-use crate::app::devices::{
-    default_index, device_restore_note, held_device, inventory_fingerprint, restore_device,
-    HeldDevice,
-};
+use crate::app::devices::{inventory_fingerprint, HeldDevice};
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
     cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
     preferences_backup_key, store_preferences, unique_presets, FollowerPref, Preferences, Preset,
     PREFERENCES_KEY, PREFERENCES_SCHEMA,
 };
+use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
     self, AudioEngine, CushionMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
     OutputDeviceSettings, Snapshot, MAX_OUTPUT_CHANNELS,
@@ -260,11 +259,6 @@ pub struct RigWerkApp {
     /// Preferences kept until the first background device scan finishes, so
     /// the window can paint before hosts are probed.
     startup: Option<StartupGate>,
-}
-
-/// Saved device choices applied once the first inventory arrives.
-struct StartupGate {
-    preferences: Preferences,
 }
 
 impl eframe::App for RigWerkApp {
@@ -794,123 +788,6 @@ impl RigWerkApp {
     }
 }
 
-/// Indices and held identities from one startup restore.
-struct RestoredDevices {
-    asio_idx: usize,
-    input_idx: usize,
-    output_idx: usize,
-    asio_held: Option<HeldDevice>,
-    input_held: Option<HeldDevice>,
-    output_held: Option<HeldDevice>,
-    notes: Vec<String>,
-}
-
-/// Selects the saved devices, and holds any stored identity the scan did not confirm.
-///
-/// The window still shows a fallback (the system default, or the first real
-/// device; the system input stays at index 0) so the app can be used. `save`
-/// writes a held identity back instead of that fallback.
-fn restore_saved_devices(inventory: &Inventory, preferences: &Preferences) -> RestoredDevices {
-    let mut asio_idx = default_index(&inventory.asio);
-    let mut output_idx = default_index(&inventory.outputs);
-    let mut input_idx = 0usize;
-    let asio_restore = restore_device(
-        &inventory.asio,
-        &preferences.asio_id,
-        &preferences.asio_backend,
-        preferences.asio_name.as_deref().unwrap_or(""),
-    );
-    if let Some(index) = asio_restore.index() {
-        asio_idx = index;
-    }
-    let input_restore = restore_device(
-        &inventory.inputs,
-        &preferences.input_id,
-        &preferences.input_backend,
-        preferences.input_name.as_deref().unwrap_or(""),
-    );
-    if let Some(index) = input_restore.index() {
-        input_idx = index;
-    }
-    let output_restore = restore_device(
-        &inventory.outputs,
-        &preferences.output_id,
-        &preferences.output_backend,
-        preferences.output_name.as_deref().unwrap_or(""),
-    );
-    if let Some(index) = output_restore.index() {
-        output_idx = index;
-    }
-    let mut notes = Vec::new();
-    for (role, name, id, restore) in [
-        (
-            "Low-latency input",
-            preferences.asio_name.as_deref().unwrap_or(""),
-            preferences.asio_id.as_str(),
-            asio_restore,
-        ),
-        (
-            "Input",
-            preferences.input_name.as_deref().unwrap_or(""),
-            preferences.input_id.as_str(),
-            input_restore,
-        ),
-        (
-            "Output",
-            preferences.output_name.as_deref().unwrap_or(""),
-            preferences.output_id.as_str(),
-            output_restore,
-        ),
-    ] {
-        let label = if !name.is_empty() { name } else { id };
-        if let Some(note) = device_restore_note(role, label, restore) {
-            notes.push(note);
-        }
-    }
-    RestoredDevices {
-        asio_idx,
-        input_idx,
-        output_idx,
-        asio_held: held_device(
-            asio_restore,
-            preferences.asio_name.clone(),
-            preferences.asio_id.clone(),
-            preferences.asio_backend.clone(),
-        ),
-        input_held: held_device(
-            input_restore,
-            preferences.input_name.clone(),
-            preferences.input_id.clone(),
-            preferences.input_backend.clone(),
-        ),
-        output_held: held_device(
-            output_restore,
-            preferences.output_name.clone(),
-            preferences.output_id.clone(),
-            preferences.output_backend.clone(),
-        ),
-        notes,
-    }
-}
-
-/// The name, id, and backend `save` writes for one side.
-fn persisted_identity(
-    held: Option<&HeldDevice>,
-    live: Option<&audio::DeviceItem>,
-) -> (Option<String>, String, String) {
-    if let Some(held) = held {
-        return (held.name.clone(), held.id.clone(), held.backend.clone());
-    }
-    match live {
-        Some(device) => (
-            Some(device.name.clone()),
-            device.id.clone(),
-            device.backend.clone(),
-        ),
-        None => (None, String::new(), String::new()),
-    }
-}
-
 /// An app with empty device lists and no held identity, for tests.
 #[cfg(test)]
 pub(crate) fn blank_app() -> RigWerkApp {
@@ -1013,7 +890,8 @@ mod tests {
 
     use super::settings::FollowerPref;
     use super::settings::{load_preferences, Preferences, Preset, PREFERENCES_KEY};
-    use super::{blank_app, repaint_interval, restore_saved_devices, ACTIVE_REPAINT, IDLE_REPAINT};
+    use super::startup::{restore_saved_devices, StartupGate};
+    use super::{blank_app, repaint_interval, ACTIVE_REPAINT, IDLE_REPAINT};
     use crate::audio::{
         self, ChannelMap, DeviceItem, EngineState, Inventory, OutputDeviceSettings, UnusedChannels,
     };
@@ -1098,7 +976,7 @@ mod tests {
     fn finish_startup_scan_restores_saved_devices_and_clears_the_gate() {
         let mut app = blank_app();
         app.inventory = audio::placeholder_inventory();
-        app.startup = Some(super::StartupGate {
+        app.startup = Some(StartupGate {
             preferences: Preferences {
                 asio_name: Some("Focusrite USB".to_owned()),
                 asio_id: "asio:focusrite".to_owned(),
@@ -1162,7 +1040,7 @@ mod tests {
     #[test]
     fn save_is_skipped_while_startup_scan_is_pending() {
         let mut app = absent_studio();
-        app.startup = Some(super::StartupGate {
+        app.startup = Some(StartupGate {
             preferences: Preferences::default(),
         });
         let mut storage = MemoryStorage::default();
