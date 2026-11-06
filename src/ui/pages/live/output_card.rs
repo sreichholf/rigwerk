@@ -170,25 +170,16 @@ impl RigWerkApp {
                             .strong(),
                     )
                     .on_hover_text(
-                        "ASIO playback uses the driver's own buffer and clock; REAL-style does not apply.",
+                        "ASIO playback uses the driver's own buffer and clock; Shared / REAL-style / Exclusive do not apply.",
                     );
+                } else if cfg!(target_os = "windows") {
+                    self.wasapi_mode_control(ui);
                 } else {
                     let low_latency = self.low_latency_output;
-                    let (label, hint) = if cfg!(target_os = "windows") {
-                        (
-                            "REAL-style",
-                            "REAL-style output: run the WASAPI device at the smallest step its driver allows (often about 3 ms instead of 10 ms), like the REAL tool, and queue only that one step. Other apps stay audible and get the shorter step too. Some drivers only offer their 10 ms default; then RigWerk still uses that minimum and labels it in the MODE line instead of falling back to a larger buffer.",
-                        )
-                    } else {
-                        (
-                            "Low latency",
-                            "Ask PipeWire for a 64-frame quantum and ALSA for the smallest period this output allows (at least 32 samples). The PIPEWIRE QUANTUM card and the DRIVER line warn when the ALSA period and the quantum do not fit, or when PipeWire falls back to its shared size.",
-                        )
-                    };
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new(label)
+                                RichText::new("Low latency")
                                     .size(ts(8.3))
                                     .color(if low_latency { AMBER } else { DIM }),
                             )
@@ -207,19 +198,15 @@ impl RigWerkApp {
                             ))
                             .corner_radius(CornerRadius::same(7)),
                         )
-                        .on_hover_text(hint)
+                        .on_hover_text(
+                            "Ask PipeWire for a 64-frame quantum and ALSA for the smallest period this output allows (at least 32 samples). The PIPEWIRE QUANTUM card and the DRIVER line warn when the ALSA period and the quantum do not fit, or when PipeWire falls back to its shared size.",
+                        )
                         .clicked()
                     {
                         self.low_latency_output = !low_latency;
                         self.push_log(
                             if self.low_latency_output {
-                                if cfg!(target_os = "windows") {
-                                    "REAL-style output on: smallest driver step when allowed."
-                                } else {
-                                    "Low-latency output on: PipeWire low quantum + smallest ALSA period when allowed."
-                                }
-                            } else if cfg!(target_os = "windows") {
-                                "REAL-style output off: normal shared output."
+                                "Low-latency output on: PipeWire low quantum + smallest ALSA period when allowed."
                             } else {
                                 "Low-latency output off: normal output buffer, PipeWire quantum released."
                             },
@@ -285,12 +272,21 @@ impl RigWerkApp {
             let quantum_label = self.quantum_summary();
             let backend_label = match self.output_step() {
                 Some((frames, ms)) => format!("STEP {frames} SMP · {ms:.1} MS"),
-                None if self.low_latency_output && self.selected_output().asio_clsid.is_none() => {
+                None if self.selected_output().asio_clsid.is_none()
+                    && (if cfg!(target_os = "windows") {
+                        self.wasapi_output_mode.wants_low_latency()
+                    } else {
+                        self.low_latency_output
+                    }) =>
+                {
                     quantum_label.unwrap_or_else(|| {
                         format!(
                             "{backend} · {}",
                             if cfg!(target_os = "windows") {
-                                "REAL-STYLE"
+                                match self.wasapi_output_mode {
+                                    crate::audio::WasapiOutputMode::Exclusive => "EXCLUSIVE",
+                                    _ => "REAL-STYLE",
+                                }
                             } else {
                                 "LOW LATENCY"
                             }
@@ -394,9 +390,61 @@ impl RigWerkApp {
         horizontal_line(ui, BORDER_SOFT);
     }
 
+    /// Three-way WASAPI clock mode: Shared / REAL-style / Exclusive.
+    fn wasapi_mode_control(&mut self, ui: &mut egui::Ui) {
+        use crate::audio::WasapiOutputMode;
+        let mut mode = self.wasapi_output_mode;
+        let active = !matches!(mode, WasapiOutputMode::Shared);
+        let response = egui::ComboBox::from_id_salt("wasapi_output_mode")
+            .width(104.0)
+            .selected_text(
+                RichText::new(mode.label())
+                    .size(ts(8.3))
+                    .color(if active { AMBER } else { DIM }),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut mode, WasapiOutputMode::Shared, "Shared");
+                ui.selectable_value(&mut mode, WasapiOutputMode::RealStyle, "REAL-style");
+                ui.selectable_value(&mut mode, WasapiOutputMode::Exclusive, "Exclusive");
+            })
+            .response
+            .on_hover_text(match mode {
+                WasapiOutputMode::Shared => {
+                    "Shared: normal WASAPI output with the chosen buffer. Other apps keep playing on this device."
+                }
+                WasapiOutputMode::RealStyle => {
+                    "REAL-style: run the WASAPI device at the smallest shared step its driver allows (often about 3 ms instead of 10 ms), like the REAL tool, and queue only that one step. Other apps stay audible and get the shorter step too. Some drivers only offer their 10 ms default; then RigWerk still uses that minimum and labels it in the MODE line."
+                }
+                WasapiOutputMode::Exclusive => {
+                    "Exclusive: open this WASAPI clock device alone at its smallest exclusive period — often lower than shared REAL-style. Other apps cannot play on this device while the bridge holds it. If the driver refuses, RigWerk falls back to shared output with the chosen buffer."
+                }
+            });
+        let _ = response;
+        if mode != self.wasapi_output_mode {
+            self.set_wasapi_output_mode(mode);
+            self.push_log(
+                match mode {
+                    WasapiOutputMode::Shared => "WASAPI clock: Shared output.",
+                    WasapiOutputMode::RealStyle => {
+                        "WASAPI clock: REAL-style — smallest shared driver step when allowed."
+                    }
+                    WasapiOutputMode::Exclusive => {
+                        "WASAPI clock: Exclusive — this device only; shared buffer if refused."
+                    }
+                },
+                if active { AMBER } else { MUTED },
+            );
+        }
+    }
+
     /// Output side clock: its own rate (or follow the input) and buffer.
     pub(crate) fn output_clock_controls(&mut self, ui: &mut egui::Ui) {
-        let real_wasapi = self.low_latency_output && self.selected_output().asio_clsid.is_none();
+        let special_wasapi = self.selected_output().asio_clsid.is_none()
+            && if cfg!(target_os = "windows") {
+                self.wasapi_output_mode.wants_low_latency()
+            } else {
+                self.low_latency_output
+            };
         ui.horizontal(|ui| {
             ui.label(micro_label("OUT CLOCK", DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -410,8 +458,17 @@ impl RigWerkApp {
                         }
                     })
                     .response
-                    .on_hover_text(if real_wasapi {
-                        "Output buffer, used if the driver refuses REAL-style. While REAL-style runs, the driver's smallest step sets the output latency."
+                    .on_hover_text(if special_wasapi {
+                        if cfg!(target_os = "windows")
+                            && self.wasapi_output_mode
+                                == crate::audio::WasapiOutputMode::Exclusive
+                        {
+                            "Output buffer, used if the driver refuses Exclusive mode. While Exclusive runs, the exclusive period sets the output latency."
+                        } else if cfg!(target_os = "windows") {
+                            "Output buffer, used if the driver refuses REAL-style. While REAL-style runs, the driver's smallest step sets the output latency."
+                        } else {
+                            "Output buffer, used if low-latency ALSA refuses the smallest period."
+                        }
                     } else {
                         "Output buffer: the block size asked of the output device."
                     });

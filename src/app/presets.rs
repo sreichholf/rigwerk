@@ -37,6 +37,7 @@ impl RigWerkApp {
             monitor: self.monitor,
             drift: self.drift,
             low_latency_output: self.low_latency_output,
+            wasapi_output_mode: Some(self.wasapi_output_mode),
             routes: self.routes,
             cushion_mode: cushion_to_pref(self.cushion_mode),
             cushion_ms: self.cushion_ms,
@@ -109,7 +110,10 @@ impl RigWerkApp {
         self.mute = preset.mute;
         self.monitor = preset.monitor;
         self.drift = preset.drift;
-        self.low_latency_output = preset.low_latency_output;
+        let mode = preset.wasapi_output_mode.unwrap_or_else(|| {
+            crate::audio::WasapiOutputMode::from_low_latency(preset.low_latency_output)
+        });
+        self.set_wasapi_output_mode(mode);
         self.routes = preset.routes;
         self.cushion_mode = cushion_from_pref(preset.cushion_mode);
         self.cushion_ms = preset.cushion_ms;
@@ -381,6 +385,7 @@ mod tests {
         app.monitor = false;
         app.drift = false;
         app.low_latency_output = false;
+        app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
         app.routes = [[false, true, false, true], [true, false, true, false]];
         app.cushion_mode = CushionMode::Manual;
         app.cushion_ms = 7.5;
@@ -406,6 +411,10 @@ mod tests {
         assert_eq!(saved.routes, app.routes);
         assert_eq!(saved.plugins[0].path, "C:/Plugins/Amp.vst3");
         assert_eq!(saved.plugins[0].mix, 0.4);
+        assert_eq!(
+            saved.wasapi_output_mode,
+            Some(crate::audio::WasapiOutputMode::Shared)
+        );
 
         app.input_gain = 0.0;
         app.output_gain = 0.0;
@@ -415,6 +424,7 @@ mod tests {
         app.monitor = true;
         app.drift = true;
         app.low_latency_output = true;
+        app.wasapi_output_mode = crate::audio::WasapiOutputMode::RealStyle;
         app.input_channels = [true, true];
         app.output_channels = [true, true];
         app.cushion_mode = CushionMode::Safe;
@@ -444,6 +454,10 @@ mod tests {
         assert!(!app.monitor);
         assert!(!app.drift);
         assert!(!app.low_latency_output);
+        assert_eq!(
+            app.wasapi_output_mode,
+            crate::audio::WasapiOutputMode::Shared
+        );
         assert_eq!(
             app.routes,
             [[false, true, false, true], [true, false, true, false]]

@@ -4,7 +4,7 @@ use super::*;
 use crate::app::Page;
 use crate::audio::{
     ChannelMap, EqSettings, GateSettings, GateSlot, OutputDeviceSettings, PluginFormat, PluginPref,
-    UnusedChannels, MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    UnusedChannels, WasapiOutputMode, MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 
 const BACKUP: &str = "rigwerk-preferences-backup-1";
@@ -155,6 +155,7 @@ fn preset_missing_fields_still_loads() {
     assert!(old.monitor);
     assert!(old.drift);
     assert!(old.low_latency_output);
+    assert_eq!(old.wasapi_output_mode, Some(WasapiOutputMode::RealStyle));
     assert_eq!(
         old.routes,
         [[true, false, false, false], [false, true, false, false]]
@@ -816,4 +817,65 @@ fn windows_virtual_out_rematch_binds_vb_cable_from_inventory() {
         let _ = cable;
         assert_eq!(followers[0].id, VIRTUAL_OUT_ID);
     }
+}
+
+#[test]
+fn wasapi_mode_migrates_from_legacy_bool() {
+    let raw_on = r#"(low_latency_output:true,sample_rate:48000)"#;
+    let on = load_preferences(Some(raw_on), BACKUP)
+        .preferences
+        .expect("readable");
+    assert_eq!(on.wasapi_output_mode, Some(WasapiOutputMode::RealStyle));
+    assert!(on.low_latency_output);
+
+    let raw_off = r#"(low_latency_output:false,sample_rate:48000)"#;
+    let off = load_preferences(Some(raw_off), BACKUP)
+        .preferences
+        .expect("readable");
+    assert_eq!(off.wasapi_output_mode, Some(WasapiOutputMode::Shared));
+    assert!(!off.low_latency_output);
+}
+
+#[test]
+fn wasapi_exclusive_mode_round_trips() {
+    let preferences = Preferences {
+        low_latency_output: false,
+        wasapi_output_mode: Some(WasapiOutputMode::Exclusive),
+        sessions: {
+            let mut session = preset("Exclusive");
+            session.low_latency_output = false;
+            session.wasapi_output_mode = Some(WasapiOutputMode::Exclusive);
+            vec![session]
+        },
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.wasapi_output_mode, Some(WasapiOutputMode::Exclusive));
+    assert!(!back.low_latency_output);
+    assert_eq!(
+        back.sessions[0].wasapi_output_mode,
+        Some(WasapiOutputMode::Exclusive)
+    );
+    assert_eq!(
+        resolved_wasapi_output_mode(&back),
+        WasapiOutputMode::Exclusive
+    );
+}
+
+#[test]
+fn wasapi_mode_from_low_latency_bool() {
+    assert_eq!(
+        WasapiOutputMode::from_low_latency(true),
+        WasapiOutputMode::RealStyle
+    );
+    assert_eq!(
+        WasapiOutputMode::from_low_latency(false),
+        WasapiOutputMode::Shared
+    );
+    assert!(WasapiOutputMode::RealStyle.wants_low_latency());
+    assert!(WasapiOutputMode::Exclusive.wants_low_latency());
+    assert!(!WasapiOutputMode::Shared.wants_low_latency());
+    assert_eq!(WasapiOutputMode::Exclusive.label(), "Exclusive");
 }

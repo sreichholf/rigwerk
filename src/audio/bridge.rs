@@ -79,6 +79,7 @@ pub(crate) fn run_bridge(
         &shared,
         config.output_buffer,
         config.real_style_output,
+        config.exclusive_output,
     )?;
     // `open_output` already published `output.rate`.  The UI thread reloads
     // plugins from that rate; this thread must not load or destroy them.

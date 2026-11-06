@@ -10,10 +10,10 @@ mod tests;
 
 pub(crate) use preferences::{
     cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
-    preferences_backup_key, rate_label, rematch_windows_virtual_out, sanitize_preset,
-    store_preferences, FollowerPref, Preferences, BUFFERS, CUSHION_MS_MAX, CUSHION_MS_MIN,
-    INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB, PREFERENCES_KEY,
-    PREFERENCES_SCHEMA, RATES,
+    preferences_backup_key, rate_label, rematch_windows_virtual_out, resolved_wasapi_output_mode,
+    sanitize_preset, store_preferences, FollowerPref, Preferences, BUFFERS, CUSHION_MS_MAX,
+    CUSHION_MS_MIN, INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB,
+    PREFERENCES_KEY, PREFERENCES_SCHEMA, RATES,
 };
 pub(crate) use preset::{unique_presets, Preset};
 

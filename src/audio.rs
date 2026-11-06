@@ -103,5 +103,6 @@ pub(crate) use shared::{FollowerLink, FollowerPlan, SCOPE_LEN};
 #[cfg(target_os = "linux")]
 pub use types::QuantumInfo;
 pub use types::{
-    CushionMode, DeviceItem, EngineState, Inventory, Snapshot, StartConfig, PIPEWIRE_LOW_QUANTUM,
+    CushionMode, DeviceItem, EngineState, Inventory, Snapshot, StartConfig, WasapiOutputMode,
+    PIPEWIRE_LOW_QUANTUM,
 };

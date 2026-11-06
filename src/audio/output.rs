@@ -1,5 +1,5 @@
-//! Opening the playback side: REAL-style WASAPI first when asked, otherwise
-//! a normal cpal stream, both fed by the shared mixer.
+//! Opening the playback side: exclusive or REAL-style WASAPI when asked,
+//! otherwise a normal cpal stream, both fed by the shared mixer.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,6 +17,13 @@ use super::thread_priority::PromoteOnce;
 #[cfg(target_os = "windows")]
 use super::win::wasapi;
 
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug)]
+enum RefuseKind {
+    Exclusive,
+    RealStyle,
+}
+
 /// What `open_output` hands back: the live stream plus the rate and channel
 /// count it really runs at.
 pub(crate) struct OpenedOutput {
@@ -25,36 +32,59 @@ pub(crate) struct OpenedOutput {
     pub(crate) channels: usize,
 }
 
-/// Either a cpal stream or RigWerk's own REAL-style WASAPI stream.  Both
-/// keep playing until they are dropped.
+/// Either a cpal stream or RigWerk's own WASAPI stream (REAL-style or
+/// exclusive).  Both keep playing until they are dropped.
 #[allow(dead_code)]
 pub(crate) enum OutputStream {
     Cpal(cpal::Stream),
     #[cfg(target_os = "windows")]
     Real(wasapi::RealOutput),
+    #[cfg(target_os = "windows")]
+    Exclusive(wasapi::ExclusiveOutput),
 }
 
-/// Opens the playback side.  With `real_style` set, a WASAPI output is first
-/// opened through IAudioClient3 at the smallest engine step its driver allows,
-/// which shortens the processing period of the whole device the way the REAL
-/// tool does.  If the driver refuses, the output opens exactly as before: a
-/// shared stream on whichever host owns the device, asking for `buffer_frames`.
+/// Opens the playback side.
+///
+/// On Windows, `exclusive` tries WASAPI exclusive mode first (clock device
+/// only).  On refuse it falls back to shared cpal with `buffer_frames` — not
+/// REAL-style.  `real_style` opens IAudioClient3 at the driver's smallest
+/// shared engine step; on refuse it also falls back to shared cpal.
 pub(crate) fn open_output(
     output_id: &str,
     sample_rate: u32,
     shared: &Arc<Shared>,
     buffer_frames: usize,
     real_style: bool,
+    exclusive: bool,
 ) -> Result<OpenedOutput, String> {
     let id: cpal::DeviceId = output_id
         .parse()
         .map_err(|error| format!("Output device id: {error}"))?;
 
-    // Only the Windows REAL-style attempt can fill this in.
-    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-    let mut refused: Option<String> = None;
+    // Only the Windows exclusive / REAL-style attempts can fill this in.
     #[cfg(target_os = "windows")]
-    if real_style {
+    let mut refused: Option<(RefuseKind, String)> = None;
+    #[cfg(target_os = "windows")]
+    if exclusive {
+        if id.host() == cpal::HostId::Wasapi {
+            match wasapi::open_exclusive(id.id(), sample_rate, Arc::clone(shared)) {
+                Ok((stream, info)) => {
+                    shared.set_output(info.rate, info.step_frames, info.describe(sample_rate));
+                    return Ok(OpenedOutput {
+                        _stream: OutputStream::Exclusive(stream),
+                        rate: info.rate,
+                        channels: info.channels,
+                    });
+                }
+                Err(reason) => refused = Some((RefuseKind::Exclusive, reason)),
+            }
+        } else {
+            refused = Some((
+                RefuseKind::Exclusive,
+                format!("{} has no exclusive mode", id.host()),
+            ));
+        }
+    } else if real_style {
         if id.host() == cpal::HostId::Wasapi {
             match wasapi::open(id.id(), sample_rate, Arc::clone(shared)) {
                 Ok((stream, info)) => {
@@ -65,18 +95,17 @@ pub(crate) fn open_output(
                         channels: info.channels,
                     });
                 }
-                Err(reason) => refused = Some(reason),
+                Err(reason) => refused = Some((RefuseKind::RealStyle, reason)),
             }
         } else {
-            refused = Some(format!("{} has no adjustable engine step", id.host()));
+            refused = Some((
+                RefuseKind::RealStyle,
+                format!("{} has no adjustable engine step", id.host()),
+            ));
         }
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = real_style;
-    // Linux handles REAL-style as an ALSA period request, so the Windows
-    // refusal reason is not part of its mode text.
-    #[cfg(target_os = "linux")]
-    let _ = &refused;
+    let _ = (real_style, exclusive);
 
     let host = cpal::host_from_id(id.host()).map_err(|error| format!("Output host: {error}"))?;
     let device = host
@@ -105,7 +134,12 @@ pub(crate) fn open_output(
     };
     #[cfg(not(target_os = "linux"))]
     let mode = |note: &str| match &refused {
-        Some(reason) => format!("Standard output{note} · REAL-style refused: {reason}"),
+        Some((RefuseKind::Exclusive, reason)) => {
+            format!("Standard output{note} · Exclusive refused: {reason}")
+        }
+        Some((RefuseKind::RealStyle, reason)) => {
+            format!("Standard output{note} · REAL-style refused: {reason}")
+        }
         None => format!("Standard output{note}"),
     };
     let stream = match make_output_stream(

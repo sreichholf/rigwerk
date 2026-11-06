@@ -34,8 +34,8 @@ libloading = "0.8"
 cpal = { version = "0.18", features = ["realtime"] }
 azo = "0.5"
 winapi = { version = "0.3", features = ["libloaderapi", "minwindef", "windef", "winuser"] }
-# Direct WASAPI access for the REAL-style output (IAudioClient3 at the
-# smallest engine step the driver allows).  Same version cpal already uses.
+# Direct WASAPI access for REAL-style (IAudioClient3 shared minimum step) and
+# exclusive clock output.  Same version cpal already uses.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

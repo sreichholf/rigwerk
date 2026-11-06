@@ -158,6 +158,14 @@ impl RigWerkApp {
                 BLUE,
                 self.output_mode_text(),
             )
+        } else if running && mode_text.starts_with("Exclusive") {
+            let step = self
+                .output_step()
+                .map(|(frames, ms)| {
+                    format!("Exclusive · {frames} smp · {ms:.1} ms · this device only")
+                })
+                .unwrap_or_else(|| "Exclusive · this device only".to_owned());
+            (step, GREEN, self.output_mode_text())
         } else if running && mode_text.starts_with("REAL-style") {
             let driver_minimum = mode_text.contains("no smaller step");
             let step = self
@@ -189,7 +197,19 @@ impl RigWerkApp {
             (step, AMBER, self.output_mode_text())
         } else if running {
             if let Some((frames, ms)) = self.output_step() {
-                let (label, tone) = if self.low_latency_output {
+                let (label, tone) = if cfg!(target_os = "windows") {
+                    match self.wasapi_output_mode {
+                        crate::audio::WasapiOutputMode::Exclusive => {
+                            (format!("Exclusive · {frames} smp · {ms:.1} ms"), GREEN)
+                        }
+                        crate::audio::WasapiOutputMode::RealStyle => {
+                            (format!("REAL · {frames} smp · {ms:.1} ms"), GREEN)
+                        }
+                        crate::audio::WasapiOutputMode::Shared => {
+                            (format!("Shared · {frames} smp · {ms:.1} ms"), MUTED)
+                        }
+                    }
+                } else if self.low_latency_output {
                     (format!("Low latency · {frames} smp · {ms:.1} ms"), GREEN)
                 } else {
                     (format!("Standard · {frames} smp · {ms:.1} ms"), MUTED)
@@ -216,13 +236,22 @@ impl RigWerkApp {
                 GREEN
             };
             (summary, tone, self.graph_block_hint())
+        } else if cfg!(target_os = "windows") {
+            let (label, tone) = match self.wasapi_output_mode {
+                crate::audio::WasapiOutputMode::Exclusive => {
+                    ("Exclusive · this device only".to_owned(), AMBER)
+                }
+                crate::audio::WasapiOutputMode::RealStyle => {
+                    ("REAL-style · driver's smallest step".to_owned(), AMBER)
+                }
+                crate::audio::WasapiOutputMode::Shared => {
+                    ("Shared · output buffer".to_owned(), MUTED)
+                }
+            };
+            (label, tone, self.output_mode_text())
         } else if self.low_latency_output {
             (
-                if cfg!(target_os = "windows") {
-                    "REAL-style · driver's smallest step".to_owned()
-                } else {
-                    "Low latency · smallest ALSA period".to_owned()
-                },
+                "Low latency · smallest ALSA period".to_owned(),
                 AMBER,
                 self.output_mode_text(),
             )

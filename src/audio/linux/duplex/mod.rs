@@ -285,6 +285,7 @@ mod tests {
             output_buffer: 128,
             asio_wrapper: false,
             real_style_output: false,
+            exclusive_output: false,
             pipewire_low_latency: false,
         };
         let thread = {
