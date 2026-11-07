@@ -1,19 +1,28 @@
-//! Signal Routing, in the two layers the engine has:
+//! Signal Routing, in the layers the engine has:
 //!
-//! 1. Input -> Mix: which input channel feeds Mix L and Mix R, the bus the
-//!    chain processes (`routes`, columns 0 and 1).
-//! 2. Mix -> outputs: which device channels play the finished mix, per
-//!    output device ([`outputs`]).
+//! 1. Input -> paths: which input channel feeds each path's L and R, before
+//!    its chain (`routes`, columns 0 and 1; one matrix per path).
+//! 2. Paths: one card per path (chain, level, mute, solo, Open in Mixer,
+//!    Duplicate, remove) and Add path ([`paths`]).
+//! 3. Paths -> outputs: which device channels play each path, per output
+//!    device, and how the paths add up there ([`outputs`]).
 //!
-//! Plus the Mix card (channel mode and monitoring).
+//! Above them the routing cards (starting points, `app::cards`) and, with
+//! several paths, a flow strip.  Plus the Mix card (channel mode and
+//! monitoring).  With one path the page reads as before: Input -> Mix,
+//! Mix -> outputs, no per-path chrome.
 
 mod outputs;
+pub(crate) use outputs::channel_list;
+mod paths;
+mod sum;
 
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Sense, Stroke, Vec2,
 };
 
+use crate::app::paths::PathInfo;
 use crate::app::RigWerkApp;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -117,9 +126,21 @@ pub(crate) fn matrix_cell(
     name: String,
     values: (&str, &str),
 ) -> bool {
+    matrix_cell_in(ui, enabled, glyph, name, values, TEAL)
+}
+
+/// [`matrix_cell`] in a path's colour.
+pub(crate) fn matrix_cell_in(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    glyph: &str,
+    name: String,
+    values: (&str, &str),
+    color: Color32,
+) -> bool {
     let (rect, response) = ui.allocate_exact_size(CELL, Sense::click());
     let base = if enabled {
-        with_alpha(TEAL, 18)
+        with_alpha(color, 18)
     } else if response.hovered() {
         with_alpha(TEXT, 7)
     } else {
@@ -132,7 +153,7 @@ pub(crate) fn matrix_cell(
         Stroke::new(
             1.0,
             if enabled {
-                with_alpha(TEAL, 75)
+                with_alpha(color, 75)
             } else {
                 BORDER_SOFT
             },
@@ -141,8 +162,8 @@ pub(crate) fn matrix_cell(
     );
     if enabled {
         ui.painter()
-            .circle_filled(rect.center(), 9.0, with_alpha(TEAL, 26));
-        ui.painter().circle_filled(rect.center(), 3.3, TEAL);
+            .circle_filled(rect.center(), 9.0, with_alpha(color, 26));
+        ui.painter().circle_filled(rect.center(), 3.3, color);
     } else {
         ui.painter().circle_stroke(
             rect.center(),
@@ -179,6 +200,108 @@ pub(crate) fn route_cell(ui: &mut egui::Ui, enabled: bool, input: usize, side: u
         format!("Route input {} to Mix {letter}", input + 1),
         ("enabled", "muted"),
     )
+}
+
+/// A layer ① cell with several paths: input `input` onto path `path`'s
+/// side `side` (0 = L, 1 = R).
+pub(crate) fn path_route_cell(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    input: usize,
+    side: usize,
+    path: &str,
+    color: Color32,
+) -> bool {
+    let letter = if side == 0 { "L" } else { "R" };
+    matrix_cell_in(
+        ui,
+        enabled,
+        &format!("{}{letter}", input + 1),
+        format!("Route input {} to {path} {letter}", input + 1),
+        ("enabled", "muted"),
+        color,
+    )
+}
+
+/// A layer ② cell with several paths: path `path`'s side `letter` onto
+/// device channel `channel` (0-based).
+pub(crate) fn path_output_cell(
+    ui: &mut egui::Ui,
+    on: bool,
+    path: &str,
+    letter: &str,
+    channel: usize,
+    color: Color32,
+) -> bool {
+    matrix_cell_in(
+        ui,
+        on,
+        &format!("{letter}{}", channel + 1),
+        format!("{path} {letter} to Out {}", channel + 1),
+        ("routed", "off"),
+        color,
+    )
+}
+
+/// A row header for one side of a path: a colour bar on the left, dimmed
+/// while the path is not audible.
+pub(crate) fn path_row_header(
+    ui: &mut egui::Ui,
+    name: &str,
+    caption: &str,
+    color: Color32,
+    audible: bool,
+) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ROW_HEADER_W, CELL.y), Sense::hover());
+    let _ = response.on_hover_text(format!("{name} · {caption}"));
+    let painter = ui.painter().with_clip_rect(rect);
+    let fade = |c: Color32| if audible { c } else { with_alpha(c, 130) };
+    painter.rect_filled(rect, CornerRadius::same(8), CARD_DEEP);
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())),
+        CornerRadius {
+            nw: 8,
+            sw: 8,
+            ne: 0,
+            se: 0,
+        },
+        fade(color),
+    );
+    let font = FontId::new(ts(11.0), FontFamily::Proportional);
+    let shown = crate::ui::widgets::fit_text(ui, name, &font, ROW_HEADER_W - 20.0);
+    painter.text(
+        rect.left_center() + Vec2::new(12.0, -6.0),
+        Align2::LEFT_CENTER,
+        shown,
+        font,
+        fade(TEXT),
+    );
+    painter.text(
+        rect.left_center() + Vec2::new(12.0, 8.0),
+        Align2::LEFT_CENTER,
+        caption,
+        FontId::new(ts(8.0), FontFamily::Proportional),
+        fade(DIM),
+    );
+}
+
+/// A path's name over its two layer ① columns, underlined in its colour.
+pub(crate) fn path_group_header(ui: &mut egui::Ui, name: &str, color: Color32, width: f32) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
+    let _ = response.on_hover_text(name);
+    let font = FontId::new(ts(8.5), FontFamily::Monospace);
+    let shown = crate::ui::widgets::fit_text(ui, &name.to_uppercase(), &font, width - 4.0);
+    ui.painter().text(
+        rect.center() - Vec2::new(0.0, 2.0),
+        Align2::CENTER_CENTER,
+        shown,
+        font,
+        color,
+    );
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(2.0, color),
+    );
 }
 
 /// A matrix row header: a name and a small caption under it.
@@ -248,20 +371,36 @@ pub(crate) fn layer_badge(ui: &mut egui::Ui, number: usize, color: Color32) {
 impl RigWerkApp {
     pub(crate) fn routing_page(&mut self, ui: &mut egui::Ui) {
         let total = ui.available_width();
+        let infos = self.path_infos();
+        let multi = infos.len() > 1;
+        let mut actions = Vec::new();
+
+        self.routing_cards_row(ui, total, &mut actions);
+        if multi {
+            self.routing_flow(ui, total, &infos);
+        }
+
         if routing_columns_stack(total) {
             card(ui, CARD, BORDER, |ui| {
                 ui.set_width(total - 32.0);
-                self.routing_input_body(ui);
+                self.routing_input_body(ui, &infos);
             });
             card(ui, CARD, BORDER, |ui| {
                 ui.set_width(total - 32.0);
-                self.routing_mix_body(ui);
+                self.routing_mix_body(ui, &infos);
             });
         } else {
             let left_w = (total * 0.66).clamp(520.0, (total - 288.0).max(520.0));
             let right_w = (total - left_w - 8.0).max(280.0);
             // Same outer height on both cards so the row stays level.
-            let row_h = routing_top_row_height(self.routes.len());
+            let row_h = routing_top_row_height(self.path().mix.routes.len())
+                + if multi {
+                    // Path group headers on the left, a channel mode row
+                    // per path on the right.
+                    (infos.len() as f32 - 1.0) * 28.0 + 24.0
+                } else {
+                    0.0
+                };
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(
                     Vec2::new(left_w, row_h),
@@ -270,7 +409,7 @@ impl RigWerkApp {
                         ui.set_min_size(Vec2::new(left_w, row_h));
                         card_fixed(ui, CARD, BORDER, row_h, |ui| {
                             ui.set_width(left_w - 32.0);
-                            self.routing_input_body(ui);
+                            self.routing_input_body(ui, &infos);
                         });
                     },
                 );
@@ -281,26 +420,31 @@ impl RigWerkApp {
                         ui.set_min_size(Vec2::new(right_w, row_h));
                         card_fixed(ui, CARD, BORDER, row_h, |ui| {
                             ui.set_width(right_w - 32.0);
-                            self.routing_mix_body(ui);
+                            self.routing_mix_body(ui, &infos);
                         });
                     },
                 );
             });
         }
 
-        let mut actions = Vec::new();
-        self.routing_outputs_card(ui, total, &mut actions);
+        self.routing_paths_card(ui, total, &infos, &mut actions);
+        self.routing_outputs_card(ui, total, &infos, &mut actions);
         for action in actions {
             self.apply_routing_action(action);
         }
     }
 
-    /// Layer ①: input channels onto Mix L / Mix R.
-    fn routing_input_body(&mut self, ui: &mut egui::Ui) {
+    /// Layer ①: input channels onto Mix L / Mix R, or with several paths
+    /// onto each path's L / R.
+    fn routing_input_body(&mut self, ui: &mut egui::Ui, infos: &[PathInfo]) {
+        if infos.len() > 1 {
+            self.routing_input_paths_body(ui, infos);
+            return;
+        }
         let input = self.active_input();
         let input_caption = input_channel_caption(&input.backend, &input.name);
         let subtitle = format!("{input_caption} -> the mix bus the chain processes");
-        let input_count = self.routes.len();
+        let input_count = self.path().mix.routes.len();
 
         ui.horizontal(|ui| {
             layer_badge(ui, 1, TEAL);
@@ -330,10 +474,11 @@ impl RigWerkApp {
             ui.horizontal(|ui| {
                 row_header(ui, &format!("IN {}", input + 1), role, TEXT);
                 for (side, column) in MIX_COLUMNS.iter().enumerate() {
-                    if route_cell(ui, self.routes[input][side], input, side) {
-                        self.routes[input][side] = !self.routes[input][side];
-                        self.engine.set_routes(self.routes);
-                        let on = self.routes[input][side];
+                    let routed = self.path().mix.routes[input][side];
+                    if route_cell(ui, routed, input, side) {
+                        let on = !routed;
+                        self.path_mut().mix.routes[input][side] = on;
+                        self.push_paths_to_engine();
                         self.push_log(
                             format!(
                                 "Route {role} -> {column} {}.",
@@ -365,22 +510,155 @@ impl RigWerkApp {
         });
     }
 
+    /// Layer ① with several paths: per path, the input channels onto its
+    /// own L / R (taps 1/2 of its stored 2×4 routes).
+    fn routing_input_paths_body(&mut self, ui: &mut egui::Ui, infos: &[PathInfo]) {
+        let input = self.active_input();
+        let input_caption = input_channel_caption(&input.backend, &input.name);
+        let subtitle = format!("{input_caption} -> each path's own L/R, before its chain");
+        let input_count = self.path().mix.routes.len();
+
+        ui.horizontal(|ui| {
+            layer_badge(ui, 1, TEAL);
+            ui.label(micro_label("INPUT -> PATHS", TEAL));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(mono(
+                    format!("{input_count} IN → {} × L/R", infos.len()),
+                    DIM,
+                    9.5,
+                ));
+            });
+        });
+        ui.label(
+            RichText::new(ellipsize(&subtitle, 80))
+                .size(ts(10.0))
+                .color(MUTED),
+        )
+        .on_hover_text(&subtitle);
+        ui.add_space(10.0);
+
+        let gap = 18.0;
+        egui::ScrollArea::horizontal()
+            .id_salt("routing_input_paths")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let spacing = ui.spacing().item_spacing.x;
+                let group_w = CELL.x * 2.0 + spacing;
+                ui.horizontal(|ui| {
+                    ui.add_space(ROW_HEADER_W);
+                    for info in infos {
+                        path_group_header(ui, &info.name, info.colour, group_w);
+                        ui.add_space(gap);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(ROW_HEADER_W);
+                    for _ in infos {
+                        column_header(ui, "L", None);
+                        column_header(ui, "R", None);
+                        ui.add_space(gap);
+                    }
+                });
+                ui.add_space(2.0);
+                for input in 0..input_count {
+                    let role = input_channel_role(input);
+                    ui.horizontal(|ui| {
+                        row_header(ui, &format!("IN {}", input + 1), role, TEXT);
+                        for info in infos {
+                            for side in 0..2 {
+                                let Some(path) = self.paths[info.slot].as_ref() else {
+                                    continue;
+                                };
+                                let mut routes = path.mix.routes;
+                                let routed = routes[input][side];
+                                if path_route_cell(ui, routed, input, side, &info.name, info.colour)
+                                {
+                                    routes[input][side] = !routed;
+                                    self.set_path_routes(info.slot, routes);
+                                    self.push_paths_to_engine();
+                                    self.push_log(
+                                        format!(
+                                            "Route {role} -> {} {} {}.",
+                                            info.name,
+                                            if side == 0 { "L" } else { "R" },
+                                            if routed { "muted" } else { "enabled" }
+                                        ),
+                                        if routed { MUTED } else { TEAL },
+                                    );
+                                }
+                            }
+                            ui.add_space(gap);
+                        }
+                    });
+                    ui.add_space(5.0);
+                }
+            });
+
+        ui.add_space(8.0);
+        horizontal_line(ui, BORDER_SOFT);
+        ui.add_space(8.0);
+        ui.horizontal_top(|ui| {
+            ui.label(RichText::new("Tip").size(ts(9.5)).color(AMBER).strong());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Mono guitar on IN 1? Route it to L and R of every path that should hear it, or use that path's Mono sum.",
+                    )
+                    .size(ts(10.0))
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+        });
+    }
+
     /// Channel mode and monitoring: what happens on the mix bus.
-    fn routing_mix_body(&mut self, ui: &mut egui::Ui) {
+    fn routing_mix_body(&mut self, ui: &mut egui::Ui, infos: &[PathInfo]) {
         ui.label(micro_label("MIX", AMBER));
         ui.add_space(8.0);
         ui.label(micro_label("CHANNEL MODE", DIM));
         ui.add_space(4.0);
-        let mut mono = self.mono;
-        ui.horizontal(|ui| {
-            if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
-                mono = false;
+        let multi = infos.len() > 1;
+        if multi {
+            // One row per path: each path has its own mono sum.
+            for info in infos {
+                let Some(mut mono) = self.paths[info.slot].as_ref().map(|path| path.mix.mono)
+                else {
+                    continue;
+                };
+                ui.horizontal(|ui| {
+                    status_dot(ui, info.colour);
+                    let font = egui::FontId::new(ts(10.0), FontFamily::Proportional);
+                    let name = crate::ui::widgets::fit_text(ui, &info.name, &font, 70.0);
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 18.0), Sense::hover());
+                    ui.painter()
+                        .text(rect.left_center(), Align2::LEFT_CENTER, name, font, TEXT);
+                    if tab_button_sized(ui, "Stereo", !mono, BLUE, 9.5).clicked() {
+                        mono = false;
+                    }
+                    if tab_button_sized(ui, "Mono sum", mono, BLUE, 9.5).clicked() {
+                        mono = true;
+                    }
+                });
+                if let Some(path) = self.paths[info.slot].as_mut() {
+                    path.mix.mono = mono;
+                }
+                ui.add_space(2.0);
             }
-            if tab_button_sized(ui, "Mono sum", mono, BLUE, 11.0).clicked() {
-                mono = true;
+        } else {
+            let mut mono = self.path().mix.mono;
+            ui.horizontal(|ui| {
+                if tab_button_sized(ui, "Stereo", !mono, BLUE, 11.0).clicked() {
+                    mono = false;
+                }
+                if tab_button_sized(ui, "Mono sum", mono, BLUE, 11.0).clicked() {
+                    mono = true;
+                }
+            });
+            if mono != self.path().mix.mono {
+                self.path_mut().mix.mono = mono;
             }
-        });
-        self.mono = mono;
+        }
         ui.add_space(10.0);
         ui.label(micro_label("MONITORING", DIM));
         ui.add_space(4.0);
@@ -410,9 +688,11 @@ impl RigWerkApp {
             status_dot(ui, TEAL);
             ui.add(
                 egui::Label::new(
-                    RichText::new(
-                        "Both layers apply live. Layer 1 shapes what the chain hears; layer 2 only decides which device channels play the finished mix.",
-                    )
+                    RichText::new(if multi {
+                        "Every layer applies live. Layer 1 shapes what each path's chain hears, the paths run their chains, and layer 2 decides which device channels play each path."
+                    } else {
+                        "Both layers apply live. Layer 1 shapes what the chain hears; layer 2 only decides which device channels play the finished mix."
+                    })
                     .size(ts(9.5))
                     .color(MUTED),
                 )

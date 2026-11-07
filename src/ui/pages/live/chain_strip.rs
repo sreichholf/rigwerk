@@ -1,5 +1,8 @@
 //! One line on Live Bridge summing up the Mixer page: each stage of the
-//! master chain in order, with a way to open the full mixer.
+//! selected path's chain in order, with a way to open the full mixer.
+//! With several paths the label names the path and counts them ("Main ·
+//! 3 paths"), and the Output chip adds what the alignment delays the
+//! output by (`RigWerkApp::added_alignment_ms`).
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
@@ -9,28 +12,61 @@ use crate::audio::EqSlot;
 use crate::ui::pages::mixer::chain::live_chain_entries;
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT};
-use crate::ui::widgets::{card_fixed, micro_label};
+use crate::ui::widgets::{card_fixed, ellipsize, micro_label, mono};
+
+/// The chain label's second line with several paths: "Main · 3 paths".
+pub(crate) fn path_count_label(name: &str, paths: usize) -> String {
+    format!("{name} · {paths} paths")
+}
+
+/// The Output chip with alignment: "+0.0 dB · +2.7 ms".
+pub(crate) fn output_summary(summary: &str, added_ms: f32) -> String {
+    format!("{summary} · +{added_ms:.1} ms")
+}
 
 impl RigWerkApp {
     pub(crate) fn chain_strip(&mut self, ui: &mut egui::Ui, width: f32) {
-        let views = self.engine.plugin_views();
-        let stages = live_chain_entries(
+        let views = self.engine.plugin_views(self.selected_path);
+        let mut stages = live_chain_entries(
             self.input_gain,
-            &self.eqs[EqSlot::Pre.index()],
+            &self.path().mix.eqs[EqSlot::Pre.index()],
             &views,
-            &self.gate,
-            &self.eqs[EqSlot::Post.index()],
+            &self.path().mix.gate,
+            &self.path().mix.eqs[EqSlot::Post.index()],
             self.output_gain,
             self.mute,
         );
+        let paths = self.path_count();
+        let added = self.added_alignment_ms();
+        if added >= 0.05 {
+            if let Some(output) = stages.last_mut() {
+                output.summary = output_summary(&output.summary, added);
+            }
+        }
+        let path_line = (paths > 1).then(|| path_count_label(&self.path().name, paths));
 
         let mut open: Option<crate::ui::pages::mixer::chain::ChainSelection> = None;
         card_fixed(ui, CARD, BORDER, 74.0, |ui| {
             ui.set_width(width - 32.0);
             ui.horizontal_centered(|ui| {
-                ui.label(micro_label("CHAIN", TEAL)).on_hover_text(
-                    "The master chain on the Mixer page, in the order the sound flows.",
-                );
+                match &path_line {
+                    Some(line) => {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(micro_label("CHAIN", TEAL));
+                            ui.label(mono(ellipsize(line, 18), MUTED, 8.5));
+                        })
+                        .response
+                        .on_hover_text(format!(
+                            "{line}. This strip shows the path the Mixer edits; pick another there or in the sidebar."
+                        ));
+                    }
+                    None => {
+                        ui.label(micro_label("CHAIN", TEAL)).on_hover_text(
+                            "The master chain on the Mixer page, in the order the sound flows.",
+                        );
+                    }
+                }
                 ui.add_space(8.0);
                 let button_w = 108.0;
                 let button_gap = 16.0;
@@ -94,9 +130,17 @@ impl RigWerkApp {
                         egui::FontId::new(ts(10.0), egui::FontFamily::Proportional),
                         if entry.live { TEXT } else { MUTED },
                     );
-                    if response
-                        .on_hover_text("Open this stage on the Mixer page")
-                        .clicked()
+                    let hint = if entry.selection
+                        == crate::ui::pages::mixer::chain::ChainSelection::Output
+                        && added >= 0.05
+                    {
+                        format!(
+                            "Open this stage on the Mixer page. Aligning the paths adds up to {added:.1} ms on an output device."
+                        )
+                    } else {
+                        "Open this stage on the Mixer page".to_owned()
+                    };
+                    if response.on_hover_text(hint).clicked()
                     {
                         open = Some(entry.selection);
                     }
@@ -125,5 +169,27 @@ impl RigWerkApp {
             self.select_chain(selection);
             self.page = Page::Mixer;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{output_summary, path_count_label};
+    use crate::app::blank_app;
+    use crate::app::cards::Card;
+
+    #[test]
+    fn the_strip_counts_paths_and_shows_the_alignment() {
+        assert_eq!(path_count_label("Main", 3), "Main · 3 paths");
+        assert_eq!(output_summary("+0.0 dB", 2.0), "+0.0 dB · +2.0 ms");
+        let mut app = blank_app();
+        assert_eq!(app.added_alignment_ms(), 0.0);
+        assert!(app.apply_card(Card::Blend));
+        let second = app.path_slots()[1];
+        app.engine.screenshot_path_latency(second, 96);
+        assert!((app.added_alignment_ms() - 2.0).abs() < 1e-3);
+        app.set_device_align(0, false);
+        assert_eq!(app.added_alignment_ms(), 0.0, "nothing waits");
+        app.engine.screenshot_path_latency(second, 0);
     }
 }

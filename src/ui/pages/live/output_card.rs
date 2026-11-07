@@ -131,8 +131,8 @@ impl RigWerkApp {
         ui.add_space(2.0);
 
         ui.horizontal(|ui| {
-            channel_chip(ui, "OUT 1", &mut self.output_channels[0], BLUE);
-            channel_chip(ui, "OUT 2", &mut self.output_channels[1], BLUE);
+            channel_chip(ui, "OUT 1", &mut self.path_mut().mix.output_enabled[0], BLUE);
+            channel_chip(ui, "OUT 2", &mut self.path_mut().mix.output_enabled[1], BLUE);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add(

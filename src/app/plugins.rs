@@ -1,9 +1,11 @@
-//! Finding VST3 and CLAP bundles and adding them to the master insert chain.
+//! Finding VST3 and CLAP bundles and adding them to the selected path's
+//! insert chain.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
+use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{self, ClapCandidate};
 use crate::audio::{PluginFormat, PluginPref};
@@ -258,22 +260,29 @@ impl RigWerkApp {
     fn install_plugin(&mut self, pref: PluginPref) {
         let format = pref.format;
         let insert_at = self.plugin_insert_at.take();
-        match self.engine.add_plugin(pref) {
+        let path = self.selected_path;
+        match self.engine.add_plugin(path, pref) {
             Ok(()) => {
-                let mut index = self.engine.plugin_views().len().saturating_sub(1);
+                let mut index = self.engine.plugin_views(path).len().saturating_sub(1);
                 if let Some(target) = insert_at {
                     while index > target {
-                        self.engine.move_plugin(index, -1);
+                        self.engine.move_plugin(path, index, -1);
                         index -= 1;
                     }
                 }
                 self.chain_selected = crate::ui::pages::mixer::chain::ChainSelection::Plugin(index);
+                // One path reads as before; with several, name the path.
+                let target = if self.path_count() > 1 {
+                    format!("path {}", self.path().name)
+                } else {
+                    "the master bus".to_owned()
+                };
                 self.push_log(
-                    format!("{} insert added to the master bus.", format.label()),
+                    format!("{} insert added to {target}.", format.label()),
                     GREEN,
                 );
                 self.plugin_browser.notice = Some((
-                    "Plugin added to the master bus.".to_owned(),
+                    format!("Plugin added to {target}."),
                     std::time::Instant::now(),
                 ));
             }
@@ -287,24 +296,43 @@ impl RigWerkApp {
         }
     }
 
+    /// The selected path's insert `index`.
+    fn insert_key(&self, index: usize) -> InsertKey {
+        InsertKey {
+            path: self.selected_path,
+            insert: index,
+        }
+    }
+
+    /// Removes insert `index` of the selected path.
     pub(crate) fn remove_plugin(&mut self, index: usize) {
+        let path = self.selected_path;
         // Editors are tied to a position in the chain: close the removed
         // insert's, and let a later insert's follow it as it slides up.
-        match self.plugin_gui.as_ref().map(|gui| gui.index) {
-            Some(open) if open == index => self.plugin_gui = None,
-            Some(open) if open > index => {
-                if let Some(gui) = self.plugin_gui.as_mut() {
-                    gui.index = open - 1;
-                }
+        let shift = |key: InsertKey| -> Option<InsertKey> {
+            if key.path != path || key.insert < index {
+                Some(key)
+            } else if key.insert == index {
+                None
+            } else {
+                Some(InsertKey {
+                    insert: key.insert - 1,
+                    ..key
+                })
             }
-            _ => {}
-        }
-        self.engine.remove_plugin(index);
-        self.plugin_editor = match self.plugin_editor {
-            Some(open) if open == index => None,
-            Some(open) if open > index => Some(open - 1),
-            other => other,
         };
+        if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
+            match shift(key) {
+                Some(moved) => {
+                    if let Some(gui) = self.plugin_gui.as_mut() {
+                        gui.key = moved;
+                    }
+                }
+                None => self.plugin_gui = None,
+            }
+        }
+        self.engine.remove_plugin(path, index);
+        self.plugin_editor = self.plugin_editor.and_then(shift);
         if self.plugin_editor.is_none() {
             self.plugin_param_filter.clear();
         }
@@ -312,53 +340,69 @@ impl RigWerkApp {
     }
 
     pub(crate) fn move_plugin(&mut self, index: usize, delta: isize) {
-        // Finished while its index still names the right insert.
-        self.finish_plugin_gui();
-        self.engine.move_plugin(index, delta);
-        self.plugin_editor = None;
-        self.plugin_param_filter.clear();
+        let path = self.selected_path;
+        // Finished while its index still names the right insert.  Editors
+        // of other paths are not affected.
+        if self
+            .plugin_gui
+            .as_ref()
+            .is_some_and(|gui| gui.key.path == path)
+        {
+            self.finish_plugin_gui();
+        }
+        self.engine.move_plugin(path, index, delta);
+        if self.plugin_editor.is_some_and(|key| key.path == path) {
+            self.plugin_editor = None;
+            self.plugin_param_filter.clear();
+        }
     }
 
     pub(crate) fn set_plugin_bypass(&mut self, index: usize, bypass: bool) {
-        self.engine.set_plugin_bypass(index, bypass);
+        self.engine
+            .set_plugin_bypass(self.selected_path, index, bypass);
     }
 
     pub(crate) fn set_plugin_mix(&mut self, index: usize, mix: f32) {
-        self.engine.set_plugin_mix(index, mix);
+        self.engine.set_plugin_mix(self.selected_path, index, mix);
     }
 
-    /// Opens the control panel for one insert, loading a saved plugin first if
-    /// the bridge has not been started yet.  When the person prefers plugin
-    /// interfaces, a plugin that can embed its own view opens that instead.
+    /// Opens the control panel for one insert of the selected path, loading
+    /// a saved plugin first if the bridge has not been started yet.  When
+    /// the person prefers plugin interfaces, a plugin that can embed its own
+    /// view opens that instead.
     pub(crate) fn open_plugin_editor(&mut self, index: usize) {
-        self.engine.ensure_plugin_loaded(index);
-        if self.plugin_editor != Some(index) {
+        let key = self.insert_key(index);
+        self.engine.ensure_plugin_loaded(key.path, index);
+        if self.plugin_editor != Some(key) {
             // A different insert: the plugin editor and the filter belong to
             // the one that was open before.
             self.finish_plugin_gui();
             self.plugin_param_filter.clear();
         }
         if self.prefer_plugin_interface {
-            let views = self.engine.plugin_views();
+            let views = self.engine.plugin_views(key.path);
             let usable = views
                 .get(index)
                 .is_some_and(|view| view.has_editor && view.error.is_none());
-            if usable && self.open_plugin_gui(index) {
+            if usable && self.open_plugin_gui(key) {
                 self.plugin_editor = None;
                 return;
             }
         }
-        self.plugin_editor = Some(index);
+        self.plugin_editor = Some(key);
     }
 
-    pub(crate) fn set_plugin_parameter(&mut self, index: usize, id: u32, value: f64) {
-        if let Err(error) = self.engine.set_plugin_parameter(index, id, value) {
+    pub(crate) fn set_plugin_parameter(&mut self, key: InsertKey, id: u32, value: f64) {
+        if let Err(error) = self
+            .engine
+            .set_plugin_parameter(key.path, key.insert, id, value)
+        {
             self.plugin_browser.notice = Some((error, std::time::Instant::now()));
         }
     }
 
-    pub(crate) fn reset_plugin_parameters(&mut self, index: usize) {
-        if let Err(error) = self.engine.reset_plugin_parameters(index) {
+    pub(crate) fn reset_plugin_parameters(&mut self, key: InsertKey) {
+        if let Err(error) = self.engine.reset_plugin_parameters(key.path, key.insert) {
             self.plugin_browser.notice = Some((error, std::time::Instant::now()));
         } else {
             self.push_log("Plugin controls reset to the plugin defaults.", TEAL);

@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::super::path::{path_level_gain, sanitize_path_level, MAX_PATHS};
+use super::align::{plan_alignment, trim_frames, AlignmentReport};
+use super::weights::{level_gain, path_channel_weights, routed_paths};
+
 /// Most device channels a [`ChannelMap`] can address.
 pub const MAX_OUTPUT_CHANNELS: usize = 8;
 
@@ -193,17 +197,174 @@ pub enum UnusedChannels {
     MonoCopy,
 }
 
-/// Level, mute and channel map of one output device, applied after the
-/// master.  Missing fields read as the defaults (0 dB, unmuted, L → 1,
-/// R → 2, mono copy on the rest), which is today's output.
+/// The alignment trim range, ms.
+pub const PATH_TRIM_MAX_MS: f32 = 5.0;
+
+/// One signal path's place in one device's sum: its channel map, its level
+/// there, its polarity, and the alignment trim on top of the automatic
+/// alignment.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct PathMapSettings {
+    pub map: ChannelMap,
+    /// The path's level on this device, dB.
+    pub level_db: f32,
+    /// Polarity flip.
+    pub invert: bool,
+    /// Alignment trim, ms (±[`PATH_TRIM_MAX_MS`]): extra delay (positive)
+    /// or less delay (negative) for this path on this device, on top of
+    /// the automatic alignment.
+    pub trim_ms: f32,
+}
+
+impl Default for PathMapSettings {
+    fn default() -> Self {
+        Self {
+            map: ChannelMap::default(),
+            level_db: 0.0,
+            invert: false,
+            trim_ms: 0.0,
+        }
+    }
+}
+
+impl PathMapSettings {
+    /// `map` as the first path's entry, defaults for the others.
+    #[cfg(test)]
+    pub fn first(map: ChannelMap) -> [Self; MAX_PATHS] {
+        let mut entries = [Self::default(); MAX_PATHS];
+        entries[0].map = map;
+        entries
+    }
+
+    /// What an added (empty) path gets on every device: nothing routed.
+    pub fn unrouted() -> Self {
+        Self {
+            map: ChannelMap { left: 0, right: 0 },
+            ..Self::default()
+        }
+    }
+
+    pub fn sanitized(self) -> Self {
+        Self {
+            level_db: sanitize_path_level(self.level_db),
+            trim_ms: if self.trim_ms.is_nan() {
+                0.0
+            } else {
+                self.trim_ms.clamp(-PATH_TRIM_MAX_MS, PATH_TRIM_MAX_MS)
+            },
+            ..self
+        }
+    }
+
+    /// The trim in whole frames at `rate` (rounded).
+    pub(crate) fn trim_frames(&self, rate: u32) -> i32 {
+        trim_frames(self.trim_ms, rate)
+    }
+
+    /// The signed linear gain the device applies to this path: the level,
+    /// negated when the polarity is flipped.  0 dB and normal polarity is
+    /// exactly 1.0.
+    pub(crate) fn gain(&self) -> f32 {
+        let gain = path_level_gain(self.level_db);
+        if self.invert {
+            -gain
+        } else {
+            gain
+        }
+    }
+}
+
+/// Level, mute and channel maps of one output device, applied after the
+/// master.  Missing fields read as the defaults (0 dB, unmuted, L → 1,
+/// R → 2 for every path, mono copy on the rest), which is today's output.
+///
+/// `path_map` is indexed by path slot in memory.  Saved, it is indexed by
+/// the path's position in the saved `paths` list (the app compacts it), and
+/// trailing default entries are left out.  Files from before paths existed
+/// stored one `map`; it loads as the first path's map.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredDeviceSettings", into = "StoredDeviceSettings")]
 pub struct OutputDeviceSettings {
     /// Device level, dB.
     pub level_db: f32,
     pub mute: bool,
-    pub map: ChannelMap,
     pub unused: UnusedChannels,
+    /// Each path's map, level, polarity and trim on this device.
+    pub path_map: [PathMapSettings; MAX_PATHS],
+    /// Latency alignment: every path routed here waits for the slowest one
+    /// (see [`plan_alignment`]).  Off, only the trims apply.  On by default,
+    /// and in files from before it existed.
+    pub align: bool,
+}
+
+/// The saved form of [`OutputDeviceSettings`].
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct StoredDeviceSettings {
+    level_db: f32,
+    mute: bool,
+    /// Path 1's map in files from before paths existed.  Read, never written.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_map"
+    )]
+    map: Option<ChannelMap>,
+    unused: UnusedChannels,
+    path_map: Vec<PathMapSettings>,
+    align: bool,
+}
+
+/// A legacy `map` is stored bare (not as `Some(..)`); reads it as present.
+fn present_map<'de, D>(deserializer: D) -> Result<Option<ChannelMap>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    ChannelMap::deserialize(deserializer).map(Some)
+}
+
+impl Default for StoredDeviceSettings {
+    fn default() -> Self {
+        Self::from(OutputDeviceSettings::default())
+    }
+}
+
+impl From<StoredDeviceSettings> for OutputDeviceSettings {
+    fn from(stored: StoredDeviceSettings) -> Self {
+        let mut path_map = [PathMapSettings::default(); MAX_PATHS];
+        if let Some(map) = stored.map {
+            path_map[0].map = map;
+        }
+        for (slot, saved) in path_map.iter_mut().zip(stored.path_map) {
+            *slot = saved;
+        }
+        Self {
+            level_db: stored.level_db,
+            mute: stored.mute,
+            unused: stored.unused,
+            path_map,
+            align: stored.align,
+        }
+    }
+}
+
+impl From<OutputDeviceSettings> for StoredDeviceSettings {
+    fn from(settings: OutputDeviceSettings) -> Self {
+        let used = settings
+            .path_map
+            .iter()
+            .rposition(|entry| *entry != PathMapSettings::default())
+            .map_or(0, |last| last + 1);
+        Self {
+            level_db: settings.level_db,
+            mute: settings.mute,
+            map: None,
+            unused: settings.unused,
+            path_map: settings.path_map[..used].to_vec(),
+            align: settings.align,
+        }
+    }
 }
 
 impl Default for OutputDeviceSettings {
@@ -211,15 +372,22 @@ impl Default for OutputDeviceSettings {
         Self {
             level_db: 0.0,
             mute: false,
-            map: ChannelMap::default(),
             unused: UnusedChannels::default(),
+            path_map: [PathMapSettings::default(); MAX_PATHS],
+            align: true,
         }
     }
 }
 
 impl OutputDeviceSettings {
+    /// Path `slot`'s channel map on this device.
+    pub fn map(&self, slot: usize) -> ChannelMap {
+        self.path_map[slot.min(MAX_PATHS - 1)].map
+    }
+
     /// A NaN level becomes 0 dB; the level is clamped to
-    /// [`DEVICE_LEVEL_MIN_DB`]..=[`DEVICE_LEVEL_MAX_DB`].
+    /// [`DEVICE_LEVEL_MIN_DB`]..=[`DEVICE_LEVEL_MAX_DB`].  Each path's level
+    /// and trim are clamped too.
     pub fn sanitized(self) -> Self {
         let level_db = if self.level_db.is_nan() {
             0.0
@@ -228,79 +396,122 @@ impl OutputDeviceSettings {
         };
         Self {
             level_db: level_db.clamp(DEVICE_LEVEL_MIN_DB, DEVICE_LEVEL_MAX_DB),
+            path_map: self.path_map.map(PathMapSettings::sanitized),
             ..self
         }
     }
 
-    /// How many of a `channels`-channel device's channels play the mix:
-    /// those a side reaches, plus the unreached ones under
-    /// [`UnusedChannels::MonoCopy`] (they carry the average).  Level and mute
-    /// don't count: this is about the routing, not about what is audible.
-    pub fn playing_channels(&self, channels: usize) -> usize {
+    /// This device with the paths reordered for saving: entry `n` is slot
+    /// `order[n]`'s, the rest are defaults.
+    pub fn with_path_order(&self, order: &[usize]) -> Self {
+        let mut path_map = [PathMapSettings::default(); MAX_PATHS];
+        for (to, &slot) in path_map.iter_mut().zip(order) {
+            *to = self.path_map[slot.min(MAX_PATHS - 1)];
+        }
+        Self { path_map, ..*self }
+    }
+
+    /// How many of a `channels`-channel device's channels play the sum of
+    /// the `live` paths: those a path reaches, plus the unreached ones under
+    /// [`UnusedChannels::MonoCopy`] (they carry a mono copy).  Level and
+    /// mute don't count: this is about the routing, not about what is
+    /// audible.
+    pub fn playing_channels(&self, channels: usize, live: [bool; MAX_PATHS]) -> usize {
+        let maps = self.path_map.map(|entry| entry.map);
         (0..channels.min(MAX_OUTPUT_CHANNELS))
             .filter(|&channel| {
-                channel_weights(self.map, self.unused, channels, channel) != [0.0; 3]
+                (0..MAX_PATHS).any(|path| {
+                    path_channel_weights(&maps, live, self.unused, channels, channel, path)
+                        != [0.0; 3]
+                })
             })
             .count()
     }
 
-    /// One settled frame of a `channels`-channel device under these settings
-    /// (no ramps): what the callback writes once a change has crossfaded.
-    /// Channels past the device or past [`MAX_OUTPUT_CHANNELS`] read 0. For
-    /// the UI, e.g. preview meters; the callback uses [`DeviceMapper`].
-    pub(crate) fn settled_frame(
+    /// Which of the `live` paths this device plays on any of its
+    /// `channels` channels (by their own map, or through the mono copy).
+    /// The routing decides, not what is audible: muted and un-soloed paths
+    /// count.  These are the paths the alignment lines up.
+    pub(crate) fn routed_paths(
         &self,
+        live: [bool; MAX_PATHS],
+        channels: usize,
+    ) -> [bool; MAX_PATHS] {
+        let maps = self.path_map.map(|entry| entry.map);
+        routed_paths(&maps, live, self.unused, channels)
+    }
+
+    /// The alignment this device gets at `rate` when the `live` paths have
+    /// `latency` (chain latency in frames): what the mixer applies, worked
+    /// out from the settings.  For the UI when no bridge runs; the mixer
+    /// publishes its own (see `AudioEngine::device_alignment`).
+    pub(crate) fn alignment(
+        &self,
+        live: [bool; MAX_PATHS],
+        channels: usize,
+        latency: [u32; MAX_PATHS],
+        rate: u32,
+    ) -> AlignmentReport {
+        let routed = self.routed_paths(live, channels);
+        let trims = self.path_map.map(|entry| entry.trim_frames(rate));
+        AlignmentReport::new(
+            plan_alignment(self.align, routed, latency, trims),
+            self.align,
+            latency,
+            rate,
+        )
+    }
+
+    /// Which of the `live` paths sound on device channel `channel` (by
+    /// their own map, or through the mono copy on an unreached channel).
+    pub(crate) fn paths_on_channel(
+        &self,
+        live: [bool; MAX_PATHS],
+        channels: usize,
+        channel: usize,
+    ) -> [bool; MAX_PATHS] {
+        let maps = self.path_map.map(|entry| entry.map);
+        std::array::from_fn(|path| {
+            path_channel_weights(&maps, live, self.unused, channels, channel, path) != [0.0; 3]
+        })
+    }
+
+    /// One settled frame of a `channels`-channel device under these settings
+    /// (no ramps): every `live` path plays the same stereo frame, scaled by
+    /// `path_gains` (its level, mute and solo) and by its level and polarity
+    /// on this device, and the paths add up as in the callback.  Channels
+    /// past the device or past [`MAX_OUTPUT_CHANNELS`] read 0.  For the UI's
+    /// preview meters; the callback uses [`DeviceMapper`](super::DeviceMapper).
+    pub(crate) fn settled_sum(
+        &self,
+        live: [bool; MAX_PATHS],
+        path_gains: [f32; MAX_PATHS],
         channels: usize,
         left: f32,
         right: f32,
     ) -> [f32; MAX_OUTPUT_CHANNELS] {
-        let gain = if self.mute {
+        let device_gain = if self.mute {
             0.0
         } else {
             level_gain(self.level_db)
         };
+        let maps = self.path_map.map(|entry| entry.map);
         let sources = [left, right, (left + right) * 0.5];
         let mut frame = [0.0; MAX_OUTPUT_CHANNELS];
         for (channel, sample) in frame.iter_mut().enumerate().take(channels) {
-            let weights = channel_weights(self.map, self.unused, channels, channel);
-            *sample = gain
-                * weights
+            let mut sum = 0.0;
+            for path in (0..MAX_PATHS).filter(|&path| live[path]) {
+                let weights =
+                    path_channel_weights(&maps, live, self.unused, channels, channel, path);
+                let mixed: f32 = weights
                     .iter()
                     .zip(sources)
                     .map(|(weight, source)| weight * source)
-                    .sum::<f32>();
+                    .sum();
+                sum += mixed * path_gains[path] * self.path_map[path].gain();
+            }
+            *sample = device_gain * sum;
         }
         frame
-    }
-}
-
-/// Linear gain of a device level in dB.  0 dB is exactly 1.0, so the default
-/// level leaves every sample untouched.
-pub(super) fn level_gain(level_db: f32) -> f32 {
-    if level_db == 0.0 {
-        1.0
-    } else {
-        10.0f32.powf(level_db / 20.0)
-    }
-}
-
-/// How much of `L`, `R` and `(L + R) / 2` device channel `channel` (0-based)
-/// of a `channels`-channel device carries, following the module docs.
-/// Exactly one weight is 1 (or none, for a silent channel), so a settled map
-/// copies one value instead of summing.
-pub(super) fn channel_weights(
-    map: ChannelMap,
-    unused: UnusedChannels,
-    channels: usize,
-    channel: usize,
-) -> [f32; 3] {
-    match map.sides_at(channels, channel) {
-        (true, false) => [1.0, 0.0, 0.0],
-        (false, true) => [0.0, 1.0, 0.0],
-        (true, true) => [0.0, 0.0, 1.0],
-        (false, false) => match unused {
-            UnusedChannels::MonoCopy => [0.0, 0.0, 1.0],
-            UnusedChannels::Silent => [0.0, 0.0, 0.0],
-        },
     }
 }

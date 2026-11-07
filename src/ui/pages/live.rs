@@ -1,11 +1,13 @@
 //! Live Bridge: the page layout and the activity strip.  Each card lives in
-//! its own file under `live/`.
+//! its own file under `live/`; the Issues strip (`live/issues.rs`) sits on
+//! top while there are issues.
 
 mod bridge_card;
 mod chain_strip;
 mod driver_line;
 mod health;
 mod input_card;
+mod issues;
 mod output_card;
 
 use eframe::egui;
@@ -34,6 +36,9 @@ impl RigWerkApp {
         // Tall enough for the Output body plus a bottom-pinned Also playing on
         // strip; Input and Bridge share the same outer height.
         let card_h = LIVE_TOP_CARD_H;
+
+        // Judgments first: one strip, only while there is something to say.
+        self.issues_strip(ui, total);
 
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(

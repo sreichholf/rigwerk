@@ -147,8 +147,23 @@ unsafe impl Sync for MainThreadTarget {}
 pub(crate) struct HostState {
     pub(super) main_thread: std::thread::ThreadId,
     pub(super) target: RwLock<MainThreadTarget>,
+    /// Set by `clap_host.request_restart`.  The audio thread stops
+    /// processing (see `ClapPlugin::process`), then the main thread
+    /// deactivates and reactivates the plugin in `ClapPlugin::service_pending`.
     pub(super) restart_requested: AtomicBool,
     pub(super) process_requested: AtomicBool,
+    /// The plugin's latency in samples, read through `clap_plugin_latency.get`
+    /// after every activation.  Readable from any thread without a lock.
+    pub(super) latency: AtomicU32,
+    /// Set by `clap_host_latency.changed`; the main thread re-reads the
+    /// latency in `ClapPlugin::service_pending`.
+    pub(super) latency_changed: AtomicBool,
+    /// Set when a re-read moved [`Self::latency`], until the path's
+    /// `service_plugins` takes it to republish the insert views.
+    pub(super) latency_unseen: AtomicBool,
+    /// Counts `ClapPlugin::process` calls, so the main thread can tell
+    /// whether the audio callback still runs while a restart waits for it.
+    pub(super) blocks: AtomicU64,
     pub(super) callback_requested: AtomicBool,
     pub(super) params_rescan: AtomicBool,
     pub(super) flush_requested: AtomicBool,
@@ -182,6 +197,10 @@ impl HostState {
             }),
             restart_requested: AtomicBool::new(false),
             process_requested: AtomicBool::new(false),
+            latency: AtomicU32::new(0),
+            latency_changed: AtomicBool::new(false),
+            latency_unseen: AtomicBool::new(false),
+            blocks: AtomicU64::new(0),
             callback_requested: AtomicBool::new(false),
             params_rescan: AtomicBool::new(false),
             flush_requested: AtomicBool::new(false),
@@ -220,6 +239,24 @@ impl HostState {
     /// buffers cannot follow.  The insert is stopped until it is reloaded.
     pub(crate) fn ports_changed(&self) -> bool {
         self.ports_changed.load(Ordering::Relaxed)
+    }
+
+    /// The plugin's latency in samples as last read (0 without the latency
+    /// extension).  Lock-free, so the audio thread may read it.
+    pub(crate) fn latency(&self) -> u32 {
+        self.latency.load(Ordering::Acquire)
+    }
+
+    /// Whether the latency changed since the last call, whoever serviced
+    /// the plugin (the path, or an open editor window).
+    pub(crate) fn take_latency_change(&self) -> bool {
+        self.latency_unseen.swap(false, Ordering::AcqRel)
+    }
+
+    /// Whether a restart or latency change waits for the main thread.
+    pub(super) fn lifecycle_pending(&self) -> bool {
+        self.restart_requested.load(Ordering::Acquire)
+            || self.latency_changed.load(Ordering::Acquire)
     }
 
     /// A state for tests that only exercise slot bookkeeping.
@@ -281,8 +318,9 @@ impl HostState {
     /// calls while the audio thread is inside `process`, so this does not take
     /// the instance mutex: an editor repainting from its timer can no longer
     /// make the audio callback skip the insert.  Returns true when a parameter
-    /// flush or rescan is waiting; those touch the instance and must run
-    /// through [`ClapPlugin::service_pending`] under its lock.
+    /// flush or rescan, a restart, or a latency re-read is waiting; those
+    /// touch the instance and must run through
+    /// [`super::ClapPlugin::service_pending`] under its lock.
     pub(crate) fn service_main_thread(&self) -> bool {
         if let Ok(target) = self.target.read() {
             if !target.plugin.is_null() {
@@ -294,7 +332,9 @@ impl HostState {
                 self.service_timers(&target);
             }
         }
-        self.flush_requested.load(Ordering::Relaxed) || self.params_rescan.load(Ordering::Relaxed)
+        self.flush_requested.load(Ordering::Relaxed)
+            || self.params_rescan.load(Ordering::Relaxed)
+            || self.lifecycle_pending()
     }
 
     pub(super) fn service_timers(&self, target: &MainThreadTarget) {
@@ -372,7 +412,7 @@ pub(super) unsafe extern "C" fn host_get_extension(
 
 pub(super) unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     if let Some(state) = unsafe { state(host) } {
-        state.restart_requested.store(true, Ordering::Relaxed);
+        state.restart_requested.store(true, Ordering::Release);
     }
 }
 
@@ -581,4 +621,13 @@ pub(super) static HOST_LATENCY: clap_host_latency = clap_host_latency {
     changed: Some(host_latency_changed),
 };
 
-pub(super) unsafe extern "C" fn host_latency_changed(_host: *const clap_host) {}
+/// `clap_host_latency.changed` is a main-thread call, and CLAP only lets the
+/// latency change while the plugin is inactive (inside `activate`) or through
+/// `request_restart`.  Only a flag is set here: the main-thread service reads
+/// the new value once the plugin is active again (it may be in the middle of
+/// `activate` right now, where `latency.get` is not allowed yet).
+pub(super) unsafe extern "C" fn host_latency_changed(host: *const clap_host) {
+    if let Some(state) = unsafe { state(host) } {
+        state.latency_changed.store(true, Ordering::Release);
+    }
+}

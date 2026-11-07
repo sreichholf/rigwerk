@@ -9,14 +9,15 @@ use std::time::{Duration, Instant};
 
 use vst3_host::PluginWindow;
 
+use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::ClapPlugin;
 use crate::audio::{plugin_instance_id, PluginHandle, PluginView};
 use crate::ui::theme::{GREEN, RED};
 
 pub(crate) struct PluginGuiWindow {
-    /// Position of the insert in the master chain.
-    pub(crate) index: usize,
+    /// The insert this editor belongs to: its path and its position there.
+    pub(crate) key: InsertKey,
     kind: GuiKind,
     last_sync: Instant,
 }
@@ -42,7 +43,7 @@ impl PluginGuiWindow {
         }
     }
 
-    /// Whether the insert at this editor's index still holds its instance.
+    /// Whether the insert at this editor's key still holds its instance.
     /// Read from the published views, so polling an open editor every frame
     /// never takes the chain lock the audio callback needs.
     fn matches(&self, view: Option<&PluginView>) -> bool {
@@ -53,11 +54,15 @@ impl PluginGuiWindow {
 impl RigWerkApp {
     /// Opens the plugin's own interface for one insert, replacing any editor
     /// that is already open.  Returns whether a window could be opened.
-    pub(crate) fn open_plugin_gui(&mut self, index: usize) -> bool {
-        self.engine.ensure_plugin_loaded(index);
+    pub(crate) fn open_plugin_gui(&mut self, key: InsertKey) -> bool {
+        let InsertKey {
+            path,
+            insert: index,
+        } = key;
+        self.engine.ensure_plugin_loaded(path, index);
         // Dropping the old window detaches its editor before the new one opens.
         self.finish_plugin_gui();
-        let Some(handle) = self.engine.plugin_handle(index) else {
+        let Some(handle) = self.engine.plugin_handle(path, index) else {
             self.plugin_browser.notice = Some((
                 "The effect is not loaded, so its interface cannot open.".to_owned(),
                 Instant::now(),
@@ -66,17 +71,22 @@ impl RigWerkApp {
         };
         let name = self
             .engine
-            .plugin_views()
+            .plugin_views(path)
             .get(index)
             .map(|view| view.name.clone())
             .unwrap_or_else(|| "Plugin".to_owned());
+        // With several paths the window title says whose insert it is.
+        let name = match self.paths.get(path).and_then(Option::as_ref) {
+            Some(owner) if self.path_count() > 1 => format!("{name} · {}", owner.name),
+            _ => name,
+        };
         let opened = match &handle {
             PluginHandle::Vst3(plugin) => {
                 let mut window = PluginWindow::new(plugin.clone());
                 match window.open() {
                     Ok(()) => {
                         self.plugin_gui = Some(PluginGuiWindow {
-                            index,
+                            key,
                             kind: GuiKind::Vst3 {
                                 plugin: plugin.clone(),
                                 window,
@@ -94,7 +104,7 @@ impl RigWerkApp {
             PluginHandle::Clap(plugin) => match ClapGuiWindow::open(plugin.clone(), &name) {
                 Ok(window) => {
                     self.plugin_gui = Some(PluginGuiWindow {
-                        index,
+                        key,
                         kind: GuiKind::Clap {
                             plugin: plugin.clone(),
                             window,
@@ -130,18 +140,18 @@ impl RigWerkApp {
     /// Drops the editor after a last sync, so whatever it changed since the
     /// previous 250 ms sync reaches the saved insert and its state blob.
     pub(crate) fn finish_plugin_gui(&mut self) {
-        if let Some(index) = self.plugin_gui.as_ref().map(|gui| gui.index) {
-            self.engine.finish_plugin_editor(index);
+        if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
+            self.engine.finish_plugin_editor(key.path, key.insert);
         }
         self.plugin_gui = None;
     }
 
     /// Servicing and keeping the open editor in step, once per frame.
     pub(crate) fn poll_plugin_gui(&mut self) {
-        let Some(index) = self.plugin_gui.as_ref().map(|gui| gui.index) else {
+        let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) else {
             return;
         };
-        let views = self.engine.plugin_views();
+        let views = self.engine.plugin_views(key.path);
         let (dismissed, same_plugin, due) = {
             let Some(gui) = self.plugin_gui.as_mut() else {
                 return;
@@ -153,7 +163,7 @@ impl RigWerkApp {
                 }
                 GuiKind::Clap { window, .. } => window.service(),
             };
-            let same_plugin = gui.matches(views.get(index));
+            let same_plugin = gui.matches(views.get(key.insert));
             let due = gui.last_sync.elapsed() >= Duration::from_millis(250);
             if due {
                 gui.last_sync = Instant::now();
@@ -171,7 +181,7 @@ impl RigWerkApp {
         if due {
             // A plugin's editor can change anything at any time; copying the
             // values back keeps the saved insert (and the panel) truthful.
-            let _ = self.engine.sync_plugin_parameters(index);
+            let _ = self.engine.sync_plugin_parameters(key.path, key.insert);
         }
     }
 }
@@ -247,8 +257,10 @@ impl ClapGuiWindow {
         }
         // Timers and `on_main_thread` (where most editors repaint) run
         // without the instance lock, so the audio callback keeps processing
-        // this insert while the editor is busy.
-        crate::audio::service_clap(&self.host, &self.plugin);
+        // this insert while the editor is busy.  A latency change it picks
+        // up stays flagged on the host, so the path's `service_plugins`
+        // still republishes the insert views; the result is not needed here.
+        let _ = crate::audio::service_clap(&self.host, &self.plugin);
         if self.host.take_gui_closed() {
             return true;
         }

@@ -59,6 +59,11 @@ impl Ramp {
         }
     }
 
+    /// Whether the ramp rests on `value` (its last sample was `value`).
+    pub(crate) fn is_settled_at(&self, value: f32) -> bool {
+        self.current == value && self.target == value
+    }
+
     /// Moves one sample and returns the value to apply.  Once the target is
     /// reached it returns exactly the target for the rest of the block, so a
     /// settled ramp adds no noise to the audio.
@@ -77,30 +82,28 @@ impl Ramp {
     }
 }
 
-/// All per-sample control ramps of the output stage.  Routing is linear, so a
-/// route change is eight gains moving between 0 and 1; channel enable and mono
-/// work the same way, and mute, monitor and the master level fold into one
-/// effective output gain so they compose without a step.
-pub(super) struct MixRamps {
+/// The per-sample control ramps at the front of one path.  Routing is
+/// linear, so a route change is eight gains moving between 0 and 1; channel
+/// enable and mono work the same way.  Mute, monitor and the master level
+/// are one ramp after the paths, on the mixer itself.
+pub(super) struct PathRamps {
     route: [[Ramp; 4]; 2],
     output_enabled: [Ramp; 2],
     mono: Ramp,
-    gain: Ramp,
 }
 
-impl MixRamps {
+impl PathRamps {
     pub(super) fn new() -> Self {
         Self {
             route: [[Ramp::new(0.0); 4]; 2],
             output_enabled: [Ramp::new(1.0); 2],
             mono: Ramp::new(0.0),
-            gain: Ramp::new(1.0),
         }
     }
 
     /// First block: adopt the live settings directly, so starting a bridge
     /// neither fades in nor jumps to them.
-    pub(super) fn snap(&mut self, routes: &[[f32; 4]; 2], enabled: [f32; 2], mono: f32, gain: f32) {
+    pub(super) fn snap(&mut self, routes: &[[f32; 4]; 2], enabled: [f32; 2], mono: f32) {
         for (row, targets) in self.route.iter_mut().zip(routes) {
             for (ramp, target) in row.iter_mut().zip(targets) {
                 ramp.snap(*target);
@@ -110,7 +113,6 @@ impl MixRamps {
             ramp.snap(target);
         }
         self.mono.snap(mono);
-        self.gain.snap(gain);
     }
 
     pub(super) fn set_targets(
@@ -118,7 +120,6 @@ impl MixRamps {
         routes: &[[f32; 4]; 2],
         enabled: [f32; 2],
         mono: f32,
-        gain: f32,
         samples: f32,
     ) {
         for (row, targets) in self.route.iter_mut().zip(routes) {
@@ -130,7 +131,6 @@ impl MixRamps {
             ramp.set_target(target, samples);
         }
         self.mono.set_target(mono, samples);
-        self.gain.set_target(gain, samples);
     }
 
     /// Routing, channel enable and mono for one input frame.  This is applied
@@ -153,13 +153,6 @@ impl MixRamps {
             }
         }
         out
-    }
-
-    /// The effective master gain for one output frame.  Mute, monitor and the
-    /// level slider all fold into this value, so any combination of them can
-    /// change without a discontinuity.
-    pub(super) fn next_output_gain(&mut self) -> f32 {
-        self.gain.next()
     }
 }
 

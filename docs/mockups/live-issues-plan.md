@@ -113,7 +113,7 @@ not assumed UI from dual-out.
 
 - [x] Mockup (`live-issues.html`)
 - [x] Plan (this file)
-- [ ] Implement strip shell on Live (collapse + filters + empty state)
+- [x] Implement strip shell on Live (collapse, hidden when empty; filters still open)
 - [ ] Migrate quantum + driver judgments
 - [ ] Wire CTAs to real settings
 - [ ] Later: silence / xrun producers

@@ -1,16 +1,26 @@
-//! Per-follower ring and cushion.  The clock callback pushes the finished
-//! stereo mix here; the follower's own cpal stream drains it with the same
+//! Per-follower ring and cushion.  The clock callback pushes the follower's
+//! finished device channels here (its own sum of the paths, aligned and
+//! mapped); the follower's own cpal stream drains them with the same
 //! ring → resampler → drift loop the clock path uses, without the chain.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::super::ring::StereoRing;
+use super::super::output_map::{frame_lanes, DeviceFrame};
+use super::super::ring::{FrameRing, LaneFrame};
 use super::super::types::CushionMode;
 
 /// One generic follower's playback bus: SPSC ring plus its own cushion.
 pub(crate) struct FollowerBus {
-    pub(crate) ring: StereoRing,
+    /// One lane per device channel (see [`frame_lanes`]).
+    pub(crate) ring: FrameRing,
+    /// The device's channel count, set before the stream opens; the clock
+    /// side maps the follower onto this many channels.
+    channels: AtomicU32,
+    /// Bumped whenever the ring is emptied or laid out anew.  The clock side
+    /// reads it at the start of a block and stops pushing once it moves, so
+    /// a long block never runs on into a reopened ring.
+    generation: AtomicU64,
     pub(crate) target_frames: AtomicU64,
     pub(crate) base_frames: AtomicU64,
     /// Producer block size in source frames (the clock output's step).
@@ -30,7 +40,9 @@ pub(crate) struct FollowerBus {
 impl FollowerBus {
     pub(crate) fn new(sample_rate: u32) -> Self {
         Self {
-            ring: StereoRing::new(sample_rate),
+            ring: FrameRing::new(sample_rate),
+            channels: AtomicU32::new(2),
+            generation: AtomicU64::new(0),
             target_frames: AtomicU64::new((sample_rate as u64 / 187).max(256)),
             base_frames: AtomicU64::new((sample_rate as u64 / 187).max(256)),
             input_block: AtomicU64::new(0),
@@ -47,6 +59,7 @@ impl FollowerBus {
     /// Clears ring counters and health for a fresh open.  Settings (cushion)
     /// stay; the UI re-pushes them every frame.
     pub(crate) fn reset_playback(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.ring.reset();
         self.underruns.store(0, Ordering::Relaxed);
         self.overruns.store(0, Ordering::Relaxed);
@@ -56,14 +69,42 @@ impl FollowerBus {
         self.lift_to_floor();
     }
 
-    pub(crate) fn push_frame(&self, left: f32, right: f32) {
-        if !self.ring.push(left, right) {
+    /// Sizes the ring for a `channels`-channel device and empties it.  Only
+    /// while no stream drains it and the clock side does not feed it (the
+    /// slot's ring-active flag is off).
+    pub(crate) fn set_device_channels(&self, channels: usize) {
+        let channels = channels.max(1);
+        self.channels
+            .store(channels.min(u32::MAX as usize) as u32, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.ring.set_lanes(frame_lanes(channels));
+        self.lift_to_floor();
+    }
+
+    /// The ring's layout generation (see the field).
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// The device channel count the ring is laid out for.
+    pub(crate) fn device_channels(&self) -> usize {
+        self.channels.load(Ordering::Relaxed) as usize
+    }
+
+    /// Producer side: one mapped device frame.
+    pub(crate) fn push_frame(&self, frame: &DeviceFrame) {
+        self.push_lanes(frame.lanes());
+    }
+
+    /// Producer side: one frame as lanes (missing lanes are silence).
+    pub(crate) fn push_lanes(&self, lanes: &[f32]) {
+        if !self.ring.push(lanes) {
             self.overruns.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub(crate) fn pop_frame(&self) -> Option<(f32, f32)> {
-        self.ring.pop()
+    pub(crate) fn pop_frame(&self, frame: &mut LaneFrame) -> bool {
+        self.ring.pop(frame)
     }
 
     pub(crate) fn ring_frames(&self) -> usize {
@@ -124,7 +165,7 @@ impl FollowerBus {
                 (ms.max(0.0) * rate as f32 / 1000.0).round() as usize
             }
         };
-        floor.clamp(32, self.ring.capacity_frames / 2)
+        floor.clamp(32, self.ring.capacity_frames() / 2)
     }
 
     pub(crate) fn lift_to_floor(&self) {
@@ -159,7 +200,7 @@ impl FollowerBus {
         };
         let floor = self.floor_frames() as u64;
         let current = self.target_frames.load(Ordering::Relaxed);
-        let ceiling = (self.ring.capacity_frames / 2) as u64;
+        let ceiling = (self.ring.capacity_frames() / 2) as u64;
         let next = (current + step).min(ceiling).max(floor);
         if next != current {
             self.target_frames.store(next, Ordering::Relaxed);

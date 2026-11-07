@@ -1,5 +1,6 @@
 //! A saved patch and helpers that operate on patches.
 
+use super::path_pref::{default_path_name, sanitize_paths, PathPref};
 use super::preferences::{
     FollowerPref, DEFAULT_BUFFER, DEFAULT_CUSHION_MS, DEFAULT_INPUT_GAIN, DEFAULT_OUTPUT_GAIN,
     DEFAULT_SAMPLE_RATE,
@@ -33,20 +34,29 @@ pub(crate) struct Preset {
     /// "follow the input".
     pub(crate) output_rate: u32,
     pub(crate) output_buffer: usize,
-    /// The EQs saved with the patch (pre and post inserts).  Patches from
-    /// before an EQ existed have none and leave the current one alone.
+    /// Path 1's EQs in patches from before paths existed (pre and post
+    /// inserts).  Patches from before an EQ existed have none and keep the
+    /// current one.  Read, never written (see [`Self::paths`]).
+    #[serde(skip_serializing)]
     pub(crate) eq: Option<EqSettings>,
+    #[serde(skip_serializing)]
     pub(crate) eq_post: Option<EqSettings>,
-    /// Built-in noise gate. Older patches have none and leave the current one.
-    #[serde(default)]
+    /// Path 1's gate in patches from before paths.  Older patches have none
+    /// and keep the current one.
+    #[serde(default, skip_serializing)]
     pub(crate) gate: Option<GateSettings>,
     /// Input fader, dB. Missing on older patches; the default is 0 dB.
     pub(crate) input_gain: f32,
     /// Output fader, dB. Missing on older patches; the default is −1.5 dB.
     pub(crate) output_gain: f32,
     pub(crate) input_channels: [bool; 2],
+    /// Path 1's channel enable in patches from before paths.  Read only.
+    #[serde(skip_serializing)]
     pub(crate) output_channels: [bool; 2],
+    /// Path 1's mono in patches from before paths.  Read only.
+    #[serde(skip_serializing)]
     pub(crate) mono: bool,
+    /// The master mute.
     pub(crate) mute: bool,
     pub(crate) monitor: bool,
     pub(crate) drift: bool,
@@ -56,14 +66,19 @@ pub(crate) struct Preset {
     /// [`Self::low_latency_output`].
     #[serde(default)]
     pub(crate) wasapi_output_mode: Option<WasapiOutputMode>,
+    /// Path 1's input routing in patches from before paths.  Read only.
+    #[serde(skip_serializing)]
     pub(crate) routes: [[bool; 4]; 2],
     /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
     pub(crate) cushion_mode: u8,
     pub(crate) cushion_ms: f32,
-    /// The master insert chain. An entry that cannot be read is skipped.
-    /// Older patches have none, which loads as an empty chain.
-    #[serde(default, deserialize_with = "skip_unreadable")]
+    /// Path 1's insert chain in patches from before paths.  An entry that
+    /// cannot be read is skipped.  Read only.
+    #[serde(default, deserialize_with = "skip_unreadable", skip_serializing)]
     pub(crate) plugins: Vec<PluginPref>,
+    /// The signal paths.  Patches from before paths have none; their
+    /// top-level mix fields become path 1 ([`Self::migrate_paths`]).
+    pub(crate) paths: Vec<PathPref>,
     /// Clock device level, mute and channel map.  Older patches have none,
     /// which loads as today's output (L → 1, R → 2, mono copy on the rest).
     /// Applying such a patch resets it on purpose: a patch must restore the
@@ -110,9 +125,46 @@ impl Default for Preset {
             cushion_mode: 0,
             cushion_ms: DEFAULT_CUSHION_MS,
             plugins: Vec::new(),
+            paths: Vec::new(),
             clock_device: OutputDeviceSettings::default(),
             followers: Vec::new(),
         }
+    }
+}
+
+impl Preset {
+    /// Moves a patch from before paths onto `paths`: its top-level mix
+    /// fields become path 1.  What such a patch did not store (an EQ or
+    /// gate from before they existed) is taken from `current`, so applying
+    /// it keeps that setting, as it always did.  A patch that has paths is
+    /// left alone.
+    pub(crate) fn migrate_paths(&mut self, current: &PathPref) {
+        if !self.paths.is_empty() {
+            return;
+        }
+        let legacy = Self::default();
+        let mut paths = vec![PathPref {
+            name: default_path_name(0),
+            colour: 0,
+            routes: self.routes,
+            mono: self.mono,
+            output_channels: self.output_channels,
+            eq: self.eq.unwrap_or(current.eq),
+            eq_post: self.eq_post.unwrap_or(current.eq_post),
+            gate: self.gate.unwrap_or(current.gate),
+            plugins: std::mem::take(&mut self.plugins),
+            level_db: 0.0,
+            mute: false,
+            solo: false,
+        }];
+        sanitize_paths(&mut paths);
+        self.paths = paths;
+        self.routes = legacy.routes;
+        self.mono = legacy.mono;
+        self.output_channels = legacy.output_channels;
+        self.eq = None;
+        self.eq_post = None;
+        self.gate = None;
     }
 }
 

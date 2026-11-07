@@ -3,6 +3,7 @@
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 
+use super::path_pref::{default_path_name, sanitize_paths, PathPref};
 use super::preset::Preset;
 use super::serde_util::skip_unreadable;
 use crate::app::Page;
@@ -11,7 +12,9 @@ use crate::audio::{
     WasapiOutputMode, MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 
-pub(crate) const PREFERENCES_SCHEMA: u32 = 1;
+/// 2: signal paths (`paths`, per-device `path_map`); layout 1 files load
+/// as one path.
+pub(crate) const PREFERENCES_SCHEMA: u32 = 2;
 
 /// Launch preferences that survive restarts.  The bridge stays stopped unless
 /// the person explicitly asks for it to start with the app.
@@ -53,8 +56,15 @@ pub(crate) struct Preferences {
     pub(crate) input_gain: f32,
     pub(crate) output_gain: f32,
     pub(crate) input_channels: [bool; 2],
+    /// Files from before paths existed: path 1's settings.  Read, never
+    /// written (see [`Self::paths`]).
+    #[serde(skip_serializing)]
     pub(crate) output_channels: [bool; 2],
+    /// Files from before paths existed: path 1's settings.  Read, never
+    /// written (see [`Self::paths`]).
+    #[serde(skip_serializing)]
     pub(crate) mono: bool,
+    /// The master mute.
     pub(crate) mute: bool,
     pub(crate) drift: bool,
     pub(crate) monitor: bool,
@@ -66,6 +76,9 @@ pub(crate) struct Preferences {
     /// [`Self::low_latency_output`] in [`sanitize_preferences`].
     #[serde(default)]
     pub(crate) wasapi_output_mode: Option<WasapiOutputMode>,
+    /// Files from before paths existed: path 1's settings.  Read, never
+    /// written (see [`Self::paths`]).
+    #[serde(skip_serializing)]
     pub(crate) routes: [[bool; 4]; 2],
     /// Output side rate; 0 follows the input.
     pub(crate) output_rate: u32,
@@ -73,18 +86,27 @@ pub(crate) struct Preferences {
     /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
     pub(crate) cushion_mode: u8,
     pub(crate) cushion_ms: f32,
-    /// The EQ before the plugin inserts (saves from before there were two
-    /// EQs load into this one).  Flat when missing.
+    /// Path 1's EQ before the plugin inserts in files from before paths
+    /// existed (saves from before there were two EQs load into this one).
+    /// Read, never written.
+    #[serde(skip_serializing)]
     pub(crate) eq: EqSettings,
-    /// The EQ after the plugin inserts.
+    /// Path 1's EQ after the inserts, in files from before paths.
+    #[serde(skip_serializing)]
     pub(crate) eq_post: EqSettings,
-    /// Built-in noise gate. Missing on older saves → default (off, POST).
-    #[serde(default)]
+    /// Path 1's gate, in files from before paths.
+    #[serde(default, skip_serializing)]
     pub(crate) gate: GateSettings,
-    /// The master insert chain (paths and settings, not live plugins).  An
-    /// entry that cannot be read is skipped, not fatal.
-    #[serde(deserialize_with = "skip_unreadable")]
+    /// Path 1's insert chain, in files from before paths.  An entry that
+    /// cannot be read is skipped, not fatal.
+    #[serde(deserialize_with = "skip_unreadable", skip_serializing)]
     pub(crate) plugins: Vec<PluginPref>,
+    /// The signal paths, in order.  Files from before paths existed have
+    /// none: their top-level mix fields load as path 1 (see
+    /// [`Self::path_prefs`]).  New files write only this.
+    pub(crate) paths: Vec<PathPref>,
+    /// The path the Mixer and Plugins pages edit (a position in `paths`).
+    pub(crate) selected_path: usize,
     /// Open a plugin's own interface directly instead of RigWerk's control
     /// panel, when the plugin has one that can be embedded.
     pub(crate) prefer_plugin_interface: bool,
@@ -137,10 +159,50 @@ impl Default for Preferences {
             eq_post: EqSettings::default(),
             gate: GateSettings::default(),
             plugins: Vec::new(),
+            paths: Vec::new(),
+            selected_path: 0,
             prefer_plugin_interface: false,
             clock_device: OutputDeviceSettings::default(),
             followers: Vec::new(),
         }
+    }
+}
+
+impl Preferences {
+    /// The saved paths, or, for a file from before paths existed, one path
+    /// made from its top-level mix fields.
+    pub(crate) fn path_prefs(&self) -> Vec<PathPref> {
+        if !self.paths.is_empty() {
+            return self.paths.clone();
+        }
+        vec![PathPref {
+            name: default_path_name(0),
+            colour: 0,
+            routes: self.routes,
+            mono: self.mono,
+            output_channels: self.output_channels,
+            eq: self.eq,
+            eq_post: self.eq_post,
+            gate: self.gate,
+            plugins: self.plugins.clone(),
+            level_db: 0.0,
+            mute: false,
+            solo: false,
+        }]
+    }
+
+    /// Moves a file from before paths onto `paths`, and clears the legacy
+    /// fields so nothing reads them by mistake.
+    pub(crate) fn migrate_paths(&mut self) {
+        self.paths = self.path_prefs();
+        let legacy = Self::default();
+        self.routes = legacy.routes;
+        self.mono = legacy.mono;
+        self.output_channels = legacy.output_channels;
+        self.eq = legacy.eq;
+        self.eq_post = legacy.eq_post;
+        self.gate = legacy.gate;
+        self.plugins = Vec::new();
     }
 }
 
@@ -479,12 +541,16 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
         &mut preferences.wasapi_output_mode,
         preferences.low_latency_output,
     );
-    preferences.eq = preferences.eq.sanitized();
-    preferences.eq_post = preferences.eq_post.sanitized();
-    preferences.gate = preferences.gate.sanitized();
+    preferences.migrate_paths();
+    sanitize_paths(&mut preferences.paths);
+    let current = preferences.paths[0].clone();
+    preferences.selected_path = preferences
+        .selected_path
+        .min(preferences.paths.len().saturating_sub(1));
     preferences.clock_device = preferences.clock_device.sanitized();
     sanitize_followers(&mut preferences.followers);
     for preset in &mut preferences.sessions {
+        preset.migrate_paths(&current);
         sanitize_preset(preset);
     }
 }
@@ -536,6 +602,9 @@ pub(crate) fn sanitize_preset(preset: &mut Preset) {
     if let Some(gate) = preset.gate.as_mut() {
         *gate = gate.sanitized();
     }
+    if !preset.paths.is_empty() {
+        sanitize_paths(&mut preset.paths);
+    }
     preset.clock_device = preset.clock_device.sanitized();
     sanitize_followers(&mut preset.followers);
 }
@@ -580,6 +649,14 @@ struct StoredCounts {
     sessions: Vec<IgnoredAny>,
     plugins: Vec<IgnoredAny>,
     followers: Vec<IgnoredAny>,
+    paths: Vec<StoredPathCounts>,
+}
+
+/// How many inserts one stored path held.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct StoredPathCounts {
+    plugins: Vec<IgnoredAny>,
 }
 
 /// "1 saved patch(es) and 2 plugin insert(s)": only the lists that lost
@@ -650,10 +727,19 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
         .sessions
         .len()
         .saturating_sub(preferences.sessions.len());
-    let skipped_plugins = counts
-        .plugins
-        .len()
-        .saturating_sub(preferences.plugins.len());
+    let stored_plugins = counts.plugins.len()
+        + counts
+            .paths
+            .iter()
+            .map(|path| path.plugins.len())
+            .sum::<usize>();
+    let loaded_plugins = preferences.plugins.len()
+        + preferences
+            .paths
+            .iter()
+            .map(|path| path.plugins.len())
+            .sum::<usize>();
+    let skipped_plugins = stored_plugins.saturating_sub(loaded_plugins);
     let skipped_followers = counts
         .followers
         .len()
@@ -671,16 +757,9 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
             preferences.schema_version
         ));
     }
-    // Older layouts need no migration yet: the field defaults cover them.
+    // Layout 1 without `paths` is migrated by `sanitize_preferences`; the
+    // other field defaults cover older layouts.
     preferences.schema_version = PREFERENCES_SCHEMA;
-    for plugin in &mut preferences.plugins {
-        if plugin.name.trim().is_empty() {
-            plugin.name = std::path::Path::new(&plugin.path)
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Plugin".to_owned());
-        }
-    }
     // Rates, buffers, gains and the cushion are checked here, and again
     // when a patch is applied. A NaN gain never reaches `10^(dB/20)`.
     sanitize_preferences(&mut preferences);
@@ -702,5 +781,14 @@ pub(crate) fn store_preferences(
     if let Some((key, raw)) = backup.take() {
         storage.set_string(&key, raw);
     }
-    eframe::set_value(storage, PREFERENCES_KEY, preferences);
+    // Only `paths` is written: anything still held in the legacy mix fields
+    // (preferences or a patch from before paths) moves there first.
+    let mut preferences = preferences.clone();
+    preferences.migrate_paths();
+    if let Some(current) = preferences.paths.first().cloned() {
+        for preset in &mut preferences.sessions {
+            preset.migrate_paths(&current);
+        }
+    }
+    eframe::set_value(storage, PREFERENCES_KEY, &preferences);
 }

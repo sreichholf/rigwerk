@@ -3,15 +3,16 @@
 use crate::app::devices::{
     device_restore_note, restore_device, restore_input, DeviceRestore, InputGroup,
 };
-use crate::app::settings::{cushion_from_pref, cushion_to_pref, sanitize_preset, Preset};
+use crate::app::settings::{cushion_from_pref, cushion_to_pref, sanitize_preset, PathPref, Preset};
 use crate::app::RigWerkApp;
-use crate::audio::EqSlot;
 use crate::ui::theme::{AMBER, BLUE, MUTED, RED, TEAL};
 
 impl RigWerkApp {
     pub(crate) fn save_preset(&mut self) {
         let input = self.active_input().clone();
         let output = self.selected_output().clone();
+        let (paths, order) = self.saved_paths();
+        let (clock_device, followers) = self.saved_devices(&order);
         let preset = Preset {
             name: self.session_name.trim().to_owned(),
             note: format!("{} → {}", input.backend, output.backend),
@@ -25,25 +26,21 @@ impl RigWerkApp {
             buffer: self.buffer_size,
             output_rate: self.output_rate,
             output_buffer: self.output_buffer,
-            eq: Some(self.eqs[EqSlot::Pre.index()]),
-            eq_post: Some(self.eqs[EqSlot::Post.index()]),
-            gate: Some(self.gate),
             input_gain: self.input_gain,
             output_gain: self.output_gain,
             input_channels: self.input_channels,
-            output_channels: self.output_channels,
-            mono: self.mono,
             mute: self.mute,
             monitor: self.monitor,
             drift: self.drift,
             low_latency_output: self.low_latency_output,
             wasapi_output_mode: Some(self.wasapi_output_mode),
-            routes: self.routes,
             cushion_mode: cushion_to_pref(self.cushion_mode),
             cushion_ms: self.cushion_ms,
-            plugins: self.engine.plugin_prefs(),
-            clock_device: self.clock_device,
-            followers: self.followers.clone(),
+            paths,
+            clock_device,
+            followers,
+            // The legacy mix fields are not written.
+            ..Preset::default()
         };
         if preset.name.is_empty() {
             self.push_log("Give the patch a name before saving.", AMBER);
@@ -86,9 +83,17 @@ impl RigWerkApp {
     }
 
     pub(crate) fn apply_preset(&mut self, index: usize) {
+        // A patch from before paths: path 1 from its mix fields, keeping
+        // what it never stored (an EQ or gate) from the first path now.
+        let first = self.path_slots()[0];
+        let current = self.paths[first]
+            .as_ref()
+            .map(|path| PathPref::from_mix(path.name.clone(), path.colour, &path.mix, Vec::new()))
+            .unwrap_or_default();
         let Some(stored) = self.sessions.get_mut(index) else {
             return;
         };
+        stored.migrate_paths(&current);
         // Same check as loading preferences: bad gains, rates and buffers
         // are replaced here, and the stored patch keeps the safe values.
         sanitize_preset(stored);
@@ -105,8 +110,6 @@ impl RigWerkApp {
         self.input_gain = preset.input_gain;
         self.output_gain = preset.output_gain;
         self.input_channels = preset.input_channels;
-        self.output_channels = preset.output_channels;
-        self.mono = preset.mono;
         self.mute = preset.mute;
         self.monitor = preset.monitor;
         self.drift = preset.drift;
@@ -114,37 +117,20 @@ impl RigWerkApp {
             crate::audio::WasapiOutputMode::from_low_latency(preset.low_latency_output)
         });
         self.set_wasapi_output_mode(mode);
-        self.routes = preset.routes;
         self.cushion_mode = cushion_from_pref(preset.cushion_mode);
         self.cushion_ms = preset.cushion_ms;
-        if let Some(eq) = preset.eq {
-            self.eqs[EqSlot::Pre.index()] = eq.sanitized();
-        }
-        if let Some(eq) = preset.eq_post {
-            self.eqs[EqSlot::Post.index()] = eq.sanitized();
-        }
-        if let Some(gate) = preset.gate {
-            self.gate = gate.sanitized();
-        }
-        self.clock_device = preset.clock_device;
-        self.followers = preset.followers.clone();
-        self.engine.set_gains(self.input_gain, self.output_gain);
-        self.engine.set_mix(
-            self.mute,
-            self.monitor,
-            self.mono,
-            self.input_channels,
-            self.output_channels,
-            self.drift,
+        // The device maps are in the patch's path order; installing maps
+        // them onto the slots the paths land in.
+        self.install_paths(
+            &preset.paths,
+            preset.clock_device,
+            preset.followers.clone(),
+            0,
         );
-        self.engine.set_routes(self.routes);
-        self.engine.set_clock_device(&self.clock_device);
+        self.engine.set_gains(self.input_gain, self.output_gain);
+        self.engine
+            .set_master(self.mute, self.monitor, self.input_channels, self.drift);
         self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
-        for slot in EqSlot::ALL {
-            self.engine.set_eq(slot, self.eqs[slot.index()]);
-        }
-        self.engine.set_gate(self.gate);
-        self.engine.restore_plugins(preset.plugins.clone());
         self.selected_session = Some(index);
         self.pending_delete = None;
         let mut device_missing = false;
@@ -290,10 +276,10 @@ mod tests {
 
         assert_eq!(app.input_gain, 4.5);
         assert_eq!(app.output_gain, -8.0);
-        assert_eq!(app.routes, routes);
+        assert_eq!(app.path().mix.routes, routes);
         assert_eq!(app.input_channels, [true, false]);
-        assert_eq!(app.output_channels, [false, true]);
-        assert!(app.mono);
+        assert_eq!(app.path().mix.output_enabled, [false, true]);
+        assert!(app.path().mix.mono);
         assert_eq!(app.asio_idx, 0);
         assert_eq!(app.output_idx, 0);
         assert_eq!(app.active_input().id, "asio:focusrite");
@@ -379,27 +365,30 @@ mod tests {
         app.input_gain = 6.0;
         app.output_gain = -12.0;
         app.input_channels = [true, false];
-        app.output_channels = [false, true];
-        app.mono = true;
+        app.path_mut().mix.output_enabled = [false, true];
+        app.path_mut().mix.mono = true;
         app.mute = true;
         app.monitor = false;
         app.drift = false;
         app.low_latency_output = false;
         app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
-        app.routes = [[false, true, false, true], [true, false, true, false]];
+        app.path_mut().mix.routes = [[false, true, false, true], [true, false, true, false]];
         app.cushion_mode = CushionMode::Manual;
         app.cushion_ms = 7.5;
         app.sample_rate = 96_000;
         app.buffer_size = 64;
         app.output_rate = 48_000;
         app.output_buffer = 256;
-        app.engine.restore_plugins(vec![PluginPref {
-            path: "C:/Plugins/Amp.vst3".to_owned(),
-            format: PluginFormat::Vst3,
-            name: "Amp".to_owned(),
-            mix: 0.4,
-            ..PluginPref::default()
-        }]);
+        app.engine.restore_plugins(
+            0,
+            vec![PluginPref {
+                path: "C:/Plugins/Amp.vst3".to_owned(),
+                format: PluginFormat::Vst3,
+                name: "Amp".to_owned(),
+                mix: 0.4,
+                ..PluginPref::default()
+            }],
+        );
 
         app.save_preset();
         let saved = app.sessions[0].clone();
@@ -408,32 +397,32 @@ mod tests {
         assert_eq!(saved.output_id, "hw:Speaker");
         assert_eq!(saved.output_backend, "ALSA");
         assert_eq!(saved.input_gain, 6.0);
-        assert_eq!(saved.routes, app.routes);
-        assert_eq!(saved.plugins[0].path, "C:/Plugins/Amp.vst3");
-        assert_eq!(saved.plugins[0].mix, 0.4);
         assert_eq!(
             saved.wasapi_output_mode,
             Some(crate::audio::WasapiOutputMode::Shared)
         );
+        assert_eq!(saved.paths[0].routes, app.path().mix.routes);
+        assert_eq!(saved.paths[0].plugins[0].path, "C:/Plugins/Amp.vst3");
+        assert_eq!(saved.paths[0].plugins[0].mix, 0.4);
 
         app.input_gain = 0.0;
         app.output_gain = 0.0;
-        app.routes = [[true, false, false, false], [false, true, false, false]];
-        app.mono = false;
+        app.path_mut().mix.routes = [[true, false, false, false], [false, true, false, false]];
+        app.path_mut().mix.mono = false;
         app.mute = false;
         app.monitor = true;
         app.drift = true;
         app.low_latency_output = true;
         app.wasapi_output_mode = crate::audio::WasapiOutputMode::RealStyle;
         app.input_channels = [true, true];
-        app.output_channels = [true, true];
+        app.path_mut().mix.output_enabled = [true, true];
         app.cushion_mode = CushionMode::Safe;
         app.cushion_ms = 10.0;
         app.sample_rate = 48_000;
         app.buffer_size = 128;
         app.output_rate = 0;
         app.output_buffer = 128;
-        app.engine.restore_plugins(Vec::new());
+        app.engine.restore_plugins(0, Vec::new());
         app.inventory
             .asio
             .insert(0, device("asio:other", "Other", "ASIO"));
@@ -448,8 +437,8 @@ mod tests {
         assert_eq!(app.input_gain, 6.0);
         assert_eq!(app.output_gain, -12.0);
         assert_eq!(app.input_channels, [true, false]);
-        assert_eq!(app.output_channels, [false, true]);
-        assert!(app.mono);
+        assert_eq!(app.path().mix.output_enabled, [false, true]);
+        assert!(app.path().mix.mono);
         assert!(app.mute);
         assert!(!app.monitor);
         assert!(!app.drift);
@@ -459,7 +448,7 @@ mod tests {
             crate::audio::WasapiOutputMode::Shared
         );
         assert_eq!(
-            app.routes,
+            app.path().mix.routes,
             [[false, true, false, true], [true, false, true, false]]
         );
         assert_eq!(app.cushion_mode, CushionMode::Manual);
@@ -470,7 +459,7 @@ mod tests {
         assert_eq!(app.output_buffer, 256);
         assert_eq!(app.active_input().id, "asio:focusrite");
         assert_eq!(app.selected_output().id, "hw:Speaker");
-        let plugins = app.engine.plugin_prefs();
+        let plugins = app.engine.plugin_prefs(0);
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].path, "C:/Plugins/Amp.vst3");
         assert_eq!(plugins[0].mix, 0.4);
@@ -530,10 +519,10 @@ mod tests {
             gate: Some(gate),
             ..crate::app::settings::Preset::default()
         });
-        app.gate = GateSettings::default();
+        app.path_mut().mix.gate = GateSettings::default();
         app.apply_preset(0);
-        assert_eq!(app.gate, gate);
-        assert_eq!(app.engine.shared.try_gate(), Some(gate));
+        assert_eq!(app.path().mix.gate, gate);
+        assert_eq!(app.engine.shared.paths[0].try_gate(), Some(gate));
     }
 
     #[test]
@@ -545,11 +534,12 @@ mod tests {
         let clock = OutputDeviceSettings {
             level_db: -4.5,
             mute: true,
-            map: ChannelMap {
+            path_map: crate::audio::PathMapSettings::first(ChannelMap {
                 left: 0b0011,
                 right: 0b1100,
-            },
+            }),
             unused: UnusedChannels::Silent,
+            align: false,
         };
         let followers = vec![
             FollowerPref {
@@ -599,7 +589,7 @@ mod tests {
         app.asio_idx = 0;
         app.output_idx = 0;
         app.use_asio_input = true;
-        app.gate = GateSettings {
+        app.path_mut().mix.gate = GateSettings {
             enabled: true,
             slot: GateSlot::Pre,
             threshold_db: -40.0,
@@ -611,6 +601,6 @@ mod tests {
         };
         app.save_preset();
         assert_eq!(app.sessions.len(), 1);
-        assert_eq!(app.sessions[0].gate, Some(app.gate));
+        assert_eq!(app.sessions[0].paths[0].gate, app.path().mix.gate);
     }
 }

@@ -1,8 +1,10 @@
 //! Small controls shared by several screens: cards, labels, buttons, tabs,
 //! meters, sliders and the device picker.
 
+mod path;
 mod slider;
 
+pub(crate) use path::{colour_swatch, nav_path_item, path_chip, path_level_text, path_toggle};
 pub(crate) use slider::{db_slider, row_info, show_focus_ring, styled_slider};
 
 #[cfg(test)]
@@ -207,8 +209,33 @@ pub(crate) fn nav_item(
     hint: &str,
     selected: bool,
 ) -> bool {
+    nav_row(ui, NavLead::Icon(icon), label, hint, selected).clicked()
+}
+
+/// Sub-entries sit this far right of the main entries.
+const NAV_SUB_INDENT: f32 = 26.0;
+
+pub(super) enum NavLead {
+    Icon(Icon),
+    Dot(Color32),
+}
+
+pub(super) fn nav_row(
+    ui: &mut egui::Ui,
+    lead: NavLead,
+    label: &str,
+    hint: &str,
+    selected: bool,
+) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
+    let indent = match lead {
+        NavLead::Icon(_) => 0.0,
+        NavLead::Dot(_) => NAV_SUB_INDENT,
+    };
+    // The highlight spans the full row (as the mockup's `.nav-path`); only
+    // the content moves right.
+    let content = Rect::from_min_max(rect.min + Vec2::new(indent, 0.0), rect.max);
     let hover = response.hovered();
     let fill = if selected {
         with_alpha(TEAL, 16)
@@ -225,26 +252,36 @@ pub(crate) fn nav_item(
             TEAL,
         );
     }
-    let icon_rect =
-        Rect::from_center_size(rect.left_center() + Vec2::new(23.0, 0.0), Vec2::splat(18.0));
-    paint_icon(
-        ui.painter(),
-        icon_rect,
-        icon,
-        if selected { TEAL } else { MUTED },
-    );
+    let lead_center = content.left_center() + Vec2::new(23.0, 0.0);
+    match lead {
+        NavLead::Icon(icon) => paint_icon(
+            ui.painter(),
+            Rect::from_center_size(lead_center, Vec2::splat(18.0)),
+            icon,
+            if selected { TEAL } else { MUTED },
+        ),
+        NavLead::Dot(colour) => {
+            ui.painter()
+                .circle_filled(lead_center, 6.0, with_alpha(colour, 50));
+            ui.painter().circle_filled(lead_center, 4.0, colour);
+        }
+    }
+    // Long path names are cut to the row, not run past the sidebar.
+    let text_w = (content.width() - 39.0 - 8.0).max(0.0);
+    let label_font = FontId::new(ts(12.2), FontFamily::Proportional);
+    let hint_font = FontId::new(ts(8.0), FontFamily::Proportional);
     ui.painter().text(
-        rect.left_center() + Vec2::new(39.0, -5.0),
+        content.left_center() + Vec2::new(39.0, -5.0),
         Align2::LEFT_CENTER,
-        label,
-        FontId::new(ts(12.2), FontFamily::Proportional),
+        fit_text(ui, label, &label_font, text_w),
+        label_font,
         if selected { TEXT } else { MUTED },
     );
     ui.painter().text(
-        rect.left_center() + Vec2::new(39.0, 8.0),
+        content.left_center() + Vec2::new(39.0, 8.0),
         Align2::LEFT_CENTER,
-        hint,
-        FontId::new(ts(8.0), FontFamily::Proportional),
+        fit_text(ui, hint, &hint_font, text_w),
+        hint_font,
         if selected { with_alpha(TEAL, 190) } else { DIM },
     );
     show_focus_ring(ui, &response, rect, 9);
@@ -256,7 +293,7 @@ pub(crate) fn nav_item(
         Some(selected),
         Some(hint.to_owned()),
     );
-    response.clicked()
+    response
 }
 
 pub(crate) fn source_tab(ui: &mut egui::Ui, label: &str, selected: bool, color: Color32) -> bool {

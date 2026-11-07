@@ -15,6 +15,8 @@ pub(crate) enum ChainSelection {
     Plugin(usize),
     Gate,
     PostEq,
+    /// The selected path's level, mute and solo (shown with 2+ paths).
+    Path,
     /// The master stage: master level and mute, and the device list.
     Output,
     /// One output device under the master; 0 is the clock device.
@@ -57,6 +59,15 @@ impl ChainSelection {
         }
     }
 
+    /// The Path stage only exists with several paths; with one it falls
+    /// back to the stage above it.
+    pub(crate) fn clamp_path(self, path_count: usize) -> Self {
+        match self {
+            Self::Path if path_count < 2 => Self::PostEq,
+            other => other,
+        }
+    }
+
     /// The stage a `RIGWERK_MIXER_STAGE` key names (screenshots and checks).
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         Some(match key {
@@ -65,6 +76,7 @@ impl ChainSelection {
             "plugins" => Self::Plugins,
             "gate" => Self::Gate,
             "post_eq" => Self::PostEq,
+            "path" => Self::Path,
             "output" => Self::Output,
             "device" => Self::OutputDevice(0),
             _ => return None,
@@ -131,6 +143,19 @@ pub(crate) fn gate_summary(gate: &GateSettings) -> (String, bool) {
     } else {
         (format!("on · {slot}"), true)
     }
+}
+
+/// The Path row's summary: level, or muted, and solo.
+pub(crate) fn path_summary(level_db: f32, mute: bool, solo: bool) -> String {
+    let mut text = if mute {
+        "muted".to_owned()
+    } else {
+        format!("{level_db:+.1} dB")
+    };
+    if solo {
+        text.push_str(" · solo");
+    }
+    text
 }
 
 /// The Output (master) row's summary: master level, or muted, and how many
@@ -241,7 +266,7 @@ pub(crate) fn live_chain_entries(
 
 pub(crate) fn stage_color(selection: ChainSelection) -> Color32 {
     match selection {
-        ChainSelection::Input => TEAL,
+        ChainSelection::Input | ChainSelection::Path => TEAL,
         ChainSelection::Output | ChainSelection::OutputDevice(_) | ChainSelection::AddOutput => {
             BLUE
         }
@@ -263,7 +288,7 @@ pub(crate) fn bypassed_color(live: bool, accent: Color32) -> Color32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{live_chain_entries, output_summary, ChainSelection};
+    use super::{live_chain_entries, output_summary, path_summary, ChainSelection};
     use crate::audio::{EqSettings, EqSlot, GateSettings, GateSlot};
 
     #[test]
@@ -357,8 +382,16 @@ mod tests {
             ChainSelection::from_key("post_eq"),
             Some(ChainSelection::PostEq)
         );
+        assert_eq!(ChainSelection::from_key("path"), Some(ChainSelection::Path));
         assert_eq!(ChainSelection::from_key("clock"), None);
         assert_eq!(ChainSelection::from_key("nope"), None);
+    }
+
+    #[test]
+    fn path_stage_needs_several_paths() {
+        assert_eq!(ChainSelection::Path.clamp_path(1), ChainSelection::PostEq);
+        assert_eq!(ChainSelection::Path.clamp_path(2), ChainSelection::Path);
+        assert_eq!(ChainSelection::Gate.clamp_path(1), ChainSelection::Gate);
     }
 
     #[test]
@@ -366,6 +399,13 @@ mod tests {
         assert_eq!(output_summary(-1.5, false, 1), "-1.5 dB · 1 device");
         assert_eq!(output_summary(0.0, false, 3), "+0.0 dB · 3 devices");
         assert_eq!(output_summary(-1.5, true, 1), "muted · 1 device");
+    }
+
+    #[test]
+    fn path_summary_shows_level_mute_and_solo() {
+        assert_eq!(path_summary(-3.0, false, false), "-3.0 dB");
+        assert_eq!(path_summary(-3.0, true, false), "muted");
+        assert_eq!(path_summary(0.0, false, true), "+0.0 dB · solo");
     }
 
     #[test]

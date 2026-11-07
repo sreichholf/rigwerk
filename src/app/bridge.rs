@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use crate::app::devices::is_wrapper_driver;
 use crate::app::RigWerkApp;
-use crate::audio::EqSlot;
 use crate::audio::{self, EngineState, StartConfig};
 use crate::ui::theme::{AMBER, BLUE, MUTED, RED};
 
@@ -177,21 +176,10 @@ impl RigWerkApp {
     }
 
     pub(crate) fn meters(&mut self, ctx: &egui::Context) {
-        self.engine.set_mix(
-            self.mute,
-            self.monitor,
-            self.mono,
-            self.input_channels,
-            self.output_channels,
-            self.drift,
-        );
-        self.engine.set_routes(self.routes);
-        self.engine.set_clock_device(&self.clock_device);
-        self.push_followers_to_engine();
-        for slot in EqSlot::ALL {
-            self.engine.set_eq(slot, self.eqs[slot.index()]);
-        }
-        self.engine.set_gate(self.gate);
+        self.engine
+            .set_master(self.mute, self.monitor, self.input_channels, self.drift);
+        self.push_paths_to_engine();
+        self.push_devices_to_engine();
         self.engine.poll();
         self.snapshot = self.engine.snapshot();
         #[cfg(target_os = "linux")]
@@ -278,9 +266,13 @@ impl RigWerkApp {
         self.peak_out_r = self.peak_out_r.max(self.meter_out_r * 0.98).max(0.0);
         // Per clock-device channel, after its map and level. Preview has no
         // engine reading, so the stand-in L/R goes through the same map.
+        let live = self.live_path_mask();
+        let path_gains = self.path_gains();
         let channel_targets = match self.engine.state {
             EngineState::Running => self.snapshot.out_channels,
-            EngineState::Preview => self.clock_device.settled_frame(
+            EngineState::Preview => self.clock_device.settled_sum(
+                live,
+                path_gains,
                 self.selected_output().channels.max(1),
                 out_l * mute_scale,
                 out_r * mute_scale,
@@ -300,8 +292,13 @@ impl RigWerkApp {
                 self.followers
                     .get(index)
                     .map(|pref| {
-                        pref.settings
-                            .settled_frame(2, out_l * mute_scale, out_r * mute_scale)
+                        pref.settings.settled_sum(
+                            live,
+                            path_gains,
+                            2,
+                            out_l * mute_scale,
+                            out_r * mute_scale,
+                        )
                     })
                     .unwrap_or([0.0; audio::MAX_OUTPUT_CHANNELS])
             }),
@@ -315,7 +312,28 @@ impl RigWerkApp {
                 *peak = peak.max(*meter * 0.98).max(0.0);
             }
         }
+        // Path meters: the engine's peak after the path's chain, times its
+        // level, mute and solo (what the path adds to the sum), before the
+        // master.  Preview has no chain, so the stand-in input goes through.
+        for (slot, gain) in path_gains.into_iter().enumerate() {
+            let (left, right) = match self.engine.state {
+                EngineState::Running => self.engine.path_meters(slot),
+                EngineState::Preview => (in_l, in_r),
+                _ => (0.0, 0.0),
+            };
+            for (side, target) in [left, right].into_iter().enumerate() {
+                let meter = &mut self.meter_paths[slot][side];
+                *meter = smooth(*meter, target.abs() * gain);
+                let peak = &mut self.peak_paths[slot][side];
+                *peak = peak.max(*meter * 0.98).max(0.0);
+            }
+        }
         let decay = (-2.3 * dt).exp();
+        for peaks in &mut self.peak_paths {
+            for peak in peaks {
+                *peak *= decay;
+            }
+        }
         for peak in &mut self.peak_out_channels {
             *peak *= decay;
         }

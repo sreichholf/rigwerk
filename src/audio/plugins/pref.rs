@@ -231,4 +231,16 @@ pub struct PluginView {
     /// [`super::PluginHandle::instance_id`]); `None` while the slot is not loaded.
     /// An open editor checks it to notice that its insert was replaced.
     pub(crate) instance: Option<usize>,
+    /// The latency in samples the insert adds (see
+    /// `PluginChain::latency_samples`); 0 when it reports none, is not
+    /// loaded, or failed.  Bypassed inserts keep theirs.
+    pub latency: u32,
+}
+
+impl PluginView {
+    /// `· 64 smp` for an insert row, or `None` when the insert adds no
+    /// latency.
+    pub fn latency_label(&self) -> Option<String> {
+        (self.latency > 0).then(|| format!("· {} smp", self.latency))
+    }
 }

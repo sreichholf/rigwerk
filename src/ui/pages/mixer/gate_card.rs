@@ -24,7 +24,7 @@ const RIGHT_INSET: f32 = 12.0;
 
 impl RigWerkApp {
     pub(crate) fn gate_inspector(&mut self, ui: &mut egui::Ui) {
-        let current = self.gate;
+        let current = self.path().mix.gate;
         let mut gate = current;
         let mut reset = false;
 
@@ -207,8 +207,8 @@ impl RigWerkApp {
                     AMBER,
                 );
             }
-            self.gate = gate;
-            self.engine.set_gate(gate);
+            self.path_mut().mix.gate = gate;
+            self.push_paths_to_engine();
         }
     }
 }
