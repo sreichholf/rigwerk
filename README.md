@@ -92,12 +92,20 @@ priority, a plugin chain that overloads the CPU can starve the desktop.
 cargo test
 ```
 
-Screenshots for docs (fixed 1440×1080, no scrollbar):
+Screenshots for docs (fixed 1440×1080 window):
 
 ```bash
 # Wayland cannot honor client resize; --screenshot drops to X11/XWayland.
-RIGWERK_PAGE=live cargo run --release -- --screenshot docs/screenshots/live.png
+export RIGWERK_ROUTING_SETUP=blend   # Live, Mixer and Routing show two paths
+for page in live mixer routing; do
+  RIGWERK_PAGE=$page cargo run --release -- --screenshot docs/screenshots/$page.png
+done
+RIGWERK_PAGE=devices cargo run --release -- --screenshot docs/screenshots/devices.png
 ```
+
+Without a display or sound card, run them under `xvfb-run -a` against the
+PipeWire null-sink graph in `AGENTS.md` (one `Audio/Sink` and one
+`Audio/Source/Virtual` node, `pw-metadata -n settings 0 clock.force-quantum 64`).
 
 `RIGWERK_PAGE` may be `live`, `mixer`, `routing`, `devices`, `sessions`,
 `plugins`, `guide`, or `diagnostics`.
