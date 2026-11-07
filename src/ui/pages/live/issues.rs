@@ -2,7 +2,9 @@
 //! Output (see `docs/mockups/live-issues-plan.md`).  One row per problem
 //! from `RigWerkApp::live_issues`: severity, title, one-line detail, where
 //! it is, and one button.  Hidden while there is nothing to report; the
-//! header collapses the rows to the worst title and "+N more".
+//! header collapses the rows to the worst title and "+N more".  A new
+//! error opens a collapsed strip again; that is decided per tick in
+//! `RigWerkApp::tick_issues`, not here.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Stroke, Vec2};

@@ -34,8 +34,10 @@ I do?” never share one place.
 | | Quantum change failed / does not fit / not low-latency | |
 | | Driver unchecked under a low-latency mode | |
 | | Underruns this session | |
+| | Bridge stopped on a lost device (after the alert) | |
 
-Severity rule: **Error** is reserved for audio breaking (DSP past the block).
+Severity rule: **Error** is reserved for audio breaking (DSP past the block,
+an underrun burst, a bridge stopped on a lost device).
 Everything that still plays, unaligned sums included, is a **Warning**.
 
 ## Placement
@@ -58,7 +60,15 @@ Built:
 - **Row content:** severity · short title · one-line detail · where · one
   action button.
 - **Do not auto-change** settings.  Actions need an explicit click.
-- Hard stop / disconnect stays `device_alert`-class, not a soft Issues row.
+- **State moves per tick** (`RigWerkApp::tick_issues`, from `logic`), also
+  while Live is not drawn: the underrun watch and the DSP latches.
+  `live_issues` only reads.  Both start over on every bridge start and stop.
+- **A new Error expands** a collapsed strip: an error title the last tick
+  did not have.  Warnings, and an error collapsed while showing, do not.
+- Hard stop / disconnect stays `device_alert`-class: the modal window.  Once
+  it is dismissed, an Error row “The bridge stopped: a device was
+  disconnected” keeps the alert text, with **Open Devices**, until the next
+  bridge start.  No row while the window is up, so the two never show at once.
 
 Not built (see Open items): All · Warnings · Errors filters, a secondary
 action (“Show on Output”, “Dismiss”), deep-link highlight of the related card.
@@ -87,12 +97,15 @@ action (“Show on Output”, “Dismiss”), deep-link highlight of the related
 - **Driver unchecked** (Warning): a checkable output with no reading, no
   check running, and a low-latency mode chosen (Low latency, REAL-style,
   Exclusive).  → **Check driver**.
-- **Underruns** (`UnderrunWatch`, moved per frame, reset on bridge start):
+- **Underruns** (`UnderrunWatch`, moved per tick, reset on bridge start and
+  stop):
   Warning “The output ran dry” with the count and how long ago, cleared after
   10 s without a new one; Error “Audio is dropping out” once 3 fall within
   5 s, held until quiet.  → the safer step that exists: **Use Safe cushion**,
   else **Turn Low latency off** / **Use Shared output**, else **Set buffer
   to** the next size.
+- **Device lost** (Error): the bridge stopped on a disconnected device and
+  the `device_alert` window was dismissed.  → **Open Devices**.
 
 DSP share only times the path chains, not the resampler, followers or mixer.
 Underruns are the direct evidence that the block was late.
@@ -125,12 +138,8 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 1. ~~Migrate today’s card judgments~~ (done: quantum, driver, underruns).
 2. ~~Underrun deltas per session~~ (done: clock output only; followers are
    item 6).
-3. **Strip state:**
-   - Move the DSP alarm latch to the per-tick update.  Today it advances in
-     `live_issues(&self)` through a `Cell`, and only while Live is drawn.
-   - Decide whether a new Error expands a collapsed strip.
-   - When the bridge stops on device lost, `device_alert` takes over and the
-     strip empties.  Say so in the strip or add a row; do not vanish silently.
+3. ~~Strip state~~ (done: per-tick latches, a new Error expands, a
+   device-lost row after the alert).
 4. **Filters, Dismiss, deep-link** highlight of the related card.
 5. **Silence:** loud stream + quiet **sink monitor** (new PipeWire metering),
    armed only while low latency is engaged.  Prefer silence ∧ recent
@@ -151,7 +160,8 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 
 | Assumption | Today |
 |---|---|
-| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun producers |
+| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun, device-lost producers |
+| Strip state | Moves per tick, not per draw; a new Error expands it |
 | Per-output preferred quantum | No: global force-quantum + `node.latency` |
 | Sink monitor meters | Not present (RigWerk peaks only) |
 | Driver / underrun / quantum judgments | In Issues; cards show readings, the log keeps history |
@@ -163,6 +173,7 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 - [x] Mockup (`live-issues.html`) and plan
 - [x] Strip on Live: hidden when empty, collapse, counts, one action per row
 - [x] Producers: unaligned sum, alignment limit, routed nowhere, DSP overload,
-  quantum, driver unchecked, underruns
+  quantum, driver unchecked, underruns, device lost
 - [x] Open items 1–2: card judgments migrated, underruns as a producer
-- [ ] Open items 3–6 above (next: strip state)
+- [x] Open item 3: strip state per tick, Error expands, device-lost row
+- [ ] Open items 4–6 above (next: filters, Dismiss, deep-link)

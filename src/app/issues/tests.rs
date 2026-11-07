@@ -352,3 +352,115 @@ fn an_unchecked_low_latency_driver_warns_until_it_has_a_reading() {
         "without a low-latency mode the step matters less"
     );
 }
+
+#[test]
+fn reading_the_issues_does_not_move_the_dsp_latches() {
+    let mut app = blank_app();
+    app.issue_state.dsp = DspAlarm {
+        warning: true,
+        error: false,
+    };
+    for _ in 0..3 {
+        let issues = app.live_issues();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].title, "The chain overloads the output block");
+        assert_eq!(issues[0].severity, IssueSeverity::Warning);
+    }
+    assert!(app.issue_state.dsp.warning, "only a tick moves the latch");
+    app.tick_issues(Instant::now());
+    assert_eq!(
+        app.issue_state.dsp,
+        DspAlarm::default(),
+        "no mixer runs: the tick reads no load and clears it"
+    );
+    assert!(app.live_issues().is_empty());
+}
+
+#[test]
+fn a_bridge_start_or_stop_clears_the_dsp_latches_and_underruns() {
+    let mut app = blank_app();
+    app.issue_state.dsp = DspAlarm {
+        warning: true,
+        error: true,
+    };
+    app.issue_state.underruns.update(3, Instant::now());
+    app.stop_bridge();
+    assert_eq!(app.issue_state.dsp, DspAlarm::default());
+    assert_eq!(app.issue_state.underruns.session_count(), 0);
+}
+
+#[test]
+fn a_new_error_expands_a_collapsed_strip_and_a_warning_does_not() {
+    let mut app = blank_app();
+    let added = app.add_path().expect("a free slot");
+    app.set_path_mute(added, false);
+    app.live_issues_collapsed = true;
+    app.expand_on_new_error();
+    assert!(app.live_issues_collapsed, "a warning leaves it collapsed");
+
+    app.issue_state.dsp = DspAlarm {
+        warning: true,
+        error: true,
+    };
+    app.expand_on_new_error();
+    assert!(!app.live_issues_collapsed, "a new error opens it");
+    app.live_issues_collapsed = true;
+    app.expand_on_new_error();
+    assert!(
+        app.live_issues_collapsed,
+        "the same error, collapsed on purpose, stays collapsed"
+    );
+
+    app.issue_state.dsp.error = false;
+    app.expand_on_new_error();
+    assert!(app.live_issues_collapsed);
+    app.issue_state.dsp.error = true;
+    app.expand_on_new_error();
+    assert!(!app.live_issues_collapsed, "it came back: new again");
+}
+
+#[test]
+fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
+    let mut app = blank_app();
+    app.issue_state.dsp = DspAlarm {
+        warning: true,
+        error: false,
+    };
+    app.live_issues_collapsed = true;
+    app.alert_lost_device("Scarlett 2i2 was unplugged, so the bridge was stopped.".to_owned());
+    assert_eq!(
+        app.issue_state.dsp,
+        DspAlarm::default(),
+        "the session ended"
+    );
+    assert!(
+        app.live_issues().is_empty(),
+        "the alert window is the hard stop; no second copy behind it"
+    );
+    app.expand_on_new_error();
+    assert!(app.live_issues_collapsed);
+
+    app.device_alert = None;
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    let issue = &issues[0];
+    assert_eq!(issue.severity, IssueSeverity::Error);
+    assert_eq!(issue.title, "The bridge stopped: a device was disconnected");
+    assert_eq!(
+        issue.detail,
+        "Scarlett 2i2 was unplugged, so the bridge was stopped."
+    );
+    assert_eq!(issue.action, IssueAction::OpenDevices);
+    assert_eq!(issue.action.label(), "Open Devices");
+    app.expand_on_new_error();
+    assert!(!app.live_issues_collapsed, "the strip opens on it");
+    app.apply_issue_action(issue.action);
+    assert!(app.page == Page::Devices);
+    assert!(app.live_issues().len() == 1, "a click changes nothing else");
+
+    app.start_bridge();
+    assert!(
+        app.issue_state.device_lost.is_none(),
+        "the next bridge start clears it"
+    );
+}

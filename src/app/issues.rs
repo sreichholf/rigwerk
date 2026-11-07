@@ -32,15 +32,25 @@
 //!   clears after [`UNDERRUN_QUIET`] without a new one, and an error once
 //!   [`UNDERRUN_BURST`] of them fall within [`UNDERRUN_BURST_WINDOW`], held
 //!   until the output goes quiet.
-//!   The watch moves once per frame (`RigWerkApp::meters`) and starts over
-//!   with each bridge start.
+//!
+//! The bridge's own:
+//! - a bridge stopped because a device was disconnected: an error row once
+//!   the `device_alert` window is dismissed, so the strip says why it
+//!   emptied instead of vanishing.  The window stays the hard stop; the row
+//!   points at the Devices page and clears with the next bridge start.
+//!
+//! The state behind the rows ([`IssueState`]) moves once per update tick in
+//! [`RigWerkApp::tick_issues`], whether or not Live is drawn, and
+//! [`RigWerkApp::live_issues`] only reads it.  The DSP latches and the
+//! underrun watch start over with each bridge start and stop.  A new error
+//! (a title not among the last tick's errors) expands a collapsed strip;
+//! warnings do not.
 //!
 //! The cards keep the readings (DRIVER, BUFFER, MODE); none of these
 //! judgments is drawn there.  The fixes the output rows offer are the
 //! controls the cards already have: Check driver, the output buffer, Low
 //! latency, the WASAPI mode and the cushion.
 
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -187,8 +197,23 @@ impl UnderrunWatch {
 /// The issue state the strip keeps between frames (not persisted).
 #[derive(Debug, Default)]
 pub(crate) struct IssueState {
-    pub(crate) dsp: Cell<DspAlarm>,
+    pub(crate) dsp: DspAlarm,
     pub(crate) underruns: UnderrunWatch,
+    /// The alert of a bridge stopped on a disconnected device, until the
+    /// next bridge start.
+    pub(crate) device_lost: Option<String>,
+    /// The error titles of the last tick, to tell a new error from one the
+    /// person already collapsed away.
+    seen_errors: Vec<String>,
+}
+
+impl IssueState {
+    /// A bridge started or stopped: the DSP latches and the underrun count
+    /// belong to the session that ended.
+    pub(crate) fn new_session(&mut self) {
+        self.dsp = DspAlarm::default();
+        self.underruns = UnderrunWatch::default();
+    }
 }
 
 /// What an issue's button does.
@@ -201,6 +226,8 @@ pub(crate) enum IssueAction {
     /// Open Signal Routing (no device in particular).
     OpenRouting,
     OpenDiagnostics,
+    /// Open the Devices page (reconnect or pick another device).
+    OpenDevices,
     /// Run the stand-alone output driver check.
     CheckDriver,
     /// Set the clock output's buffer to this many samples.
@@ -219,6 +246,7 @@ impl IssueAction {
             IssueAction::AlignDevice(_) => "Align paths".to_owned(),
             IssueAction::ShowRouting(_) | IssueAction::OpenRouting => "Show in Routing".to_owned(),
             IssueAction::OpenDiagnostics => "Open diagnostics".to_owned(),
+            IssueAction::OpenDevices => "Open Devices".to_owned(),
             IssueAction::CheckDriver => "Check driver".to_owned(),
             IssueAction::SetOutputBuffer(frames) => format!("Set buffer to {frames}"),
             IssueAction::LowLatencyOff => "Turn Low latency off".to_owned(),
@@ -246,9 +274,47 @@ impl LiveIssue {
 }
 
 impl RigWerkApp {
-    /// Every current issue, errors first.  Moves the DSP latches.
+    /// Moves the issue state once per update tick: the underrun watch and
+    /// the DSP latches from the engine, then a collapsed strip opens for a
+    /// new error.
+    pub(crate) fn tick_issues(&mut self, now: Instant) {
+        if self.engine.state == EngineState::Running {
+            self.issue_state
+                .underruns
+                .update(self.snapshot.underruns, now);
+        }
+        let total = self.engine.total_dsp_time().unwrap_or_default();
+        self.issue_state.dsp = self
+            .issue_state
+            .dsp
+            .next(total.avg_share(), total.peak_share());
+        self.expand_on_new_error();
+    }
+
+    /// Opens a collapsed strip when an error appears that the last tick did
+    /// not have.  A warning, or an error the person collapsed while it was
+    /// showing, leaves the strip as it is.
+    pub(crate) fn expand_on_new_error(&mut self) {
+        let errors: Vec<String> = self
+            .live_issues()
+            .into_iter()
+            .filter(|issue| issue.severity == IssueSeverity::Error)
+            .map(|issue| issue.title)
+            .collect();
+        if errors
+            .iter()
+            .any(|title| !self.issue_state.seen_errors.contains(title))
+        {
+            self.live_issues_collapsed = false;
+        }
+        self.issue_state.seen_errors = errors;
+    }
+
+    /// Every current issue, errors first.  Only reads: the state behind
+    /// the rows moves in [`Self::tick_issues`].
     pub(crate) fn live_issues(&self) -> Vec<LiveIssue> {
         let mut issues = Vec::new();
+        self.device_lost_issue(&mut issues);
         self.unaligned_sum_issues(&mut issues);
         self.clamped_issues(&mut issues);
         self.unheard_path_issues(&mut issues);
@@ -258,6 +324,25 @@ impl RigWerkApp {
         self.underrun_issue(&mut issues);
         issues.sort_by_key(|issue| issue.severity);
         issues
+    }
+
+    /// A bridge stopped on a disconnected device.  Not while the alert
+    /// window is up: that is the hard stop, and the row is what stays once
+    /// it is dismissed.
+    fn device_lost_issue(&self, issues: &mut Vec<LiveIssue>) {
+        let Some(alert) = &self.issue_state.device_lost else {
+            return;
+        };
+        if self.device_alert.is_some() {
+            return;
+        }
+        issues.push(LiveIssue {
+            severity: IssueSeverity::Error,
+            title: "The bridge stopped: a device was disconnected".to_owned(),
+            detail: alert.clone(),
+            place: "BRIDGE · Stopped".to_owned(),
+            action: IssueAction::OpenDevices,
+        });
     }
 
     /// (a) Paths that add up unaligned on a device.
@@ -392,6 +477,9 @@ impl RigWerkApp {
     /// (c) The paths' DSP time against the block they have to fit in: the
     /// mixer's total per block, so peaks of different blocks never add up.
     fn dsp_issue(&self, issues: &mut Vec<LiveIssue>) {
+        let Some(severity) = self.issue_state.dsp.severity() else {
+            return;
+        };
         let total = self.engine.total_dsp_time().unwrap_or_default();
         let block = total.block_ns as f32;
         let (avg_share, peak_share) = (total.avg_share(), total.peak_share());
@@ -406,11 +494,6 @@ impl RigWerkApp {
                 heaviest = Some((info.name.clone(), most));
             }
         }
-        let alarm = self.issue_state.dsp.get().next(avg_share, peak_share);
-        self.issue_state.dsp.set(alarm);
-        let Some(severity) = alarm.severity() else {
-            return;
-        };
         let quantum = if self.snapshot.direct {
             "graph quantum"
         } else {
@@ -649,6 +732,7 @@ impl RigWerkApp {
             }
             IssueAction::OpenRouting => self.page = Page::Routing,
             IssueAction::OpenDiagnostics => self.page = Page::Diagnostics,
+            IssueAction::OpenDevices => self.page = Page::Devices,
             IssueAction::CheckDriver => self.start_output_driver_check(true),
             IssueAction::SetOutputBuffer(frames) => {
                 self.output_buffer = frames;

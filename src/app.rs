@@ -185,8 +185,9 @@ pub struct RigWerkApp {
     pub(crate) routing_last_card: Option<crate::app::cards::Card>,
     /// The Live Issues strip shows only its header (not persisted).
     pub(crate) live_issues_collapsed: bool,
-    /// What the Live Issues keep between frames (the DSP hysteresis and the
-    /// session's underruns).
+    /// What the Live Issues keep between frames (the DSP hysteresis, the
+    /// session's underruns, a lost device and the errors already shown).
+    /// Moved once per tick by `tick_issues`.
     pub(crate) issue_state: crate::app::issues::IssueState,
     /// Where the next Plugins-page add should land (`None` = append).
     pub(crate) plugin_insert_at: Option<usize>,
@@ -291,10 +292,10 @@ pub struct RigWerkApp {
 impl eframe::App for RigWerkApp {
     /// Non-painting maintenance.  eframe also calls this while the window is
     /// hidden or minimized, with no egui pass, so engine watchdogs, device
-    /// watching and plugin main-thread/timer servicing keep running.  The
-    /// timed repaint request at the end is what keeps those hidden passes
-    /// coming: 16 ms while the bridge is live or a plugin editor is open,
-    /// otherwise 200 ms.
+    /// watching, plugin main-thread/timer servicing and the Live Issues
+    /// state keep running.  The timed repaint request at the end is what
+    /// keeps those hidden passes coming: 16 ms while the bridge is live or
+    /// a plugin editor is open, otherwise 200 ms.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.meters(ctx);
         self.watch_devices();
@@ -302,6 +303,7 @@ impl eframe::App for RigWerkApp {
         self.engine.service_plugins();
         self.poll_plugin_gui();
         self.sync_bridge_config();
+        self.tick_issues(Instant::now());
         let plugin_editor_open = self.plugin_editor.is_some() || self.plugin_gui.is_some();
         let interval = if self.startup.is_some() {
             Duration::from_millis(16)

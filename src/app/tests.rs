@@ -499,4 +499,5 @@ fn one_missed_scan_does_not_stop_the_bridge() {
         .log
         .iter()
         .any(|entry| entry.text.contains("unplugged — bridge stopped")));
+    assert_eq!(app.issue_state.device_lost, app.device_alert);
 }
