@@ -8,7 +8,8 @@ dependency that forced it changes. The license is GPL-3.0-or-later.
 `REVIEW.md` and `REVIEW-FIXES.md` record a finished review.
 `docs/mockups/dual-out-plan.md` records the multi-output work that has
 landed. `docs/mockups/live-issues-plan.md` is still open: the Issues
-strip is not in the UI.
+strip is on Live, but the card warnings still need migrating into it and
+later producers are not built.
 
 ## Commands
 
