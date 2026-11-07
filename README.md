@@ -26,6 +26,8 @@ it is ASIO and/or WASAPI. Between them sits an async ring, a short mixer rack
 
 ![Signal Routing](docs/screenshots/routing.png)
 
+![Plugins](docs/screenshots/plugins.png)
+
 ![Devices](docs/screenshots/devices.png)
 
 ## Multiple signal paths
@@ -92,30 +94,41 @@ priority, a plugin chain that overloads the CPU can starve the desktop.
 cargo test
 ```
 
-Screenshots for docs (fixed 1440×1080 window):
+Screenshots for docs (fixed 1440×1080 window). Every README screenshot uses
+the same `showcase` setup: Blend clean (paths Clean and Room) with real
+inserts, a second output sink as a follower plus RigWerk Out, and a running
+bridge.
 
 ```bash
 # Wayland cannot honor client resize; --screenshot drops to X11/XWayland.
-export RIGWERK_ROUTING_SETUP=blend   # Live, Mixer and Routing show two paths
-for page in live mixer routing; do
+export RIGWERK_ROUTING_SETUP=showcase RIGWERK_SCREENSHOT_START=1
+export RIGWERK_SCREENSHOT_PLUGINS="1=/usr/lib/clap/lsp-plugins-clap.clap#Compressor Stereo;\
+2=/usr/lib/vst3/DragonflyRoomReverb.vst3;\
+2=/usr/lib/clap/lsp-plugins-clap.clap#Limiter Stereo"
+for page in live mixer routing plugins devices; do
   RIGWERK_PAGE=$page cargo run --release -- --screenshot docs/screenshots/$page.png
 done
-RIGWERK_PAGE=devices cargo run --release -- --screenshot docs/screenshots/devices.png
 ```
 
-Without a display or sound card, run them under `xvfb-run -a` against the
-PipeWire null-sink graph in `AGENTS.md` (one `Audio/Sink` and one
-`Audio/Source/Virtual` node, `pw-metadata -n settings 0 clock.force-quantum 64`).
+`RIGWERK_SCREENSHOT_START=1` opens the selected devices, so take these
+against a virtual graph, not real hardware. The README set was taken under
+`xvfb-run -a` with the PipeWire null-sink graph from `AGENTS.md`: sinks
+"Studio Monitors" and "USB Headphones", a virtual source "Guitar Interface"
+fed a plucked-string loop through `pw-cat` and `pw-link`, and
+`pw-metadata -n settings 0 clock.force-quantum 64`. The plugins are the
+Debian/Ubuntu `lsp-plugins-clap` and `dragonfly-reverb-vst3` packages.
+`RIGWERK_SCREENSHOT_PLUGINS` is a `;` list of
+`<path number>=<bundle>[#<effect name>]`.
 
 `RIGWERK_PAGE` may be `live`, `mixer`, `routing`, `devices`, `sessions`,
 `plugins`, `guide`, or `diagnostics`.
 `RIGWERK_MIXER_STAGE` selects a Mixer stage: `input`, `pre_eq`, `plugins`,
 `gate`, `post_eq`, `output`, or `device` (the clock device).
 `RIGWERK_ROUTING_SETUP` sets up paths: `drywet`, `sum3`, `blend`,
-`dualamp-off` (alignment off, the red warning) or `live3` (Blend plus an
-empty, unmuted third path). `blend`, `dualamp-off` and `live3` fake the plugin
-latency of one path (no plugin is loaded), so the alignment has something to
-show. `RIGWERK_SCROLL=<px>` scrolls the page down.
+`dualamp-off` (alignment off, the red warning), `live3` (Blend plus an
+empty, unmuted third path) or `showcase` (above). `blend`, `dualamp-off` and
+`live3` fake the plugin latency of one path (no plugin is loaded), so the
+alignment has something to show. `RIGWERK_SCROLL=<px>` scrolls the page down.
 
 ## License
 
