@@ -89,6 +89,19 @@ fn candidate_from_clap(candidate: ClapCandidate) -> PluginCandidate {
     }
 }
 
+/// The effects in one bundle: CLAP by its `.clap` extension, else VST3.
+fn candidates_from_path(path: &Path) -> Vec<PluginCandidate> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("clap"))
+    {
+        candidates_from_clap_bundle(path)
+    } else {
+        candidates_from_bundle(path)
+    }
+}
+
 fn candidates_from_clap_bundle(path: &Path) -> Vec<PluginCandidate> {
     match clap::scan_bundle(path) {
         Ok(found) => found.into_iter().map(candidate_from_clap).collect(),
@@ -224,15 +237,7 @@ impl RigWerkApp {
             ));
             return;
         }
-        let candidates = if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("clap"))
-        {
-            candidates_from_clap_bundle(&path)
-        } else {
-            candidates_from_bundle(&path)
-        };
+        let candidates = candidates_from_path(&path);
         if let Some(candidate) = candidates.first() {
             self.add_plugin_candidate(&candidate.clone());
             if candidates.len() > 1 {
@@ -255,6 +260,25 @@ impl RigWerkApp {
                 std::time::Instant::now(),
             ));
         }
+    }
+
+    /// Adds the effect called `name` (the first one when `None`) from a
+    /// VST3 or CLAP bundle to the selected path.  `false` when the bundle
+    /// holds no such effect.  Used by the screenshot setup.
+    pub(crate) fn add_plugin_from_bundle(&mut self, path: &Path, name: Option<&str>) -> bool {
+        let candidates = candidates_from_path(path);
+        let found = match name {
+            Some(name) => candidates
+                .iter()
+                .find(|candidate| candidate.name.eq_ignore_ascii_case(name)),
+            None => candidates.first(),
+        };
+        let Some(candidate) = found.cloned() else {
+            return false;
+        };
+        let before = self.engine.plugin_views(self.selected_path).len();
+        self.add_plugin_candidate(&candidate);
+        self.engine.plugin_views(self.selected_path).len() > before
     }
 
     fn install_plugin(&mut self, pref: PluginPref) {
