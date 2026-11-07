@@ -8,6 +8,7 @@ pub(crate) mod bridge;
 pub(crate) mod cards;
 pub(crate) mod devices;
 pub(crate) mod driver_check;
+pub(crate) mod issues;
 pub(crate) mod paths;
 pub(crate) mod plugin_gui;
 pub(crate) mod plugins;
@@ -182,6 +183,10 @@ pub struct RigWerkApp {
     pub(crate) routing_preset_path: Option<usize>,
     /// The routing card applied last, for "Custom · edited from <card>".
     pub(crate) routing_last_card: Option<crate::app::cards::Card>,
+    /// The Live Issues strip shows only its header (not persisted).
+    pub(crate) live_issues_collapsed: bool,
+    /// What the Live Issues keep between frames (the DSP hysteresis).
+    pub(crate) issue_state: crate::app::issues::IssueState,
     /// Where the next Plugins-page add should land (`None` = append).
     pub(crate) plugin_insert_at: Option<usize>,
     pub(crate) meter_in_l: f32,
@@ -343,24 +348,30 @@ impl eframe::App for RigWerkApp {
                     }
                     return;
                 }
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        self.header(ui);
-                        ui.add_space(14.0);
-                        match self.page {
-                            Page::Live => self.live_page(ui, &ctx),
-                            Page::Mixer => self.mixer_page(ui),
-                            Page::Routing => self.routing_page(ui),
-                            Page::Devices => self.devices_page(ui),
-                            Page::Sessions => self.sessions_page(ui),
-                            Page::Plugins => self.plugins_page(ui),
-                            Page::Guide => self.guide_page(ui),
-                            Page::Diagnostics => self.diagnostics_page(ui),
-                        }
-                        ui.add_space(18.0);
-                    });
+                let mut page_scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                if let Some(offset) = self
+                    .screenshot
+                    .as_ref()
+                    .and_then(|_| screenshot::screenshot_scroll())
+                {
+                    page_scroll = page_scroll.vertical_scroll_offset(offset);
+                }
+                page_scroll.show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    self.header(ui);
+                    ui.add_space(14.0);
+                    match self.page {
+                        Page::Live => self.live_page(ui, &ctx),
+                        Page::Mixer => self.mixer_page(ui),
+                        Page::Routing => self.routing_page(ui),
+                        Page::Devices => self.devices_page(ui),
+                        Page::Sessions => self.sessions_page(ui),
+                        Page::Plugins => self.plugins_page(ui),
+                        Page::Guide => self.guide_page(ui),
+                        Page::Diagnostics => self.diagnostics_page(ui),
+                    }
+                    ui.add_space(18.0);
+                });
             });
 
         if self.show_about {
@@ -663,6 +674,8 @@ impl RigWerkApp {
             routing_device: 0,
             routing_preset_path: None,
             routing_last_card: None,
+            live_issues_collapsed: false,
+            issue_state: Default::default(),
             plugin_insert_at: None,
             meter_in_l: 0.0,
             meter_in_r: 0.0,
@@ -879,6 +892,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         routing_device: 0,
         routing_preset_path: None,
         routing_last_card: None,
+        live_issues_collapsed: false,
+        issue_state: Default::default(),
         plugin_insert_at: None,
         meter_in_l: 0.0,
         meter_in_r: 0.0,

@@ -12,7 +12,7 @@ use super::bridge::run_bridge;
 #[cfg(target_os = "linux")]
 use super::linux::pipewire;
 use super::output_map::{AlignmentReport, OutputDeviceSettings};
-use super::path::{PathMix, PathState, MAX_PATHS};
+use super::path::{DspTime, PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
 use super::shared::FollowerPlan;
 use super::shared::Shared;
@@ -251,6 +251,24 @@ impl AudioEngine {
     /// the path level and the master.
     pub fn path_meters(&self, slot: usize) -> (f32, f32) {
         self.shared.path(slot).meters()
+    }
+
+    /// Path `slot`'s DSP time: the mixer's smoothed and peak time per
+    /// block on the path's chain and the block's length.  `None` while no
+    /// mixer runs the path.  Cleared on every start and stop.
+    pub fn path_dsp_time(&self, slot: usize) -> Option<DspTime> {
+        if !self.shared.running.load(Ordering::Relaxed) {
+            return None;
+        }
+        let time = self.shared.path(slot).dsp_time();
+        (time.block_ns > 0).then_some(time)
+    }
+
+    /// Screenshot hook: makes path `slot`'s chain report `samples` of
+    /// latency, as a latent plugin would, so Signal Routing can show the
+    /// alignment without loading one.  Only used before a bridge runs.
+    pub fn screenshot_path_latency(&self, slot: usize, samples: u32) {
+        self.shared.path(slot).screenshot_latency(samples);
     }
 
     /// Sets the clock device's channel map, level and mute (sanitized here).
@@ -617,6 +635,9 @@ impl AudioEngine {
     fn finish_stop(&mut self) {
         self.shared.running.store(false, Ordering::Relaxed);
         // No mixer runs any more: what it published is stale.
+        for path in &self.shared.paths {
+            path.store_dsp_time(DspTime::default());
+        }
         self.shared.clock_device.clear_alignment();
         for follower in &self.shared.followers {
             follower.clear_alignment();

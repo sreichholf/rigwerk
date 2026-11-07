@@ -1,4 +1,5 @@
-//! Diagnostics: the activity log, scan notes and the bridge status line.
+//! Diagnostics: the activity log, scan notes, the bridge status line and
+//! the signal paths' DSP time (per path, against the block it must fit).
 //!
 //! The header pill still follows the engine state. This page shows the
 //! bridge's own status string beside that, and keeps scan notes and quantum
@@ -14,6 +15,22 @@ use crate::audio::EngineState;
 use crate::ui::theme::ts;
 use crate::ui::theme::{AMBER, BORDER, CARD, DIM, MUTED, RED, TEAL, TEXT};
 use crate::ui::widgets::{card, ghost_button, micro_label, mono, status_dot};
+
+/// One path's DSP line: "0.21 ms avg · 0.40 ms peak of 10.7 ms · 2% / 4%",
+/// or why there is none.
+pub(crate) fn dsp_text(dsp: Option<crate::audio::DspTime>) -> String {
+    match dsp {
+        Some(time) if time.block_ns > 0 => format!(
+            "{:.2} ms avg · {:.2} ms peak of {:.1} ms · {:.0}% / {:.0}%",
+            time.avg_ns as f32 / 1e6,
+            time.peak_ns as f32 / 1e6,
+            time.block_ns as f32 / 1e6,
+            time.avg_share() * 100.0,
+            time.peak_share() * 100.0
+        ),
+        _ => "not running".to_owned(),
+    }
+}
 
 fn engine_state_label(state: EngineState) -> &'static str {
     match state {
@@ -51,6 +68,17 @@ impl RigWerkApp {
         }
     }
 
+    /// One line per path: name, chain latency, DSP time per block.
+    fn path_dsp_lines(&self) -> Vec<(crate::app::paths::PathInfo, String)> {
+        self.path_infos()
+            .into_iter()
+            .map(|info| {
+                let dsp = dsp_text(self.engine.path_dsp_time(info.slot));
+                (info, dsp)
+            })
+            .collect()
+    }
+
     /// Plain-text report: oldest activity first, plus the live status and notes.
     pub(crate) fn diagnostics_text(&self) -> String {
         let mut lines = Vec::new();
@@ -63,6 +91,15 @@ impl RigWerkApp {
         match self.engine.quantum_note() {
             Some(note) => lines.push(format!("Quantum: {note}")),
             None => lines.push("Quantum: none".to_owned()),
+        }
+        lines.push("Signal paths (chain latency · DSP time per block):".to_owned());
+        for (info, dsp) in self.path_dsp_lines() {
+            lines.push(format!(
+                "- {}: {:.1} ms · {dsp}{}",
+                info.name,
+                info.latency_ms,
+                if info.mute { " · muted" } else { "" }
+            ));
         }
         lines.push("Scan notes:".to_owned());
         if self.inventory.notes.is_empty() {
@@ -152,6 +189,47 @@ impl RigWerkApp {
                     .wrap(),
                 );
             });
+        });
+
+        ui.add_space(10.0);
+        card(ui, CARD, BORDER, |ui| {
+            ui.set_width(width - 32.0);
+            ui.label(micro_label("SIGNAL PATHS · DSP TIME", DIM));
+            ui.add_space(6.0);
+            egui::Grid::new("diagnostics_paths")
+                .num_columns(3)
+                .spacing([18.0, 4.0])
+                .show(ui, |ui| {
+                    for header in ["PATH", "CHAIN LATENCY", "DSP PER BLOCK · AVG / PEAK"] {
+                        ui.label(mono(header, DIM, 8.5));
+                    }
+                    ui.end_row();
+                    for (info, dsp) in self.path_dsp_lines() {
+                        ui.horizontal(|ui| {
+                            status_dot(ui, info.colour);
+                            ui.label(RichText::new(&info.name).size(ts(11.0)).color(TEXT));
+                        });
+                        ui.label(mono(format!("{:.1} ms", info.latency_ms), MUTED, 9.5));
+                        let time = self.engine.path_dsp_time(info.slot).unwrap_or_default();
+                        let color = if time.peak_share() >= crate::app::issues::DSP_ERROR_SHARE {
+                            RED
+                        } else if time.avg_share() >= crate::app::issues::DSP_WARN_SHARE {
+                            AMBER
+                        } else {
+                            MUTED
+                        };
+                        ui.label(mono(dsp, color, 9.5));
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Time the mixer spends on each path's chain per block (routing, EQs, gate, inserts), smoothed and as a peak that decays over about two seconds, against the block's length: the graph quantum on the PipeWire duplex path, the output block otherwise.",
+                )
+                .size(ts(10.0))
+                .color(DIM),
+            );
         });
 
         ui.add_space(10.0);
@@ -255,6 +333,15 @@ mod tests {
         assert!(text.contains("ASIO registry scan: boom"), "{text}");
         assert!(text.contains("Bridge ready."), "{text}");
         assert!(text.contains("cap 400"), "{text}");
+        assert!(text.contains("- Main: 0.0 ms · not running"), "{text}");
+        assert_eq!(
+            super::dsp_text(Some(crate::audio::DspTime {
+                avg_ns: 210_000,
+                peak_ns: 428_000,
+                block_ns: 10_700_000,
+            })),
+            "0.21 ms avg · 0.43 ms peak of 10.7 ms · 2% / 4%"
+        );
 
         let path: PathBuf = std::env::temp_dir().join(format!(
             "rigwerk-diagnostics-test-{}-report.txt",

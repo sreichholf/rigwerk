@@ -35,6 +35,14 @@
 //! phase; that chunk loses the inserts' sound (see
 //! [`PathProcessor::run_inserts`] and the `path` module docs).
 //!
+//! Each path's chain (front, inserts, back) runs as one piece per block
+//! and is timed with one monotonic clock read per path and stage (the
+//! vDSO / QPC clock `Instant` reads, as the drift relax timer already
+//! does; no allocation, no lock).  The smoothed time per block and the
+//! block's length are published per path (`PathControls::dsp_time`, with a
+//! peak that decays over [`DSP_PEAK_SECONDS`]) for
+//! Diagnostics and the Live overload issue.
+//!
 //! One path at 0 dB (path and device level), unmuted, normal polarity is
 //! bit-identical to the chain before paths existed: every unity gain is a
 //! copy, not a multiply.
@@ -49,7 +57,7 @@ use super::gate::{GateSlot, NoiseGate};
 use super::output_map::{
     DeviceFrame, DeviceMapper, PathLines, PathTiming, MAX_ALIGN_DELAY, MAX_FOLLOWERS,
 };
-use super::path::{LiveSlots, PathControls, PathState, MAX_PATHS};
+use super::path::{DspTime, LiveSlots, PathControls, PathState, MAX_PATHS};
 use super::plugins::MAX_ALIGN;
 use super::resampler::FrameResampler;
 use super::shared::Shared;
@@ -159,7 +167,19 @@ pub(crate) struct PathProcessor {
     /// No chain output has played since the path (re)started: nothing to
     /// smooth a switch from.
     chain_fresh: bool,
+    /// The time this block spent on the path so far, and the smoothed time
+    /// per block, ns (see [`Self::publish_dsp`]).
+    dsp_block_ns: u64,
+    dsp_ns: f32,
+    /// The decaying peak of the time per block, ns.
+    dsp_peak_ns: f32,
 }
+
+/// How fast the published DSP time follows the measured one, per block.
+/// About 100 blocks (a second at 512 frames / 48 kHz) to settle.
+const DSP_SMOOTHING: f32 = 0.02;
+/// Time constant of the published DSP peak's decay, seconds.
+const DSP_PEAK_SECONDS: f32 = 2.0;
 
 /// How long the chain's output takes to come back after a block it missed
 /// (it played its delayed input meanwhile).
@@ -184,6 +204,9 @@ impl PathProcessor {
             chain_declick: Declick::default(),
             declick_len: (DECLICK_SECONDS * rate as f32) as u32,
             chain_fresh: true,
+            dsp_block_ns: 0,
+            dsp_ns: 0.0,
+            dsp_peak_ns: 0.0,
             block: Vec::new(),
             plugin_l: Vec::new(),
             plugin_r: Vec::new(),
@@ -217,6 +240,9 @@ impl PathProcessor {
         self.chain_fresh = true;
         self.chain_declick = Declick::default();
         self.drain = None;
+        self.dsp_block_ns = 0;
+        self.dsp_ns = 0.0;
+        self.dsp_peak_ns = 0.0;
     }
 
     /// Grows the per-block scratch outside the callback.
@@ -346,27 +372,69 @@ impl PathProcessor {
         }
     }
 
-    /// The per-frame front of the chain for one input frame: routing, channel
-    /// enable and mono (with their ramps), then the pre EQ and a PRE gate.
-    /// The result waits in `block` for the plugin inserts.
+    /// Holds one input frame in `block` for [`Self::run_front`].
     #[inline]
-    fn stage_front(&mut self, index: usize, left: f32, right: f32) {
-        // Routing, channel enable and mono move with the ramps, before
-        // the EQ and the inserts, which is where those controls act.
-        let mut out = self.ramps.next_input(left, right);
-        // The chain on the path's mix (taps 1/2), in order: pre EQ, optional
-        // PRE gate, plugin inserts, optional POST gate, post EQ.  Built-ins
-        // are per-sample → no added latency.
-        if self.plan.pre_eq {
-            (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
-        }
-        if self.plan.gate_pre {
-            (out[0], out[1]) = self.gate.process(out[0], out[1]);
-        }
-        self.block[index] = out;
+    fn stage_input(&mut self, index: usize, left: f32, right: f32) {
+        self.block[index] = [left, right, 0.0, 0.0];
     }
 
-    /// Runs the plugin inserts over a block that `stage_front` filled, in
+    /// The front of the chain over a block of staged input frames, in
+    /// place: routing, channel enable and mono (with their ramps), then the
+    /// pre EQ and a PRE gate.  The result waits in `block` for the plugin
+    /// inserts.  Each path's state only moves with its own frames, so
+    /// running it per block instead of per frame gives the same samples,
+    /// and the mixer can time each path as one piece.
+    fn run_front(&mut self, frames: usize) {
+        for index in 0..frames {
+            let [left, right, _, _] = self.block[index];
+            // Routing, channel enable and mono move with the ramps, before
+            // the EQ and the inserts, which is where those controls act.
+            let mut out = self.ramps.next_input(left, right);
+            // The chain on the path's mix (taps 1/2), in order: pre EQ,
+            // optional PRE gate, plugin inserts, optional POST gate, post
+            // EQ.  Built-ins are per-sample → no added latency.
+            if self.plan.pre_eq {
+                (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
+            }
+            if self.plan.gate_pre {
+                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+            }
+            self.block[index] = out;
+        }
+    }
+
+    /// Adds the time from `since` to `now` to this block's DSP time and
+    /// returns `now`, the start of whatever is timed next.
+    #[inline]
+    fn add_dsp_time(&mut self, since: Instant, now: Instant) -> Instant {
+        self.dsp_block_ns += now.saturating_duration_since(since).as_nanos() as u64;
+        now
+    }
+
+    /// Smooths this block's DSP time into the published one, folds it into
+    /// the decaying peak ([`DSP_PEAK_SECONDS`]) and stores both with the
+    /// block's length (`frames` at `rate`), the path's budget.  Atomics
+    /// only.
+    fn publish_dsp(&mut self, controls: &PathControls, frames: usize, rate: u32) {
+        let measured = self.dsp_block_ns.min(u32::MAX as u64) as f32;
+        self.dsp_block_ns = 0;
+        self.dsp_ns = if self.dsp_ns == 0.0 {
+            measured
+        } else {
+            self.dsp_ns + (measured - self.dsp_ns) * DSP_SMOOTHING
+        };
+        let seconds = frames as f32 / rate.max(1) as f32;
+        let decay = (-seconds / DSP_PEAK_SECONDS).exp();
+        self.dsp_peak_ns = measured.max(self.dsp_peak_ns * decay);
+        let block_ns = (frames as u64 * 1_000_000_000 / rate.max(1) as u64).min(u32::MAX as u64);
+        controls.store_dsp_time(DspTime {
+            avg_ns: self.dsp_ns as u32,
+            peak_ns: self.dsp_peak_ns as u32,
+            block_ns: block_ns as u32,
+        });
+    }
+
+    /// Runs the plugin inserts over a block that `run_front` filled, in
     /// chunks of at most [`CHAIN_CHUNK`] frames.
     ///
     /// The chain never just drops out.  Mix, bypass and plugin controls do
@@ -752,24 +820,35 @@ impl OutputMixer {
         }
     }
 
-    /// Splits one input frame into every live path.
+    /// Splits one input frame into every live path.  Their chains run in
+    /// [`Self::finish_block`].
     #[inline]
     fn stage_front(&mut self, index: usize, left: f32, right: f32) {
         for slot in self.live.iter() {
-            self.paths[slot].stage_front(index, left, right);
+            self.paths[slot].stage_input(index, left, right);
         }
     }
 
-    /// The rest of the chain for a block that `stage_front` filled: each
-    /// live path's inserts, POST gate and post EQ, then the master level on
+    /// The chains for a block that `stage_front` filled: each live path's
+    /// front (routing, pre EQ, PRE gate), inserts, POST gate and post EQ,
+    /// each path timed (its DSP time, see [`PathProcessor::publish_dsp`]:
+    /// one clock read per path and stage, no allocation, no lock), then
+    /// the master level on
     /// each path's frame, the meters and the scope.  Each finished frame
     /// goes to `write` with the clock device's mapper, the live followers'
     /// mappers, every live path's frame (the mappers sum them) and the
     /// stereo sum of the paths' taps, and the frame counter advances.
     fn finish_block(&mut self, shared: &Shared, frames: usize, mut write: impl WriteFrame) {
         let live = self.live;
+        // Every front runs before any plugin can touch the float mode.
+        let mut mark = Instant::now();
+        for slot in live.iter() {
+            self.paths[slot].run_front(frames);
+            mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+        }
         for slot in live.iter() {
             self.paths[slot].run_inserts(&shared.paths[slot], frames);
+            mark = self.paths[slot].add_dsp_time(mark, Instant::now());
         }
 
         // A plugin may have cleared flush-to-zero; the POST gate, post EQ
@@ -777,8 +856,11 @@ impl OutputMixer {
         // before the caller's guard, so the thread's original mode still
         // comes back last.
         let _post_denormals = DenormalGuard::new();
+        mark = Instant::now();
         for slot in live.iter() {
             self.paths[slot].finish_block(&shared.paths[slot], frames);
+            mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+            self.paths[slot].publish_dsp(&shared.paths[slot], frames, self.output_rate);
         }
 
         let followers = &mut self.followers[..self.live_followers];
@@ -2160,6 +2242,29 @@ mod tests {
         };
         shared.restore_path(1, &mix, Vec::new());
         (OutputMixer::new(48_000, channels), shared)
+    }
+
+    #[test]
+    fn each_live_path_publishes_its_dsp_time_and_block_budget() {
+        let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
+        mixer.prepare(480);
+        let _ = device_frames(&mut mixer, &shared, 2, 480);
+        for slot in 0..2 {
+            let time = shared.paths[slot].dsp_time();
+            assert_eq!(time.block_ns, 10_000_000, "480 frames at 48 kHz are 10 ms");
+            assert!(time.avg_ns < time.block_ns, "a plain chain fits its block");
+            assert!(
+                time.peak_ns >= time.avg_ns,
+                "one block: the peak is that block"
+            );
+        }
+        assert_eq!(
+            shared.paths[2].dsp_time(),
+            super::DspTime::default(),
+            "an unused slot never runs"
+        );
+        shared.paths[0].reset_meters();
+        assert_eq!(shared.paths[0].dsp_time(), super::DspTime::default());
     }
 
     /// `frames` frames of the clock device, as one block.

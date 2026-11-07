@@ -6,10 +6,14 @@
 //! they are in the session.
 //!
 //! With one path the matrix is today's Mix L / Mix R onto the device's
-//! channels.  With several, it has one row pair per path in the path's
-//! colour (cells in one column add up), a sum block per path (level and
-//! polarity on this device; trim and alignment wait for P3), and the
-//! routing warnings (`RigWerkApp::routing_warnings`).
+//! channels.  With several, the device header carries its align switch,
+//! the matrix has one row pair per path in the path's colour (cells in one
+//! column add up), and a sum block lists per path its level, polarity and
+//! trim on this device and the alignment delay it gets there, then a
+//! latency line ("Waits for <path>, +X ms") and latency bars (own chain
+//! latency, hatched alignment delay).  The routing warnings
+//! (`RigWerkApp::routing_warnings`) sit above the matrix.  Alignment only
+//! lines up the paths on one device, never devices with each other.
 
 use eframe::egui;
 use egui::{
@@ -17,12 +21,13 @@ use egui::{
     Stroke, Vec2,
 };
 
+use crate::app::alignment::DeviceAlignment;
 use crate::app::cards::{Card, RoutingWarning, RoutingWarningKind};
 use crate::app::paths::PathInfo;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{
     ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
-    UnusedChannels, MAX_OUTPUT_CHANNELS,
+    UnusedChannels, MAX_ALIGN, MAX_OUTPUT_CHANNELS,
 };
 use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::pages::mixer::output_devices::{block, device_state, OutputDeviceRow};
@@ -35,7 +40,7 @@ use crate::ui::widgets::{
     path_level_text, path_toggle, row_info, show_focus_ring, tab_button_sized, tag_width,
 };
 
-use super::paths::level_stepper;
+use super::paths::{level_stepper, trim_stepper, trim_text};
 use super::{
     column_header, layer_badge, matrix_cell, path_output_cell, path_row_header, row_header, CELL,
     ROW_HEADER_W,
@@ -458,8 +463,15 @@ pub(crate) fn channel_list(channels: &[usize]) -> String {
         .join(", ")
 }
 
-/// The red (Sum) or amber (Shift) banner over a device's matrix.
-fn warning_banner(ui: &mut egui::Ui, warning: &RoutingWarning, device: &str) {
+/// The red (Sum) or amber (Shift) banner over a device's matrix.  With
+/// the device's alignment off it offers to turn it on (pushed to `edits`).
+fn warning_banner(
+    ui: &mut egui::Ui,
+    warning: &RoutingWarning,
+    device: &str,
+    align: bool,
+    edits: &mut Vec<MapEdit>,
+) {
     let (color, title, body) = match warning.kind {
         RoutingWarningKind::Sum => (
             RED,
@@ -467,7 +479,11 @@ fn warning_banner(ui: &mut egui::Ui, warning: &RoutingWarning, device: &str) {
                 "Paths add up unaligned on {device} ({}).",
                 channel_list(&warning.channels)
             ),
-            "They arrive at different times and can comb filter (thin, hollow sound). Until alignment lands, keep summed paths on separate channels or devices.",
+            if align {
+                "They arrive at different times and comb filter (thin, hollow sound): their trims pull them apart. Set the trims equal."
+            } else {
+                "They arrive at different times and comb filter (thin, hollow sound). Turn alignment on, or trim by hand."
+            },
         ),
         RoutingWarningKind::Shift => (
             AMBER,
@@ -486,6 +502,22 @@ fn warning_banner(ui: &mut egui::Ui, warning: &RoutingWarning, device: &str) {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(RichText::new(title).size(ts(10.5)).color(color).strong());
                 ui.label(RichText::new(body).size(ts(10.5)).color(MUTED));
+                if !align {
+                    ui.add_space(6.0);
+                    let button = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Align paths").size(ts(9.5)).color(color),
+                            )
+                            .fill(with_alpha(color, 18))
+                            .stroke(Stroke::new(1.0, with_alpha(color, 90)))
+                            .corner_radius(CornerRadius::same(6)),
+                        )
+                        .on_hover_text(format!("Turn alignment on for {device}"));
+                    if button.clicked() {
+                        edits.push(MapEdit::Align(true));
+                    }
+                }
             });
         });
 }
@@ -544,6 +576,15 @@ pub(crate) enum MapEdit {
     },
     /// The path's polarity on the device.
     Invert { slot: usize, invert: bool },
+    /// The path's alignment trim on the device, ms; `commit` as for
+    /// `Level`.
+    Trim {
+        slot: usize,
+        trim_ms: f32,
+        commit: bool,
+    },
+    /// The device's align switch.
+    Align(bool),
     /// What the device's unreached channels play.
     Unused(UnusedChannels),
 }
@@ -687,6 +728,42 @@ impl RigWerkApp {
                     if invert { AMBER } else { TEAL },
                 );
             }
+            MapEdit::Trim {
+                slot,
+                trim_ms,
+                commit,
+            } => {
+                if !edit_entry(self, slot, &|entry| entry.trim_ms = trim_ms) || !commit {
+                    return;
+                }
+                let trim = self
+                    .device_path_map(device, slot)
+                    .map_or(trim_ms, |entry| entry.trim_ms);
+                self.push_log(
+                    format!(
+                        "{} trim on {}: {}.",
+                        path_name(self, slot),
+                        row.name,
+                        trim_text(trim)
+                    ),
+                    TEAL,
+                );
+            }
+            MapEdit::Align(align) => {
+                self.set_device_align(device, align);
+                self.push_log(
+                    format!(
+                        "{}: alignment {}.",
+                        row.name,
+                        if align {
+                            "on, every path waits for the slowest"
+                        } else {
+                            "off, each path plays as its chain finishes"
+                        }
+                    ),
+                    if align { TEAL } else { AMBER },
+                );
+            }
             MapEdit::Unused(mode) => {
                 if let Some(settings) = self.output_settings_mut(device) {
                     settings.unused = mode;
@@ -774,9 +851,15 @@ impl RigWerkApp {
                         .count()
                         > 1
                 });
-                let slowest = several
-                    .iter()
-                    .fold(0.0_f32, |slowest, info| slowest.max(info.latency_ms));
+                // What the device plays at: the slowest arrival there.
+                let slowest = self.device_alignment(device).map_or_else(
+                    || {
+                        several
+                            .iter()
+                            .fold(0.0_f32, |slowest, info| slowest.max(info.latency_ms))
+                    },
+                    |alignment| alignment.total_ms,
+                );
                 DeviceLine {
                     text: format!(
                         "{} paths{} · {slowest:.1} ms",
@@ -961,6 +1044,7 @@ impl RigWerkApp {
     ) {
         let channels = row.channels;
         let multi = infos.len() > 1;
+        let alignment = self.device_alignment(index).unwrap_or_default();
         // Presets (and the single-path matrix) edit this path.
         let path = self.routing_preset_slot(infos);
         let slots: Vec<usize> = infos.iter().map(|info| info.slot).collect();
@@ -988,6 +1072,13 @@ impl RigWerkApp {
             } else if row.virtual_out {
                 crate::ui::widgets::virtual_tag(ui);
             }
+            if multi {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let Some(align) = align_switch(ui, settings.align, &row.name) {
+                        edits.push(MapEdit::Align(align));
+                    }
+                });
+            }
         });
         ui.label(mono(
             format!("{} · {} CH", row.backend.to_uppercase(), channels),
@@ -1004,11 +1095,14 @@ impl RigWerkApp {
             let summary = map_summary(&settings, path, channels);
             (summary.silent, summary.nothing_routed)
         };
-        if multi {
-            for warning in self.routing_warnings(index) {
-                warning_banner(ui, &warning, &row.name);
-                ui.add_space(8.0);
-            }
+        let warnings = if multi {
+            self.routing_warnings(index)
+        } else {
+            Vec::new()
+        };
+        for warning in &warnings {
+            warning_banner(ui, warning, &row.name, settings.align, edits);
+            ui.add_space(8.0);
         }
         if silent {
             nothing_routed_banner(ui, &row.name);
@@ -1154,7 +1248,22 @@ impl RigWerkApp {
         ui.add_space(8.0);
 
         if multi && !reaching.is_empty() {
-            sum_block(ui, row, &settings, &reaching, edits);
+            let unaligned: Vec<usize> = warnings
+                .iter()
+                .filter(|warning| warning.kind == RoutingWarningKind::Sum)
+                .flat_map(|warning| warning.paths.iter().copied())
+                .collect();
+            sum_block(
+                ui,
+                row,
+                &settings,
+                &SumView {
+                    reaching: &reaching,
+                    alignment: &alignment,
+                    unaligned: &unaligned,
+                },
+                edits,
+            );
             ui.add_space(8.0);
         }
 
@@ -1216,13 +1325,48 @@ impl RigWerkApp {
 pub(crate) const SUM_NOTE: &str =
     "Cells in one column add up. Master level and mute (Mixer -> Output) act after the sum.";
 
-/// The sum block: per path on this device, its level and polarity; trim
-/// and the alignment delay come with alignment.  Then the latency line.
+/// What the sum block shows on one device besides the settings.
+struct SumView<'a> {
+    /// The paths this device plays, in display order.
+    reaching: &'a [&'a PathInfo],
+    alignment: &'a DeviceAlignment,
+    /// Path slots in an unaligned sum here (the red warning).
+    unaligned: &'a [usize],
+}
+
+/// Under the latency bars: what alignment does not cover.
+pub(crate) const ALIGN_SCOPE_NOTE: &str = "Alignment lines up the paths on this device only. Each device still has its own buffer, and a follower its cushion, so devices differ from each other.";
+
+/// The device's "Align paths  On | Off" switch.  Returns the new state on
+/// a click that changes it.
+fn align_switch(ui: &mut egui::Ui, align: bool, device: &str) -> Option<bool> {
+    let mut changed = None;
+    // Right to left: Off, On, then the label.
+    let off = tab_button_sized(ui, "Off", !align, RED, 9.5);
+    let off = off.on_hover_text(format!(
+        "Each path plays on {device} as soon as its chain finishes (lowest latency; summed paths comb filter)"
+    ));
+    if off.clicked() && align {
+        changed = Some(false);
+    }
+    let on = tab_button_sized(ui, "On", align, BLUE, 9.5).on_hover_text(format!(
+        "Every path on {device} waits for the slowest one there"
+    ));
+    if on.clicked() && !align {
+        changed = Some(true);
+    }
+    ui.label(micro_label("ALIGN PATHS", DIM));
+    changed
+}
+
+/// The sum block: per path on this device, its level, polarity and trim
+/// and the alignment delay it gets; then the latency line, the latency
+/// bars and what the alignment does not cover.
 fn sum_block(
     ui: &mut egui::Ui,
     row: &OutputDeviceRow,
     settings: &OutputDeviceSettings,
-    reaching: &[&PathInfo],
+    view: &SumView,
     edits: &mut Vec<MapEdit>,
 ) {
     block(ui, |ui| {
@@ -1232,8 +1376,19 @@ fn sum_block(
                 BLUE,
             ));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(mono("ALIGN · AFTER ALIGNMENT", DIM, 8.5))
-                    .on_hover_text("Per-device alignment comes in a later version.");
+                let (text, color) = if view.alignment.align {
+                    ("ALIGNED", BLUE)
+                } else {
+                    (
+                        "ALIGNMENT OFF",
+                        if view.unaligned.is_empty() {
+                            AMBER
+                        } else {
+                            RED
+                        },
+                    )
+                };
+                ui.label(mono(text, color, 8.5));
             });
         });
         ui.add_space(6.0);
@@ -1249,8 +1404,10 @@ fn sum_block(
                             ui.label(micro_label(header, DIM));
                         }
                         ui.end_row();
-                        for info in reaching {
+                        for info in view.reaching {
+                            let (text, color) = alignment_cell(view, info);
                             sum_row(ui, row, settings.path_map[info.slot], info, edits);
+                            ui.label(mono(text, color, 9.0));
                             ui.end_row();
                         }
                     });
@@ -1260,16 +1417,21 @@ fn sum_block(
         ui.add_space(6.0);
         ui.add(
             egui::Label::new(
-                RichText::new(latency_line(&row.name, reaching))
+                RichText::new(latency_line(&row.name, view.alignment, view.reaching))
                     .size(ts(10.0))
-                    .color(MUTED),
+                    .color(if view.alignment.clamped { RED } else { MUTED }),
             )
             .wrap(),
         );
+        ui.add_space(6.0);
+        latency_bars(ui, view);
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(RichText::new(ALIGN_SCOPE_NOTE).size(ts(9.5)).color(DIM)).wrap());
     });
 }
 
-/// One path's row in the sum block.
+/// One path's level, polarity and trim in the sum block (the alignment
+/// cell follows).
 fn sum_row(
     ui: &mut egui::Ui,
     row: &OutputDeviceRow,
@@ -1281,7 +1443,8 @@ fn sum_row(
         let (dot, _) = ui.allocate_exact_size(Vec2::new(8.0, 18.0), Sense::hover());
         ui.painter().circle_filled(dot.center(), 4.0, info.colour);
         ui.label(RichText::new(&info.name).size(ts(10.5)).color(TEXT));
-        ui.label(mono(format!("{:.1} ms", info.latency_ms), DIM, 8.5));
+        ui.label(mono(format!("{:.1} ms", info.latency_ms), DIM, 8.5))
+            .on_hover_text("The path's own chain latency (its plugins)");
     });
     if let Some(step) = level_stepper(
         ui,
@@ -1307,42 +1470,177 @@ fn sum_row(
             invert: !entry.invert,
         });
     }
-    let _ = ui
-        .add_enabled(
-            false,
-            egui::Button::new(mono(format!("{:+.1} ms", entry.trim_ms), DIM, 9.0))
-                .fill(Color32::TRANSPARENT)
-                .stroke(Stroke::new(1.0, BORDER_SOFT))
-                .corner_radius(CornerRadius::same(6))
-                .min_size(Vec2::new(70.0, 22.0)),
-        )
-        .on_disabled_hover_text("Trim (±5 ms) applies after alignment");
-    ui.label(mono("after alignment", DIM, 9.0));
+    if let Some(step) = trim_stepper(
+        ui,
+        entry.trim_ms,
+        &format!("{} trim on {}", info.name, row.name),
+    ) {
+        edits.push(MapEdit::Trim {
+            slot: info.slot,
+            trim_ms: step.level_db,
+            commit: step.commit,
+        });
+    }
 }
 
-/// The latency line under the sum: what each path adds, and how far apart
-/// they arrive until alignment exists.
-pub(crate) fn latency_line(device: &str, reaching: &[&PathInfo]) -> String {
-    let parts: Vec<String> = reaching
-        .iter()
-        .map(|info| format!("{} {:.1} ms", info.name, info.latency_ms))
-        .collect();
-    let mut text = format!(
-        "Latency: {device} plays each path as its chain finishes ({}).",
-        parts.join(" · ")
-    );
-    if reaching.len() > 1 {
-        let (min, max) = reaching
-            .iter()
-            .fold((f32::INFINITY, 0.0_f32), |(min, max), info| {
-                (min.min(info.latency_ms), max.max(info.latency_ms))
-            });
-        let spread = (max - min).max(0.0);
-        if spread >= 0.05 {
-            text.push_str(&format!(" Up to {spread:.1} ms apart: no alignment yet."));
+/// The alignment cell of one path: the delay it gets here, whether it
+/// sets the pace, or why it is out of line.
+fn alignment_cell(view: &SumView, info: &PathInfo) -> (String, Color32) {
+    let alignment = view.alignment;
+    let delay = alignment.per_path[info.slot].unwrap_or(0.0);
+    if info.latency_samples > MAX_ALIGN {
+        return ("past the limit · plays late".to_owned(), RED);
+    }
+    if view.unaligned.contains(&info.slot) {
+        let text = if delay >= 0.05 {
+            format!("delay {delay:.2} ms · unaligned")
         } else {
-            text.push_str(" No alignment yet: a plugin that adds latency shifts its path.");
+            "unaligned".to_owned()
+        };
+        return (text, RED);
+    }
+    if delay >= 0.05 {
+        return (format!("waits {delay:.2} ms"), BLUE);
+    }
+    if alignment.align && alignment.waits_for == Some(info.slot) {
+        return ("slowest · sets the pace".to_owned(), DIM);
+    }
+    ("no delay".to_owned(), DIM)
+}
+
+/// One bar per path: its own chain latency in its colour, then the
+/// alignment delay hatched, and the arrival in ms.
+fn latency_bars(ui: &mut egui::Ui, view: &SumView) {
+    let arrival = |info: &PathInfo| {
+        view.alignment.arrival_ms[info.slot]
+            .unwrap_or(info.latency_ms)
+            .max(0.0)
+    };
+    let longest = view
+        .reaching
+        .iter()
+        .map(|info| arrival(info))
+        .fold(0.0_f32, f32::max);
+    // Short latencies stay short bars: the scale never drops below 6 ms.
+    let scale = longest.max(6.0);
+    let name_w = 110.0;
+    let value_w = 64.0;
+    for info in view.reaching {
+        ui.horizontal(|ui| {
+            let font = FontId::new(ts(9.0), FontFamily::Monospace);
+            let (name_rect, _) = ui.allocate_exact_size(Vec2::new(name_w, 14.0), Sense::hover());
+            let name = fit_text(ui, &info.name, &font, name_w - 4.0);
+            ui.painter().text(
+                name_rect.left_center(),
+                Align2::LEFT_CENTER,
+                name,
+                font.clone(),
+                MUTED,
+            );
+            let track_w = (ui.available_width() - value_w - 8.0).max(60.0);
+            let (track, response) = ui.allocate_exact_size(Vec2::new(track_w, 8.0), Sense::hover());
+            let painter = ui.painter().with_clip_rect(track);
+            painter.rect_filled(track, CornerRadius::same(3), CARD);
+            let own = info.latency_ms.max(0.0).min(arrival(info));
+            let pad = (arrival(info) - own).max(0.0);
+            let x = |ms: f32| track.left() + track.width() * (ms / scale).min(1.0);
+            let own_rect = egui::Rect::from_min_max(track.min, egui::pos2(x(own), track.bottom()));
+            painter.rect_filled(own_rect, CornerRadius::ZERO, with_alpha(info.colour, 230));
+            if pad > 0.0 {
+                let pad_rect = egui::Rect::from_min_max(
+                    egui::pos2(x(own), track.top()),
+                    egui::pos2(x(own + pad), track.bottom()),
+                );
+                let hatch = painter.with_clip_rect(pad_rect.intersect(track));
+                let mut start = pad_rect.left() - track.height();
+                while start < pad_rect.right() {
+                    hatch.line_segment(
+                        [
+                            egui::pos2(start, track.bottom()),
+                            egui::pos2(start + track.height(), track.top()),
+                        ],
+                        Stroke::new(1.5, with_alpha(BLUE, 150)),
+                    );
+                    start += 4.0;
+                }
+            }
+            painter.rect_stroke(
+                track,
+                CornerRadius::same(3),
+                Stroke::new(1.0, BORDER_SOFT),
+                egui::StrokeKind::Inside,
+            );
+            let _ = response.on_hover_text(format!(
+                "{}: {own:.1} ms chain + {pad:.1} ms alignment",
+                info.name
+            ));
+            let (value, _) = ui.allocate_exact_size(Vec2::new(value_w, 14.0), Sense::hover());
+            ui.painter().text(
+                value.right_center(),
+                Align2::RIGHT_CENTER,
+                format!("{:.1} ms", own + pad),
+                font,
+                MUTED,
+            );
+        });
+    }
+}
+
+/// The latency line under the sum: what the device waits for and how much
+/// that adds, or with the alignment off how far apart the paths arrive.
+pub(crate) fn latency_line(
+    device: &str,
+    alignment: &DeviceAlignment,
+    reaching: &[&PathInfo],
+) -> String {
+    let name_of = |slot: usize| {
+        reaching
+            .iter()
+            .find(|info| info.slot == slot)
+            .map(|info| info.name.as_str())
+    };
+    let mut text = if reaching.len() < 2 {
+        let name = reaching.first().map_or("", |info| info.name.as_str());
+        format!(
+            "Nothing to align: {name} is the only path on {device} ({:.1} ms).",
+            alignment.total_ms
+        )
+    } else if alignment.align {
+        match alignment.waits_for.and_then(name_of) {
+            // Within a frame: the paths line up exactly.
+            Some(slowest) if alignment.spread_frames() <= 1 => format!(
+                "Waits for {slowest}, +{:.1} ms. Every path on {device} plays {:.1} ms after its chain input.",
+                alignment.added_ms, alignment.total_ms
+            ),
+            Some(slowest) => format!(
+                "Waits for {slowest}, +{:.1} ms. Paths on {device} play up to {:.1} ms after their chain input (trims shift paths by up to {:.2} ms).",
+                alignment.added_ms,
+                alignment.total_ms,
+                alignment.spread_ms()
+            ),
+            None if alignment.added_ms >= 0.05 => format!(
+                "Nothing to align; the trims add up to +{:.1} ms on {device}.",
+                alignment.added_ms
+            ),
+            None => format!(
+                "Nothing to align: every path on {device} has the same latency ({:.1} ms).",
+                alignment.total_ms
+            ),
         }
+    } else {
+        let spread = alignment.spread_ms();
+        if spread >= 0.05 {
+            format!(
+                "Alignment off: each path plays on {device} as its chain finishes, up to {spread:.1} ms apart."
+            )
+        } else {
+            format!("Alignment off: the paths on {device} arrive together anyway.")
+        }
+    };
+    if alignment.clamped {
+        text.push_str(&format!(
+            " A chain is longer than the alignment covers ({MAX_ALIGN} frames) and plays later than shown."
+        ));
     }
     text
 }
@@ -1579,9 +1877,9 @@ mod tests {
         let tree = accesskit_frame(|ui| app.routing_page(ui));
         let single = node_named(&tree, "Single path card");
         assert_eq!(single.toggled(), Some(Toggled::True));
-        assert!(node_named(&tree, "Blend clean card").is_disabled());
-        assert!(node_named(&tree, "Dual-amp card").is_disabled());
-        assert!(!node_named(&tree, "Dry L / Wet R card").is_disabled());
+        for card in ["Blend clean card", "Dual-amp card", "Dry L / Wet R card"] {
+            assert!(!node_named(&tree, card).is_disabled(), "{card}");
+        }
         for name in [
             "Mute Main",
             "Open Main in Mixer",
@@ -1673,7 +1971,10 @@ mod tests {
         app.set_device_align(0, false);
         app.clock_device.path_map[infos[1].slot].trim_ms = 1.0;
         let shift = line(&app);
-        assert_eq!(shift.text, "2 paths · 0.0 ms");
+        assert_eq!(
+            shift.text, "2 paths · 1.0 ms",
+            "the trimmed path arrives last"
+        );
         assert_eq!(shift.color, AMBER);
 
         // Both on L/R: they add up.
@@ -1710,22 +2011,81 @@ mod tests {
     }
 
     #[test]
-    fn the_latency_line_says_how_far_apart_paths_arrive() {
+    fn the_latency_line_says_what_the_device_waits_for() {
         let mut app = blank_app();
-        assert!(app.apply_card(Card::DryWet));
-        let mut infos = app.path_infos();
-        let one = latency_line("Scarlett", &[&infos[0]]);
+        assert!(app.apply_card(Card::Blend));
+        let infos = app.path_infos();
+        let both = [&infos[0], &infos[1]];
+        let line = |app: &crate::app::RigWerkApp| {
+            latency_line("Scarlett", &app.device_alignment(0).unwrap(), &both)
+        };
         assert_eq!(
-            one,
-            "Latency: Scarlett plays each path as its chain finishes (Main 0.0 ms)."
+            line(&app),
+            "Nothing to align: every path on Scarlett has the same latency (0.0 ms)."
         );
-        infos[1].latency_ms = 1.3;
-        let two = latency_line("Scarlett", &[&infos[0], &infos[1]]);
-        assert!(
-            two.ends_with("Up to 1.3 ms apart: no alignment yet."),
-            "{two}"
+        assert_eq!(
+            latency_line("Scarlett", &app.device_alignment(0).unwrap(), &both[..1]),
+            "Nothing to align: Main is the only path on Scarlett (0.0 ms)."
         );
+        // 2 ms of plugin latency on the second path: the first waits.
+        app.engine.screenshot_path_latency(infos[1].slot, 96);
+        assert_eq!(
+            line(&app),
+            "Waits for Main 2, +2.0 ms. Every path on Scarlett plays 2.0 ms after its chain input."
+        );
+        // A trim on the first path: they no longer arrive together.
+        app.clock_device.path_map[infos[0].slot].trim_ms = 0.5;
+        assert_eq!(
+            line(&app),
+            "Waits for Main 2, +2.5 ms. Paths on Scarlett play up to 2.5 ms after their chain input (trims shift paths by up to 0.50 ms)."
+        );
+        app.clock_device.path_map[infos[0].slot].trim_ms = 0.0;
+        app.set_device_align(0, false);
+        assert_eq!(
+            line(&app),
+            "Alignment off: each path plays on Scarlett as its chain finishes, up to 2.0 ms apart."
+        );
+        app.engine.screenshot_path_latency(infos[1].slot, 0);
         assert_eq!(channel_list(&[0, 2]), "Out 1, Out 3");
+    }
+
+    #[test]
+    fn the_sum_block_edits_trim_and_align_and_flags_the_unaligned_sum() {
+        let mut app = blank_app();
+        assert!(app.apply_card(Card::DualAmp));
+        let second = app.path_slots()[1];
+        app.apply_map_edit(
+            0,
+            MapEdit::Trim {
+                slot: second,
+                trim_ms: 9.0,
+                commit: true,
+            },
+        );
+        assert_eq!(app.clock_device.path_map[second].trim_ms, 5.0, "clamped");
+        assert!(app
+            .log
+            .iter()
+            .any(|entry| entry.text.contains("Main 2 trim on")));
+        app.apply_map_edit(
+            0,
+            MapEdit::Trim {
+                slot: second,
+                trim_ms: 0.0,
+                commit: false,
+            },
+        );
+        app.apply_map_edit(0, MapEdit::Align(false));
+        assert!(!app.device_align(0));
+        app.engine.screenshot_path_latency(second, 96);
+        let tree = accesskit_frame(|ui| app.routing_page(ui));
+        let trim = format!("Main 2 trim on {}", app.output_device_rows()[0].name);
+        let _ = node_named(&tree, &trim);
+        let _ = node_named(&tree, "Align paths");
+        app.apply_map_edit(0, MapEdit::Align(true));
+        assert!(app.device_align(0));
+        assert!(app.routing_warnings(0).is_empty());
+        app.engine.screenshot_path_latency(second, 0);
     }
 
     #[test]

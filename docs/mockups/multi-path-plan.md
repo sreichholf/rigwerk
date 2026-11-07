@@ -36,7 +36,7 @@ Read this before picking up any work package. Background and UI:
 
 ## Work packages
 
-Each package has one implementer agent and a different reviewer agent.
+Each package is implemented once and reviewed separately.
 Packages on the same line of the table can run in parallel, each in its
 own worktree.
 
@@ -129,6 +129,11 @@ own worktree.
   must not cost a block. Pick the smallest safe design (e.g. prepare the
   edit off-thread and swap it in an O(1) section, or keep the last good
   chain running until the swap). Document the choice in the module docs.
+  Outcome: `try_lock` stays, with a fallback. Mix, bypass and plugin
+  controls no longer take the chain lock, so common edits are lock-free;
+  a chunk that misses the lock (a structural edit) plays the chain input
+  delayed by the chain latency, so the sum keeps its phase (see `path.rs`,
+  "Chain handover").
 - Publish the per-device total latency and the per-path delay for the
   UI.
 - Tests: two identical paths, one with a latent fake plugin. With align
@@ -148,5 +153,5 @@ own worktree.
 
 ## Status
 
-- [ ] P1  - [ ] L1  - [ ] P2  - [ ] U1  - [ ] U2  - [ ] P3  - [ ] U3
-- [ ] Final review  - [ ] PR
+- [x] P1  - [x] L1  - [x] P2  - [x] U1  - [x] U2  - [x] P3  - [x] U3
+- [x] Final review  - [ ] PR

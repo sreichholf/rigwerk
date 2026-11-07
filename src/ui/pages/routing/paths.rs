@@ -7,10 +7,11 @@
 use eframe::egui;
 use egui::{Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Sense, Stroke, Vec2};
 
+use crate::app::alignment::DeviceAlignment;
 use crate::app::cards::Card;
 use crate::app::paths::PathInfo;
 use crate::app::RigWerkApp;
-use crate::audio::{MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB};
+use crate::audio::{MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_TRIM_MAX_MS};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, RED, TEAL, TEXT,
@@ -20,9 +21,6 @@ use crate::ui::widgets::{
 };
 
 use super::outputs::RoutingAction;
-
-/// What the Blend and Dual-amp cards say while they are disabled.
-pub(crate) const NEEDS_ALIGNMENT: &str = "needs latency alignment";
 
 /// Under the cards.
 pub(crate) const CARDS_NOTE: &str =
@@ -50,15 +48,31 @@ pub(crate) fn custom_label(last: Option<Card>) -> String {
     }
 }
 
-/// The flow strip's Align node: nothing to do while every path has the
-/// same latency.
-pub(crate) fn align_status(infos: &[PathInfo]) -> &'static str {
-    let first = infos.first().map_or(0, |info| info.latency_samples);
-    if infos.iter().all(|info| info.latency_samples == first) {
-        "nothing to align"
+/// The flow strip's Align node, from every output device's alignment:
+/// the most it adds anywhere, how many devices have it off, or nothing to
+/// align.
+pub(crate) fn align_status(devices: &[DeviceAlignment]) -> String {
+    let added = devices
+        .iter()
+        .filter(|device| device.align)
+        .map(|device| device.added_ms)
+        .fold(0.0, f32::max);
+    let off = devices
+        .iter()
+        .filter(|device| !device.align && device.path_count() > 1)
+        .count();
+    let mut text = if added >= 0.05 {
+        format!("up to +{added:.1} ms")
     } else {
-        "not yet"
+        "nothing to align".to_owned()
+    };
+    if off > 0 {
+        text.push_str(&format!(
+            " · off on {off} device{}",
+            if off == 1 { "" } else { "s" }
+        ));
     }
+    text
 }
 
 /// The × remove button: two drawn strokes, legible at any font.
@@ -110,6 +124,24 @@ pub(crate) fn remove_button(ui: &mut egui::Ui, name: &str) -> bool {
     response.clicked()
 }
 
+/// One step of a trim stepper, clamped to ±[`PATH_TRIM_MAX_MS`] and kept
+/// on 0.01 ms.
+pub(crate) fn step_trim(trim_ms: f32, step: f32) -> f32 {
+    ((trim_ms + step).clamp(-PATH_TRIM_MAX_MS, PATH_TRIM_MAX_MS) * 100.0).round() / 100.0
+}
+
+/// A trim as the stepper shows it, to the 0.01 ms it steps by: "0.00 ms",
+/// "+1.25 ms", "−0.50 ms".
+pub(crate) fn trim_text(trim_ms: f32) -> String {
+    if trim_ms.abs() < 0.005 {
+        "0.00 ms".to_owned()
+    } else if trim_ms > 0.0 {
+        format!("+{trim_ms:.2} ms")
+    } else {
+        format!("−{:.2} ms", -trim_ms)
+    }
+}
+
 /// One step of a level stepper, clamped to the path level range.
 pub(crate) fn step_level(level_db: f32, step: f32) -> f32 {
     let next = if level_db <= PATH_LEVEL_MIN_DB && step > 0.0 {
@@ -152,10 +184,58 @@ pub(crate) struct LevelStep {
     pub(crate) commit: bool,
 }
 
+/// How a "− value +" stepper steps, reads and resets.
+struct StepSpec {
+    /// One ± click.
+    step: f32,
+    /// Per dragged point.
+    drag: f32,
+    /// What a double-click sets.
+    reset: f32,
+    apply: fn(f32, f32) -> f32,
+    text: fn(f32) -> String,
+    hint: &'static str,
+}
+
 /// A "− value +" level stepper (1 dB steps; drag the value for finer
 /// steps, double-click it for 0 dB).  Returns the new level on a change,
 /// and the final level when a drag ends.
 pub(crate) fn level_stepper(ui: &mut egui::Ui, level_db: f32, name: &str) -> Option<LevelStep> {
+    stepper(
+        ui,
+        level_db,
+        name,
+        &StepSpec {
+            step: 1.0,
+            drag: 0.1,
+            reset: 0.0,
+            apply: step_level,
+            text: path_level_text,
+            hint: "Drag to fine-tune, double-click for 0 dB",
+        },
+    )
+}
+
+/// A "− value +" alignment trim stepper (0.1 ms steps, ±5 ms; drag for
+/// 0.01 ms, double-click for 0).  Same results as [`level_stepper`].
+pub(crate) fn trim_stepper(ui: &mut egui::Ui, trim_ms: f32, name: &str) -> Option<LevelStep> {
+    stepper(
+        ui,
+        trim_ms,
+        name,
+        &StepSpec {
+            step: 0.1,
+            drag: 0.01,
+            reset: 0.0,
+            apply: step_trim,
+            text: trim_text,
+            hint:
+                "Extra delay on top of the alignment (±5 ms). Drag to fine-tune, double-click for 0",
+        },
+    )
+}
+
+fn stepper(ui: &mut egui::Ui, level_db: f32, name: &str, spec: &StepSpec) -> Option<LevelStep> {
     let mut next = None;
     let mut commit = false;
     let height = 22.0;
@@ -178,7 +258,10 @@ pub(crate) fn level_stepper(ui: &mut egui::Ui, level_db: f32, name: &str) -> Opt
         rect.min + Vec2::new(button_w + value_w, 0.0),
         Vec2::new(button_w, height),
     );
-    for (area, glyph, step, label) in [(minus, "−", -1.0, "down"), (plus, "+", 1.0, "up")] {
+    for (area, glyph, step, label) in [
+        (minus, "−", -spec.step, "down"),
+        (plus, "+", spec.step, "up"),
+    ] {
         let response = ui.interact(area, base.id.with(label), Sense::click());
         if response.hovered() {
             ui.painter()
@@ -200,19 +283,19 @@ pub(crate) fn level_stepper(ui: &mut egui::Ui, level_db: f32, name: &str) -> Opt
             None,
         );
         if response.clicked() {
-            next = Some(step_level(level_db, step));
+            next = Some((spec.apply)(level_db, step));
             commit = true;
         }
     }
     let response = ui.interact(value, base.id.with("value"), Sense::click_and_drag());
     if response.dragged() {
-        let delta = response.drag_delta().x * 0.1;
+        let delta = response.drag_delta().x * spec.drag;
         if delta != 0.0 {
-            next = Some(step_level(next.unwrap_or(level_db), delta));
+            next = Some((spec.apply)(next.unwrap_or(level_db), delta));
         }
     }
     if response.double_clicked() {
-        next = Some(0.0);
+        next = Some(spec.reset);
         commit = true;
     }
     if response.drag_stopped() {
@@ -223,18 +306,18 @@ pub(crate) fn level_stepper(ui: &mut egui::Ui, level_db: f32, name: &str) -> Opt
     ui.painter().text(
         value.center(),
         Align2::CENTER_CENTER,
-        path_level_text(shown),
+        (spec.text)(shown),
         FontId::new(ts(9.0), FontFamily::Monospace),
         TEXT,
     );
-    let response = response.on_hover_text("Drag to fine-tune, double-click for 0 dB");
+    let response = response.on_hover_text(spec.hint);
     row_info(
         &response,
         egui::Role::SpinButton,
         ui.is_enabled(),
         name.to_owned(),
         None,
-        Some(path_level_text(shown)),
+        Some((spec.text)(shown)),
     );
     next.map(|level_db| LevelStep { level_db, commit })
 }
@@ -250,18 +333,13 @@ pub(crate) fn small_button(ui: &mut egui::Ui, label: &str, color: Color32) -> eg
 }
 
 /// One starting-point card.  Returns whether it was clicked.
-fn card_pick(ui: &mut egui::Ui, card: Card, on: bool, enabled: bool) -> bool {
+fn card_pick(ui: &mut egui::Ui, card: Card, on: bool) -> bool {
     let size = Vec2::new(158.0, 46.0);
-    let sense = if enabled {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
     let fill = if on {
         with_alpha(TEAL, 16)
-    } else if enabled && response.hovered() {
+    } else if response.hovered() {
         with_alpha(TEXT, 8)
     } else {
         CARD_DEEP
@@ -273,47 +351,47 @@ fn card_pick(ui: &mut egui::Ui, card: Card, on: bool, enabled: bool) -> bool {
         Stroke::new(1.0, if on { with_alpha(TEAL, 90) } else { BORDER }),
         egui::StrokeKind::Inside,
     );
-    let alpha = |color: Color32| {
-        if enabled {
-            color
-        } else {
-            with_alpha(color, 100)
-        }
-    };
     painter.text(
         rect.left_top() + Vec2::new(12.0, 15.0),
         Align2::LEFT_CENTER,
         card.label(),
         FontId::new(ts(11.0), FontFamily::Proportional),
-        alpha(if on { TEAL } else { TEXT }),
+        if on { TEAL } else { TEXT },
     );
-    let caption = if enabled {
-        card_caption(card)
-    } else {
-        NEEDS_ALIGNMENT
-    };
+    let caption = card_caption(card);
     painter.text(
         rect.left_top() + Vec2::new(12.0, 32.0),
         Align2::LEFT_CENTER,
         caption,
         FontId::new(ts(8.5), FontFamily::Monospace),
-        alpha(MUTED),
+        MUTED,
     );
     show_focus_ring(ui, &response, rect, 9);
-    let response = if enabled {
-        response.on_hover_text(card_caption(card))
-    } else {
-        response.on_hover_text(format!("{}: {NEEDS_ALIGNMENT}", card.label()))
-    };
+    let response = response.on_hover_text(card_hint(card));
     row_info(
         &response,
         egui::Role::Button,
-        enabled,
+        true,
         format!("{} card", card.label()),
         Some(on),
         Some(caption.to_owned()),
     );
-    enabled && response.clicked()
+    response.clicked()
+}
+
+/// A card's tooltip.
+pub(crate) fn card_hint(card: Card) -> &'static str {
+    match card {
+        Card::Single => "One path on Out 1/2: the routing before paths existed.",
+        Card::DryWet => "The first path on the left channels, the second on the right. Nothing adds up.",
+        Card::Blend => {
+            "A copy of the first path, both summed: the clean one at −6 dB under the driven one. The devices align them."
+        }
+        Card::DualAmp => {
+            "A copy of the first path, both summed, the second with its polarity flipped. Put a different amp on each; the devices align them."
+        }
+        Card::PerDevice => "The first path on the clock device, the second on every follower.",
+    }
 }
 
 /// A flow strip node: a mono key over a value, with an optional colour
@@ -408,8 +486,7 @@ impl RigWerkApp {
                     MUTED,
                 );
                 for card in Card::ALL {
-                    let enabled = !card.needs_alignment();
-                    if card_pick(ui, card, current == Some(card), enabled) {
+                    if card_pick(ui, card, current == Some(card)) {
                         actions.push(RoutingAction::ApplyCard(card));
                     }
                 }
@@ -498,7 +575,16 @@ impl RigWerkApp {
                     }
                 });
                 flow_arrow(ui);
-                flow_node(ui, "ALIGN", DIM, align_status(infos), None);
+                let alignments: Vec<DeviceAlignment> = (0..devices)
+                    .filter_map(|device| self.device_alignment(device))
+                    .collect();
+                let status = align_status(&alignments);
+                let color = if status == "nothing to align" {
+                    DIM
+                } else {
+                    BLUE
+                };
+                flow_node(ui, "ALIGN", color, &status, None);
                 flow_arrow(ui);
                 flow_node(
                     ui,
@@ -842,7 +928,9 @@ fn add_path_tile(ui: &mut egui::Ui, size: Vec2, enabled: bool, actions: &mut Vec
 
 #[cfg(test)]
 mod tests {
-    use super::{align_status, card_caption, custom_label, step_level};
+    use super::{
+        align_status, card_caption, card_hint, custom_label, step_level, step_trim, trim_text,
+    };
     use crate::app::cards::Card;
     use crate::ui::widgets::path_level_text;
 
@@ -861,7 +949,20 @@ mod tests {
     fn every_card_has_a_caption() {
         for card in Card::ALL {
             assert!(!card_caption(card).is_empty());
+            assert!(!card_hint(card).is_empty());
         }
+    }
+
+    #[test]
+    fn trims_step_within_five_ms() {
+        assert_eq!(step_trim(0.0, 0.1), 0.1);
+        assert_eq!(step_trim(4.95, 0.1), 5.0);
+        assert_eq!(step_trim(-5.0, -0.1), -5.0);
+        assert_eq!(trim_text(0.0), "0.00 ms");
+        assert_eq!(trim_text(0.004), "0.00 ms");
+        assert_eq!(trim_text(0.01), "+0.01 ms");
+        assert_eq!(trim_text(1.25), "+1.25 ms");
+        assert_eq!(trim_text(-0.5), "−0.50 ms");
     }
 
     #[test]
@@ -872,10 +973,17 @@ mod tests {
             "Custom · edited from Per-device mixes"
         );
         let mut app = crate::app::blank_app();
-        assert!(app.apply_card(Card::DryWet));
-        let mut infos = app.path_infos();
-        assert_eq!(align_status(&infos), "nothing to align");
-        infos[1].latency_samples = 64;
-        assert_eq!(align_status(&infos), "not yet");
+        assert!(app.apply_card(Card::Blend));
+        let devices =
+            |app: &crate::app::RigWerkApp| vec![app.device_alignment(0).expect("the clock device")];
+        assert_eq!(align_status(&devices(&app)), "nothing to align");
+        let second = app.path_slots()[1];
+        app.engine.screenshot_path_latency(second, 96);
+        assert_eq!(align_status(&devices(&app)), "up to +2.0 ms");
+        app.set_device_align(0, false);
+        assert_eq!(
+            align_status(&devices(&app)),
+            "nothing to align · off on 1 device"
+        );
     }
 }

@@ -96,22 +96,21 @@ pub(crate) use linux::hotplug;
 pub(crate) use linux::native::{is_native_id, node_latency_frames, node_name as linux_node_name};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
+#[cfg(test)]
+pub(crate) use mixer::OutputMixer;
+pub(crate) use output_map::path_level_gain;
 pub use output_map::{
     sanitize_path_level, AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings,
     PathMapSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS,
     MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
-// Ranges for the path level, the per-device path level and the trim, for
-// the path pages (U1/U2).
-#[cfg(test)]
-pub(crate) use mixer::OutputMixer;
-pub(crate) use output_map::path_level_gain;
-#[allow(unused_imports)]
+// Ranges for the path level, the per-device path level and the trim.
 pub use output_map::{PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_TRIM_MAX_MS};
 pub(crate) use path::PathState;
-pub use path::{PathMix, MAX_PATHS};
+pub use path::{DspTime, PathMix, MAX_PATHS};
 #[cfg(target_os = "windows")]
 pub(crate) use plugins::service_clap;
+pub(crate) use plugins::MAX_ALIGN;
 pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use shared::{FollowerLink, FollowerPlan, SCOPE_LEN};

@@ -13,6 +13,7 @@
 //! Mix -> outputs, no per-path chrome.
 
 mod outputs;
+pub(crate) use outputs::channel_list;
 mod paths;
 
 use eframe::egui;

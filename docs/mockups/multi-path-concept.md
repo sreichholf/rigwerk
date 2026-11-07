@@ -181,15 +181,21 @@ keyed by (path, insert), not insert index.
 
 ## What a review should check
 
-- Is "master after the sum" right, or should each path also be able to skip
-  the master (e.g. a stream path that ignores the monitor mute)?
-- Is per-device alignment the right granularity, or per channel group?
-- `MAX_PATHS = 4`: enough for dual-amp + blend + stream?
-- Should a path be able to take its input from another path's output
-  (e.g. stream = main + limiter)? Assumed **no** for now: duplicate instead.
-- `try_lock` in `process_plugins` skips a chain for a block while the UI
-  edits it. In a sum that is a level/phase jump, not just a tonal blip.
-  Needs a lock-free handover (or a fade) before step 3 ships.
+Answered in the multi-path PR:
+
+- ~~Is "master after the sum" right?~~ **Decided:** the master is shared by
+  every path and applied to each path before the alignment (see "Engine
+  shape"); no path skips it.
+- ~~Per-device alignment or per channel group?~~ **Decided:** per device,
+  with an align switch per device and trim and polarity per path there.
+- ~~`MAX_PATHS = 4` enough?~~ **Decided:** 4 (dual-amp + blend + stream fit).
+- ~~A path taking its input from another path's output?~~ **Decided:** no;
+  duplicate instead.
+- ~~`try_lock` in `process_plugins` skips a chain for a block.~~
+  **Resolved:** `try_lock` stays with a fallback. Mix, bypass and plugin
+  controls no longer take the chain lock, so common edits are lock-free; a
+  chunk that misses the lock plays the chain input delayed by the chain
+  latency, so the sum keeps its phase (`path.rs`, "Chain handover").
 
 ## Out of scope
 

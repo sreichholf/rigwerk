@@ -8,6 +8,10 @@
 //! are kept but routed nowhere.  Any edit afterwards reads as Custom
 //! ([`RigWerkApp::current_card`] returns `None`).
 //!
+//! Blend and Dual-amp sum two paths on every channel; the per-device
+//! latency alignment (on by default, `app::alignment`) lines them up, so a
+//! latent amp sim on one of them does not comb filter.
+//!
 //! Warnings: two paths that sound on one channel of a device and arrive on
 //! different frames comb filter ([`RoutingWarningKind::Sum`], red).  With
 //! the device's align switch on that only happens when trims pull them
@@ -59,10 +63,10 @@ impl Card {
         }
     }
 
-    /// Cards that sum paths on one channel and rely on the latency
-    /// alignment (on by default per device, see `app::alignment`).  The
-    /// engine aligns now, so the UI may stop offering them disabled.
-    pub(crate) fn needs_alignment(self) -> bool {
+    /// Cards that sum paths on one channel (they rely on the latency
+    /// alignment, on by default per device).  Their missing second path
+    /// starts as a copy of the first.
+    pub(crate) fn sums_paths(self) -> bool {
         matches!(self, Card::Blend | Card::DualAmp)
     }
 
@@ -161,7 +165,7 @@ impl RigWerkApp {
         let selected = self.selected_path;
         while self.path_count() < card.path_count() {
             let first = self.path_slots()[0];
-            let added = if card.needs_alignment() {
+            let added = if card.sums_paths() {
                 self.duplicate_path(first)
             } else {
                 self.add_path()
@@ -371,7 +375,8 @@ mod tests {
     fn blend_and_dual_amp_copy_the_first_path() {
         let mut app = blank_app();
         app.path_mut().mix.mono = true;
-        assert!(Card::Blend.needs_alignment() && Card::DualAmp.needs_alignment());
+        assert!(Card::Blend.sums_paths() && Card::DualAmp.sums_paths());
+        assert!(!Card::DryWet.sums_paths());
         assert!(app.apply_card(Card::DualAmp));
         let second = app.path_slots()[1];
         assert!(app.paths[second].as_ref().unwrap().mix.mono, "a copy");

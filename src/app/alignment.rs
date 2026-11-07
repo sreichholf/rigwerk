@@ -3,10 +3,12 @@
 //! The engine lines the paths up on each device (see `audio::output_map`,
 //! "Alignment"); this is the app side: the per-device align switch, and
 //! what the alignment does on a device in ms, for the Signal Routing page
-//! (latency line, alignment delay per path) and the Live summary.
-
-// The alignment UI (U3) builds on this.
-#![allow(dead_code)]
+//! (latency line, alignment delay per path, latency bars), the Live
+//! summary (the added latency on the Output chip) and Live Issues.
+//!
+//! Alignment lines up the paths on one device.  It does not line devices
+//! up with each other: a follower's cushion and every device's own buffer
+//! still differ.
 
 use crate::app::RigWerkApp;
 use crate::audio::{AlignmentReport, MAX_PATHS};
@@ -43,6 +45,35 @@ pub(crate) struct DeviceAlignment {
 }
 
 impl DeviceAlignment {
+    /// How far apart the earliest and the latest path arrive here, ms (0
+    /// with fewer than two paths).
+    pub(crate) fn spread_ms(&self) -> f32 {
+        let mut arrivals = self.arrival_ms.iter().flatten();
+        let Some(&first) = arrivals.next() else {
+            return 0.0;
+        };
+        let (min, max) = arrivals.fold((first, first), |(min, max), &arrival| {
+            (min.min(arrival), max.max(arrival))
+        });
+        max - min
+    }
+
+    /// How far apart the earliest and the latest path arrive here, frames.
+    pub(crate) fn spread_frames(&self) -> u32 {
+        let arrivals = self.arrival_frames.iter().flatten();
+        let max = arrivals.clone().max();
+        let min = arrivals.min();
+        match (min, max) {
+            (Some(min), Some(max)) => max - min,
+            _ => 0,
+        }
+    }
+
+    /// How many paths the device plays.
+    pub(crate) fn path_count(&self) -> usize {
+        self.per_path.iter().flatten().count()
+    }
+
     fn from_report(report: &AlignmentReport, live: bool) -> Self {
         Self {
             align: report.align,
@@ -83,6 +114,18 @@ impl RigWerkApp {
             self.engine.plugin_rate().max(1),
         );
         Some(DeviceAlignment::from_report(&report, false))
+    }
+
+    /// The most the alignment (and the trims) add on any output device, ms:
+    /// what the Live Output chip shows.  0 with one path.
+    pub(crate) fn added_alignment_ms(&self) -> f32 {
+        if self.path_count() < 2 {
+            return 0.0;
+        }
+        (0..self.device_settings().len())
+            .filter_map(|device| self.device_alignment(device))
+            .map(|alignment| alignment.added_ms)
+            .fold(0.0, f32::max)
     }
 
     /// Output device `device`'s align switch.
