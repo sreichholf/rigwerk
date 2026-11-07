@@ -9,6 +9,13 @@
 //! Alignment lines up the paths on one device.  It does not line devices
 //! up with each other: a follower's cushion and every device's own buffer
 //! still differ.
+//!
+//! Warnings: two paths that sound on one channel of a device and arrive on
+//! different frames comb filter ([`RoutingWarningKind::Sum`], red).  With
+//! the device's align switch on that only happens when trims pull them
+//! apart; with it off, whenever their chain latency plus trim differ.  On
+//! an unaligned device two such paths on different channels shift the
+//! image ([`RoutingWarningKind::Shift`], amber).
 
 use crate::app::RigWerkApp;
 use crate::audio::{AlignmentReport, MAX_PATHS};
@@ -142,6 +149,96 @@ impl RigWerkApp {
         if let Some(settings) = self.device_settings_mut().nth(device) {
             settings.align = align;
         }
+    }
+}
+
+/// Why the Signal Routing page warns about one device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoutingWarningKind {
+    /// Unaligned paths add up on a channel: comb filter (red).
+    Sum,
+    /// Unaligned paths play on different channels of one device: the image
+    /// shifts (amber).
+    Shift,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RoutingWarning {
+    pub(crate) kind: RoutingWarningKind,
+    /// The path slots involved, in display order.
+    pub(crate) paths: Vec<usize>,
+    /// The device channels (0-based) involved: those carrying several paths
+    /// for [`RoutingWarningKind::Sum`], every playing one for `Shift`.
+    pub(crate) channels: Vec<usize>,
+}
+
+impl RigWerkApp {
+    /// What the Signal Routing page should warn about on output device
+    /// `device` (0 = clock device, then followers).  Every live path counts,
+    /// muted or not: the routing decides, as for alignment.  Only paths
+    /// that arrive on different frames (chain latency, alignment and trim)
+    /// warn: `Sum` when they add up on one channel (also on an aligned
+    /// device, when trims pull them apart), `Shift` when an unaligned
+    /// device plays them on different channels.  At most one warning:
+    /// `Sum` wins over `Shift`.
+    pub(crate) fn routing_warnings(&self, device: usize) -> Vec<RoutingWarning> {
+        let Some(settings) = self.device_settings().get(device).copied() else {
+            return Vec::new();
+        };
+        let arrival = self
+            .device_alignment(device)
+            .map(|alignment| alignment.arrival_frames)
+            .unwrap_or_default();
+        // Paths line up only when they arrive on the same frame.
+        let apart = |paths: &[bool; MAX_PATHS]| {
+            let mut times = (0..MAX_PATHS)
+                .filter(|&path| paths[path])
+                .map(|path| arrival[path].unwrap_or(0));
+            times
+                .next()
+                .is_some_and(|first| times.any(|time| time != first))
+        };
+        let channels = self.device_channels(device);
+        let live = self.live_path_mask();
+        let order = self.path_slots();
+        let mut sounding = [false; MAX_PATHS];
+        let mut summed = [false; MAX_PATHS];
+        let mut sum_channels = Vec::new();
+        let mut playing_channels = Vec::new();
+        for channel in 0..channels {
+            let on = settings.paths_on_channel(live, channels, channel);
+            let count = on.iter().filter(|on| **on).count();
+            if count > 0 {
+                playing_channels.push(channel);
+            }
+            let unaligned = count > 1 && apart(&on);
+            if unaligned {
+                sum_channels.push(channel);
+            }
+            for path in 0..MAX_PATHS {
+                sounding[path] |= on[path];
+                summed[path] |= on[path] && unaligned;
+            }
+        }
+        let in_order = |flags: [bool; MAX_PATHS]| -> Vec<usize> {
+            order.iter().copied().filter(|&slot| flags[slot]).collect()
+        };
+        if !sum_channels.is_empty() {
+            return vec![RoutingWarning {
+                kind: RoutingWarningKind::Sum,
+                paths: in_order(summed),
+                channels: sum_channels,
+            }];
+        }
+        let paths = in_order(sounding);
+        if !settings.align && paths.len() > 1 && apart(&sounding) {
+            return vec![RoutingWarning {
+                kind: RoutingWarningKind::Shift,
+                paths,
+                channels: playing_channels,
+            }];
+        }
+        Vec::new()
     }
 }
 

@@ -39,7 +39,7 @@ pub(crate) struct ReloadPlan {
 /// a block instead of stalling the callback; UI paths may still block on the
 /// chain lock.  A skip never changes the timing: a skipped insert plays its
 /// input delayed by its latency, and a missed chain lock is covered the same
-/// way by the mixer (see the `path` module docs, "Chain handover").
+/// way by the mixer (see the `path::plugins` module docs, "Chain handover").
 ///
 /// Latency: every insert reports the samples it delays the signal by (VST3
 /// `getLatencySamples`, CLAP `latency.get`, read after each activation and

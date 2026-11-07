@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::path::MAX_PATHS;
-use super::super::plugins::MAX_ALIGN;
+use super::super::path::{path_level_gain, sanitize_path_level, MAX_PATHS};
+use super::align::{plan_alignment, trim_frames, AlignmentReport};
+use super::weights::{level_gain, path_channel_weights, routed_paths};
 
 /// Most device channels a [`ChannelMap`] can address.
 pub const MAX_OUTPUT_CHANNELS: usize = 8;
@@ -196,11 +197,6 @@ pub enum UnusedChannels {
     MonoCopy,
 }
 
-/// Range of a path's level, both the path level itself and its level on
-/// one device, dB.  At or below the minimum the path is silent (−∞).
-pub const PATH_LEVEL_MIN_DB: f32 = -60.0;
-pub const PATH_LEVEL_MAX_DB: f32 = 6.0;
-
 /// The alignment trim range, ms.
 pub const PATH_TRIM_MAX_MS: f32 = 5.0;
 
@@ -276,27 +272,6 @@ impl PathMapSettings {
         } else {
             gain
         }
-    }
-}
-
-/// A NaN path level becomes 0 dB; the level is clamped to
-/// [`PATH_LEVEL_MIN_DB`]..=[`PATH_LEVEL_MAX_DB`].
-pub fn sanitize_path_level(level_db: f32) -> f32 {
-    if level_db.is_nan() {
-        0.0
-    } else {
-        level_db.clamp(PATH_LEVEL_MIN_DB, PATH_LEVEL_MAX_DB)
-    }
-}
-
-/// Linear gain of a path level: exactly 1.0 at 0 dB, silence at or below
-/// [`PATH_LEVEL_MIN_DB`].
-pub(crate) fn path_level_gain(level_db: f32) -> f32 {
-    let level_db = sanitize_path_level(level_db);
-    if level_db <= PATH_LEVEL_MIN_DB {
-        0.0
-    } else {
-        level_gain(level_db)
     }
 }
 
@@ -538,219 +513,5 @@ impl OutputDeviceSettings {
             *sample = device_gain * sum;
         }
         frame
-    }
-}
-
-/// A trim in ms as whole frames at `rate`, clamped to the trim range.
-pub(crate) fn trim_frames(trim_ms: f32, rate: u32) -> i32 {
-    if trim_ms.is_nan() {
-        return 0;
-    }
-    let trim_ms = trim_ms.clamp(-PATH_TRIM_MAX_MS, PATH_TRIM_MAX_MS);
-    (trim_ms * rate as f32 / 1000.0).round() as i32
-}
-
-/// The longest alignment delay, in frames: the longest chain latency
-/// ([`MAX_ALIGN`]) plus room for the trims (twice the trim range at
-/// 384 kHz), so a trim never has to be cut short.
-pub(crate) const MAX_ALIGN_DELAY: u32 = MAX_ALIGN + 4096;
-
-/// What the alignment does on one device: the delay each routed path gets
-/// there, in frames, and which path the others wait for.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct AlignmentPlan {
-    /// Per path slot: the delay added on this device, `None` for a path the
-    /// device does not play.
-    pub(crate) delays: [Option<u32>; MAX_PATHS],
-    /// The path the others wait for: the slowest routed one, when align is
-    /// on and some other routed path is faster.
-    pub(crate) waits_for: Option<usize>,
-}
-
-/// Works out one device's alignment from which paths it plays (`routed`),
-/// their chain latency (frames, clamped to [`MAX_ALIGN`]) and their trims
-/// (frames, signed).  Allocation free, for the audio thread.
-///
-/// With `align` on, path `p` waits `max(latency) − latency(p) + trim(p)`,
-/// the maximum taken over the routed paths: every one of them, muted or
-/// un-soloed included, so muting never moves the latency.  With it off,
-/// only the trim applies.  Negative results shift every routed path by the
-/// same amount, so the smallest delay is 0 (a negative trim makes the
-/// others wait instead).  Delays are clamped to [`MAX_ALIGN_DELAY`].
-pub(crate) fn plan_alignment(
-    align: bool,
-    routed: [bool; MAX_PATHS],
-    latency: [u32; MAX_PATHS],
-    trims: [i32; MAX_PATHS],
-) -> AlignmentPlan {
-    let latency = latency.map(|value| value.min(MAX_ALIGN) as i64);
-    let routed_paths = || (0..MAX_PATHS).filter(|&path| routed[path]);
-    let slowest = routed_paths().max_by(|&a, &b| latency[a].cmp(&latency[b]).then(b.cmp(&a)));
-    let Some(slowest) = slowest else {
-        return AlignmentPlan::default();
-    };
-    let max = latency[slowest];
-    let raw = |path: usize| {
-        let wait = if align { max - latency[path] } else { 0 };
-        wait + trims[path] as i64
-    };
-    let lowest = routed_paths().map(raw).min().unwrap_or(0);
-    let shift = (-lowest).max(0);
-    let mut plan = AlignmentPlan::default();
-    for path in routed_paths() {
-        let delay = (raw(path) + shift).clamp(0, MAX_ALIGN_DELAY as i64);
-        plan.delays[path] = Some(delay as u32);
-    }
-    if align && routed_paths().any(|path| latency[path] < max) {
-        plan.waits_for = Some(slowest);
-    }
-    plan
-}
-
-/// One device's alignment as the UI shows it, in frames at `rate`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AlignmentReport {
-    /// The device's align switch.
-    pub align: bool,
-    /// The rate the frames are counted at.
-    pub rate: u32,
-    /// The path slot this device waits for (see [`AlignmentPlan`]).
-    pub waits_for: Option<usize>,
-    /// Per path slot: the alignment delay it gets on this device, `None`
-    /// when the device does not play it.
-    pub delays: [Option<u32>; MAX_PATHS],
-    /// Per path slot: its chain latency plus its delay here, what the
-    /// person hears it late by on this device.  `None` when not played.
-    pub arrivals: [Option<u32>; MAX_PATHS],
-    /// The largest of `arrivals`: the device's latency from the chains and
-    /// the alignment (the slowest routed path, plus any trim).
-    pub total: u32,
-    /// The largest alignment delay on the device: what aligning (and the
-    /// trims) adds on top of a path's own chain.
-    pub added: u32,
-    /// Some path this device plays has a chain latency above
-    /// [`MAX_ALIGN`]: it is aligned (and counted here) as if it had
-    /// exactly that much, so it arrives later than shown.
-    pub clamped: bool,
-}
-
-impl AlignmentReport {
-    pub(crate) fn new(
-        plan: AlignmentPlan,
-        align: bool,
-        latency: [u32; MAX_PATHS],
-        rate: u32,
-    ) -> Self {
-        let arrivals: [Option<u32>; MAX_PATHS] = std::array::from_fn(|path| {
-            plan.delays[path].map(|delay| delay + latency[path].min(MAX_ALIGN))
-        });
-        Self {
-            align,
-            rate,
-            waits_for: plan.waits_for,
-            delays: plan.delays,
-            arrivals,
-            total: arrivals.iter().flatten().copied().max().unwrap_or(0),
-            added: plan.delays.iter().flatten().copied().max().unwrap_or(0),
-            clamped: (0..MAX_PATHS)
-                .any(|path| plan.delays[path].is_some() && latency[path] > MAX_ALIGN),
-        }
-    }
-
-    /// Frames at this report's rate in ms.
-    pub fn ms(&self, frames: u32) -> f32 {
-        if self.rate == 0 {
-            0.0
-        } else {
-            frames as f32 * 1000.0 / self.rate as f32
-        }
-    }
-}
-
-/// Which of the `live` paths a `channels`-channel device plays: those with
-/// some non-zero weight on one of its channels.
-pub(super) fn routed_paths(
-    maps: &[ChannelMap; MAX_PATHS],
-    live: [bool; MAX_PATHS],
-    unused: UnusedChannels,
-    channels: usize,
-) -> [bool; MAX_PATHS] {
-    let last = channels.min(MAX_OUTPUT_CHANNELS);
-    std::array::from_fn(|path| {
-        (0..last).any(|channel| {
-            path_channel_weights(maps, live, unused, channels, channel, path) != [0.0; 3]
-        })
-    })
-}
-
-/// Linear gain of a device level in dB.  0 dB is exactly 1.0, so the default
-/// level leaves every sample untouched.
-pub(super) fn level_gain(level_db: f32) -> f32 {
-    if level_db == 0.0 {
-        1.0
-    } else {
-        10.0f32.powf(level_db / 20.0)
-    }
-}
-
-/// How much of `L`, `R` and `(L + R) / 2` device channel `channel` (0-based)
-/// of a `channels`-channel device carries, following the module docs.
-/// Exactly one weight is 1 (or none, for a silent channel), so a settled map
-/// copies one value instead of summing.
-pub(super) fn channel_weights(
-    map: ChannelMap,
-    unused: UnusedChannels,
-    channels: usize,
-    channel: usize,
-) -> [f32; 3] {
-    match map.sides_at(channels, channel) {
-        (true, false) => [1.0, 0.0, 0.0],
-        (false, true) => [0.0, 1.0, 0.0],
-        (true, true) => [0.0, 0.0, 1.0],
-        (false, false) => match unused {
-            UnusedChannels::MonoCopy => [0.0, 0.0, 1.0],
-            UnusedChannels::Silent => [0.0, 0.0, 0.0],
-        },
-    }
-}
-
-/// How much of path `path`'s `L`, `R` and `(L + R) / 2` device channel
-/// `channel` (0-based) carries when the `live` paths (with `maps`) play on
-/// one device, following the module docs:
-/// - a channel any live path reaches carries exactly what each path's own
-///   map sends there (paths that do not reach it add nothing);
-/// - a channel no live path reaches is silent under
-///   [`UnusedChannels::Silent`]; under [`UnusedChannels::MonoCopy`] it
-///   carries the mono copy of every live path that reaches some channel of
-///   this device, or of every live path when none does.
-///
-/// With one live path this is exactly [`channel_weights`].
-pub(super) fn path_channel_weights(
-    maps: &[ChannelMap; MAX_PATHS],
-    live: [bool; MAX_PATHS],
-    unused: UnusedChannels,
-    channels: usize,
-    channel: usize,
-    path: usize,
-) -> [f32; 3] {
-    if !live[path] {
-        return [0.0; 3];
-    }
-    let live_paths = || (0..MAX_PATHS).filter(|&other| live[other]);
-    let reached =
-        live_paths().any(|other| maps[other].sides_at(channels, channel) != (false, false));
-    if reached {
-        return channel_weights(maps[path], UnusedChannels::Silent, channels, channel);
-    }
-    match unused {
-        UnusedChannels::Silent => [0.0; 3],
-        UnusedChannels::MonoCopy => {
-            let mapped = |other: usize| maps[other].reaches_any(channels);
-            if mapped(path) || !live_paths().any(mapped) {
-                [0.0, 0.0, 1.0]
-            } else {
-                [0.0; 3]
-            }
-        }
     }
 }

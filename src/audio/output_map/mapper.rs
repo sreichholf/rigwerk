@@ -5,10 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use super::super::delay::{DelayLine, DelayTap, TAP_FADE_SECONDS};
 use super::super::mixer::Ramp;
 use super::super::path::{LiveSlots, MAX_PATHS};
-use super::types::{
-    level_gain, path_channel_weights, plan_alignment, routed_paths, trim_frames, AlignmentPlan,
-    AlignmentReport, ChannelMap, OutputDeviceSettings, UnusedChannels, MAX_OUTPUT_CHANNELS,
-};
+use super::align::{plan_alignment, trim_frames, AlignmentPlan, AlignmentReport};
+use super::types::{ChannelMap, OutputDeviceSettings, UnusedChannels, MAX_OUTPUT_CHANNELS};
+use super::weights::{level_gain, path_channel_weights, routed_paths};
 
 /// What the mapper needs to align the paths in one block: each path's
 /// chain latency (frames, read once per block) and the rate.

@@ -132,8 +132,8 @@ own worktree.
   Outcome: `try_lock` stays, with a fallback. Mix, bypass and plugin
   controls no longer take the chain lock, so common edits are lock-free;
   a chunk that misses the lock (a structural edit) plays the chain input
-  delayed by the chain latency, so the sum keeps its phase (see `path.rs`,
-  "Chain handover").
+  delayed by the chain latency, so the sum keeps its phase (see
+  `path/plugins.rs`, "Chain handover").
 - Publish the per-device total latency and the per-path delay for the
   UI.
 - Tests: two identical paths, one with a latent fake plugin. With align

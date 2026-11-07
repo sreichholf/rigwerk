@@ -195,7 +195,7 @@ Answered in the multi-path PR:
   **Resolved:** `try_lock` stays with a fallback. Mix, bypass and plugin
   controls no longer take the chain lock, so common edits are lock-free; a
   chunk that misses the lock plays the chain input delayed by the chain
-  latency, so the sum keeps its phase (`path.rs`, "Chain handover").
+  latency, so the sum keeps its phase (`path/plugins.rs`, "Chain handover").
 
 ## Out of scope
 

@@ -5,7 +5,7 @@
 //!
 //! Producers so far are the signal paths':
 //! - unaligned paths that add up on one device channel (the Signal Routing
-//!   `Sum` warning, `app::cards`),
+//!   `Sum` warning, `app::alignment`),
 //! - a device playing a path whose chain latency is past what the
 //!   alignment covers ([`MAX_ALIGN`]),
 //! - an unmuted path that no unmuted device plays (a muted one is parked
@@ -17,7 +17,7 @@
 
 use std::cell::Cell;
 
-use crate::app::cards::RoutingWarningKind;
+use crate::app::alignment::RoutingWarningKind;
 use crate::app::RigWerkApp;
 use crate::audio::MAX_ALIGN;
 

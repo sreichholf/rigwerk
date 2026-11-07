@@ -15,6 +15,7 @@
 mod outputs;
 pub(crate) use outputs::channel_list;
 mod paths;
+mod sum;
 
 use eframe::egui;
 use egui::{

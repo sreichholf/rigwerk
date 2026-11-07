@@ -68,20 +68,23 @@
 //! An unaligned path with no trim reads its line at delay 0, which is the
 //! frame just written: one path with no latency stays bit-identical.
 
+mod align;
 mod mapper;
 mod types;
+mod weights;
 
+pub use align::AlignmentReport;
+pub(crate) use align::MAX_ALIGN_DELAY;
 pub(crate) use mapper::{
     frame_lanes, DeviceControls, DeviceFrame, DeviceMapper, PathLines, PathTiming,
     SLOTS as FRAME_LANES,
 };
-pub(crate) use types::{path_level_gain, MAX_ALIGN_DELAY};
 pub use types::{
-    sanitize_path_level, AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings,
-    PathMapSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS,
-    MAX_OUTPUT_CHANNELS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_TRIM_MAX_MS, VIRTUAL_OUT_ID,
-    VIRTUAL_OUT_NAME,
+    ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings, UnusedChannels,
+    DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, PATH_TRIM_MAX_MS,
+    VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
+pub(in crate::audio) use weights::level_gain;
 
 #[cfg(test)]
 pub(crate) use mapper::old_write_frame;
@@ -89,7 +92,7 @@ pub(crate) use mapper::old_write_frame;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::path::MAX_PATHS;
+    use crate::audio::path::{MAX_PATHS, PATH_LEVEL_MAX_DB};
 
     #[test]
     fn a_settled_frame_matches_the_mapper() {
