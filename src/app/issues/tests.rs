@@ -2,7 +2,7 @@ use super::{DspAlarm, IssueAction, IssueSeverity};
 use crate::app::blank_app;
 use crate::app::cards::Card;
 use crate::app::Page;
-use crate::audio::{ChannelMap, MAX_ALIGN};
+use crate::audio::{ChannelMap, PathMapSettings, MAX_ALIGN};
 
 #[test]
 fn one_path_has_no_path_issues() {
@@ -11,7 +11,7 @@ fn one_path_has_no_path_issues() {
 }
 
 #[test]
-fn an_unaligned_sum_is_an_error_that_aligns_on_a_click() {
+fn an_unaligned_sum_is_a_warning_that_aligns_on_a_click() {
     let mut app = blank_app();
     assert!(app.apply_card(Card::Blend));
     assert!(app.live_issues().is_empty(), "aligned, same latency");
@@ -25,7 +25,11 @@ fn an_unaligned_sum_is_an_error_that_aligns_on_a_click() {
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1);
     let issue = &issues[0];
-    assert_eq!(issue.severity, IssueSeverity::Error);
+    assert_eq!(
+        issue.severity,
+        IssueSeverity::Warning,
+        "a comb filter colours the sound; it does not break it"
+    );
     assert!(issue.title.starts_with("Paths add up unaligned on "));
     assert!(issue.detail.contains("Main and Main 2"), "{}", issue.detail);
     assert!(issue.detail.contains("10.0 ms apart"), "{}", issue.detail);
@@ -73,6 +77,28 @@ fn an_unmuted_path_no_device_plays_warns() {
         .any(|issue| issue.title == "Path 2 is routed nowhere audible"));
     app.apply_issue_action(issues[0].action);
     assert!(app.page == Page::Routing);
+}
+
+#[test]
+fn the_only_path_routed_nowhere_warns() {
+    let mut app = blank_app();
+    let main = app.path_slots()[0];
+    app.clock_device.path_map[main] = PathMapSettings::unrouted();
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].title, "Main is routed nowhere");
+    assert_eq!(issues[0].severity, IssueSeverity::Warning);
+    app.set_path_mute(main, true);
+    assert!(app.live_issues().is_empty(), "muted on purpose");
+}
+
+#[test]
+fn the_only_path_on_a_muted_device_warns() {
+    let mut app = blank_app();
+    app.clock_device.mute = true;
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].title, "Main is routed nowhere audible");
 }
 
 #[test]

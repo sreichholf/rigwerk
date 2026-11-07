@@ -23,7 +23,7 @@ use super::follower::FollowerBus;
 #[cfg(test)]
 use super::gate::GateSettings;
 use super::output_map::{DeviceControls, DeviceFrame, OutputDeviceSettings, MAX_FOLLOWERS};
-use super::path::{LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
+use super::path::{DspCell, DspTime, LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
 use super::plugins::PluginPref;
 #[cfg(test)]
 use super::plugins::PluginView;
@@ -134,6 +134,11 @@ pub(crate) struct Shared {
     /// all are preallocated so adding one never allocates.  Slot 0 is the
     /// one path every session has today.
     pub(crate) paths: [PathControls; MAX_PATHS],
+    /// The DSP time of every live path's chain together, per block: the
+    /// smoothed sum and the decaying peak of each block's sum (not the sum
+    /// of the paths' peaks, which come from different blocks).  Written by
+    /// the mixer at the end of each block, read by the Live overload issue.
+    pub(crate) total_dsp: DspCell,
 }
 
 impl Shared {
@@ -188,6 +193,7 @@ impl Shared {
             output_mode: Mutex::new(String::new()),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
             paths: std::array::from_fn(|_| PathControls::new(sample_rate)),
+            total_dsp: DspCell::default(),
         };
         shared.paths[0].set_state(PathState::Active);
         shared
@@ -457,6 +463,7 @@ impl Shared {
         for path in &self.paths {
             path.reset_meters();
         }
+        self.total_dsp.store(DspTime::default());
         // Keep the plan and count across a session reset: the UI re-pushes
         // them every frame, and clearing here would drop links for a tick.
         self.scope_in.clear();

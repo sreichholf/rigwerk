@@ -3,17 +3,25 @@
 //! problem becomes one row here, with a severity, where it is and one
 //! action that only runs on a click.
 //!
+//! An error means the audio itself is about to break (a block nearly
+//! late); anything that only colours the sound, such as a comb filter, is
+//! a warning.
+//!
 //! Producers so far are the signal paths':
 //! - unaligned paths that add up on one device channel (the Signal Routing
-//!   `Sum` warning, `app::alignment`),
+//!   `Sum` warning, `app::alignment`): a warning,
 //! - a device playing a path whose chain latency is past what the
 //!   alignment covers ([`MAX_ALIGN`]),
-//! - an unmuted path that no unmuted device plays (a muted one is parked
-//!   on purpose, e.g. right after Add path, and does not warn),
-//! - paths whose DSP time does not fit the block (the graph quantum on the
+//! - an unmuted path that no unmuted device plays, also when it is the only
+//!   path (a muted one is parked on purpose, e.g. right after Add path, and
+//!   does not warn),
+//! - the paths' DSP time not fitting the block (the graph quantum on the
 //!   PipeWire duplex path, the output block otherwise), with hysteresis so
 //!   the row does not flicker: the smoothed share raises the warning, the
-//!   decaying peak share the error.
+//!   decaying peak share the error.  Both shares come from the mixer's
+//!   total per block (`AudioEngine::total_dsp_time`), never from adding up
+//!   the paths' peaks, which may be seconds apart; the per-path times only
+//!   name the heaviest path.
 
 use std::cell::Cell;
 
@@ -163,7 +171,7 @@ impl RigWerkApp {
             let spread = if arrivals.is_empty() { 0.0 } else { spread };
             let align = self.device_align(device);
             issues.push(LiveIssue {
-                severity: IssueSeverity::Error,
+                severity: IssueSeverity::Warning,
                 title: format!("Paths add up unaligned on {}", row.name),
                 detail: format!(
                     "{} meet on {} up to {spread:.1} ms apart: a comb filter (thin, hollow sound). {}",
@@ -223,10 +231,8 @@ impl RigWerkApp {
 
     /// (b) An unmuted path that no unmuted device plays: its chain runs
     /// for nothing.  A muted path is parked on purpose and does not warn.
+    /// Also checked with one path: then nothing is heard at all.
     fn unheard_path_issues(&self, issues: &mut Vec<LiveIssue>) {
-        if self.path_count() < 2 {
-            return;
-        }
         let devices = self.device_settings();
         for info in self.path_infos() {
             if info.mute {
@@ -260,30 +266,23 @@ impl RigWerkApp {
         }
     }
 
-    /// (c) The paths' DSP time against the block they have to fit in.
+    /// (c) The paths' DSP time against the block they have to fit in: the
+    /// mixer's total per block, so peaks of different blocks never add up.
     fn dsp_issue(&self, issues: &mut Vec<LiveIssue>) {
-        let mut avg = 0.0f32;
-        let mut peak = 0.0f32;
-        let mut block = 0.0f32;
+        let total = self.engine.total_dsp_time().unwrap_or_default();
+        let block = total.block_ns as f32;
+        let (avg_share, peak_share) = (total.avg_share(), total.peak_share());
         let mut heaviest: Option<(String, f32)> = None;
         let infos = self.path_infos();
         for info in &infos {
             let Some(time) = self.engine.path_dsp_time(info.slot) else {
                 continue;
             };
-            avg += time.avg_ns as f32;
-            peak += time.peak_ns as f32;
-            block = block.max(time.block_ns as f32);
             let most = time.avg_ns as f32;
             if heaviest.as_ref().is_none_or(|(_, top)| most > *top) {
                 heaviest = Some((info.name.clone(), most));
             }
         }
-        let (avg_share, peak_share) = if block > 0.0 {
-            (avg / block, peak / block)
-        } else {
-            (0.0, 0.0)
-        };
         let alarm = self.issue_state.dsp.get().next(avg_share, peak_share);
         self.issue_state.dsp.set(alarm);
         let Some(severity) = alarm.severity() else {

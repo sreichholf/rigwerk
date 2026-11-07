@@ -40,8 +40,12 @@
 //! vDSO / QPC clock `Instant` reads, as the drift relax timer already
 //! does; no allocation, no lock).  The smoothed time per block and the
 //! block's length are published per path (`PathControls::dsp_time`, with a
-//! peak that decays over [`path::DSP_PEAK_SECONDS`]) for
-//! Diagnostics and the Live overload issue.
+//! peak that decays over [`path::DSP_PEAK_SECONDS`]) for Diagnostics.  The
+//! sum of every path's time in the same block is smoothed and peaked the
+//! same way and published as the total (`Shared::total_dsp`) for the Live
+//! overload issue: its peak is the worst block, not the sum of the paths'
+//! peaks, which may come from blocks seconds apart.  Both backends (the
+//! ring and the PipeWire duplex graph) publish it, through `finish_block`.
 //!
 //! One path at 0 dB (path and device level), unmuted, normal polarity is
 //! bit-identical to the chain before paths existed: every unity gain is a
@@ -64,7 +68,7 @@ mod align_tests;
 mod path;
 pub(crate) mod ramp;
 
-use path::PathProcessor;
+use path::{DspMeter, PathProcessor};
 
 pub(crate) use ramp::Ramp;
 use ramp::{fade_down, fade_up, CONTROL_RAMP_SECONDS, DROPOUT_FADE_SECONDS};
@@ -173,6 +177,8 @@ pub(crate) struct OutputMixer {
     /// see [`Shared::feeds_follower`]), with the ring's layout generation
     /// as read at the start of the block.
     feeding: [Option<u64>; MAX_FOLLOWERS],
+    /// Every live path's DSP time per block together (`Shared::total_dsp`).
+    total_dsp: DspMeter,
 }
 
 impl OutputMixer {
@@ -207,6 +213,7 @@ impl OutputMixer {
             followers: std::array::from_fn(|_| DeviceMapper::new(2)),
             live_followers: 0,
             feeding: [None; MAX_FOLLOWERS],
+            total_dsp: DspMeter::default(),
         }
     }
 
@@ -380,8 +387,8 @@ impl OutputMixer {
     /// The chains for a block that `stage_front` filled: each live path's
     /// front (routing, pre EQ, PRE gate), inserts, POST gate and post EQ,
     /// each path timed (its DSP time, see [`PathProcessor::publish_dsp`]:
-    /// one clock read per path and stage, no allocation, no lock), then
-    /// the master level on
+    /// one clock read per path and stage, no allocation, no lock) and the
+    /// block's total over every path published, then the master level on
     /// each path's frame, the meters and the scope.  Each finished frame
     /// goes to `write` with the clock device's mapper, the live followers'
     /// mappers, every live path's frame (the mappers sum them) and the
@@ -405,11 +412,17 @@ impl OutputMixer {
         // comes back last.
         let _post_denormals = DenormalGuard::new();
         mark = Instant::now();
+        let mut total_ns = 0u64;
         for slot in live.iter() {
             self.paths[slot].finish_block(&shared.paths[slot], frames);
             mark = self.paths[slot].add_dsp_time(mark, Instant::now());
-            self.paths[slot].publish_dsp(&shared.paths[slot], frames, self.output_rate);
+            total_ns += self.paths[slot].publish_dsp(&shared.paths[slot], frames, self.output_rate);
         }
+        // The total's peak is the peak of each block's sum: paths that peak
+        // in different blocks must not add up.
+        shared
+            .total_dsp
+            .store(self.total_dsp.push(total_ns, frames, self.output_rate));
 
         let followers = &mut self.followers[..self.live_followers];
         let mut peak_l = 0.0f32;

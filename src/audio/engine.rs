@@ -264,6 +264,18 @@ impl AudioEngine {
         (time.block_ns > 0).then_some(time)
     }
 
+    /// The DSP time of every live path's chain together: the smoothed time
+    /// per block and the decaying peak of one block's total (paths that
+    /// peak in different blocks do not add up), with the block's length.
+    /// `None` while no mixer runs.  Cleared on every start and stop.
+    pub fn total_dsp_time(&self) -> Option<DspTime> {
+        if !self.shared.running.load(Ordering::Relaxed) {
+            return None;
+        }
+        let time = self.shared.total_dsp.load();
+        (time.block_ns > 0).then_some(time)
+    }
+
     /// Screenshot hook: makes path `slot`'s chain report `samples` of
     /// latency, as a latent plugin would, so Signal Routing can show the
     /// alignment without loading one.  Only used before a bridge runs.
@@ -638,6 +650,7 @@ impl AudioEngine {
         for path in &self.shared.paths {
             path.store_dsp_time(DspTime::default());
         }
+        self.shared.total_dsp.store(DspTime::default());
         self.shared.clock_device.clear_alignment();
         for follower in &self.shared.followers {
             follower.clear_alignment();

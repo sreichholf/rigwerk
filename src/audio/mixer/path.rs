@@ -75,19 +75,64 @@ pub(crate) struct PathProcessor {
     /// No chain output has played since the path (re)started: nothing to
     /// smooth a switch from.
     chain_fresh: bool,
-    /// The time this block spent on the path so far, and the smoothed time
-    /// per block, ns (see [`Self::publish_dsp`]).
+    /// The time this block spent on the path so far, ns, and its smoothed
+    /// time and decaying peak per block (see [`Self::publish_dsp`]).
     dsp_block_ns: u64,
-    dsp_ns: f32,
-    /// The decaying peak of the time per block, ns.
-    dsp_peak_ns: f32,
+    dsp: DspMeter,
 }
 
 /// How fast the published DSP time follows the measured one, per block.
 /// About 100 blocks (a second at 512 frames / 48 kHz) to settle.
 const DSP_SMOOTHING: f32 = 0.02;
 /// Time constant of the published DSP peak's decay, seconds.
-const DSP_PEAK_SECONDS: f32 = 2.0;
+pub(super) const DSP_PEAK_SECONDS: f32 = 2.0;
+
+/// One block's measured DSP time folded into a smoothed time per block
+/// ([`DSP_SMOOTHING`]) and a peak that decays over [`DSP_PEAK_SECONDS`].
+/// Each path has one, and the mixer one for the total of every path, fed
+/// the sum of the paths' times in the same block.  Plain floats: no
+/// allocation, no lock.
+///
+/// The times are absolute, so a new block length (a quantum or rate
+/// change) starts the meter over: a 1024-frame block's time would read as
+/// an overload of a 256-frame one for seconds.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct DspMeter {
+    avg_ns: f32,
+    peak_ns: f32,
+    /// The block length of the last push.
+    frames: usize,
+    rate: u32,
+}
+
+impl DspMeter {
+    /// Folds in one block that took `measured_ns` and lasted `frames` at
+    /// `rate`, and returns what to publish.
+    pub(super) fn push(&mut self, measured_ns: u64, frames: usize, rate: u32) -> DspTime {
+        if (frames, rate) != (self.frames, self.rate) {
+            *self = Self {
+                frames,
+                rate,
+                ..Self::default()
+            };
+        }
+        let measured = measured_ns.min(u32::MAX as u64) as f32;
+        self.avg_ns = if self.avg_ns == 0.0 {
+            measured
+        } else {
+            self.avg_ns + (measured - self.avg_ns) * DSP_SMOOTHING
+        };
+        let seconds = frames as f32 / rate.max(1) as f32;
+        let decay = (-seconds / DSP_PEAK_SECONDS).exp();
+        self.peak_ns = measured.max(self.peak_ns * decay);
+        let block_ns = (frames as u64 * 1_000_000_000 / rate.max(1) as u64).min(u32::MAX as u64);
+        DspTime {
+            avg_ns: self.avg_ns as u32,
+            peak_ns: self.peak_ns as u32,
+            block_ns: block_ns as u32,
+        }
+    }
+}
 
 /// How long the chain's output takes to come back after a block it missed
 /// (it played its delayed input meanwhile).
@@ -113,8 +158,7 @@ impl PathProcessor {
             declick_len: (DECLICK_SECONDS * rate as f32) as u32,
             chain_fresh: true,
             dsp_block_ns: 0,
-            dsp_ns: 0.0,
-            dsp_peak_ns: 0.0,
+            dsp: DspMeter::default(),
             block: Vec::new(),
             plugin_l: Vec::new(),
             plugin_r: Vec::new(),
@@ -149,8 +193,7 @@ impl PathProcessor {
         self.chain_declick = Declick::default();
         self.drain = None;
         self.dsp_block_ns = 0;
-        self.dsp_ns = 0.0;
-        self.dsp_peak_ns = 0.0;
+        self.dsp = DspMeter::default();
     }
 
     /// Grows the per-block scratch outside the callback.
@@ -321,25 +364,13 @@ impl PathProcessor {
 
     /// Smooths this block's DSP time into the published one, folds it into
     /// the decaying peak ([`DSP_PEAK_SECONDS`]) and stores both with the
-    /// block's length (`frames` at `rate`), the path's budget.  Atomics
-    /// only.
-    pub(super) fn publish_dsp(&mut self, controls: &PathControls, frames: usize, rate: u32) {
-        let measured = self.dsp_block_ns.min(u32::MAX as u64) as f32;
+    /// block's length (`frames` at `rate`), the path's budget.  Returns the
+    /// block's measured time, ns, for the mixer's total.  Atomics only.
+    pub(super) fn publish_dsp(&mut self, controls: &PathControls, frames: usize, rate: u32) -> u64 {
+        let measured = self.dsp_block_ns;
         self.dsp_block_ns = 0;
-        self.dsp_ns = if self.dsp_ns == 0.0 {
-            measured
-        } else {
-            self.dsp_ns + (measured - self.dsp_ns) * DSP_SMOOTHING
-        };
-        let seconds = frames as f32 / rate.max(1) as f32;
-        let decay = (-seconds / DSP_PEAK_SECONDS).exp();
-        self.dsp_peak_ns = measured.max(self.dsp_peak_ns * decay);
-        let block_ns = (frames as u64 * 1_000_000_000 / rate.max(1) as u64).min(u32::MAX as u64);
-        controls.store_dsp_time(DspTime {
-            avg_ns: self.dsp_ns as u32,
-            peak_ns: self.dsp_peak_ns as u32,
-            block_ns: block_ns as u32,
-        });
+        controls.store_dsp_time(self.dsp.push(measured, frames, rate));
+        measured
     }
 
     /// Runs the plugin inserts over a block that `run_front` filled, in

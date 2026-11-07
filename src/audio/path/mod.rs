@@ -217,7 +217,8 @@ impl LiveSlots {
 /// A CLAP plugin and its host state, as `service_plugins` services them.
 type ClapService = (Arc<HostState>, Arc<Mutex<ClapPlugin>>);
 
-/// One path's DSP time per block, as the mixer publishes it.
+/// A DSP time per block, as the mixer publishes it: one path's, or every
+/// live path's together (`Shared::total_dsp`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DspTime {
     /// Smoothed time on the path's chain per block, ns.
@@ -245,6 +246,33 @@ impl DspTime {
         } else {
             ns as f32 / self.block_ns as f32
         }
+    }
+}
+
+/// A [`DspTime`] as atomics, so the audio thread can publish it without a
+/// lock.  Each field is stored on its own (`Relaxed`): a reader may see one
+/// block's average beside the next block's peak, which a meter can afford.
+#[derive(Debug, Default)]
+pub(crate) struct DspCell {
+    avg_ns: AtomicU32,
+    peak_ns: AtomicU32,
+    block_ns: AtomicU32,
+}
+
+impl DspCell {
+    pub(crate) fn load(&self) -> DspTime {
+        DspTime {
+            avg_ns: self.avg_ns.load(Ordering::Relaxed),
+            peak_ns: self.peak_ns.load(Ordering::Relaxed),
+            block_ns: self.block_ns.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Called by the output callback at the end of each block.
+    pub(crate) fn store(&self, time: DspTime) {
+        self.avg_ns.store(time.avg_ns, Ordering::Relaxed);
+        self.peak_ns.store(time.peak_ns, Ordering::Relaxed);
+        self.block_ns.store(time.block_ns, Ordering::Relaxed);
     }
 }
 
@@ -277,9 +305,7 @@ pub(crate) struct PathControls {
     /// (smoothed, and a decaying peak), and how long that block lasts, ns:
     /// its DSP budget.  Written by the mixer at the end of each block (see
     /// `mixer::PathProcessor::publish_dsp`), read by Diagnostics and Live.
-    dsp_ns: AtomicU32,
-    dsp_peak_ns: AtomicU32,
-    block_ns: AtomicU32,
+    dsp: DspCell,
     /// The CLAP plugins the UI services every frame, published with the
     /// views so `service_plugins` does not take the chain lock to find them.
     ///
@@ -355,9 +381,7 @@ impl PathControls {
             retired: AtomicBool::new(false),
             meter_l: AtomicU32::new(0.0f32.to_bits()),
             meter_r: AtomicU32::new(0.0f32.to_bits()),
-            dsp_ns: AtomicU32::new(0),
-            dsp_peak_ns: AtomicU32::new(0),
-            block_ns: AtomicU32::new(0),
+            dsp: DspCell::default(),
             plugin_services: Mutex::new(Arc::from(Vec::new())),
             vst3_services: Mutex::new(Arc::from(Vec::new())),
             slot_links: Mutex::new(Arc::from(Vec::new())),
@@ -649,18 +673,12 @@ impl PathControls {
     /// The path's DSP time per block and the block's length (all zero
     /// until a mixer has run it).
     pub(crate) fn dsp_time(&self) -> DspTime {
-        DspTime {
-            avg_ns: self.dsp_ns.load(Ordering::Relaxed),
-            peak_ns: self.dsp_peak_ns.load(Ordering::Relaxed),
-            block_ns: self.block_ns.load(Ordering::Relaxed),
-        }
+        self.dsp.load()
     }
 
     /// Called by the output callback at the end of each block.
     pub(crate) fn store_dsp_time(&self, time: DspTime) {
-        self.dsp_ns.store(time.avg_ns, Ordering::Relaxed);
-        self.dsp_peak_ns.store(time.peak_ns, Ordering::Relaxed);
-        self.block_ns.store(time.block_ns, Ordering::Relaxed);
+        self.dsp.store(time);
     }
 
     /// Applies new EQ settings; unchanged settings cost nothing.
