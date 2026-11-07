@@ -1,6 +1,8 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use super::silence::{SILENCE_RAISE_ALONE, SILENCE_RAISE_WITH_UNDERRUNS};
 use super::{
     highlight_strength, DspAlarm, HeldFlag, IssueAction, IssueCard, IssueFilter, IssueKey,
     IssueSeverity, UnderrunWatch, CARD_HIGHLIGHT_FOR, DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER,
@@ -963,4 +965,90 @@ fn a_held_flag_waits_both_ways() {
     assert!(flag.update(false, start + second * 3, second, three));
     assert!(flag.update(false, start + second * 5, second, three));
     assert!(!flag.update(false, start + second * 6, second, three));
+}
+
+/// Ticks every 50 ms for `span` from `from`, returning the time after.
+#[cfg(target_os = "linux")]
+fn tick_for(app: &mut RigWerkApp, from: Instant, span: Duration) -> Instant {
+    let mut now = from;
+    while now < from + span {
+        now += Duration::from_millis(50);
+        app.tick_issues(now);
+    }
+    now
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_silent_sink_under_low_latency_is_an_error_only_with_underruns() {
+    let mut app = blank_app();
+    app.engine.state = EngineState::Running;
+    app.low_latency_output = true;
+    app.snapshot.output_channels = 2;
+    app.snapshot.out_channels[1] = 0.1;
+    let start = Instant::now();
+    app.tick_issues(start);
+    let now = tick_for(&mut app, start, Duration::from_secs(4));
+    assert!(
+        app.live_issues().is_empty(),
+        "no monitor data: never a guess"
+    );
+
+    // Without underruns the RigWerk stream may just be muted in the
+    // desktop mixer: a warning that says so, and the strip stays shut.
+    app.engine.set_test_sink_peak(Some(0.0));
+    app.live_issues_collapsed = true;
+    let now = tick_for(&mut app, now, SILENCE_RAISE_ALONE);
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    let issue = &issues[0];
+    assert_eq!(issue.key, IssueKey::SinkSilent);
+    assert_eq!(issue.severity, IssueSeverity::Warning);
+    assert_eq!(issue.title, "Output may be silent under low latency");
+    assert!(issue.detail.contains("desktop mixer"), "{}", issue.detail);
+    assert_eq!(issue.card, Some(IssueCard::Output));
+    assert_eq!(issue.action, IssueAction::LowLatencyOff);
+    assert!(
+        app.live_issues_collapsed,
+        "a warning does not open the strip"
+    );
+
+    app.mute = true;
+    app.tick_issues(now + Duration::from_millis(50));
+    assert!(app.live_issues().is_empty(), "muted on purpose");
+    app.mute = false;
+
+    // A rest: neither side is loud, so nothing is judged.
+    app.snapshot.out_channels[1] = 0.0;
+    let now = tick_for(&mut app, now, Duration::from_secs(5));
+    assert!(app.live_issues().is_empty());
+
+    // With underruns the shorter hold applies, and it is an error.
+    app.snapshot.out_channels[1] = 0.1;
+    app.snapshot.underruns = 1;
+    let now = tick_for(&mut app, now, SILENCE_RAISE_WITH_UNDERRUNS);
+    let issue = app
+        .live_issues()
+        .into_iter()
+        .find(|issue| issue.key == IssueKey::SinkSilent)
+        .expect("the silence row");
+    assert_eq!(issue.severity, IssueSeverity::Error);
+    assert_eq!(issue.title, "Output went silent under low latency");
+    assert!(issue.detail.contains("ran dry"), "{}", issue.detail);
+    assert!(!app.live_issues_collapsed, "a new error opens the strip");
+
+    app.engine.set_test_sink_peak(Some(0.05));
+    tick_for(&mut app, now, Duration::from_secs(1));
+    let keys: Vec<IssueKey> = app.live_issues().iter().map(|issue| issue.key).collect();
+    assert!(!keys.contains(&IssueKey::SinkSilent), "heard again");
+
+    app.low_latency_output = false;
+    app.engine.set_test_sink_peak(Some(0.0));
+    tick_for(&mut app, now, Duration::from_secs(5));
+    let keys: Vec<IssueKey> = app.live_issues().iter().map(|issue| issue.key).collect();
+    assert!(
+        !keys.contains(&IssueKey::SinkSilent),
+        "only armed under Low latency"
+    );
+    app.engine.state = EngineState::Idle;
 }

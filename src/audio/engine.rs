@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use super::bridge::run_bridge;
 #[cfg(target_os = "linux")]
 use super::linux::pipewire;
+#[cfg(target_os = "linux")]
+use super::linux::sink_monitor::SinkMonitor;
 use super::output_map::{AlignmentReport, OutputDeviceSettings};
 use super::path::{DspTime, PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
@@ -74,6 +76,13 @@ pub struct AudioEngine {
     /// A quantum request or restore that failed. The live status line moves
     /// on; this stays until a later attempt succeeds.
     quantum_note: Option<String>,
+    /// The clock sink's monitor, open only while a Low latency bridge runs
+    /// on a PipeWire sink.  Opened and dropped here, on the UI thread.
+    #[cfg(target_os = "linux")]
+    sink_monitor: Option<SinkMonitor>,
+    /// A sink monitor reading tests can set in place of a live one.
+    #[cfg(test)]
+    test_sink_peak: Option<f32>,
 }
 
 impl AudioEngine {
@@ -99,6 +108,10 @@ impl AudioEngine {
             #[cfg(target_os = "linux")]
             quantum_retry_at: None,
             quantum_note: None,
+            #[cfg(target_os = "linux")]
+            sink_monitor: None,
+            #[cfg(test)]
+            test_sink_peak: None,
         }
     }
 
@@ -124,6 +137,37 @@ impl AudioEngine {
     /// A quantum failure that should stay visible after the status line moves on.
     pub(crate) fn quantum_note(&self) -> Option<&str> {
         self.quantum_note.as_deref()
+    }
+
+    /// The peak on the clock sink's monitor since the last read, while a
+    /// Low latency bridge runs on a PipeWire sink and blocks arrive.
+    /// `None` everywhere else: without it the silence check is inert.
+    pub(crate) fn sink_monitor_peak(&mut self, now: Instant) -> Option<f32> {
+        #[cfg(test)]
+        if self.test_sink_peak.is_some() {
+            return self.test_sink_peak;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(monitor) = self.sink_monitor.as_mut() {
+            return monitor.read(now);
+        }
+        let _ = now;
+        None
+    }
+
+    /// Stands in for the sink monitor's reading in tests (the silence
+    /// watch only arms on Linux).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn set_test_sink_peak(&mut self, peak: Option<f32>) {
+        self.test_sink_peak = peak;
+    }
+
+    /// Closes the sink monitor, if one is open.  Its thread ends on its own.
+    fn close_sink_monitor(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            self.sink_monitor = None;
+        }
     }
 
     /// Remembers a quantum failure and publishes it as the current status.
@@ -567,6 +611,19 @@ impl AudioEngine {
         if config.pipewire_low_latency {
             self.apply_quantum_force();
         }
+        // Low latency is what can starve the sink, so only then is its
+        // monitor worth a stream.
+        #[cfg(target_os = "linux")]
+        {
+            self.sink_monitor = if config.pipewire_low_latency {
+                SinkMonitor::open(
+                    &config.output_id,
+                    config.output_rate.unwrap_or(config.sample_rate),
+                )
+            } else {
+                None
+            };
+        }
         // Plugin load stays on this thread (the UI thread), not on the
         // bridge.  The saved inserts open at the planned rate before the
         // first callback.  If the device opens at another rate, `set_output`
@@ -637,6 +694,7 @@ impl AudioEngine {
             self.started_at = None;
             self.shared.running.store(false, Ordering::Relaxed);
             self.release_quantum();
+            self.close_sink_monitor();
             return;
         }
 
@@ -657,6 +715,7 @@ impl AudioEngine {
         }
         self.shared.device_lost.store(false, Ordering::Relaxed);
         self.release_quantum();
+        self.close_sink_monitor();
         self.shared.set_status("Bridge stopped");
         if let Ok(mut error) = self.shared.error.lock() {
             *error = None;
@@ -733,6 +792,7 @@ impl AudioEngine {
         self.started_at = None;
         self.stopping_since = None;
         self.release_quantum();
+        self.close_sink_monitor();
         if let Some(error) = self.current_error() {
             self.shared.set_status(format!("Error: {error}"));
         }

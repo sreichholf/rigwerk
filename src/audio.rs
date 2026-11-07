@@ -10,6 +10,7 @@
 //! - `win/wasapi`: REAL-style WASAPI playback (Windows).
 //! - `linux/native`: PipeWire sources, sinks, and RigWerk's own nodes.
 //! - `linux/pipewire`: the desktop-wide quantum switch.
+//! - `linux/sink_monitor`: the clock sink's monitor peak under Low latency.
 //! - `linux/alsa`: direct ALSA hardware PCMs and the output period.
 //!
 //! The rest of the audio side is backend-neutral:

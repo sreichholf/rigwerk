@@ -13,3 +13,5 @@ pub(crate) mod hotplug;
 #[cfg(target_os = "linux")]
 pub(crate) mod native;
 pub(crate) mod pipewire;
+#[cfg(target_os = "linux")]
+pub(crate) mod sink_monitor;

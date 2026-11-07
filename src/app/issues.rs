@@ -32,6 +32,14 @@
 //!   clears after [`UNDERRUN_QUIET`] without a new one, and an error once
 //!   [`UNDERRUN_BURST`] of them fall within [`UNDERRUN_BURST_WINDOW`], held
 //!   until the output goes quiet.
+//! - a sink that went silent under Low latency ([`SilenceWatch`]): RigWerk
+//!   sends a loud signal while PipeWire's monitor of the clock sink stays
+//!   quiet.  An error with recent underruns, since the graph is starving;
+//!   the fix is Low latency off.  Without them a warning that also names
+//!   the desktop mixer: RigWerk's meter is read before PipeWire's stream
+//!   volume, so a muted or turned-down RigWerk stream looks the same.
+//!   Only while Low latency runs and the monitor delivers blocks: without
+//!   that reading there is no row, never a guess.
 //!
 //! Each follower's own (a generic "also playing on" device, by its slot),
 //! placed as `OUTPUT · <name>` on the Output card, and only while the
@@ -98,6 +106,8 @@
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+pub(crate) use silence::{SilenceInput, SilenceWatch};
 
 use crate::app::alignment::RoutingWarningKind;
 use crate::app::paths::PathInfo;
@@ -371,6 +381,7 @@ pub(crate) enum IssueKey {
     FollowerUnderruns(usize),
     /// Follower slot.
     FollowerDrift(usize),
+    SinkSilent,
 }
 
 impl IssueKey {
@@ -461,6 +472,8 @@ pub(crate) struct IssueState {
     /// The follower id each slot's state is about, `None` until the first
     /// tick adopts the slots as they are.
     follower_ids: Option<[String; MAX_FOLLOWERS]>,
+    /// Whether the clock sink went silent under Low latency.
+    pub(crate) silence: SilenceWatch,
     /// The alert of a bridge stopped on a disconnected device, until the
     /// next bridge start.
     pub(crate) device_lost: Option<String>,
@@ -485,6 +498,7 @@ impl IssueState {
         self.underruns = UnderrunWatch::default();
         self.follower_underruns = Default::default();
         self.follower_drift = Default::default();
+        self.silence = SilenceWatch::default();
         self.dismissed.clear();
     }
 
@@ -641,6 +655,8 @@ impl RigWerkApp {
                 held.update(pinned, now, DRIFT_RAISE_AFTER, DRIFT_CLEAR_AFTER);
             }
         }
+        let silence = self.silence_input(now);
+        self.issue_state.silence.update(silence, now);
         let total = self.engine.total_dsp_time().unwrap_or_default();
         self.issue_state.dsp = self
             .issue_state
@@ -670,6 +686,33 @@ impl RigWerkApp {
         for slot in (0..MAX_FOLLOWERS).filter(|&slot| changed[slot]) {
             let count = self.snapshot.follower_underruns[slot];
             self.issue_state.forget_follower(slot, count);
+        }
+    }
+
+    /// This tick's readings for the silence watch.  Armed while a PipeWire
+    /// Low latency bridge runs (Linux only: the sink monitor and its
+    /// Turn Low latency off action are PipeWire's, not WASAPI's); parked when nothing should reach the clock
+    /// device (master mute, its own mute, or no unmuted path routed to it).
+    fn silence_input(&mut self, now: Instant) -> SilenceInput {
+        let monitor = self.engine.sink_monitor_peak(now);
+        let channels =
+            (self.snapshot.output_channels as usize).clamp(1, self.snapshot.out_channels.len());
+        let sent = self.snapshot.out_channels[..channels]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max);
+        let routed = self
+            .path_infos()
+            .iter()
+            .any(|info| !info.mute && self.path_reaches_device(info.slot, 0));
+        SilenceInput {
+            armed: cfg!(target_os = "linux")
+                && self.engine.state == EngineState::Running
+                && self.low_latency_output,
+            sent,
+            monitor,
+            parked: self.mute || !self.monitor || self.clock_device.mute || !routed,
+            underruns: self.issue_state.underruns.episode().is_some(),
         }
     }
 
@@ -794,6 +837,7 @@ impl RigWerkApp {
         self.quantum_issue(&mut issues);
         self.driver_issue(&mut issues);
         self.underrun_issue(&mut issues);
+        self.silence_issue(&mut issues);
         self.follower_issues(&rows, &mut issues);
         issues.sort_by_key(|issue| issue.severity);
         issues
@@ -1173,6 +1217,43 @@ impl RigWerkApp {
         });
     }
 
+    /// The clock sink went silent while RigWerk plays into it under Low
+    /// latency.  Turning Low latency off gives the graph a larger block.
+    /// An error only with recent underruns: without them the RigWerk
+    /// stream may just be muted in the desktop mixer.
+    fn silence_issue(&self, issues: &mut Vec<LiveIssue>) {
+        if self.engine.state != EngineState::Running || !self.issue_state.silence.silent() {
+            return;
+        }
+        let name = self.selected_output().name.clone();
+        let (severity, title, detail) = if self.issue_state.underruns.episode().is_some() {
+            (
+                IssueSeverity::Error,
+                "Output went silent under low latency",
+                format!(
+                    "RigWerk sends signal to {name}, but PipeWire's monitor of that sink hears nothing, and the output ran dry. The graph block is too small for this system; turning Low latency off gives it a larger one."
+                ),
+            )
+        } else {
+            (
+                IssueSeverity::Warning,
+                "Output may be silent under low latency",
+                format!(
+                    "RigWerk sends signal to {name}, but PipeWire's monitor of that sink hears nothing. The RigWerk stream may be muted or turned down in the desktop mixer; if not, the graph block is too small, and turning Low latency off gives it a larger one."
+                ),
+            )
+        };
+        issues.push(LiveIssue {
+            key: IssueKey::SinkSilent,
+            severity,
+            title: title.to_owned(),
+            detail,
+            place: "OUTPUT · Low latency".to_owned(),
+            card: Some(IssueCard::Output),
+            action: IssueAction::LowLatencyOff,
+        });
+    }
+
     /// (g) Each follower on its own: missing, then its ring's underruns,
     /// then its drift loop.  A missing follower plays nothing, so it gets
     /// that one row only.
@@ -1379,6 +1460,8 @@ fn ago_text(since: Duration) -> String {
         ago => format!("{ago} s ago"),
     }
 }
+
+mod silence;
 
 #[cfg(test)]
 mod tests;

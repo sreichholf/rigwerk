@@ -5,8 +5,8 @@ Mockup: `live-issues.html` (open in a browser; scenario and Today/Proposed
 toggles in the top bar).  Code: `src/app/issues.rs` (producers, actions) and
 `src/ui/pages/live/issues.rs` (the strip).
 
-Low-latency silence detection is a later **producer** for this strip,
-not a separate toast family.
+Low-latency silence detection is a **producer** for this strip, not a
+separate toast family.
 
 ## Problem
 
@@ -27,7 +27,7 @@ I do?” never share one place.
 
 | Keep on the card | In Issues today | Still to move into Issues |
 |---|---|---|
-| DRIVER actual rate/step (neutral fact) | Unaligned paths summing on a device | Sink silent (later) |
+| DRIVER actual rate/step (neutral fact) | Unaligned paths summing on a device | |
 | MODE / buffer / path numbers | Path past the alignment limit | |
 | Underrun count on BUFFER (neutral) | Unmuted path no unmuted device plays | |
 | Low latency toggle, buffer, cushion | DSP overload of the block | |
@@ -36,6 +36,7 @@ I do?” never share one place.
 | | Underruns this session | |
 | | Bridge stopped on a lost device (after the alert) | |
 | | Per follower: not playing, underruns, drift at limit | |
+| | Sink silent under Low latency | |
 
 Severity rule: **Error** is reserved for audio breaking (DSP past the block,
 an underrun burst, a bridge stopped on a lost device).
@@ -120,6 +121,24 @@ Built:
   to** the next size.
 - **Device lost** (Error): the bridge stopped on a disconnected device and
   the `device_alert` window was dismissed.  → **Open Devices**.
+- **Sink silent** (`app::issues::silence`, Output card): RigWerk sends
+  above −40 dBFS (the clock device's meter, after gate, map, level and
+  mutes) while the clock sink's monitor stays below −70 dBFS for 1.5 s with
+  an underrun run open, 3 s without.  With underruns it is an Error
+  “Output went silent under low latency”.  Without them it is a Warning
+  “Output may be silent under low latency” that also names the desktop
+  mixer: RigWerk's meter is read before PipeWire's stream volume, so a
+  RigWerk stream muted or turned down there looks the same.  A rest (both
+  quiet) counts for nothing, and 2 s of rest drop the evidence gathered
+  before it; 1 s of monitor signal clears it.  Armed only while a Low latency bridge runs; master or
+  device mute, or no unmuted path to the clock device, disarm it.  The
+  monitor (`audio::linux::sink_monitor`) is a passive PipeWire capture
+  stream with `stream.capture.sink` on the clock sink (by name, or the
+  default sink behind the ALSA shim), opened and dropped by the engine
+  with the Low latency bridge; its process callback only folds a peak into
+  an atomic.  No blocks (no PipeWire, not linked, suspended, other
+  platforms) → no reading → no row.  → **Turn Low latency off** (the plan's
+  “Use safer latency”).
 - **Per follower** (`OUTPUT · <name>`, Output card, keyed by follower slot,
   only while the bridge runs):
   - Warning “<name> is not playing”: its stream failed to open or was lost
@@ -166,7 +185,8 @@ Examples for the migrated rows:
 
 - Warning: “Graph block and output period do not line up” → **Set buffer to 64**
 - Warning: “Output driver not checked yet” → **Check driver**
-- Error (later): “Output went silent under low latency” → **Use safer latency**
+- Error: “Output went silent under low latency” → **Turn Low latency off**
+  (with underruns; without them a Warning that also names the desktop mixer)
 
 A quantum step table (`64 → 128 → 256 → off`) is a separate product decision.
 
@@ -179,10 +199,11 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
    device-lost row after the alert).
 4. ~~Filters, Dismiss, deep-link~~ (done: warnings-only Dismiss, a 1.5 s
    card ring).
-5. **Silence:** loud stream + quiet **sink monitor** (new PipeWire metering),
-   armed only while low latency is engaged.  Prefer silence ∧ recent
-   underruns; gate / mute / nothing routed guard false positives, since
-   guitar rests are common.
+5. ~~Silence~~ (done: loud send + quiet sink monitor under Low latency,
+   an Error only with recent underruns; rests, mutes and nothing routed
+   never raise it.  The monitor reads a live graph: on a null sink it
+   links to the default sink's monitor and reads a 0.5 sine as 0.5 (see
+   `AGENTS.md`).  A sink starving under Low latency is not reproduced).
 6. ~~Per follower~~ (done: not playing / retried, its own underruns, drift
    at limit; the safer step is the follower's cushion, then the output
    buffer).
@@ -199,10 +220,10 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 
 | Assumption | Today |
 |---|---|
-| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun, device-lost, per-follower producers |
+| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun, device-lost, per-follower, sink-silent producers |
 | Strip state | Moves per tick, not per draw; a new Error expands it |
 | Per-output preferred quantum | No: global force-quantum + `node.latency` |
-| Sink monitor meters | Not present (RigWerk peaks only) |
+| Sink monitor meters | Clock sink only, PipeWire only, only under Low latency; peak, no UI meter |
 | Driver / underrun / quantum judgments | In Issues; cards show readings, the log keeps history |
 | DSP timing | Path chains only; not resampler, followers, mixer |
 | Follower cushion | Stored in session |
@@ -212,9 +233,12 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 - [x] Mockup (`live-issues.html`) and plan
 - [x] Strip on Live: hidden when empty, collapse, counts, one action per row
 - [x] Producers: unaligned sum, alignment limit, routed nowhere, DSP overload,
-  quantum, driver unchecked, underruns, device lost, per follower
+  quantum, driver unchecked, underruns, device lost, per follower, sink
+  silent
 - [x] Open items 1–2: card judgments migrated, underruns as a producer
 - [x] Open item 3: strip state per tick, Error expands, device-lost row
 - [x] Open item 4: filters, Dismiss, Show on <card>
 - [x] Open item 6: per-follower issues
-- [ ] Open item 5 above (silence)
+- [x] Open item 5: sink silent under Low latency (sink monitor stream)
+
+All open items are resolved.
