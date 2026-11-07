@@ -926,6 +926,17 @@ impl Shared {
                 .min(MAX_FOLLOWERS),
             follower_channels: std::array::from_fn(|index| self.followers[index].meters()),
             follower_channel_counts: std::array::from_fn(|index| self.followers[index].channels()),
+            follower_missing: std::array::from_fn(|index| {
+                self.follower_buses[index].missing.load(Ordering::Relaxed)
+            }),
+            follower_underruns: std::array::from_fn(|index| {
+                self.follower_buses[index].underruns.load(Ordering::Relaxed)
+            }),
+            follower_drift_at_limit: std::array::from_fn(|index| {
+                self.follower_buses[index]
+                    .drift_at_limit
+                    .load(Ordering::Relaxed)
+            }),
             underruns: self.underruns.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
             input_frames: self.input_frames.load(Ordering::Relaxed),

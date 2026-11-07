@@ -28,13 +28,14 @@ I do?” never share one place.
 | Keep on the card | In Issues today | Still to move into Issues |
 |---|---|---|
 | DRIVER actual rate/step (neutral fact) | Unaligned paths summing on a device | Sink silent (later) |
-| MODE / buffer / path numbers | Path past the alignment limit | Per-follower underruns |
+| MODE / buffer / path numbers | Path past the alignment limit | |
 | Underrun count on BUFFER (neutral) | Unmuted path no unmuted device plays | |
 | Low latency toggle, buffer, cushion | DSP overload of the block | |
 | | Quantum change failed / does not fit / not low-latency | |
 | | Driver unchecked under a low-latency mode | |
 | | Underruns this session | |
 | | Bridge stopped on a lost device (after the alert) | |
+| | Per follower: not playing, underruns, drift at limit | |
 
 Severity rule: **Error** is reserved for audio breaking (DSP past the block,
 an underrun burst, a bridge stopped on a lost device).
@@ -119,6 +120,30 @@ Built:
   to** the next size.
 - **Device lost** (Error): the bridge stopped on a disconnected device and
   the `device_alert` window was dismissed.  → **Open Devices**.
+- **Per follower** (`OUTPUT · <name>`, Output card, keyed by follower slot,
+  only while the bridge runs):
+  - Warning “<name> is not playing”: its stream failed to open or was lost
+    and is being retried (`FollowerBus::missing`), or it is not among the
+    output devices (one key each, so dismissing one does not hide the
+    other).  → **Show in Mixer** (pick another device or remove it).  No
+    other row for that follower while it is out.
+  - Underruns of its own ring (`FollowerBus::underruns`, counted since its
+    stream opened), one `UnderrunWatch` per slot with the clock output's rules: Warning
+    “<name> ran dry”, Error “Audio is dropping out on <name>”.  → the
+    follower's own **Use Safe cushion**, else **Set buffer to** the next
+    size (its stream asks for the output buffer).  Never Low latency or the
+    WASAPI mode: those govern the clock device only.
+  - Warning “<name> drifts too far to follow”: its drift integral is pinned
+    at the ±500 ppm limit (`FollowerBus::drift_at_limit`), held so it
+    does not flicker: raised after 1 s pinned, cleared after 3 s free.
+    Not while the loop closes a large step of its target (a new cushion),
+    which pins it with nothing wrong with the clock.  → **Open
+    diagnostics**.
+  - A slot that holds another follower than the last tick (removed,
+    reordered or repointed live) starts its watches over and drops its
+    dismissals.
+  - PipeWire in-graph followers have no ring: only the missing check
+    applies.
 
 DSP share only times the path chains, not the resampler, followers or mixer.
 Underruns are the direct evidence that the block was late.
@@ -134,8 +159,7 @@ Do not invent per-output quantum steppers.  Name what RigWerk owns:
 
 - **Low latency** (desktop `clock.force-quantum` + stream `node.latency`)
 - **Output buffer** / OUT CLOCK period
-- **Cushion** Safe / Low latency / Manual (per follower once generic
-  followers exist)
+- **Cushion** Safe / Low latency / Manual (per follower too, in the Mixer)
 - **Check driver** (probe only)
 
 Examples for the migrated rows:
@@ -149,7 +173,7 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 ## Open items (in order)
 
 1. ~~Migrate today’s card judgments~~ (done: quantum, driver, underruns).
-2. ~~Underrun deltas per session~~ (done: clock output only; followers are
+2. ~~Underrun deltas per session~~ (done: clock output; followers in
    item 6).
 3. ~~Strip state~~ (done: per-tick latches, a new Error expands, a
    device-lost row after the alert).
@@ -159,8 +183,9 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
    armed only while low latency is engaged.  Prefer silence ∧ recent
    underruns; gate / mute / nothing routed guard false positives, since
    guitar rests are common.
-6. **Per follower:** evaluate per device; actions name cushion vs Low latency
-   correctly for that path.
+6. ~~Per follower~~ (done: not playing / retried, its own underruns, drift
+   at limit; the safer step is the follower's cushion, then the output
+   buffer).
 
 ## Non-goals
 
@@ -174,7 +199,7 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 
 | Assumption | Today |
 |---|---|
-| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun, device-lost producers |
+| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun, device-lost, per-follower producers |
 | Strip state | Moves per tick, not per draw; a new Error expands it |
 | Per-output preferred quantum | No: global force-quantum + `node.latency` |
 | Sink monitor meters | Not present (RigWerk peaks only) |
@@ -187,8 +212,9 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 - [x] Mockup (`live-issues.html`) and plan
 - [x] Strip on Live: hidden when empty, collapse, counts, one action per row
 - [x] Producers: unaligned sum, alignment limit, routed nowhere, DSP overload,
-  quantum, driver unchecked, underruns, device lost
+  quantum, driver unchecked, underruns, device lost, per follower
 - [x] Open items 1–2: card judgments migrated, underruns as a producer
 - [x] Open item 3: strip state per tick, Error expands, device-lost row
 - [x] Open item 4: filters, Dismiss, Show on <card>
-- [ ] Open items 5–6 above (next: silence)
+- [x] Open item 6: per-follower issues
+- [ ] Open item 5 above (silence)

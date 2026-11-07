@@ -42,6 +42,7 @@ mod follower;
 #[cfg(target_os = "windows")]
 pub(crate) use follower::is_generic_follower;
 pub(crate) use follower::is_vb_cable_render;
+pub(crate) use follower::FOLLOWER_DRIFT_LIMIT_PPM;
 mod gate;
 mod input;
 mod mixer;

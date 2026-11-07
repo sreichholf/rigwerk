@@ -2,13 +2,16 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::{
-    highlight_strength, DspAlarm, IssueAction, IssueCard, IssueFilter, IssueKey, IssueSeverity,
-    UnderrunWatch, CARD_HIGHLIGHT_FOR, UNDERRUN_BURST_WINDOW, UNDERRUN_QUIET,
+    highlight_strength, DspAlarm, HeldFlag, IssueAction, IssueCard, IssueFilter, IssueKey,
+    IssueSeverity, UnderrunWatch, CARD_HIGHLIGHT_FOR, DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER,
+    UNDERRUN_BURST_WINDOW, UNDERRUN_QUIET,
 };
 use crate::app::cards::Card;
 use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
+use crate::app::settings::{cushion_to_pref, FollowerPref};
 use crate::app::{blank_app, Page, RigWerkApp};
 use crate::audio::{ChannelMap, CushionMode, DeviceItem, EngineState, PathMapSettings, MAX_ALIGN};
+use crate::ui::pages::mixer::chain::ChainSelection;
 
 /// A real (not demo) clock output the driver check can read.
 fn with_real_output(app: &mut RigWerkApp) {
@@ -689,4 +692,275 @@ fn show_on_a_card_rings_it_for_a_moment() {
     assert_eq!(highlight_strength(CARD_HIGHLIGHT_FOR * 2), 0.0);
     app.tick_issues(now + CARD_HIGHLIGHT_FOR);
     assert!(app.issue_state.highlight.is_none(), "the tick forgets it");
+}
+
+/// A running bridge with one generic follower, "USB Headphones", in the
+/// device list and on a Low latency cushion.
+fn with_follower() -> RigWerkApp {
+    let mut app = blank_app();
+    app.inventory.outputs.push(DeviceItem {
+        id: "test:usb".to_owned(),
+        name: "USB Headphones".to_owned(),
+        backend: "ALSA".to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    });
+    app.followers.push(FollowerPref {
+        id: "test:usb".to_owned(),
+        backend: "ALSA".to_owned(),
+        name: "USB Headphones".to_owned(),
+        cushion_mode: cushion_to_pref(CushionMode::LowLatency),
+        ..FollowerPref::default()
+    });
+    app.engine.state = EngineState::Running;
+    app
+}
+
+#[test]
+fn a_follower_being_retried_is_a_warning_that_shows_it_in_the_mixer() {
+    let mut app = with_follower();
+    assert!(app.live_issues().is_empty(), "{:?}", app.live_issues());
+    app.snapshot.follower_missing[0] = true;
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    let issue = &issues[0];
+    assert_eq!(issue.key, IssueKey::FollowerRetrying(0));
+    assert_eq!(issue.severity, IssueSeverity::Warning, "the clock plays on");
+    assert_eq!(issue.title, "USB Headphones is not playing");
+    assert!(issue.detail.contains("retrying"), "{}", issue.detail);
+    assert_eq!(issue.place, "OUTPUT · USB Headphones");
+    assert_eq!(issue.card, Some(IssueCard::Output));
+    assert_eq!(issue.action, IssueAction::ShowFollower(0));
+    assert_eq!(issue.action.label(), "Show in Mixer");
+    app.apply_issue_action(issue.action);
+    assert!(app.page == Page::Mixer);
+    assert_eq!(app.chain_selected, ChainSelection::OutputDevice(1));
+    app.refresh_issues();
+    app.dismiss_issue(IssueKey::FollowerRetrying(0));
+    assert_eq!(app.issue_view().hidden, 1);
+
+    app.snapshot.follower_missing[0] = false;
+    app.inventory.outputs.clear();
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "gone from the device list: {issues:?}");
+    assert_eq!(issues[0].key, IssueKey::FollowerNotListed(0));
+    app.refresh_issues();
+    assert_eq!(app.issue_view().hidden, 0, "a different problem");
+    assert!(
+        !issues[0].detail.contains("retrying"),
+        "{}",
+        issues[0].detail
+    );
+
+    app.engine.state = EngineState::Idle;
+    assert!(app.live_issues().is_empty(), "only while the bridge runs");
+}
+
+#[test]
+fn follower_underruns_offer_its_own_cushion_then_the_buffer() {
+    let mut app = with_follower();
+    let now = Instant::now();
+    app.snapshot.follower_underruns[0] = 2;
+    app.tick_issues(now);
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "the clock output is fine: {issues:?}");
+    let issue = &issues[0];
+    assert_eq!(issue.key, IssueKey::FollowerUnderruns(0));
+    assert_eq!(issue.severity, IssueSeverity::Warning);
+    assert_eq!(issue.title, "USB Headphones ran dry");
+    assert!(
+        issue
+            .detail
+            .starts_with("2 underruns, the last just now (2 underruns since it opened)"),
+        "{}",
+        issue.detail
+    );
+    assert_eq!(issue.place, "OUTPUT · USB Headphones");
+    assert_eq!(issue.action, IssueAction::FollowerSafeCushion(0));
+    assert_eq!(issue.action.label(), "Use Safe cushion");
+
+    // The clock's own cushion is not the one that helps here.
+    app.cushion_mode = CushionMode::LowLatency;
+    app.apply_issue_action(IssueAction::FollowerSafeCushion(0));
+    assert_eq!(
+        app.followers[0].cushion_mode,
+        cushion_to_pref(CushionMode::Safe)
+    );
+    assert_eq!(app.cushion_mode, CushionMode::LowLatency);
+    assert_eq!(
+        app.log.last().unwrap().text,
+        "USB Headphones: cushion Safe."
+    );
+
+    app.low_latency_output = true;
+    let action = app.live_issues()[0].action;
+    assert_eq!(
+        action,
+        IssueAction::SetOutputBuffer(256),
+        "never the clock device's Low latency"
+    );
+    assert!(app.live_issues()[0].detail.ends_with(
+        "Followers ask for the output buffer: 256 samples give USB Headphones more room."
+    ));
+
+    app.snapshot.follower_underruns[0] = 4;
+    app.tick_issues(now + Duration::from_millis(500));
+    let issue = &app.live_issues()[0];
+    assert_eq!(issue.severity, IssueSeverity::Error);
+    assert_eq!(issue.title, "Audio is dropping out on USB Headphones");
+
+    app.tick_issues(now + Duration::from_millis(500) + UNDERRUN_QUIET);
+    assert!(app.live_issues().is_empty(), "cleared after a quiet spell");
+
+    app.snapshot.follower_underruns[0] = 5;
+    app.tick_issues(now + UNDERRUN_QUIET * 2);
+    assert_eq!(app.live_issues().len(), 1);
+    app.stop_bridge();
+    assert_eq!(
+        app.issue_state.follower_underruns[0].session_count(),
+        0,
+        "per session"
+    );
+}
+
+#[test]
+fn a_missing_follower_has_no_underrun_or_drift_row() {
+    let mut app = with_follower();
+    app.snapshot.follower_underruns[0] = 1;
+    app.snapshot.follower_drift_at_limit[0] = true;
+    let now = Instant::now();
+    app.tick_issues(now);
+    app.tick_issues(now + DRIFT_RAISE_AFTER);
+    app.snapshot.follower_missing[0] = true;
+    let keys: Vec<IssueKey> = app.live_issues().iter().map(|issue| issue.key).collect();
+    assert_eq!(keys, [IssueKey::FollowerRetrying(0)]);
+}
+
+#[test]
+fn a_pinned_follower_drift_loop_is_a_warning() {
+    let mut app = with_follower();
+    app.snapshot.follower_drift_at_limit[0] = true;
+    let now = Instant::now();
+    app.tick_issues(now);
+    assert!(app.live_issues().is_empty(), "not pinned long enough yet");
+    app.tick_issues(now + DRIFT_RAISE_AFTER);
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    let issue = &issues[0];
+    assert_eq!(issue.key, IssueKey::FollowerDrift(0));
+    assert_eq!(issue.severity, IssueSeverity::Warning);
+    assert_eq!(issue.title, "USB Headphones drifts too far to follow");
+    assert!(issue.detail.contains("500 ppm limit"), "{}", issue.detail);
+    assert_eq!(issue.place, "OUTPUT · USB Headphones");
+    assert_eq!(issue.action, IssueAction::OpenDiagnostics);
+}
+
+#[test]
+fn a_follower_drift_warning_is_held_against_flicker() {
+    let mut app = with_follower();
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    // Hovering at the limit: pinned, free, pinned, never a full second.
+    for (ms, pinned) in [(0, true), (600, false), (700, true), (1500, false)] {
+        app.snapshot.follower_drift_at_limit[0] = pinned;
+        app.tick_issues(at(ms));
+        assert!(app.live_issues().is_empty(), "{ms} ms");
+    }
+    app.snapshot.follower_drift_at_limit[0] = true;
+    app.tick_issues(at(2000));
+    app.tick_issues(at(3000));
+    assert_eq!(app.live_issues()[0].key, IssueKey::FollowerDrift(0));
+    // Free for a moment: the warning holds.
+    app.snapshot.follower_drift_at_limit[0] = false;
+    app.tick_issues(at(3100));
+    app.snapshot.follower_drift_at_limit[0] = true;
+    app.tick_issues(at(4000));
+    app.snapshot.follower_drift_at_limit[0] = false;
+    app.tick_issues(at(4100));
+    app.tick_issues(at(4100) + DRIFT_CLEAR_AFTER - Duration::from_millis(1));
+    assert_eq!(app.live_issues().len(), 1, "still held");
+    app.tick_issues(at(4100) + DRIFT_CLEAR_AFTER);
+    assert!(app.live_issues().is_empty(), "clear for the full hold");
+
+    app.snapshot.follower_drift_at_limit[0] = true;
+    app.tick_issues(at(9000));
+    app.tick_issues(at(10000));
+    assert_eq!(app.live_issues().len(), 1);
+    app.stop_bridge();
+    assert!(!app.issue_state.follower_drift[0].raised(), "per session");
+}
+
+#[test]
+fn a_slot_that_holds_another_follower_starts_over() {
+    let mut app = with_follower();
+    let now = Instant::now();
+    app.tick_issues(now);
+    app.snapshot.follower_underruns[0] = 2;
+    app.snapshot.follower_drift_at_limit[0] = true;
+    app.tick_issues(now + Duration::from_millis(100));
+    app.tick_issues(now + DRIFT_RAISE_AFTER * 2);
+    let keys: Vec<IssueKey> = app.live_issues().iter().map(|issue| issue.key).collect();
+    assert_eq!(
+        keys,
+        [IssueKey::FollowerUnderruns(0), IssueKey::FollowerDrift(0)]
+    );
+    app.dismiss_issue(IssueKey::FollowerUnderruns(0));
+    assert_eq!(app.issue_view().hidden, 1);
+
+    // Replaced live by another device; its stream has not opened yet, so
+    // the slot still reads the old one's count and drift.
+    app.inventory.outputs.push(DeviceItem {
+        id: "test:dock".to_owned(),
+        name: "Dock".to_owned(),
+        backend: "ALSA".to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    });
+    app.followers[0].id = "test:dock".to_owned();
+    app.followers[0].name = "Dock".to_owned();
+    app.snapshot.follower_drift_at_limit[0] = false;
+    let later = now + DRIFT_RAISE_AFTER * 3;
+    app.tick_issues(later);
+    assert!(app.live_issues().is_empty(), "{:?}", app.live_issues());
+    assert_eq!(
+        app.issue_view().hidden,
+        0,
+        "the dismissal was the old one's"
+    );
+
+    // Its stream opens (the count starts over), then it runs dry itself.
+    app.snapshot.follower_underruns[0] = 0;
+    app.tick_issues(later + Duration::from_millis(100));
+    app.snapshot.follower_underruns[0] = 1;
+    app.tick_issues(later + Duration::from_millis(200));
+    let view = app.issue_view();
+    assert_eq!(view.hidden, 0);
+    assert_eq!(view.visible[0].key, IssueKey::FollowerUnderruns(0));
+    assert_eq!(view.visible[0].title, "Dock ran dry");
+    assert!(
+        view.visible[0]
+            .detail
+            .starts_with("1 underrun, the last just now (1 underrun since it opened)"),
+        "{}",
+        view.visible[0].detail
+    );
+}
+
+#[test]
+fn a_held_flag_waits_both_ways() {
+    let mut flag = HeldFlag::default();
+    let start = Instant::now();
+    let second = Duration::from_secs(1);
+    let three = Duration::from_secs(3);
+    assert!(!flag.update(true, start, second, three));
+    assert!(!flag.update(false, start + second / 2, second, three));
+    assert!(!flag.update(true, start + second, second, three));
+    assert!(flag.update(true, start + second * 2, second, three));
+    assert!(flag.update(false, start + second * 3, second, three));
+    assert!(flag.update(false, start + second * 5, second, three));
+    assert!(!flag.update(false, start + second * 6, second, three));
 }

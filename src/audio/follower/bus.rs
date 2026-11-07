@@ -35,6 +35,9 @@ pub(crate) struct FollowerBus {
     pub(crate) overruns: AtomicU64,
     /// Stream open failed or the device vanished; the bridge keeps running.
     pub(crate) missing: AtomicBool,
+    /// The drift loop's integral sits at its limit: the follower's clock is
+    /// further off than the loop can steer.  Written once per follower block.
+    pub(crate) drift_at_limit: AtomicBool,
 }
 
 impl FollowerBus {
@@ -53,6 +56,7 @@ impl FollowerBus {
             underruns: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
             missing: AtomicBool::new(false),
+            drift_at_limit: AtomicBool::new(false),
         }
     }
 
@@ -66,6 +70,7 @@ impl FollowerBus {
         self.input_block.store(0, Ordering::Relaxed);
         self.output_block.store(0, Ordering::Relaxed);
         self.missing.store(false, Ordering::Relaxed);
+        self.drift_at_limit.store(false, Ordering::Relaxed);
         self.lift_to_floor();
     }
 

@@ -58,6 +58,7 @@ mod supervisor;
 mod tests;
 
 pub(crate) use bus::FollowerBus;
+pub(crate) use mixer::DRIFT_LIMIT_PPM as FOLLOWER_DRIFT_LIMIT_PPM;
 pub(crate) use supervisor::FollowerOutputs;
 
 /// Whether `device_id` should play through a generic follower ring (cpal),
