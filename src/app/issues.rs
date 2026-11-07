@@ -41,10 +41,27 @@
 //!
 //! The state behind the rows ([`IssueState`]) moves once per update tick in
 //! [`RigWerkApp::tick_issues`], whether or not Live is drawn, and
-//! [`RigWerkApp::live_issues`] only reads it.  The DSP latches and the
-//! underrun watch start over with each bridge start and stop.  A new error
+//! [`RigWerkApp::live_issues`] only reads it.  The tick keeps the issues it
+//! computed, and the strip draws those ([`RigWerkApp::issue_view`]), so
+//! they are judged once per tick, not again for each frame drawn.  The DSP
+//! latches and the underrun watch start over with each bridge start and
+//! stop.  A new error
 //! (a title not among the last tick's errors) expands a collapsed strip;
 //! warnings do not.
+//!
+//! What the person does with the strip is app state too, never persisted:
+//! - the filter (All, Warnings, Errors).  Choosing one expands the strip.
+//!   It falls back to All when nothing is left to show, and when a new
+//!   error opens the strip while it shows only warnings.
+//! - dismissed warnings, by their stable [`IssueKey`] (the kind and the
+//!   device or path slot, never the title, which carries numbers).  One
+//!   stays hidden until a tick no longer has it as a warning (it cleared,
+//!   or it became an error), or until the bridge session changes.  Errors
+//!   cannot be dismissed: audio is breaking, so they stay until fixed.
+//!   Showing the dismissed ones again is one click.
+//! - the card a row relates to ([`IssueCard`]) rings for
+//!   [`CARD_HIGHLIGHT_FOR`] after "Show on <card>"; nothing scrolls or
+//!   moves, and the time is passed in so the pulse can be tested.
 //!
 //! The cards keep the readings (DRIVER, BUFFER, MODE); none of these
 //! judgments is drawn there.  The fixes the output rows offer are the
@@ -55,11 +72,13 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::app::alignment::RoutingWarningKind;
+use crate::app::paths::PathInfo;
 use crate::app::settings::BUFFERS;
 use crate::app::RigWerkApp;
 use crate::audio::{CushionMode, EngineState, MAX_ALIGN};
 #[cfg(target_os = "linux")]
 use crate::audio::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
+use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
 
 /// The smoothed DSP share of the block that raises the warning, and the
 /// share it has to drop under to clear it.
@@ -77,6 +96,9 @@ pub(crate) const UNDERRUN_QUIET: Duration = Duration::from_secs(10);
 /// into an error: the audio is breaking up, not clicking once.
 pub(crate) const UNDERRUN_BURST: usize = 3;
 pub(crate) const UNDERRUN_BURST_WINDOW: Duration = Duration::from_secs(5);
+
+/// How long "Show on <card>" rings the related card.
+pub(crate) const CARD_HIGHLIGHT_FOR: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum IssueSeverity {
@@ -194,6 +216,138 @@ impl UnderrunWatch {
     }
 }
 
+/// Which rows the strip lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum IssueFilter {
+    #[default]
+    All,
+    Warnings,
+    Errors,
+}
+
+impl IssueFilter {
+    pub(crate) const ALL: [IssueFilter; 3] =
+        [IssueFilter::All, IssueFilter::Warnings, IssueFilter::Errors];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            IssueFilter::All => "All",
+            IssueFilter::Warnings => "Warnings",
+            IssueFilter::Errors => "Errors",
+        }
+    }
+
+    pub(crate) fn admits(self, severity: IssueSeverity) -> bool {
+        match self {
+            IssueFilter::All => true,
+            IssueFilter::Warnings => severity == IssueSeverity::Warning,
+            IssueFilter::Errors => severity == IssueSeverity::Error,
+        }
+    }
+
+    /// The muted line for a filter with no rows.
+    pub(crate) fn empty_note(self) -> &'static str {
+        match self {
+            IssueFilter::All => "No issues",
+            IssueFilter::Warnings => "No warnings",
+            IssueFilter::Errors => "No errors",
+        }
+    }
+}
+
+/// What an issue is, apart from its wording: the kind and the device or
+/// path slot it is about.  Dismissing goes by this, since titles carry
+/// counts and names that change while the problem stays the same.  One
+/// row that can say different things gets a key for each, so dismissing
+/// one does not hide another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IssueKey {
+    DeviceLost,
+    /// Output device row.
+    UnalignedSum(usize),
+    /// Output device row.
+    PastAlignment(usize),
+    /// Path slot.
+    RoutedNowhere(usize),
+    Dsp,
+    /// PipeWire did not take the quantum change.
+    QuantumNotTaken,
+    /// The graph block cannot be read (PipeWire, so Linux only).
+    #[cfg(target_os = "linux")]
+    QuantumUnknown,
+    /// The output period does not line up with the graph block.
+    #[cfg(target_os = "linux")]
+    QuantumMisfit,
+    /// Low latency runs on a graph block that is not low.
+    #[cfg(target_os = "linux")]
+    QuantumNotLow,
+    Driver,
+    Underruns,
+}
+
+/// The Live card an issue is about, for "Show on <card>".  Routing and
+/// DSP rows have none: their button opens another page.  An Input variant
+/// comes with the first producer that is about the input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IssueCard {
+    Bridge,
+    Output,
+}
+
+impl IssueCard {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            IssueCard::Bridge => "Bridge",
+            IssueCard::Output => "Output",
+        }
+    }
+}
+
+/// A card ringing after "Show on <card>", in its issue's severity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CardHighlight {
+    pub(crate) card: IssueCard,
+    pub(crate) severity: IssueSeverity,
+    pub(crate) since: Instant,
+}
+
+/// How strongly a highlight `elapsed` old rings, 1 at the start: two
+/// pulses that fade out, 0 from [`CARD_HIGHLIGHT_FOR`] on.
+pub(crate) fn highlight_strength(elapsed: Duration) -> f32 {
+    if elapsed >= CARD_HIGHLIGHT_FOR {
+        return 0.0;
+    }
+    let t = elapsed.as_secs_f32() / CARD_HIGHLIGHT_FOR.as_secs_f32();
+    (1.0 - t) * (0.6 + 0.4 * (t * std::f32::consts::TAU * 2.0).cos())
+}
+
+/// The rows the strip can show: every issue except dismissed warnings.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct IssueView {
+    /// Errors first, as [`RigWerkApp::live_issues`] orders them.
+    pub(crate) visible: Vec<LiveIssue>,
+    /// Current issues that are dismissed.
+    pub(crate) hidden: usize,
+}
+
+impl IssueView {
+    /// Nothing to report and nothing hidden: the strip is not drawn.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.visible.is_empty() && self.hidden == 0
+    }
+
+    /// The visible rows `filter` lets through.
+    pub(crate) fn filtered(&self, filter: IssueFilter) -> impl Iterator<Item = &LiveIssue> {
+        self.visible
+            .iter()
+            .filter(move |issue| filter.admits(issue.severity))
+    }
+
+    pub(crate) fn count(&self, filter: IssueFilter) -> usize {
+        self.filtered(filter).count()
+    }
+}
+
 /// The issue state the strip keeps between frames (not persisted).
 #[derive(Debug, Default)]
 pub(crate) struct IssueState {
@@ -205,14 +359,48 @@ pub(crate) struct IssueState {
     /// The error titles of the last tick, to tell a new error from one the
     /// person already collapsed away.
     seen_errors: Vec<String>,
+    /// Which rows the strip lists.
+    pub(crate) filter: IssueFilter,
+    /// Warnings the person dismissed, until they clear or the session ends.
+    dismissed: Vec<IssueKey>,
+    /// The card "Show on <card>" rings, until [`CARD_HIGHLIGHT_FOR`] passed.
+    highlight: Option<CardHighlight>,
+    /// The issues of the last tick, errors first: what the strip shows.
+    current: Vec<LiveIssue>,
 }
 
 impl IssueState {
-    /// A bridge started or stopped: the DSP latches and the underrun count
-    /// belong to the session that ended.
+    /// A bridge started or stopped: the DSP latches, the underrun count and
+    /// the dismissed warnings belong to the session that ended.
     pub(crate) fn new_session(&mut self) {
         self.dsp = DspAlarm::default();
         self.underruns = UnderrunWatch::default();
+        self.dismissed.clear();
+    }
+
+    /// Whether `issue` is a dismissed warning.  Errors always show.
+    pub(crate) fn hides(&self, issue: &LiveIssue) -> bool {
+        issue.severity == IssueSeverity::Warning && self.dismissed.contains(&issue.key)
+    }
+
+    /// Once per tick: forgets dismissals whose warning is gone (cleared, or
+    /// now an error), so it shows when it comes back, and returns the
+    /// filter to All when the strip has nothing left to show.
+    fn settle(&mut self, issues: &[LiveIssue], now: Instant) {
+        self.dismissed.retain(|key| {
+            issues
+                .iter()
+                .any(|issue| issue.key == *key && issue.severity == IssueSeverity::Warning)
+        });
+        if issues.iter().all(|issue| self.hides(issue)) {
+            self.filter = IssueFilter::All;
+        }
+        if self
+            .highlight
+            .is_some_and(|lit| now.saturating_duration_since(lit.since) >= CARD_HIGHLIGHT_FOR)
+        {
+            self.highlight = None;
+        }
     }
 }
 
@@ -258,11 +446,15 @@ impl IssueAction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LiveIssue {
+    /// What it is, apart from the wording (dismissing goes by this).
+    pub(crate) key: IssueKey,
     pub(crate) severity: IssueSeverity,
     pub(crate) title: String,
     pub(crate) detail: String,
     /// Where it is, e.g. `ROUTING · Scarlett 2i2`.
     pub(crate) place: String,
+    /// The Live card it is about, if any.
+    pub(crate) card: Option<IssueCard>,
     pub(crate) action: IssueAction,
 }
 
@@ -271,12 +463,34 @@ impl LiveIssue {
     pub(crate) fn action_name(&self) -> String {
         format!("{}: {}", self.action.label(), self.title)
     }
+
+    /// Only warnings can be dismissed.
+    pub(crate) fn dismissable(&self) -> bool {
+        self.severity == IssueSeverity::Warning
+    }
+
+    /// The Dismiss button's accessible name.
+    pub(crate) fn dismiss_name(&self) -> String {
+        format!("Dismiss: {}", self.title)
+    }
+
+    /// "Show on Output", for an issue about a card.
+    pub(crate) fn show_label(&self) -> Option<String> {
+        self.card.map(|card| format!("Show on {}", card.label()))
+    }
+
+    /// The "Show on <card>" button's accessible name.
+    pub(crate) fn show_name(&self) -> Option<String> {
+        self.show_label()
+            .map(|label| format!("{label}: {}", self.title))
+    }
 }
 
 impl RigWerkApp {
     /// Moves the issue state once per update tick: the underrun watch and
-    /// the DSP latches from the engine, then a collapsed strip opens for a
-    /// new error.
+    /// the DSP latches from the engine, then the dismissals, the filter and
+    /// the card highlight settle, and a collapsed strip opens for a new
+    /// error.
     pub(crate) fn tick_issues(&mut self, now: Instant) {
         if self.engine.state == EngineState::Running {
             self.issue_state
@@ -288,37 +502,130 @@ impl RigWerkApp {
             .issue_state
             .dsp
             .next(total.avg_share(), total.peak_share());
-        self.expand_on_new_error();
+        let issues = self.live_issues();
+        self.issue_state.settle(&issues, now);
+        self.open_on_new_error(&issues);
+        self.issue_state.current = issues;
     }
 
     /// Opens a collapsed strip when an error appears that the last tick did
     /// not have.  A warning, or an error the person collapsed while it was
-    /// showing, leaves the strip as it is.
+    /// showing, leaves the strip as it is.  The tick does the same over the
+    /// issues it already has.
+    #[cfg(test)]
     pub(crate) fn expand_on_new_error(&mut self) {
-        let errors: Vec<String> = self
-            .live_issues()
-            .into_iter()
+        let issues = self.live_issues();
+        self.open_on_new_error(&issues);
+    }
+
+    /// Takes the issues the strip shows from the state as it is now, as a
+    /// tick would, without moving the watches or latches.  For tests that
+    /// set the state by hand.
+    #[cfg(test)]
+    pub(crate) fn refresh_issues(&mut self) {
+        self.issue_state.current = self.live_issues();
+    }
+
+    /// [`Self::expand_on_new_error`] over this tick's issues.  Errors are
+    /// never dismissed, so every one counts; a strip filtered to warnings
+    /// goes back to All so the new error is in view.
+    fn open_on_new_error(&mut self, issues: &[LiveIssue]) {
+        let errors: Vec<String> = issues
+            .iter()
             .filter(|issue| issue.severity == IssueSeverity::Error)
-            .map(|issue| issue.title)
+            .map(|issue| issue.title.clone())
             .collect();
         if errors
             .iter()
             .any(|title| !self.issue_state.seen_errors.contains(title))
         {
             self.live_issues_collapsed = false;
+            if !self.issue_state.filter.admits(IssueSeverity::Error) {
+                self.issue_state.filter = IssueFilter::All;
+            }
         }
         self.issue_state.seen_errors = errors;
+    }
+
+    /// The rows the strip can show and how many are dismissed, from the
+    /// last tick's issues.
+    pub(crate) fn issue_view(&self) -> IssueView {
+        let issues = &self.issue_state.current;
+        let total = issues.len();
+        let visible: Vec<LiveIssue> = issues
+            .iter()
+            .filter(|issue| !self.issue_state.hides(issue))
+            .cloned()
+            .collect();
+        IssueView {
+            hidden: total - visible.len(),
+            visible,
+        }
+    }
+
+    /// Lists only the rows `filter` lets through, and opens the strip.
+    pub(crate) fn set_issue_filter(&mut self, filter: IssueFilter) {
+        self.issue_state.filter = filter;
+        self.live_issues_collapsed = false;
+    }
+
+    /// Hides the warning with `key` until it clears and comes back, or the
+    /// bridge session changes.  An error is not hidden.  Goes by the last
+    /// tick's issues, the ones the strip shows.
+    pub(crate) fn dismiss_issue(&mut self, key: IssueKey) {
+        let warning = self
+            .issue_state
+            .current
+            .iter()
+            .any(|issue| issue.key == key && issue.dismissable());
+        if warning && !self.issue_state.dismissed.contains(&key) {
+            self.issue_state.dismissed.push(key);
+        }
+    }
+
+    /// Shows the dismissed warnings again, in an open strip.
+    pub(crate) fn restore_dismissed_issues(&mut self) {
+        self.issue_state.dismissed.clear();
+        self.live_issues_collapsed = false;
+    }
+
+    /// Rings `card` in `severity`'s colour from `now` on.
+    pub(crate) fn show_issue_card(
+        &mut self,
+        card: IssueCard,
+        severity: IssueSeverity,
+        now: Instant,
+    ) {
+        self.issue_state.highlight = Some(CardHighlight {
+            card,
+            severity,
+            since: now,
+        });
+    }
+
+    /// How strongly `card` rings at `now`, and in which severity, while a
+    /// highlight on it lasts.
+    pub(crate) fn card_highlight(
+        &self,
+        card: IssueCard,
+        now: Instant,
+    ) -> Option<(IssueSeverity, f32)> {
+        let lit = self.issue_state.highlight.filter(|lit| lit.card == card)?;
+        let strength = highlight_strength(now.saturating_duration_since(lit.since));
+        (strength > 0.0).then_some((lit.severity, strength))
     }
 
     /// Every current issue, errors first.  Only reads: the state behind
     /// the rows moves in [`Self::tick_issues`].
     pub(crate) fn live_issues(&self) -> Vec<LiveIssue> {
+        let infos = self.path_infos();
+        let rows = self.output_device_rows();
         let mut issues = Vec::new();
         self.device_lost_issue(&mut issues);
-        self.unaligned_sum_issues(&mut issues);
-        self.clamped_issues(&mut issues);
-        self.unheard_path_issues(&mut issues);
-        self.dsp_issue(&mut issues);
+        self.unaligned_sum_issues(&rows, &mut issues);
+        self.clamped_issues(&infos, &rows, &mut issues);
+        self.unheard_path_issues(&infos, &mut issues);
+        self.dsp_issue(&infos, &mut issues);
         self.quantum_issue(&mut issues);
         self.driver_issue(&mut issues);
         self.underrun_issue(&mut issues);
@@ -337,20 +644,22 @@ impl RigWerkApp {
             return;
         }
         issues.push(LiveIssue {
+            key: IssueKey::DeviceLost,
             severity: IssueSeverity::Error,
             title: "The bridge stopped: a device was disconnected".to_owned(),
             detail: alert.clone(),
             place: "BRIDGE · Stopped".to_owned(),
+            card: Some(IssueCard::Bridge),
             action: IssueAction::OpenDevices,
         });
     }
 
     /// (a) Paths that add up unaligned on a device.
-    fn unaligned_sum_issues(&self, issues: &mut Vec<LiveIssue>) {
+    fn unaligned_sum_issues(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
         if self.path_count() < 2 {
             return;
         }
-        for (device, row) in self.output_device_rows().iter().enumerate() {
+        for (device, row) in rows.iter().enumerate() {
             let Some(warning) = self
                 .routing_warnings(device)
                 .into_iter()
@@ -379,6 +688,7 @@ impl RigWerkApp {
             let spread = if arrivals.is_empty() { 0.0 } else { spread };
             let align = self.device_align(device);
             issues.push(LiveIssue {
+                key: IssueKey::UnalignedSum(device),
                 severity: IssueSeverity::Warning,
                 title: format!("Paths add up unaligned on {}", row.name),
                 detail: format!(
@@ -392,6 +702,7 @@ impl RigWerkApp {
                     }
                 ),
                 place: format!("ROUTING · {}", row.name),
+                card: None,
                 action: if align {
                     IssueAction::ShowRouting(device)
                 } else {
@@ -403,13 +714,17 @@ impl RigWerkApp {
 
     /// A device with alignment on that plays a path longer than the
     /// alignment covers: that path arrives late against the others.
-    fn clamped_issues(&self, issues: &mut Vec<LiveIssue>) {
+    fn clamped_issues(
+        &self,
+        infos: &[PathInfo],
+        rows: &[OutputDeviceRow],
+        issues: &mut Vec<LiveIssue>,
+    ) {
         if self.path_count() < 2 {
             return;
         }
-        let infos = self.path_infos();
         let rate = self.engine.plugin_rate().max(1);
-        for (device, row) in self.output_device_rows().iter().enumerate() {
+        for (device, row) in rows.iter().enumerate() {
             let Some(alignment) = self.device_alignment(device) else {
                 continue;
             };
@@ -424,6 +739,7 @@ impl RigWerkApp {
                 .map(|info| info.name.as_str())
                 .collect();
             issues.push(LiveIssue {
+                key: IssueKey::PastAlignment(device),
                 severity: IssueSeverity::Warning,
                 title: format!("{} is past the alignment limit", names.join(" and ")),
                 detail: format!(
@@ -432,6 +748,7 @@ impl RigWerkApp {
                     row.name
                 ),
                 place: format!("ROUTING · {}", row.name),
+                card: None,
                 action: IssueAction::ShowRouting(device),
             });
         }
@@ -440,9 +757,9 @@ impl RigWerkApp {
     /// (b) An unmuted path that no unmuted device plays: its chain runs
     /// for nothing.  A muted path is parked on purpose and does not warn.
     /// Also checked with one path: then nothing is heard at all.
-    fn unheard_path_issues(&self, issues: &mut Vec<LiveIssue>) {
+    fn unheard_path_issues(&self, infos: &[PathInfo], issues: &mut Vec<LiveIssue>) {
         let devices = self.device_settings();
-        for info in self.path_infos() {
+        for info in infos {
             if info.mute {
                 continue;
             }
@@ -465,10 +782,12 @@ impl RigWerkApp {
                 )
             };
             issues.push(LiveIssue {
+                key: IssueKey::RoutedNowhere(info.slot),
                 severity: IssueSeverity::Warning,
                 title,
                 detail,
                 place: format!("ROUTING · {}", info.name),
+                card: None,
                 action: IssueAction::OpenRouting,
             });
         }
@@ -476,7 +795,7 @@ impl RigWerkApp {
 
     /// (c) The paths' DSP time against the block they have to fit in: the
     /// mixer's total per block, so peaks of different blocks never add up.
-    fn dsp_issue(&self, issues: &mut Vec<LiveIssue>) {
+    fn dsp_issue(&self, infos: &[PathInfo], issues: &mut Vec<LiveIssue>) {
         let Some(severity) = self.issue_state.dsp.severity() else {
             return;
         };
@@ -484,8 +803,7 @@ impl RigWerkApp {
         let block = total.block_ns as f32;
         let (avg_share, peak_share) = (total.avg_share(), total.peak_share());
         let mut heaviest: Option<(String, f32)> = None;
-        let infos = self.path_infos();
-        for info in &infos {
+        for info in infos {
             let Some(time) = self.engine.path_dsp_time(info.slot) else {
                 continue;
             };
@@ -515,6 +833,7 @@ impl RigWerkApp {
             format!("{shares}. Remove an insert or raise the buffer.")
         };
         issues.push(LiveIssue {
+            key: IssueKey::Dsp,
             severity,
             title: if infos.len() > 1 {
                 format!("Paths overload the {quantum}")
@@ -523,6 +842,7 @@ impl RigWerkApp {
             },
             detail,
             place: format!("DSP · {name}"),
+            card: None,
             action: IssueAction::OpenDiagnostics,
         });
     }
@@ -533,10 +853,12 @@ impl RigWerkApp {
     fn quantum_issue(&self, issues: &mut Vec<LiveIssue>) {
         if let Some(note) = self.engine.quantum_note() {
             issues.push(LiveIssue {
+                key: IssueKey::QuantumNotTaken,
                 severity: IssueSeverity::Warning,
                 title: "PipeWire did not take the quantum change".to_owned(),
                 detail: note.to_owned(),
                 place: "OUTPUT · Low latency".to_owned(),
+                card: Some(IssueCard::Output),
                 action: IssueAction::OpenDiagnostics,
             });
         } else {
@@ -560,10 +882,12 @@ impl RigWerkApp {
         let quantum = info.quantum;
         if !info.available || quantum == 0 {
             return self.low_latency_output.then(|| LiveIssue {
+                key: IssueKey::QuantumUnknown,
                 severity: IssueSeverity::Warning,
                 title: "PipeWire's graph block is unknown".to_owned(),
                 detail: info.note.clone(),
                 place: "OUTPUT · Low latency".to_owned(),
+                card: Some(IssueCard::Output),
                 action: IssueAction::OpenDiagnostics,
             });
         }
@@ -591,15 +915,18 @@ impl RigWerkApp {
                 )
             };
             return Some(LiveIssue {
+                key: IssueKey::QuantumMisfit,
                 severity: IssueSeverity::Warning,
                 title: "Graph block and output period do not line up".to_owned(),
                 detail,
                 place: "OUTPUT · Out clock".to_owned(),
+                card: Some(IssueCard::Output),
                 action,
             });
         }
         let running = self.engine.state == EngineState::Running;
         (!info.low_latency && self.low_latency_output && running).then(|| LiveIssue {
+            key: IssueKey::QuantumNotLow,
             severity: IssueSeverity::Warning,
             title: "Low latency is on, but the graph block is not".to_owned(),
             detail: format!(
@@ -607,6 +934,7 @@ impl RigWerkApp {
                 quantum as f32 / info.rate.max(1) as f32 * 1000.0
             ),
             place: "OUTPUT · Low latency".to_owned(),
+            card: Some(IssueCard::Output),
             action: IssueAction::OpenDiagnostics,
         })
     }
@@ -623,10 +951,12 @@ impl RigWerkApp {
             return;
         }
         issues.push(LiveIssue {
+            key: IssueKey::Driver,
             severity: IssueSeverity::Warning,
             title: "Output driver not checked yet".to_owned(),
             detail: "Ask the sound system which rate and step this output allows before trusting MODE. Opens no audio.".to_owned(),
             place: "OUTPUT · Driver".to_owned(),
+            card: Some(IssueCard::Output),
             action: IssueAction::CheckDriver,
         });
     }
@@ -675,6 +1005,7 @@ impl RigWerkApp {
             (IssueSeverity::Warning, "The output ran dry")
         };
         issues.push(LiveIssue {
+            key: IssueKey::Underruns,
             severity,
             title: title.to_owned(),
             detail: format!(
@@ -683,6 +1014,7 @@ impl RigWerkApp {
                 count(watch.session_count())
             ),
             place: format!("OUTPUT · {}", self.selected_output().name),
+            card: Some(IssueCard::Output),
             action,
         });
     }

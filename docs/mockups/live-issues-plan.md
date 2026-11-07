@@ -58,11 +58,13 @@ Built:
 - **Severity:** Error (red) vs Warning (amber).  One row per problem, not per
   symptom.
 - **Row content:** severity · short title · one-line detail · where · one
-  action button.
+  action button, plus the secondary Dismiss / Show on <card>.
 - **Do not auto-change** settings.  Actions need an explicit click.
 - **State moves per tick** (`RigWerkApp::tick_issues`, from `logic`), also
   while Live is not drawn: the underrun watch and the DSP latches.
   `live_issues` only reads.  Both start over on every bridge start and stop.
+  The tick keeps the issues it judged and the strip draws those, so they
+  are not judged again for every frame drawn.
 - **A new Error expands** a collapsed strip: an error title the last tick
   did not have.  Warnings, and an error collapsed while showing, do not.
 - Hard stop / disconnect stays `device_alert`-class: the modal window.  Once
@@ -70,8 +72,19 @@ Built:
   disconnected” keeps the alert text, with **Open Devices**, until the next
   bridge start.  No row while the window is up, so the two never show at once.
 
-Not built (see Open items): All · Warnings · Errors filters, a secondary
-action (“Show on Output”, “Dismiss”), deep-link highlight of the related card.
+- **Filters** All · Warnings · Errors on the header, with counts.  Choosing
+  one expands the strip; a filter with no rows shows “No errors right now.”
+  It falls back to All when nothing is left, and when a new error opens a
+  strip filtered to warnings.  Not persisted.
+- **Dismiss** (warnings only: an error is audio breaking and stays until
+  fixed).  Keyed by kind + device row or path slot (`IssueKey`), not the
+  title; a row that can say different things (the quantum row's four) has
+  a key for each, so dismissing one does not hide another.  Hidden until the warning clears (or turns into an error) and comes
+  back, or the bridge session changes.  The header shows “N dismissed ·
+  show”, and stays up while every row is dismissed.
+- **Show on <card>** for rows about a Live card (Output: quantum, driver,
+  underruns; Bridge: device lost) rings that card in the row's colour for
+  1.5 s.  Nothing scrolls; routing and DSP rows have no card.
 
 ## Producers today
 
@@ -140,7 +153,8 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
    item 6).
 3. ~~Strip state~~ (done: per-tick latches, a new Error expands, a
    device-lost row after the alert).
-4. **Filters, Dismiss, deep-link** highlight of the related card.
+4. ~~Filters, Dismiss, deep-link~~ (done: warnings-only Dismiss, a 1.5 s
+   card ring).
 5. **Silence:** loud stream + quiet **sink monitor** (new PipeWire metering),
    armed only while low latency is engaged.  Prefer silence ∧ recent
    underruns; gate / mute / nothing routed guard false positives, since
@@ -176,4 +190,5 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
   quantum, driver unchecked, underruns, device lost
 - [x] Open items 1–2: card judgments migrated, underruns as a producer
 - [x] Open item 3: strip state per tick, Error expands, device-lost row
-- [ ] Open items 4–6 above (next: filters, Dismiss, deep-link)
+- [x] Open item 4: filters, Dismiss, Show on <card>
+- [ ] Open items 5–6 above (next: silence)

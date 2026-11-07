@@ -2,7 +2,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::{
-    DspAlarm, IssueAction, IssueSeverity, UnderrunWatch, UNDERRUN_BURST_WINDOW, UNDERRUN_QUIET,
+    highlight_strength, DspAlarm, IssueAction, IssueCard, IssueFilter, IssueKey, IssueSeverity,
+    UnderrunWatch, CARD_HIGHLIGHT_FOR, UNDERRUN_BURST_WINDOW, UNDERRUN_QUIET,
 };
 use crate::app::cards::Card;
 use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
@@ -463,4 +464,229 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
         app.issue_state.device_lost.is_none(),
         "the next bridge start clears it"
     );
+}
+
+/// An app with one warning: an unmuted second path routed nowhere.
+fn with_unrouted_path() -> (RigWerkApp, usize) {
+    let mut app = blank_app();
+    let added = app.add_path().expect("a free slot");
+    app.set_path_mute(added, false);
+    (app, added)
+}
+
+#[test]
+fn issues_carry_a_stable_key_and_their_card() {
+    let (mut app, added) = with_unrouted_path();
+    let issue = &app.live_issues()[0];
+    assert_eq!(issue.key, IssueKey::RoutedNowhere(added));
+    assert_eq!(issue.card, None, "routing rows point to another page");
+    assert_eq!(issue.show_label(), None);
+
+    app.engine
+        .note_quantum_failure("PipeWire quantum not set: test".to_owned());
+    let quantum = app
+        .live_issues()
+        .into_iter()
+        .find(|issue| issue.key == IssueKey::QuantumNotTaken)
+        .expect("the quantum row");
+    assert_eq!(quantum.card, Some(IssueCard::Output));
+    assert_eq!(quantum.show_label().as_deref(), Some("Show on Output"));
+    assert_eq!(
+        quantum.show_name().as_deref(),
+        Some("Show on Output: PipeWire did not take the quantum change")
+    );
+
+    app.issue_state.underruns.update(1, Instant::now());
+    app.engine.state = EngineState::Running;
+    let first = app
+        .live_issues()
+        .into_iter()
+        .find(|issue| issue.key == IssueKey::Underruns)
+        .expect("the underrun row");
+    app.issue_state
+        .underruns
+        .update(2, Instant::now() + Duration::from_secs(3));
+    let later = app
+        .live_issues()
+        .into_iter()
+        .find(|issue| issue.key == IssueKey::Underruns)
+        .expect("the underrun row");
+    assert_ne!(first.detail, later.detail, "the wording moves");
+    assert_eq!(first.key, later.key, "the key does not");
+}
+
+#[test]
+fn a_filter_lists_its_rows_and_opens_the_strip() {
+    let (mut app, _) = with_unrouted_path();
+    app.issue_state.dsp = DspAlarm {
+        warning: true,
+        error: true,
+    };
+    app.refresh_issues();
+    let view = app.issue_view();
+    assert_eq!(view.count(IssueFilter::All), 2);
+    assert_eq!(view.count(IssueFilter::Warnings), 1);
+    assert_eq!(view.count(IssueFilter::Errors), 1);
+    app.live_issues_collapsed = true;
+    app.set_issue_filter(IssueFilter::Errors);
+    assert!(
+        !app.live_issues_collapsed,
+        "choosing a filter opens the strip"
+    );
+    let rows: Vec<_> = app
+        .issue_view()
+        .filtered(IssueFilter::Errors)
+        .cloned()
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].key, IssueKey::Dsp);
+    assert_eq!(IssueFilter::Errors.empty_note(), "No errors");
+}
+
+#[test]
+fn the_filter_falls_back_to_all_when_nothing_is_left_or_an_error_is_new() {
+    let (mut app, added) = with_unrouted_path();
+    let now = Instant::now();
+    app.set_issue_filter(IssueFilter::Errors);
+    app.tick_issues(now);
+    assert_eq!(
+        app.issue_state.filter,
+        IssueFilter::Errors,
+        "a warning is still there; the filter stays"
+    );
+    app.set_path_mute(added, true);
+    app.tick_issues(now);
+    assert_eq!(app.issue_state.filter, IssueFilter::All, "nothing left");
+
+    app.set_path_mute(added, false);
+    app.set_issue_filter(IssueFilter::Warnings);
+    app.live_issues_collapsed = true;
+    app.issue_state.dsp.error = true;
+    app.expand_on_new_error();
+    assert!(!app.live_issues_collapsed);
+    assert_eq!(
+        app.issue_state.filter,
+        IssueFilter::All,
+        "the new error is in view"
+    );
+}
+
+#[test]
+fn a_dismissed_warning_stays_hidden_until_it_clears_and_comes_back() {
+    let (mut app, added) = with_unrouted_path();
+    let now = Instant::now();
+    let key = IssueKey::RoutedNowhere(added);
+    app.refresh_issues();
+    app.dismiss_issue(key);
+    let view = app.issue_view();
+    assert!(view.visible.is_empty());
+    assert_eq!(view.hidden, 1);
+    assert!(!view.is_empty(), "the header stays, to show it again");
+    app.tick_issues(now);
+    assert_eq!(app.issue_view().hidden, 1, "still there: still dismissed");
+
+    app.set_path_mute(added, true);
+    app.tick_issues(now);
+    app.set_path_mute(added, false);
+    app.refresh_issues();
+    let view = app.issue_view();
+    assert_eq!(view.visible.len(), 1, "it cleared and came back");
+    assert_eq!(view.hidden, 0);
+
+    app.dismiss_issue(key);
+    app.restore_dismissed_issues();
+    assert_eq!(app.issue_view().visible.len(), 1, "shown again on request");
+
+    app.dismiss_issue(key);
+    app.live_issues_collapsed = true;
+    app.restore_dismissed_issues();
+    assert!(!app.live_issues_collapsed, "shown in an open strip");
+
+    app.dismiss_issue(key);
+    app.stop_bridge();
+    app.refresh_issues();
+    assert_eq!(
+        app.issue_view().visible.len(),
+        1,
+        "a new bridge session shows it again"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dismissing_one_quantum_problem_does_not_hide_another() {
+    let mut app = blank_app();
+    app.engine.state = EngineState::Running;
+    app.output_buffer = 128;
+    app.quantum = Some(crate::audio::QuantumInfo::assess(true, 64, 48_000, 128));
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].key, IssueKey::QuantumMisfit);
+    app.refresh_issues();
+    app.dismiss_issue(IssueKey::QuantumMisfit);
+    assert_eq!(app.issue_view().hidden, 1);
+
+    // The period fits now, but the graph block is not the low one.
+    app.quantum = Some(crate::audio::QuantumInfo::assess(true, 1024, 48_000, 64));
+    app.refresh_issues();
+    let view = app.issue_view();
+    assert_eq!(view.hidden, 0, "a different problem: {view:?}");
+    assert_eq!(view.visible[0].key, IssueKey::QuantumNotLow);
+    app.engine.state = EngineState::Idle;
+}
+
+#[test]
+fn an_error_is_not_dismissed_and_a_dismissed_warning_that_turns_error_shows() {
+    let mut app = blank_app();
+    let now = Instant::now();
+    app.issue_state.dsp = DspAlarm {
+        warning: true,
+        error: false,
+    };
+    app.refresh_issues();
+    app.dismiss_issue(IssueKey::Dsp);
+    assert_eq!(app.issue_view().hidden, 1);
+
+    app.issue_state.dsp.error = true;
+    let issues = app.live_issues();
+    assert_eq!(issues[0].severity, IssueSeverity::Error);
+    assert!(!issues[0].dismissable());
+    app.refresh_issues();
+    let view = app.issue_view();
+    assert_eq!(view.visible.len(), 1, "an error always shows");
+    assert_eq!(view.hidden, 0);
+    app.issue_state.settle(&issues, now);
+    app.dismiss_issue(IssueKey::Dsp);
+    app.issue_state.dsp.error = false;
+    app.refresh_issues();
+    assert_eq!(
+        app.issue_view().visible.len(),
+        1,
+        "the error ended the dismissal, and it was not dismissed itself"
+    );
+}
+
+#[test]
+fn show_on_a_card_rings_it_for_a_moment() {
+    let mut app = blank_app();
+    let now = Instant::now();
+    assert_eq!(app.card_highlight(IssueCard::Output, now), None);
+    app.show_issue_card(IssueCard::Output, IssueSeverity::Warning, now);
+    assert_eq!(
+        app.card_highlight(IssueCard::Output, now),
+        Some((IssueSeverity::Warning, 1.0))
+    );
+    assert_eq!(app.card_highlight(IssueCard::Bridge, now), None);
+    let half = app
+        .card_highlight(IssueCard::Output, now + CARD_HIGHLIGHT_FOR / 2)
+        .expect("still ringing")
+        .1;
+    assert!(half > 0.0 && half < 1.0, "{half}");
+    assert_eq!(
+        app.card_highlight(IssueCard::Output, now + CARD_HIGHLIGHT_FOR),
+        None
+    );
+    assert_eq!(highlight_strength(CARD_HIGHLIGHT_FOR * 2), 0.0);
+    app.tick_issues(now + CARD_HIGHLIGHT_FOR);
+    assert!(app.issue_state.highlight.is_none(), "the tick forgets it");
 }

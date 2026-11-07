@@ -1,6 +1,7 @@
 //! Live Bridge: the page layout and the activity strip.  Each card lives in
 //! its own file under `live/`; the Issues strip (`live/issues.rs`) sits on
-//! top while there are issues.
+//! top while there are issues, and "Show on <card>" there rings the Bridge
+//! or Output card here for a moment.
 
 mod bridge_card;
 mod chain_strip;
@@ -13,6 +14,7 @@ mod output_card;
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
 
+use crate::app::issues::IssueCard;
 use crate::app::{Page, RigWerkApp};
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER, CARD, CARD_RAISED, DIM, MUTED, RED, TEAL};
@@ -53,7 +55,7 @@ impl RigWerkApp {
                 },
             );
             connector(ui, card_h, self.is_active(), TEAL);
-            ui.allocate_ui_with_layout(
+            let bridge = ui.allocate_ui_with_layout(
                 Vec2::new(bridge_w, card_h),
                 Layout::top_down(Align::LEFT),
                 |ui| {
@@ -64,8 +66,9 @@ impl RigWerkApp {
                     });
                 },
             );
+            self.card_highlight_ring(ui, bridge.response.rect, IssueCard::Bridge);
             connector(ui, card_h, self.is_active(), BLUE);
-            ui.allocate_ui_with_layout(
+            let output = ui.allocate_ui_with_layout(
                 Vec2::new(output_w, card_h),
                 Layout::top_down(Align::LEFT),
                 |ui| {
@@ -76,6 +79,7 @@ impl RigWerkApp {
                     });
                 },
             );
+            self.card_highlight_ring(ui, output.response.rect, IssueCard::Output);
         });
 
         ui.add_space(10.0);
