@@ -7,8 +7,10 @@ dependency that forced it changes. The license is GPL-3.0-or-later.
 
 `REVIEW.md` and `REVIEW-FIXES.md` record a finished review.
 `docs/mockups/dual-out-plan.md` records the multi-output work that has
-landed. `docs/mockups/live-issues-plan.md` is still open: the Issues
-strip is not in the UI.
+landed. `docs/mockups/live-issues-plan.md` records the Live Issues strip; its
+open items are done.  The sink monitor behind the silence row reads a
+live PipeWire graph (see "A PipeWire graph without hardware"), but a
+sink starving under Low latency has not been reproduced.
 
 ## Commands
 
@@ -41,6 +43,31 @@ tests stay `#[ignore]` and only play silence.
 
 Windows-only code, when you are not running the Windows CI job:
 `cargo check --target x86_64-pc-windows-gnu`.
+
+### A PipeWire graph without hardware
+
+A container has no sound card, but PipeWire runs with a null sink.  This
+is how the sink monitor was checked; use it for any ignored test that
+needs a live graph.  The tone goes to a virtual sink, never to a device,
+so the "hardware tests only play silence" rule still holds for committed
+tests.
+
+```bash
+apt-get install -y pipewire pipewire-bin wireplumber dbus
+export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700 "$XDG_RUNTIME_DIR"
+pipewire &
+dbus-run-session -- wireplumber &   # without D-Bus it exits; nothing links
+pw-cli create-node adapter '{ factory.name=support.null-audio-sink
+  node.name=test_sink media.class=Audio/Sink audio.position=[FL FR]
+  object.linger=true }'
+wpctl status                        # test_sink is the default (*) sink
+pw-cat -p tone.wav &                # e.g. a 300 Hz sine at 0.5
+cargo test --locked sink_monitor_reads_the_default_sink -- --ignored --nocapture
+```
+
+The test prints `Some(~0.5)` while the tone plays.  An idle sink is
+suspended and reads `None`, not `0.0`.  `pw-link -l` shows whether
+WirePlumber linked a stream.
 
 ## When a test fails
 

@@ -223,3 +223,25 @@ fn real_style_stream_renders_on_the_default_output() {
         snapshot.frames
     );
 }
+
+/// Opens the sink monitor on the default PipeWire sink for a moment and
+/// prints its peak.  It only captures; nothing is played.  The monitor is
+/// passive, so a suspended sink delivers no blocks and reads `None`; play
+/// something on it to see a reading.  Run with
+/// `cargo test sink_monitor_reads -- --ignored --nocapture`.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs a running PipeWire daemon"]
+fn sink_monitor_reads_the_default_sink() {
+    use std::time::{Duration, Instant};
+
+    let mut monitor = super::linux::sink_monitor::SinkMonitor::open("alsa:pipewire", 48_000)
+        .expect("the monitor thread starts");
+    let mut reading = None;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        reading = reading.or(monitor.read(Instant::now()));
+    }
+    println!("default sink monitor peak: {reading:?}");
+    assert!(reading.is_none_or(|peak| (0.0..=16.0).contains(&peak)));
+}

@@ -1016,6 +1016,93 @@ fn each_live_path_publishes_its_dsp_time_and_block_budget() {
     );
 }
 
+#[test]
+fn the_total_dsp_peak_is_the_worst_blocks_sum_not_the_sum_of_peaks() {
+    use super::path::DspMeter;
+    const MS: u64 = 1_000_000;
+    // Two paths that each spike once, in different blocks (10 ms each).
+    let blocks = [(8 * MS, MS), (MS, 8 * MS), (MS, MS)];
+    let (mut first, mut second, mut total) = (
+        DspMeter::default(),
+        DspMeter::default(),
+        DspMeter::default(),
+    );
+    let mut times = (Default::default(), Default::default(), Default::default());
+    for (a, b) in blocks {
+        times = (
+            first.push(a, 480, 48_000),
+            second.push(b, 480, 48_000),
+            total.push(a + b, 480, 48_000),
+        );
+    }
+    let (first, second, total) = times;
+    assert_eq!(total.block_ns, 10_000_000);
+    let summed_peaks = first.peak_ns as u64 + second.peak_ns as u64;
+    assert!(
+        summed_peaks > 15 * MS,
+        "each path kept its spike: {summed_peaks}"
+    );
+    assert!(
+        total.peak_ns as u64 <= 9 * MS && total.peak_ns as u64 > 8 * MS,
+        "the worst block took 9 ms: {}",
+        total.peak_ns
+    );
+    assert!(total.peak_share() < 0.95, "no block was nearly late");
+}
+
+#[test]
+fn a_new_block_length_starts_the_dsp_meter_over() {
+    use super::path::DspMeter;
+    const MS: u64 = 1_000_000;
+    let mut meter = DspMeter::default();
+    // 1024 frames at 48 kHz (21.3 ms), each taking 15 ms: 70%.
+    for _ in 0..200 {
+        meter.push(15 * MS, 1024, 48_000);
+    }
+    // The quantum drops to 256 frames (5.3 ms) and the load with it.
+    let time = meter.push(3 * MS, 256, 48_000);
+    assert_eq!(time.block_ns, 5_333_333);
+    assert_eq!(time.avg_ns as u64, 3 * MS, "no 15 ms left over");
+    assert_eq!(time.peak_ns as u64, 3 * MS, "no 15 ms peak left over");
+    assert!(time.peak_share() < 0.95, "{}", time.peak_share());
+    // A rate change is a new block length too.
+    let time = meter.push(MS, 256, 96_000);
+    assert_eq!(time.peak_ns as u64, MS);
+    // The same block length keeps smoothing.
+    let time = meter.push(2 * MS, 256, 96_000);
+    assert!(time.avg_ns as u64 > MS && (time.avg_ns as u64) < 2 * MS);
+    assert_eq!(time.peak_ns as u64, 2 * MS);
+}
+
+#[test]
+fn the_mixer_publishes_the_total_dsp_time_of_its_paths() {
+    let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
+    mixer.prepare(480);
+    assert_eq!(
+        shared.total_dsp.load(),
+        super::super::path::DspTime::default()
+    );
+    for _ in 0..4 {
+        let _ = device_frames(&mut mixer, &shared, 2, 480);
+    }
+    let total = shared.total_dsp.load();
+    assert_eq!(total.block_ns, 10_000_000);
+    assert!(
+        total.avg_ns < total.block_ns,
+        "two plain chains fit the block"
+    );
+    let paths: Vec<_> = (0..2).map(|slot| shared.paths[slot].dsp_time()).collect();
+    // Each block's total is the sum of the paths' times in that block, so
+    // its peak is at most the sum of their peaks (one ns of truncation each).
+    assert!(total.peak_ns <= paths[0].peak_ns + paths[1].peak_ns + 2);
+    assert!(total.peak_ns + 1 >= paths[0].peak_ns.max(paths[1].peak_ns));
+    shared.reset();
+    assert_eq!(
+        shared.total_dsp.load(),
+        super::super::path::DspTime::default()
+    );
+}
+
 /// `frames` frames of the clock device, as one block.
 fn device_frames(
     mixer: &mut OutputMixer,

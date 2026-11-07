@@ -71,6 +71,8 @@ impl RigWerkApp {
         self.bridge_restart_pending = false;
         self.bridge_signature = self.current_bridge_signature();
         self.driver_checked = false;
+        self.issue_state.new_session();
+        self.issue_state.device_lost = None;
         self.engine.set_gains(self.input_gain, self.output_gain);
         if self.is_preview() {
             self.engine.start_preview();
@@ -136,6 +138,7 @@ impl RigWerkApp {
         self.bridge_restart_pending = false;
         self.bridge_signature = 0;
         self.engine.stop();
+        self.issue_state.new_session();
         #[cfg(target_os = "linux")]
         self.refresh_quantum_if_idle();
         if self.engine.state == EngineState::Stopping {
@@ -173,6 +176,14 @@ impl RigWerkApp {
         );
         self.stop_bridge();
         self.bridge_restart_pending = true;
+    }
+
+    /// The bridge stopped because a device went away: the alert window now,
+    /// and the Live Issues row once that is dismissed.
+    pub(crate) fn alert_lost_device(&mut self, alert: String) {
+        self.issue_state.new_session();
+        self.issue_state.device_lost = Some(alert.clone());
+        self.device_alert = Some(alert);
     }
 
     pub(crate) fn meters(&mut self, ctx: &egui::Context) {
@@ -220,7 +231,7 @@ impl RigWerkApp {
             self.bridge_signature = 0;
             self.bridge_restart_pending = false;
             self.push_log("A bridge device was disconnected — bridge stopped.", RED);
-            self.device_alert = Some(format!(
+            self.alert_lost_device(format!(
                 "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
             ));
         }
@@ -511,6 +522,19 @@ impl RigWerkApp {
         } else {
             format!("Standard output · {} smp buffer", self.output_buffer)
         }
+    }
+
+    /// Turns the Low latency output on or off, and logs it.
+    pub(crate) fn set_low_latency_output(&mut self, on: bool) {
+        self.low_latency_output = on;
+        self.push_log(
+            if on {
+                "Low-latency output on: PipeWire low quantum + smallest ALSA period when allowed."
+            } else {
+                "Low-latency output off: normal output buffer, PipeWire quantum released."
+            },
+            if on { AMBER } else { MUTED },
+        );
     }
 
     /// Apply a Windows WASAPI clock mode and keep the legacy bool aligned

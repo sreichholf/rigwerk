@@ -11,8 +11,13 @@ use super::mixer::FollowerMixer;
 /// A shared state with one generic follower slot, its ring laid out for a
 /// `channels`-channel device and a manual cushion of `cushion_ms`.
 fn one_follower(channels: usize, cushion_ms: f32) -> Shared {
-    let shared = Shared::new(48_000);
-    shared.set_output(48_000, 64, "test");
+    one_follower_at(48_000, channels, cushion_ms)
+}
+
+/// [`one_follower`] with everything at `rate`.
+fn one_follower_at(rate: u32, channels: usize, cushion_ms: f32) -> Shared {
+    let shared = Shared::new(rate);
+    shared.set_output(rate, 64, "test");
     shared.drift_enabled.store(false, Ordering::Relaxed);
     let mut plan = FollowerPlan {
         count: 1,
@@ -31,7 +36,7 @@ fn one_follower(channels: usize, cushion_ms: f32) -> Shared {
     bus.set_device_channels(channels);
     bus.reset_playback();
     bus.set_cushion(CushionMode::Manual, cushion_ms);
-    bus.set_source_rate(48_000);
+    bus.set_source_rate(rate);
     shared
         .follower_ring_active(0)
         .store(true, Ordering::Relaxed);
@@ -97,6 +102,97 @@ fn a_follower_underrun_does_not_stop_the_clock() {
         "follower underrun must not stop the bridge"
     );
     assert_eq!(shared.underruns.load(Ordering::Relaxed), 0);
+    let snapshot = shared.snapshot();
+    assert!(snapshot.follower_underruns[0] >= 1, "per follower");
+    assert_eq!(snapshot.underruns, 0, "not the clock output's");
+}
+
+#[test]
+fn a_missing_follower_shows_in_the_snapshot_until_it_reopens() {
+    let shared = one_follower(2, 10.0);
+    let bus = shared.follower_bus(0);
+    bus.missing.store(true, Ordering::Relaxed);
+    assert_eq!(
+        shared.snapshot().follower_missing,
+        [true, false, false, false]
+    );
+    bus.reset_playback();
+    assert!(!shared.snapshot().follower_missing[0]);
+}
+
+#[test]
+fn a_ring_held_far_above_its_cushion_pins_the_drift_loop() {
+    let shared = one_follower(2, 200.0);
+    shared.drift_enabled.store(true, Ordering::Relaxed);
+    let bus = shared.follower_bus(0);
+    let target = bus.target_frames();
+    assert_eq!(target, 9_600);
+    // Just under the purge line: the device seems to run slow, far more
+    // than the loop may correct.
+    let held = target * 2;
+    let mut mixer = FollowerMixer::new(0, 48_000, 2);
+    let mut pinned_after = None;
+    for block in 0..400 {
+        while bus.ring_frames() < held {
+            bus.push_lanes(&[0.1, 0.1]);
+        }
+        mixer.render(&shared, 1_024, |_, _| {});
+        if bus.drift_at_limit.load(Ordering::Relaxed) {
+            pinned_after = Some(block);
+            break;
+        }
+    }
+    assert!(pinned_after.is_some(), "the integral reaches its limit");
+    assert!(shared.snapshot().follower_drift_at_limit[0]);
+    bus.reset_playback();
+    assert!(
+        !shared.snapshot().follower_drift_at_limit[0],
+        "a reopen clears it"
+    );
+}
+
+#[test]
+fn closing_a_large_cushion_step_does_not_flag_the_drift_loop() {
+    // 8 kHz and 256-frame blocks (32 ms): the loop's seconds, fewer frames.
+    let shared = one_follower_at(8_000, 2, 200.0);
+    shared.drift_enabled.store(true, Ordering::Relaxed);
+    let bus = shared.follower_bus(0);
+    let mut mixer = FollowerMixer::new(0, 8_000, 2);
+    let mut block = |pushed: usize| {
+        for _ in 0..pushed {
+            bus.push_lanes(&[0.1, 0.1]);
+        }
+        mixer.render(&shared, 256, |_, _| {});
+        bus.drift_at_limit.load(Ordering::Relaxed)
+    };
+    while bus.ring_frames() < bus.target_frames() {
+        bus.push_lanes(&[0.1, 0.1]);
+    }
+    // The clock side feeds exactly what the device takes: no clock error.
+    for _ in 0..100 {
+        assert!(!block(256));
+    }
+    // 30 ms less cushion: far more ring error than the proportional term
+    // alone corrects at the limit, so the integral winds up while the loop
+    // drains it (about a minute), with nothing wrong with the clock.
+    bus.set_cushion(CushionMode::Manual, 170.0);
+    let mut closed = None;
+    for index in 0..3_000 {
+        assert!(!block(256), "flagged {index} blocks after the step");
+        if bus.ring_frames() < bus.target_frames() {
+            closed.get_or_insert(index);
+        }
+        if closed.is_some_and(|closed| index > closed + 100) {
+            break;
+        }
+    }
+    assert!(closed.is_some(), "the loop closed the step");
+    assert_eq!(bus.underruns.load(Ordering::Relaxed), 0);
+
+    // A device that really takes about 2000 ppm more than it is fed still
+    // pins it.
+    let pinned = (0..3_000).any(|index| block(if index % 2 == 0 { 255 } else { 256 }));
+    assert!(pinned, "a real clock error still flags");
 }
 
 /// A wide follower with 8192-frame blocks at `rate`: the Safe cushion is

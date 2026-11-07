@@ -31,7 +31,6 @@ impl RigWerkApp {
 
     fn output_card_body(&mut self, ui: &mut egui::Ui) {
         let low_label = self.inventory.low_latency_label.clone();
-        let quantum_problem = self.quantum_problem();
         // Keep the tab on the selected output's side, unless the person has
         // switched to a side that has no outputs at all.
         let selected_low = self.is_low_latency_output(self.selected_output());
@@ -99,18 +98,6 @@ impl RigWerkApp {
                 self.accept_output_device();
             }
             self.output_idx = indices[position];
-        }
-
-        // A PipeWire quantum that does not match the ALSA period, or one that
-        // is too large to count as low latency, is shown right at the output
-        // that would suffer from it.
-        if let Some(problem) = &quantum_problem {
-            ui.label(
-                RichText::new(ellipsize(problem, 78))
-                    .size(ts(8.6))
-                    .color(AMBER),
-            )
-            .on_hover_text(problem.clone());
         }
 
         // Measured: ASIO4ALL takes the cards it drives for itself, so the same
@@ -199,19 +186,11 @@ impl RigWerkApp {
                             .corner_radius(CornerRadius::same(7)),
                         )
                         .on_hover_text(
-                            "Ask PipeWire for a 64-frame quantum and ALSA for the smallest period this output allows (at least 32 samples). The PIPEWIRE QUANTUM card and the DRIVER line warn when the ALSA period and the quantum do not fit, or when PipeWire falls back to its shared size.",
+                            "Ask PipeWire for a 64-frame quantum and ALSA for the smallest period this output allows (at least 32 samples). The Issues strip warns when the ALSA period and the quantum do not fit, or when PipeWire falls back to its shared size.",
                         )
                         .clicked()
                     {
-                        self.low_latency_output = !low_latency;
-                        self.push_log(
-                            if self.low_latency_output {
-                                "Low-latency output on: PipeWire low quantum + smallest ALSA period when allowed."
-                            } else {
-                                "Low-latency output off: normal output buffer, PipeWire quantum released."
-                            },
-                            if self.low_latency_output { AMBER } else { MUTED },
-                        );
+                        self.set_low_latency_output(!low_latency);
                     }
                 }
             });
@@ -222,15 +201,9 @@ impl RigWerkApp {
         ui.add_space(3.0);
         let output_actual = self.output_actual();
         let stopped = self.engine.state != EngineState::Running;
-        let checkable = stopped
-            && !self.selected_output().demo
-            && self.selected_output().asio_clsid.is_none()
-            && (cfg!(target_os = "linux")
-                || self
-                    .selected_output()
-                    .backend
-                    .eq_ignore_ascii_case("WASAPI"));
-        let checking = checkable.then(|| self.driver_probe_job.is_some());
+        let checking = self
+            .output_driver_checkable()
+            .then(|| self.driver_probe_job.is_some());
         if driver_line(
             ui,
             output_actual.as_ref(),
@@ -272,27 +245,19 @@ impl RigWerkApp {
             let quantum_label = self.quantum_summary();
             let backend_label = match self.output_step() {
                 Some((frames, ms)) => format!("STEP {frames} SMP · {ms:.1} MS"),
-                None if self.selected_output().asio_clsid.is_none()
-                    && (if cfg!(target_os = "windows") {
-                        self.wasapi_output_mode.wants_low_latency()
-                    } else {
-                        self.low_latency_output
-                    }) =>
-                {
-                    quantum_label.unwrap_or_else(|| {
-                        format!(
-                            "{backend} · {}",
-                            if cfg!(target_os = "windows") {
-                                match self.wasapi_output_mode {
-                                    crate::audio::WasapiOutputMode::Exclusive => "EXCLUSIVE",
-                                    _ => "REAL-STYLE",
-                                }
-                            } else {
-                                "LOW LATENCY"
+                None if self.wants_low_latency_output() => quantum_label.unwrap_or_else(|| {
+                    format!(
+                        "{backend} · {}",
+                        if cfg!(target_os = "windows") {
+                            match self.wasapi_output_mode {
+                                crate::audio::WasapiOutputMode::Exclusive => "EXCLUSIVE",
+                                _ => "REAL-STYLE",
                             }
-                        )
-                    })
-                }
+                        } else {
+                            "LOW LATENCY"
+                        }
+                    )
+                }),
                 None => backend,
             };
             ui.label(RichText::new(ellipsize(&name, 30)).size(ts(9.0)).color(DIM));
@@ -439,12 +404,7 @@ impl RigWerkApp {
 
     /// Output side clock: its own rate (or follow the input) and buffer.
     pub(crate) fn output_clock_controls(&mut self, ui: &mut egui::Ui) {
-        let special_wasapi = self.selected_output().asio_clsid.is_none()
-            && if cfg!(target_os = "windows") {
-                self.wasapi_output_mode.wants_low_latency()
-            } else {
-                self.low_latency_output
-            };
+        let special_wasapi = self.wants_low_latency_output();
         ui.horizontal(|ui| {
             ui.label(micro_label("OUT CLOCK", DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

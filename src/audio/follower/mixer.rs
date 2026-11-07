@@ -3,6 +3,13 @@
 //! callback already ran those and pushed the follower's finished device
 //! channels into its ring.  This side only crosses the clock: it follows the
 //! fill, converts the rate and fades around an underrun, on every lane.
+//!
+//! What the Live Issues strip reads comes back through the slot's
+//! [`FollowerBus`](super::FollowerBus) as atomics: the underrun count and
+//! whether the drift integral is pinned at [`DRIFT_LIMIT_PPM`].  Closing a
+//! large step of the target (a new cushion) can wind the integral to its
+//! limit with nothing wrong with the clock, so the pin is not published
+//! while such a step explains it.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -15,11 +22,14 @@ use super::super::ring::LaneFrame;
 use super::super::shared::Shared;
 
 /// Same drift gains as [`super::super::mixer::OutputMixer`].
-const DRIFT_LIMIT_PPM: f32 = 500.0;
+pub(crate) const DRIFT_LIMIT_PPM: f32 = 500.0;
 const DRIFT_LIMIT_RATIO: f32 = DRIFT_LIMIT_PPM * 1e-6;
 const DRIFT_FILTER_SECONDS: f32 = 0.5;
 const DRIFT_KP: f32 = 0.06;
 const DRIFT_KI: f32 = 0.0012;
+/// A target step this large (seconds of ring) saturates the proportional
+/// term on its own, so closing it may wind the integral to its limit.
+const DRIFT_STEP_SECONDS: f32 = DRIFT_LIMIT_RATIO / DRIFT_KP;
 
 const SILENCE: LaneFrame = [0.0; super::super::output_map::FRAME_LANES];
 
@@ -55,6 +65,11 @@ pub(crate) struct FollowerMixer {
     drift_ppm: f32,
     drift_integral: f32,
     drift_error: Option<f32>,
+    /// The target the loop steered to last block.
+    steer_target: usize,
+    /// The ring error (seconds) a large target step left, while the loop
+    /// closes it: until the error crosses zero or outgrows the step.
+    step_error: Option<f32>,
     resampling: bool,
     stable_since: Instant,
 }
@@ -83,6 +98,8 @@ impl FollowerMixer {
             drift_ppm: 0.0,
             drift_integral: 0.0,
             drift_error: None,
+            steer_target: 0,
+            step_error: None,
             resampling: false,
             stable_since: Instant::now(),
         }
@@ -114,6 +131,7 @@ impl FollowerMixer {
             self.drift_ppm = 0.0;
             self.drift_integral = 0.0;
             self.drift_error = None;
+            self.step_error = None;
         }
     }
 
@@ -123,6 +141,7 @@ impl FollowerMixer {
             self.drift_ppm = 0.0;
             self.drift_integral = 0.0;
             self.drift_error = None;
+            self.step_error = None;
             return 0.0;
         }
         if self.priming {
@@ -144,6 +163,29 @@ impl FollowerMixer {
         let correction = DRIFT_KP * error + self.drift_integral;
         self.drift_ppm = (correction * 1_000_000.0).clamp(-DRIFT_LIMIT_PPM, DRIFT_LIMIT_PPM);
         self.drift_ppm
+    }
+
+    /// Follows a large step of the target outside priming (see
+    /// [`DRIFT_STEP_SECONDS`]) until the ring error crosses zero, or grows
+    /// past the step by more than `margin` seconds (the step no longer
+    /// explains it), and returns whether the integral's pin is one the
+    /// clock caused.  Call after [`Self::steer_drift`].
+    fn drift_pinned(&mut self, shared: &Shared, target: usize, margin: f32) -> bool {
+        let rate = self.source_rate as f32;
+        let previous = std::mem::replace(&mut self.steer_target, target);
+        if !self.priming
+            && previous != 0
+            && (target as f32 - previous as f32).abs() / rate >= DRIFT_STEP_SECONDS
+        {
+            let fill = shared.follower_bus(self.slot).ring_frames();
+            self.step_error = Some((fill as f32 - target as f32) / rate);
+        }
+        if let (Some(step), Some(error)) = (self.step_error, self.drift_error) {
+            if error.signum() != step.signum() || error.abs() > step.abs() + margin {
+                self.step_error = None;
+            }
+        }
+        self.drift_integral.abs() >= DRIFT_LIMIT_RATIO && self.step_error.is_none()
     }
 
     /// Renders `frames` onto the follower device.
@@ -170,6 +212,8 @@ impl FollowerMixer {
             let excess_line = target * 2 + block_source_frames;
             let fill = shared.follower_bus(self.slot).ring_frames();
             if fill > excess_line {
+                // The loop did not hold the ring: no step explains that.
+                self.step_error = None;
                 let mut skipped = SILENCE;
                 for _ in 0..fill - target {
                     if !shared.follower_bus(self.slot).pop_frame(&mut skipped) {
@@ -186,6 +230,12 @@ impl FollowerMixer {
 
         let seconds = frames as f32 / self.output_rate as f32;
         let drift_ppm = self.steer_drift(shared, target, seconds, drift);
+        let margin = block_source_frames as f32 / self.source_rate as f32;
+        let pinned = self.drift_pinned(shared, target, margin);
+        shared
+            .follower_bus(self.slot)
+            .drift_at_limit
+            .store(pinned, Ordering::Relaxed);
         self.resampler.set_correction_ppm(drift_ppm);
         let needs_resample = self.resampler.active() || drift;
         if needs_resample != self.resampling {
@@ -253,6 +303,8 @@ impl FollowerMixer {
             self.resampler.reset();
             self.drift_ppm = 0.0;
             self.drift_error = None;
+            // Priming refills the ring to the new target: no step to close.
+            self.step_error = None;
             self.stable_since = Instant::now();
         } else if !self.priming && self.stable_since.elapsed() >= bus.relax_after() {
             bus.relax_target();

@@ -170,6 +170,14 @@ pub struct Snapshot {
     pub follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
     /// Each follower's real channel count (0 until published).
     pub follower_channel_counts: [u32; MAX_FOLLOWERS],
+    /// Generic followers that failed to open or were lost, and are being
+    /// retried.  PipeWire in-graph followers always read false.
+    pub follower_missing: [bool; MAX_FOLLOWERS],
+    /// Underruns of each generic follower's own ring since its stream
+    /// opened (a reopen starts again from 0).
+    pub follower_underruns: [u64; MAX_FOLLOWERS],
+    /// Generic followers whose drift loop is pinned at its limit.
+    pub follower_drift_at_limit: [bool; MAX_FOLLOWERS],
     pub underruns: u64,
     /// Frames the input callback dropped because the ring was full.
     #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.

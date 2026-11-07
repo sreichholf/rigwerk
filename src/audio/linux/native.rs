@@ -758,7 +758,7 @@ fn pod(bytes: &[u8]) -> Result<&Pod, String> {
     Pod::from_bytes(bytes).ok_or_else(|| "PipeWire format was empty".to_owned())
 }
 
-fn ensure_init() {
+pub(crate) fn ensure_init() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(pw::init);
 }
