@@ -49,9 +49,13 @@ Windows-only code, when you are not running the Windows CI job:
 - Do not delete a test to make the suite pass, and do not weaken it.
 - `#[ignore]` is only for a test that opens a real device or a live
   PipeWire graph. Those are `src/audio/hardware_tests.rs` and the ignored
-  test in `src/audio/linux/duplex/mod.rs`.
-- New DSP behavior gets a `#[cfg(test)]` module in the same file. There
-  is no `tests/` directory.
+  test in `src/audio/linux/duplex/tests.rs`.
+- Unit tests live in a `tests.rs` beside the code they test, declared
+  as `#[cfg(test)] mod tests;`. `src/a/b.rs` uses `src/a/b/tests.rs`;
+  `src/a/mod.rs` uses `src/a/tests.rs`. Do not write inline
+  `mod tests { ... }` blocks. New DSP behavior gets tests there.
+- There is no `tests/` directory. The crate is a binary, so integration
+  tests could not reach its `pub(crate)` items.
 
 ## Layout
 
