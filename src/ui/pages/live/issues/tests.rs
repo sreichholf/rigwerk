@@ -22,3 +22,15 @@ fn the_strip_counts_and_names_its_rows() {
     assert_eq!(strip.value(), Some("1 warning"));
     let _ = node_named(&tree, "Show in Routing: Path 2 is routed nowhere");
 }
+
+#[test]
+fn an_output_row_names_its_action() {
+    let mut app = blank_app();
+    app.engine
+        .note_quantum_failure("PipeWire quantum not set: test".to_owned());
+    let tree = accesskit_frame(|ui| app.issues_strip(ui, 1200.0));
+    let _ = node_named(
+        &tree,
+        "Open diagnostics: PipeWire did not take the quantum change",
+    );
+}

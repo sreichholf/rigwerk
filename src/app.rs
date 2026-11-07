@@ -185,7 +185,8 @@ pub struct RigWerkApp {
     pub(crate) routing_last_card: Option<crate::app::cards::Card>,
     /// The Live Issues strip shows only its header (not persisted).
     pub(crate) live_issues_collapsed: bool,
-    /// What the Live Issues keep between frames (the DSP hysteresis).
+    /// What the Live Issues keep between frames (the DSP hysteresis and the
+    /// session's underruns).
     pub(crate) issue_state: crate::app::issues::IssueState,
     /// Where the next Plugins-page add should land (`None` = append).
     pub(crate) plugin_insert_at: Option<usize>,

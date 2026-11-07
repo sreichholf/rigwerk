@@ -1,4 +1,7 @@
-//! The Live scope and the bridge health tiles.
+//! The Live scope and the bridge health tiles.  Readings only: the
+//! underrun count on BUFFER and the MODE line stay neutral, and the
+//! judgments about them (underruns, a quantum that does not fit) are Live
+//! Issues rows (`app::issues`).
 
 use eframe::egui;
 use egui::{Align, Layout, Sense, Vec2};
@@ -48,6 +51,16 @@ impl RigWerkApp {
                 0
             },
         );
+    }
+
+    /// The graph-block reading's colour: green when it fits a low-latency
+    /// path, neutral otherwise.  The warning itself is a Live Issues row.
+    fn quantum_tone(&self) -> egui::Color32 {
+        if self.quantum_problem().is_some() {
+            MUTED
+        } else {
+            GREEN
+        }
     }
 
     pub(crate) fn health_card(&mut self, ui: &mut egui::Ui, width: f32) {
@@ -112,7 +125,7 @@ impl RigWerkApp {
                 } else {
                     format!("{underruns} drops")
                 },
-                if underruns == 0 { DIM } else { AMBER },
+                DIM,
             );
             ui.horizontal(|ui| {
                 metric_tile_with_badge(
@@ -128,7 +141,7 @@ impl RigWerkApp {
                     "Ring-buffer fill. No underruns this session.".to_owned()
                 } else {
                     format!(
-                        "Ring-buffer fill. {underruns} underrun(s) — the ring ran empty and audio glitched."
+                        "Ring-buffer fill. {underruns} underrun(s) this session: the ring ran empty. The Issues strip says what to change."
                     )
                 });
                 metric_tile(ui, "DRIFT", &drift_value, drift_unit, GREEN, tile_w);
@@ -151,7 +164,7 @@ impl RigWerkApp {
         let running = self.engine.state == EngineState::Running;
         let mode_text = &self.snapshot.output_mode;
         // While the bridge runs, MODE shows the live output block — not the
-        // desktop PipeWire graph size (that lives on the OUTPUT card warning).
+        // desktop PipeWire graph size (a misfit is a Live Issues row).
         let (mode, color, hint) = if self.selected_output().asio_clsid.is_some() {
             (
                 "ASIO output · direct".to_owned(),
@@ -216,12 +229,7 @@ impl RigWerkApp {
                 };
                 (label, tone, self.output_mode_text())
             } else if let Some(summary) = self.quantum_summary() {
-                let tone = if self.quantum_problem().is_some() {
-                    AMBER
-                } else {
-                    GREEN
-                };
-                (summary, tone, self.graph_block_hint())
+                (summary, self.quantum_tone(), self.graph_block_hint())
             } else {
                 (
                     "Standard · output buffer".to_owned(),
@@ -230,12 +238,7 @@ impl RigWerkApp {
                 )
             }
         } else if let Some(summary) = self.quantum_summary() {
-            let tone = if self.quantum_problem().is_some() {
-                AMBER
-            } else {
-                GREEN
-            };
-            (summary, tone, self.graph_block_hint())
+            (summary, self.quantum_tone(), self.graph_block_hint())
         } else if cfg!(target_os = "windows") {
             let (label, tone) = match self.wasapi_output_mode {
                 crate::audio::WasapiOutputMode::Exclusive => {

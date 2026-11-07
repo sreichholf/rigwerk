@@ -117,8 +117,8 @@ impl RigWerkApp {
     pub(crate) fn refresh_quantum_check(&mut self, _log: bool) {}
 
     /// Once the output runs, keep the graph quantum and the delivered block in
-    /// sync. The idle check freezes while Running, so without this the amber
-    /// OUTPUT warning can stick on a pre-start 1024/48 kHz reading after the
+    /// sync. The idle check freezes while Running, so without this the
+    /// quantum issue can stick on a pre-start 1024/48 kHz reading after the
     /// bridge has forced a smaller quantum (or the graph rate has moved).
     #[cfg(target_os = "linux")]
     pub(crate) fn refresh_quantum_actual(&mut self) {
@@ -281,6 +281,29 @@ impl RigWerkApp {
         {
             None
         }
+    }
+
+    /// Whether the stand-alone check can read the selected output now: the
+    /// bridge is not running and the output is a real ALSA / PipeWire or
+    /// WASAPI device (ASIO reads its own driver while it runs).
+    pub(crate) fn output_driver_checkable(&self) -> bool {
+        let output = self.selected_output();
+        self.engine.state != EngineState::Running
+            && !output.demo
+            && output.asio_clsid.is_none()
+            && (cfg!(target_os = "linux") || output.backend.eq_ignore_ascii_case("WASAPI"))
+    }
+
+    /// Whether the clock output asks for a smaller step than its buffer:
+    /// Low latency on Linux, REAL-style or Exclusive on Windows.  An ASIO
+    /// output has no such mode.
+    pub(crate) fn wants_low_latency_output(&self) -> bool {
+        self.selected_output().asio_clsid.is_none()
+            && if cfg!(target_os = "windows") {
+                self.wasapi_output_mode.wants_low_latency()
+            } else {
+                self.low_latency_output
+            }
     }
 
     /// The input driver's real rate and block size, once the bridge runs and

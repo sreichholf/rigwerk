@@ -22,12 +22,34 @@
 //!   total per block (`AudioEngine::total_dsp_time`), never from adding up
 //!   the paths' peaks, which may be seconds apart; the per-path times only
 //!   name the heaviest path.
+//!
+//! The output's own:
+//! - a PipeWire quantum change that failed (`AudioEngine::quantum_note`),
+//!   an output period that does not line up with the graph block, or a
+//!   graph block still too large while Low latency runs (`QuantumInfo`),
+//! - an output driver with no reading while a low-latency mode is chosen,
+//! - underruns in this bridge session ([`UnderrunWatch`]): a warning that
+//!   clears after [`UNDERRUN_QUIET`] without a new one, and an error once
+//!   [`UNDERRUN_BURST`] of them fall within [`UNDERRUN_BURST_WINDOW`], held
+//!   until the output goes quiet.
+//!   The watch moves once per frame (`RigWerkApp::meters`) and starts over
+//!   with each bridge start.
+//!
+//! The cards keep the readings (DRIVER, BUFFER, MODE); none of these
+//! judgments is drawn there.  The fixes the output rows offer are the
+//! controls the cards already have: Check driver, the output buffer, Low
+//! latency, the WASAPI mode and the cushion.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::app::alignment::RoutingWarningKind;
+use crate::app::settings::BUFFERS;
 use crate::app::RigWerkApp;
-use crate::audio::MAX_ALIGN;
+use crate::audio::{CushionMode, EngineState, MAX_ALIGN};
+#[cfg(target_os = "linux")]
+use crate::audio::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
 
 /// The smoothed DSP share of the block that raises the warning, and the
 /// share it has to drop under to clear it.
@@ -37,6 +59,14 @@ pub(crate) const DSP_WARN_CLEAR: f32 = 0.60;
 /// and the share it has to drop under to clear it.
 pub(crate) const DSP_ERROR_SHARE: f32 = 0.95;
 pub(crate) const DSP_ERROR_CLEAR: f32 = 0.85;
+
+/// How long the output has to play without a new underrun before its
+/// issue clears.
+pub(crate) const UNDERRUN_QUIET: Duration = Duration::from_secs(10);
+/// This many underruns within [`UNDERRUN_BURST_WINDOW`] turn the warning
+/// into an error: the audio is breaking up, not clicking once.
+pub(crate) const UNDERRUN_BURST: usize = 3;
+pub(crate) const UNDERRUN_BURST_WINDOW: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum IssueSeverity {
@@ -80,10 +110,85 @@ impl DspAlarm {
     }
 }
 
+/// A run of underruns that has not yet gone quiet for [`UNDERRUN_QUIET`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnderrunEpisode {
+    /// Underruns since the run began.
+    pub(crate) count: u64,
+    /// Time since the latest one, as of the last update.
+    pub(crate) since_last: Duration,
+    /// Whether a burst was seen in this run.  Held until the run ends.
+    pub(crate) burst: bool,
+    last: Instant,
+}
+
+/// Follows the session's underrun count from frame to frame.  Time is
+/// passed in, so the clearing and the burst rule can be tested.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct UnderrunWatch {
+    /// The session count at the last update.
+    seen: u64,
+    /// When the latest underruns arrived, oldest first, at most
+    /// [`UNDERRUN_BURST`] of them.
+    recent: VecDeque<Instant>,
+    episode: Option<UnderrunEpisode>,
+}
+
+impl UnderrunWatch {
+    /// Takes the session's underrun count at `now`.  A count lower than the
+    /// last one is a new session and starts over.
+    pub(crate) fn update(&mut self, count: u64, now: Instant) {
+        if count < self.seen {
+            *self = Self::default();
+        }
+        let new = count - self.seen;
+        self.seen = count;
+        if new > 0 {
+            for _ in 0..new.min(UNDERRUN_BURST as u64) {
+                if self.recent.len() == UNDERRUN_BURST {
+                    self.recent.pop_front();
+                }
+                self.recent.push_back(now);
+            }
+            let burst = self.recent.len() == UNDERRUN_BURST
+                && self.recent.front().is_some_and(|first| {
+                    now.saturating_duration_since(*first) <= UNDERRUN_BURST_WINDOW
+                });
+            let episode = self.episode.get_or_insert(UnderrunEpisode {
+                count: 0,
+                since_last: Duration::ZERO,
+                burst: false,
+                last: now,
+            });
+            episode.count += new;
+            episode.last = now;
+            episode.burst |= burst;
+        }
+        if let Some(episode) = &mut self.episode {
+            episode.since_last = now.saturating_duration_since(episode.last);
+            if episode.since_last >= UNDERRUN_QUIET {
+                self.episode = None;
+                self.recent.clear();
+            }
+        }
+    }
+
+    /// The current run of underruns, if the output has not gone quiet.
+    pub(crate) fn episode(&self) -> Option<&UnderrunEpisode> {
+        self.episode.as_ref()
+    }
+
+    /// Underruns in this bridge session.
+    pub(crate) fn session_count(&self) -> u64 {
+        self.seen
+    }
+}
+
 /// The issue state the strip keeps between frames (not persisted).
 #[derive(Debug, Default)]
 pub(crate) struct IssueState {
     pub(crate) dsp: Cell<DspAlarm>,
+    pub(crate) underruns: UnderrunWatch,
 }
 
 /// What an issue's button does.
@@ -96,14 +201,29 @@ pub(crate) enum IssueAction {
     /// Open Signal Routing (no device in particular).
     OpenRouting,
     OpenDiagnostics,
+    /// Run the stand-alone output driver check.
+    CheckDriver,
+    /// Set the clock output's buffer to this many samples.
+    SetOutputBuffer(usize),
+    /// Turn the Low latency output off (PipeWire / ALSA).
+    LowLatencyOff,
+    /// Put the WASAPI clock output back to Shared.
+    SharedOutput,
+    /// Set the input-to-output cushion to Safe.
+    SafeCushion,
 }
 
 impl IssueAction {
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> String {
         match self {
-            IssueAction::AlignDevice(_) => "Align paths",
-            IssueAction::ShowRouting(_) | IssueAction::OpenRouting => "Show in Routing",
-            IssueAction::OpenDiagnostics => "Open diagnostics",
+            IssueAction::AlignDevice(_) => "Align paths".to_owned(),
+            IssueAction::ShowRouting(_) | IssueAction::OpenRouting => "Show in Routing".to_owned(),
+            IssueAction::OpenDiagnostics => "Open diagnostics".to_owned(),
+            IssueAction::CheckDriver => "Check driver".to_owned(),
+            IssueAction::SetOutputBuffer(frames) => format!("Set buffer to {frames}"),
+            IssueAction::LowLatencyOff => "Turn Low latency off".to_owned(),
+            IssueAction::SharedOutput => "Use Shared output".to_owned(),
+            IssueAction::SafeCushion => "Use Safe cushion".to_owned(),
         }
     }
 }
@@ -133,6 +253,9 @@ impl RigWerkApp {
         self.clamped_issues(&mut issues);
         self.unheard_path_issues(&mut issues);
         self.dsp_issue(&mut issues);
+        self.quantum_issue(&mut issues);
+        self.driver_issue(&mut issues);
+        self.underrun_issue(&mut issues);
         issues.sort_by_key(|issue| issue.severity);
         issues
     }
@@ -321,6 +444,190 @@ impl RigWerkApp {
         });
     }
 
+    /// (d) The PipeWire graph block against the output: a quantum change
+    /// that failed, then the period / block fit, then a block still too
+    /// large while Low latency runs.  One row at most: it is one problem.
+    fn quantum_issue(&self, issues: &mut Vec<LiveIssue>) {
+        if let Some(note) = self.engine.quantum_note() {
+            issues.push(LiveIssue {
+                severity: IssueSeverity::Warning,
+                title: "PipeWire did not take the quantum change".to_owned(),
+                detail: note.to_owned(),
+                place: "OUTPUT · Low latency".to_owned(),
+                action: IssueAction::OpenDiagnostics,
+            });
+        } else {
+            #[cfg(target_os = "linux")]
+            if let Some(issue) = self
+                .quantum
+                .as_ref()
+                .and_then(|info| self.quantum_info_issue(info))
+            {
+                issues.push(issue);
+            }
+        }
+    }
+
+    /// The row for one quantum comparison, if it is worth one.  A large
+    /// graph block with Low latency off is what the person chose, and before
+    /// the bridge runs the block is still the idle desktop one; neither is a
+    /// problem.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn quantum_info_issue(&self, info: &QuantumInfo) -> Option<LiveIssue> {
+        let quantum = info.quantum;
+        if !info.available || quantum == 0 {
+            return self.low_latency_output.then(|| LiveIssue {
+                severity: IssueSeverity::Warning,
+                title: "PipeWire's graph block is unknown".to_owned(),
+                detail: info.note.clone(),
+                place: "OUTPUT · Low latency".to_owned(),
+                action: IssueAction::OpenDiagnostics,
+            });
+        }
+        let period = info.alsa_period;
+        if period > 0 && !info.fits {
+            let fitting =
+                BUFFERS.iter().rev().copied().find(|&frames| {
+                    frames as u32 <= quantum && quantum.is_multiple_of(frames as u32)
+                });
+            let action = match fitting {
+                // The buffer is what the output asked for: changing it helps.
+                Some(frames) if period as usize == self.output_buffer => {
+                    IssueAction::SetOutputBuffer(frames)
+                }
+                _ if self.low_latency_output => IssueAction::LowLatencyOff,
+                _ => IssueAction::OpenDiagnostics,
+            };
+            let detail = if period > quantum {
+                format!(
+                    "The output period ({period} frames) is larger than the PipeWire graph block ({quantum} frames), so the coarser period sets the latency."
+                )
+            } else {
+                format!(
+                    "The output period ({period} frames) does not divide the PipeWire graph block ({quantum} frames), so the two clocks drift against each other and can xrun."
+                )
+            };
+            return Some(LiveIssue {
+                severity: IssueSeverity::Warning,
+                title: "Graph block and output period do not line up".to_owned(),
+                detail,
+                place: "OUTPUT · Out clock".to_owned(),
+                action,
+            });
+        }
+        let running = self.engine.state == EngineState::Running;
+        (!info.low_latency && self.low_latency_output && running).then(|| LiveIssue {
+            severity: IssueSeverity::Warning,
+            title: "Low latency is on, but the graph block is not".to_owned(),
+            detail: format!(
+                "The desktop PipeWire graph runs {quantum} frames ({:.1} ms), not the {PIPEWIRE_LOW_QUANTUM} RigWerk asked for. Another app may hold the quantum.",
+                quantum as f32 / info.rate.max(1) as f32 * 1000.0
+            ),
+            place: "OUTPUT · Low latency".to_owned(),
+            action: IssueAction::OpenDiagnostics,
+        })
+    }
+
+    /// (e) A low-latency output whose driver has no reading yet: MODE
+    /// shows what was asked for, not what the driver allows.  Not while a
+    /// check is running.
+    fn driver_issue(&self, issues: &mut Vec<LiveIssue>) {
+        if !self.output_driver_checkable()
+            || !self.wants_low_latency_output()
+            || self.driver_probe_job.is_some()
+            || self.output_actual().is_some()
+        {
+            return;
+        }
+        issues.push(LiveIssue {
+            severity: IssueSeverity::Warning,
+            title: "Output driver not checked yet".to_owned(),
+            detail: "Ask the sound system which rate and step this output allows before trusting MODE. Opens no audio.".to_owned(),
+            place: "OUTPUT · Driver".to_owned(),
+            action: IssueAction::CheckDriver,
+        });
+    }
+
+    /// (f) Underruns in this bridge session: the ring ran empty and the
+    /// output played a gap.  An error while they come in a burst.
+    fn underrun_issue(&self, issues: &mut Vec<LiveIssue>) {
+        if self.engine.state != EngineState::Running {
+            return;
+        }
+        let watch = &self.issue_state.underruns;
+        let Some(episode) = watch.episode() else {
+            return;
+        };
+        let count = |count: u64| {
+            if count == 1 {
+                "1 underrun".to_owned()
+            } else {
+                format!("{count} underruns")
+            }
+        };
+        let ago = episode.since_last.as_secs();
+        let when = if ago == 0 {
+            "just now".to_owned()
+        } else {
+            format!("{ago} s ago")
+        };
+        let action = self.safer_latency_action();
+        let remedy = match action {
+            IssueAction::SafeCushion => "A Safe cushion grows after each dropout.".to_owned(),
+            IssueAction::LowLatencyOff => {
+                "Turning Low latency off gives the output a larger block.".to_owned()
+            }
+            IssueAction::SharedOutput => {
+                "Shared output uses the chosen buffer instead of the driver's smallest step."
+                    .to_owned()
+            }
+            IssueAction::SetOutputBuffer(frames) => {
+                format!("A {frames}-sample output buffer gives it more room.")
+            }
+            _ => "Check the DSP load and the driver in Diagnostics.".to_owned(),
+        };
+        let (severity, title) = if episode.burst {
+            (IssueSeverity::Error, "Audio is dropping out on the output")
+        } else {
+            (IssueSeverity::Warning, "The output ran dry")
+        };
+        issues.push(LiveIssue {
+            severity,
+            title: title.to_owned(),
+            detail: format!(
+                "{}, the last {when} ({} this session): the output played gaps. {remedy}",
+                count(episode.count),
+                count(watch.session_count())
+            ),
+            place: format!("OUTPUT · {}", self.selected_output().name),
+            action,
+        });
+    }
+
+    /// The control that buys the output the most safety for the least
+    /// latency: the Safe cushion, then Low latency (or REAL-style /
+    /// Exclusive) off, then the next larger output buffer.
+    pub(crate) fn safer_latency_action(&self) -> IssueAction {
+        if !self.snapshot.direct && self.cushion_mode != CushionMode::Safe {
+            return IssueAction::SafeCushion;
+        }
+        if self.selected_output().asio_clsid.is_some() {
+            return IssueAction::OpenDiagnostics;
+        }
+        if self.wants_low_latency_output() {
+            return if cfg!(target_os = "windows") {
+                IssueAction::SharedOutput
+            } else {
+                IssueAction::LowLatencyOff
+            };
+        }
+        BUFFERS
+            .iter()
+            .copied()
+            .find(|&frames| frames > self.output_buffer)
+            .map_or(IssueAction::OpenDiagnostics, IssueAction::SetOutputBuffer)
+    }
+
     /// Runs an issue's action (a click on its button).
     pub(crate) fn apply_issue_action(&mut self, action: IssueAction) {
         use crate::app::Page;
@@ -342,6 +649,24 @@ impl RigWerkApp {
             }
             IssueAction::OpenRouting => self.page = Page::Routing,
             IssueAction::OpenDiagnostics => self.page = Page::Diagnostics,
+            IssueAction::CheckDriver => self.start_output_driver_check(true),
+            IssueAction::SetOutputBuffer(frames) => {
+                self.output_buffer = frames;
+                self.push_log(
+                    format!("Output buffer set to {frames} samples."),
+                    crate::ui::theme::BLUE,
+                );
+            }
+            IssueAction::LowLatencyOff => self.set_low_latency_output(false),
+            IssueAction::SharedOutput => {
+                self.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Shared);
+                self.push_log("WASAPI clock: Shared output.", crate::ui::theme::MUTED);
+            }
+            IssueAction::SafeCushion => {
+                self.cushion_mode = CushionMode::Safe;
+                self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
+                self.push_log("Cushion: Safe.", crate::ui::theme::AMBER);
+            }
         }
     }
 }

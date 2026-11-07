@@ -5,7 +5,7 @@ Mockup: `live-issues.html` (open in a browser; scenario and Today/Proposed
 toggles in the top bar).  Code: `src/app/issues.rs` (producers, actions) and
 `src/ui/pages/live/issues.rs` (the strip).
 
-Low-latency silence / xrun detection is a later **producer** for this strip,
+Low-latency silence detection is a later **producer** for this strip,
 not a separate toast family.
 
 ## Problem
@@ -27,10 +27,13 @@ I do?” never share one place.
 
 | Keep on the card | In Issues today | Still to move into Issues |
 |---|---|---|
-| DRIVER actual rate/step (neutral fact) | Unaligned paths summing on a device | Quantum does not fit / not low-latency |
-| MODE / buffer / path numbers | Path past the alignment limit | Driver unchecked when that matters |
-| Low latency toggle, buffer, cushion | Unmuted path no unmuted device plays | Underrun deltas |
-| | DSP overload of the block | Sink silent (later) |
+| DRIVER actual rate/step (neutral fact) | Unaligned paths summing on a device | Sink silent (later) |
+| MODE / buffer / path numbers | Path past the alignment limit | Per-follower underruns |
+| Underrun count on BUFFER (neutral) | Unmuted path no unmuted device plays | |
+| Low latency toggle, buffer, cushion | DSP overload of the block | |
+| | Quantum change failed / does not fit / not low-latency | |
+| | Driver unchecked under a low-latency mode | |
+| | Underruns this session | |
 
 Severity rule: **Error** is reserved for audio breaking (DSP past the block).
 Everything that still plays, unaligned sums included, is a **Warning**.
@@ -74,9 +77,30 @@ action (“Show on Output”, “Dismiss”), deep-link highlight of the related
   block otherwise), with hysteresis: Warning at 70% smoothed, clears under
   60%; Error at 95% peak, clears under 85%.  The peak is the per-block total
   DSP time across paths, published by the mixer.  → **Open diagnostics**.
+- **Quantum** (Warning, one row): the quantum change failed
+  (`AudioEngine::quantum_note`) → **Open diagnostics**; the output period
+  does not divide the graph block → **Set buffer to N** (the largest buffer
+  that divides it) when the buffer is what the output asked for, else
+  **Turn Low latency off**; the graph block still above the low quantum
+  while Low latency runs → **Open diagnostics**.  A large block with Low
+  latency off, or before the bridge forces it, is not an issue.
+- **Driver unchecked** (Warning): a checkable output with no reading, no
+  check running, and a low-latency mode chosen (Low latency, REAL-style,
+  Exclusive).  → **Check driver**.
+- **Underruns** (`UnderrunWatch`, moved per frame, reset on bridge start):
+  Warning “The output ran dry” with the count and how long ago, cleared after
+  10 s without a new one; Error “Audio is dropping out” once 3 fall within
+  5 s, held until quiet.  → the safer step that exists: **Use Safe cushion**,
+  else **Turn Low latency off** / **Use Shared output**, else **Set buffer
+  to** the next size.
 
 DSP share only times the path chains, not the resampler, followers or mixer.
 Underruns are the direct evidence that the block was late.
+
+The cards keep only readings: no quantum note under the OUTPUT picker, no
+Check driver button or amber on DRIVER (a click on the line checks again),
+the underrun badge on BUFFER and the quantum tone on MODE are neutral.  The
+activity log still records the quantum note and driver differences.
 
 ## Copy / remediation (map to real controls)
 
@@ -98,12 +122,9 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 
 ## Open items (in order)
 
-1. **Migrate today’s card judgments:** the quantum note (logged from
-   `app/bridge.rs`), the amber Check driver line (`live/driver_line.rs`) and
-   the underrun badge on BUFFER (`live/health.rs`).  Remove the card warnings
-   in the same change.
-2. **Underrun deltas** per session as a producer, with safer-latency / buffer
-   actions.  Before silence detection: they are the direct evidence.
+1. ~~Migrate today’s card judgments~~ (done: quantum, driver, underruns).
+2. ~~Underrun deltas per session~~ (done: clock output only; followers are
+   item 6).
 3. **Strip state:**
    - Move the DSP alarm latch to the per-tick update.  Today it advances in
      `live_issues(&self)` through a `Cell`, and only while Live is drawn.
@@ -130,10 +151,10 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 
 | Assumption | Today |
 |---|---|
-| Shared Issues strip | On Live: routing, alignment, DSP producers |
+| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun producers |
 | Per-output preferred quantum | No: global force-quantum + `node.latency` |
 | Sink monitor meters | Not present (RigWerk peaks only) |
-| Driver / underrun / quantum judgments | Still on the cards and the log |
+| Driver / underrun / quantum judgments | In Issues; cards show readings, the log keeps history |
 | DSP timing | Path chains only; not resampler, followers, mixer |
 | Follower cushion | Stored in session |
 
@@ -141,5 +162,7 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 
 - [x] Mockup (`live-issues.html`) and plan
 - [x] Strip on Live: hidden when empty, collapse, counts, one action per row
-- [x] Producers: unaligned sum, alignment limit, routed nowhere, DSP overload
-- [ ] Open items 1–6 above (next: migrate the card judgments)
+- [x] Producers: unaligned sum, alignment limit, routed nowhere, DSP overload,
+  quantum, driver unchecked, underruns
+- [x] Open items 1–2: card judgments migrated, underruns as a producer
+- [ ] Open items 3–6 above (next: strip state)

@@ -1,8 +1,31 @@
-use super::{DspAlarm, IssueAction, IssueSeverity};
-use crate::app::blank_app;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use super::{
+    DspAlarm, IssueAction, IssueSeverity, UnderrunWatch, UNDERRUN_BURST_WINDOW, UNDERRUN_QUIET,
+};
 use crate::app::cards::Card;
-use crate::app::Page;
-use crate::audio::{ChannelMap, PathMapSettings, MAX_ALIGN};
+use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
+use crate::app::{blank_app, Page, RigWerkApp};
+use crate::audio::{ChannelMap, CushionMode, DeviceItem, EngineState, PathMapSettings, MAX_ALIGN};
+
+/// A real (not demo) clock output the driver check can read.
+fn with_real_output(app: &mut RigWerkApp) {
+    app.inventory.outputs.push(DeviceItem {
+        id: "test:out".to_owned(),
+        name: "Scarlett 2i2".to_owned(),
+        backend: if cfg!(target_os = "windows") {
+            "WASAPI"
+        } else {
+            "ALSA"
+        }
+        .to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    });
+}
 
 #[test]
 fn one_path_has_no_path_issues() {
@@ -114,4 +137,218 @@ fn the_dsp_alarm_has_hysteresis() {
     assert!(errored.next(0.65, 0.86).error, "held above 85%");
     let cleared = errored.next(0.65, 0.84);
     assert_eq!(cleared.severity(), Some(IssueSeverity::Warning));
+}
+
+#[test]
+fn underruns_warn_and_clear_after_a_quiet_spell() {
+    let start = Instant::now();
+    let mut watch = UnderrunWatch::default();
+    watch.update(0, start);
+    assert!(watch.episode().is_none());
+    watch.update(1, start + Duration::from_secs(1));
+    let episode = *watch.episode().expect("one underrun raises it");
+    assert_eq!(episode.count, 1);
+    assert!(!episode.burst);
+    watch.update(1, start + Duration::from_secs(4));
+    assert_eq!(watch.episode().unwrap().since_last, Duration::from_secs(3));
+    watch.update(1, start + Duration::from_secs(1) + UNDERRUN_QUIET);
+    assert!(watch.episode().is_none(), "quiet long enough");
+    assert_eq!(watch.session_count(), 1, "the session count stays");
+}
+
+#[test]
+fn an_underrun_burst_is_an_error_until_it_goes_quiet() {
+    let start = Instant::now();
+    let mut watch = UnderrunWatch::default();
+    watch.update(1, start);
+    watch.update(2, start + UNDERRUN_BURST_WINDOW + Duration::from_secs(1));
+    watch.update(3, start + UNDERRUN_BURST_WINDOW + Duration::from_secs(2));
+    assert!(
+        !watch.episode().unwrap().burst,
+        "three, but spread wider than the window"
+    );
+    let late = start + UNDERRUN_BURST_WINDOW + Duration::from_secs(3);
+    watch.update(4, late);
+    let episode = watch.episode().unwrap();
+    assert!(episode.burst, "the last three within the window");
+    assert_eq!(episode.count, 4);
+    watch.update(4, late + Duration::from_secs(5));
+    assert!(watch.episode().unwrap().burst, "held while the run lasts");
+    watch.update(4, late + UNDERRUN_QUIET);
+    assert!(watch.episode().is_none());
+    watch.update(5, late + UNDERRUN_QUIET + Duration::from_secs(1));
+    assert!(!watch.episode().unwrap().burst, "a new run starts calm");
+}
+
+#[test]
+fn a_lower_underrun_count_is_a_new_session() {
+    let now = Instant::now();
+    let mut watch = UnderrunWatch::default();
+    watch.update(5, now);
+    assert!(watch.episode().unwrap().burst, "five at once");
+    watch.update(0, now + Duration::from_millis(20));
+    assert!(watch.episode().is_none());
+    assert_eq!(watch.session_count(), 0);
+}
+
+#[test]
+fn underruns_while_running_offer_a_safer_latency() {
+    let mut app = blank_app();
+    let now = Instant::now();
+    app.issue_state.underruns.update(2, now);
+    assert!(app.live_issues().is_empty(), "only while the bridge runs");
+    app.engine.state = EngineState::Running;
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    let issue = &issues[0];
+    assert_eq!(issue.severity, IssueSeverity::Warning);
+    assert_eq!(issue.title, "The output ran dry");
+    assert!(
+        issue
+            .detail
+            .starts_with("2 underruns, the last just now (2 underruns this session)"),
+        "{}",
+        issue.detail
+    );
+    app.cushion_mode = CushionMode::LowLatency;
+    assert_eq!(app.live_issues()[0].action, IssueAction::SafeCushion);
+    app.apply_issue_action(IssueAction::SafeCushion);
+    assert_eq!(app.cushion_mode, CushionMode::Safe);
+    let action = app.live_issues()[0].action;
+    if cfg!(target_os = "windows") {
+        assert_eq!(action, IssueAction::SharedOutput);
+    } else {
+        assert_eq!(action, IssueAction::LowLatencyOff);
+        assert_eq!(action.label(), "Turn Low latency off");
+        app.apply_issue_action(action);
+        assert!(!app.low_latency_output);
+        assert!(app
+            .log
+            .last()
+            .unwrap()
+            .text
+            .starts_with("Low-latency output off"));
+        assert_eq!(
+            app.live_issues()[0].action,
+            IssueAction::SetOutputBuffer(256)
+        );
+    }
+    app.issue_state
+        .underruns
+        .update(4, now + Duration::from_millis(500));
+    assert_eq!(app.live_issues()[0].severity, IssueSeverity::Error);
+    assert_eq!(
+        app.live_issues()[0].title,
+        "Audio is dropping out on the output"
+    );
+    app.issue_state
+        .underruns
+        .update(4, now + Duration::from_millis(500) + UNDERRUN_QUIET);
+    assert!(app.live_issues().is_empty(), "cleared after a quiet spell");
+    app.engine.state = EngineState::Idle;
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_period_that_does_not_fit_the_graph_block_sets_the_buffer() {
+    let mut app = blank_app();
+    app.low_latency_output = false;
+    app.output_buffer = 128;
+    let issue = app
+        .quantum_info_issue(&crate::audio::QuantumInfo::assess(true, 64, 48_000, 128))
+        .expect("128 frames do not fit a 64-frame block");
+    assert_eq!(issue.severity, IssueSeverity::Warning);
+    assert_eq!(issue.title, "Graph block and output period do not line up");
+    assert_eq!(issue.action, IssueAction::SetOutputBuffer(64));
+    assert_eq!(
+        issue.action_name(),
+        "Set buffer to 64: Graph block and output period do not line up"
+    );
+    app.apply_issue_action(issue.action);
+    assert_eq!(app.output_buffer, 64);
+    assert_eq!(
+        app.log.last().unwrap().text,
+        "Output buffer set to 64 samples."
+    );
+    assert!(app
+        .quantum_info_issue(&crate::audio::QuantumInfo::assess(true, 64, 48_000, 64))
+        .is_none());
+    // Low latency picks the driver's period: the buffer would not help.
+    app.low_latency_output = true;
+    let issue = app
+        .quantum_info_issue(&crate::audio::QuantumInfo::assess(true, 64, 48_000, 96))
+        .unwrap();
+    assert_eq!(issue.action, IssueAction::LowLatencyOff);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_large_graph_block_matters_only_under_low_latency_while_running() {
+    let mut app = blank_app();
+    let idle = crate::audio::QuantumInfo::assess(true, 1024, 48_000, 64);
+    assert!(app.quantum_info_issue(&idle).is_none(), "not running yet");
+    app.engine.state = EngineState::Running;
+    let issue = app.quantum_info_issue(&idle).expect("low latency is on");
+    assert_eq!(issue.title, "Low latency is on, but the graph block is not");
+    assert_eq!(issue.action, IssueAction::OpenDiagnostics);
+    app.low_latency_output = false;
+    assert!(
+        app.quantum_info_issue(&idle).is_none(),
+        "the person chose it"
+    );
+    app.engine.state = EngineState::Idle;
+}
+
+#[test]
+fn a_failed_quantum_change_is_one_row() {
+    let mut app = blank_app();
+    app.engine
+        .note_quantum_failure("PipeWire quantum not set: test".to_owned());
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].title, "PipeWire did not take the quantum change");
+    assert_eq!(issues[0].detail, "PipeWire quantum not set: test");
+    assert_eq!(issues[0].place, "OUTPUT · Low latency");
+}
+
+#[test]
+fn an_unchecked_low_latency_driver_warns_until_it_has_a_reading() {
+    let mut app = blank_app();
+    assert!(
+        app.live_issues().is_empty(),
+        "the demo output has no driver"
+    );
+    with_real_output(&mut app);
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].title, "Output driver not checked yet");
+    assert_eq!(issues[0].place, "OUTPUT · Driver");
+    assert_eq!(issues[0].action, IssueAction::CheckDriver);
+    assert_eq!(issues[0].action.label(), "Check driver");
+
+    let (sender, receiver) = mpsc::channel();
+    app.driver_probe_job = Some(receiver);
+    assert!(app.live_issues().is_empty(), "a check is running");
+    app.driver_probe_job = None;
+    drop(sender);
+
+    app.driver_probe = Some(DriverCheck {
+        device_id: "test:out".to_owned(),
+        name: "Scarlett 2i2".to_owned(),
+        result: Ok(DriverActual {
+            rate: 48_000,
+            frames: 64,
+            notes: Vec::new(),
+            tone: DriverTone::Good,
+        }),
+        manual: true,
+    });
+    assert!(app.live_issues().is_empty(), "a reading answers it");
+    app.driver_probe = None;
+    app.low_latency_output = false;
+    app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
+    assert!(
+        app.live_issues().is_empty(),
+        "without a low-latency mode the step matters less"
+    );
 }

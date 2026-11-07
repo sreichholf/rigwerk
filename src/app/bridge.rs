@@ -71,6 +71,7 @@ impl RigWerkApp {
         self.bridge_restart_pending = false;
         self.bridge_signature = self.current_bridge_signature();
         self.driver_checked = false;
+        self.issue_state.underruns = Default::default();
         self.engine.set_gains(self.input_gain, self.output_gain);
         if self.is_preview() {
             self.engine.start_preview();
@@ -182,6 +183,11 @@ impl RigWerkApp {
         self.push_devices_to_engine();
         self.engine.poll();
         self.snapshot = self.engine.snapshot();
+        if self.engine.state == EngineState::Running {
+            self.issue_state
+                .underruns
+                .update(self.snapshot.underruns, Instant::now());
+        }
         #[cfg(target_os = "linux")]
         {
             self.refresh_quantum_actual();
@@ -511,6 +517,19 @@ impl RigWerkApp {
         } else {
             format!("Standard output · {} smp buffer", self.output_buffer)
         }
+    }
+
+    /// Turns the Low latency output on or off, and logs it.
+    pub(crate) fn set_low_latency_output(&mut self, on: bool) {
+        self.low_latency_output = on;
+        self.push_log(
+            if on {
+                "Low-latency output on: PipeWire low quantum + smallest ALSA period when allowed."
+            } else {
+                "Low-latency output off: normal output buffer, PipeWire quantum released."
+            },
+            if on { AMBER } else { MUTED },
+        );
     }
 
     /// Apply a Windows WASAPI clock mode and keep the legacy bool aligned
