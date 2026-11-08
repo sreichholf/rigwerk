@@ -1,0 +1,63 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # Same pin as ci.yml.
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Rust extractor runs build scripts; pipewire-sys and alsa-sys
+      # need their headers.  Only the Linux cfg is analyzed.
+      - name: Install system libraries
+        if: matrix.language == 'rust'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libpipewire-0.3-dev \
+            libclang-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@master
+        if: matrix.language == 'rust'
+        with:
+          toolchain: 1.95.0
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

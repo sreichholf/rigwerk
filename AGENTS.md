@@ -33,7 +33,9 @@ cargo test --locked
 CI (`.github/workflows/ci.yml`) also compiles the ignored hardware tests
 (`cargo test --locked --no-run -- --ignored`) and runs
 `cargo build --locked --release`. That release build is CI's gate, not
-the local one.
+the local one.  CodeQL (`.github/workflows/codeql.yml`) scans the Rust
+code and the workflows on pushes to `master`, on pull requests, and
+weekly.  Its alerts land in the repository's Security tab.
 
 System libraries are installed by `.cursor/install.sh`. The package list
 CI uses is in `.github/workflows/ci.yml`.
