@@ -166,6 +166,7 @@ Settings are RON in eframe storage (`app/settings`).
   `mixer`, `routing`, `devices`, `sessions`, `plugins`, `guide`,
   `diagnostics`). `RIGWERK_MIXER_STAGE` selects a Mixer stage.
   Screenshot mode drops Wayland so the requested window size sticks.
+  The README set and how to retake it: `docs/screenshots/README.md`.
 
 ## Commits
 
