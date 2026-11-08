@@ -1,134 +1,155 @@
 # RigWerk
 
-Independent audio bridge: take any input clock, play on any output clock.
+Play an audio interface through effects and out to any other device, even
+when the two don't share a clock. Plug a guitar into one interface, run it
+through EQ, plugins and a noise gate, and hear it on your monitors,
+headphones and stream at the same time.
 
-On Linux that is usually PipeWire (or a direct ALSA `hw:` device). On Windows
-it is ASIO and/or WASAPI. Between them sits an async ring, a short mixer rack
-(EQ, inserts, noise gate), and a stereo route matrix.
+RigWerk runs on Linux (PipeWire, or ALSA directly) and Windows (ASIO and
+WASAPI). It is alpha software: expect rough edges and changes.
+
+## What it does
+
+- **Any input to any output.** Input and output keep their own clocks and
+  sample rates. RigWerk converts between them and corrects the slow drift.
+- **Effects.** EQ, VST3 and CLAP plugins, and a noise gate.
+- **Several outputs at once.** Play on extra devices, or publish the mix
+  for other apps to record.
+- **Up to four signal paths**, each with its own effects, kept in time
+  with each other.
+- **Low latency when you want it**, with the real buffer sizes shown, not
+  just the ones you asked for.
+- **Sessions** to save and reload your whole setup.
+
+## A quick tour
+
+The sidebar has one page per task. In order:
+
+### Live Bridge
+
+Pick the input and output, start the bridge, and watch it run: level
+meters, a scope, the latency you hear, drift and dropouts. The output can
+run in a low latency mode (on Windows: shared, low-latency shared or
+exclusive WASAPI), and a driver check shows the buffer the device actually
+uses.
+
+When something needs attention, an Issues strip appears at the top and says
+what is wrong and what to do: a path nobody hears, a chain too heavy for
+the buffer, an output that went quiet. Tick auto-start to start the bridge
+when RigWerk opens.
 
 ![Live Bridge](docs/screenshots/live.png)
 
-## Features
+### Mixer
 
-- **Two clocks.** Input and output keep their own rates; RigWerk resamples and
-  steers drift instead of forcing one device to follow the other.
-- **Mixer rack.** Pre/post EQ, VST3 + CLAP inserts, and a causal noise gate on
-  the master mix.
-- **Two-layer routing.** Inputs onto Mix L/R, then the finished mix onto any
-  device channels, with presets; unused channels stay silent or get a mono
-  copy.
-- **Multiple signal paths.** Up to four chains on the same input, summed per
-  output device and lined up for plugin latency (see below).
-- **Sessions.** Save the whole patch (devices, gains, routes, EQ, gate,
-  plugins, paths) and load it again.
+The signal chain from top to bottom: input gain, EQ, plugins, noise gate,
+EQ, path level and output. Click a stage to edit it on the right. Plugins
+can be bypassed, reordered and mixed with the dry signal, and open either
+in their own window or as a list of parameters.
+
+The Output stage lists every device that plays the mix. Add extra outputs
+here, each with its own level, mute and safety buffer (Safe, Low latency or
+Manual), or add RigWerk Out to publish the mix as a source other apps can
+record (on Windows this needs a virtual cable such as VB-Audio Cable). If
+an extra output drops out, the rest keep playing and RigWerk keeps trying
+to reopen it.
 
 ![Mixer](docs/screenshots/mixer.png)
 
-![Signal Routing](docs/screenshots/routing.png)
+### Plugins
+
+The library of VST3 and CLAP effects found in the standard folders. Search
+it, add an effect to a path with one click, or add one by file path.
 
 ![Plugins](docs/screenshots/plugins.png)
 
+### Signal Routing
+
+Which input channels feed each path, and which output channels play each
+path. Paths can run in stereo or sum to mono (handy for a guitar on one
+input).
+
+A path is its own effects chain: EQ, plugins, gate and level. Run up to
+four side by side on the same input and send each one to any outputs. For
+example, put a clean and a distorted amp on the same guitar and blend them,
+or send a limited mix to your stream and an unlimited one to your monitors.
+
+Presets at the top get you started:
+
+- **Single path**: one chain, nothing extra.
+- **Dry L / Wet R**: one path on the left, another on the right.
+- **Blend clean**: a clean copy 6 dB under the main path.
+- **Dual-amp**: two copies summed, one with its polarity flipped, so each
+  can get a different amp sim.
+- **Per-device mixes**: one path on the main output, another on every
+  other output.
+
+Presets only change routing; your plugins stay where they are.
+
+**Keeping paths in time.** Plugins such as amp sims and lookahead limiters
+add delay. When two paths with different delays play on the same output,
+they sound hollow (comb filtering). So RigWerk delays the faster paths to
+match the slowest one on that output. Signal Routing shows how much each
+output waits, and you can turn this off per output when nothing is summed
+there. Each path also has its own level, polarity and a small timing trim
+per output.
+
+Limits: paths are lined up within one output, not between outputs, and only
+for plugin delays up to about 0.7 s. A path can't feed another path
+(duplicate it instead).
+
+![Signal Routing](docs/screenshots/routing.png)
+
+### Devices
+
+Every input and output RigWerk found, and which ones are in use. New and
+removed devices show up on their own. If the main input or output is
+unplugged while running, the bridge stops and tells you. On Linux this page
+also checks that the ALSA buffer matches PipeWire's, since a mismatch adds
+latency.
+
 ![Devices](docs/screenshots/devices.png)
 
-## Multiple signal paths
+### Sessions, Setup Guide and Diagnostics
 
-A path is a full Mixer chain (routing, pre EQ, inserts, gate, post EQ, path
-level). Up to four run on the same input, split right after the clock side,
-so they cost no extra ring or cushion. Signal Routing shows them in three
-layers: input onto each path, the paths, and each path onto output device
-channels. Cells that meet on one channel add up. The master level and mute
-are shared by every path and applied to each path before alignment, so a
-master change reaches a delayed path up to its alignment delay later. The
-master meters and the scope show the paths' plain stereo sum (not aligned).
+- **Sessions** saves everything (devices, levels, routing, EQ, gate, plugins
+  and their settings, paths) under a name, to load again later.
+- **Setup Guide** walks through a first setup, with notes for Linux and
+  Windows.
+- **Diagnostics** has the activity log and how much of each audio buffer
+  every path's effects use.
 
-Cards set everything up in one click and never delete inserts:
+## Install and run
 
-- **Single path**: today's routing.
-- **Dry L / Wet R**: one path on the left channels, another on the right.
-- **Blend clean**: a copy of the first path at −6 dB under the driven one.
-- **Dual-amp**: two copies summed, the second with its polarity flipped; put a
-  different amp sim on each.
-- **Per-device mixes**: one path on the clock device, another on every
-  follower (e.g. the stream gets a limiter the monitors don't).
-
-**Alignment.** Plugins (amp sims, lookahead limiters, linear-phase EQs) delay
-their path, and two paths that add up a few samples apart comb filter. So on
-each output device every path waits for the slowest path that plays there;
-muted paths count too, so muting never moves the latency. Each device has an
-align switch (on by default); each path on each device has a level, a
-polarity flip and a trim (±5 ms) on top. The cost is the slowest path's
-latency on that device: Routing says what a device waits for ("Waits for
-Drive, +2.7 ms") and Live shows the added time on the Output chip. Turn it
-off on a device where nothing adds up and you want each path as fast as it
-gets; Routing warns red when unaligned paths then add up on a channel.
-
-Limits: alignment lines up the paths on one device, not devices with each
-other (each device still has its own buffer, a follower its cushion). It
-covers chain latency up to `MAX_ALIGN` (2¹⁵ = 32768 frames, about 0.7 s at
-48 kHz); a longer chain plays late and Live Issues says so. A path cannot
-take its input from another path; duplicate it instead. Diagnostics shows
-each path's DSP time per block (average and peak), and Live Issues names an
-unmuted path routed nowhere audible, an unaligned sum, or paths that
-overload the block.
-
-## Build and run
-
-Rust **1.95** or newer (`rust-toolchain.toml` pins 1.95.0 — the lowest version
-that builds egui/eframe 0.37).
+There are no release builds yet; build from source with Rust 1.95 or newer:
 
 ```bash
 cargo run --release
 ```
 
-Linux needs PipeWire or ALSA development headers (`libpipewire-0.3-dev`,
-`libasound2-dev`) and a display (X11 or Wayland). Windows needs the MSVC
-toolchain; ASIO drivers are optional.
+- **Linux** needs a desktop (X11 or Wayland) and the PipeWire and ALSA
+  development packages (`libpipewire-0.3-dev`, `libasound2-dev` on
+  Debian/Ubuntu).
+- **Windows** needs the MSVC toolchain. ASIO drivers are optional.
 
-On Linux, direct ALSA streams run their audio threads at real-time priority
-when your user may use it (an `RLIMIT_RTPRIO`, usually via the `audio` group
-in `/etc/security/limits.d`). Without it they run at normal priority, as
-before. PipeWire's own threads are real time either way. At real-time
-priority, a plugin chain that overloads the CPU can starve the desktop.
+For the lowest latency on Linux with direct ALSA devices, let your user run
+real-time audio threads (usually by joining the `audio` group). Without it
+RigWerk still works, just with less headroom. PipeWire devices don't need
+this. Note that with real-time priority, a plugin chain that is too heavy
+for your CPU can make the desktop stutter.
+
+## Development
+
+The minimum Rust version is pinned in `rust-toolchain.toml` (1.95.0, the
+lowest that builds egui/eframe 0.37). Coding guidelines are in
+[`AGENTS.md`](AGENTS.md).
 
 ```bash
 cargo test
 ```
 
-Screenshots for docs (fixed 1440×1080 window). Every README screenshot uses
-the same `showcase` setup: Blend clean (paths Clean and Room) with real
-inserts, a second output sink as a follower plus RigWerk Out, and a running
-bridge.
-
-```bash
-# Wayland cannot honor client resize; --screenshot drops to X11/XWayland.
-export RIGWERK_ROUTING_SETUP=showcase RIGWERK_SCREENSHOT_START=1
-export RIGWERK_SCREENSHOT_PLUGINS="1=/usr/lib/clap/lsp-plugins-clap.clap#Compressor Stereo;\
-2=/usr/lib/vst3/DragonflyRoomReverb.vst3;\
-2=/usr/lib/clap/lsp-plugins-clap.clap#Limiter Stereo"
-for page in live mixer routing plugins devices; do
-  RIGWERK_PAGE=$page cargo run --release -- --screenshot docs/screenshots/$page.png
-done
-```
-
-`RIGWERK_SCREENSHOT_START=1` opens the selected devices, so take these
-against a virtual graph, not real hardware. The README set was taken under
-`xvfb-run -a` with the PipeWire null-sink graph from `AGENTS.md`: sinks
-"Studio Monitors" and "USB Headphones", a virtual source "Guitar Interface"
-fed a plucked-string loop through `pw-cat` and `pw-link`, and
-`pw-metadata -n settings 0 clock.force-quantum 64`. The plugins are the
-Debian/Ubuntu `lsp-plugins-clap` and `dragonfly-reverb-vst3` packages.
-`RIGWERK_SCREENSHOT_PLUGINS` is a `;` list of
-`<path number>=<bundle>[#<effect name>]`.
-
-`RIGWERK_PAGE` may be `live`, `mixer`, `routing`, `devices`, `sessions`,
-`plugins`, `guide`, or `diagnostics`.
-`RIGWERK_MIXER_STAGE` selects a Mixer stage: `input`, `pre_eq`, `plugins`,
-`gate`, `post_eq`, `output`, or `device` (the clock device).
-`RIGWERK_ROUTING_SETUP` sets up paths: `drywet`, `sum3`, `blend`,
-`dualamp-off` (alignment off, the red warning), `live3` (Blend plus an
-empty, unmuted third path) or `showcase` (above). `blend`, `dualamp-off` and
-`live3` fake the plugin latency of one path (no plugin is loaded), so the
-alignment has something to show. `RIGWERK_SCROLL=<px>` scrolls the page down.
+The README screenshots and how to retake them are described in
+[`docs/screenshots`](docs/screenshots/README.md).
 
 ## License
 
