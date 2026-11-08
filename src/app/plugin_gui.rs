@@ -1,8 +1,11 @@
 //! The plugin's own graphical editor, in a window of the plugin's making.
 //!
-//! VST3 editors are opened through `vst3-host`'s [`PluginWindow`].  CLAP
-//! editors are embedded in a native Win32 window created here, because CLAP's
-//! GUI extension expects the host to provide the parent `HWND`.
+//! VST3 editors are opened through `vst3-host`'s [`PluginWindow`].  On Linux
+//! that window is an X11 client, so it needs a display (`DISPLAY`, including
+//! XWayland).  The crate does not implement `IWaylandHost` / `IWaylandFrame`,
+//! and a session with no X server cannot open the editor.  CLAP editors are
+//! embedded in a native Win32 window created here, because CLAP's GUI
+//! extension expects the host to provide the parent `HWND`.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -147,6 +150,12 @@ impl RigWerkApp {
     }
 
     /// Servicing and keeping the open editor in step, once per frame.
+    ///
+    /// On Linux a VST3 editor paints from the host `IRunLoop`.  This drives
+    /// that loop while the window is open.  The call try-locks the instance,
+    /// so the UI never waits on the audio callback.  While the UI holds the
+    /// lock to paint, the callback skips the insert for that block, declicked
+    /// and with its latency kept.
     pub(crate) fn poll_plugin_gui(&mut self) {
         let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) else {
             return;
@@ -157,9 +166,15 @@ impl RigWerkApp {
                 return;
             };
             let dismissed = match &mut gui.kind {
-                GuiKind::Vst3 { window, .. } => {
+                GuiKind::Vst3 { plugin, window } => {
                     let _ = window.service_platform_events();
-                    window.closed_by_user() || !window.is_open()
+                    let dismissed = window.closed_by_user() || !window.is_open();
+                    // A title-bar close is already recorded.  Painting now would
+                    // draw into a window the host is about to destroy.
+                    if !dismissed {
+                        service_vst3_run_loop(plugin);
+                    }
+                    dismissed
                 }
                 GuiKind::Clap { window, .. } => window.service(),
             };
@@ -183,6 +198,43 @@ impl RigWerkApp {
             // values back keeps the saved insert (and the panel) truthful.
             let _ = self.engine.sync_plugin_parameters(key.path, key.insert);
         }
+    }
+}
+
+/// Drives a Linux VST3 editor's `IRunLoop` without blocking the audio callback.
+///
+/// VSTGUI registers its X11 connection and timers there and only paints when
+/// the host calls [`vst3_host::Plugin::service_run_loop`].  That needs the
+/// instance lock.  The audio callback try-locks the same mutex and skips the
+/// insert when it loses, so this does the same: a busy callback leaves the
+/// editor for the next frame, and a poisoned lock is recovered rather than
+/// silencing the editor for the rest of the session.  Other platforms have no
+/// host run loop to service.  Taking the lock there would only make the
+/// callback skip blocks.
+fn service_vst3_run_loop(plugin: &Mutex<vst3_host::Plugin>) {
+    #[cfg(target_os = "linux")]
+    {
+        try_with_instance(plugin, vst3_host::Plugin::service_run_loop);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = plugin;
+}
+
+/// Runs `body` when the instance lock is free, including after a panic
+/// poisoned it.  Returns whether `body` ran.  A lock the audio callback still
+/// holds is left alone.
+#[cfg(any(test, target_os = "linux"))]
+fn try_with_instance<T>(instance: &Mutex<T>, body: impl FnOnce(&mut T)) -> bool {
+    match instance.try_lock() {
+        Ok(mut guard) => {
+            body(&mut guard);
+            true
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            body(&mut poisoned.into_inner());
+            true
+        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
     }
 }
 
@@ -457,5 +509,5 @@ impl ClapGuiWindow {
     }
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(test)]
 mod tests;
