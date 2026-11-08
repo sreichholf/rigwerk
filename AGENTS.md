@@ -191,6 +191,9 @@ Flush subnormal floats in the audio callbacks
 
 ## Pull requests
 
+- Branch: always a descriptive name, `<area>/<topic>` (e.g. `ci/codeql`,
+  `docs/refresh-readme-screenshots`).  Push a generated session branch
+  under such a name before opening the PR.
 - Title: same style as a commit subject.
 - Body: short bullets only:
   - **What**: the basic change, a few bullets.
