@@ -6,6 +6,7 @@
 //! serialised through the same mutex the VST3 host already uses, so a plugin
 //! instance is only ever called from one thread at a time.
 
+mod gui;
 mod host;
 mod module;
 mod plugin;
@@ -16,10 +17,11 @@ mod state;
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub(crate) use gui::{ParentWindow, ResizeHints, WindowApi};
 #[cfg(test)]
 pub(crate) use host::{claim_main_thread_for_test, MainThreadClaim};
 pub(crate) use host::{
-    is_main_thread, mark_main_thread, may_destroy_plugins_here, HostState, StateSave,
+    is_main_thread, mark_main_thread, may_destroy_plugins_here, GuiVisibility, HostState, StateSave,
 };
 pub(crate) use plugin::ClapPlugin;
 pub(crate) use ports::AUDIO_PORTS_CHANGED;
