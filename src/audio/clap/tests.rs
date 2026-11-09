@@ -9,7 +9,14 @@ use clap_sys::ext::audio_ports::{
 };
 use clap_sys::host::clap_host;
 
-use super::host::{host_audio_ports_flag_supported, host_audio_ports_rescan, HostState, StateSave};
+use clap_sys::ext::gui::{clap_gui_resize_hints, CLAP_WINDOW_API_WAYLAND, CLAP_WINDOW_API_X11};
+
+use super::gui::{
+    choose_editor_api, linux_candidates, EditorApi, ParentWindow, ResizeHints, WindowApi,
+};
+use super::host::{
+    host_audio_ports_flag_supported, host_audio_ports_rescan, GuiVisibility, HostState, StateSave,
+};
 use super::module::{module_key, EntryInit, ModuleRegistry};
 use super::plugin::ClapPlugin;
 use super::ports::{
@@ -250,6 +257,7 @@ mod fake {
         SEEN.with(|seen| seen.borrow_mut().take());
         LATENCY.with(|latency| latency.set(None));
         NEXT_LATENCY.with(|latency| latency.set(None));
+        gui::reset();
         // `NoAudioPorts` declares the extension with no ports at all.
         PORTS_DECLARED.with(|ports| {
             *ports.borrow_mut() = (step == Fail::NoAudioPorts).then(|| (Vec::new(), Vec::new()));
@@ -438,7 +446,7 @@ mod fake {
         if id == CLAP_EXT_LATENCY && LATENCY.with(Cell::get).is_some() {
             return (&LATENCY_EXT as *const clap_plugin_latency).cast();
         }
-        ptr::null()
+        gui::extension(id)
     }
 
     fn declared(is_input: bool) -> Vec<PortInfo> {
@@ -630,6 +638,224 @@ mod fake {
         let restore = Restore::from_pref(&pref);
         let module = acquire()?;
         ClapPlugin::instantiate(module, plugin_id, 48_000, 256, &restore).map(|(plugin, _)| plugin)
+    }
+
+    /// The fake's GUI and `posix-fd-support` extensions, each left out
+    /// until a test offers it.
+    pub(super) mod gui {
+        use super::log;
+        use clap_sys::ext::gui::{clap_gui_resize_hints, clap_plugin_gui, CLAP_EXT_GUI};
+        use clap_sys::ext::posix_fd_support::{
+            clap_plugin_posix_fd_support, CLAP_EXT_POSIX_FD_SUPPORT,
+        };
+        use clap_sys::plugin::clap_plugin;
+        use std::cell::{Cell, RefCell};
+        use std::ffi::{c_char, c_void, CStr};
+        use std::ptr;
+
+        /// What the fake's GUI agrees to.
+        #[derive(Clone)]
+        pub(in super::super) struct Gui {
+            /// `(api, floating)` pairs `is_api_supported` accepts.
+            pub(in super::super) supported: Vec<(&'static CStr, bool)>,
+            pub(in super::super) resizable: bool,
+            /// `get_resize_hints`; `None` leaves the call failing.
+            pub(in super::super) hints: Option<clap_gui_resize_hints>,
+            /// `adjust_size` rounds both sides down to this step; 0 refuses.
+            pub(in super::super) step: u32,
+            pub(in super::super) accept_size: bool,
+            pub(in super::super) size: (u32, u32),
+        }
+
+        impl Default for Gui {
+            fn default() -> Self {
+                Self {
+                    supported: Vec::new(),
+                    resizable: false,
+                    hints: None,
+                    step: 0,
+                    accept_size: true,
+                    size: (400, 300),
+                }
+            }
+        }
+
+        thread_local! {
+            static GUI: RefCell<Option<Gui>> = const { RefCell::new(None) };
+            static FDS: Cell<bool> = const { Cell::new(false) };
+            static FD_CALLS: RefCell<Vec<(i32, u32)>> = const { RefCell::new(Vec::new()) };
+        }
+
+        pub(in super::super) fn reset() {
+            GUI.with(|gui| gui.borrow_mut().take());
+            FDS.with(|fds| fds.set(false));
+            FD_CALLS.with(|calls| calls.borrow_mut().clear());
+        }
+
+        pub(in super::super) fn offer(gui: Gui) {
+            GUI.with(|cell| *cell.borrow_mut() = Some(gui));
+        }
+
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub(in super::super) fn offer_fd_support() {
+            FDS.with(|fds| fds.set(true));
+        }
+
+        /// The `(fd, flags)` the plugin's `on_fd` was called with.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub(in super::super) fn fd_calls() -> Vec<(i32, u32)> {
+            FD_CALLS.with(|calls| calls.borrow().clone())
+        }
+
+        /// The size the fake's view has now.
+        pub(in super::super) fn size() -> (u32, u32) {
+            with(|gui| gui.size)
+        }
+
+        fn with<T>(read: impl FnOnce(&mut Gui) -> T) -> T {
+            GUI.with(|gui| read(gui.borrow_mut().as_mut().expect("the GUI is offered")))
+        }
+
+        pub(super) fn extension(id: &CStr) -> *const c_void {
+            if id == CLAP_EXT_GUI && GUI.with(|gui| gui.borrow().is_some()) {
+                return (&GUI_EXT as *const clap_plugin_gui).cast();
+            }
+            if id == CLAP_EXT_POSIX_FD_SUPPORT && FDS.with(Cell::get) {
+                return (&FD_EXT as *const clap_plugin_posix_fd_support).cast();
+            }
+            ptr::null()
+        }
+
+        unsafe extern "C" fn is_api_supported(
+            _plugin: *const clap_plugin,
+            api: *const c_char,
+            floating: bool,
+        ) -> bool {
+            let api = unsafe { CStr::from_ptr(api) };
+            with(|gui| gui.supported.contains(&(api, floating)))
+        }
+
+        unsafe extern "C" fn create(
+            _plugin: *const clap_plugin,
+            _api: *const c_char,
+            floating: bool,
+        ) -> bool {
+            log(if floating {
+                "gui.create.floating"
+            } else {
+                "gui.create.embedded"
+            });
+            true
+        }
+
+        unsafe extern "C" fn destroy(_plugin: *const clap_plugin) {
+            log("gui.destroy");
+        }
+
+        unsafe extern "C" fn set_scale(_plugin: *const clap_plugin, _scale: f64) -> bool {
+            log("gui.set_scale");
+            true
+        }
+
+        unsafe extern "C" fn get_size(
+            _plugin: *const clap_plugin,
+            width: *mut u32,
+            height: *mut u32,
+        ) -> bool {
+            let (w, h) = with(|gui| gui.size);
+            unsafe {
+                *width = w;
+                *height = h;
+            }
+            true
+        }
+
+        unsafe extern "C" fn can_resize(_plugin: *const clap_plugin) -> bool {
+            with(|gui| gui.resizable)
+        }
+
+        unsafe extern "C" fn get_resize_hints(
+            _plugin: *const clap_plugin,
+            hints: *mut clap_gui_resize_hints,
+        ) -> bool {
+            match with(|gui| gui.hints) {
+                Some(value) => {
+                    unsafe { *hints = value };
+                    true
+                }
+                None => false,
+            }
+        }
+
+        unsafe extern "C" fn adjust_size(
+            _plugin: *const clap_plugin,
+            width: *mut u32,
+            height: *mut u32,
+        ) -> bool {
+            log("gui.adjust_size");
+            let step = with(|gui| gui.step);
+            if step == 0 {
+                return false;
+            }
+            unsafe {
+                *width -= *width % step;
+                *height -= *height % step;
+            }
+            true
+        }
+
+        unsafe extern "C" fn set_size(
+            _plugin: *const clap_plugin,
+            width: u32,
+            height: u32,
+        ) -> bool {
+            log("gui.set_size");
+            with(|gui| {
+                if gui.accept_size {
+                    gui.size = (width, height);
+                }
+                gui.accept_size
+            })
+        }
+
+        unsafe extern "C" fn suggest_title(_plugin: *const clap_plugin, _title: *const c_char) {
+            log("gui.suggest_title");
+        }
+
+        unsafe extern "C" fn show(_plugin: *const clap_plugin) -> bool {
+            log("gui.show");
+            true
+        }
+
+        unsafe extern "C" fn hide(_plugin: *const clap_plugin) -> bool {
+            log("gui.hide");
+            true
+        }
+
+        static GUI_EXT: clap_plugin_gui = clap_plugin_gui {
+            is_api_supported: Some(is_api_supported),
+            get_preferred_api: None,
+            create: Some(create),
+            destroy: Some(destroy),
+            set_scale: Some(set_scale),
+            get_size: Some(get_size),
+            can_resize: Some(can_resize),
+            get_resize_hints: Some(get_resize_hints),
+            adjust_size: Some(adjust_size),
+            set_size: Some(set_size),
+            set_parent: None,
+            set_transient: None,
+            suggest_title: Some(suggest_title),
+            show: Some(show),
+            hide: Some(hide),
+        };
+
+        unsafe extern "C" fn on_fd(_plugin: *const clap_plugin, fd: i32, flags: u32) {
+            FD_CALLS.with(|calls| calls.borrow_mut().push((fd, flags)));
+        }
+
+        static FD_EXT: clap_plugin_posix_fd_support =
+            clap_plugin_posix_fd_support { on_fd: Some(on_fd) };
     }
 
     /// A second fake entry that counts `init`/`deinit` across threads
@@ -1342,4 +1568,284 @@ fn a_restart_runs_on_the_main_thread_once_the_stream_has_stopped() {
 fn a_huge_latency_is_clamped() {
     let plugin = fake_plugin_with_latency_for_test(u32::MAX);
     assert_eq!(plugin.latency_samples(), crate::audio::plugins::MAX_ALIGN);
+}
+
+/// Loads the fake with this GUI and its editor API chosen from
+/// `candidates`, as a load in that session would.
+fn fake_with_gui(gui: fake::gui::Gui, candidates: &[EditorApi]) -> ClapPlugin {
+    const MAIN: u32 = CLAP_AUDIO_PORT_IS_MAIN;
+    fake::reset(fake::Fail::Nothing);
+    fake::gui::offer(gui);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    plugin.editor_api = choose_editor_api(plugin.plugin, plugin.gui_ext, candidates);
+    plugin
+}
+
+fn gui_events() -> Vec<&'static str> {
+    fake::events()
+        .into_iter()
+        .filter(|event| event.starts_with("gui."))
+        .collect()
+}
+
+#[test]
+fn linux_prefers_an_x11_parent_and_floats_on_pure_wayland() {
+    let embedded = |api| EditorApi {
+        api,
+        floating: false,
+    };
+    let floating = |api| EditorApi {
+        api,
+        floating: true,
+    };
+    assert_eq!(
+        linux_candidates(true, true),
+        vec![
+            embedded(WindowApi::X11),
+            floating(WindowApi::X11),
+            floating(WindowApi::Wayland),
+        ]
+    );
+    assert_eq!(
+        linux_candidates(false, true),
+        vec![floating(WindowApi::Wayland)]
+    );
+    assert!(linux_candidates(false, false).is_empty());
+}
+
+#[test]
+fn the_editor_api_is_the_first_one_the_plugin_supports() {
+    let x11_and_wayland = linux_candidates(true, true);
+    let gui = |supported| fake::gui::Gui {
+        supported,
+        ..Default::default()
+    };
+    let plugin = fake_with_gui(
+        gui(vec![
+            (CLAP_WINDOW_API_WAYLAND, true),
+            (CLAP_WINDOW_API_X11, false),
+        ]),
+        &x11_and_wayland,
+    );
+    assert_eq!(
+        plugin.editor_api(),
+        Some(EditorApi {
+            api: WindowApi::X11,
+            floating: false
+        })
+    );
+    drop(plugin);
+
+    // A plugin that only floats still has an editor.
+    let plugin = fake_with_gui(gui(vec![(CLAP_WINDOW_API_WAYLAND, true)]), &x11_and_wayland);
+    assert_eq!(
+        plugin.editor_api(),
+        Some(EditorApi {
+            api: WindowApi::Wayland,
+            floating: true
+        })
+    );
+    drop(plugin);
+
+    let plugin = fake_with_gui(
+        gui(vec![(CLAP_WINDOW_API_X11, false)]),
+        &linux_candidates(false, true),
+    );
+    assert!(!plugin.has_editor());
+}
+
+#[test]
+fn a_plugin_without_the_gui_extension_has_no_editor() {
+    let plugin = fake_plugin_for_test(false);
+    let candidates = linux_candidates(true, true);
+    assert_eq!(
+        choose_editor_api(plugin.plugin, plugin.gui_ext, &candidates),
+        None
+    );
+}
+
+#[test]
+fn a_floating_editor_is_created_titled_shown_and_destroyed() {
+    let mut plugin = fake_with_gui(
+        fake::gui::Gui {
+            supported: vec![(CLAP_WINDOW_API_WAYLAND, true)],
+            ..Default::default()
+        },
+        &linux_candidates(false, true),
+    );
+    assert_eq!(plugin.prepare_editor(), Ok((400, 300)));
+    plugin
+        .show_floating_editor("Fake - CLAP", 2.0)
+        .expect("show the floating editor");
+    // A floating editor cannot take a parent.
+    assert!(plugin.attach_editor(ParentWindow::X11(1), 1.0).is_err());
+    plugin.close_editor();
+    assert_eq!(
+        gui_events(),
+        vec![
+            "gui.create.floating",
+            "gui.set_scale",
+            "gui.suggest_title",
+            "gui.show",
+            "gui.hide",
+            "gui.destroy",
+        ]
+    );
+}
+
+#[test]
+fn a_fixed_editor_keeps_its_size_when_the_window_is_dragged() {
+    let mut plugin = fake_with_gui(
+        fake::gui::Gui {
+            supported: vec![(CLAP_WINDOW_API_X11, false)],
+            ..Default::default()
+        },
+        &linux_candidates(true, false),
+    );
+    plugin.prepare_editor().expect("create the editor");
+    assert_eq!(plugin.editor_resize_hints(), ResizeHints::FIXED);
+    assert_eq!(plugin.resize_editor(900, 700), (400, 300));
+    assert!(!gui_events().contains(&"gui.set_size"));
+}
+
+#[test]
+fn a_user_resize_goes_through_adjust_size_first() {
+    let mut plugin = fake_with_gui(
+        fake::gui::Gui {
+            supported: vec![(CLAP_WINDOW_API_X11, false)],
+            resizable: true,
+            step: 50,
+            ..Default::default()
+        },
+        &linux_candidates(true, false),
+    );
+    plugin.prepare_editor().expect("create the editor");
+    assert!(plugin.editor_resize_hints().resizable());
+    assert_eq!(plugin.resize_editor(523, 377), (500, 350));
+    assert_eq!(fake::gui::size(), (500, 350));
+    let events = gui_events();
+    let adjust = events.iter().position(|event| *event == "gui.adjust_size");
+    let set = events.iter().position(|event| *event == "gui.set_size");
+    assert!(adjust.is_some() && adjust < set, "{events:?}");
+}
+
+#[test]
+fn a_refused_resize_snaps_the_window_back() {
+    let mut plugin = fake_with_gui(
+        fake::gui::Gui {
+            supported: vec![(CLAP_WINDOW_API_X11, false)],
+            resizable: true,
+            accept_size: false,
+            ..Default::default()
+        },
+        &linux_candidates(true, false),
+    );
+    plugin.prepare_editor().expect("create the editor");
+    // `adjust_size` refuses (step 0), so the size is passed unchanged and
+    // `set_size` refuses that too.
+    assert_eq!(plugin.resize_editor(523, 377), (400, 300));
+}
+
+#[test]
+fn resize_hints_come_from_the_plugin() {
+    let plugin = fake_with_gui(
+        fake::gui::Gui {
+            supported: vec![(CLAP_WINDOW_API_X11, false)],
+            resizable: true,
+            hints: Some(clap_gui_resize_hints {
+                can_resize_horizontally: true,
+                can_resize_vertically: false,
+                preserve_aspect_ratio: true,
+                aspect_ratio_width: 16,
+                aspect_ratio_height: 9,
+            }),
+            ..Default::default()
+        },
+        &linux_candidates(true, false),
+    );
+    assert_eq!(
+        plugin.editor_resize_hints(),
+        ResizeHints {
+            horizontal: true,
+            vertical: false,
+            aspect: Some((16, 9)),
+        }
+    );
+}
+
+#[test]
+fn show_hide_and_hint_requests_wait_for_the_window() {
+    let shared = std::sync::Arc::new(HostState::new());
+    let host = super::plugin::make_host(&shared);
+    let host: *const clap_host = &host;
+    let gui = &super::host::HOST_GUI;
+    assert_eq!(shared.take_gui_visibility(), None);
+    unsafe {
+        assert!((gui.request_hide.expect("request_hide"))(host));
+        assert!((gui.request_show.expect("request_show"))(host));
+    }
+    // The later request wins, and is taken once.
+    assert_eq!(shared.take_gui_visibility(), Some(GuiVisibility::Show));
+    assert_eq!(shared.take_gui_visibility(), None);
+    assert!(!shared.take_gui_hints_changed());
+    unsafe { (gui.resize_hints_changed.expect("resize_hints_changed"))(host) };
+    assert!(shared.take_gui_hints_changed());
+    assert!(!shared.take_gui_hints_changed());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn posix_fds_are_registered_once_and_polled_for_the_plugin() {
+    use clap_sys::ext::posix_fd_support::{CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE};
+
+    let _main = super::claim_main_thread_for_test();
+    const MAIN: u32 = CLAP_AUDIO_PORT_IS_MAIN;
+    fake::reset(fake::Fail::Nothing);
+    fake::gui::offer_fd_support();
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let plugin = fake::load("fake").expect("load the fake plugin");
+    let host: *const clap_host = &*plugin._host;
+    let fd_ext = &super::host::HOST_POSIX_FD;
+    let register = fd_ext.register_fd.expect("register_fd");
+    let modify = fd_ext.modify_fd.expect("modify_fd");
+    let unregister = fd_ext.unregister_fd.expect("unregister_fd");
+
+    let mut pipe = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    let [read_end, write_end] = pipe;
+    unsafe {
+        assert!(register(host, read_end, CLAP_POSIX_FD_WRITE));
+        assert!(
+            !register(host, read_end, CLAP_POSIX_FD_READ),
+            "registered twice"
+        );
+        assert!(
+            !modify(host, write_end, CLAP_POSIX_FD_READ),
+            "not registered"
+        );
+    }
+    // Nothing to read and only writes watched: no call.
+    plugin.host_state.service_main_thread();
+    assert!(fake::gui::fd_calls().is_empty());
+
+    unsafe { assert!(modify(host, read_end, CLAP_POSIX_FD_READ)) };
+    assert_eq!(
+        unsafe { libc::write(write_end, b"x".as_ptr().cast(), 1) },
+        1
+    );
+    plugin.host_state.service_main_thread();
+    assert_eq!(fake::gui::fd_calls(), vec![(read_end, CLAP_POSIX_FD_READ)]);
+
+    unsafe {
+        assert!(unregister(host, read_end));
+        assert!(!unregister(host, read_end));
+    }
+    plugin.host_state.service_main_thread();
+    assert_eq!(fake::gui::fd_calls().len(), 1);
+    drop(plugin);
+    unsafe {
+        libc::close(read_end);
+        libc::close(write_end);
+    }
 }

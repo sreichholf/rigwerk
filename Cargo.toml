@@ -53,8 +53,11 @@ windows = { version = "0.62", features = [
 # above, so X11 and Wayland are switched back on here.
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["x11", "wayland"] }
-# Netlink uevent socket for sound-card add/remove. No libudev.
+# Netlink uevent socket for sound-card add/remove, and poll() for the fds a
+# CLAP plugin registers. No libudev.
 libc = "0.2"
+# The X11 window a CLAP editor embeds in.  vst3-host already links it.
+xcb = "1.7"
 # Native PipeWire client. The ALSA `pipewire` plugin is not the Linux path.
 # v0_3_50 exposes pw_buffer.requested so playback fills one quantum, not maxsize.
 pipewire = { version = "0.10", features = ["v0_3_50"] }

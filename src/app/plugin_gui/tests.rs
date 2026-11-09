@@ -22,7 +22,7 @@ fn opens_and_closes_a_clap_window() {
         return;
     }
     let mut window =
-        ClapGuiWindow::open(plugin.clone(), &candidate.name).expect("open the fixture window");
-    assert!(!window.service());
+        ClapGuiWindow::open(plugin.clone(), &candidate.name, 1.0).expect("open the fixture window");
+    assert!(!window.service(1.0));
     drop(window);
 }

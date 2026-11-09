@@ -255,6 +255,9 @@ pub struct RigWerkApp {
     pub(crate) plugin_editor: Option<paths::InsertKey>,
     /// The plugin's own editor window, when it has one open.
     pub(crate) plugin_gui: Option<plugin_gui::PluginGuiWindow>,
+    /// egui's points-to-pixels factor, read every frame.  A CLAP editor
+    /// whose window does not report its own DPI is scaled by this.
+    pub(crate) ui_scale: f32,
     /// Filter typed into the configure panel.
     pub(crate) plugin_param_filter: String,
     /// Open the plugin's own interface straight from the insert when it has one.
@@ -301,6 +304,7 @@ impl eframe::App for RigWerkApp {
         self.watch_devices();
         self.poll_plugin_scan();
         self.engine.service_plugins();
+        self.ui_scale = ctx.pixels_per_point();
         self.poll_plugin_gui();
         self.sync_bridge_config();
         self.tick_issues(Instant::now());
@@ -727,6 +731,7 @@ impl RigWerkApp {
             plugin_browser: plugins::PluginBrowser::default(),
             plugin_editor: None,
             plugin_gui: None,
+            ui_scale: 1.0,
             plugin_param_filter: String::new(),
             prefer_plugin_interface: preferences.prefer_plugin_interface,
             preferences_backup: loaded.backup,
@@ -942,6 +947,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         plugin_browser: plugins::PluginBrowser::default(),
         plugin_editor: None,
         plugin_gui: None,
+        ui_scale: 1.0,
         plugin_param_filter: String::new(),
         prefer_plugin_interface: false,
         preferences_backup: None,

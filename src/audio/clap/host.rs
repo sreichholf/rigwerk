@@ -1,9 +1,12 @@
 //! CLAP host state, main-thread helpers, and host extension callbacks.
+//!
+//! The GUI callbacks may arrive on any thread, so they only set flags that
+//! the open editor window follows on the UI thread.
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -12,6 +15,12 @@ use clap_sys::ext::gui::{clap_host_gui, CLAP_EXT_GUI};
 use clap_sys::ext::latency::{clap_host_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::log::{clap_host_log, clap_log_severity, CLAP_EXT_LOG};
 use clap_sys::ext::params::{clap_host_params, CLAP_EXT_PARAMS};
+use clap_sys::ext::posix_fd_support::clap_plugin_posix_fd_support;
+#[cfg(target_os = "linux")]
+use clap_sys::ext::posix_fd_support::{
+    clap_host_posix_fd_support, clap_posix_fd_flags, CLAP_EXT_POSIX_FD_SUPPORT,
+    CLAP_POSIX_FD_ERROR, CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE,
+};
 use clap_sys::ext::state::{clap_host_state, clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK};
 use clap_sys::ext::timer_support::{
@@ -134,6 +143,7 @@ pub(super) struct MainThreadTarget {
     pub(super) plugin: *const clap_plugin,
     pub(super) timer_ext: *const clap_plugin_timer_support,
     pub(super) state_ext: *const clap_plugin_state,
+    pub(super) fd_ext: *const clap_plugin_posix_fd_support,
 }
 
 // Safety: the pointers are only dereferenced on the main thread while the
@@ -172,6 +182,15 @@ pub(crate) struct HostState {
     pub(super) ports_changed: AtomicBool,
     pub(super) gui_closed: AtomicBool,
     pub(super) gui_resize: AtomicU64,
+    /// The last `request_show` or `request_hide` the open editor window
+    /// has not followed yet (see [`GuiVisibility`]); 0 for none.
+    pub(super) gui_visibility: AtomicU8,
+    /// Set by `resize_hints_changed`; the window re-reads the hints.
+    pub(super) gui_hints_changed: AtomicBool,
+    /// File descriptors the plugin registered through `posix-fd-support`,
+    /// with the flags it watches.  Main-thread only, like the extension.
+    #[cfg(target_os = "linux")]
+    pub(super) fds: Mutex<Vec<(i32, clap_posix_fd_flags)>>,
     /// Set by `clap_host_state.mark_dirty`.
     pub(super) state_dirty: AtomicBool,
     /// Mirrors whether the instance holds parameter values the plugin has
@@ -194,6 +213,7 @@ impl HostState {
                 plugin: ptr::null(),
                 timer_ext: ptr::null(),
                 state_ext: ptr::null(),
+                fd_ext: ptr::null(),
             }),
             restart_requested: AtomicBool::new(false),
             process_requested: AtomicBool::new(false),
@@ -207,6 +227,10 @@ impl HostState {
             ports_changed: AtomicBool::new(false),
             gui_closed: AtomicBool::new(false),
             gui_resize: AtomicU64::new(0),
+            gui_visibility: AtomicU8::new(0),
+            gui_hints_changed: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            fds: Mutex::new(Vec::new()),
             state_dirty: AtomicBool::new(false),
             params_pending: AtomicBool::new(false),
             timers: Mutex::new(Vec::new()),
@@ -215,7 +239,6 @@ impl HostState {
         }
     }
 
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn take_gui_resize(&self) -> Option<(u32, u32)> {
         let packed = self.gui_resize.swap(0, Ordering::Relaxed);
         if packed == 0 {
@@ -225,9 +248,22 @@ impl HostState {
         }
     }
 
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn take_gui_closed(&self) -> bool {
         self.gui_closed.swap(false, Ordering::Relaxed)
+    }
+
+    /// The show or hide the plugin asked for since the last call.
+    pub(crate) fn take_gui_visibility(&self) -> Option<GuiVisibility> {
+        match self.gui_visibility.swap(0, Ordering::Relaxed) {
+            GUI_SHOW => Some(GuiVisibility::Show),
+            GUI_HIDE => Some(GuiVisibility::Hide),
+            _ => None,
+        }
+    }
+
+    /// Whether the plugin's resize hints changed since the last call.
+    pub(crate) fn take_gui_hints_changed(&self) -> bool {
+        self.gui_hints_changed.swap(false, Ordering::Relaxed)
     }
 
     /// Whether the plugin reported state changes since the last save.
@@ -330,6 +366,8 @@ impl HostState {
                     }
                 }
                 self.service_timers(&target);
+                #[cfg(target_os = "linux")]
+                self.service_fds(&target);
             }
         }
         self.flush_requested.load(Ordering::Relaxed)
@@ -362,6 +400,84 @@ impl HostState {
             unsafe { on_timer(target.plugin, id) };
         }
     }
+}
+
+impl HostState {
+    /// Polls the registered file descriptors without waiting and hands the
+    /// ready ones to `on_fd`.  Runs where the timers do, so a plugin that
+    /// waits on its own display connection is serviced at the same rate.
+    #[cfg(target_os = "linux")]
+    pub(super) fn service_fds(&self, target: &MainThreadTarget) {
+        let Some(on_fd) = (unsafe { target.fd_ext.as_ref() }).and_then(|ext| ext.on_fd) else {
+            return;
+        };
+        let mut polled: Vec<libc::pollfd> = {
+            let fds = self
+                .fds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            fds.iter()
+                .map(|&(fd, flags)| libc::pollfd {
+                    fd,
+                    events: poll_events(flags),
+                    revents: 0,
+                })
+                .collect()
+        };
+        if polled.is_empty() {
+            return;
+        }
+        let ready = unsafe { libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, 0) };
+        if ready <= 0 {
+            return;
+        }
+        for entry in polled {
+            let flags = fd_flags(entry.revents);
+            if flags != 0 {
+                unsafe { on_fd(target.plugin, entry.fd, flags) };
+            }
+        }
+    }
+}
+
+/// `poll` events for the CLAP flags a plugin registered.  Errors are always
+/// reported by `poll`, so `CLAP_POSIX_FD_ERROR` needs no event bit.
+#[cfg(target_os = "linux")]
+pub(super) fn poll_events(flags: clap_posix_fd_flags) -> libc::c_short {
+    let mut events = 0;
+    if flags & CLAP_POSIX_FD_READ != 0 {
+        events |= libc::POLLIN;
+    }
+    if flags & CLAP_POSIX_FD_WRITE != 0 {
+        events |= libc::POLLOUT;
+    }
+    events
+}
+
+/// The CLAP flags for what `poll` returned.
+#[cfg(target_os = "linux")]
+pub(super) fn fd_flags(revents: libc::c_short) -> clap_posix_fd_flags {
+    let mut flags = 0;
+    if revents & libc::POLLIN != 0 {
+        flags |= CLAP_POSIX_FD_READ;
+    }
+    if revents & libc::POLLOUT != 0 {
+        flags |= CLAP_POSIX_FD_WRITE;
+    }
+    if revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        flags |= CLAP_POSIX_FD_ERROR;
+    }
+    flags
+}
+
+const GUI_SHOW: u8 = 1;
+const GUI_HIDE: u8 = 2;
+
+/// A `request_show` or `request_hide` from the plugin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuiVisibility {
+    Show,
+    Hide,
 }
 
 /// The outcome of [`HostState::save_state`].
@@ -405,6 +521,8 @@ pub(super) unsafe extern "C" fn host_get_extension(
         &HOST_STATE as *const _ as *const c_void
     } else if id == CLAP_EXT_LATENCY {
         &HOST_LATENCY as *const _ as *const c_void
+    } else if cfg!(target_os = "linux") {
+        posix_fd_extension(id)
     } else {
         ptr::null()
     }
@@ -497,7 +615,13 @@ pub(super) static HOST_GUI: clap_host_gui = clap_host_gui {
     closed: Some(host_gui_closed),
 };
 
-pub(super) unsafe extern "C" fn host_gui_resize_hints_changed(_host: *const clap_host) {}
+/// Thread-safe in CLAP: only a flag is set, and the editor window re-reads
+/// the hints on its next service.
+pub(super) unsafe extern "C" fn host_gui_resize_hints_changed(host: *const clap_host) {
+    if let Some(state) = unsafe { state(host) } {
+        state.gui_hints_changed.store(true, Ordering::Relaxed);
+    }
+}
 
 pub(super) unsafe extern "C" fn host_gui_request_resize(
     host: *const clap_host,
@@ -512,11 +636,21 @@ pub(super) unsafe extern "C" fn host_gui_request_resize(
     true
 }
 
-pub(super) unsafe extern "C" fn host_gui_request_show(_host: *const clap_host) -> bool {
-    true
+/// Thread-safe in CLAP: the open editor window shows itself and the view on
+/// its next service.  The later of a show and a hide wins.
+pub(super) unsafe extern "C" fn host_gui_request_show(host: *const clap_host) -> bool {
+    request_visibility(host, GUI_SHOW)
 }
 
-pub(super) unsafe extern "C" fn host_gui_request_hide(_host: *const clap_host) -> bool {
+pub(super) unsafe extern "C" fn host_gui_request_hide(host: *const clap_host) -> bool {
+    request_visibility(host, GUI_HIDE)
+}
+
+unsafe fn request_visibility(host: *const clap_host, request: u8) -> bool {
+    let Some(state) = (unsafe { state(host) }) else {
+        return false;
+    };
+    state.gui_visibility.store(request, Ordering::Relaxed);
     true
 }
 
@@ -630,4 +764,86 @@ pub(super) unsafe extern "C" fn host_latency_changed(host: *const clap_host) {
     if let Some(state) = unsafe { state(host) } {
         state.latency_changed.store(true, Ordering::Release);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn posix_fd_extension(id: &CStr) -> *const c_void {
+    if id == CLAP_EXT_POSIX_FD_SUPPORT {
+        &HOST_POSIX_FD as *const _ as *const c_void
+    } else {
+        ptr::null()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn posix_fd_extension(_id: &CStr) -> *const c_void {
+    ptr::null()
+}
+
+#[cfg(target_os = "linux")]
+pub(super) static HOST_POSIX_FD: clap_host_posix_fd_support = clap_host_posix_fd_support {
+    register_fd: Some(host_register_fd),
+    modify_fd: Some(host_modify_fd),
+    unregister_fd: Some(host_unregister_fd),
+};
+
+/// Registers `fd` once; a second registration of the same descriptor is
+/// refused, as CLAP asks the plugin to use `modify_fd` for that.
+#[cfg(target_os = "linux")]
+pub(super) unsafe extern "C" fn host_register_fd(
+    host: *const clap_host,
+    fd: i32,
+    flags: clap_posix_fd_flags,
+) -> bool {
+    let Some(state) = (unsafe { state(host) }) else {
+        return false;
+    };
+    if fd < 0 {
+        return false;
+    }
+    let mut fds = state
+        .fds
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if fds.iter().any(|&(known, _)| known == fd) {
+        return false;
+    }
+    fds.push((fd, flags));
+    true
+}
+
+#[cfg(target_os = "linux")]
+pub(super) unsafe extern "C" fn host_modify_fd(
+    host: *const clap_host,
+    fd: i32,
+    flags: clap_posix_fd_flags,
+) -> bool {
+    let Some(state) = (unsafe { state(host) }) else {
+        return false;
+    };
+    let mut fds = state
+        .fds
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match fds.iter_mut().find(|(known, _)| *known == fd) {
+        Some(entry) => {
+            entry.1 = flags;
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) unsafe extern "C" fn host_unregister_fd(host: *const clap_host, fd: i32) -> bool {
+    let Some(state) = (unsafe { state(host) }) else {
+        return false;
+    };
+    let mut fds = state
+        .fds
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = fds.len();
+    fds.retain(|&(known, _)| known != fd);
+    fds.len() != before
 }

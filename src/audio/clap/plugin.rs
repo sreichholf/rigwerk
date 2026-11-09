@@ -1,4 +1,5 @@
-//! Loaded CLAP plugin instances and process/parameter/GUI methods.
+//! Loaded CLAP plugin instances and process/parameter methods.  The GUI
+//! calls are in `gui.rs`.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
@@ -12,14 +13,13 @@ use clap_sys::events::{
     CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE,
 };
 use clap_sys::ext::audio_ports::{clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS};
-use clap_sys::ext::gui::{
-    clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_WIN32,
-};
+use clap_sys::ext::gui::{clap_plugin_gui, CLAP_EXT_GUI};
 use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
     clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN,
     CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
 };
+use clap_sys::ext::posix_fd_support::{clap_plugin_posix_fd_support, CLAP_EXT_POSIX_FD_SUPPORT};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::ext::timer_support::{clap_plugin_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use clap_sys::host::clap_host;
@@ -30,6 +30,7 @@ use clap_sys::version::CLAP_VERSION;
 
 use crate::audio::plugins::{clamp_latency, PluginParamView, Restore};
 
+use super::gui::{choose_editor_api, session_candidates, EditorApi};
 use super::host::{
     host_get_extension, host_request_callback, host_request_process, host_request_restart,
     AudioThreadScope, HostState, MainThreadTarget, HOST_NAME, HOST_URL, HOST_VENDOR, HOST_VERSION,
@@ -221,7 +222,9 @@ pub(crate) struct ClapPlugin {
     /// block count and the time the main thread first saw it waiting.
     pub(super) restart_wait: Option<(u64, Instant)>,
     pub(super) editor_open: bool,
-    pub(super) has_editor: bool,
+    /// The window API the editor opens with; `None` without an editor
+    /// this session can show.
+    pub(super) editor_api: Option<EditorApi>,
 }
 
 // SAFETY: every access to the raw CLAP pointers is serialised through the
@@ -284,6 +287,7 @@ impl ClapPlugin {
         let audio_ports_ext = extension::<clap_plugin_audio_ports>(plugin, CLAP_EXT_AUDIO_PORTS);
         let state_ext = extension::<clap_plugin_state>(plugin, CLAP_EXT_STATE);
         let latency_ext = extension::<clap_plugin_latency>(plugin, CLAP_EXT_LATENCY);
+        let fd_ext = extension::<clap_plugin_posix_fd_support>(plugin, CLAP_EXT_POSIX_FD_SUPPORT);
 
         let rate = if sample_rate == 0 {
             48_000.0
@@ -316,9 +320,9 @@ impl ClapPlugin {
             started: false,
             restart_wait: None,
             editor_open: false,
-            has_editor: false,
+            editor_api: None,
         };
-        plugin.has_editor = gui_supports_embedding(plugin.plugin, plugin.gui_ext);
+        plugin.editor_api = choose_editor_api(plugin.plugin, plugin.gui_ext, &session_candidates());
         *plugin
             .host_state
             .target
@@ -327,6 +331,7 @@ impl ClapPlugin {
             plugin: plugin.plugin,
             timer_ext: plugin.timer_ext,
             state_ext: plugin.state_ext,
+            fd_ext,
         };
         // Restore the saved state and controls while the plugin is still
         // inactive: `state.load` is a main-thread call, and `params.flush` is
@@ -440,10 +445,6 @@ impl ClapPlugin {
     /// The callback state the main-thread servicing works from.
     pub(crate) fn host(&self) -> Arc<HostState> {
         Arc::clone(&self.host_state)
-    }
-
-    pub(crate) fn has_editor(&self) -> bool {
-        self.has_editor
     }
 
     pub(super) fn activate(&mut self) -> Result<(), String> {
@@ -925,96 +926,6 @@ impl ClapPlugin {
         Ok(true)
     }
 
-    /// Creates the plugin's GUI resources and asks how large its view is.
-    /// Win32 embedding only; Linux still uses the in-app parameter panel.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(crate) fn prepare_editor(&mut self) -> Result<(u32, u32), String> {
-        if self.editor_open {
-            return Ok(self.editor_size().unwrap_or((640, 480)));
-        }
-        if !self.has_editor {
-            return Err("This plugin has no interface that RigWerk can embed.".to_owned());
-        }
-        let gui = unsafe { self.gui_ext.as_ref() }
-            .ok_or_else(|| "This plugin has no GUI extension.".to_owned())?;
-        let create = gui
-            .create
-            .ok_or_else(|| "The plugin cannot create its interface.".to_owned())?;
-        if !unsafe { create(self.plugin, CLAP_WINDOW_API_WIN32.as_ptr(), false) } {
-            return Err("The plugin refused to create its interface.".to_owned());
-        }
-        self.editor_open = true;
-        let size = self.editor_size().unwrap_or((640, 480));
-        Ok(size)
-    }
-
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(crate) fn editor_size(&self) -> Option<(u32, u32)> {
-        let gui = unsafe { self.gui_ext.as_ref() }?;
-        let get_size = gui.get_size?;
-        let mut width = 640;
-        let mut height = 480;
-        if unsafe { get_size(self.plugin, &mut width, &mut height) } {
-            Some((width.max(80), height.max(80)))
-        } else {
-            None
-        }
-    }
-
-    /// Attaches the prepared view to a native window and shows it.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(crate) fn attach_editor(&mut self, hwnd: *mut c_void, scale: f64) -> Result<(), String> {
-        let gui = unsafe { self.gui_ext.as_ref() }
-            .ok_or_else(|| "This plugin has no GUI extension.".to_owned())?;
-        if let Some(set_scale) = gui.set_scale {
-            let _ = unsafe { set_scale(self.plugin, scale) };
-        }
-        let window = clap_window {
-            api: CLAP_WINDOW_API_WIN32.as_ptr(),
-            specific: clap_window_handle { win32: hwnd },
-        };
-        if let Some(set_parent) = gui.set_parent {
-            if !unsafe { set_parent(self.plugin, &window) } {
-                return Err("The plugin could not attach its interface.".to_owned());
-            }
-        }
-        if let Some(show) = gui.show {
-            let _ = unsafe { show(self.plugin) };
-        }
-        self.editor_open = true;
-        Ok(())
-    }
-
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(crate) fn resize_editor(&mut self, width: u32, height: u32) {
-        let Some(gui) = (unsafe { self.gui_ext.as_ref() }) else {
-            return;
-        };
-        if let Some(can_resize) = gui.can_resize {
-            if !unsafe { can_resize(self.plugin) } {
-                return;
-            }
-        }
-        if let Some(set_size) = gui.set_size {
-            let _ = unsafe { set_size(self.plugin, width, height) };
-        }
-    }
-
-    pub(crate) fn close_editor(&mut self) {
-        if !self.editor_open {
-            return;
-        }
-        if let Some(gui) = unsafe { self.gui_ext.as_ref() } {
-            if let Some(hide) = gui.hide {
-                let _ = unsafe { hide(self.plugin) };
-            }
-            if let Some(destroy) = gui.destroy {
-                unsafe { destroy(self.plugin) };
-            }
-        }
-        self.editor_open = false;
-    }
-
     /// The parameter flush and rescan, restart and latency re-read the
     /// plugin asked for.  These read and write the instance's cached
     /// parameters and event list, or change its activation, so they run
@@ -1065,6 +976,7 @@ impl Drop for ClapPlugin {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         target.plugin = ptr::null();
         target.timer_ext = ptr::null();
+        target.fd_ext = ptr::null();
         drop(target);
         self.close_editor();
         // No audio callback can be inside the plugin: it holds the last
@@ -1096,25 +1008,4 @@ pub(super) fn extension<T>(plugin: *const clap_plugin, id: &CStr) -> *const T {
         return ptr::null();
     };
     unsafe { get(plugin, id.as_ptr()).cast::<T>() }
-}
-
-pub(super) fn gui_supports_embedding(
-    plugin: *const clap_plugin,
-    gui: *const clap_plugin_gui,
-) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        let Some(gui) = (unsafe { gui.as_ref() }) else {
-            return false;
-        };
-        let Some(supported) = gui.is_api_supported else {
-            return false;
-        };
-        unsafe { supported(plugin, CLAP_WINDOW_API_WIN32.as_ptr(), false) }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (plugin, gui);
-        false
-    }
 }
