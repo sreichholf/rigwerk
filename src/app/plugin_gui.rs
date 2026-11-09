@@ -3,9 +3,13 @@
 //! VST3 editors are opened through `vst3-host`'s [`PluginWindow`].  On Linux
 //! that window is an X11 client, so it needs a display (`DISPLAY`, including
 //! XWayland).  The crate does not implement `IWaylandHost` / `IWaylandFrame`,
-//! and a session with no X server cannot open the editor.  CLAP editors are
-//! embedded in a native Win32 window created here, because CLAP's GUI
-//! extension expects the host to provide the parent `HWND`.
+//! and a session with no X server cannot open the editor.
+//!
+//! A CLAP editor embeds in a native window created here (Win32, or X11 when
+//! an X server is reachable), or floats in a toplevel of its own (pure
+//! Wayland, or a plugin that only floats).  The plugin's GUI callbacks only
+//! set flags on its host; [`ClapGuiWindow::service`] follows them once per
+//! frame.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,7 +18,7 @@ use vst3_host::PluginWindow;
 
 use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
-use crate::audio::clap::ClapPlugin;
+use crate::audio::clap::{ClapPlugin, GuiVisibility, HostState, ParentWindow, ResizeHints};
 use crate::audio::{plugin_instance_id, PluginHandle, PluginView};
 use crate::ui::theme::{GREEN, RED};
 
@@ -104,23 +108,25 @@ impl RigWerkApp {
                     }
                 }
             }
-            PluginHandle::Clap(plugin) => match ClapGuiWindow::open(plugin.clone(), &name) {
-                Ok(window) => {
-                    self.plugin_gui = Some(PluginGuiWindow {
-                        key,
-                        kind: GuiKind::Clap {
-                            plugin: plugin.clone(),
-                            window,
-                        },
-                        last_sync: Instant::now(),
-                    });
-                    true
+            PluginHandle::Clap(plugin) => {
+                match ClapGuiWindow::open(plugin.clone(), &name, f64::from(self.ui_scale)) {
+                    Ok(window) => {
+                        self.plugin_gui = Some(PluginGuiWindow {
+                            key,
+                            kind: GuiKind::Clap {
+                                plugin: plugin.clone(),
+                                window,
+                            },
+                            last_sync: Instant::now(),
+                        });
+                        true
+                    }
+                    Err(error) => {
+                        self.gui_error(error);
+                        false
+                    }
                 }
-                Err(error) => {
-                    self.gui_error(error);
-                    false
-                }
-            },
+            }
         };
         if opened {
             self.push_log("Opened the plugin's own interface.", GREEN);
@@ -176,7 +182,7 @@ impl RigWerkApp {
                     }
                     dismissed
                 }
-                GuiKind::Clap { window, .. } => window.service(),
+                GuiKind::Clap { window, .. } => window.service(f64::from(self.ui_scale)),
             };
             let same_plugin = gui.matches(views.get(key.insert));
             let due = gui.last_sync.elapsed() >= Duration::from_millis(250);
@@ -238,76 +244,115 @@ fn try_with_instance<T>(instance: &Mutex<T>, body: impl FnOnce(&mut T)) -> bool 
     }
 }
 
+/// What a native editor window saw since the last poll.
+#[derive(Default)]
+struct FrameEvents {
+    /// The user asked to close it.
+    closed: bool,
+    /// Its client area now has this size.
+    size: Option<(u32, u32)>,
+    /// It moved to a display with this scale.
+    scale: Option<f64>,
+}
+
+/// The native window an embedded CLAP editor lives in.  Sizes are physical
+/// pixels of the client area.  Dropping it destroys the window, so the
+/// editor must be detached first.
+trait EditorFrame {
+    fn parent(&self) -> ParentWindow;
+    /// The display scale of the window itself, for a frame that tracks it.
+    /// `None` follows the app's scale instead.
+    fn own_scale(&self) -> Option<f64>;
+    fn poll(&mut self) -> FrameEvents;
+    fn resize(&mut self, width: u32, height: u32);
+    /// Lets the user resize the window only the way the editor allows.
+    fn set_resize_hints(&mut self, hints: ResizeHints, size: (u32, u32));
+    fn show(&mut self);
+    fn hide(&mut self);
+}
+
 #[cfg(target_os = "windows")]
+mod win32;
+#[cfg(target_os = "linux")]
+mod x11;
+
+/// A CLAP editor and the window it is in.  `frame` is `None` for a floating
+/// editor, whose toplevel the plugin owns.
 struct ClapGuiWindow {
     plugin: Arc<Mutex<ClapPlugin>>,
-    host: Arc<crate::audio::clap::HostState>,
-    hwnd: winapi::shared::windef::HWND,
-    state: Box<ClapWindowState>,
+    host: Arc<HostState>,
+    frame: Option<Box<dyn EditorFrame>>,
+    hints: ResizeHints,
+    /// The client size the editor was last given or asked for, so the
+    /// window's echo of a resize is not passed back to the plugin.
     last_client: Option<(u32, u32)>,
+    scale: f64,
 }
 
-#[cfg(target_os = "windows")]
-struct ClapWindowState {
-    closed: std::sync::atomic::AtomicBool,
-    client_size: std::sync::atomic::AtomicU64,
+fn lock(plugin: &Mutex<ClapPlugin>) -> std::sync::MutexGuard<'_, ClapPlugin> {
+    plugin.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-#[cfg(target_os = "windows")]
 impl ClapGuiWindow {
-    fn open(plugin: Arc<Mutex<ClapPlugin>>, title: &str) -> Result<Self, String> {
-        let (width, height, host) = {
-            let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            let (width, height) = plugin.prepare_editor()?;
-            (width, height, plugin.host())
+    fn open(plugin: Arc<Mutex<ClapPlugin>>, title: &str, app_scale: f64) -> Result<Self, String> {
+        let (api, size, host) = {
+            let mut locked = lock(&plugin);
+            let api = locked
+                .editor_api()
+                .ok_or_else(|| "This plugin has no interface RigWerk can open here.".to_owned())?;
+            let size = locked.prepare_editor()?;
+            (api, size, locked.host())
         };
-        let state = Box::new(ClapWindowState {
-            closed: std::sync::atomic::AtomicBool::new(false),
-            client_size: std::sync::atomic::AtomicU64::new(0),
-        });
-        let hwnd = create_window(title, width, height, &state)?;
-
-        let scale = unsafe {
-            let dpi = winapi::um::winuser::GetDpiForWindow(hwnd);
-            if dpi == 0 {
-                1.0
-            } else {
-                dpi as f64 / 96.0
-            }
-        };
-        let attached = {
-            let mut locked = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            locked.attach_editor(hwnd as *mut std::ffi::c_void, scale)
-        };
-        if let Err(error) = attached {
-            let mut locked = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            locked.close_editor();
-            unsafe {
-                winapi::um::winuser::DestroyWindow(hwnd);
-            }
-            return Err(error);
-        }
-        unsafe {
-            winapi::um::winuser::ShowWindow(hwnd, winapi::um::winuser::SW_SHOW);
-            winapi::um::winuser::UpdateWindow(hwnd);
-        }
-        Ok(Self {
+        let mut window = Self {
             plugin,
             host,
-            hwnd,
-            state,
-            last_client: None,
-        })
+            frame: None,
+            hints: ResizeHints::FIXED,
+            last_client: Some(size),
+            scale: app_scale,
+        };
+        if api.floating {
+            // Dropping `window` on failure destroys the created editor.
+            lock(&window.plugin).show_floating_editor(&format!("{title} - CLAP"), app_scale)?;
+            return Ok(window);
+        }
+        let frame = create_frame(api.api, title, size)?;
+        window.scale = frame.own_scale().unwrap_or(app_scale);
+        let parent = frame.parent();
+        // Owned by `window` from here, so a failed attach still detaches the
+        // editor before the native window is destroyed.
+        window.frame = Some(frame);
+        let hints = {
+            let mut locked = lock(&window.plugin);
+            locked.attach_editor(parent, window.scale)?;
+            locked.editor_resize_hints()
+        };
+        window.apply_hints(hints, size);
+        if let Some(frame) = window.frame.as_mut() {
+            frame.show();
+        }
+        Ok(window)
     }
 
-    /// Runs the plugin's main-thread work and follows its resize requests.
+    fn apply_hints(&mut self, hints: ResizeHints, size: (u32, u32)) {
+        self.hints = hints;
+        if let Some(frame) = self.frame.as_mut() {
+            frame.set_resize_hints(hints, size);
+        }
+    }
+
+    /// Runs the plugin's main-thread work and follows its window requests.
     /// Returns true once the window should be closed.
-    fn service(&mut self) -> bool {
-        use std::sync::atomic::Ordering;
-        if self.state.closed.load(Ordering::Relaxed) {
+    fn service(&mut self, app_scale: f64) -> bool {
+        let events = self
+            .frame
+            .as_mut()
+            .map(|frame| frame.poll())
+            .unwrap_or_default();
+        if events.closed {
             return true;
         }
-        // Timers and `on_main_thread` (where most editors repaint) run
+        // Timers, fds and `on_main_thread` (where most editors repaint) run
         // without the instance lock, so the audio callback keeps processing
         // this insert while the editor is busy.  A latency change it picks
         // up stays flagged on the host, so the path's `service_plugins`
@@ -316,196 +361,98 @@ impl ClapGuiWindow {
         if self.host.take_gui_closed() {
             return true;
         }
-        if let Some((width, height)) = self.host.take_gui_resize() {
-            unsafe {
-                resize_window(self.hwnd, width, height);
+        let scale = match self.frame.as_ref().and_then(|frame| frame.own_scale()) {
+            Some(_) => events.scale,
+            None => ((app_scale - self.scale).abs() > 1e-3).then_some(app_scale),
+        };
+        let Some(frame) = self.frame.as_mut() else {
+            // A floating editor sizes and shows its own toplevel.
+            if let Some(scale) = scale {
+                self.scale = scale;
+                lock(&self.plugin).set_editor_scale(scale);
             }
-            self.last_client = Some((width, height));
+            return false;
+        };
+        match self.host.take_gui_visibility() {
+            Some(GuiVisibility::Show) => {
+                frame.show();
+                lock(&self.plugin).show_editor();
+            }
+            Some(GuiVisibility::Hide) => {
+                lock(&self.plugin).hide_editor();
+                frame.hide();
+            }
+            None => {}
+        }
+        if let Some(scale) = scale {
+            self.scale = scale;
+            let size = {
+                let mut locked = lock(&self.plugin);
+                locked.set_editor_scale(scale);
+                locked.editor_size()
+            };
+            if let Some(size) = size {
+                self.resize_frame(size);
+            }
+        }
+        if self.host.take_gui_hints_changed() {
+            let hints = lock(&self.plugin).editor_resize_hints();
+            let size = self.last_client.unwrap_or((640, 480));
+            self.apply_hints(hints, size);
+        }
+        if let Some(size) = self.host.take_gui_resize() {
+            self.resize_frame(size);
             return false;
         }
-        let packed = self.state.client_size.swap(0, Ordering::Relaxed);
-        if packed != 0 {
-            let width = (packed >> 32) as u32;
-            let height = packed as u32;
-            if self.last_client != Some((width, height)) {
-                self.last_client = Some((width, height));
-                // A resize is a user action and rare; it is the one editor
-                // call that still takes the instance lock.
-                self.plugin
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .resize_editor(width, height);
+        if let Some(size) = events.size {
+            if self.last_client != Some(size) {
+                // The user resized the window: the plugin rounds the size
+                // and the window follows whatever it settled on.
+                let fitted = lock(&self.plugin).resize_editor(size.0, size.1);
+                self.last_client = Some(fitted);
+                if fitted != size {
+                    self.resize_frame(fitted);
+                }
             }
         }
         false
     }
+
+    /// Gives the window a new client size the editor chose, and pins the
+    /// axes it cannot resize to that size.
+    fn resize_frame(&mut self, size: (u32, u32)) {
+        if let Some(frame) = self.frame.as_mut() {
+            frame.resize(size.0, size.1);
+            frame.set_resize_hints(self.hints, size);
+        }
+        self.last_client = Some(size);
+    }
 }
 
-#[cfg(target_os = "windows")]
 impl Drop for ClapGuiWindow {
     fn drop(&mut self) {
-        // Detach the editor before destroying the parent window.
-        let mut plugin = self
-            .plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        plugin.close_editor();
-        drop(plugin);
-        unsafe {
-            winapi::um::winuser::DestroyWindow(self.hwnd);
-        }
-        let _ = &self.state;
+        // Detach the editor before the window it is embedded in goes.
+        lock(&self.plugin).close_editor();
+        drop(self.frame.take());
     }
 }
 
-#[cfg(target_os = "windows")]
-fn create_window(
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "linux")),
+    allow(unused_variables)
+)]
+fn create_frame(
+    api: crate::audio::clap::WindowApi,
     title: &str,
-    width: u32,
-    height: u32,
-    state: &ClapWindowState,
-) -> Result<winapi::shared::windef::HWND, String> {
-    use std::mem;
-    use std::ptr;
-    use winapi::shared::minwindef::UINT;
-    use winapi::shared::windef::HWND;
-    use winapi::shared::windef::RECT;
-    use winapi::um::libloaderapi::GetModuleHandleW;
-    use winapi::um::winuser::{
-        AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongPtrW,
-        LoadCursorW, RegisterClassExW, SetWindowLongPtrW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-        GWLP_USERDATA, IDC_ARROW, SIZE_MINIMIZED, WM_CLOSE, WM_SIZE, WNDCLASSEXW,
-        WS_OVERLAPPEDWINDOW,
-    };
-
-    unsafe extern "system" fn window_proc(
-        hwnd: HWND,
-        message: UINT,
-        wparam: winapi::shared::minwindef::WPARAM,
-        lparam: winapi::shared::minwindef::LPARAM,
-    ) -> winapi::shared::minwindef::LRESULT {
-        if message == WM_CLOSE {
-            if let Some(state) = window_state(hwnd) {
-                state
-                    .closed
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            return 0;
-        }
-        if message == WM_SIZE && wparam != SIZE_MINIMIZED {
-            if let Some(state) = window_state(hwnd) {
-                let mut rect: RECT = mem::zeroed();
-                if GetClientRect(hwnd, &mut rect) != 0 {
-                    let width = (rect.right - rect.left).max(0) as u64;
-                    let height = (rect.bottom - rect.top).max(0) as u64;
-                    state
-                        .client_size
-                        .store((width << 32) | height, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            return 0;
-        }
-        DefWindowProcW(hwnd, message, wparam, lparam)
-    }
-
-    unsafe fn window_state(hwnd: HWND) -> Option<&'static ClapWindowState> {
-        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ClapWindowState;
-        if pointer.is_null() {
-            None
-        } else {
-            Some(&*pointer)
-        }
-    }
-
-    unsafe {
-        static REGISTER: std::sync::Once = std::sync::Once::new();
-        let class_name = "IndependentAudioBridgeClapWindow\0"
-            .encode_utf16()
-            .collect::<Vec<u16>>();
-        REGISTER.call_once(|| {
-            let mut class: WNDCLASSEXW = mem::zeroed();
-            class.cbSize = mem::size_of::<WNDCLASSEXW>() as UINT;
-            class.style = CS_HREDRAW | CS_VREDRAW;
-            class.lpfnWndProc = Some(window_proc);
-            class.hInstance = GetModuleHandleW(ptr::null());
-            class.hCursor = LoadCursorW(ptr::null_mut(), IDC_ARROW);
-            class.lpszClassName = class_name.as_ptr();
-            RegisterClassExW(&class);
-        });
-
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: width as i32,
-            bottom: height as i32,
-        };
-        AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
-        let window_title = format!("{title} - CLAP\0")
-            .encode_utf16()
-            .collect::<Vec<u16>>();
-        let hwnd = CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            window_title.as_ptr(),
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            GetModuleHandleW(ptr::null()),
-            ptr::null_mut(),
-        );
-        if hwnd.is_null() {
-            return Err("Could not create a window for the CLAP interface.".to_owned());
-        }
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as *const _ as isize);
-        Ok(hwnd)
-    }
-}
-
-#[cfg(target_os = "windows")]
-unsafe fn resize_window(hwnd: winapi::shared::windef::HWND, width: u32, height: u32) {
-    use winapi::shared::windef::RECT;
-    use winapi::um::winuser::{
-        AdjustWindowRectEx, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-        WS_OVERLAPPEDWINDOW,
-    };
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: width as i32,
-        bottom: height as i32,
-    };
-    unsafe {
-        AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            0,
-            0,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
-}
-
-// The other platforms do not have a native window implementation for CLAP
-// editors yet.  Plugins still process audio and expose their controls in the
-// the RigWerk panel; only the "open the plugin's own view" path is unavailable.
-#[cfg(not(target_os = "windows"))]
-struct ClapGuiWindow;
-
-#[cfg(not(target_os = "windows"))]
-impl ClapGuiWindow {
-    fn open(_plugin: Arc<Mutex<ClapPlugin>>, _title: &str) -> Result<Self, String> {
-        Err("CLAP interfaces can only be embedded on Windows in this build.".to_owned())
-    }
-
-    fn service(&mut self) -> bool {
-        true
+    size: (u32, u32),
+) -> Result<Box<dyn EditorFrame>, String> {
+    use crate::audio::clap::WindowApi;
+    match api {
+        #[cfg(target_os = "windows")]
+        WindowApi::Win32 => Ok(Box::new(win32::Win32Frame::create(title, size)?)),
+        #[cfg(target_os = "linux")]
+        WindowApi::X11 => Ok(Box::new(x11::X11Frame::create(title, size)?)),
+        _ => Err("This window system cannot hold the plugin's interface.".to_owned()),
     }
 }
 

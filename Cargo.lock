@@ -2391,6 +2391,7 @@ dependencies = [
  "vst3-host",
  "winapi",
  "windows",
+ "xcb",
 ]
 
 [[package]]

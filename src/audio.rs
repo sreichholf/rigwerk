@@ -112,7 +112,6 @@ pub(crate) use path::PathState;
 pub use path::{
     sanitize_path_level, DspTime, PathMix, MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
 };
-#[cfg(target_os = "windows")]
 pub(crate) use plugins::service_clap;
 pub(crate) use plugins::MAX_ALIGN;
 pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
