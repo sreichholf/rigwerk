@@ -24,11 +24,16 @@ use crate::audio::LockStats;
 /// and how often UI-side work held it (parameter drags, state capture and the
 /// editor all count).  Measurement only: the audio thread writes these
 /// relaxedly and Diagnostics reads them.
+///
+/// `processed` is the same thread's notice that the plugin actually ran a
+/// chunk: a VST3 change it reported is only visible after one, so the editor
+/// sync needs it to decide between the change poll and a full read.
 pub(crate) struct SlotControls {
     mix: AtomicU32,
     bypass: AtomicBool,
     attempts: AtomicU64,
     skips: AtomicU64,
+    processed: AtomicBool,
 }
 
 impl SlotControls {
@@ -38,6 +43,7 @@ impl SlotControls {
             bypass: AtomicBool::new(pref.bypass),
             attempts: AtomicU64::new(0),
             skips: AtomicU64::new(0),
+            processed: AtomicBool::new(false),
         }
     }
 
@@ -84,6 +90,19 @@ impl SlotControls {
     pub(crate) fn reset_lock_stats(&self) {
         self.attempts.store(0, Ordering::Relaxed);
         self.skips.store(0, Ordering::Relaxed);
+    }
+
+    /// Notes that the plugin processed a chunk (audio thread).  A VST3 change
+    /// the plugin reports is only visible after a processed block, so the
+    /// editor sync reads this before it trusts the change poll.
+    pub(crate) fn note_processed(&self) {
+        self.processed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the plugin processed a chunk since the last call, clearing the
+    /// flag (UI thread).
+    pub(crate) fn take_processed(&self) -> bool {
+        self.processed.swap(false, Ordering::Relaxed)
     }
 }
 

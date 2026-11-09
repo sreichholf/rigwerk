@@ -1,3 +1,4 @@
+use super::plugins::needs_full_sync;
 use super::PathControls;
 use crate::audio::LockStats;
 
@@ -28,6 +29,28 @@ fn lock_stats_clamp_skips_to_attempts() {
     };
     assert_eq!(clamped.skipped(), 2);
     assert_eq!(clamped.share(), 1.0);
+}
+
+#[test]
+fn only_a_processed_vst3_insert_can_sync_from_reported_changes() {
+    // Full unless the caller did not ask for it, the insert processed a
+    // block, and it is a VST3 insert.
+    let table = [
+        (true, true, true, true),
+        (true, false, true, true),
+        (true, true, false, true),
+        (false, true, true, false),
+        (false, false, true, true),
+        (false, true, false, true),
+        (false, false, false, true),
+    ];
+    for (requested, processed, has_vst3, expected) in table {
+        assert_eq!(
+            needs_full_sync(requested, processed, has_vst3),
+            expected,
+            "requested={requested} processed={processed} has_vst3={has_vst3}"
+        );
+    }
 }
 
 #[test]

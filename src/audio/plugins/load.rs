@@ -49,11 +49,17 @@ pub(crate) fn instance_id<T>(plugin: &Arc<T>) -> usize {
     Arc::as_ptr(plugin) as *const () as usize
 }
 
-/// Reads a plugin's current controls for [`PluginChain::apply_synced_parameters`],
-/// without the chain lock.  Returns `None` while a CLAP value (one moved in
-/// RigWerk's panel, or a saved one restored into a plugin without
-/// `params.flush`) is still waiting for the next audio block, because reading
-/// the plugin then would show the old value and the sync would save it.
+/// Reads a plugin's current controls in full, for
+/// [`PluginChain::apply_synced_parameters`].  This reads and formats every
+/// control, so callers use it when a change poll cannot see the edits: a CLAP
+/// editor (no change feed), a stopped bridge, or an insert that has not
+/// processed a block, where VST3 reports parameter changes only after it has
+/// processed one.  An open, processing VST3 editor polls
+/// [`take_parameter_changes`] instead.
+/// Returns `None` while a CLAP value (one moved in RigWerk's panel, or a
+/// saved one restored into a plugin without `params.flush`) is still waiting
+/// for the next audio block, because reading the plugin then would show the
+/// old value and the sync would save it.
 pub(crate) fn read_plugin_parameters(handle: &PluginHandle) -> Option<Vec<PluginParamView>> {
     if let PluginHandle::Clap(clap) = handle {
         let clap = clap.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -62,6 +68,103 @@ pub(crate) fn read_plugin_parameters(handle: &PluginHandle) -> Option<Vec<Plugin
         }
     }
     Some(host_parameters(handle))
+}
+
+/// One control value a plugin reported as changed, with the text its own
+/// formatter gives it.
+pub(crate) struct ParamChange {
+    pub(crate) id: u32,
+    pub(crate) value: f64,
+    pub(crate) display: Option<String>,
+}
+
+/// Drains the control changes a VST3 plugin reported since the last call (its
+/// editor's edits and the processor's own output parameters), formatting each
+/// while the instance is still locked.  A drag and the processor's feedback
+/// can report the same id many times, so the last value per id is kept and
+/// only that one is formatted.  `Some(vec![])` means nothing changed; `None`
+/// means the format has no equivalent.  VST3 only becomes visible after a
+/// processed block, so an insert that has not processed one uses the full
+/// [`read_plugin_parameters`] read instead.
+pub(crate) fn take_parameter_changes(handle: &PluginHandle) -> Option<Vec<ParamChange>> {
+    let PluginHandle::Vst3(plugin) = handle else {
+        return None;
+    };
+    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+    let changes = plugin.get_parameter_changes();
+    if changes.is_empty() {
+        return Some(Vec::new());
+    }
+    Some(
+        latest_parameter_values(changes)
+            .into_iter()
+            .map(|(id, value)| ParamChange {
+                id,
+                value,
+                display: plugin.format_parameter(id, value).ok(),
+            })
+            .collect(),
+    )
+}
+
+/// Collapses reported `(id, value)` pairs to the last value per id, in id
+/// order.  A drag reports many values for one control before the next poll,
+/// and a processor's output parameter can echo them; formatting each would
+/// hold the instance lock far longer than needed.
+pub(crate) fn latest_parameter_values(changes: Vec<(u32, f64)>) -> Vec<(u32, f64)> {
+    let mut latest = std::collections::BTreeMap::new();
+    for (id, value) in changes {
+        latest.insert(id, value);
+    }
+    latest.into_iter().collect()
+}
+
+/// Drains the control changes a VST3 plugin reported since the last call,
+/// without formatting any of them.  A sync that reads every control anyway
+/// only needs the queue emptied: a value queued before the fresher full read
+/// would otherwise be applied by the next change poll, putting an older value
+/// back.  Formatting is the expensive part of [`take_parameter_changes`] and
+/// would be thrown away here.  `None` means the format has no change feed.
+pub(crate) fn take_parameter_values(handle: &PluginHandle) -> Option<Vec<(u32, f64)>> {
+    let PluginHandle::Vst3(plugin) = handle else {
+        return None;
+    };
+    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+    Some(latest_parameter_values(plugin.get_parameter_changes()))
+}
+
+/// Applies editor-reported changes to the cached views and the saved values,
+/// touching only the ids they name.  Every known change is applied; the
+/// return value is `false` when any id was not in the cached views (a control
+/// the plugin added or renamed), which asks the caller for a full read.  The
+/// saved list keeps [`merge_synced_params`]'s semantics: every live value
+/// away from its default, plus saved entries the plugin does not list.
+/// Changes that are already at their default therefore leave it.
+pub(crate) fn apply_parameter_changes(
+    parameters: &mut [PluginParamView],
+    saved: &mut Vec<PluginParamPref>,
+    changes: &[ParamChange],
+) -> bool {
+    if changes.is_empty() {
+        return true;
+    }
+    let mut all_known = true;
+    for change in changes {
+        match parameters
+            .iter_mut()
+            .find(|parameter| parameter.id == change.id)
+        {
+            Some(parameter) => {
+                parameter.value = change.value;
+                if let Some(display) = &change.display {
+                    parameter.display = display.clone();
+                }
+            }
+            None => all_known = false,
+        }
+    }
+    *saved = merge_synced_params(saved, parameters);
+    all_known
 }
 
 /// Runs one CLAP plugin's main-thread work.  Callbacks and timers run without
@@ -92,9 +195,16 @@ const VST3_POLL_MS: u64 = 250;
 /// How long after a parameter edit, editor sync or load the service keeps
 /// looking.  A plugin raises `kLatencyChanged` in response to such an edit
 /// (a mode switch, an oversampling toggle, a preset); with no edit there is
-/// nothing to look for.  An open editor syncs every 250 ms, so it keeps the
-/// window open for as long as it is shown.
+/// nothing to look for.  The 250 ms editor sync nudges this on every poll,
+/// even one that reports no changes, so an open editor keeps the window open
+/// for as long as it is shown.
 const VST3_POLL_WINDOW_MS: u64 = 2_000;
+
+/// How long a full read of the control list is held off after one was forced
+/// by a reported id the cached views do not know.  A plugin can report an
+/// output parameter it never lists, which would otherwise ask for a full read
+/// (and format every control) on every poll.
+const UNKNOWN_FULL_MS: u64 = 1_000;
 
 /// Milliseconds since the first call, for the poll window atomics.
 fn now_ms() -> u64 {
@@ -114,6 +224,14 @@ pub(crate) struct Vst3Service {
     poll_until: AtomicU64,
     /// When it may look next.
     next_poll: AtomicU64,
+    /// Until when (see [`now_ms`]) the unknown-id full-read fallback waits
+    /// (see [`UNKNOWN_FULL_MS`]).
+    next_unknown_full: AtomicU64,
+    /// Set when the plugin reported changed parameter values or titles, so
+    /// the next editor sync reads every control instead of only the reported
+    /// changes.  This covers an added, renamed or re-defaulted control
+    /// without waiting for the editor to close.
+    parameters_changed: AtomicBool,
     /// Whether a failed `service_host_requests` was logged already.
     error_logged: AtomicBool,
 }
@@ -130,6 +248,8 @@ impl Vst3Service {
             latency: AtomicU32::new(clamp_latency(latency)),
             poll_until: AtomicU64::new(0),
             next_poll: AtomicU64::new(0),
+            next_unknown_full: AtomicU64::new(0),
+            parameters_changed: AtomicBool::new(false),
             error_logged: AtomicBool::new(false),
         };
         // Some plugins settle their latency right after loading.
@@ -141,11 +261,35 @@ impl Vst3Service {
         self.latency.load(Ordering::Acquire)
     }
 
-    /// Opens the poll window: something just changed the plugin (a control,
-    /// a reset, an editor sync, a load), so it may raise a restart request.
+    /// Takes the "read every control" request set by
+    /// [`Self::service`].  The editor sync uses the full read once and then
+    /// goes back to polling reported changes.  No unit test exercises this:
+    /// building a [`Plugin`] needs a real VST3 module, and a stand-in would
+    /// only test the `AtomicBool`.
+    pub(crate) fn take_parameters_changed(&self) -> bool {
+        self.parameters_changed.swap(false, Ordering::AcqRel)
+    }
+
+    /// Opens the poll window: something just touched the plugin (a control,
+    /// a reset, a load), so it may raise a restart request.  The 250 ms
+    /// editor sync calls this on every poll, changes or not, so an open
+    /// editor keeps the window open for as long as it is shown.
     pub(crate) fn nudge(&self) {
         self.poll_until
             .store(now_ms() + VST3_POLL_WINDOW_MS, Ordering::Relaxed);
+    }
+
+    /// Whether the full-read fallback for a reported id the cached views do
+    /// not know may run now, arming [`UNKNOWN_FULL_MS`].  Bounds a plugin
+    /// that reports an output id it never lists.
+    pub(crate) fn unknown_full_due(&self) -> bool {
+        let now = now_ms();
+        if now < self.next_unknown_full.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.next_unknown_full
+            .store(now + UNKNOWN_FULL_MS, Ordering::Relaxed);
+        true
     }
 
     /// Applies the plugin's `restartComponent` requests and re-reads its
@@ -174,10 +318,16 @@ impl Vst3Service {
             Err(TryLockError::WouldBlock) => return false,
         };
         match plugin.service_host_requests() {
-            Ok(flags) if flags.reload_component() => {
-                eprintln!("[plugins] a VST3 plugin asked to be reloaded; remove and add it again");
+            Ok(flags) => {
+                if flags.param_values_changed() || flags.param_titles_changed() {
+                    self.parameters_changed.store(true, Ordering::Release);
+                }
+                if flags.reload_component() {
+                    eprintln!(
+                        "[plugins] a VST3 plugin asked to be reloaded; remove and add it again"
+                    );
+                }
             }
-            Ok(_) => {}
             // The latency may still have changed (the request can fail
             // halfway through the restart), so it is read either way.
             Err(error) => {
@@ -334,9 +484,10 @@ pub(crate) fn params_to_restore(
 }
 
 /// The saved parameter list after reading the plugin's live controls: every
-/// control away from its default, plus any saved entry the plugin does not
-/// list (an id hidden or renamed by this plugin version), which a sync must
-/// not silently delete.
+/// writable control away from its default, plus any saved entry the plugin
+/// does not list (an id hidden or renamed by this plugin version), which a
+/// sync must not silently delete.  A read-only control is output the plugin
+/// reports, not a setting this app owns, so it is never saved.
 pub(crate) fn merge_synced_params(
     previous: &[PluginParamPref],
     live: &[PluginParamView],
@@ -346,7 +497,9 @@ pub(crate) fn merge_synced_params(
         .filter(|saved| !live.iter().any(|parameter| parameter.id == saved.id))
         .cloned();
     live.iter()
-        .filter(|parameter| (parameter.value - parameter.default).abs() > PARAM_EPSILON)
+        .filter(|parameter| {
+            !parameter.read_only && (parameter.value - parameter.default).abs() > PARAM_EPSILON
+        })
         .map(|parameter| PluginParamPref {
             id: parameter.id,
             value: parameter.value,
@@ -516,9 +669,24 @@ fn load_vst3(
         .as_deref()
         .is_some_and(|bytes| plugin.load_state(bytes).is_ok());
     let values = restore.params(state_loaded);
+    // A value that was skipped as read-only leaves the blob as the only
+    // record of that control, so the slot is not stale for it.
+    let mut applied = false;
     if !values.is_empty() {
         let defaults = plugin.get_parameters().unwrap_or_default();
+        // Read-only controls are the plugin's own output, not settings this
+        // app owns: an old blob plus a failed capture must not push a saved
+        // value, or a default reset, into one.  CLAP's restore skips these
+        // too.
+        let read_only: Vec<u32> = defaults
+            .iter()
+            .filter(|parameter| parameter.is_read_only)
+            .map(|parameter| parameter.id)
+            .collect();
         for (id, value) in &values {
+            if read_only.contains(id) {
+                continue;
+            }
             let value = value.or_else(|| {
                 defaults
                     .iter()
@@ -526,12 +694,12 @@ fn load_vst3(
                     .map(|parameter| parameter.default)
             });
             if let Some(value) = value {
-                let _ = plugin.set_parameter(*id, value.clamp(0.0, 1.0));
+                applied |= plugin.set_parameter(*id, value.clamp(0.0, 1.0)).is_ok();
             }
         }
     }
     plugin
         .start_processing()
         .map_err(|error| format!("Start failed: {error}"))?;
-    Ok((plugin, state_loaded && values.is_empty()))
+    Ok((plugin, state_loaded && !applied))
 }

@@ -183,13 +183,34 @@ impl RigWerkApp {
         self.finish_plugin_gui();
     }
 
-    /// Drops the editor after a last sync, so whatever it changed since the
-    /// previous 250 ms sync reaches the saved insert and its state blob.
+    /// Drops the editor after a last full sync, so whatever it changed since
+    /// the previous poll reaches the saved insert and its state blob.
+    ///
+    /// The poll itself only asks a VST3 insert that processed a block for the
+    /// changes it reported; a CLAP editor and an insert that has not
+    /// processed a block are read in full instead (see
+    /// [`Self::poll_plugin_gui`]).  So this close-time read is not the only
+    /// full one, but it is the last chance to see changes a plugin made
+    /// without reporting them.
     pub(crate) fn finish_plugin_gui(&mut self) {
         if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
             self.engine.finish_plugin_editor(key.path, key.insert);
         }
         self.plugin_gui = None;
+    }
+
+    /// Copies the open editor's current controls into the engine with a full
+    /// read, without closing the editor.  Used before a save and before a
+    /// bridge starts: an edit may be younger than the last 250 ms poll, and
+    /// the save or the new session is built from the insert's saved values
+    /// and state blob, not from the open editor.  The full sync marks the
+    /// insert's saved state stale, so a later save captures it again.
+    pub(crate) fn sync_plugin_editor(&self) {
+        if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
+            let _ = self
+                .engine
+                .sync_plugin_parameters(key.path, key.insert, true);
+        }
     }
 
     /// Servicing and keeping the open editor in step, once per UI frame.
@@ -201,21 +222,17 @@ impl RigWerkApp {
     /// busy often enough for the audio callback to miss many chunks.  The UI
     /// never waits on the callback.  While the UI holds the lock to service
     /// the loop, the callback skips the insert for that chunk, declicked and
-    /// with its latency kept.  The cheap platform-event service (window close,
-    /// resize and DPI changes) still runs every frame and try-locks once for
-    /// them, so the interval limits only the run loop itself.
+    /// with its latency kept.  So the 30 Hz gate delays the editor's input
+    /// and timer dispatch as well as its paint.  The cheap platform-event
+    /// service (window close, resize and DPI changes) still runs every frame
+    /// and try-locks once for them, so the interval limits only the run loop
+    /// itself.
     pub(crate) fn poll_plugin_gui(&mut self) {
         let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) else {
             return;
         };
         let views = self.engine.plugin_views(key.path);
-        let audio_active = matches!(
-            self.engine.state,
-            EngineState::Starting
-                | EngineState::Running
-                | EngineState::Stopping
-                | EngineState::Preview
-        );
+        let audio_active = audio_active(self.engine.state);
         let now = Instant::now();
         let (dismissed, same_plugin, due) = {
             let Some(gui) = self.plugin_gui.as_mut() else {
@@ -257,9 +274,16 @@ impl RigWerkApp {
             return;
         }
         if due {
-            // A plugin's editor can change anything at any time; copying the
-            // values back keeps the saved insert (and the panel) truthful.
-            let _ = self.engine.sync_plugin_parameters(key.path, key.insert);
+            // A running VST3 insert reports its own changes, so the sync reads
+            // only the controls it names once it has processed a block.  A
+            // bridge that is not running processes none, so no VST3 edit could
+            // become visible and every poll reads in full; the sync also goes
+            // full for a CLAP editor and an insert that has not processed a
+            // block (see `needs_full_sync`).
+            let full = self.engine.state != EngineState::Running;
+            let _ = self
+                .engine
+                .sync_plugin_parameters(key.path, key.insert, full);
         }
     }
 }

@@ -49,8 +49,8 @@ fn only_a_running_callback_counts_as_audio_active() {
 #[test]
 fn the_run_loop_is_due_at_once_when_an_editor_opens() {
     let now = Instant::now();
-    // The opening seed: one interval in the past, or now where the clock
-    // cannot go that far back.  (The constructor must use this same seed.)
+    // This pins the seed helper the open path uses: one interval in the
+    // past, or now where the clock cannot go that far back.
     assert!(run_loop_due(true, run_loop_start(now), now));
 }
 

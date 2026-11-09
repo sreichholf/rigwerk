@@ -20,8 +20,10 @@
 //! What still takes the chain lock is structural and short: adding,
 //! removing, moving or restoring inserts, reopening them for a new rate
 //! (slow loads and teardowns run outside the lock), resetting a plugin's
-//! controls, syncing from its editor, capturing state for a save, and the
-//! publish of the views those edits do.
+//! controls, capturing state for a save, and the publish of the views those
+//! edits do.  Syncing from an editor applies only what a running VST3 insert
+//! reported; a CLAP editor (no change feed) and an insert that has not
+//! processed a block since the last sync are read in full instead.
 //!
 //! For those rare misses the mixer keeps the timing: rather than a second,
 //! lock-free copy of the chain (plugin instances are stateful and cannot be
@@ -38,8 +40,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError, TryLockError};
 
 use super::super::plugins::{
-    host_format_parameter, host_set_parameter, PluginChain, PluginHandle, PluginPref, PluginView,
-    SlotLink, Vst3Service,
+    host_format_parameter, host_set_parameter, take_parameter_changes, take_parameter_values,
+    PluginChain, PluginHandle, PluginPref, PluginView, SlotLink, Vst3Service,
 };
 use super::{ClapService, LockStats, PathControls, PluginLockReport};
 
@@ -70,6 +72,15 @@ impl Drop for PublishOnUnwind<'_> {
     fn drop(&mut self) {
         self.path.publish_poisoned();
     }
+}
+
+/// Whether an editor sync has to read every control: it was asked to
+/// (`requested`), or the insert has not processed a block since the last sync
+/// (`!processed`, so a reported change may not be visible yet), or it is not a
+/// VST3 insert at all (CLAP has no change feed).  Only a VST3 insert that
+/// processed a block can be synced from its reported changes.
+pub(super) fn needs_full_sync(requested: bool, processed: bool, has_vst3: bool) -> bool {
+    requested || !processed || !has_vst3
 }
 
 impl PathControls {
@@ -427,14 +438,77 @@ impl PathControls {
     }
 
     /// Copies control values back after the plugin's own editor changed them.
-    /// The plugin is read without the chain lock; only storing the result
-    /// takes it, briefly.
-    pub(crate) fn sync_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        let handle = self
-            .plugins
-            .lock()
-            .map_err(|_| "Plugin chain unavailable".to_owned())?
-            .loaded_handle(index)?;
+    ///
+    /// With `full`, the whole control list is read and formatted, and the
+    /// reporter is only drained (`take_parameter_values`).  Without it, only
+    /// the changes a running VST3 insert reported are applied with
+    /// [`take_parameter_changes`]; a CLAP plugin has no change feed, and an
+    /// insert that has not processed a block since the last sync has no
+    /// visible changes yet, so both cases read in full instead (see
+    /// [`needs_full_sync`]).  A plugin that reported a changed parameter list
+    /// (`param_titles_changed` / `param_values_changed`) is forced to the full
+    /// read too, and an id the cached views do not know falls back to it, at
+    /// most once a second (see [`Vst3Service::unknown_full_due`]).  A changed
+    /// name or default on an existing id is picked up by the full sync on
+    /// stop, close or save, or by that fallback when the id is new.
+    ///
+    /// A missing or unloaded insert is a silent no-op.
+    pub(crate) fn sync_plugin_parameters(&self, index: usize, full: bool) -> Result<(), String> {
+        // From the published links, so the periodic sync never takes the
+        // chain lock just to find the plugin.
+        let link = self.slot_link(index);
+        // Keep the VST3 restart/parameter poll window open for as long as the
+        // editor is being synced, even when it reports no parameter changes:
+        // a request raised by an editor action that does not call
+        // `performEdit` would otherwise go unseen once the window lapses.
+        // This is a plain atomic store, on the UI thread.
+        if let Some(service) = link.as_ref().and_then(|link| link.vst3.as_ref()) {
+            service.nudge();
+        }
+        let parameters_changed = link
+            .as_ref()
+            .and_then(|link| link.vst3.as_ref())
+            .is_some_and(|vst3| vst3.take_parameters_changed());
+        let Some(link) = link else {
+            return Ok(());
+        };
+        let processed = link.controls.take_processed();
+        let vst3 = link.vst3.clone();
+        let Some(handle) = link.plugin else {
+            return Ok(());
+        };
+        // Decided before draining, from the processed flag and the service's
+        // requests (atomics, no plugin call).
+        let full = needs_full_sync(full || parameters_changed, processed, vst3.is_some());
+        if !full {
+            let Some(changes) = take_parameter_changes(&handle) else {
+                return Ok(());
+            };
+            if changes.is_empty() {
+                return Ok(());
+            }
+            match self
+                .edit_chain(|chain| chain.apply_synced_parameter_changes(index, &handle, &changes))
+            {
+                Some(Some(true)) | Some(None) => return Ok(()),
+                // An id the cached views did not know: read the whole list
+                // instead.  The edit above has already released the lock.
+                Some(Some(false)) => {
+                    if !vst3
+                        .as_ref()
+                        .is_none_or(|service| service.unknown_full_due())
+                    {
+                        return Ok(());
+                    }
+                }
+                None => return Err("Plugin chain unavailable".to_owned()),
+            }
+        } else {
+            // Drain the reporter before the full read, without formatting:
+            // a value queued before the fresher read would otherwise be
+            // applied by the next change poll, putting an older value back.
+            drop(take_parameter_values(&handle));
+        }
         let Some(parameters) = super::super::plugins::read_plugin_parameters(&handle) else {
             return Ok(());
         };

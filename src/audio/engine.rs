@@ -555,15 +555,26 @@ impl AudioEngine {
     }
 
     /// Copies control values back after the plugin's own editor changed them.
-    pub fn sync_plugin_parameters(&self, path: usize, index: usize) -> Result<(), String> {
-        self.shared.path(path).sync_plugin_parameters(index)
+    /// With `full` the whole control list is read and formatted; without it
+    /// only the changes a running VST3 insert reported are applied (and an id
+    /// the plugin does not list falls back to the full read, see
+    /// [`Self::finish_plugin_editor`] for the close-time sync).
+    pub fn sync_plugin_parameters(
+        &self,
+        path: usize,
+        index: usize,
+        full: bool,
+    ) -> Result<(), String> {
+        self.shared.path(path).sync_plugin_parameters(index, full)
     }
 
     /// Copies the editor's last changes back and marks the insert's saved
-    /// state for capture, when its editor closes.
+    /// state for capture, when its editor closes.  This is the full read,
+    /// which CLAP depends on and which catches anything a VST3 plugin changed
+    /// without reporting it.
     pub fn finish_plugin_editor(&self, path: usize, index: usize) {
         let controls = self.shared.path(path);
-        let _ = controls.sync_plugin_parameters(index);
+        let _ = controls.sync_plugin_parameters(index, true);
         controls.mark_plugin_state_stale(index);
     }
 

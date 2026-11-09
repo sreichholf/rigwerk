@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use super::super::clap::{HostState, AUDIO_PORTS_CHANGED};
-use super::load::{merge_synced_params, params_to_restore, Capture, Restore};
+use super::load::{
+    apply_parameter_changes, latest_parameter_values, merge_synced_params, params_to_restore,
+    Capture, ParamChange, Restore,
+};
 use super::pref::{
     base64_decode, base64_encode, PluginFormat, PluginParamPref, PluginParamView, PluginPref,
     PluginState, PLUGIN_STATE_VERSION,
@@ -171,6 +174,139 @@ fn sync_keeps_changed_values_and_ids_the_plugin_does_not_list() {
 }
 
 #[test]
+fn a_read_only_control_is_never_saved() {
+    let previous = [];
+    let live = [
+        view(1, 0.7, 0.0),
+        PluginParamView {
+            read_only: true,
+            ..view(2, 0.9, 0.0)
+        },
+    ];
+    assert_eq!(merge_synced_params(&previous, &live), vec![param(1, 0.7)]);
+}
+
+#[test]
+fn the_same_control_reported_twice_keeps_the_last_value() {
+    // A drag's backlog and the processor's output feedback can report one
+    // id many times before the next poll.
+    assert_eq!(
+        latest_parameter_values(vec![(1, 0.2), (2, 0.4), (1, 0.9), (2, 0.1)]),
+        vec![(1, 0.9), (2, 0.1)]
+    );
+    let mut parameters = vec![view(1, 0.2, 0.0)];
+    let mut saved = Vec::new();
+    let changes = [
+        ParamChange {
+            id: 1,
+            value: 0.5,
+            display: None,
+        },
+        ParamChange {
+            id: 1,
+            value: 0.9,
+            display: None,
+        },
+    ];
+    assert!(apply_parameter_changes(
+        &mut parameters,
+        &mut saved,
+        &changes
+    ));
+    assert_eq!(parameters[0].value, 0.9);
+    assert_eq!(saved, vec![param(1, 0.9)]);
+}
+
+#[test]
+fn a_change_keeps_a_saved_id_the_plugin_does_not_list() {
+    let mut parameters = vec![view(1, 0.2, 0.0)];
+    let mut saved = vec![param(1, 0.2), param(9, 0.4)];
+    let changes = [ParamChange {
+        id: 1,
+        value: 0.6,
+        display: None,
+    }];
+    assert!(apply_parameter_changes(
+        &mut parameters,
+        &mut saved,
+        &changes
+    ));
+    assert_eq!(saved, vec![param(1, 0.6), param(9, 0.4)]);
+}
+
+#[test]
+fn reported_changes_update_only_the_controls_they_name() {
+    let mut parameters = vec![view(1, 0.2, 0.0), view(2, 0.5, 0.5), view(3, 0.9, 0.0)];
+    let mut saved = vec![param(1, 0.2), param(3, 0.9), param(9, 0.4)];
+    let changes = [
+        ParamChange {
+            id: 1,
+            value: 0.7,
+            display: Some("70 %".to_owned()),
+        },
+        // Not a control this plugin lists: ignored.
+        ParamChange {
+            id: 4,
+            value: 0.5,
+            display: None,
+        },
+    ];
+    // One id in this batch is not a control the plugin lists, so the call is
+    // asked for a full read, even though it applies the known ones.
+    assert!(!apply_parameter_changes(
+        &mut parameters,
+        &mut saved,
+        &changes
+    ));
+    assert_eq!(parameters[0].value, 0.7);
+    assert_eq!(parameters[0].display, "70 %");
+    // The views and saved entries it did not name stay as they were.
+    assert_eq!(parameters[1].value, 0.5);
+    assert_eq!(parameters[2].value, 0.9);
+    assert_eq!(saved, vec![param(1, 0.7), param(3, 0.9), param(9, 0.4)]);
+    // A batch of only known ids applies cleanly and asks for nothing.
+    let mut fresh = vec![view(1, 0.2, 0.0)];
+    let mut fresh_saved = Vec::new();
+    let known = [ParamChange {
+        id: 1,
+        value: 0.3,
+        display: None,
+    }];
+    assert!(apply_parameter_changes(
+        &mut fresh,
+        &mut fresh_saved,
+        &known
+    ));
+    assert_eq!(fresh[0].value, 0.3);
+    assert_eq!(fresh_saved, vec![param(1, 0.3)]);
+}
+
+#[test]
+fn a_reported_change_back_to_default_removes_it_from_saved() {
+    let mut parameters = vec![view(1, 0.6, 0.5), view(2, 0.4, 0.0)];
+    let mut saved = vec![param(1, 0.6), param(2, 0.4)];
+    let changes = [ParamChange {
+        id: 1,
+        value: 0.5,
+        display: None,
+    }];
+    apply_parameter_changes(&mut parameters, &mut saved, &changes);
+    assert_eq!(parameters[0].value, 0.5);
+    // No text was reported, so the cached one is kept.
+    assert_eq!(parameters[0].display, "");
+    assert_eq!(saved, vec![param(2, 0.4)]);
+}
+
+#[test]
+fn no_reported_changes_leave_everything_unchanged() {
+    let mut parameters = vec![view(1, 0.6, 0.0)];
+    let mut saved = vec![param(1, 0.6)];
+    apply_parameter_changes(&mut parameters, &mut saved, &[]);
+    assert_eq!(parameters[0].value, 0.6);
+    assert_eq!(saved, vec![param(1, 0.6)]);
+}
+
+#[test]
 fn a_port_change_is_visible_without_processing_a_block() {
     let mut slot = Slot::empty(PluginPref::default());
     slot.clap_host = Some(Arc::new(HostState::for_test(true)));
@@ -320,6 +456,37 @@ fn a_skipped_insert_still_delays_by_its_latency() {
     chain.process(&mut left, &mut right, 64);
     assert_eq!(left, impulse(64, 24));
     assert_eq!(right, impulse(64, 25));
+    // A bypassed or mix-0 insert never tries its plugin lock at all: the
+    // delay comes from the dry fallback, not from a skipped attempt.
+    for index in 0..2 {
+        assert_eq!(
+            chain.slot_mut_for_test(index).controls.lock_stats(),
+            crate::audio::LockStats::default(),
+            "insert {index}"
+        );
+    }
+}
+
+#[test]
+fn processing_a_slot_sets_the_processed_flag_once() {
+    use super::PluginChain;
+    let mut chain = PluginChain::new(48_000);
+    chain.insert_delay_for_test(0);
+    let controls = Arc::clone(&chain.slot_mut_for_test(0).controls);
+    assert!(!controls.take_processed());
+    let mut left = vec![0.0f32; 32];
+    let mut right = vec![0.0f32; 32];
+    chain.process(&mut left, &mut right, 32);
+    assert!(controls.take_processed());
+    assert!(!controls.take_processed());
+    // A skipped block (bypass) does not set it: an editor edit would not be
+    // visible in one.
+    chain.set_bypass(0, true);
+    chain.process(&mut left, &mut right, 32);
+    assert!(!controls.take_processed());
+    // Destroy the slot here rather than through the chain's deferred
+    // teardown, which another test's main-thread claim could trigger.
+    drop(chain.restore(Vec::new()));
 }
 
 #[test]
