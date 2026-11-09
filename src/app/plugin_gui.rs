@@ -19,8 +19,37 @@ use vst3_host::PluginWindow;
 use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{ClapPlugin, GuiVisibility, HostState, ParentWindow, ResizeHints};
-use crate::audio::{plugin_instance_id, PluginHandle, PluginView};
+use crate::audio::{plugin_instance_id, EngineState, PluginHandle, PluginView};
 use crate::ui::theme::{GREEN, RED};
+
+/// How often a Linux VST3 editor's run loop is serviced while a bridge runs.
+/// Every frame would hold the instance lock often enough for the audio
+/// callback to miss many blocks; at about 30 Hz the editor still paints.
+const VST3_RUN_LOOP_INTERVAL: Duration = Duration::from_millis(30);
+
+/// Whether the editor's run loop is due.  With no audio running there is
+/// nothing to starve, so every frame services it; while a bridge runs it is
+/// limited to [`VST3_RUN_LOOP_INTERVAL`].
+fn run_loop_due(active: bool, last: Instant, now: Instant) -> bool {
+    !active || now.saturating_duration_since(last) >= VST3_RUN_LOOP_INTERVAL
+}
+
+/// The `last_run_loop` an editor starts with: one interval in the past, so
+/// the first frame services the loop and paints, or `now` on a clock that
+/// cannot go back that far.  Shared with the test, which pins the property.
+fn run_loop_start(now: Instant) -> Instant {
+    now.checked_sub(VST3_RUN_LOOP_INTERVAL).unwrap_or(now)
+}
+
+/// Whether the engine is running a callback that can process a plugin block.
+/// Preview does not: it starts no callback, so a VST3 insert there never
+/// sees a processed block and its reported changes stay queued.
+fn audio_active(state: EngineState) -> bool {
+    matches!(
+        state,
+        EngineState::Starting | EngineState::Running | EngineState::Stopping
+    )
+}
 
 pub(crate) struct PluginGuiWindow {
     /// The insert this editor belongs to: its path and its position there.
@@ -33,6 +62,10 @@ enum GuiKind {
     Vst3 {
         plugin: Arc<Mutex<vst3_host::Plugin>>,
         window: PluginWindow,
+        /// When the run loop was last serviced, for
+        /// [`VST3_RUN_LOOP_INTERVAL`].  Kept here rather than on the shared
+        /// window so the VST3 arm can update it under its own borrow.
+        last_run_loop: Instant,
     },
     Clap {
         plugin: Arc<Mutex<ClapPlugin>>,
@@ -97,6 +130,10 @@ impl RigWerkApp {
                             kind: GuiKind::Vst3 {
                                 plugin: plugin.clone(),
                                 window,
+                                // Due at once, so opening the editor paints
+                                // on the first frame rather than after one
+                                // interval of a blank window.
+                                last_run_loop: run_loop_start(Instant::now()),
                             },
                             last_sync: Instant::now(),
                         });
@@ -155,30 +192,50 @@ impl RigWerkApp {
         self.plugin_gui = None;
     }
 
-    /// Servicing and keeping the open editor in step, once per frame.
+    /// Servicing and keeping the open editor in step, once per UI frame.
     ///
-    /// On Linux a VST3 editor paints from the host `IRunLoop`.  This drives
-    /// that loop while the window is open.  The call try-locks the instance,
-    /// so the UI never waits on the audio callback.  While the UI holds the
-    /// lock to paint, the callback skips the insert for that block, declicked
-    /// and with its latency kept.
+    /// On Linux a VST3 editor's `IRunLoop` carries its input, timers and
+    /// repaints.  This drives that loop while the window is open, about 30 Hz
+    /// while a bridge runs and at the full frame rate when it is stopped:
+    /// each service try-locks the instance, and at 60 Hz the lock would be
+    /// busy often enough for the audio callback to miss many chunks.  The UI
+    /// never waits on the callback.  While the UI holds the lock to service
+    /// the loop, the callback skips the insert for that chunk, declicked and
+    /// with its latency kept.  The cheap platform-event service (window close,
+    /// resize and DPI changes) still runs every frame and try-locks once for
+    /// them, so the interval limits only the run loop itself.
     pub(crate) fn poll_plugin_gui(&mut self) {
         let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) else {
             return;
         };
         let views = self.engine.plugin_views(key.path);
+        let audio_active = matches!(
+            self.engine.state,
+            EngineState::Starting
+                | EngineState::Running
+                | EngineState::Stopping
+                | EngineState::Preview
+        );
+        let now = Instant::now();
         let (dismissed, same_plugin, due) = {
             let Some(gui) = self.plugin_gui.as_mut() else {
                 return;
             };
             let dismissed = match &mut gui.kind {
-                GuiKind::Vst3 { plugin, window } => {
+                GuiKind::Vst3 {
+                    plugin,
+                    window,
+                    last_run_loop,
+                } => {
                     let _ = window.service_platform_events();
                     let dismissed = window.closed_by_user() || !window.is_open();
                     // A title-bar close is already recorded.  Painting now would
                     // draw into a window the host is about to destroy.
-                    if !dismissed {
-                        service_vst3_run_loop(plugin);
+                    if !dismissed
+                        && run_loop_due(audio_active, *last_run_loop, now)
+                        && service_vst3_run_loop(plugin)
+                    {
+                        *last_run_loop = now;
                     }
                     dismissed
                 }
@@ -217,13 +274,20 @@ impl RigWerkApp {
 /// silencing the editor for the rest of the session.  Other platforms have no
 /// host run loop to service.  Taking the lock there would only make the
 /// callback skip blocks.
-fn service_vst3_run_loop(plugin: &Mutex<vst3_host::Plugin>) {
+///
+/// Returns whether the loop ran, so a collision retries on the next frame
+/// instead of waiting out [`VST3_RUN_LOOP_INTERVAL`].  Non-Linux platforms
+/// have nothing to run and report `true`.
+fn service_vst3_run_loop(plugin: &Mutex<vst3_host::Plugin>) -> bool {
     #[cfg(target_os = "linux")]
     {
-        try_with_instance(plugin, vst3_host::Plugin::service_run_loop);
+        try_with_instance(plugin, vst3_host::Plugin::service_run_loop)
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = plugin;
+    {
+        let _ = plugin;
+        true
+    }
 }
 
 /// Runs `body` when the instance lock is free, including after a panic
