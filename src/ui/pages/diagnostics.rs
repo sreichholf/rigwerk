@@ -1,5 +1,6 @@
-//! Diagnostics: the activity log, scan notes, the bridge status line and
-//! the signal paths' DSP time (per path, against the block it must fit).
+//! Diagnostics: the activity log, scan notes, the bridge status line, the
+//! signal paths' DSP time (per path, against the block it must fit) and the
+//! plugin locks the audio thread skipped.
 //!
 //! The header pill still follows the engine state. This page shows the
 //! bridge's own status string beside that, and keeps scan notes and quantum
@@ -29,6 +30,69 @@ pub(crate) fn dsp_text(dsp: Option<crate::audio::DspTime>) -> String {
             time.peak_share() * 100.0
         ),
         _ => "not running".to_owned(),
+    }
+}
+
+/// "0 chunks", "1 chunk", "N chunks": the count with its unit, so a single
+/// chunk never reads as a plural.
+fn chunk_text(count: u64) -> String {
+    if count == 1 {
+        "1 chunk".to_owned()
+    } else {
+        format!("{count} chunks")
+    }
+}
+
+/// The skip share as text.  A non-zero skip that rounds to nothing reads
+/// "<1%", so a rare skip is not reported as none.
+fn percent_text(stats: &crate::audio::LockStats) -> String {
+    // Before any attempt `share` is 0, so the zero-skip case covers it.
+    if stats.skipped() == 0 {
+        return "0%".to_owned();
+    }
+    let percent = stats.share() * 100.0;
+    if percent < 1.0 {
+        "<1%".to_owned()
+    } else {
+        format!("{percent:.0}%")
+    }
+}
+
+/// Why the chain count and the insert counts differ; the card and the export
+/// say the same thing.
+const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Insert counts cover only chunks where the chain lock was free.";
+
+/// The line under a chain whose inserts were never reached.  A bypassed
+/// insert or one at mix 0 never tries its plugin lock, which is normal, and
+/// a chain lock that was always busy also keeps the inserts out.
+const NO_INSERT_TRIED: &str =
+    "(no insert tried its lock — bypassed, at mix 0, or the chain never ran)";
+
+/// Whether the path got chunks through its chain but none through an insert,
+/// so nothing below the chain line explains what happened.  A poisoned chain
+/// never processed its chunks, so it does not read as "no insert tried its
+/// lock".  A bypassed insert or one at mix 0 never tries its plugin lock
+/// either, which is normal, so the line names those causes instead of
+/// reading as a fault.
+fn no_insert_ran(report: &crate::audio::PluginLockReport) -> bool {
+    !report.chain_poisoned
+        && report.chain.attempts > 0
+        && report.inserts.iter().all(|insert| insert.attempts == 0)
+}
+
+/// One path's chain lock line: its skip share, or why there is none.  A
+/// poisoned chain is not contention, so its counters would read as a
+/// misleading skip rate.
+fn chain_lock_text(report: &crate::audio::PluginLockReport) -> String {
+    if report.chain_poisoned {
+        "chain unavailable after an internal error".to_owned()
+    } else {
+        format!(
+            "chain: {} skipped of {} ({})",
+            report.chain.skipped(),
+            chunk_text(report.chain.attempts),
+            percent_text(&report.chain)
+        )
     }
 }
 
@@ -100,6 +164,60 @@ impl RigWerkApp {
                 info.latency_ms,
                 if info.mute { " · muted" } else { "" }
             ));
+        }
+        let lock_reports: Vec<_> = self
+            .path_infos()
+            .into_iter()
+            .map(|info| {
+                let report = self.engine.plugin_lock_report(info.slot);
+                let views = self.engine.plugin_views(info.slot);
+                (info, report, views)
+            })
+            .collect();
+        lines.push("Plugin locks (skipped / attempted):".to_owned());
+        let any_attempts = lock_reports.iter().any(|(_, report, _)| {
+            // A poisoned chain has no attempts to show; it is still the only
+            // thing the section has to say about that path.
+            report.chain_poisoned
+                || report.chain.attempts > 0
+                || report.inserts.iter().any(|insert| insert.attempts > 0)
+        });
+        if !any_attempts {
+            lines.push("No plugin blocks yet.".to_owned());
+        } else {
+            for (info, report, views) in &lock_reports {
+                let path_attempts = report.chain.attempts
+                    + report
+                        .inserts
+                        .iter()
+                        .map(|insert| insert.attempts)
+                        .sum::<u64>();
+                // Reset clears the attempts but not the poison, so a poisoned
+                // chain must stay visible with nothing counted.
+                if path_attempts == 0 && !report.chain_poisoned {
+                    continue;
+                }
+                lines.push(format!("- {}: {}", info.name, chain_lock_text(report)));
+                if no_insert_ran(report) {
+                    lines.push(format!("  - {NO_INSERT_TRIED}"));
+                }
+                for (index, insert) in report.inserts.iter().enumerate() {
+                    if insert.attempts == 0 {
+                        continue;
+                    }
+                    let name = views
+                        .get(index)
+                        .map(|view| view.name.clone())
+                        .unwrap_or_else(|| format!("Insert {}", index + 1));
+                    lines.push(format!(
+                        "  - {name}: {} of {} ({})",
+                        insert.skipped(),
+                        chunk_text(insert.attempts),
+                        percent_text(insert)
+                    ));
+                }
+            }
+            lines.push(COUNTS_CAPTION.to_owned());
         }
         lines.push("Scan notes:".to_owned());
         if self.inventory.notes.is_empty() {
@@ -230,6 +348,98 @@ impl RigWerkApp {
                 .size(ts(10.0))
                 .color(DIM),
             );
+        });
+
+        ui.add_space(10.0);
+        card(ui, CARD, BORDER, |ui| {
+            ui.set_width(width - 32.0);
+            ui.label(micro_label("PLUGIN LOCKS · SKIPPED / ATTEMPTED", DIM));
+            ui.add_space(6.0);
+            let reports: Vec<_> = self
+                .path_infos()
+                .into_iter()
+                .map(|info| {
+                    let report = self.engine.plugin_lock_report(info.slot);
+                    (info, report)
+                })
+                .collect();
+            let any_attempts = reports.iter().any(|(_, report)| {
+                // See the export above: a poisoned chain outlives a reset.
+                report.chain_poisoned
+                    || report.chain.attempts > 0
+                    || report.inserts.iter().any(|insert| insert.attempts > 0)
+            });
+            if !any_attempts {
+                ui.label(
+                    RichText::new("No plugin blocks yet.")
+                        .size(ts(11.0))
+                        .color(MUTED),
+                );
+            } else {
+                for (info, report) in &reports {
+                    let path_attempts = report.chain.attempts
+                        + report
+                            .inserts
+                            .iter()
+                            .map(|insert| insert.attempts)
+                            .sum::<u64>();
+                    if path_attempts == 0 && !report.chain_poisoned {
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        status_dot(ui, info.colour);
+                        ui.label(RichText::new(&info.name).size(ts(11.0)).color(TEXT));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(mono(
+                            chain_lock_text(report),
+                            if report.chain_poisoned || report.chain.skipped() > 0 {
+                                AMBER
+                            } else {
+                                MUTED
+                            },
+                            9.5,
+                        ));
+                    });
+                    let views = self.engine.plugin_views(info.slot);
+                    if no_insert_ran(report) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(mono(NO_INSERT_TRIED, MUTED, 9.5));
+                        });
+                    }
+                    for (index, insert) in report.inserts.iter().enumerate() {
+                        if insert.attempts == 0 {
+                            continue;
+                        }
+                        let name = views
+                            .get(index)
+                            .map(|view| view.name.clone())
+                            .unwrap_or_else(|| format!("Insert {}", index + 1));
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(mono(
+                                format!(
+                                    "{name}: {} of {} ({})",
+                                    insert.skipped(),
+                                    chunk_text(insert.attempts),
+                                    percent_text(insert)
+                                ),
+                                if insert.skipped() > 0 { AMBER } else { MUTED },
+                                9.5,
+                            ));
+                        });
+                    }
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new(COUNTS_CAPTION).size(ts(10.0)).color(DIM));
+            }
+            ui.add_space(6.0);
+            if ghost_button(ui, "Reset all", 120.0) {
+                self.engine.reset_plugin_lock_counters();
+                self.push_log("Plugin lock counters reset.", TEAL);
+            }
         });
 
         ui.add_space(10.0);

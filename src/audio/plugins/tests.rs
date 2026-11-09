@@ -261,6 +261,37 @@ fn impulse(frames: usize, at: usize) -> Vec<f32> {
 }
 
 #[test]
+fn a_rate_reload_keeps_the_insert_lock_counters() {
+    use super::PluginChain;
+    let mut chain = PluginChain::new(48_000);
+    chain.insert_delay_for_test(16);
+    let mut left = vec![0.0f32; 32];
+    let mut right = vec![0.0f32; 32];
+    chain.process(&mut left, &mut right, 32);
+    let before = chain.slot_mut_for_test(0).controls.lock_stats();
+    assert_eq!(before.attempts, 1, "the insert lock was tried once");
+
+    let plan = chain.reload_plan(96_000).expect("a new rate reloads");
+    assert_eq!(plan.jobs.len(), 1);
+    let built: Vec<_> = plan
+        .jobs
+        .into_iter()
+        .map(|(index, pref)| (index, pref, Slot::delay_for_test(16)))
+        .collect();
+    let replaced = match chain.install_reload(plan.previous_rate, 96_000, built) {
+        Ok(replaced) => replaced,
+        Err(_) => panic!("the rebuilt slots match the chain"),
+    };
+    drop(replaced);
+    // `install_reload` reuses the old `SlotControls`, so the UI-side mix,
+    // bypass and lock counters survive the rebuild.
+    assert_eq!(chain.slot_mut_for_test(0).controls.lock_stats(), before);
+    // Destroy the rebuilt slot here rather than through the chain's deferred
+    // teardown, which another test's main-thread claim could trigger.
+    drop(chain.restore(Vec::new()));
+}
+
+#[test]
 fn a_partial_mix_lines_the_dry_side_up_with_the_wet_one() {
     use super::PluginChain;
     let mut chain = PluginChain::new(48_000);
@@ -321,12 +352,28 @@ fn a_clap_insert_skipped_by_its_editor_or_a_restart_keeps_its_latency() {
         assert!(left.windows(2).take(95).all(|pair| pair[1] < pair[0]));
         assert_eq!(left[96..], impulse(128, 100)[96..]);
     }
+    // The normal block before and the locked one now: one lock skip.
+    assert_eq!(
+        chain.slot_mut_for_test(0).controls.lock_stats(),
+        crate::audio::LockStats {
+            attempts: 2,
+            skips: 1,
+        }
+    );
     // A restart passes the block through: still 64 frames late.
     restart_fake_with_latency_for_test(64);
     let mut left = impulse(128, 0);
     let mut right = impulse(128, 0);
     chain.process(&mut left, &mut right, 128);
     assert_eq!(left, impulse(128, 64));
+    // The restart's pass-through is an attempt, not a missed lock.
+    assert_eq!(
+        chain.slot_mut_for_test(0).controls.lock_stats(),
+        crate::audio::LockStats {
+            attempts: 3,
+            skips: 1,
+        }
+    );
     drop(plugin);
     drop(chain.restore(Vec::new()));
 }

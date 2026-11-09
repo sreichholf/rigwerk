@@ -19,6 +19,7 @@ use super::plugins::{PluginPref, PluginView};
 use super::shared::FollowerPlan;
 use super::shared::Shared;
 use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
+use super::PluginLockReport;
 
 /// A driver open can take seconds (ASIO's own timeout is six); a start that
 /// never reports live is treated as stuck rather than left on "Linking".
@@ -318,6 +319,21 @@ impl AudioEngine {
         }
         let time = self.shared.total_dsp.load();
         (time.block_ns > 0).then_some(time)
+    }
+
+    /// Path `path`'s plugin lock counters: how often the audio thread tried
+    /// the chain lock and each insert's plugin lock, and how often it found
+    /// one busy.  Measurement only; the report takes no lock on the sample
+    /// path.
+    pub fn plugin_lock_report(&self, path: usize) -> PluginLockReport {
+        self.shared.path(path).plugin_lock_report()
+    }
+
+    /// Clears the plugin lock counters of every path.
+    pub fn reset_plugin_lock_counters(&self) {
+        for slot in 0..MAX_PATHS {
+            self.shared.path(slot).reset_plugin_lock_counters();
+        }
     }
 
     /// Screenshot hook: makes path `slot`'s chain report `samples` of

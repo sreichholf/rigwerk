@@ -745,6 +745,7 @@ fn run_plugin(
     right: &mut [f32],
 ) -> Outcome {
     let count = left.len().min(right.len());
+    slot.controls.note_attempt();
     #[cfg(test)]
     if let Some(test) = slot.test_delay.as_mut() {
         let latency = test.latency.min(MAX_ALIGN) as usize;
@@ -767,7 +768,10 @@ fn run_plugin(
             let mut plugin = match plugin.try_lock() {
                 Ok(plugin) => plugin,
                 Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
-                Err(TryLockError::WouldBlock) => return Outcome::Skipped,
+                Err(TryLockError::WouldBlock) => {
+                    slot.controls.note_lock_skip();
+                    return Outcome::Skipped;
+                }
             };
             buffers.block_size = count;
             // The VST3 host works out how many frames to run from the length
@@ -804,7 +808,10 @@ fn run_plugin(
             let mut plugin = match plugin.try_lock() {
                 Ok(plugin) => plugin,
                 Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
-                Err(TryLockError::WouldBlock) => return Outcome::Skipped,
+                Err(TryLockError::WouldBlock) => {
+                    slot.controls.note_lock_skip();
+                    return Outcome::Skipped;
+                }
             };
             match plugin.process(left, right, count, 1.0) {
                 Ok(true) => Outcome::Processed,
