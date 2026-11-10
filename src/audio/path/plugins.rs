@@ -20,8 +20,10 @@
 //! What still takes the chain lock is structural and short: adding,
 //! removing, moving or restoring inserts, reopening them for a new rate
 //! (slow loads and teardowns run outside the lock), resetting a plugin's
-//! controls, syncing from its editor, capturing state for a save, and the
-//! publish of the views those edits do.
+//! controls, capturing state for a save, and the publish of the views those
+//! edits do.  Syncing from an editor applies only what a running VST3 insert
+//! reported; a CLAP editor (no change feed) and an insert that has not
+//! processed a block since the last sync are read in full instead.
 //!
 //! For those rare misses the mixer keeps the timing: rather than a second,
 //! lock-free copy of the chain (plugin instances are stateful and cannot be
@@ -35,13 +37,13 @@
 //! [`PathControls::process_plugins`] reports whether the chain ran.
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, PoisonError, TryLockError};
 
 use super::super::plugins::{
-    host_format_parameter, host_set_parameter, PluginChain, PluginHandle, PluginPref, PluginView,
-    SlotLink, Vst3Service,
+    host_format_parameter, host_set_parameter, take_parameter_changes, take_parameter_values,
+    PluginChain, PluginHandle, PluginPref, PluginView, SlotLink, Vst3Service,
 };
-use super::{ClapService, PathControls};
+use super::{ClapService, LockStats, PathControls, PluginLockReport};
 
 /// The service lists a publish replaces; dropped after the chain lock is
 /// released, since they may hold the last reference to a removed plugin.
@@ -70,6 +72,15 @@ impl Drop for PublishOnUnwind<'_> {
     fn drop(&mut self) {
         self.path.publish_poisoned();
     }
+}
+
+/// Whether an editor sync has to read every control: it was asked to
+/// (`requested`), or the insert has not processed a block since the last sync
+/// (`!processed`, so a reported change may not be visible yet), or it is not a
+/// VST3 insert at all (CLAP has no change feed).  Only a VST3 insert that
+/// processed a block can be synced from its reported changes.
+pub(super) fn needs_full_sync(requested: bool, processed: bool, has_vst3: bool) -> bool {
+    requested || !processed || !has_vst3
 }
 
 impl PathControls {
@@ -263,8 +274,29 @@ impl PathControls {
         let old = self
             .edit_chain(|chain| chain.restore(prefs))
             .unwrap_or_default();
+        // The insert counters come from the fresh SlotControls; the chain
+        // lock's own counters belong to the chain this replaces.
+        self.chain_attempts.store(0, Ordering::Relaxed);
+        self.chain_skips.store(0, Ordering::Relaxed);
         // Destroyed after the chain lock is released.
         drop(old);
+    }
+
+    /// Adds the pure-delay test insert (see `Slot::delay_for_test`).  Lets a
+    /// test outside `audio` give a path one active insert.
+    #[cfg(test)]
+    pub(crate) fn insert_delay_for_test(&self, latency: u32) {
+        self.edit_chain(|chain| chain.insert_delay_for_test(latency));
+    }
+
+    /// Poisons the chain lock the way a panicking edit does, so a test can
+    /// check what the audio thread and Diagnostics report afterwards.
+    #[cfg(test)]
+    pub(crate) fn poison_chain_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _chain = self.plugins.lock().expect("the chain is not poisoned yet");
+            panic!("poison the chain");
+        }));
     }
 
     /// Whether the chain needs a reload for `rate`: it was built at another
@@ -406,14 +438,77 @@ impl PathControls {
     }
 
     /// Copies control values back after the plugin's own editor changed them.
-    /// The plugin is read without the chain lock; only storing the result
-    /// takes it, briefly.
-    pub(crate) fn sync_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        let handle = self
-            .plugins
-            .lock()
-            .map_err(|_| "Plugin chain unavailable".to_owned())?
-            .loaded_handle(index)?;
+    ///
+    /// With `full`, the whole control list is read and formatted, and the
+    /// reporter is only drained (`take_parameter_values`).  Without it, only
+    /// the changes a running VST3 insert reported are applied with
+    /// [`take_parameter_changes`]; a CLAP plugin has no change feed, and an
+    /// insert that has not processed a block since the last sync has no
+    /// visible changes yet, so both cases read in full instead (see
+    /// [`needs_full_sync`]).  A plugin that reported a changed parameter list
+    /// (`param_titles_changed` / `param_values_changed`) is forced to the full
+    /// read too, and an id the cached views do not know falls back to it, at
+    /// most once a second (see [`Vst3Service::unknown_full_due`]).  A changed
+    /// name or default on an existing id is picked up by the full sync on
+    /// stop, close or save, or by that fallback when the id is new.
+    ///
+    /// A missing or unloaded insert is a silent no-op.
+    pub(crate) fn sync_plugin_parameters(&self, index: usize, full: bool) -> Result<(), String> {
+        // From the published links, so the periodic sync never takes the
+        // chain lock just to find the plugin.
+        let link = self.slot_link(index);
+        // Keep the VST3 restart/parameter poll window open for as long as the
+        // editor is being synced, even when it reports no parameter changes:
+        // a request raised by an editor action that does not call
+        // `performEdit` would otherwise go unseen once the window lapses.
+        // This is a plain atomic store, on the UI thread.
+        if let Some(service) = link.as_ref().and_then(|link| link.vst3.as_ref()) {
+            service.nudge();
+        }
+        let parameters_changed = link
+            .as_ref()
+            .and_then(|link| link.vst3.as_ref())
+            .is_some_and(|vst3| vst3.take_parameters_changed());
+        let Some(link) = link else {
+            return Ok(());
+        };
+        let processed = link.controls.take_processed();
+        let vst3 = link.vst3.clone();
+        let Some(handle) = link.plugin else {
+            return Ok(());
+        };
+        // Decided before draining, from the processed flag and the service's
+        // requests (atomics, no plugin call).
+        let full = needs_full_sync(full || parameters_changed, processed, vst3.is_some());
+        if !full {
+            let Some(changes) = take_parameter_changes(&handle) else {
+                return Ok(());
+            };
+            if changes.is_empty() {
+                return Ok(());
+            }
+            match self
+                .edit_chain(|chain| chain.apply_synced_parameter_changes(index, &handle, &changes))
+            {
+                Some(Some(true)) | Some(None) => return Ok(()),
+                // An id the cached views did not know: read the whole list
+                // instead.  The edit above has already released the lock.
+                Some(Some(false)) => {
+                    if !vst3
+                        .as_ref()
+                        .is_none_or(|service| service.unknown_full_due())
+                    {
+                        return Ok(());
+                    }
+                }
+                None => return Err("Plugin chain unavailable".to_owned()),
+            }
+        } else {
+            // Drain the reporter before the full read, without formatting:
+            // a value queued before the fresher read would otherwise be
+            // applied by the next change poll, putting an older value back.
+            drop(take_parameter_values(&handle));
+        }
         let Some(parameters) = super::super::plugins::read_plugin_parameters(&handle) else {
             return Ok(());
         };
@@ -590,6 +685,13 @@ impl PathControls {
     /// active insert but some latency (every insert bypassed) still runs, so
     /// its skipped inserts delay the block by their latency.  `try_lock`
     /// keeps a UI edit from stalling the block.
+    ///
+    /// Every real attempt on the chain lock is counted; so is a lock found
+    /// busy, which leaves the block to the dry fallback below.  A poisoned
+    /// lock is not counted as a skip: it is not contention, and the chain
+    /// stays unusable for the rest of the session (see
+    /// [`PluginLockReport::chain_poisoned`]).  Measurement only: the counters
+    /// are written relaxedly and Diagnostics reads them.
     pub(crate) fn process_plugins(
         &self,
         left: &mut [f32],
@@ -599,8 +701,19 @@ impl PathControls {
         if self.plugin_active.load(Ordering::Relaxed) == 0 && self.latency_samples() == 0 {
             return true;
         }
-        let Ok(mut chain) = self.plugins.try_lock() else {
-            return false;
+        self.chain_attempts.fetch_add(1, Ordering::Relaxed);
+        let mut chain = match self.plugins.try_lock() {
+            Ok(chain) => chain,
+            Err(TryLockError::WouldBlock) => {
+                self.chain_skips.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                // An earlier panic held the chain lock: the inserts are gone
+                // for this session, and no poll will bring them back.
+                self.chain_poisoned.store(true, Ordering::Relaxed);
+                return false;
+            }
         };
         let failed = chain.process(left, right, frames);
         self.plugin_active.store(chain.active(), Ordering::Relaxed);
@@ -609,5 +722,44 @@ impl PathControls {
             self.plugin_views_dirty.store(true, Ordering::Release);
         }
         true
+    }
+
+    /// This path's plugin lock counters: the chain lock and each insert's
+    /// own plugin lock.  Measurement only; never takes the chain lock.
+    pub(crate) fn plugin_lock_report(&self) -> PluginLockReport {
+        let links = Arc::clone(
+            &self
+                .slot_links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        PluginLockReport {
+            chain: LockStats {
+                attempts: self.chain_attempts.load(Ordering::Relaxed),
+                skips: self.chain_skips.load(Ordering::Relaxed),
+            },
+            inserts: links
+                .iter()
+                .map(|link| link.controls.lock_stats())
+                .collect(),
+            chain_poisoned: self.chain_poisoned.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Clears this path's plugin lock counters (UI thread).  It does not
+    /// clear [`PluginLockReport::chain_poisoned`]: resetting a counter cannot
+    /// make a poisoned chain usable.
+    pub(crate) fn reset_plugin_lock_counters(&self) {
+        self.chain_attempts.store(0, Ordering::Relaxed);
+        self.chain_skips.store(0, Ordering::Relaxed);
+        let links = Arc::clone(
+            &self
+                .slot_links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for link in links.iter() {
+            link.controls.reset_lock_stats();
+        }
     }
 }

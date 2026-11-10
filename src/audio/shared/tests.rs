@@ -352,6 +352,10 @@ fn mix_bypass_and_controls_never_wait_for_the_chain_lock() {
                 // The fake has no controls: this fails, but at the
                 // plugin, without the chain lock.
                 let _ = path.set_plugin_parameter(0, 7, 0.5);
+                // Neither reading nor resetting the counters may take the
+                // chain lock the main thread holds.
+                let _ = path.plugin_lock_report();
+                path.reset_plugin_lock_counters();
             }
             path.set_plugin_mix(0, 0.25);
             path.set_plugin_bypass(0, true);

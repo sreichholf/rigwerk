@@ -105,12 +105,15 @@ pub use output_map::{
     UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
     VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
+#[cfg(test)]
+pub(crate) use shared::tests::claim_main_thread;
 // Ranges for the path level, the per-device path level and the trim.
 pub use output_map::PATH_TRIM_MAX_MS;
 pub(crate) use path::path_level_gain;
 pub(crate) use path::PathState;
 pub use path::{
-    sanitize_path_level, DspTime, PathMix, MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
+    sanitize_path_level, DspTime, LockStats, PathMix, PluginLockReport, MAX_PATHS,
+    PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
 };
 pub(crate) use plugins::service_clap;
 pub(crate) use plugins::MAX_ALIGN;

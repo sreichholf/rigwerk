@@ -61,6 +61,9 @@ mod plugins;
 
 use plugins::ParamWrite;
 
+#[cfg(test)]
+mod tests;
+
 /// Most signal paths a session can hold.  Every per-path array (controls,
 /// processors, device maps) is this long; only the active ones run.
 pub const MAX_PATHS: usize = 4;
@@ -249,6 +252,43 @@ impl DspTime {
     }
 }
 
+/// How often one lock on the sample path was tried and how often it was
+/// busy, so its work was skipped for that chunk.  Measurement only: the
+/// audio thread writes these relaxedly and never reads them back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LockStats {
+    pub attempts: u64,
+    pub skips: u64,
+}
+
+impl LockStats {
+    /// The skips, never more than the attempts: a reset racing the audio
+    /// thread can zero the attempts after a skip was counted.
+    pub fn skipped(&self) -> u64 {
+        self.skips.min(self.attempts)
+    }
+
+    /// The skips as a share of the attempts (0 before any attempt).
+    pub fn share(&self) -> f32 {
+        if self.attempts == 0 {
+            0.0
+        } else {
+            self.skipped() as f32 / self.attempts as f32
+        }
+    }
+}
+
+/// One path's plugin lock counters: the chain's own lock and one per insert.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginLockReport {
+    pub chain: LockStats,
+    pub inserts: Vec<LockStats>,
+    /// The chain lock was poisoned by a panic while it was held, so the
+    /// inserts are gone for the rest of the session.  The skip counters then
+    /// describe nothing, and Diagnostics says so instead of showing a rate.
+    pub chain_poisoned: bool,
+}
+
 /// A [`DspTime`] as atomics, so the audio thread can publish it without a
 /// lock.  Each field is stored on its own (`Relaxed`): a reader may see one
 /// block's average beside the next block's peak, which a meter can afford.
@@ -346,6 +386,15 @@ pub(crate) struct PathControls {
     /// without the chain lock.
     latency: Arc<AtomicU32>,
     plugin_active: AtomicUsize,
+    /// How often the audio thread tried this path's chain lock and how often
+    /// it was busy, so the chunk played the chain's input delayed instead.
+    /// Measurement only: written relaxedly by the audio thread.
+    chain_attempts: AtomicU64,
+    chain_skips: AtomicU64,
+    /// Set by the audio thread when the chain lock is poisoned: an earlier
+    /// panic while the lock was held left the chain unusable, which is not
+    /// contention and never clears.
+    chain_poisoned: AtomicBool,
     /// The two built-in EQs (pre and post inserts).  Each version counter
     /// lets the audio callback notice a change without taking the lock.
     eq: [Mutex<EqSettings>; 2],
@@ -395,6 +444,9 @@ impl PathControls {
             latency: chain.latency_handle(),
             plugins: Mutex::new(chain),
             plugin_active: AtomicUsize::new(0),
+            chain_attempts: AtomicU64::new(0),
+            chain_skips: AtomicU64::new(0),
+            chain_poisoned: AtomicBool::new(false),
             eq: [
                 Mutex::new(EqSettings::default()),
                 Mutex::new(EqSettings::default()),

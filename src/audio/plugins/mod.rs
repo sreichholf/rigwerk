@@ -39,7 +39,8 @@ pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use chain::{PluginChain, SlotLink};
 pub(crate) use load::{
     capture_state, host_format_parameter, host_set_parameter, instance_id, read_plugin_parameters,
-    service_clap, PluginHandle, Restore, Vst3Service, MAX_BLOCK,
+    service_clap, take_parameter_changes, take_parameter_values, PluginHandle, Restore,
+    Vst3Service, MAX_BLOCK,
 };
 pub(crate) use slot::drain_deferred_plugins;
 

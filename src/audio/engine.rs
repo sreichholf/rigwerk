@@ -19,6 +19,7 @@ use super::plugins::{PluginPref, PluginView};
 use super::shared::FollowerPlan;
 use super::shared::Shared;
 use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
+use super::PluginLockReport;
 
 /// A driver open can take seconds (ASIO's own timeout is six); a start that
 /// never reports live is treated as stuck rather than left on "Linking".
@@ -320,6 +321,21 @@ impl AudioEngine {
         (time.block_ns > 0).then_some(time)
     }
 
+    /// Path `path`'s plugin lock counters: how often the audio thread tried
+    /// the chain lock and each insert's plugin lock, and how often it found
+    /// one busy.  Measurement only; the report takes no lock on the sample
+    /// path.
+    pub fn plugin_lock_report(&self, path: usize) -> PluginLockReport {
+        self.shared.path(path).plugin_lock_report()
+    }
+
+    /// Clears the plugin lock counters of every path.
+    pub fn reset_plugin_lock_counters(&self) {
+        for slot in 0..MAX_PATHS {
+            self.shared.path(slot).reset_plugin_lock_counters();
+        }
+    }
+
     /// Screenshot hook: makes path `slot`'s chain report `samples` of
     /// latency, as a latent plugin would, so Signal Routing can show the
     /// alignment without loading one.  Only used before a bridge runs.
@@ -539,15 +555,26 @@ impl AudioEngine {
     }
 
     /// Copies control values back after the plugin's own editor changed them.
-    pub fn sync_plugin_parameters(&self, path: usize, index: usize) -> Result<(), String> {
-        self.shared.path(path).sync_plugin_parameters(index)
+    /// With `full` the whole control list is read and formatted; without it
+    /// only the changes a running VST3 insert reported are applied (and an id
+    /// the plugin does not list falls back to the full read, see
+    /// [`Self::finish_plugin_editor`] for the close-time sync).
+    pub fn sync_plugin_parameters(
+        &self,
+        path: usize,
+        index: usize,
+        full: bool,
+    ) -> Result<(), String> {
+        self.shared.path(path).sync_plugin_parameters(index, full)
     }
 
     /// Copies the editor's last changes back and marks the insert's saved
-    /// state for capture, when its editor closes.
+    /// state for capture, when its editor closes.  This is the full read,
+    /// which CLAP depends on and which catches anything a VST3 plugin changed
+    /// without reporting it.
     pub fn finish_plugin_editor(&self, path: usize, index: usize) {
         let controls = self.shared.path(path);
-        let _ = controls.sync_plugin_parameters(index);
+        let _ = controls.sync_plugin_parameters(index, true);
         controls.mark_plugin_state_stale(index);
     }
 

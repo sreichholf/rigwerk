@@ -8,8 +8,8 @@ use vst3_host::AudioBuffers;
 use super::super::clap::{ClapPlugin, HostState};
 use super::super::delay::{DECLICK_SECONDS, TAP_FADE_SECONDS};
 use super::load::{
-    host_format_parameter, host_reset_parameters, host_set_parameter, merge_synced_params, Capture,
-    PluginHandle, StateRequest, Vst3Service, MAX_BLOCK,
+    apply_parameter_changes, host_format_parameter, host_reset_parameters, host_set_parameter,
+    merge_synced_params, Capture, ParamChange, PluginHandle, StateRequest, Vst3Service, MAX_BLOCK,
 };
 #[cfg(test)]
 use super::pref::PluginFormat;
@@ -413,18 +413,6 @@ impl PluginChain {
             .collect()
     }
 
-    /// The plugin behind one slot, for work that must not hold the chain
-    /// lock.  Fails with the slot's own error when it is not loaded.
-    pub(crate) fn loaded_handle(&self, index: usize) -> Result<PluginHandle, String> {
-        let Some(slot) = self.slots.get(index) else {
-            return Err("That insert is no longer in the chain".to_owned());
-        };
-        slot.plugin.clone().ok_or_else(|| {
-            slot.resolved_error()
-                .unwrap_or_else(|| "The plugin is not loaded".to_owned())
-        })
-    }
-
     /// Stores controls read with [`super::read_plugin_parameters`] back into the
     /// slot, provided it still holds the same plugin instance.
     pub(crate) fn apply_synced_parameters(
@@ -448,6 +436,37 @@ impl PluginChain {
         // The editor is open and can change more than parameters.
         slot.state_stale = true;
         slot.nudge_vst3();
+    }
+
+    /// Stores control changes reported by an open VST3 editor, touching only
+    /// the ids they name instead of reading every control again.  The same
+    /// instance check as [`Self::apply_synced_parameters`].  `Some(false)`
+    /// when an id was not in the cached views (a control the plugin added or
+    /// renamed), which asks the caller for a full read; `None` when the slot
+    /// or instance no longer matches.
+    ///
+    /// The index/instance guard is not unit-tested: it needs two real plugin
+    /// instances, the same limitation as [`Self::apply_synced_parameters`].
+    pub(crate) fn apply_synced_parameter_changes(
+        &mut self,
+        index: usize,
+        handle: &PluginHandle,
+        changes: &[ParamChange],
+    ) -> Option<bool> {
+        let slot = self.slots.get_mut(index)?;
+        if !slot
+            .plugin
+            .as_ref()
+            .is_some_and(|current| current.same(handle))
+        {
+            return None;
+        }
+        let all_known =
+            apply_parameter_changes(&mut slot.parameters, &mut slot.pref.params, changes);
+        // The editor is open and can change more than parameters.
+        slot.state_stale = true;
+        slot.nudge_vst3();
+        Some(all_known)
     }
 
     /// The loaded plugins whose state should be captured now: those whose
@@ -691,6 +710,11 @@ fn process_slot(
     };
     let failed = matches!(outcome, Outcome::Failed);
     let processed = matches!(outcome, Outcome::Processed);
+    if processed {
+        // The editor sync needs to know a block ran: only then can a VST3
+        // plugin's reported changes have become visible.
+        slot.controls.note_processed();
+    }
     match outcome {
         Outcome::Processed if mix < 1.0 => {
             let dry = 1.0 - mix;
@@ -745,6 +769,7 @@ fn run_plugin(
     right: &mut [f32],
 ) -> Outcome {
     let count = left.len().min(right.len());
+    slot.controls.note_attempt();
     #[cfg(test)]
     if let Some(test) = slot.test_delay.as_mut() {
         let latency = test.latency.min(MAX_ALIGN) as usize;
@@ -767,7 +792,10 @@ fn run_plugin(
             let mut plugin = match plugin.try_lock() {
                 Ok(plugin) => plugin,
                 Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
-                Err(TryLockError::WouldBlock) => return Outcome::Skipped,
+                Err(TryLockError::WouldBlock) => {
+                    slot.controls.note_lock_skip();
+                    return Outcome::Skipped;
+                }
             };
             buffers.block_size = count;
             // The VST3 host works out how many frames to run from the length
@@ -804,7 +832,10 @@ fn run_plugin(
             let mut plugin = match plugin.try_lock() {
                 Ok(plugin) => plugin,
                 Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
-                Err(TryLockError::WouldBlock) => return Outcome::Skipped,
+                Err(TryLockError::WouldBlock) => {
+                    slot.controls.note_lock_skip();
+                    return Outcome::Skipped;
+                }
             };
             match plugin.process(left, right, count, 1.0) {
                 Ok(true) => Outcome::Processed,

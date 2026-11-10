@@ -37,6 +37,45 @@ fn poll_with_no_editor_leaves_the_window_unset() {
 }
 
 #[test]
+fn only_a_running_callback_counts_as_audio_active() {
+    assert!(!audio_active(EngineState::Idle));
+    assert!(audio_active(EngineState::Starting));
+    assert!(audio_active(EngineState::Running));
+    assert!(audio_active(EngineState::Stopping));
+    assert!(!audio_active(EngineState::Preview));
+    assert!(!audio_active(EngineState::Error));
+}
+
+#[test]
+fn the_run_loop_is_due_at_once_when_an_editor_opens() {
+    let now = Instant::now();
+    // This pins the seed helper the open path uses: one interval in the
+    // past, or now where the clock cannot go that far back.
+    assert!(run_loop_due(true, run_loop_start(now), now));
+}
+
+#[test]
+fn an_open_editor_services_its_run_loop_less_often_while_audio_runs() {
+    let now = Instant::now();
+    // With no bridge running there is nothing to starve: every frame.
+    assert!(run_loop_due(false, now, now));
+    assert!(run_loop_due(
+        false,
+        now,
+        now.checked_sub(Duration::from_millis(1)).unwrap_or(now)
+    ));
+    // While it runs, the interval has to pass first.
+    assert!(!run_loop_due(true, now, now));
+    assert!(!run_loop_due(
+        true,
+        now,
+        now + VST3_RUN_LOOP_INTERVAL - Duration::from_millis(1)
+    ));
+    assert!(run_loop_due(true, now, now + VST3_RUN_LOOP_INTERVAL));
+    assert!(run_loop_due(true, now, now + Duration::from_millis(100)));
+}
+
+#[test]
 fn editor_service_skips_a_busy_instance_lock() {
     let plugin = Mutex::new(Probe(0));
     let _held = plugin.lock().expect("lock");

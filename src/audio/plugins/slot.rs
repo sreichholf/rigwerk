@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::super::clap::{HostState, AUDIO_PORTS_CHANGED};
@@ -12,15 +12,28 @@ use super::load::{
 };
 use super::pref::{PluginParamView, PluginPref, PluginView};
 use super::MAX_ALIGN;
+use crate::audio::LockStats;
 
 /// An insert's mix and bypass as atomics: the UI sets them without the
 /// chain lock and the audio thread reads them every chunk, so dragging the
 /// mix or toggling bypass never makes the audio thread miss the chain.
 /// The slot's `pref.mix` / `pref.bypass` are only the values it was made
 /// with; [`Slot::saved_pref`] and the views read these.
+///
+/// It also counts how often the audio thread tried the insert's plugin lock
+/// and how often UI-side work held it (parameter drags, state capture and the
+/// editor all count).  Measurement only: the audio thread writes these
+/// relaxedly and Diagnostics reads them.
+///
+/// `processed` is the same thread's notice that the plugin actually ran a
+/// chunk: a VST3 change it reported is only visible after one, so the editor
+/// sync needs it to decide between the change poll and a full read.
 pub(crate) struct SlotControls {
     mix: AtomicU32,
     bypass: AtomicBool,
+    attempts: AtomicU64,
+    skips: AtomicU64,
+    processed: AtomicBool,
 }
 
 impl SlotControls {
@@ -28,6 +41,9 @@ impl SlotControls {
         Self {
             mix: AtomicU32::new(pref.mix.clamp(0.0, 1.0).to_bits()),
             bypass: AtomicBool::new(pref.bypass),
+            attempts: AtomicU64::new(0),
+            skips: AtomicU64::new(0),
+            processed: AtomicBool::new(false),
         }
     }
 
@@ -50,6 +66,43 @@ impl SlotControls {
 
     pub(crate) fn set_bypass(&self, bypass: bool) {
         self.bypass.store(bypass, Ordering::Relaxed);
+    }
+
+    /// Counts one attempt on the insert's plugin lock (audio thread, once
+    /// per chunk the insert runs).
+    pub(crate) fn note_attempt(&self) {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts an attempt whose plugin lock was busy, so that chunk skipped
+    /// the insert (audio thread).
+    pub(crate) fn note_lock_skip(&self) {
+        self.skips.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn lock_stats(&self) -> LockStats {
+        LockStats {
+            attempts: self.attempts.load(Ordering::Relaxed),
+            skips: self.skips.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn reset_lock_stats(&self) {
+        self.attempts.store(0, Ordering::Relaxed);
+        self.skips.store(0, Ordering::Relaxed);
+    }
+
+    /// Notes that the plugin processed a chunk (audio thread).  A VST3 change
+    /// the plugin reports is only visible after a processed block, so the
+    /// editor sync reads this before it trusts the change poll.
+    pub(crate) fn note_processed(&self) {
+        self.processed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the plugin processed a chunk since the last call, clearing the
+    /// flag (UI thread).
+    pub(crate) fn take_processed(&self) -> bool {
+        self.processed.swap(false, Ordering::Relaxed)
     }
 }
 
