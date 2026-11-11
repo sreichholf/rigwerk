@@ -1010,12 +1010,16 @@ impl Shared {
             out_l: f32::from_bits(self.out_l.load(Ordering::Relaxed)),
             out_r: f32::from_bits(self.out_r.load(Ordering::Relaxed)),
             out_channels: self.clock_device.meters(),
+            out_reduction_db: self.clock_device.reduction_db(),
             output_channels: self.clock_device.channels(),
             follower_count: self
                 .follower_count
                 .load(Ordering::Relaxed)
                 .min(MAX_FOLLOWERS),
             follower_channels: std::array::from_fn(|index| self.followers[index].meters()),
+            follower_reduction_db: std::array::from_fn(|index| {
+                self.followers[index].reduction_db()
+            }),
             follower_channel_counts: std::array::from_fn(|index| self.followers[index].channels()),
             follower_missing: std::array::from_fn(|index| {
                 self.follower_buses[index].missing.load(Ordering::Relaxed)

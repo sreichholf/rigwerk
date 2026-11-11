@@ -35,6 +35,8 @@ fn write_frame_converts_to_the_device_format() {
     let mut mapper = DeviceMapper::new(2);
     mapper.begin_block(&controls, 288.0);
     let mut frame = [0i16; 2];
-    write_frame(&mut frame, mapper.map(0.5, -1.0));
-    assert_eq!(frame, [i16::from_sample(0.5f32), i16::from_sample(-1.0f32)]);
+    // Under the safety ceiling, so the mapper copies and the conversion
+    // is the only thing this checks.
+    write_frame(&mut frame, mapper.map(0.5, -0.5));
+    assert_eq!(frame, [i16::from_sample(0.5f32), i16::from_sample(-0.5f32)]);
 }

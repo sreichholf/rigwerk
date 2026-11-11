@@ -809,9 +809,10 @@ fn live_slots_add_up_and_a_reactivated_slot_starts_fresh() {
     assert!(out[0][0] > 0.5 && out[0][0] < 0.51, "{:?}", out[0]);
     assert!(largest_step(&out) < 0.5 / 100.0);
     assert_eq!(out[399], [1.0, -0.5, 0.0, 0.0]);
+    let ceiling = crate::audio::safety_ceiling_linear();
     assert!(device(&mut mixer, &shared)
         .iter()
-        .all(|f| *f == [1.0, -0.5]));
+        .all(|f| *f == [ceiling, -0.5 * ceiling]));
     // Removing slot 0 keeps it running through its fade-out, after
     // which the mixer makes it inactive; slot 1 stays where it is.
     shared.paths[0].set_state(PathState::FadingOut);
@@ -820,6 +821,12 @@ fn live_slots_add_up_and_a_reactivated_slot_starts_fresh() {
     assert_eq!(out[399], [0.5, -0.25, 0.0, 0.0]);
     assert_eq!(shared.paths[0].state(), PathState::Inactive);
     assert_eq!(render(&mut mixer, &shared, 16)[0], [0.5, -0.25, 0.0, 0.0]);
+    // The summed pair was over the ceiling.  The remaining path is under
+    // it; the limiter releases over tens of ms before the copy is exact.
+    for _ in 0..20_000 {
+        shared.push_frame(0.5, -0.25);
+    }
+    mixer.render(&shared, 16_000, |_, _| {});
     assert!(device(&mut mixer, &shared)
         .iter()
         .all(|f| *f == [0.5, -0.25]));
@@ -1151,7 +1158,13 @@ fn two_paths_add_up_where_their_maps_meet() {
     // Out 1 sums both L; Out 2 is path 0's R; Out 3 is reached by no
     // path, so it gets the mono copy of both paths mapped here; Out 4 is
     // path 1's R.
-    assert_eq!(out[31], [1.0, -0.25, 0.25, -0.25]);
+    // Out 1 is both lefts (1.0), over the safety ceiling, so the frame is
+    // held there and the other channels scale with it.
+    let ceiling = crate::audio::safety_ceiling_linear();
+    assert_eq!(
+        out[31],
+        [ceiling, -0.25 * ceiling, 0.25 * ceiling, -0.25 * ceiling]
+    );
 }
 
 #[test]
@@ -1193,13 +1206,15 @@ fn level_and_polarity_apply_per_path_and_device() {
         }
     });
     assert_eq!(clock[63], [0.5 * gain - 0.5, -0.25 * gain + 0.25]);
-    assert_eq!(follower[63], [1.0, -0.5]);
+    let ceiling = crate::audio::safety_ceiling_linear();
+    assert_eq!(follower[63], [ceiling, -0.5 * ceiling]);
     assert_eq!(shared.clock_device.path_gain(1), -1.0);
 }
 
 #[test]
 fn a_polarity_flip_ramps_through_zero_without_a_click() {
-    let (mut mixer, shared) = two_path_mixer((0.5, 0.5), 2);
+    // Two copies stay under the safety ceiling, so the ramp stays linear.
+    let (mut mixer, shared) = two_path_mixer((0.4, 0.4), 2);
     let _adopted = device_frames(&mut mixer, &shared, 2, 16);
     shared.clock_device.set(&device_with(&[(
         1,
@@ -1211,7 +1226,7 @@ fn a_polarity_flip_ramps_through_zero_without_a_click() {
     let out = device_frames(&mut mixer, &shared, 2, 600);
     assert_eq!(
         out[0][0],
-        1.0 - 1.0 / 288.0,
+        0.8 - 0.8 / 288.0,
         "the first sample barely moves"
     );
     assert!(out.iter().any(|frame| frame[0].abs() < 0.01), "passes zero");

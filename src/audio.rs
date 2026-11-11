@@ -30,7 +30,8 @@
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
-//! - `output_map`: per-device level, mute and channel map.
+//! - `output_map`: per-device level, mute, safety ceiling and channel map.
+//! - `limiter`: the per-device sample-peak ceiling after the device level.
 //! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
@@ -50,6 +51,7 @@ pub(crate) use follower::is_vb_cable_render;
 pub(crate) use follower::FOLLOWER_DRIFT_LIMIT_PPM;
 mod gate;
 mod input;
+mod limiter;
 mod mixer;
 mod output;
 mod output_map;
@@ -117,6 +119,9 @@ pub use output_map::{
 #[cfg(test)]
 pub(crate) use shared::tests::claim_main_thread;
 // Ranges for the path level, the per-device path level and the trim.
+#[cfg(test)]
+pub(crate) use limiter::safety_ceiling_linear;
+pub(crate) use limiter::{SAFETY_CEILING_DB, SAFETY_GR_DB};
 pub use output_map::PATH_TRIM_MAX_MS;
 pub(crate) use path::path_level_gain;
 pub(crate) use path::PathState;

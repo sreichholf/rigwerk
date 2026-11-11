@@ -29,7 +29,8 @@
 //! mute and the unused rule belong to the device.  The mapper maps each live
 //! path's frame with its own map, scales it by its level and polarity on the
 //! device and adds the paths up per channel (cells that meet on a channel
-//! add, they are not averaged), then applies the device level.
+//! add, they are not averaged), then applies the device level, the safety
+//! ceiling and the mute.
 //!
 //! A channel no live path reaches follows [`UnusedChannels`]: silent, or
 //! under `MonoCopy` the sum of the mono copies `(L + R) / 2` of every live
@@ -41,7 +42,19 @@
 //! audible, decides which channels play.
 //!
 //! One path at 0 dB with normal polarity gives exactly its own mapped frame,
-//! bit for bit: unity gains copy instead of multiplying.
+//! bit for bit, while the sample stays under the safety ceiling: unity gains
+//! copy instead of multiplying.
+//!
+//! # Safety ceiling
+//!
+//! After the device level and before the mute, a sample-peak limiter
+//! ([`super::limiter`]) holds any sample above −1.0 dBFS at that ceiling.
+//! There is no lookahead, so alignment does not move.  Attack is immediate
+//! and the gain returns to unity over a few tens of milliseconds.  A signal
+//! that stays under the ceiling is not touched.  The reduction in dB (0 when
+//! not limiting) is published beside the device meters.  The same limiter
+//! runs for the clock device and every follower, including the virtual
+//! publish device, because each of them is mapped here.
 //!
 //! # Alignment
 //!

@@ -1,6 +1,6 @@
 use super::{
     chain_device_row, device_channel_count, device_level_text, device_row_value, device_state,
-    list_device_row, title_name_width, OutputDeviceRow,
+    gain_reduction_text, list_device_row, title_name_width, OutputDeviceRow,
 };
 use crate::audio::{EngineState, OutputDeviceSettings, MAX_OUTPUT_CHANNELS};
 use crate::ui::widgets::fit_text;
@@ -17,6 +17,7 @@ fn clock_row(level_db: f32, mute: bool) -> OutputDeviceRow {
         follower_index: None,
         missing: false,
         publish: false,
+        reduction_db: 0.0,
         settings: OutputDeviceSettings {
             level_db,
             mute,
@@ -46,6 +47,22 @@ fn device_level_reads_muted_or_decibels() {
         "+0.0 dB"
     );
     assert_eq!(device_level_text(&clock_row(-1.5, true).settings), "muted");
+}
+
+#[test]
+fn device_row_names_the_reduction_when_the_ceiling_holds() {
+    let mut row = clock_row(0.0, false);
+    assert_eq!(gain_reduction_text(0.0), None);
+    assert_eq!(gain_reduction_text(0.4), None);
+    row.reduction_db = 3.2;
+    assert_eq!(
+        gain_reduction_text(row.reduction_db).as_deref(),
+        Some("3.2 dB")
+    );
+    assert_eq!(
+        device_row_value(&row, EngineState::Running),
+        "clock device · +0.0 dB · 3.2 dB · running"
+    );
 }
 
 #[test]
