@@ -69,7 +69,7 @@ fn bridge_column(ui: &mut egui::Ui, manual: bool) -> Rect {
         egui::Sense::hover(),
     );
     ui.add_space(9.0);
-    progress_line(ui, "BUFFER", 0.0, AMBER);
+    progress_line(ui, "BUFFER", "0%", 0.0, AMBER);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         metric_inline(ui, "DRIFT", "OFF", MUTED);

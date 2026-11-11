@@ -17,7 +17,7 @@
 //! - `types`: the public vocabulary (devices, snapshot, start settings).
 //! - `engine`: the handle the UI uses to start, stop and tune the bridge.
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
-//! - `shared`: the ring buffer, cushion and meters both sides share.
+//! - `shared`: the ring buffer, cushion, meters and tuner tap both sides share.
 //! - `path`: one signal path's controls (routing, EQs, gate, inserts).
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
@@ -29,6 +29,7 @@
 //! - `ring`: lock-free multi-lane SPSC ring for each generic follower.
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
+//! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute and channel map.
 //! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
@@ -59,6 +60,7 @@ mod ring;
 mod scope;
 mod shared;
 mod thread_priority;
+mod tuner;
 mod types;
 
 #[cfg(target_os = "windows")]
@@ -127,6 +129,13 @@ pub(crate) use plugins::MAX_ALIGN;
 pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use shared::{FollowerLink, FollowerPlan, SCOPE_LEN};
+pub(crate) use tuner::{
+    cents_to_ratio, note_name, octave, tuning_index, StringReading, TuneState, TunerAnalysis,
+    TunerChannel, TunerFrame, TunerTolerance, Tuning, TuningGroup, CENTER_CENTS, DEFAULT_PRESET_ID,
+    PRESETS, TAP_COPY_FRAMES,
+};
+#[cfg(test)]
+pub(crate) use tuner::{tuning_by_id, TunerReading};
 #[cfg(target_os = "linux")]
 pub use types::QuantumInfo;
 pub use types::{

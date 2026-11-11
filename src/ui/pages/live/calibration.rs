@@ -258,7 +258,8 @@ impl RigWerkApp {
                 ui.add_space(12.0);
 
                 if measuring {
-                    progress_line(ui, "CAPTURE", progress, AMBER);
+                    let percent = format!("{}%", (progress * 100.0).round() as i32);
+                    progress_line(ui, "CAPTURE", &percent, progress, AMBER);
                     ui.add_space(6.0);
                     ui.add(
                         egui::Label::new(

@@ -121,6 +121,22 @@ pub(crate) struct Preferences {
     /// that cannot be read is treated as missing (the app re-measures).
     #[serde(default, deserialize_with = "skip_unreadable_option")]
     pub(crate) measured_latency: Option<MeasuredLatency>,
+    /// Tuner preset id, or
+    /// [`DEFAULT_PRESET_ID`](crate::audio::DEFAULT_PRESET_ID) for chromatic.
+    /// An unknown id falls back to chromatic.
+    pub(crate) tuner_tuning: String,
+    /// A4 in Hz, inside the 415–466 the page offers.
+    pub(crate) tuner_reference_hz: f32,
+    /// 0 sum, 1 left, 2 right.
+    pub(crate) tuner_channel: u8,
+    /// 0 strobe, 1 needle.
+    pub(crate) tuner_display: u8,
+    /// 0 single note, 1 all strings.
+    pub(crate) tuner_listen: u8,
+    /// Mute the bridge output while the tuner page is open.
+    pub(crate) tuner_auto_mute: bool,
+    /// 0 tight, 1 standard, 2 live; the labels carry the cent values.
+    pub(crate) tuner_tolerance: u8,
 }
 
 impl Default for Preferences {
@@ -171,6 +187,13 @@ impl Default for Preferences {
             clock_device: OutputDeviceSettings::default(),
             followers: Vec::new(),
             measured_latency: None,
+            tuner_tuning: crate::audio::DEFAULT_PRESET_ID.to_owned(),
+            tuner_reference_hz: 440.0,
+            tuner_channel: 0,
+            tuner_display: 0,
+            tuner_listen: 0,
+            tuner_auto_mute: true,
+            tuner_tolerance: 1,
         }
     }
 }
@@ -538,6 +561,9 @@ fn write_bridge_settings(preferences: &mut Preferences, settings: BridgeSettings
 
 /// Checks the preference numbers and every saved patch. Called from
 /// [`load_preferences`]; applying a patch checks again.
+///
+/// The tuner's A4 reference is clamped to the range the page offers, and a
+/// NaN becomes 440 Hz, so the pitch maths never sees it.
 pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     let settings = validate_bridge_settings(
         bridge_settings_from_preferences(preferences),
@@ -548,6 +574,8 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
         &mut preferences.wasapi_output_mode,
         preferences.low_latency_output,
     );
+    preferences.tuner_reference_hz =
+        crate::app::tuner::sanitise_reference(preferences.tuner_reference_hz);
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
     let current = preferences.paths[0].clone();
@@ -633,6 +661,7 @@ pub(crate) fn page_key(page: Page) -> &'static str {
     match page {
         Page::Live => "live",
         Page::Mixer => "mixer",
+        Page::Tuner => "tuner",
         Page::Routing => "routing",
         Page::Devices => "devices",
         Page::Sessions => "sessions",
@@ -645,6 +674,7 @@ pub(crate) fn page_key(page: Page) -> &'static str {
 pub(crate) fn page_from_key(key: &str) -> Page {
     match key.trim().to_lowercase().as_str() {
         "mixer" => Page::Mixer,
+        "tuner" => Page::Tuner,
         "routing" => Page::Routing,
         "devices" => Page::Devices,
         "sessions" => Page::Sessions,

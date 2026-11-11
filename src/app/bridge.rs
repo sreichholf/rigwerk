@@ -191,8 +191,12 @@ impl RigWerkApp {
     }
 
     pub(crate) fn meters(&mut self, ctx: &egui::Context) {
+        // One mute for the engine and for the meters below.  Preview draws
+        // its levels here instead of reading them back, so a second check
+        // would leave those meters moving while the tuner layer holds.
+        let output_muted = self.mute || self.tuner.auto_muted(self.page, self.engine.state);
         self.engine
-            .set_master(self.mute, self.monitor, self.input_channels, self.drift);
+            .set_master(output_muted, self.monitor, self.input_channels, self.drift);
         self.push_paths_to_engine();
         self.push_devices_to_engine();
         self.engine.poll();
@@ -272,7 +276,7 @@ impl RigWerkApp {
 
         self.meter_in_l = smooth(self.meter_in_l, in_l);
         self.meter_in_r = smooth(self.meter_in_r, in_r);
-        let mute_scale = if self.mute { 0.0 } else { 1.0 };
+        let mute_scale = if output_muted { 0.0 } else { 1.0 };
         self.meter_out_l = smooth(self.meter_out_l, out_l * mute_scale);
         self.meter_out_r = smooth(self.meter_out_r, out_r * mute_scale);
         self.peak_in_l = self.peak_in_l.max(self.meter_in_l * 0.98).max(0.0);
