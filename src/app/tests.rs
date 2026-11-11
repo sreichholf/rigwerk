@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
+use eframe::egui;
 use eframe::App;
+
+use crate::ui::widgets::{run_frame, test_input};
 
 use super::settings::FollowerPref;
 use super::settings::{load_preferences, Preferences, Preset, PREFERENCES_KEY};
@@ -500,4 +503,122 @@ fn one_missed_scan_does_not_stop_the_bridge() {
         .iter()
         .any(|entry| entry.text.contains("unplugged — bridge stopped")));
     assert_eq!(app.issue_state.device_lost, app.device_alert);
+}
+
+/// One M key event.  `down` is false for the release between two presses.
+/// egui treats another key-down, while M is still down, as a repeat.
+fn key_m(modifiers: egui::Modifiers, down: bool) -> egui::RawInput {
+    let mut input = test_input(None);
+    input.events.push(egui::Event::Key {
+        key: egui::Key::M,
+        physical_key: None,
+        pressed: down,
+        repeat: false,
+        modifiers,
+    });
+    input
+}
+
+/// Runs one frame and handles the panic chord the way `App::ui` does.
+fn press_panic_chord(app: &mut super::RigWerkApp, ctx: &egui::Context, input: egui::RawInput) {
+    let handle = ctx.clone();
+    let _ = run_frame(ctx, input, |_| app.handle_panic_mute(&handle));
+}
+
+/// Ctrl on Windows and Linux sets both `ctrl` and egui's `command`.
+fn ctrl_shift() -> egui::Modifiers {
+    egui::Modifiers::COMMAND
+        .plus(egui::Modifiers::CTRL)
+        .plus(egui::Modifiers::SHIFT)
+}
+
+/// Command on macOS sets `command` and `mac_cmd`, not `ctrl`.
+fn command_shift() -> egui::Modifiers {
+    egui::Modifiers::COMMAND
+        .plus(egui::Modifiers::MAC_CMD)
+        .plus(egui::Modifiers::SHIFT)
+}
+
+#[test]
+fn panic_chord_toggles_master_mute() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    assert!(!app.mute);
+
+    press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), true));
+    assert!(app.mute, "Ctrl+Shift+M mutes");
+    // Still held: egui reports the next key-down as a repeat, which must not unmute.
+    press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), true));
+    assert!(app.mute, "holding the chord does not toggle again");
+    press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), false));
+    press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), true));
+    assert!(!app.mute, "a second press unmutes");
+    press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), false));
+
+    press_panic_chord(&mut app, &ctx, key_m(command_shift(), true));
+    assert!(app.mute, "Command+Shift+M mutes on macOS");
+    press_panic_chord(&mut app, &ctx, key_m(command_shift(), false));
+    press_panic_chord(&mut app, &ctx, key_m(command_shift(), true));
+    assert!(!app.mute, "a second Command+Shift+M unmutes");
+}
+
+#[test]
+fn panic_chord_ignores_ctrl_m() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    press_panic_chord(
+        &mut app,
+        &ctx,
+        key_m(egui::Modifiers::COMMAND.plus(egui::Modifiers::CTRL), true),
+    );
+    assert!(!app.mute);
+}
+
+#[test]
+fn panic_chord_ignores_alt() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    press_panic_chord(
+        &mut app,
+        &ctx,
+        key_m(ctrl_shift().plus(egui::Modifiers::ALT), true),
+    );
+    assert!(!app.mute);
+}
+
+#[test]
+fn panic_chord_does_not_toggle_while_a_text_edit_has_focus() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    let handle = ctx.clone();
+    let mut text = String::new();
+
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        ui.text_edit_singleline(&mut text).request_focus();
+    });
+    // Focus lands on the next pass.  The field has to stay on screen or egui drops it.
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        ui.text_edit_singleline(&mut text);
+    });
+
+    let mut kept_the_key = false;
+    let _ = run_frame(&ctx, key_m(ctrl_shift(), true), |ui| {
+        assert!(handle.text_edit_focused(), "the text edit still has focus");
+        app.handle_panic_mute(&handle);
+        kept_the_key = handle.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::M,
+                        pressed: true,
+                        ..
+                    }
+                )
+            })
+        });
+        ui.text_edit_singleline(&mut text);
+    });
+    assert!(!app.mute, "typing is not a mute");
+    assert!(kept_the_key, "the text edit keeps the key");
 }

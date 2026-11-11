@@ -126,6 +126,11 @@ fn repaint_interval(state: EngineState, plugin_editor_open: bool) -> Duration {
 /// there after ordinary bridge chatter.
 pub(crate) const ACTIVITY_LOG_CAP: usize = 400;
 
+/// Command and shift, and nothing else.  Command is Ctrl on Windows and
+/// Linux, and Command on macOS.  `matches_exact` rejects Alt; egui's
+/// `consume_key` would treat that extra modifier as optional.
+const PANIC_MUTE_MODIFIERS: egui::Modifiers = egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT);
+
 pub(crate) struct LogEntry {
     pub(crate) at: String,
     pub(crate) text: String,
@@ -345,6 +350,10 @@ impl eframe::App for RigWerkApp {
     }
 
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Once per frame, before any page.  A control that only exists on
+        // Live or Mixer would miss the chord everywhere else.
+        self.handle_panic_mute(root.ctx());
+
         let ctx = root.ctx().clone();
         // Screenshots need a painted frame, so they stay on the drawing side.
         self.handle_screenshot(&ctx);
@@ -620,6 +629,45 @@ impl eframe::App for RigWerkApp {
 }
 
 impl RigWerkApp {
+    /// Ctrl+Shift+M toggles the master mute, the same switch as the mute
+    /// button (`self.mute`; the next `meters` pass publishes it, and the
+    /// mixer ramps).  On macOS the chord is Command+Shift+M.  A second press
+    /// unmutes.  A text edit with focus keeps the key, and any modifier
+    /// other than command and shift (Alt, for one) does not count.  A held
+    /// key repeats; only the first press toggles.
+    fn handle_panic_mute(&mut self, ctx: &egui::Context) {
+        if ctx.text_edit_focused() {
+            return;
+        }
+        let pressed = ctx.input_mut(|input| {
+            let mut pressed = false;
+            input.events.retain(|event| {
+                let egui::Event::Key {
+                    key,
+                    pressed: down,
+                    repeat,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    return true;
+                };
+                if *key != egui::Key::M || !*down || !modifiers.matches_exact(PANIC_MUTE_MODIFIERS)
+                {
+                    return true;
+                }
+                if !*repeat {
+                    pressed = true;
+                }
+                false
+            });
+            pressed
+        });
+        if pressed {
+            self.mute = !self.mute;
+        }
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
         // eframe builds the app on its UI thread, which is the thread that
         // services CLAP plugins; record it before any plugin can load.
