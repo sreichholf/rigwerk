@@ -1,22 +1,17 @@
 use std::cell::Cell;
 
 use eframe::egui;
-use egui::{Align, Layout, Pos2, Rect, RichText, Vec2};
+use egui::{Align, Layout, Pos2, Rect, Vec2};
 
-use super::{
-    bridge_scope_height, cushion_mode_picker, cushion_modes_fit, cushion_tab_row_width,
-    manual_cushion_size,
-};
+use super::{cushion_mode_picker, cushion_modes_fit, cushion_tab_row_width, manual_cushion_size};
 use crate::audio::CushionMode;
-use crate::ui::theme::{self, ts, AMBER, DIM, MUTED, TEXT};
-use crate::ui::widgets::{metric_inline, micro_label, mono, progress_line, status_dot};
+use crate::ui::theme;
 
-/// Inner height of the live row cards: shared outer height, 15 px inset each side.
-const CARD_INNER_H: f32 = crate::ui::pages::live::LIVE_TOP_CARD_H - 30.0;
-/// Inner width of the bridge card at the 1040 px minimum window.
+/// Inner width of the old bridge column at the 1040 px minimum window.
+/// The strip is the full page now; this width is only the "tabs do not fit" case.
 const NARROW_W: f32 = 150.0;
 
-fn run_column(width: f32, height: f32, draw: impl FnOnce(&mut egui::Ui, Rect)) -> Rect {
+fn run_column(width: f32, height: f32, draw: impl FnOnce(&mut egui::Ui)) -> Rect {
     let ctx = egui::Context::default();
     theme::configure_style(&ctx);
     let input = egui::RawInput {
@@ -39,87 +34,28 @@ fn run_column(width: f32, height: f32, draw: impl FnOnce(&mut egui::Ui, Rect)) -
                 .layout(Layout::top_down(Align::LEFT)),
         );
         column.set_clip_rect(clip);
-        draw(&mut column, clip);
+        draw(&mut column);
         content = column.min_rect();
     });
     output.textures_delta.clear();
     content
 }
 
-/// The bridge card's vertical rhythm, with the real scope height and picker.
-fn bridge_column(ui: &mut egui::Ui, manual: bool) -> Rect {
-    ui.horizontal(|ui| {
-        ui.label(micro_label("BRIDGE", AMBER));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            status_dot(ui, DIM);
-        });
-    });
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new("Two clocks, one strip of audio")
-            .size(ts(11.5))
-            .color(TEXT)
-            .strong(),
-    );
-    ui.label(RichText::new("Async ring buffer").size(ts(9.5)).color(DIM));
-    ui.add_space(9.0);
-    let scope_h = bridge_scope_height(cushion_modes_fit(ui));
-    let _ = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), scope_h),
-        egui::Sense::hover(),
-    );
-    ui.add_space(9.0);
-    progress_line(ui, "BUFFER", "0%", 0.0, AMBER);
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        metric_inline(ui, "DRIFT", "OFF", MUTED);
-        metric_inline(ui, "UNDERRUN", "0", MUTED);
-    });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        let mut drift = true;
-        let _ = ui.checkbox(
-            &mut drift,
-            RichText::new("Drift correction")
-                .size(ts(10.0))
-                .color(MUTED),
-        );
-    });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label(micro_label("CUSHION", DIM));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(mono("—", AMBER, 9.0));
-        });
-    });
-    ui.add_space(3.0);
-    let mut mode = if manual {
-        CushionMode::Manual
-    } else {
-        CushionMode::Safe
-    };
-    let picker = cushion_mode_picker(ui, &mut mode);
-    if manual {
-        let mut ms = 10.0;
-        let _ = manual_cushion_size(ui, &mut ms);
-    }
-    picker
-}
-
 #[test]
-fn narrow_bridge_card_keeps_the_cushion_control_inside() {
+fn narrow_remainder_uses_one_cushion_control() {
     let picker = Cell::new(Rect::NAN);
-    let content = run_column(NARROW_W, 800.0, |ui, _clip| {
-        picker.set(bridge_column(ui, true));
+    let content = run_column(NARROW_W, 200.0, |ui| {
+        assert!(
+            !cushion_modes_fit(ui),
+            "the fixture stopped being narrower than the three labels"
+        );
+        let mut mode = CushionMode::Manual;
+        picker.set(cushion_mode_picker(ui, &mut mode));
     });
     let picker = picker.get();
     assert!(
-        cushion_tab_row_width_at(NARROW_W) > NARROW_W,
-        "the fixture stopped being narrower than the three labels"
-    );
-    assert!(
         picker.width() <= NARROW_W + 0.5,
-        "mode control is {:.1} px in a {NARROW_W} px card",
+        "mode control is {:.1} px in a {NARROW_W} px row",
         picker.width()
     );
     assert!(
@@ -129,21 +65,16 @@ fn narrow_bridge_card_keeps_the_cushion_control_inside() {
     );
     assert!(
         content.width() <= NARROW_W + 0.5,
-        "card content is {:.1} px wide",
+        "row content is {:.1} px wide",
         content.width()
-    );
-    assert!(
-        content.height() <= CARD_INNER_H + 0.5,
-        "manual cushion block is {:.1} px tall and the card only has {CARD_INNER_H}",
-        content.height()
     );
 }
 
 #[test]
-fn wide_bridge_card_keeps_the_three_mode_tabs() {
+fn wide_strip_keeps_the_three_mode_tabs() {
     let picker = Cell::new(Rect::NAN);
     let predicted = Cell::new(0.0);
-    let _ = run_column(400.0, 800.0, |ui, _clip| {
+    let _ = run_column(400.0, 80.0, |ui| {
         predicted.set(cushion_tab_row_width(ui));
         assert!(cushion_modes_fit(ui));
         let mut mode = CushionMode::Safe;
@@ -158,14 +89,22 @@ fn wide_bridge_card_keeps_the_three_mode_tabs() {
     );
     assert!(picker.width() > 180.0 && picker.width() < 220.0);
     assert!(picker.height() <= 32.0);
-    assert_eq!(bridge_scope_height(true), 76.0);
-    assert_eq!(bridge_scope_height(false), 24.0);
 }
 
-fn cushion_tab_row_width_at(width: f32) -> f32 {
-    let width_cell = Cell::new(0.0);
-    let _ = run_column(width, 80.0, |ui, _clip| {
-        width_cell.set(cushion_tab_row_width(ui));
+#[test]
+fn manual_size_sits_under_the_mode_row() {
+    let picker = Cell::new(Rect::NAN);
+    let content = run_column(720.0, 200.0, |ui| {
+        let mut mode = CushionMode::Manual;
+        picker.set(cushion_mode_picker(ui, &mut mode));
+        let mut ms = 12.5;
+        let _ = manual_cushion_size(ui, &mut ms);
     });
-    width_cell.get()
+    let picker = picker.get();
+    assert!(picker.bottom() < content.bottom() - 8.0);
+    assert!(
+        content.height() < 120.0,
+        "manual strip is {:.1} px tall",
+        content.height()
+    );
 }

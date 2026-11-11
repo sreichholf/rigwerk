@@ -20,8 +20,7 @@ use crate::audio::DeviceItem;
 use crate::ui::icons::{paint_icon, Icon};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, TEAL,
-    TEXT,
+    with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, TEAL, TEXT,
 };
 
 pub(crate) fn card<R>(
@@ -499,13 +498,6 @@ pub(crate) fn meter_row(ui: &mut egui::Ui, label: &str, value: f32, peak: f32, c
     });
 }
 
-pub(crate) fn metric_inline(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
-    ui.horizontal(|ui| {
-        ui.label(micro_label(label, DIM));
-        ui.label(mono(value, color, 9.0));
-    });
-}
-
 /// A labelled bar: the name on the left, a formatted value in monospace on the
 /// right, and a 4 px bar underneath filled to `fraction`.
 pub(crate) fn progress_line(
@@ -624,33 +616,6 @@ pub(crate) fn route_summary(ui: &mut egui::Ui, label: &str, value: &str, color: 
             );
         });
     });
-}
-
-pub(crate) fn connector(ui: &mut egui::Ui, height: f32, active: bool, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(20.0, height), Sense::hover());
-    let y = rect.center().y;
-    let line = if active { color } else { BORDER };
-    ui.painter().line_segment(
-        [
-            egui::pos2(rect.left() + 2.0, y),
-            egui::pos2(rect.right() - 3.0, y),
-        ],
-        Stroke::new(1.0, with_alpha(line, 120)),
-    );
-    ui.painter().circle_filled(
-        egui::pos2(rect.right() - 2.0, y),
-        2.0,
-        with_alpha(line, 200),
-    );
-    if active {
-        let t = ui.input(|input| input.time) as f32;
-        let pulse = (t * 1.4).fract();
-        let x = rect.left() + 2.0 + (rect.width() - 7.0) * pulse;
-        ui.painter()
-            .circle_filled(egui::pos2(x, y), 2.4, with_alpha(color, 210));
-        ui.painter()
-            .circle_filled(egui::pos2(x, y), 5.0, with_alpha(color, 28));
-    }
 }
 
 pub(crate) fn legend_dot(ui: &mut egui::Ui, label: &str, color: Color32) {
