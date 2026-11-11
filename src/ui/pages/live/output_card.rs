@@ -18,15 +18,13 @@ use crate::ui::widgets::{
 
 impl RigWerkApp {
     pub(crate) fn output_card(&mut self, ui: &mut egui::Ui) {
-        // Pin the Also playing on row to the bottom so a long body cannot
-        // clip the follower chips. Laid out bottom-up, it takes its real height.
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            self.also_playing_on(ui);
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                ui.set_min_width(ui.available_width());
-                self.output_card_body(ui);
-            });
-        });
+        // Top-down, so the card is as tall as its content and the Input card
+        // can match that height.  A fixed frame used to pin this row to the
+        // bottom; the followers now follow the body, and nothing is clipped.
+        ui.set_min_width(ui.available_width());
+        self.output_card_body(ui);
+        ui.add_space(8.0);
+        self.also_playing_on(ui);
     }
 
     fn output_card_body(&mut self, ui: &mut egui::Ui) {
@@ -120,36 +118,7 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             channel_chip(ui, "OUT 1", &mut self.path_mut().mix.output_enabled[0], BLUE);
             channel_chip(ui, "OUT 2", &mut self.path_mut().mix.output_enabled[1], BLUE);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(if self.mute { "muted" } else { "mute" })
-                                .size(ts(9.0))
-                                .color(if self.mute { RED } else { GREEN }),
-                        )
-                        .fill(if self.mute {
-                            with_alpha(RED, 24)
-                        } else {
-                            with_alpha(GREEN, 18)
-                        })
-                        .stroke(Stroke::new(
-                            1.0,
-                            if self.mute {
-                                with_alpha(RED, 60)
-                            } else {
-                                with_alpha(GREEN, 40)
-                            },
-                        ))
-                        .corner_radius(CornerRadius::same(7)),
-                    )
-                    .on_hover_text("Silence the output without stopping the bridge.")
-                    .clicked()
-                {
-                    self.mute = !self.mute;
-                }
-                ui.add_space(4.0);
-                if self.selected_output().asio_clsid.is_some() {
+            if self.selected_output().asio_clsid.is_some() {
                     ui.label(
                         RichText::new("ASIO direct")
                             .size(ts(8.3))
@@ -193,7 +162,33 @@ impl RigWerkApp {
                         self.set_low_latency_output(!low_latency);
                     }
                 }
-            });
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(if self.mute { "muted" } else { "mute" })
+                            .size(ts(9.0))
+                            .color(if self.mute { RED } else { GREEN }),
+                    )
+                    .fill(if self.mute {
+                        with_alpha(RED, 24)
+                    } else {
+                        with_alpha(GREEN, 18)
+                    })
+                    .stroke(Stroke::new(
+                        1.0,
+                        if self.mute {
+                            with_alpha(RED, 60)
+                        } else {
+                            with_alpha(GREEN, 40)
+                        },
+                    ))
+                    .corner_radius(CornerRadius::same(7)),
+                )
+                .on_hover_text("Silence the output without stopping the bridge.")
+                .clicked()
+            {
+                self.mute = !self.mute;
+            }
         });
 
         ui.add_space(5.0);
@@ -268,8 +263,8 @@ impl RigWerkApp {
         });
     }
 
-    /// One row under the Output card: label, follower chips, then + add.
-    /// Called in a bottom-up layout: the row goes first, the hairline above it.
+    /// One row under the Output body: a hairline, then the label, follower
+    /// chips and + add.
     pub(crate) fn also_playing_on(&mut self, ui: &mut egui::Ui) {
         use crate::app::Page;
         use crate::ui::pages::mixer::chain::ChainSelection;
@@ -277,9 +272,9 @@ impl RigWerkApp {
 
         let rows = self.output_device_rows();
         let followers: Vec<_> = rows.into_iter().filter(|row| !row.clock).collect();
-        // Exact row height (chip text + button padding): a plain `horizontal`
-        // in a bottom-up layout starts at interact height and the taller
-        // buttons grow down past the card clip.
+        horizontal_line(ui, BORDER_SOFT);
+        ui.add_space(6.0);
+        // Exact row height (chip text + button padding).
         let font_h = ui.fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(ts(9.5))));
         let row_h = (font_h + ui.spacing().button_padding.y * 2.0).max(24.0);
         ui.allocate_ui_with_layout(
@@ -351,8 +346,6 @@ impl RigWerkApp {
                 });
             },
         );
-        ui.add_space(6.0);
-        horizontal_line(ui, BORDER_SOFT);
     }
 
     /// Three-way WASAPI clock mode: Shared / REAL-style / Exclusive.
@@ -403,72 +396,70 @@ impl RigWerkApp {
     }
 
     /// Output side clock: its own rate (or follow the input) and buffer.
+    /// The two menus sit next to the label.
     pub(crate) fn output_clock_controls(&mut self, ui: &mut egui::Ui) {
         let special_wasapi = self.wants_low_latency_output();
         ui.horizontal(|ui| {
             ui.label(micro_label("OUT CLOCK", DIM));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let mut buffer = self.output_buffer;
-                egui::ComboBox::from_id_salt("output_buffer")
-                    .width(72.0)
-                    .selected_text(mono(format!("{buffer} smp"), MUTED, 9.0))
-                    .show_ui(ui, |ui| {
-                        for option in BUFFERS {
-                            ui.selectable_value(&mut buffer, option, format!("{option} samples"));
-                        }
-                    })
-                    .response
-                    .on_hover_text(if special_wasapi {
-                        if cfg!(target_os = "windows")
-                            && self.wasapi_output_mode
-                                == crate::audio::WasapiOutputMode::Exclusive
-                        {
-                            "Output buffer, used if the driver refuses Exclusive mode. While Exclusive runs, the exclusive period sets the output latency."
-                        } else if cfg!(target_os = "windows") {
-                            "Output buffer, used if the driver refuses REAL-style. While REAL-style runs, the driver's smallest step sets the output latency."
-                        } else {
-                            "Output buffer, used if low-latency ALSA refuses the smallest period."
-                        }
-                    } else {
-                        "Output buffer: the block size asked of the output device."
-                    });
-                if buffer != self.output_buffer {
-                    self.output_buffer = buffer;
-                    self.push_log(format!("Output buffer set to {buffer} samples."), BLUE);
-                }
-                let mut rate = self.output_rate;
-                let shown = if rate == 0 {
-                    "Match input".to_owned()
+            let mut rate = self.output_rate;
+            let shown = if rate == 0 {
+                "Match input".to_owned()
+            } else {
+                rate_label(rate)
+            };
+            egui::ComboBox::from_id_salt("output_rate")
+                .width(84.0)
+                .selected_text(mono(shown, MUTED, 9.0))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut rate, 0, "Match input");
+                    for option in RATES {
+                        ui.selectable_value(&mut rate, option, rate_label(option));
+                    }
+                })
+                .response
+                .on_hover_text(if cfg!(target_os = "windows") {
+                    "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. Shared WASAPI outputs mix at the rate set in Windows."
                 } else {
-                    rate_label(rate)
-                };
-                egui::ComboBox::from_id_salt("output_rate")
-                    .width(84.0)
-                    .selected_text(mono(shown, MUTED, 9.0))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut rate, 0, "Match input");
-                        for option in RATES {
-                            ui.selectable_value(&mut rate, option, rate_label(option));
-                        }
-                    })
-                    .response
-                    .on_hover_text(if cfg!(target_os = "windows") {
-                        "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. Shared WASAPI outputs mix at the rate set in Windows."
+                    "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
+                });
+            if rate != self.output_rate {
+                self.output_rate = rate;
+                self.push_log(
+                    if rate == 0 {
+                        "Output rate follows the input.".to_owned()
                     } else {
-                        "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
-                    });
-                if rate != self.output_rate {
-                    self.output_rate = rate;
-                    self.push_log(
-                        if rate == 0 {
-                            "Output rate follows the input.".to_owned()
-                        } else {
-                            format!("Output clock set to {}.", rate_label(rate))
-                        },
-                        BLUE,
-                    );
-                }
-            });
+                        format!("Output clock set to {}.", rate_label(rate))
+                    },
+                    BLUE,
+                );
+            }
+            let mut buffer = self.output_buffer;
+            egui::ComboBox::from_id_salt("output_buffer")
+                .width(72.0)
+                .selected_text(mono(format!("{buffer} smp"), MUTED, 9.0))
+                .show_ui(ui, |ui| {
+                    for option in BUFFERS {
+                        ui.selectable_value(&mut buffer, option, format!("{option} samples"));
+                    }
+                })
+                .response
+                .on_hover_text(if special_wasapi {
+                    if cfg!(target_os = "windows")
+                        && self.wasapi_output_mode == crate::audio::WasapiOutputMode::Exclusive
+                    {
+                        "Output buffer, used if the driver refuses Exclusive mode. While Exclusive runs, the exclusive period sets the output latency."
+                    } else if cfg!(target_os = "windows") {
+                        "Output buffer, used if the driver refuses REAL-style. While REAL-style runs, the driver's smallest step sets the output latency."
+                    } else {
+                        "Output buffer, used if low-latency ALSA refuses the smallest period."
+                    }
+                } else {
+                    "Output buffer: the block size asked of the output device."
+                });
+            if buffer != self.output_buffer {
+                self.output_buffer = buffer;
+                self.push_log(format!("Output buffer set to {buffer} samples."), BLUE);
+            }
         });
     }
 }

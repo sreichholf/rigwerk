@@ -90,45 +90,6 @@ pub(crate) fn draw_scope(ui: &egui::Ui, rect: Rect, input: &[f32], output: &[f32
     );
 }
 
-pub(crate) fn draw_mini_scope(ui: &egui::Ui, rect: Rect, samples: &[f32], active: bool) {
-    let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, CornerRadius::same(9), CARD_DEEP);
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(9),
-        Stroke::new(1.0, BORDER_SOFT),
-        egui::StrokeKind::Inside,
-    );
-    for step in 1..6 {
-        let x = rect.left() + rect.width() * step as f32 / 6.0;
-        painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            Stroke::new(0.6, Color32::from_rgb(24, 30, 40)),
-        );
-    }
-    if active && samples.iter().any(|sample| sample.abs() > 1.0e-5) {
-        paint_trace(&painter, rect, samples, AMBER, with_alpha(AMBER, 16), true);
-    } else {
-        let points: Vec<egui::Pos2> = (0..96)
-            .map(|index| {
-                let x = rect.left() + rect.width() * index as f32 / 95.0;
-                egui::pos2(x, rect.center().y)
-            })
-            .collect();
-        painter.add(egui::Shape::line(
-            points,
-            Stroke::new(1.0, with_alpha(AMBER, 60)),
-        ));
-    }
-    painter.text(
-        rect.left_top() + Vec2::new(8.0, 7.0),
-        Align2::LEFT_TOP,
-        scope_badge(active),
-        FontId::new(ts(8.0), FontFamily::Monospace),
-        if active { MUTED } else { DIM },
-    );
-}
-
 fn paint_trace(
     painter: &egui::Painter,
     rect: Rect,

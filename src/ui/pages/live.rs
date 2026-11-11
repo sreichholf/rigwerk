@@ -1,7 +1,9 @@
 //! Live Bridge: the page layout and the activity strip.  Each card lives in
-//! its own file under `live/`; the Issues strip (`live/issues.rs`) sits on
-//! top while there are issues, and "Show on <card>" there rings the Bridge
-//! or Output card here for a moment.
+//! its own file under `live/`.  Input and Output share one row, the same
+//! width and the same height.  The bridge is the strip under that row: one
+//! line when a PipeWire node has no ring, and the cushion when it does.
+//! The Issues strip (`live/issues.rs`) sits on top while there are issues,
+//! and "Show on <card>" there rings the bridge strip or the Output card.
 
 mod bridge_card;
 mod calibration;
@@ -13,75 +15,24 @@ mod issues;
 mod output_card;
 
 use eframe::egui;
-use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
+use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
 use crate::app::issues::IssueCard;
 use crate::app::{Page, RigWerkApp};
 use crate::ui::theme::ts;
-use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER, CARD, CARD_RAISED, DIM, MUTED, RED, TEAL};
-use crate::ui::widgets::{card_fixed, connector, ellipsize, micro_label, mono, status_dot};
-
-/// Shared outer height for the Live Input / Bridge / Output row. Contents
-/// differ, but the frames stay level whenever this row is resized.
-pub(crate) const LIVE_TOP_CARD_H: f32 = 490.0;
+use crate::ui::theme::{with_alpha, BLUE, BORDER, CARD, DIM, MUTED, RED, TEAL};
+use crate::ui::widgets::{card_fixed, ellipsize, micro_label, mono, status_dot};
 
 impl RigWerkApp {
     pub(crate) fn live_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let total = ui.available_width();
-        let gap = 20.0;
-        // Two 20 px connectors plus the four 8 px item gaps around them.
-        let usable = (total - gap * 2.0 - 32.0).max(600.0);
-        // Input and output are the two ends of the bridge: same width, same
-        // height, with the bridge card between them.
-        let bridge_w = usable * 0.26;
-        let input_w = (usable - bridge_w) / 2.0;
-        let output_w = input_w;
-        // Tall enough for the Output body plus a bottom-pinned Also playing on
-        // strip; Input and Bridge share the same outer height.
-        let card_h = LIVE_TOP_CARD_H;
 
         // Judgments first: one strip, only while there is something to say.
         self.issues_strip(ui, total);
 
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                Vec2::new(input_w, card_h),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_min_size(Vec2::new(input_w, card_h));
-                    card_fixed(ui, CARD, BORDER, card_h, |ui| {
-                        ui.set_width(input_w - 32.0);
-                        self.input_card(ui);
-                    });
-                },
-            );
-            connector(ui, card_h, self.is_active(), TEAL);
-            let bridge = ui.allocate_ui_with_layout(
-                Vec2::new(bridge_w, card_h),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_min_size(Vec2::new(bridge_w, card_h));
-                    card_fixed(ui, CARD_RAISED, with_alpha(AMBER, 46), card_h, |ui| {
-                        ui.set_width(bridge_w - 32.0);
-                        self.bridge_card(ui, ctx);
-                    });
-                },
-            );
-            self.card_highlight_ring(ui, bridge.response.rect, IssueCard::Bridge);
-            connector(ui, card_h, self.is_active(), BLUE);
-            let output = ui.allocate_ui_with_layout(
-                Vec2::new(output_w, card_h),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    ui.set_min_size(Vec2::new(output_w, card_h));
-                    card_fixed(ui, CARD, BORDER, card_h, |ui| {
-                        ui.set_width(output_w - 32.0);
-                        self.output_card(ui);
-                    });
-                },
-            );
-            self.card_highlight_ring(ui, output.response.rect, IssueCard::Output);
-        });
+        self.live_io_pair(ui, total);
+        ui.add_space(10.0);
+        self.bridge_card(ui, ctx);
 
         ui.add_space(10.0);
         self.publish_banner(ui, total);
@@ -120,6 +71,73 @@ impl RigWerkApp {
 
         ui.add_space(11.0);
         self.activity_strip(ui, total);
+    }
+
+    /// Input and Output, equal width.  The Output card's content sets the
+    /// height; the Input card uses that height on the next frame so the two
+    /// frames share a bottom edge.  One frame of lag is invisible next to
+    /// the screenshot settle.
+    fn live_io_pair(&mut self, ui: &mut egui::Ui, total: f32) {
+        let gap = 14.0;
+        let card_w = ((total - gap) / 2.0).max(240.0);
+        let id = ui.scope_id().with("live_io_h");
+        let min_h = ui
+            .ctx()
+            .data(|data| data.get_temp::<f32>(id).unwrap_or(0.0));
+        let mut output_h = 0.0;
+        let mut output_rect = egui::Rect::NOTHING;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(
+                Vec2::new(card_w, 0.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_min_width(card_w);
+                    ui.set_max_width(card_w);
+                    self.io_card(ui, min_h, |app, ui| app.input_card(ui));
+                },
+            );
+            let output = ui.allocate_ui_with_layout(
+                Vec2::new(card_w, 0.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_min_width(card_w);
+                    ui.set_max_width(card_w);
+                    output_h = self.io_card(ui, 0.0, |app, ui| app.output_card(ui));
+                },
+            );
+            output_rect = output.response.rect;
+        });
+        self.card_highlight_ring(ui, output_rect, IssueCard::Output);
+        if (output_h - min_h).abs() > 1.0 {
+            ui.ctx().data_mut(|data| data.insert_temp(id, output_h));
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// One Live card.  `min_h` stretches a shorter card down to its sibling.
+    /// Returns the outer height, which is the content height when `min_h` is 0.
+    fn io_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        min_h: f32,
+        body: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) -> f32 {
+        let response = egui::Frame::new()
+            .fill(CARD)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(CornerRadius::same(13))
+            .inner_margin(Margin::symmetric(15, 15))
+            .show(ui, |ui| {
+                let inner = (ui.available_width()).max(0.0);
+                ui.set_min_width(inner);
+                ui.set_max_width(inner);
+                if min_h > 0.0 {
+                    ui.set_min_height((min_h - 30.0).max(0.0));
+                }
+                body(self, ui);
+            });
+        response.response.rect.height()
     }
 
     /// Publish status for RigWerk Out: on, off, or missing.
