@@ -110,6 +110,7 @@ impl RigWerkApp {
         }
         let conditions = self.latency_conditions();
         let blocker = self.calibration_blocker();
+        let budget = self.latency_budget();
         let measured = self.measured_latency.clone();
         let stale = measured
             .as_ref()
@@ -300,7 +301,7 @@ impl RigWerkApp {
                         ui.add_space(10.0);
                     }
                     if let Some(measured) = &measured {
-                        measured_summary(ui, measured, stale.as_deref());
+                        measured_summary(ui, measured, stale.as_deref(), budget.estimate_ms);
                         ui.add_space(12.0);
                     }
                     ui.horizontal(|ui| {
@@ -354,13 +355,13 @@ impl RigWerkApp {
     }
 }
 
-/// The stored result: value, conditions, date and confidence.  The estimate
-/// beside it is labelled separately in the latency budget; the two cover
-/// different legs and are never subtracted.
+/// The stored result: value, conditions, date, confidence, and the estimate
+/// beside it.  The two cover different legs, so they are never subtracted.
 fn measured_summary(
     ui: &mut egui::Ui,
     measured: &crate::app::latency::MeasuredLatency,
     stale: Option<&str>,
+    estimate_ms: f32,
 ) {
     ui.horizontal(|ui| {
         ui.label(
@@ -398,6 +399,26 @@ fn measured_summary(
             RichText::new(measured.summary(stale))
                 .size(ts(10.0))
                 .color(if stale.is_some() { AMBER } else { MUTED }),
+        )
+        .wrap(),
+    );
+    ui.add_space(4.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!(
+                "Estimated path now {estimate_ms:.1} ms (derived; input block, cushion, chain, output step and after-node). It is a different leg, not this measurement's error."
+            ))
+            .size(ts(10.0))
+            .color(DIM),
+        )
+        .wrap(),
+    );
+    ui.add_space(4.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(crate::app::budget::LEGS_NOTE)
+                .size(ts(9.5))
+                .color(DIM),
         )
         .wrap(),
     );

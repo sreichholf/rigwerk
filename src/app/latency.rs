@@ -4,8 +4,8 @@
 //! input and output, the rates the bridge really ran at, the input block and
 //! output step, and how the output opened.  [`MeasuredLatency::stale_reason`]
 //! changes one of those and the result is marked stale instead of being
-//! silently reused.  The estimate is added separately; nothing in this file
-//! estimates anything.
+//! silently reused.  `app::budget` adds the estimate beside it; nothing in
+//! this file estimates anything.
 //!
 //! The type is stored in the preferences, so every field reads through
 //! `#[serde(default)]` and [`MeasuredLatency::sanitized`] drops a value that
@@ -14,7 +14,7 @@
 use serde::Deserialize;
 
 use crate::app::RigWerkApp;
-use crate::audio::{EngineState, MAX_ROUND_TRIP_MS};
+use crate::audio::MAX_ROUND_TRIP_MS;
 
 /// How the person closed the loop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
@@ -250,30 +250,16 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 impl RigWerkApp {
     /// What the rig is set to now, for measuring and for staleness.
     pub(crate) fn latency_conditions(&self) -> LatencyConditions {
-        let running = self.engine.state == EngineState::Running;
-        let snapshot = &self.snapshot;
-        let planned_output_rate = if self.output_rate > 0 {
-            self.output_rate
-        } else {
-            self.sample_rate
-        };
+        let parts = self.latency_parts();
         LatencyConditions {
             input_id: self.active_input().id.clone(),
             input_name: self.active_input().name.clone(),
             output_id: self.selected_output().id.clone(),
             output_name: self.selected_output().name.clone(),
-            input_rate: pick_live(running, snapshot.input_rate, self.sample_rate).max(1),
-            output_rate: pick_live(running, snapshot.output_rate, planned_output_rate).max(1),
-            input_buffer: pick_live(
-                running,
-                snapshot.input_block_frames,
-                self.buffer_size as u32,
-            ),
-            output_step: pick_live(
-                running,
-                snapshot.output_step_frames,
-                self.output_buffer as u32,
-            ),
+            input_rate: parts.input_rate,
+            output_rate: parts.output_rate,
+            input_buffer: parts.input_block,
+            output_step: parts.output_step,
             output_mode: self.output_mode_key().to_owned(),
         }
     }
@@ -296,16 +282,6 @@ impl RigWerkApp {
         } else {
             "standard"
         }
-    }
-}
-
-/// The running reading, or the planned setting when the bridge is not (or
-/// has not reported one yet).  Mirrors the choices in `latency_ms`.
-fn pick_live(running: bool, live: u32, planned: u32) -> u32 {
-    if running && live > 0 {
-        live
-    } else {
-        planned
     }
 }
 

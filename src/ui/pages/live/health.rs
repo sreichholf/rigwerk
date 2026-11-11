@@ -83,9 +83,9 @@ impl RigWerkApp {
         };
         let path_ms = self.latency_ms();
         let path_hint = if self.engine.state == EngineState::Running && self.snapshot.direct {
-            "Estimated RigWerk path only (input block + output step; the duplex node has no cushion). Not a measured round trip."
+            "Estimated RigWerk path only (input block + output step; the duplex node has no cushion). Not a loopback measurement."
         } else {
-            "Estimated RigWerk path only (block + cushion + output step). What you can tune here; not a measured round trip."
+            "Estimated RigWerk path only (block + cushion + output step). What you can tune here; not a loopback measurement."
         };
         let buffer_fill = if self.engine.state == EngineState::Preview {
             0.38 + (ui.input(|input| input.time) as f32 * 0.8).sin() * 0.04
@@ -113,7 +113,7 @@ impl RigWerkApp {
                 metric_tile(ui, "HEARD", &format!("{heard:.1}"), "ms", BLUE, tile_w).on_hover_text(
                     format!(
                         "{path_ms:.1} ms in RigWerk + {after:.1} ms after (graph/device). \
-                         Closer to what you hear; not a measured round trip."
+                         Closer to what you hear; not a loopback measurement."
                     ),
                 );
             });

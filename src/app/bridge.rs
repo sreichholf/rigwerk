@@ -375,32 +375,43 @@ impl RigWerkApp {
         }
     }
 
-    /// RigWerk's own path: input block + cushion + output step. AD/DA, the
-    /// driver, plugins, and anything past our playback node are not included.
-    /// While stopped, the requested buffer and a planned cushion of twice that
-    /// buffer stand in, so a cushion left over from the last run is not shown.
-    pub(crate) fn latency_ms(&self) -> f32 {
+    /// The parts of RigWerk's own path, as `latency_ms` and the latency
+    /// budget read them.  While stopped, the requested buffer and a planned
+    /// cushion of twice that buffer stand in, so a cushion left over from the
+    /// last run is not shown.
+    pub(crate) fn latency_parts(&self) -> LatencyParts {
         let running = self.engine.state == EngineState::Running;
         let pick = |live: u32, planned: u32| if running && live > 0 { live } else { planned };
-        let input_rate = pick(self.snapshot.input_rate, self.sample_rate).max(1) as f32;
         let planned_output_rate = if self.output_rate > 0 {
             self.output_rate
         } else {
             self.sample_rate
         };
-        let output_rate = pick(self.snapshot.output_rate, planned_output_rate).max(1) as f32;
-        let output_step = pick(self.snapshot.output_step_frames, self.output_buffer as u32) as f32;
-        let input_block = pick(self.snapshot.input_block_frames, self.buffer_size as u32) as f32;
         // The PipeWire duplex node has no bridge buffer: input and output
         // run in the same graph cycle.
-        let target = if running && self.snapshot.direct {
+        let cushion = if running && self.snapshot.direct {
             0
         } else if running && self.snapshot.target_frames > 0 {
-            self.snapshot.target_frames
+            self.snapshot.target_frames as u32
         } else {
-            self.buffer_size * 2
-        } as f32;
-        ((input_block + target) / input_rate + output_step / output_rate) * 1000.0
+            (self.buffer_size * 2) as u32
+        };
+        LatencyParts {
+            running,
+            direct: running && self.snapshot.direct,
+            input_block: pick(self.snapshot.input_block_frames, self.buffer_size as u32),
+            cushion,
+            output_step: pick(self.snapshot.output_step_frames, self.output_buffer as u32),
+            input_rate: pick(self.snapshot.input_rate, self.sample_rate).max(1),
+            output_rate: pick(self.snapshot.output_rate, planned_output_rate).max(1),
+        }
+    }
+
+    /// RigWerk's own path: input block + cushion + output step.  AD/DA, the
+    /// driver, plugins, alignment trims, and anything past our playback node
+    /// are not included; see `app::budget` for the full reading.
+    pub(crate) fn latency_ms(&self) -> f32 {
+        self.latency_parts().bridge_ms()
     }
 
     /// Delay past our playback node (graph filters + device), when PipeWire
@@ -546,6 +557,33 @@ impl RigWerkApp {
     pub(crate) fn set_wasapi_output_mode(&mut self, mode: audio::WasapiOutputMode) {
         self.wasapi_output_mode = mode;
         self.low_latency_output = matches!(mode, audio::WasapiOutputMode::RealStyle);
+    }
+}
+
+/// The bridge's own latency, in the terms `latency_ms` has always used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LatencyParts {
+    /// Whether a bridge runs, for the "planned" labels.
+    pub(crate) running: bool,
+    /// Whether input and output share one PipeWire graph cycle (no ring).
+    pub(crate) direct: bool,
+    /// The block the input really delivers, frames.
+    pub(crate) input_block: u32,
+    /// The ring's fill target, frames (0 on the duplex node).
+    pub(crate) cushion: u32,
+    /// The step the output really runs at, frames.
+    pub(crate) output_step: u32,
+    pub(crate) input_rate: u32,
+    pub(crate) output_rate: u32,
+}
+
+impl LatencyParts {
+    /// Input block + cushion at the input rate, plus the output step at the
+    /// output rate.
+    pub(crate) fn bridge_ms(&self) -> f32 {
+        ((self.input_block + self.cushion) as f32 / self.input_rate.max(1) as f32
+            + self.output_step as f32 / self.output_rate.max(1) as f32)
+            * 1000.0
     }
 }
 

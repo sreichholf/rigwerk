@@ -5,6 +5,7 @@
 
 pub(crate) mod alignment;
 pub(crate) mod bridge;
+pub(crate) mod budget;
 pub(crate) mod calibration;
 pub(crate) mod cards;
 pub(crate) mod devices;

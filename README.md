@@ -125,8 +125,14 @@ latency.
   and their settings, paths) under a name, to load again later.
 - **Setup Guide** walks through a first setup, with notes for Linux and
   Windows.
-- **Diagnostics** has the activity log and how much of each audio buffer
-  every path's effects use.
+- **Diagnostics** has the activity log, how much of each audio buffer every
+  path's effects use, and the latency budget: each part of the path (input
+  block, bridge cushion, plugin chain, output step, the delay after
+  RigWerk's playback node) with where its number comes from, the estimate
+  those add up to, and the last measured loopback with its date and
+  conditions. The measurement and the estimate cover different legs of the
+  path, so they are shown side by side rather than subtracted. Copy and
+  Export include the same breakdown.
 
 ## Install and run
 

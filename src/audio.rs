@@ -23,7 +23,7 @@
 //! - `input` / `output`: the cpal capture and playback sides.
 //! - `mixer` / `resampler`: turning ring frames into output frames.
 //! - `calibration`: the click, the capture buffer and the correlator behind
-//!   the measured loopback (the estimate is added separately).
+//!   the measured loopback (the estimate stays in `app::budget`).
 //! - `follower`: generic multi-output (each follower mixed and mapped on the
 //!   clock callback → own ring + cpal stream).
 //! - `ring`: lock-free multi-lane SPSC ring for each generic follower.
