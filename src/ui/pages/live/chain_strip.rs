@@ -1,18 +1,21 @@
 //! One line on Live Bridge summing up the Mixer page: each stage of the
 //! selected path's chain in order, with a way to open the full mixer.
-//! With several paths the label names the path and counts them ("Main ·
-//! 3 paths"), and the Output chip adds what the alignment delays the
-//! output by (`RigWerkApp::added_alignment_ms`).
+//! The PLUGINS stage's BYP pill skips that path's inserts without writing
+//! each insert's own bypass.  With several paths the label names the path
+//! and counts them ("Main · 3 paths"), and the Output chip adds what the
+//! alignment delays the output by (`RigWerkApp::added_alignment_ms`).
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{Page, RigWerkApp};
 use crate::audio::EqSlot;
-use crate::ui::pages::mixer::chain::live_chain_entries;
+use crate::ui::pages::mixer::chain::{
+    apply_chain_bypass, live_chain_entries, ChainSelection, CHAIN_BYPASS_HINT,
+};
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT};
-use crate::ui::widgets::{card_fixed, ellipsize, micro_label, mono};
+use crate::ui::widgets::{bypass_pill, card_fixed, ellipsize, fit_text, micro_label, mono};
 
 /// The chain label's second line with several paths: "Main · 3 paths".
 pub(crate) fn path_count_label(name: &str, paths: usize) -> String {
@@ -27,6 +30,7 @@ pub(crate) fn output_summary(summary: &str, added_ms: f32) -> String {
 impl RigWerkApp {
     pub(crate) fn chain_strip(&mut self, ui: &mut egui::Ui, width: f32) {
         let views = self.engine.plugin_views(self.selected_path);
+        let chain_bypass = self.path().mix.chain_bypass;
         let mut stages = live_chain_entries(
             self.input_gain,
             &self.path().mix.eqs[EqSlot::Pre.index()],
@@ -36,6 +40,7 @@ impl RigWerkApp {
             self.output_gain,
             self.mute,
         );
+        apply_chain_bypass(&mut stages, chain_bypass);
         let paths = self.path_count();
         let added = self.added_alignment_ms();
         if added >= 0.05 {
@@ -45,7 +50,8 @@ impl RigWerkApp {
         }
         let path_line = (paths > 1).then(|| path_count_label(&self.path().name, paths));
 
-        let mut open: Option<crate::ui::pages::mixer::chain::ChainSelection> = None;
+        let mut open: Option<ChainSelection> = None;
+        let mut toggle_bypass = false;
         card_fixed(ui, CARD, BORDER, 74.0, |ui| {
             ui.set_width(width - 32.0);
             ui.horizontal_centered(|ui| {
@@ -116,11 +122,17 @@ impl RigWerkApp {
                         ),
                         egui::StrokeKind::Inside,
                     );
+                    let label_font = egui::FontId::new(ts(7.5), egui::FontFamily::Monospace);
+                    let plugins = entry.selection == ChainSelection::Plugins;
+                    // The pill sits on the label row.  A label that still fits
+                    // is unchanged, so an off bypass looks like the stage did.
+                    let fitted = plugins
+                        .then(|| fit_text(ui, entry.label, &label_font, (stage_w - 42.0).max(0.0)));
                     ui.painter().text(
                         rect.left_top() + Vec2::new(9.0, 7.0),
                         egui::Align2::LEFT_TOP,
-                        entry.label,
-                        egui::FontId::new(ts(7.5), egui::FontFamily::Monospace),
+                        fitted.as_deref().unwrap_or(entry.label),
+                        label_font,
                         if entry.live { entry.color } else { DIM },
                     );
                     ui.painter().text(
@@ -130,18 +142,33 @@ impl RigWerkApp {
                         egui::FontId::new(ts(10.0), egui::FontFamily::Proportional),
                         if entry.live { TEXT } else { MUTED },
                     );
-                    let hint = if entry.selection
-                        == crate::ui::pages::mixer::chain::ChainSelection::Output
-                        && added >= 0.05
-                    {
+                    let pill_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.right() - 40.0, rect.top() + 3.0),
+                        egui::pos2(rect.right() - 4.0, rect.top() + 20.0),
+                    );
+                    if plugins {
+                        let mut pill_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(pill_rect)
+                                .layout(Layout::right_to_left(Align::Center)),
+                        );
+                        if bypass_pill(&mut pill_ui, chain_bypass)
+                            .on_hover_text(CHAIN_BYPASS_HINT)
+                            .clicked()
+                        {
+                            toggle_bypass = true;
+                        }
+                    }
+                    let hint = if entry.selection == ChainSelection::Output && added >= 0.05 {
                         format!(
                             "Open this stage on the Mixer page. Aligning the paths adds up to {added:.1} ms on an output device."
                         )
                     } else {
                         "Open this stage on the Mixer page".to_owned()
                     };
-                    if response.on_hover_text(hint).clicked()
-                    {
+                    let pointer = ui.input(|input| input.pointer.interact_pos());
+                    let on_pill = plugins && pointer.is_some_and(|pos| pill_rect.contains(pos));
+                    if response.on_hover_text(hint).clicked() && !on_pill && !toggle_bypass {
                         open = Some(entry.selection);
                     }
                 }
@@ -165,6 +192,9 @@ impl RigWerkApp {
                 });
             });
         });
+        if toggle_bypass {
+            self.set_chain_bypass(!chain_bypass);
+        }
         if let Some(selection) = open {
             self.select_chain(selection);
             self.page = Page::Mixer;

@@ -8,6 +8,9 @@
 //! its inserts.  So the edits made all the time never take the chain lock:
 //! - mix and bypass are atomics per insert (`SlotControls`) that the audio
 //!   thread reads every chunk;
+//! - the path's chain bypass is one atomic the audio thread loads in
+//!   `PluginChain::process`: it skips every insert without writing the
+//!   slots' own bypass, and the latency stays counted;
 //! - a plugin control goes straight to the plugin through the published
 //!   insert links (`slot_links`), holding only that plugin's own lock (the
 //!   audio thread then skips just that insert for a chunk, delayed by its
@@ -747,7 +750,10 @@ impl PathControls {
     ///
     /// The flags keep the common no-plugin case lock-free.  A chain with no
     /// active insert but some latency (every insert bypassed) still runs, so
-    /// its skipped inserts delay the block by their latency.  `try_lock`
+    /// its skipped inserts delay the block by their latency.  The path's
+    /// chain bypass is an atomic the chain loads while this holds it by
+    /// `try_lock`.  When it is set, every insert is skipped, the latency
+    /// still counts, and each slot's own bypass is left alone.  `try_lock`
     /// keeps a UI edit from stalling the block.
     ///
     /// Every real attempt on the chain lock is counted; so is a lock found

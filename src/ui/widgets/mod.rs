@@ -103,6 +103,39 @@ pub(crate) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
         .galley(rect.center() - galley.size() / 2.0, galley, color);
 }
 
+/// A small BYP pill.  `on` is the hot amber state; off stays a quiet
+/// outline.  The caller adds the tooltip.
+pub(crate) fn bypass_pill(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let color = if on { AMBER } else { DIM };
+    let galley = ui.painter().layout_no_wrap(
+        "BYP".to_owned(),
+        FontId::new(ts(7.0), FontFamily::Monospace),
+        color,
+    );
+    let size = Vec2::new(galley.size().x + 10.0, 15.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if on {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(7), with_alpha(AMBER, 24));
+    }
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(7),
+        Stroke::new(
+            1.0,
+            if on {
+                with_alpha(AMBER, 55)
+            } else {
+                BORDER_SOFT
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
     ui.painter()

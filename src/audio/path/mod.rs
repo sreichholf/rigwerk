@@ -39,7 +39,8 @@
 //! and the chain really delays by exactly that much at all times: an
 //! insert skipped for a block plays its input delayed by its latency, and
 //! an insert's dry/wet mix delays its dry side (see `PluginChain::process`).
-//! The mixer lines the paths up per device with it (`output_map`,
+//! A path-level chain bypass skips every insert the same way, and the total
+//! still counts.  The mixer lines the paths up per device with it (`output_map`,
 //! "Alignment").
 //!
 //! The plugin-chain side of [`PathControls`] (edits, publish, controls,
@@ -95,8 +96,9 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
 }
 
 /// The settings of one path the UI owns and pushes: input routing, mono,
-/// channel enable, the two EQs, the gate, and the path level, mute and
-/// solo.  The plugin chain is kept in the engine ([`PathControls`]).
+/// channel enable, the two EQs, the gate, the path level, mute and solo,
+/// and the insert-chain bypass.  The plugin chain is kept in the engine
+/// ([`PathControls`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathMix {
     /// The 2 × 4 input routing (input × tap).  Only taps 1/2 (the path's
@@ -112,6 +114,9 @@ pub struct PathMix {
     pub level_db: f32,
     pub mute: bool,
     pub solo: bool,
+    /// Skips every insert's processing without changing each insert's own
+    /// bypass.  Latency stays counted.
+    pub chain_bypass: bool,
 }
 
 impl Default for PathMix {
@@ -125,6 +130,7 @@ impl Default for PathMix {
             level_db: 0.0,
             mute: false,
             solo: false,
+            chain_bypass: false,
         }
     }
 }
@@ -385,6 +391,10 @@ pub(crate) struct PathControls {
     /// The chain's total latency ([`PluginChain::latency_handle`]), read
     /// without the chain lock.
     latency: Arc<AtomicU32>,
+    /// Path-level insert bypass ([`PluginChain::chain_bypass_handle`]).
+    /// The audio thread loads it inside the chain; the UI stores it
+    /// without the chain lock.  It does not write each slot's bypass.
+    chain_bypass: Arc<AtomicBool>,
     plugin_active: AtomicUsize,
     /// How often the audio thread tried this path's chain lock and how often
     /// it was busy, so the chunk played the chain's input delayed instead.
@@ -442,6 +452,7 @@ impl PathControls {
             chain_rate: AtomicU32::new(chain.rate()),
             chain_unopened: AtomicBool::new(false),
             latency: chain.latency_handle(),
+            chain_bypass: chain.chain_bypass_handle(),
             plugins: Mutex::new(chain),
             plugin_active: AtomicUsize::new(0),
             chain_attempts: AtomicU64::new(0),
@@ -475,6 +486,7 @@ impl PathControls {
         self.set_level_db(previous.level_db());
         copy_bool(&self.mute, &previous.mute);
         copy_bool(&self.solo, &previous.solo);
+        self.set_chain_bypass(previous.chain_bypassed());
         // A fade-out does not outlive its session.
         self.set_state(match previous.state() {
             PathState::Active => PathState::Active,
@@ -618,6 +630,7 @@ impl PathControls {
         self.set_level_db(mix.level_db);
         self.set_mute(mix.mute);
         self.set_solo(mix.solo);
+        self.set_chain_bypass(mix.chain_bypass);
     }
 
     /// The UI-owned settings as stored now.
@@ -645,6 +658,7 @@ impl PathControls {
             level_db: self.level_db(),
             mute: self.muted(),
             solo: self.soloed(),
+            chain_bypass: self.chain_bypassed(),
         }
     }
 
@@ -678,6 +692,16 @@ impl PathControls {
 
     pub(crate) fn soloed(&self) -> bool {
         self.solo.load(Ordering::Relaxed)
+    }
+
+    /// Skips every insert's processing.  The audio thread reads the same
+    /// atomic inside the chain.  Each slot's own bypass is not written.
+    pub(crate) fn set_chain_bypass(&self, bypass: bool) {
+        self.chain_bypass.store(bypass, Ordering::Relaxed);
+    }
+
+    pub(crate) fn chain_bypassed(&self) -> bool {
+        self.chain_bypass.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set_routes(&self, routes: [[bool; 4]; 2]) {

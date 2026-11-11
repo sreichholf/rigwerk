@@ -420,6 +420,14 @@ impl RigWerkApp {
         }
     }
 
+    /// Skips every insert on the selected path.  Each insert's own bypass
+    /// is left as it is.  Pushed now, so the audio thread sees it before
+    /// the next frame.
+    pub(crate) fn set_chain_bypass(&mut self, bypass: bool) {
+        self.path_mut().mix.chain_bypass = bypass;
+        self.push_paths_to_engine();
+    }
+
     pub(crate) fn set_path_mute(&mut self, slot: usize, mute: bool) {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
             path.mix.mute = mute;

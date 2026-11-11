@@ -570,3 +570,59 @@ fn a_bypass_after_a_latency_change_delays_by_the_new_latency_at_once() {
     chain.process(&mut left, &mut right, 128);
     assert_eq!(left, impulse(128, 64), "no fade from the old delay");
 }
+
+#[test]
+fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
+    use super::PluginChain;
+    use std::sync::atomic::Ordering;
+
+    let mut chain = PluginChain::new(48_000);
+    let total = chain.latency_handle();
+    chain.insert_delay_for_test(16);
+    chain.insert_delay_for_test(8);
+    chain.set_bypass(1, true);
+    assert!(!chain.slot_mut_for_test(0).controls.bypass());
+    assert!(chain.slot_mut_for_test(1).controls.bypass());
+    assert_eq!(chain.latency_samples(), 24);
+    assert_eq!(total.load(Ordering::Acquire), 24);
+
+    chain.set_chain_bypass(true);
+    let mut left = impulse(64, 0);
+    let mut right = impulse(64, 1);
+    assert!(!chain.process(&mut left, &mut right, 64));
+    assert_eq!(left, impulse(64, 24));
+    assert_eq!(right, impulse(64, 25));
+    assert!(
+        !chain.slot_mut_for_test(0).controls.bypass(),
+        "the active insert's bypass is not written"
+    );
+    assert!(chain.slot_mut_for_test(1).controls.bypass());
+    assert!(!chain.slot_mut_for_test(0).controls.take_processed());
+    assert!(!chain.slot_mut_for_test(1).controls.take_processed());
+    for index in 0..2 {
+        assert_eq!(
+            chain.slot_mut_for_test(index).controls.lock_stats(),
+            crate::audio::LockStats::default(),
+            "insert {index} did not run"
+        );
+    }
+    assert_eq!(chain.latency_samples(), 24);
+    assert_eq!(total.load(Ordering::Acquire), 24);
+
+    chain.set_chain_bypass(false);
+    let mut left = vec![0.0f32; 64];
+    let mut right = vec![0.0f32; 64];
+    assert!(!chain.process(&mut left, &mut right, 64));
+    assert!(
+        chain.slot_mut_for_test(0).controls.take_processed(),
+        "turning chain bypass off processes the insert again"
+    );
+    assert!(!chain.slot_mut_for_test(1).controls.take_processed());
+    assert!(!chain.slot_mut_for_test(0).controls.bypass());
+    assert!(chain.slot_mut_for_test(1).controls.bypass());
+    assert_eq!(chain.slot_mut_for_test(0).controls.lock_stats().attempts, 1);
+    assert_eq!(chain.slot_mut_for_test(1).controls.lock_stats().attempts, 0);
+    assert_eq!(chain.latency_samples(), 24);
+    assert_eq!(total.load(Ordering::Acquire), 24);
+    drop(chain.restore(Vec::new()));
+}

@@ -215,6 +215,7 @@ impl Preferences {
             eq_post: self.eq_post,
             gate: self.gate,
             plugins: self.plugins.clone(),
+            chain_bypass: false,
             level_db: 0.0,
             mute: false,
             solo: false,

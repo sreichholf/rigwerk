@@ -1,6 +1,6 @@
 //! The master insert chain.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
 use vst3_host::AudioBuffers;
@@ -47,12 +47,18 @@ pub(crate) struct ReloadPlan {
 /// inserts included (see [`Slot::latency_samples`]), is
 /// [`Self::latency_samples`], and is also kept in an atomic
 /// ([`Self::latency_handle`]) that readers outside the chain lock can load.
+/// A path-level chain bypass ([`Self::set_chain_bypass`]) skips every
+/// insert the same way and still counts in that total.
 pub(crate) struct PluginChain {
     slots: Vec<Slot>,
     buffers: AudioBuffers,
     sample_rate: u32,
     /// [`Self::latency_samples`] as last published.
     latency: Arc<AtomicU32>,
+    /// Skips every insert's processing.  The audio thread loads it; the UI
+    /// stores it without the chain lock.  It does not write each slot's
+    /// own bypass.
+    chain_bypass: Arc<AtomicBool>,
 }
 
 impl PluginChain {
@@ -67,6 +73,7 @@ impl PluginChain {
             buffers: AudioBuffers::new(2, 2, MAX_BLOCK, rate as f64),
             sample_rate: rate,
             latency: Arc::new(AtomicU32::new(0)),
+            chain_bypass: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -93,6 +100,21 @@ impl PluginChain {
     /// latency on the main thread shows up by the next block.
     pub(crate) fn latency_handle(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.latency)
+    }
+
+    /// The path-level bypass flag, shared so the UI can set it without the
+    /// chain lock.  [`Self::process`] loads it on the audio thread.
+    pub(crate) fn chain_bypass_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.chain_bypass)
+    }
+
+    /// Skips every insert's processing until cleared.  Each slot's own
+    /// bypass is left as it is, so clearing this restores those states.
+    /// Latency stays counted.  The running path writes the same atomic;
+    /// this setter is for the chain's own tests.
+    #[cfg(test)]
+    pub(crate) fn set_chain_bypass(&self, bypass: bool) {
+        self.chain_bypass.store(bypass, Ordering::Relaxed);
     }
 
     /// Publishes the latency total after a change made outside the chain
@@ -577,7 +599,9 @@ impl PluginChain {
     /// silent.  Every skipped insert still delays by its latency, and an
     /// insert's dry/wet mix blends with its input delayed by that latency,
     /// so the block comes out [`Self::latency_samples`] late, with the dry
-    /// and wet sides of every insert lined up.
+    /// and wet sides of every insert lined up.  The path's chain bypass
+    /// skips every insert for the block the same way, without writing each
+    /// slot's bypass.
     ///
     /// Returns whether a slot gained an error in this block, or the chain
     /// latency changed, so the caller can ask the UI thread to republish
@@ -586,12 +610,21 @@ impl PluginChain {
     /// Also refreshes [`Self::latency_handle`], so a latency change made on
     /// the main thread (outside the chain lock) reaches it by the next block.
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
-        let failed = self.process_inserts(left, right, frames);
+        // One relaxed load.  The flag is an atomic, so this does not lock
+        // or allocate; the callback already holds the chain only by try_lock.
+        let chain_bypass = self.chain_bypass.load(Ordering::Relaxed);
+        let failed = self.process_inserts(left, right, frames, chain_bypass);
         let latency_changed = self.publish_latency();
         failed || latency_changed
     }
 
-    fn process_inserts(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
+    fn process_inserts(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+        chain_bypass: bool,
+    ) -> bool {
         let frames = frames.min(left.len()).min(right.len());
         if frames == 0 {
             return false;
@@ -610,7 +643,7 @@ impl PluginChain {
             let left = &mut left[offset..offset + count];
             let right = &mut right[offset..offset + count];
             for slot in slots.iter_mut() {
-                failed |= process_slot(slot, buffers, left, right, timing);
+                failed |= process_slot(slot, buffers, left, right, timing, chain_bypass);
             }
             offset += count;
         }
@@ -641,9 +674,10 @@ enum Outcome {
 /// Runs one insert over one chunk (at most [`MAX_BLOCK`] frames) in place.
 /// The input always goes into the insert's dry line first.  A processed
 /// chunk with a partial mix is blended with that dry side delayed by the
-/// insert's latency; a skipped chunk (bypass, mix at 0, the plugin's lock
-/// held by its editor, a CLAP restart's passthrough) plays the input
-/// delayed by that latency.  So the insert delays by its reported latency
+/// insert's latency; a skipped chunk (the path's chain bypass, the slot's
+/// own bypass, mix at 0, the plugin's lock held by its editor, a CLAP
+/// restart's passthrough) plays the input delayed by that latency.  So the
+/// insert delays by its reported latency
 /// whatever happens to it.  A switch between the plugin running and being
 /// skipped (bypass toggled, mix through 0, a plugin-lock skip, a CLAP
 /// restart) cannot crossfade, since only one of the two exists for the
@@ -655,6 +689,7 @@ fn process_slot(
     left: &mut [f32],
     right: &mut [f32],
     timing: SlotTiming,
+    chain_bypass: bool,
 ) -> bool {
     let count = left.len().min(right.len());
     if count == 0 {
@@ -672,7 +707,9 @@ fn process_slot(
         slot.dry_tap.set_target(latency, timing.fade);
     }
     let mix = slot.controls.mix();
-    let outcome = if !slot.active() || mix <= 0.0 {
+    // Chain bypass skips the plugin and leaves the slot's own bypass flag
+    // alone, so clearing it restores whatever each insert was set to.
+    let outcome = if chain_bypass || !slot.active() || mix <= 0.0 {
         Outcome::Skipped
     } else {
         run_plugin(slot, buffers, left, right)
