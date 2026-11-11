@@ -4,6 +4,8 @@
 //! line when a PipeWire node has no ring, and the cushion when it does.
 //! The Issues strip (`live/issues.rs`) sits on top while there are issues,
 //! and "Show on <card>" there rings the bridge strip or the Output card.
+//! An ASIO side's Panel chip posts a request; the bridge thread opens the
+//! driver's control panel.
 
 mod bridge_card;
 mod calibration;
@@ -19,9 +21,10 @@ use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
 use crate::app::issues::IssueCard;
 use crate::app::{Page, RigWerkApp};
+use crate::audio::AsioPanelSide;
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, BLUE, BORDER, CARD, DIM, MUTED, RED, TEAL};
-use crate::ui::widgets::{card_fixed, ellipsize, micro_label, mono, status_dot};
+use crate::ui::widgets::{card_fixed, ellipsize, micro_label, mono, status_dot, tab_button_sized};
 
 impl RigWerkApp {
     pub(crate) fn live_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -138,6 +141,41 @@ impl RigWerkApp {
                 body(self, ui);
             });
         response.response.rect.height()
+    }
+
+    /// ASIO control-panel chip for one bridge side.  Hidden unless that side
+    /// is an ASIO driver.  Disabled until the running bridge has that driver
+    /// open; the click only posts a request.
+    pub(crate) fn asio_panel_chip(
+        &mut self,
+        ui: &mut egui::Ui,
+        side: AsioPanelSide,
+        color: egui::Color32,
+    ) {
+        let Some(clsid) = self.asio_panel_clsid(side) else {
+            return;
+        };
+        let ready = self.engine.open_asio_driver(side) == Some(clsid);
+        let response = ui
+            .add_enabled_ui(ready, |ui| tab_button_sized(ui, "Panel", ready, color, 9.0))
+            .inner;
+        if !ready {
+            let _ = response.on_disabled_hover_text(
+                "The panel is available once the bridge is running on that ASIO driver.",
+            );
+        } else if response
+            .on_hover_text("Open this ASIO driver's control panel.")
+            .clicked()
+        {
+            self.engine.request_asio_panel(side);
+        }
+    }
+
+    fn asio_panel_clsid(&self, side: AsioPanelSide) -> Option<u128> {
+        match side {
+            AsioPanelSide::Input => self.active_input().asio_clsid,
+            AsioPanelSide::Output => self.selected_output().asio_clsid,
+        }
     }
 
     /// Publish status for RigWerk Out: on, off, or missing.

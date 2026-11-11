@@ -1,11 +1,13 @@
-//! The input card: device, channels, input clock, gain and meters.
+//! The input card: device, channels, input clock, gain and meters.  When
+//! the input is ASIO, a Panel chip sits with the channel chips and asks
+//! the bridge to open that driver's control panel.
 
 use eframe::egui;
 use egui::{Align, Layout, RichText};
 
 use crate::app::settings::{rate_label, BUFFERS, INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, RATES};
 use crate::app::RigWerkApp;
-use crate::audio::EngineState;
+use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::pages::live::driver_line::driver_line;
 use crate::ui::theme::ts;
 use crate::ui::theme::{AMBER, BLUE, DIM, GREEN, MUTED, TEAL, TEXT};
@@ -59,6 +61,7 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             channel_chip(ui, "IN 1", &mut self.input_channels[0], TEAL);
             channel_chip(ui, "IN 2", &mut self.input_channels[1], TEAL);
+            self.asio_panel_chip(ui, AsioPanelSide::Input, TEAL);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(mono(self.latency_caption(), MUTED, 9.5));
             });

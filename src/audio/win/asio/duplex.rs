@@ -1,5 +1,6 @@
 //! One ASIO driver carrying both directions: one callback moves input into
-//! the ring and output out of it.
+//! the ring and output out of it.  Either side's Panel request opens this
+//! driver's control panel, on this thread, between callbacks.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -12,7 +13,9 @@ use super::callback::{
     CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
 use super::output::silence_asio_output;
+use super::panel::service_asio_panel;
 use super::ASIO_INPUT_CALLBACKS;
+use crate::audio::AsioPanelSide;
 
 pub(crate) fn run_asio_duplex_bridge(
     config: &StartConfig,
@@ -154,7 +157,17 @@ pub(crate) fn run_asio_duplex_bridge(
     let wait = wait_for_callbacks(
         registration.signal(),
         || stop.load(Ordering::Relaxed),
-        || followers.sync(&shared),
+        || {
+            followers.sync(&shared);
+            // One driver serves both cards.  A stop already in flight must
+            // not open the panel on its way out.
+            !stop.load(Ordering::Relaxed)
+                && service_asio_panel(
+                    &driver,
+                    &shared,
+                    &[AsioPanelSide::Input, AsioPanelSide::Output],
+                )
+        },
     );
     match wait {
         CallbackWait::Stopped => {}

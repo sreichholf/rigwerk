@@ -16,6 +16,8 @@
 //! The rest of the audio side is backend-neutral:
 //! - `types`: the public vocabulary (devices, snapshot, start settings).
 //! - `engine`: the handle the UI uses to start, stop and tune the bridge.
+//! - `asio_panel`: the UI's request to open an ASIO control panel.  The
+//!   bridge thread that owns the driver takes it; the call is Windows-only.
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
 //! - `shared`: the ring buffer, cushion, meters and tuner tap both sides share.
 //! - `path`: one signal path's controls (routing, EQs, gate, inserts).
@@ -36,6 +38,7 @@
 //! - `denormal`: flush-to-zero for the audio callbacks.
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
 
+mod asio_panel;
 mod bridge;
 mod calibration;
 pub(crate) mod clap;
@@ -77,6 +80,7 @@ pub use win::wasapi::probe as probe_output_driver;
 #[cfg(test)]
 mod hardware_tests;
 
+pub(crate) use asio_panel::AsioPanelSide;
 pub(crate) use calibration::{
     analyze_channels, click_waveform, round_trip_ms, CalibrationFailure, CalibrationState,
     MAX_ROUND_TRIP_MS,
