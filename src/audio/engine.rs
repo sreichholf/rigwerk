@@ -556,9 +556,10 @@ impl AudioEngine {
 
     /// Copies control values back after the plugin's own editor changed them.
     /// With `full` the whole control list is read and formatted; without it
-    /// only the changes a running VST3 insert reported are applied (and an id
-    /// the plugin does not list falls back to the full read, see
-    /// [`Self::finish_plugin_editor`] for the close-time sync).
+    /// a running VST3 insert's reported changes only patch the published
+    /// view.  An id that view does not list is left for the full read on
+    /// close ([`Self::finish_plugin_editor`]), save, bypass, stop, or bridge
+    /// start.
     pub fn sync_plugin_parameters(
         &self,
         path: usize,

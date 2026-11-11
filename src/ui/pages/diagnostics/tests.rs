@@ -106,6 +106,24 @@ fn a_poisoned_chain_is_named_instead_of_a_skip_rate() {
 }
 
 #[test]
+fn a_zero_latency_edit_panic_is_named_in_diagnostics() {
+    // The claim lets the chain's slots be destroyed here; one left for the
+    // deferred queue can flake the parallel suite.
+    let _main = claim_main_thread();
+    let app = blank_app();
+    let path = app.engine.shared.path(0);
+    path.insert_delay_for_test(0);
+    path.poison_chain_in_edit_for_test();
+
+    let text = app.diagnostics_text();
+    assert!(
+        text.contains("chain unavailable after an internal error"),
+        "{text}"
+    );
+    assert!(!text.contains(super::NO_INSERT_TRIED), "{text}");
+}
+
+#[test]
 fn the_report_includes_status_notes_and_the_log() {
     let mut app = blank_app();
     app.inventory
