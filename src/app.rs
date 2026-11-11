@@ -1,7 +1,7 @@
 //! The RigWerk window: app state, start-up, the frame loop and saving.
 //!
 //! Logic is grouped in `app/` (settings, devices, bridge control, patches,
-//! screenshots); everything drawn on screen lives in `ui/`.
+//! screenshots, tuner); everything drawn on screen lives in `ui/`.
 
 pub(crate) mod alignment;
 pub(crate) mod bridge;
@@ -19,6 +19,7 @@ pub(crate) mod presets;
 pub(crate) mod screenshot;
 pub(crate) mod settings;
 pub(crate) mod startup;
+pub(crate) mod tuner;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -49,6 +50,7 @@ use crate::ui::theme::{
 pub(crate) enum Page {
     Live,
     Mixer,
+    Tuner,
     Routing,
     Devices,
     Sessions,
@@ -66,6 +68,7 @@ pub(crate) fn initial_page() -> Page {
         .as_str()
     {
         "mixer" => Page::Mixer,
+        "tuner" => Page::Tuner,
         "routing" => Page::Routing,
         "devices" => Page::Devices,
         "sessions" => Page::Sessions,
@@ -131,7 +134,13 @@ pub(crate) struct LogEntry {
 
 pub struct RigWerkApp {
     pub(crate) page: Page,
+    /// The page the previous logic pass ran with.  The tuner logs its mute
+    /// layer changing when this differs from `page`.
+    pub(crate) last_page: Page,
     pub(crate) engine: AudioEngine,
+    /// Tuner settings, the analysis behind the current frame and the
+    /// auto-mute rule.
+    pub(crate) tuner: tuner::TunerState,
     pub(crate) inventory: Inventory,
     pub(crate) asio_idx: usize,
     pub(crate) input_idx: usize,
@@ -311,6 +320,14 @@ impl eframe::App for RigWerkApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.meters(ctx);
         self.poll_calibration();
+        self.log_tuner_page();
+        self.tuner.poll(
+            &self.engine,
+            self.sample_rate,
+            self.page,
+            self.screenshot.is_some(),
+            self.started.elapsed().as_secs_f32(),
+        );
         self.watch_devices();
         self.poll_plugin_scan();
         self.engine.service_plugins();
@@ -376,10 +393,16 @@ impl eframe::App for RigWerkApp {
                 page_scroll.show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     self.header(ui);
-                    ui.add_space(14.0);
+                    // The tuner skips the usual 14 px header gap and the
+                    // 18 px page bottom gap (it keeps 2 px); the panel's own
+                    // 18 px bottom margin is unchanged.
+                    if self.page != Page::Tuner {
+                        ui.add_space(14.0);
+                    }
                     match self.page {
                         Page::Live => self.live_page(ui, &ctx),
                         Page::Mixer => self.mixer_page(ui),
+                        Page::Tuner => self.tuner_page(ui),
                         Page::Routing => self.routing_page(ui),
                         Page::Devices => self.devices_page(ui),
                         Page::Sessions => self.sessions_page(ui),
@@ -387,7 +410,7 @@ impl eframe::App for RigWerkApp {
                         Page::Guide => self.guide_page(ui),
                         Page::Diagnostics => self.diagnostics_page(ui),
                     }
-                    ui.add_space(18.0);
+                    ui.add_space(if self.page == Page::Tuner { 2.0 } else { 18.0 });
                 });
             });
 
@@ -582,6 +605,13 @@ impl eframe::App for RigWerkApp {
             clock_device,
             followers,
             measured_latency: self.measured_latency.clone(),
+            tuner_tuning: self.tuner.preset_id().to_owned(),
+            tuner_reference_hz: self.tuner.reference_hz,
+            tuner_channel: self.tuner.channel.to_u8(),
+            tuner_display: self.tuner.display.to_u8(),
+            tuner_listen: self.tuner.listen.to_u8(),
+            tuner_auto_mute: self.tuner.auto_mute,
+            tuner_tolerance: self.tuner.tolerance.to_u8(),
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -632,10 +662,14 @@ impl RigWerkApp {
         let selected_session = preferences
             .selected_session
             .filter(|index| *index < sessions.len());
+        let page = restored_page(&preferences, screenshot_mode);
+        let tuner = tuner::TunerState::new(&preferences, screenshot_mode);
 
         let mut app = Self {
-            page: restored_page(&preferences, screenshot_mode),
+            page,
+            last_page: page,
             engine,
+            tuner,
             inventory,
             asio_idx,
             input_idx,
@@ -886,7 +920,9 @@ impl RigWerkApp {
 pub(crate) fn blank_app() -> RigWerkApp {
     RigWerkApp {
         page: Page::Live,
+        last_page: Page::Live,
         engine: AudioEngine::new(48_000),
+        tuner: tuner::TunerState::new(&Preferences::default(), false),
         inventory: Inventory::default(),
         asio_idx: 0,
         input_idx: 0,

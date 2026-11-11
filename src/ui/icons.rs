@@ -13,6 +13,7 @@ pub(crate) enum Icon {
     Device,
     Layers,
     Mixer,
+    Tune,
     Plug,
     Help,
     Log,
@@ -112,6 +113,39 @@ pub(crate) fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color:
                 );
                 painter.circle_filled(egui::pos2(x, center.y - height / 2.0 + 2.0), 1.8, color);
             }
+        }
+        Icon::Tune => {
+            // A tuning fork: two prongs meeting at a stem on a small base.
+            let top = center.y - 7.5;
+            let join = center.y + 1.5;
+            let bottom = center.y + 7.5;
+            for x in [-3.6, 3.6] {
+                painter.line_segment(
+                    [
+                        egui::pos2(center.x + x, top),
+                        egui::pos2(center.x + x, join),
+                    ],
+                    stroke,
+                );
+            }
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - 3.6, join),
+                    egui::pos2(center.x + 3.6, join),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(center.x, join), egui::pos2(center.x, bottom)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - 4.0, bottom),
+                    egui::pos2(center.x + 4.0, bottom),
+                ],
+                stroke,
+            );
         }
         Icon::Plug => {
             // A plug: body with two prongs and a cable.

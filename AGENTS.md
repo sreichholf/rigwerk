@@ -165,7 +165,7 @@ Settings are RON in eframe storage (`app/settings`).
   `ui/widgets` before adding a one-off control.
 - Meters, scopes, and latency figures come from the live snapshot.
 - Screenshot runs use `--screenshot <file>` and `RIGWERK_PAGE` (`live`,
-  `mixer`, `routing`, `devices`, `sessions`, `plugins`, `guide`,
+  `mixer`, `routing`, `devices`, `sessions`, `plugins`, `tuner`, `guide`,
   `diagnostics`). `RIGWERK_MIXER_STAGE` selects a Mixer stage.
   Screenshot mode drops Wayland so the requested window size sticks.
   The README set and how to retake it: `docs/screenshots/README.md`.

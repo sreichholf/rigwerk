@@ -386,6 +386,51 @@ pub(crate) fn channel_chip(ui: &mut egui::Ui, label: &str, checked: &mut bool, c
         *checked = !*checked;
     }
 }
+
+/// A two-state switch: a 38 × 22 track with a 16 px knob.  Returns whether
+/// the click changed the value.
+pub(crate) fn switch(ui: &mut egui::Ui, value: &mut bool, color: Color32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(38.0, 22.0), Sense::click());
+    let t = ui.ctx().animate_bool(response.id, *value);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(11),
+        if *value {
+            with_alpha(color, 60)
+        } else {
+            CARD_DEEP
+        },
+    );
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(11),
+        Stroke::new(
+            1.0,
+            if *value {
+                with_alpha(color, 130)
+            } else {
+                BORDER_SOFT
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    let knob_x = rect.left() + 11.0 + (rect.width() - 22.0) * t;
+    ui.painter().circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        8.0,
+        if *value { color } else { MUTED },
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.clicked() {
+        *value = !*value;
+        true
+    } else {
+        false
+    }
+}
+
 pub(crate) fn meter_row(ui: &mut egui::Ui, label: &str, value: f32, peak: f32, color: Color32) {
     ui.horizontal(|ui| {
         ui.add_sized(
@@ -428,15 +473,19 @@ pub(crate) fn metric_inline(ui: &mut egui::Ui, label: &str, value: &str, color: 
     });
 }
 
-pub(crate) fn progress_line(ui: &mut egui::Ui, label: &str, value: f32, color: Color32) {
+/// A labelled bar: the name on the left, a formatted value in monospace on the
+/// right, and a 4 px bar underneath filled to `fraction`.
+pub(crate) fn progress_line(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    fraction: f32,
+    color: Color32,
+) {
     ui.horizontal(|ui| {
         ui.label(micro_label(label, DIM));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(mono(
-                format!("{}%", (value * 100.0).round() as i32),
-                color,
-                8.5,
-            ));
+            ui.label(mono(value, color, 9.0));
         });
     });
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
@@ -444,10 +493,10 @@ pub(crate) fn progress_line(ui: &mut egui::Ui, label: &str, value: f32, color: C
         .rect_filled(rect, CornerRadius::same(2), Color32::from_rgb(27, 34, 46));
     let filled = Rect::from_min_size(
         rect.min,
-        Vec2::new(rect.width() * value.clamp(0.0, 1.0), rect.height()),
+        Vec2::new(rect.width() * fraction.clamp(0.0, 1.0), rect.height()),
     );
     ui.painter()
-        .rect_filled(filled, CornerRadius::same(2), with_alpha(color, 210));
+        .rect_filled(filled, CornerRadius::same(2), with_alpha(color, 220));
 }
 
 pub(crate) fn metric_tile(

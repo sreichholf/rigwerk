@@ -16,6 +16,8 @@ serde = { version = "1", features = ["derive"] }
 ron = "0.12"
 cpal = "0.18"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Preset-guided per-string spectra for the tuner.
+rustfft = "6"
 # VST3 discovery, hosting and processing.  The crate ships its own bindings,
 # so no Steinberg SDK or extra native toolchain is needed.  0.11.1 is the
 # first release whose Linux editor window reports a title-bar close.

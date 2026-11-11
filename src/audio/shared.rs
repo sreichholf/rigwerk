@@ -1,6 +1,7 @@
 //! State shared between the input callback, the output callback and the
 //! UI: the ring buffer, the cushion (its fill target), meters, the master
-//! and device settings, the signal paths and what each side really runs at.
+//! and device settings, the signal paths, the tuner tap and what each side
+//! really runs at.
 //! An armed round-trip measurement lives here too ([`super::calibration`]):
 //! its capture buffer and click are allocated with the session, so the
 //! callbacks only touch atomics.
@@ -37,6 +38,14 @@ use super::calibration::Calibration;
 
 pub(crate) use super::scope::SCOPE_LEN;
 
+/// Native frames the tuner tap keeps: 32 768 frames is 0.68 s at 48 kHz, twice
+/// the largest window the analysis asks for.  The reader always copies the
+/// newest window, so the extra turn only buys slack before the producer
+/// overwrites what is being read.
+pub(crate) const TAP_CAPACITY_FRAMES: usize = 32_768;
+
+const _: () = assert!(crate::audio::tuner::TAP_COPY_FRAMES <= TAP_CAPACITY_FRAMES);
+
 /// One follower slot as the PipeWire linker / generic supervisor (and the UI)
 /// sees it.  Updated live; the audio callback only reads
 /// [`Shared::followers`] controls and the ring-active flags.
@@ -69,6 +78,16 @@ pub(crate) struct Shared {
     head: AtomicU64,
     tail: AtomicU64,
     pub(crate) capacity_frames: usize,
+    /// Interleaved stereo samples for the tuner, as `f32` bit patterns.  This
+    /// is an overwrite ring rather than a queue: the input callback writes
+    /// every frame it pushes into `ring` here too, one reader (the UI) copies
+    /// the latest window, and an unread frame is simply overwritten.  A torn
+    /// window at the wrap seam is acceptable because pitch analysis does not
+    /// need sample continuity across the whole window.
+    tap: Vec<AtomicU32>,
+    /// Total frames written to the tap.  Slots are `counter % tap_capacity`.
+    tap_head: AtomicU64,
+    tap_capacity: usize,
     pub(crate) target_frames: AtomicU64,
     /// Starting cushion from the chosen buffer (Safe mode's floor).
     pub(crate) base_frames: AtomicU64,
@@ -159,6 +178,11 @@ impl Shared {
             head: AtomicU64::new(0),
             tail: AtomicU64::new(0),
             capacity_frames,
+            tap: (0..TAP_CAPACITY_FRAMES * 2)
+                .map(|_| AtomicU32::new(0))
+                .collect(),
+            tap_head: AtomicU64::new(0),
+            tap_capacity: TAP_CAPACITY_FRAMES,
             target_frames: AtomicU64::new((sample_rate as u64 / 187).max(256)),
             base_frames: AtomicU64::new((sample_rate as u64 / 187).max(256)),
             input_block: AtomicU64::new(0),
@@ -489,6 +513,9 @@ impl Shared {
         // stores does not matter.
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
+        // Defensive: a fresh session has written nothing, so the tap starts
+        // empty and `copy_tap` reports nothing until it has a whole window.
+        self.tap_head.store(0, Ordering::Relaxed);
         self.set_status("Starting bridge");
         self.device_lost.store(false, Ordering::Relaxed);
         if let Ok(mut error) = self.error.lock() {
@@ -881,6 +908,51 @@ impl Shared {
         self.ring[index].store(left.to_bits(), Ordering::Relaxed);
         self.ring[index + 1].store(right.to_bits(), Ordering::Relaxed);
         self.head.store(head.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Called by the one input producer, once per frame, next to `push_frame`
+    /// and before the channel mute zeroes a disabled side: the tuner sees the
+    /// instrument even when that channel is not being monitored.  Never
+    /// blocks, allocates or takes a lock; the release store of `tap_head`
+    /// publishes both samples to the reader.
+    pub(crate) fn tap_frame(&self, left: f32, right: f32) {
+        let head = self.tap_head.load(Ordering::Relaxed);
+        let index = (head % self.tap_capacity as u64) as usize * 2;
+        self.tap[index].store(left.to_bits(), Ordering::Relaxed);
+        self.tap[index + 1].store(right.to_bits(), Ordering::Relaxed);
+        self.tap_head.store(head.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Copies the latest `frames` interleaved frames (oldest first) into
+    /// `out`, which must hold `frames * 2` samples.  Called from the UI
+    /// thread.  Returns 0 while the tap has not yet seen a whole window, so a
+    /// fresh session reads nothing instead of stale or partly unwritten data.
+    pub(crate) fn copy_tap(&self, out: &mut [f32], frames: usize) -> usize {
+        if frames == 0 || frames > self.tap_capacity || out.len() < frames * 2 {
+            return 0;
+        }
+        let head = self.tap_head.load(Ordering::Acquire);
+        if head < frames as u64 {
+            return 0;
+        }
+        let start = head - frames as u64;
+        let capacity = self.tap_capacity as u64;
+        // The window can straddle the wrap point, so it is copied in at most
+        // two runs rather than a modulo per frame.
+        let first = (capacity - start % capacity).min(frames as u64) as usize;
+        let mut base = (start % capacity) as usize * 2;
+        for frame in 0..first {
+            out[frame * 2] = f32::from_bits(self.tap[base].load(Ordering::Relaxed));
+            out[frame * 2 + 1] = f32::from_bits(self.tap[base + 1].load(Ordering::Relaxed));
+            base += 2;
+        }
+        let mut base = 0;
+        for frame in first..frames {
+            out[frame * 2] = f32::from_bits(self.tap[base].load(Ordering::Relaxed));
+            out[frame * 2 + 1] = f32::from_bits(self.tap[base + 1].load(Ordering::Relaxed));
+            base += 2;
+        }
+        frames
     }
 
     /// Peak-hold into the input scope for a path that does not go through

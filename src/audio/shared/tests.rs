@@ -563,3 +563,93 @@ fn followers_are_pushed_live_and_cleared() {
     assert_eq!(shared.follower_count(), 0);
     assert!(shared.follower_plan().slots[0].node_name.is_empty());
 }
+
+#[test]
+fn tap_returns_frames_in_order() {
+    let shared = super::Shared::new(48_000);
+    for frame in 0..1_000u32 {
+        shared.tap_frame(frame as f32, -(frame as f32));
+    }
+    let mut out = vec![0.0f32; 64 * 2];
+    assert_eq!(shared.copy_tap(&mut out, 64), 64);
+    for frame in 0..64 {
+        assert_eq!(out[frame * 2], (936 + frame) as f32);
+        assert_eq!(out[frame * 2 + 1], -((936 + frame) as f32));
+    }
+}
+
+#[test]
+fn tap_wraps_and_keeps_order() {
+    let shared = super::Shared::new(48_000);
+    let capacity = super::TAP_CAPACITY_FRAMES;
+    // Two full turns plus a little, so the newest window straddles the
+    // wrap point.
+    let written = capacity * 2 + 100;
+    for frame in 0..written {
+        shared.tap_frame(frame as f32, frame as f32 + 0.5);
+    }
+    let mut out = vec![0.0f32; 128 * 2];
+    assert_eq!(shared.copy_tap(&mut out, 128), 128);
+    for frame in 0..128 {
+        let expected = (written - 128 + frame) as f32;
+        assert_eq!(out[frame * 2], expected);
+        assert_eq!(out[frame * 2 + 1], expected + 0.5);
+    }
+    // A whole ring is also a valid window and ends at the newest frame.
+    let mut whole = vec![0.0f32; capacity * 2];
+    assert_eq!(shared.copy_tap(&mut whole, capacity), capacity);
+    assert_eq!(whole[(capacity - 1) * 2], (written - 1) as f32);
+    assert_eq!(whole[0], (written - capacity) as f32);
+}
+
+#[test]
+fn tap_needs_enough_frames() {
+    let shared = super::Shared::new(48_000);
+    let mut out = vec![0.0f32; 32 * 2];
+    assert_eq!(shared.copy_tap(&mut out, 32), 0);
+    for frame in 0..31 {
+        shared.tap_frame(frame as f32, 0.0);
+    }
+    assert_eq!(shared.copy_tap(&mut out, 32), 0);
+    shared.tap_frame(31.0, 0.0);
+    assert_eq!(shared.copy_tap(&mut out, 32), 32);
+    // A window taller than the output slice is refused rather than read
+    // past its end.
+    assert_eq!(shared.copy_tap(&mut out, 33), 0);
+    // A zero-frame window has nothing to copy.
+    assert_eq!(shared.copy_tap(&mut out, 0), 0);
+    let mut tiny = [0.0f32; 2];
+    // A slice too short for the window is refused too.
+    assert_eq!(shared.copy_tap(&mut tiny, 32), 0);
+    // A window taller than the ring is refused however much room the output
+    // has.
+    let mut oversized = vec![0.0f32; (super::TAP_CAPACITY_FRAMES + 1) * 2];
+    assert_eq!(
+        shared.copy_tap(&mut oversized, super::TAP_CAPACITY_FRAMES + 1),
+        0
+    );
+    // A session reset empties the tap: nothing is read until the new
+    // session has written a whole window again.
+    shared.reset();
+    assert_eq!(shared.copy_tap(&mut out, 32), 0);
+}
+
+#[test]
+fn tap_does_not_touch_bridge_ring() {
+    let shared = super::Shared::new(48_000);
+    for frame in 0..100 {
+        shared.push_frame(frame as f32, 0.0);
+    }
+    let head = shared.head.load(Ordering::Relaxed);
+    let tail = shared.tail.load(Ordering::Relaxed);
+    let frames = shared.ring_frames();
+    for frame in 0..5_000 {
+        shared.tap_frame(frame as f32, 0.0);
+    }
+    assert_eq!(shared.head.load(Ordering::Relaxed), head);
+    assert_eq!(shared.tail.load(Ordering::Relaxed), tail);
+    assert_eq!(shared.ring_frames(), frames);
+    assert_eq!(shared.ring_frames(), 100);
+    // The bridge ring still pops the frames it was given.
+    assert_eq!(shared.pop_frame(), Some((0.0, 0.0)));
+}

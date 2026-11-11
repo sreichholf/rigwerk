@@ -63,7 +63,9 @@ impl RigWerkApp {
         } else {
             0.0
         };
-        progress_line(ui, "BUFFER", fill.clamp(0.0, 1.0), AMBER);
+        let fill = fill.clamp(0.0, 1.0);
+        let percent = format!("{}%", (fill * 100.0).round() as i32);
+        progress_line(ui, "BUFFER", &percent, fill, AMBER);
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {

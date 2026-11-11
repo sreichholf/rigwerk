@@ -1225,3 +1225,69 @@ fn a_cap_dropped_output_is_not_reported_as_unreadable() {
         loaded.notices
     );
 }
+
+#[test]
+fn tuner_settings_round_trip() {
+    let preferences = Preferences {
+        tuner_tuning: "drop-c".to_owned(),
+        tuner_reference_hz: 432.0,
+        tuner_channel: 2,
+        tuner_display: 1,
+        tuner_listen: 1,
+        tuner_auto_mute: false,
+        tuner_tolerance: 2,
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.tuner_tuning, "drop-c");
+    assert_eq!(back.tuner_reference_hz, 432.0);
+    assert_eq!(back.tuner_channel, 2);
+    assert_eq!(back.tuner_display, 1);
+    assert_eq!(back.tuner_listen, 1);
+    assert!(!back.tuner_auto_mute);
+    assert_eq!(back.tuner_tolerance, 2);
+    assert_eq!(back.schema_version, PREFERENCES_SCHEMA);
+}
+
+#[test]
+fn missing_tuner_fields_use_the_page_defaults() {
+    let raw = r#"(session_name:"Old rig")"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let preferences = loaded.preferences.expect("readable");
+    assert_eq!(preferences.tuner_tuning, crate::audio::DEFAULT_PRESET_ID);
+    assert_eq!(preferences.tuner_reference_hz, 440.0);
+    assert_eq!(preferences.tuner_channel, 0);
+    assert_eq!(preferences.tuner_display, 0);
+    assert_eq!(preferences.tuner_listen, 0);
+    assert!(preferences.tuner_auto_mute);
+    assert_eq!(preferences.tuner_tolerance, 1);
+}
+
+#[test]
+fn tuner_reference_is_sanitized_on_load() {
+    let high = load_preferences(Some(r#"(tuner_reference_hz:500.0)"#), BACKUP)
+        .preferences
+        .expect("readable");
+    assert_eq!(high.tuner_reference_hz, crate::app::tuner::REFERENCE_MAX_HZ);
+    let low = load_preferences(Some(r#"(tuner_reference_hz:400.0)"#), BACKUP)
+        .preferences
+        .expect("readable");
+    assert_eq!(low.tuner_reference_hz, crate::app::tuner::REFERENCE_MIN_HZ);
+    let nan = load_preferences(Some(r#"(tuner_reference_hz:NaN)"#), BACKUP)
+        .preferences
+        .expect("readable");
+    assert_eq!(
+        nan.tuner_reference_hz,
+        crate::app::tuner::DEFAULT_REFERENCE_HZ
+    );
+}
+
+#[test]
+fn tuner_page_key_round_trips() {
+    assert_eq!(page_key(Page::Tuner), "tuner");
+    assert!(page_from_key("tuner") == Page::Tuner);
+    assert!(page_from_key(" Tuner ") == Page::Tuner);
+}

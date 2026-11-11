@@ -222,6 +222,7 @@ impl AsioCallbackContext {
             self.shared.capture_calibration(raw_left, raw_right);
             let mut left = raw_left * gain;
             let mut right = raw_right * gain;
+            self.shared.tap_frame(left, right);
             if !enabled_l {
                 left = 0.0;
             }

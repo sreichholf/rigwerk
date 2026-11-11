@@ -95,6 +95,15 @@ impl RigWerkApp {
                 }
                 if nav_item(
                     ui,
+                    Icon::Tune,
+                    "Tuner",
+                    "Chromatic + poly",
+                    self.page == Page::Tuner,
+                ) {
+                    target = Some(Page::Tuner);
+                }
+                if nav_item(
+                    ui,
                     Icon::Plug,
                     "Plugins",
                     "VST3 + CLAP",
@@ -233,6 +242,10 @@ impl RigWerkApp {
             Page::Mixer => (
                 "Mixer".to_owned(),
                 "Signal chain top to bottom · inspector for the selected stage.".to_owned(),
+            ),
+            Page::Tuner => (
+                "Tuner".to_owned(),
+                "Chromatic, strobe, and every string at once.".to_owned(),
             ),
             Page::Routing => (
                 "Signal Routing".to_owned(),

@@ -121,6 +121,21 @@ impl AudioEngine {
         self.shared.snapshot()
     }
 
+    /// Copies the newest tap window for the tuner.  Returns 0 until the input
+    /// side has written a whole window.
+    pub(crate) fn copy_tap(&self, out: &mut [f32], frames: usize) -> usize {
+        self.shared.copy_tap(out, frames)
+    }
+
+    /// The rate the input really runs at.  The requested rate is the fallback
+    /// until the input side has reported its own.
+    pub(crate) fn active_rate(&self) -> u32 {
+        match self.shared.source_rate.load(Ordering::Relaxed) {
+            0 => self.sample_rate,
+            rate => rate,
+        }
+    }
+
     /// Decimated in/out waveform bins for the Live scope (oldest → newest).
     pub(crate) fn copy_scope(&self, input: &mut [f32], output: &mut [f32]) {
         self.shared.copy_scope(input, output);
