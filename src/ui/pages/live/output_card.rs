@@ -184,7 +184,9 @@ impl RigWerkApp {
                     ))
                     .corner_radius(CornerRadius::same(7)),
                 )
-                .on_hover_text("Silence the output without stopping the bridge.")
+                .on_hover_text(
+                    "Silence the output without stopping the bridge. Mute (Ctrl+Shift+M).",
+                )
                 .clicked()
             {
                 self.mute = !self.mute;
