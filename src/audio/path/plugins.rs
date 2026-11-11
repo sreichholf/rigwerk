@@ -20,10 +20,11 @@
 //! What still takes the chain lock is structural and short: adding,
 //! removing, moving or restoring inserts, reopening them for a new rate
 //! (slow loads and teardowns run outside the lock), resetting a plugin's
-//! controls, capturing state for a save, and the publish of the views those
-//! edits do.  Syncing from an editor applies only what a running VST3 insert
-//! reported; a CLAP editor (no change feed) and an insert that has not
-//! processed a block since the last sync are read in full instead.
+//! controls, capturing state for a save, a full editor sync, and the publish
+//! of the views those edits do.  The running poll of a VST3 insert does not
+//! take it: the changes it reported only patch the published view.  A CLAP
+//! editor (no change feed) and an insert that has not processed a block
+//! since the last sync are read in full instead.
 //!
 //! For those rare misses the mixer keeps the timing: rather than a second,
 //! lock-free copy of the chain (plugin instances are stateful and cannot be
@@ -41,7 +42,7 @@ use std::sync::{Arc, PoisonError, TryLockError};
 
 use super::super::plugins::{
     host_format_parameter, host_set_parameter, take_parameter_changes, take_parameter_values,
-    PluginChain, PluginHandle, PluginPref, PluginView, SlotLink, Vst3Service,
+    PluginChain, PluginHandle, PluginParamView, PluginPref, PluginView, SlotLink, Vst3Service,
 };
 use super::{ClapService, LockStats, PathControls, PluginLockReport};
 
@@ -81,6 +82,36 @@ impl Drop for PublishOnUnwind<'_> {
 /// processed a block can be synced from its reported changes.
 pub(super) fn needs_full_sync(requested: bool, processed: bool, has_vst3: bool) -> bool {
     requested || !processed || !has_vst3
+}
+
+/// What the running poll does with one id from [`take_parameter_changes`],
+/// decided from the published view after that drain has released the
+/// instance.
+///
+/// A known id only patches the published view.  The saved parameters and the
+/// slot's stale flag stay as they are, whether the control is read-only or a
+/// writable one the processor echoed.  An id the view does not list is
+/// ignored.  A control the plugin actually added is picked up by the full
+/// read on save, close, bypass, stop, or bridge start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RunningSync {
+    /// Patch the published view's value and display.  Do not write the saved
+    /// parameters and do not mark the slot stale.
+    ViewOnly,
+    /// The published view does not list this id.
+    Ignore,
+}
+
+/// Classifies one reported id against the controls the published view
+/// already lists.  A known id is [`RunningSync::ViewOnly`] whether or not
+/// its cached `read_only` flag is set.  An id the view does not list is
+/// [`RunningSync::Ignore`], not a request for a full read.
+pub(super) fn classify_running_change(parameters: &[PluginParamView], id: u32) -> RunningSync {
+    if parameters.iter().any(|parameter| parameter.id == id) {
+        RunningSync::ViewOnly
+    } else {
+        RunningSync::Ignore
+    }
 }
 
 impl PathControls {
@@ -184,6 +215,10 @@ impl PathControls {
     /// to service, nothing to reopen.  This is what `plugin_views` returned
     /// for a poisoned chain before the views were published.
     fn publish_poisoned(&self) {
+        // A panic in edit_chain clears the active flag before the callback
+        // can observe the poisoned mutex.  A zero-latency chain then never
+        // try-locks.
+        self.chain_poisoned.store(true, Ordering::Relaxed);
         self.plugin_active.store(0, Ordering::Relaxed);
         self.chain_unopened.store(false, Ordering::Relaxed);
         self.published_ports_changed.store(0, Ordering::Relaxed);
@@ -296,6 +331,16 @@ impl PathControls {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _chain = self.plugins.lock().expect("the chain is not poisoned yet");
             panic!("poison the chain");
+        }));
+    }
+
+    /// Panics inside `edit_chain`, so the unwind guard publishes the dead
+    /// chain.  Unlike `poison_chain_for_test`, this is the edit-path poison:
+    /// the active flag is cleared before anything try-locks the mutex.
+    #[cfg(test)]
+    pub(crate) fn poison_chain_in_edit_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.edit_chain(|_chain| panic!("poison the chain in an edit"));
         }));
     }
 
@@ -440,17 +485,21 @@ impl PathControls {
     /// Copies control values back after the plugin's own editor changed them.
     ///
     /// With `full`, the whole control list is read and formatted, and the
-    /// reporter is only drained (`take_parameter_values`).  Without it, only
-    /// the changes a running VST3 insert reported are applied with
-    /// [`take_parameter_changes`]; a CLAP plugin has no change feed, and an
-    /// insert that has not processed a block since the last sync has no
-    /// visible changes yet, so both cases read in full instead (see
-    /// [`needs_full_sync`]).  A plugin that reported a changed parameter list
-    /// (`param_titles_changed` / `param_values_changed`) is forced to the full
-    /// read too, and an id the cached views do not know falls back to it, at
-    /// most once a second (see [`Vst3Service::unknown_full_due`]).  A changed
-    /// name or default on an existing id is picked up by the full sync on
-    /// stop, close or save, or by that fallback when the id is new.
+    /// reporter is only drained (`take_parameter_values`).  Without it, a
+    /// running VST3 insert is drained once with [`take_parameter_changes`]
+    /// and each id is classified from the published view (see
+    /// [`classify_running_change`]).  A known id, read-only or writable,
+    /// patches that view's value and display and nothing else.  An id the
+    /// view does not list is ignored.  That poll does not take the chain
+    /// lock, does not write the saved parameters, and does not mark the slot
+    /// stale.  A CLAP plugin has no change feed, and an insert that has not
+    /// processed a block since the last sync has no visible changes yet, so
+    /// both cases read in full instead (see [`needs_full_sync`]).  A plugin
+    /// that reported a changed parameter list (`param_titles_changed` /
+    /// `param_values_changed`) is forced to the full read too.  A control the
+    /// plugin actually added, or a changed name or default on an existing id,
+    /// is picked up by that full read on save, close, bypass, stop, or bridge
+    /// start.
     ///
     /// A missing or unloaded insert is a silent no-op.
     pub(crate) fn sync_plugin_parameters(&self, index: usize, full: bool) -> Result<(), String> {
@@ -473,13 +522,13 @@ impl PathControls {
             return Ok(());
         };
         let processed = link.controls.take_processed();
-        let vst3 = link.vst3.clone();
+        let has_vst3 = link.vst3.is_some();
         let Some(handle) = link.plugin else {
             return Ok(());
         };
         // Decided before draining, from the processed flag and the service's
         // requests (atomics, no plugin call).
-        let full = needs_full_sync(full || parameters_changed, processed, vst3.is_some());
+        let full = needs_full_sync(full || parameters_changed, processed, has_vst3);
         if !full {
             let Some(changes) = take_parameter_changes(&handle) else {
                 return Ok(());
@@ -487,28 +536,43 @@ impl PathControls {
             if changes.is_empty() {
                 return Ok(());
             }
-            match self
-                .edit_chain(|chain| chain.apply_synced_parameter_changes(index, &handle, &changes))
+            // The instance lock is released.  Classify from the published
+            // view, which already caches `read_only`.  No second plugin call
+            // and no chain lock.
+            let views = self.plugin_views();
+            let Some(cached) = views.get(index).map(|view| &view.parameters) else {
+                return Ok(());
+            };
+            if !changes
+                .iter()
+                .any(|change| classify_running_change(cached, change.id) == RunningSync::ViewOnly)
             {
-                Some(Some(true)) | Some(None) => return Ok(()),
-                // An id the cached views did not know: read the whole list
-                // instead.  The edit above has already released the lock.
-                Some(Some(false)) => {
-                    if !vst3
-                        .as_ref()
-                        .is_none_or(|service| service.unknown_full_due())
+                return Ok(());
+            }
+            self.patch_view(index, |view| {
+                for change in &changes {
+                    if classify_running_change(&view.parameters, change.id) != RunningSync::ViewOnly
                     {
-                        return Ok(());
+                        continue;
+                    }
+                    if let Some(parameter) = view
+                        .parameters
+                        .iter_mut()
+                        .find(|parameter| parameter.id == change.id)
+                    {
+                        parameter.value = change.value;
+                        if let Some(display) = &change.display {
+                            parameter.display = display.clone();
+                        }
                     }
                 }
-                None => return Err("Plugin chain unavailable".to_owned()),
-            }
-        } else {
-            // Drain the reporter before the full read, without formatting:
-            // a value queued before the fresher read would otherwise be
-            // applied by the next change poll, putting an older value back.
-            drop(take_parameter_values(&handle));
+            });
+            return Ok(());
         }
+        // Drain the reporter before the full read, without formatting:
+        // a value queued before the fresher read would otherwise be
+        // applied by the next change poll, putting an older value back.
+        drop(take_parameter_values(&handle));
         let Some(parameters) = super::super::plugins::read_plugin_parameters(&handle) else {
             return Ok(());
         };

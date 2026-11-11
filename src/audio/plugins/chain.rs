@@ -8,8 +8,8 @@ use vst3_host::AudioBuffers;
 use super::super::clap::{ClapPlugin, HostState};
 use super::super::delay::{DECLICK_SECONDS, TAP_FADE_SECONDS};
 use super::load::{
-    apply_parameter_changes, host_format_parameter, host_reset_parameters, host_set_parameter,
-    merge_synced_params, Capture, ParamChange, PluginHandle, StateRequest, Vst3Service, MAX_BLOCK,
+    host_format_parameter, host_reset_parameters, host_set_parameter, merge_synced_params, Capture,
+    PluginHandle, StateRequest, Vst3Service, MAX_BLOCK,
 };
 #[cfg(test)]
 use super::pref::PluginFormat;
@@ -436,37 +436,6 @@ impl PluginChain {
         // The editor is open and can change more than parameters.
         slot.state_stale = true;
         slot.nudge_vst3();
-    }
-
-    /// Stores control changes reported by an open VST3 editor, touching only
-    /// the ids they name instead of reading every control again.  The same
-    /// instance check as [`Self::apply_synced_parameters`].  `Some(false)`
-    /// when an id was not in the cached views (a control the plugin added or
-    /// renamed), which asks the caller for a full read; `None` when the slot
-    /// or instance no longer matches.
-    ///
-    /// The index/instance guard is not unit-tested: it needs two real plugin
-    /// instances, the same limitation as [`Self::apply_synced_parameters`].
-    pub(crate) fn apply_synced_parameter_changes(
-        &mut self,
-        index: usize,
-        handle: &PluginHandle,
-        changes: &[ParamChange],
-    ) -> Option<bool> {
-        let slot = self.slots.get_mut(index)?;
-        if !slot
-            .plugin
-            .as_ref()
-            .is_some_and(|current| current.same(handle))
-        {
-            return None;
-        }
-        let all_known =
-            apply_parameter_changes(&mut slot.parameters, &mut slot.pref.params, changes);
-        // The editor is open and can change more than parameters.
-        slot.state_stale = true;
-        slot.nudge_vst3();
-        Some(all_known)
     }
 
     /// The loaded plugins whose state should be captured now: those whose

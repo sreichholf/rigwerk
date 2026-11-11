@@ -140,6 +140,9 @@ pub(crate) fn take_parameter_values(handle: &PluginHandle) -> Option<Vec<(u32, f
 /// saved list keeps [`merge_synced_params`]'s semantics: every live value
 /// away from its default, plus saved entries the plugin does not list.
 /// Changes that are already at their default therefore leave it.
+///
+/// Kept for the parameter tests.  The running editor poll does not call it.
+#[cfg(test)]
 pub(crate) fn apply_parameter_changes(
     parameters: &mut [PluginParamView],
     saved: &mut Vec<PluginParamPref>,
@@ -200,12 +203,6 @@ const VST3_POLL_MS: u64 = 250;
 /// for as long as it is shown.
 const VST3_POLL_WINDOW_MS: u64 = 2_000;
 
-/// How long a full read of the control list is held off after one was forced
-/// by a reported id the cached views do not know.  A plugin can report an
-/// output parameter it never lists, which would otherwise ask for a full read
-/// (and format every control) on every poll.
-const UNKNOWN_FULL_MS: u64 = 1_000;
-
 /// Milliseconds since the first call, for the poll window atomics.
 fn now_ms() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -224,9 +221,6 @@ pub(crate) struct Vst3Service {
     poll_until: AtomicU64,
     /// When it may look next.
     next_poll: AtomicU64,
-    /// Until when (see [`now_ms`]) the unknown-id full-read fallback waits
-    /// (see [`UNKNOWN_FULL_MS`]).
-    next_unknown_full: AtomicU64,
     /// Set when the plugin reported changed parameter values or titles, so
     /// the next editor sync reads every control instead of only the reported
     /// changes.  This covers an added, renamed or re-defaulted control
@@ -248,7 +242,6 @@ impl Vst3Service {
             latency: AtomicU32::new(clamp_latency(latency)),
             poll_until: AtomicU64::new(0),
             next_poll: AtomicU64::new(0),
-            next_unknown_full: AtomicU64::new(0),
             parameters_changed: AtomicBool::new(false),
             error_logged: AtomicBool::new(false),
         };
@@ -277,19 +270,6 @@ impl Vst3Service {
     pub(crate) fn nudge(&self) {
         self.poll_until
             .store(now_ms() + VST3_POLL_WINDOW_MS, Ordering::Relaxed);
-    }
-
-    /// Whether the full-read fallback for a reported id the cached views do
-    /// not know may run now, arming [`UNKNOWN_FULL_MS`].  Bounds a plugin
-    /// that reports an output id it never lists.
-    pub(crate) fn unknown_full_due(&self) -> bool {
-        let now = now_ms();
-        if now < self.next_unknown_full.load(Ordering::Relaxed) {
-            return false;
-        }
-        self.next_unknown_full
-            .store(now + UNKNOWN_FULL_MS, Ordering::Relaxed);
-        true
     }
 
     /// Applies the plugin's `restartComponent` requests and re-reads its

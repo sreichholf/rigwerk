@@ -274,12 +274,12 @@ impl RigWerkApp {
             return;
         }
         if due {
-            // A running VST3 insert reports its own changes, so the sync reads
-            // only the controls it names once it has processed a block.  A
-            // bridge that is not running processes none, so no VST3 edit could
-            // become visible and every poll reads in full; the sync also goes
-            // full for a CLAP editor and an insert that has not processed a
-            // block (see `needs_full_sync`).
+            // A running VST3 insert is drained from the changes it reported,
+            // once it has processed a block; that poll only patches the
+            // published view.  A bridge that is not running processes none,
+            // so no VST3 edit could become visible and every poll reads in
+            // full; the sync also goes full for a CLAP editor and an insert
+            // that has not processed a block (see `needs_full_sync`).
             let full = self.engine.state != EngineState::Running;
             let _ = self
                 .engine

@@ -1,6 +1,6 @@
-use super::plugins::needs_full_sync;
+use super::plugins::{classify_running_change, needs_full_sync, RunningSync};
 use super::PathControls;
-use crate::audio::LockStats;
+use crate::audio::{LockStats, PluginParamView};
 
 #[test]
 fn a_path_with_no_inserts_does_not_count_a_chain_attempt() {
@@ -122,4 +122,53 @@ fn a_poisoned_chain_is_reported_without_counting_a_skip() {
     // Resetting the counters cannot make the chain usable again.
     path.reset_plugin_lock_counters();
     assert!(path.plugin_lock_report().chain_poisoned);
+}
+
+#[test]
+fn a_zero_latency_edit_panic_is_reported_before_the_callback() {
+    // The chain cannot be edited or restored once poisoned, so the claim
+    // makes sure its slots are destroyed on this thread instead of being
+    // left for the deferred queue.
+    let _main = crate::audio::claim_main_thread();
+    let path = PathControls::new(48_000);
+    path.insert_delay_for_test(0);
+    path.poison_chain_in_edit_for_test();
+    // Published by the unwind guard.  The callback has not run yet.
+    assert!(path.plugin_lock_report().chain_poisoned);
+    let mut left = vec![0.0f32; 64];
+    let mut right = vec![0.0f32; 64];
+    // Active is cleared and latency is still 0, so this returns before the
+    // poisoned lock and counts no attempt.
+    assert!(path.process_plugins(&mut left, &mut right, 64));
+    assert_eq!(path.plugin_lock_report().chain.attempts, 0);
+}
+
+fn cached_control(id: u32, read_only: bool) -> PluginParamView {
+    PluginParamView {
+        id,
+        read_only,
+        ..PluginParamView::default()
+    }
+}
+
+#[test]
+fn a_known_read_only_id_is_view_only() {
+    let cached = [cached_control(7, true)];
+    assert_eq!(classify_running_change(&cached, 7), RunningSync::ViewOnly);
+}
+
+#[test]
+fn a_known_writable_id_is_view_only_and_not_a_save() {
+    // The same decision as a read-only id: patch the published view, and do
+    // not write the saved parameters.  A writable id the processor echoes
+    // is not the user's setting.
+    let cached = [cached_control(3, false)];
+    assert_eq!(classify_running_change(&cached, 3), RunningSync::ViewOnly);
+}
+
+#[test]
+fn an_unknown_id_is_ignored() {
+    let cached = [cached_control(3, false), cached_control(7, true)];
+    assert_eq!(classify_running_change(&cached, 9), RunningSync::Ignore);
+    assert_eq!(classify_running_change(&[], 3), RunningSync::Ignore);
 }
