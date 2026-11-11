@@ -263,7 +263,7 @@ impl RigWerkApp {
                     ui.add(
                         egui::Label::new(
                             RichText::new(
-                                "The main output is muted while it measures; extra outputs keep playing. Keep the loopback connected.",
+                                "The mix on the main output is muted while it measures. The click ignores that output's mute and fader, so a muted output still plays it. Extra outputs keep playing. Keep the loopback connected.",
                             )
                             .size(ts(10.5))
                             .color(AMBER),
@@ -301,7 +301,13 @@ impl RigWerkApp {
                         ui.add_space(10.0);
                     }
                     if let Some(measured) = &measured {
-                        measured_summary(ui, measured, stale.as_deref(), budget.estimate_ms);
+                        measured_summary(
+                            ui,
+                            measured,
+                            stale.as_deref(),
+                            budget.estimate_ms,
+                            budget.estimate_gap.as_deref(),
+                        );
                         ui.add_space(12.0);
                     }
                     ui.horizontal(|ui| {
@@ -329,7 +335,8 @@ impl RigWerkApp {
                         ui.label(
                             RichText::new(
                                 "The result replaces the previous one only when a click is heard \
-                                 and correlated.",
+                                 and correlated. The click ignores the clock output's mute and \
+                                 fader, so a muted output still plays it.",
                             )
                             .size(ts(10.0))
                             .color(DIM),
@@ -362,6 +369,7 @@ fn measured_summary(
     measured: &crate::app::latency::MeasuredLatency,
     stale: Option<&str>,
     estimate_ms: f32,
+    estimate_gap: Option<&str>,
 ) {
     ui.horizontal(|ui| {
         ui.label(
@@ -405,9 +413,14 @@ fn measured_summary(
     ui.add_space(4.0);
     ui.add(
         egui::Label::new(
-            RichText::new(format!(
-                "Estimated path now {estimate_ms:.1} ms (derived; input block, cushion, chain, output step and after-node). It is a different leg, not this measurement's error."
-            ))
+            RichText::new(match estimate_gap {
+                Some(gap) => format!(
+                    "Estimated path now {estimate_ms:.1} ms (derived; {gap}). It is a different leg, not this measurement's error."
+                ),
+                None => format!(
+                    "Estimated path now {estimate_ms:.1} ms (derived; input block, cushion, chain, output step and after-node). It is a different leg, not this measurement's error."
+                ),
+            })
             .size(ts(10.0))
             .color(DIM),
         )

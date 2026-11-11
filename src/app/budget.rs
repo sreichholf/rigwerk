@@ -38,6 +38,9 @@ pub(crate) enum LatencySource {
     Reported,
     /// RigWerk's own buffer choice, not a hardware reading.
     Setting,
+    /// The size asked for while the bridge is stopped, or before the driver
+    /// has reported the block it opened.
+    Planned,
     /// Added or converted here from reported parts.
     Derived,
 }
@@ -48,6 +51,7 @@ impl LatencySource {
             Self::Measured => "measured",
             Self::Reported => "reported",
             Self::Setting => "setting",
+            Self::Planned => "planned",
             Self::Derived => "estimated",
         }
     }
@@ -76,8 +80,11 @@ impl BudgetPart {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LatencyBudget {
     pub(crate) parts: Vec<BudgetPart>,
-    /// The sum of the reported and setting parts.  Not a loopback.
+    /// The sum of the parts that have a number.  Not a loopback.  Parts
+    /// without one are named in [`Self::estimate_gap`] and left out.
     pub(crate) estimate_ms: f32,
+    /// Why the sum is short of the labelled path, when a part has no number.
+    pub(crate) estimate_gap: Option<String>,
     /// The stored measurement, if any.
     pub(crate) measured: Option<MeasuredLatency>,
     /// Why the stored measurement no longer applies.
@@ -100,9 +107,12 @@ impl LatencyBudget {
             ));
         }
         lines.push(format!(
-            "= Estimated path: {:.1} ms ({}; includes the chain and the after-node delay, so it differs from the Live US, which is the bridge alone)",
+            "= Estimated path: {:.1} ms ({}; {})",
             self.estimate_ms,
-            LatencySource::Derived.label()
+            LatencySource::Derived.label(),
+            self.estimate_gap.as_deref().unwrap_or(
+                "includes the chain and the after-node delay, so it differs from the Live US, which is the bridge alone"
+            )
         ));
         match &self.measured {
             Some(measured) => lines.push(format!(
@@ -149,13 +159,17 @@ impl RigWerkApp {
                 "{} frames at {}{}",
                 parts_of_bridge.output_step,
                 rate_label(parts_of_bridge.output_rate),
-                planned_suffix(parts_of_bridge.running)
+                planned_suffix(parts_of_bridge.output_reported)
             ),
             ms: Some(frames_ms(
                 parts_of_bridge.output_step,
                 parts_of_bridge.output_rate,
             )),
-            source: LatencySource::Reported,
+            source: if parts_of_bridge.output_reported {
+                LatencySource::Reported
+            } else {
+                LatencySource::Planned
+            },
         });
         parts.push(BudgetPart {
             label: "AFTER PLAYBACK NODE",
@@ -174,6 +188,13 @@ impl RigWerkApp {
             source: LatencySource::Reported,
         });
         let estimate_ms: f32 = parts.iter().filter_map(|part| part.ms).sum();
+        let missing: Vec<&str> = parts
+            .iter()
+            .filter(|part| part.ms.is_none())
+            .map(|part| part.label)
+            .collect();
+        let estimate_gap = (!missing.is_empty())
+            .then(|| format!("{} unknown, left out of the sum", missing.join(", ")));
         let stale = self
             .measured_latency
             .as_ref()
@@ -181,14 +202,15 @@ impl RigWerkApp {
         LatencyBudget {
             parts,
             estimate_ms,
+            estimate_gap,
             measured: self.measured_latency.clone(),
             stale,
         }
     }
 }
 
-fn planned_suffix(running: bool) -> &'static str {
-    if running {
+fn planned_suffix(reported: bool) -> &'static str {
+    if reported {
         ""
     } else {
         " (planned)"
@@ -202,10 +224,14 @@ fn input_block_part(parts: &LatencyParts) -> BudgetPart {
             "{} frames at {}{}",
             parts.input_block,
             rate_label(parts.input_rate),
-            planned_suffix(parts.running)
+            planned_suffix(parts.input_reported)
         ),
         ms: Some(frames_ms(parts.input_block, parts.input_rate)),
-        source: LatencySource::Reported,
+        source: if parts.input_reported {
+            LatencySource::Reported
+        } else {
+            LatencySource::Planned
+        },
     }
 }
 

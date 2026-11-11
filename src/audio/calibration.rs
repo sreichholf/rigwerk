@@ -25,7 +25,16 @@
 //!
 //! The click is a short linear chirp, 400 Hz to 6 kHz, Hann-windowed, so it
 //! has no step at either end (no click of its own) and correlates sharply
-//! even when the loop colours the sound.
+//! even when the loop colours the sound.  Both input channels are kept.
+//! The correlator scores each one and keeps the better peak, so a loop on
+//! one side still measures and a polarity-inverted pair does not cancel.
+//!
+//! The phase word and the capture count carry the arm's generation.  A
+//! callback already inside [`Calibration::capture_frame`] when the UI
+//! finishes and arms again cannot publish that frame into the new window:
+//! its compare-and-exchange names the old generation.  The click lives in
+//! two buffers.  The mixer latches one at the start of its block, and
+//! [`Calibration::arm`] writes the other.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -240,6 +249,62 @@ pub(crate) fn analyze_capture(
     })
 }
 
+/// Scores each channel and keeps the better peak.  A mono downmix would
+/// cancel a polarity-inverted pair and bury a one-sided loop in the other
+/// channel; either channel on its own still correlates (an inverted click
+/// included, because the score is absolute).
+pub(crate) fn analyze_channels(
+    left: &[f32],
+    right: &[f32],
+    template: &[f32],
+    rate: u32,
+) -> Result<CaptureAnalysis, CalibrationFailure> {
+    match (
+        analyze_capture(left, template, rate),
+        analyze_capture(right, template, rate),
+    ) {
+        (Ok(left), Ok(right)) => Ok(if left.score >= right.score {
+            left
+        } else {
+            right
+        }),
+        (Ok(found), Err(_)) | (Err(_), Ok(found)) => Ok(found),
+        (Err(left), Err(right)) => Err(prefer_failure(left, right)),
+    }
+}
+
+/// The failure that tells the person more.  A clip outranks a miss, and a
+/// miss outranks silence; two misses keep the closer score.
+fn prefer_failure(left: CalibrationFailure, right: CalibrationFailure) -> CalibrationFailure {
+    let rank = |failure: &CalibrationFailure| match failure {
+        CalibrationFailure::Clipped => 3,
+        CalibrationFailure::NoPeak { .. } => 2,
+        CalibrationFailure::TooQuiet { .. } => 1,
+        CalibrationFailure::TooShort
+        | CalibrationFailure::OutOfWindow
+        | CalibrationFailure::Timing => 0,
+    };
+    let (rank_left, rank_right) = (rank(&left), rank(&right));
+    if rank_left != rank_right {
+        return if rank_left > rank_right { left } else { right };
+    }
+    match (left, right) {
+        (
+            CalibrationFailure::NoPeak { score: left },
+            CalibrationFailure::NoPeak { score: right },
+        ) => CalibrationFailure::NoPeak {
+            score: left.max(right),
+        },
+        (
+            CalibrationFailure::TooQuiet { level_db: left },
+            CalibrationFailure::TooQuiet { level_db: right },
+        ) => CalibrationFailure::TooQuiet {
+            level_db: left.max(right),
+        },
+        (chosen, _) => chosen,
+    }
+}
+
 /// The start of the click's burst.  The ducked mix leaves it as the loudest
 /// event in the capture, so the loudest millisecond is found first and then
 /// walked back to the leading edge of the burst.  The walk stops at the noise
@@ -317,17 +382,45 @@ fn best_lag(capture: &[f32], template: &[f32], first: usize, last: usize) -> Opt
     best
 }
 
+/// Generation in the high bits, [`CalibrationState`] in the low 8.
+/// A compare-and-exchange names both, so a callback still inside the
+/// previous arm cannot move the new one.
+fn pack(generation: u64, state: CalibrationState) -> u64 {
+    (generation << 8) | state as u64
+}
+
+fn unpack(word: u64) -> (u64, CalibrationState) {
+    (word >> 8, CalibrationState::from_u32((word & 0xff) as u32))
+}
+
+/// The next arm id.  Zero is the session's initial idle word, so a bump
+/// that would wrap skips it.
+fn next_generation(generation: u64) -> u64 {
+    let next = generation.wrapping_add(1) & 0xffff_ffff;
+    if next == 0 {
+        1
+    } else {
+        next
+    }
+}
+
 /// The armed measurement: the preallocated capture, the click and the
 /// atomics the three threads share.
 pub(crate) struct Calibration {
     /// The clock the stamps are relative to.  Set when the session is built,
     /// so every thread reads the same monotonic time base without a lock.
     epoch: Instant,
-    state: AtomicU32,
-    /// Monophonic raw capture, `f32` bits.  The input callback writes the
-    /// slots below `captured`; only the UI thread reads them, after `Ready`.
-    capture: Vec<AtomicU32>,
-    captured: AtomicUsize,
+    /// [`pack`] of the arm generation and the [`CalibrationState`].
+    phase: AtomicU64,
+    /// Raw capture, `f32` bits, one buffer per channel.  The input callback
+    /// writes the slots below the published count; only the UI thread reads
+    /// them, after `Ready`.
+    capture_l: Vec<AtomicU32>,
+    capture_r: Vec<AtomicU32>,
+    /// High 32 bits are the arm generation, low 32 the number of frames
+    /// published.  Publishing is a compare-and-exchange on the whole word,
+    /// so a stale callback cannot advance the next arm's count.
+    captured: AtomicU64,
     /// Frames kept before the capture window is full.
     limit: AtomicUsize,
     /// Frames of capture before the click may play.
@@ -341,21 +434,24 @@ pub(crate) struct Calibration {
     capture_start_ns: AtomicU64,
     capture_end_ns: AtomicU64,
     emitted_ns: AtomicU64,
-    /// Bumped on every arm, so the mixer knows a new measurement started
-    /// even when it never saw the state pass through `Idle` between blocks.
-    generation: AtomicU64,
-    /// The click as `f32` bits, written by the app while idle.
-    click: Vec<AtomicU32>,
-    click_len: AtomicUsize,
+    /// The click as `f32` bits, two copies.  `arm` fills the side that is
+    /// not published; the mixer reads only the side it latched.
+    click: [Vec<AtomicU32>; 2],
+    click_len: [AtomicUsize; 2],
+    /// Which click buffer the mixer should latch.  0 or 1.
+    click_side: AtomicU32,
 }
 
 impl Calibration {
     pub(crate) fn new() -> Self {
+        let channel = || (0..CAPTURE_CAPACITY).map(|_| AtomicU32::new(0)).collect();
+        let click = || (0..MAX_CLICK_SAMPLES).map(|_| AtomicU32::new(0)).collect();
         Self {
             epoch: Instant::now(),
-            state: AtomicU32::new(CalibrationState::Idle as u32),
-            capture: (0..CAPTURE_CAPACITY).map(|_| AtomicU32::new(0)).collect(),
-            captured: AtomicUsize::new(0),
+            phase: AtomicU64::new(pack(0, CalibrationState::Idle)),
+            capture_l: channel(),
+            capture_r: channel(),
+            captured: AtomicU64::new(0),
             limit: AtomicUsize::new(0),
             settle: AtomicUsize::new(0),
             ducked: AtomicBool::new(false),
@@ -363,20 +459,41 @@ impl Calibration {
             capture_start_ns: AtomicU64::new(0),
             capture_end_ns: AtomicU64::new(0),
             emitted_ns: AtomicU64::new(0),
-            generation: AtomicU64::new(0),
-            click: (0..MAX_CLICK_SAMPLES).map(|_| AtomicU32::new(0)).collect(),
-            click_len: AtomicUsize::new(0),
+            click: [click(), click()],
+            click_len: [AtomicUsize::new(0), AtomicUsize::new(0)],
+            click_side: AtomicU32::new(0),
         }
     }
 
+    fn phase(&self) -> (u64, CalibrationState) {
+        unpack(self.phase.load(Ordering::Acquire))
+    }
+
     pub(crate) fn state(&self) -> CalibrationState {
-        CalibrationState::from_u32(self.state.load(Ordering::Acquire))
+        self.phase().1
     }
 
     /// Which arm this is.  The mixer resets its click position when it
     /// changes, so a retry armed straight after a result still plays.
     pub(crate) fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.phase().0
+    }
+
+    /// Bumps the generation and clears every counter a stale callback might
+    /// still publish.  The phase word itself is stored by the caller, last,
+    /// so a callback that sees the new state also sees the cleared counters
+    /// and the click buffer.
+    fn retire(&self) -> u64 {
+        let generation = next_generation(self.generation());
+        self.captured.store(generation << 32, Ordering::Relaxed);
+        self.ducked.store(false, Ordering::Relaxed);
+        self.hold_left.store(0, Ordering::Relaxed);
+        self.capture_start_ns.store(0, Ordering::Relaxed);
+        self.capture_end_ns.store(0, Ordering::Relaxed);
+        self.emitted_ns.store(0, Ordering::Relaxed);
+        self.limit.store(0, Ordering::Relaxed);
+        self.settle.store(0, Ordering::Relaxed);
+        generation
     }
 
     /// Arms a measurement for an input running at `input_rate`, with
@@ -397,12 +514,14 @@ impl Calibration {
         if click.is_empty() || click.len() > MAX_CLICK_SAMPLES || input_rate == 0 {
             return Err("The measurement settings are invalid.".to_owned());
         }
-        for (slot, sample) in self.click.iter().zip(click) {
+        // Write the buffer the mixer is not reading.  It latches `click_side`
+        // when it notices the new generation, which is published below.
+        let side = (self.click_side.load(Ordering::Relaxed) ^ 1) as usize;
+        for (slot, sample) in self.click[side].iter().zip(click) {
             slot.store(sample.to_bits(), Ordering::Relaxed);
         }
-        self.click_len.store(click.len(), Ordering::Release);
-        self.captured.store(0, Ordering::Relaxed);
-        self.ducked.store(false, Ordering::Relaxed);
+        self.click_len[side].store(click.len(), Ordering::Release);
+        let generation = self.retire();
         // Two input blocks (one being captured while the duck settles, one
         // for the host's queue), or a whole output step if that is longer: a
         // large independent output buffer must not leave its program tail in
@@ -411,9 +530,6 @@ impl Calibration {
             (2 * input_block as usize).max(output_step as usize).max(1),
             Ordering::Relaxed,
         );
-        self.capture_start_ns.store(0, Ordering::Relaxed);
-        self.capture_end_ns.store(0, Ordering::Relaxed);
-        self.emitted_ns.store(0, Ordering::Relaxed);
         let limit = (CAPTURE_SECONDS * input_rate as f32).round() as usize;
         self.limit.store(
             limit.clamp(click.len(), CAPTURE_CAPACITY),
@@ -422,25 +538,29 @@ impl Calibration {
         let settle = (SETTLE_SECONDS * input_rate as f32).round() as usize;
         self.settle
             .store(settle.clamp(1, CAPTURE_CAPACITY / 2), Ordering::Relaxed);
+        self.click_side.store(side as u32, Ordering::Release);
         // Release: the input and output callbacks see the click and the
         // window only after they see `Armed`.
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        self.state
-            .store(CalibrationState::Armed as u32, Ordering::Release);
+        self.phase
+            .store(pack(generation, CalibrationState::Armed), Ordering::Release);
         Ok(())
     }
 
     /// Ends a measurement from the UI thread.  The mixer ramps the mix back
-    /// as soon as it sees `Idle`; nothing else was ever forced.
+    /// as soon as it sees `Idle`; nothing else was ever forced.  The
+    /// generation moves too, so a callback already past its state check
+    /// cannot publish into whatever is armed next.
     pub(crate) fn finish(&self) {
-        self.state
-            .store(CalibrationState::Idle as u32, Ordering::Release);
+        let generation = self.retire();
+        self.phase
+            .store(pack(generation, CalibrationState::Idle), Ordering::Release);
     }
 
     /// One input frame, raw (before gain and channel enable), from whichever
     /// capture callback owns this side.  One relaxed load on the idle path.
+    /// Both channels are stored; the correlator picks the better one.
     pub(crate) fn capture_frame(&self, left: f32, right: f32) {
-        let state = self.state();
+        let (generation, state) = self.phase();
         if !matches!(
             state,
             CalibrationState::Armed
@@ -458,17 +578,27 @@ impl Calibration {
             }
             let hold = self.hold_left.load(Ordering::Relaxed);
             if hold > 0 {
-                self.hold_left.store(hold - 1, Ordering::Relaxed);
+                // A newer arm replaces this hold.  The exchange names the
+                // value we read, so it cannot count that arm's frames down.
+                if self.generation() != generation {
+                    return;
+                }
+                let _ = self.hold_left.compare_exchange(
+                    hold,
+                    hold - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
                 return;
             }
             let start = self.now_ns();
-            // A cancel that landed first wins; this frame is dropped instead
-            // of leaving the state ducked.
+            // The generation is part of the word, so this cannot move a
+            // newer arm out of `Armed`.
             if self
-                .state
+                .phase
                 .compare_exchange(
-                    CalibrationState::Armed as u32,
-                    CalibrationState::Capturing as u32,
+                    pack(generation, CalibrationState::Armed),
+                    pack(generation, CalibrationState::Capturing),
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 )
@@ -477,44 +607,74 @@ impl Calibration {
                 return;
             }
             self.capture_start_ns.store(start, Ordering::Release);
-            if self.state() != CalibrationState::Capturing {
-                // Cancelled between the transition and the stamp.
+            if self.generation() != generation || self.state() != CalibrationState::Capturing {
+                // Cancelled, or a new arm landed, between the transition and
+                // the stamp.  That arm clears the stamp itself.
                 return;
             }
         }
-        let index = self.captured.load(Ordering::Relaxed);
+        self.commit_frame(generation, left, right);
+    }
+
+    /// Publishes one frame for `generation`.  `false` when a newer arm owns
+    /// the count, or the window is already full.  The sample is stored
+    /// before the count moves, and the count moves only if it still names
+    /// this generation and this index.
+    pub(crate) fn commit_frame(&self, generation: u64, left: f32, right: f32) -> bool {
+        let word = self.captured.load(Ordering::Acquire);
+        if word >> 32 != generation {
+            return false;
+        }
+        let index = word as u32 as usize;
         let limit = self.limit.load(Ordering::Relaxed);
         if index >= limit || index >= CAPTURE_CAPACITY {
-            return;
+            return false;
         }
-        let mono = 0.5 * (left + right);
-        self.capture[index].store(mono.to_bits(), Ordering::Relaxed);
-        // Release: whoever sees the higher count may read the sample.
-        self.captured.store(index + 1, Ordering::Release);
+        self.capture_l[index].store(left.to_bits(), Ordering::Relaxed);
+        self.capture_r[index].store(right.to_bits(), Ordering::Relaxed);
+        let next = (generation << 32) | (index as u64 + 1);
+        if self
+            .captured
+            .compare_exchange(word, next, Ordering::Release, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
         if index + 1 >= limit {
             self.capture_end_ns.store(self.now_ns(), Ordering::Release);
-            let current = self.state();
-            if matches!(current, CalibrationState::Emitting | CalibrationState::Tail) {
-                // Never overwrite a cancel with `Ready`.
-                if self
-                    .state
-                    .compare_exchange(
-                        current as u32,
-                        CalibrationState::Ready as u32,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_err()
-                    && current == CalibrationState::Emitting
-                {
-                    let _ = self.state.compare_exchange(
-                        CalibrationState::Tail as u32,
-                        CalibrationState::Ready as u32,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
-                }
-            }
+            self.mark_ready(generation);
+        }
+        true
+    }
+
+    /// Closes the window once the click has been handed to the output.
+    /// A cancel or a newer arm wins: the exchange names this generation.
+    fn mark_ready(&self, generation: u64) {
+        let word = self.phase.load(Ordering::Acquire);
+        if word >> 8 != generation {
+            return;
+        }
+        let state = unpack(word).1;
+        if !matches!(state, CalibrationState::Emitting | CalibrationState::Tail) {
+            return;
+        }
+        if self
+            .phase
+            .compare_exchange(
+                pack(generation, state),
+                pack(generation, CalibrationState::Ready),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+            && state == CalibrationState::Emitting
+        {
+            let _ = self.phase.compare_exchange(
+                pack(generation, CalibrationState::Tail),
+                pack(generation, CalibrationState::Ready),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         }
     }
 
@@ -528,25 +688,31 @@ impl Calibration {
     /// click may play.
     pub(crate) fn settled(&self) -> bool {
         self.state() == CalibrationState::Capturing
-            && self.captured.load(Ordering::Acquire) >= self.settle.load(Ordering::Relaxed)
+            && self.captured() >= self.settle.load(Ordering::Relaxed)
     }
 
     /// Records the clock sample that carries the click's first frame, if the
-    /// measurement is still capturing.  `false` when a cancel landed first;
-    /// the mixer then plays nothing and lets the duck ramp home.
+    /// measurement is still capturing.  `false` when a cancel or a newer arm
+    /// landed first; the mixer then plays nothing and lets the duck ramp home.
     pub(crate) fn note_emitting(&self, at: Instant) -> bool {
+        let (generation, state) = self.phase();
+        if state != CalibrationState::Capturing {
+            return false;
+        }
         let ns = at
             .saturating_duration_since(self.epoch)
             .as_nanos()
             .min(u64::MAX as u128) as u64;
-        // Published before the state transition: the CAS releases, so a
-        // reader that sees `Emitting` also sees the stamp.  A losing CAS
-        // leaves the stamp behind, and `arm` clears it for the next run.
+        // Before the transition.  The exchange releases, so an input callback
+        // that sees `Emitting` also sees the stamp.  A losing exchange leaves
+        // the stamp behind; `retire` clears it, and the next winning exchange
+        // on this thread writes the stamp for that arm before it publishes
+        // `Emitting`.
         self.emitted_ns.store(ns, Ordering::Release);
-        self.state
+        self.phase
             .compare_exchange(
-                CalibrationState::Capturing as u32,
-                CalibrationState::Emitting as u32,
+                pack(generation, CalibrationState::Capturing),
+                pack(generation, CalibrationState::Emitting),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -555,24 +721,40 @@ impl Calibration {
 
     /// The click has played out; now only the capture window is left.
     pub(crate) fn note_emitted(&self) {
-        let _ = self.state.compare_exchange(
-            CalibrationState::Emitting as u32,
-            CalibrationState::Tail as u32,
+        let (generation, state) = self.phase();
+        if state != CalibrationState::Emitting {
+            return;
+        }
+        let _ = self.phase.compare_exchange(
+            pack(generation, CalibrationState::Emitting),
+            pack(generation, CalibrationState::Tail),
             Ordering::AcqRel,
             Ordering::Relaxed,
         );
     }
 
-    pub(crate) fn click_sample(&self, index: usize) -> f32 {
-        f32::from_bits(self.click[index.min(MAX_CLICK_SAMPLES - 1)].load(Ordering::Relaxed))
+    /// Which click buffer [`CalibrationEmitter`] should read.  Published
+    /// before the phase word, so a mixer that sees the new generation also
+    /// sees this.
+    pub(crate) fn click_side(&self) -> u32 {
+        self.click_side.load(Ordering::Acquire) & 1
     }
 
-    pub(crate) fn click_len(&self) -> usize {
-        self.click_len.load(Ordering::Relaxed)
+    pub(crate) fn click_sample(&self, side: usize, index: usize) -> f32 {
+        let side = side & 1;
+        f32::from_bits(self.click[side][index.min(MAX_CLICK_SAMPLES - 1)].load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn click_len(&self, side: usize) -> usize {
+        self.click_len[side & 1].load(Ordering::Acquire)
     }
 
     pub(crate) fn captured(&self) -> usize {
-        self.captured.load(Ordering::Acquire).min(CAPTURE_CAPACITY)
+        let word = self.captured.load(Ordering::Acquire);
+        if word >> 32 != self.generation() {
+            return 0;
+        }
+        (word as u32 as usize).min(CAPTURE_CAPACITY)
     }
 
     /// The capture frames the current window holds (0 when idle).
@@ -600,13 +782,20 @@ impl Calibration {
         self.emitted_ns.load(Ordering::Acquire)
     }
 
-    /// Copies the captured mono signal for the correlator.  UI thread only.
-    pub(crate) fn copy_capture(&self, out: &mut Vec<f32>) -> usize {
+    /// Copies both captured channels for the correlator.  UI thread only.
+    pub(crate) fn copy_capture(&self, left: &mut Vec<f32>, right: &mut Vec<f32>) -> usize {
         let len = self.captured();
-        out.clear();
-        out.reserve(len);
-        for slot in &self.capture[..len] {
-            out.push(f32::from_bits(slot.load(Ordering::Relaxed)));
+        left.clear();
+        right.clear();
+        left.reserve(len);
+        right.reserve(len);
+        for index in 0..len {
+            left.push(f32::from_bits(
+                self.capture_l[index].load(Ordering::Relaxed),
+            ));
+            right.push(f32::from_bits(
+                self.capture_r[index].load(Ordering::Relaxed),
+            ));
         }
         len
     }
@@ -639,6 +828,10 @@ pub(crate) struct CalibrationEmitter {
     generation: u64,
     /// Whether the caller has been told the duck reached silence.
     ducked: bool,
+    /// The click buffer latched for `generation`.  `next` reads this side
+    /// even if `arm` publishes the other one mid-block.
+    click_side: usize,
+    click_len: usize,
 }
 
 impl CalibrationEmitter {
@@ -650,6 +843,8 @@ impl CalibrationEmitter {
             finished: false,
             generation: 0,
             ducked: false,
+            click_side: 0,
+            click_len: 0,
         }
     }
 
@@ -662,17 +857,22 @@ impl CalibrationEmitter {
         rate: u32,
         now: Instant,
     ) -> (f32, f32) {
-        let state = calibration.state();
-        let generation = calibration.generation();
+        // One load: the generation and the state share a word, and a second
+        // load could observe a newer arm than the first.
+        let (generation, state) = calibration.phase();
         if generation != self.generation {
             // A new arm, even one that arrived without an idle block in
             // between: start a fresh click.  The gain is not snapped back;
-            // a cancel mid-duck still has to ramp home.
+            // a cancel mid-duck still has to ramp home.  The side is the
+            // one `arm` published for this generation; the other buffer is
+            // what a later arm may already be writing.
             self.generation = generation;
             self.click_pos = 0;
             self.emitting = false;
             self.finished = false;
             self.ducked = false;
+            self.click_side = calibration.click_side() as usize;
+            self.click_len = calibration.click_len(self.click_side);
         }
         if state == CalibrationState::Idle {
             self.emitting = false;
@@ -709,9 +909,13 @@ impl CalibrationEmitter {
             calibration.note_ducked();
         }
         let click = if self.emitting {
-            let sample = calibration.click_sample(self.click_pos);
+            let sample = if self.click_pos < self.click_len {
+                calibration.click_sample(self.click_side, self.click_pos)
+            } else {
+                0.0
+            };
             self.click_pos += 1;
-            if self.click_pos >= calibration.click_len() {
+            if self.click_pos >= self.click_len {
                 self.emitting = false;
                 self.finished = true;
                 calibration.note_emitted();

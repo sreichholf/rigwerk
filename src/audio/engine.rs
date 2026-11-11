@@ -380,9 +380,9 @@ impl AudioEngine {
         self.shared.calibration.finish();
     }
 
-    /// Copies the captured loopback into `out` (UI thread, after `Ready`).
-    pub fn calibration_capture(&self, out: &mut Vec<f32>) -> usize {
-        self.shared.calibration.copy_capture(out)
+    /// Copies both channels of the captured loopback (UI thread, after `Ready`).
+    pub fn calibration_capture(&self, left: &mut Vec<f32>, right: &mut Vec<f32>) -> usize {
+        self.shared.calibration.copy_capture(left, right)
     }
 
     /// How many capture frames are in and how many the window holds.

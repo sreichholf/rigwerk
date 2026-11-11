@@ -379,7 +379,9 @@ impl RigWerkApp {
                 &format!("{:.1} ms", budget.estimate_ms),
                 AMBER,
                 "estimated",
-                "Input block + cushion + plugin chain + output step + after-node delay, at the rates they run at. The Live US readout is the bridge alone, so it differs from this by the chain and the after-node delay; alignment trims are not included.",
+                budget.estimate_gap.as_deref().unwrap_or(
+                    "Input block + cushion + plugin chain + output step + after-node delay, at the rates they run at. The Live US readout is the bridge alone, so it differs from this by the chain and the after-node delay; alignment trims are not included.",
+                ),
             );
             ui.add_space(3.0);
             match &budget.measured {
@@ -412,7 +414,7 @@ impl RigWerkApp {
             ui.add_space(2.0);
             ui.label(
                 RichText::new(
-                    "Reported means the driver, graph or a plugin said so; setting is RigWerk's own cushion; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
+                    "Reported means the driver, graph or a plugin said so; planned is the size asked for before the driver has opened; setting is RigWerk's own cushion; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
                 )
                 .size(ts(10.0))
                 .color(DIM),

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::latency::{LatencyConditions, LoopbackKind, MeasuredLatency};
 use crate::app::RigWerkApp;
-use crate::audio::{self, CalibrationFailure, CalibrationState, EngineState};
+use crate::audio::{self, analyze_channels, CalibrationFailure, CalibrationState, EngineState};
 use crate::ui::theme::{AMBER, MUTED, TEAL};
 
 /// How long a measurement may take before the app gives up.  The capture
@@ -49,9 +49,10 @@ pub(crate) struct CalibrationUi {
     pub(crate) phase: CalibrationPhase,
     /// How the loop is closed, stored with a result.
     pub(crate) loopback: LoopbackKind,
-    /// Scratch for the captured loopback, reused between measurements so the
-    /// UI thread does not allocate a megabyte every time.
-    pub(crate) capture: Vec<f32>,
+    /// Scratch for the captured loopback, one buffer per channel, reused
+    /// between measurements so the UI thread does not allocate every time.
+    pub(crate) capture_l: Vec<f32>,
+    pub(crate) capture_r: Vec<f32>,
 }
 
 impl Default for CalibrationUi {
@@ -60,7 +61,8 @@ impl Default for CalibrationUi {
             open: false,
             phase: CalibrationPhase::Idle,
             loopback: LoopbackKind::Cable,
-            capture: Vec::new(),
+            capture_l: Vec::new(),
+            capture_r: Vec::new(),
         }
     }
 }
@@ -123,7 +125,8 @@ impl RigWerkApp {
             conditions.output_step,
         ) {
             Ok(()) => {
-                self.calibration.capture.clear();
+                self.calibration.capture_l.clear();
+                self.calibration.capture_r.clear();
                 self.calibration.phase = CalibrationPhase::Measuring {
                     started: Instant::now(),
                     conditions,
@@ -203,9 +206,10 @@ impl RigWerkApp {
             );
             return;
         }
-        let captured = self
-            .engine
-            .calibration_capture(&mut self.calibration.capture);
+        let captured = self.engine.calibration_capture(
+            &mut self.calibration.capture_l,
+            &mut self.calibration.capture_r,
+        );
         let capture_start_ns = self.engine.calibration_capture_start_ns();
         let capture_end_ns = self.engine.calibration_capture_end_ns();
         // A dropped input block leaves fewer frames than the wall time says,
@@ -222,8 +226,9 @@ impl RigWerkApp {
             return;
         }
         let template = audio::click_waveform(conditions.input_rate);
-        let analysis = audio::analyze_capture(
-            &self.calibration.capture[..captured],
+        let analysis = analyze_channels(
+            &self.calibration.capture_l[..captured],
+            &self.calibration.capture_r[..captured],
             &template,
             conditions.input_rate,
         );

@@ -79,6 +79,33 @@ fn the_budget_adds_the_reported_parts_and_labels_their_origin() {
 }
 
 #[test]
+fn a_stopped_budget_labels_planned_buffers_and_leaves_out_the_unknown_part() {
+    let app = blank_app();
+    let budget = app.latency_budget();
+    let source = |label: &str| {
+        budget
+            .parts
+            .iter()
+            .find(|part| part.label == label)
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .source
+    };
+    assert_eq!(source("INPUT BLOCK"), LatencySource::Planned);
+    assert_eq!(source("OUTPUT STEP"), LatencySource::Planned);
+    assert_eq!(source("BRIDGE CUSHION"), LatencySource::Setting);
+    assert!(budget
+        .parts
+        .iter()
+        .any(|part| part.label == "AFTER PLAYBACK NODE" && part.ms.is_none()));
+    let text = budget.text_lines().join("\n");
+    assert!(
+        text.contains("AFTER PLAYBACK NODE unknown, left out of the sum"),
+        "{text}"
+    );
+    assert!(text.contains("(planned)"), "{text}");
+}
+
+#[test]
 fn the_budget_compares_a_fresh_measurement_with_the_estimate() {
     let mut app = blank_app();
     app.engine.state = EngineState::Running;
@@ -108,7 +135,7 @@ fn the_budget_compares_a_fresh_measurement_with_the_estimate() {
     assert_eq!(budget.stale, None);
     let text = budget.text_lines().join("\n");
     assert!(text.contains("Measured loopback: 40.0 ms"));
-    assert!(text.contains("OUT → cable → IN"));
+    assert!(text.contains("OUT Speakers → cable → IN Focusrite USB"));
     assert!(!text.contains("minus estimate"), "{text}");
 }
 

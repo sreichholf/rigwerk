@@ -74,7 +74,7 @@ pub use win::wasapi::probe as probe_output_driver;
 mod hardware_tests;
 
 pub(crate) use calibration::{
-    analyze_capture, click_waveform, round_trip_ms, CalibrationFailure, CalibrationState,
+    analyze_channels, click_waveform, round_trip_ms, CalibrationFailure, CalibrationState,
     MAX_ROUND_TRIP_MS,
 };
 pub(crate) use devices::device_choice_label;

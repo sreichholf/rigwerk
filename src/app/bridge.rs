@@ -404,6 +404,8 @@ impl RigWerkApp {
             output_step: pick(self.snapshot.output_step_frames, self.output_buffer as u32),
             input_rate: pick(self.snapshot.input_rate, self.sample_rate).max(1),
             output_rate: pick(self.snapshot.output_rate, planned_output_rate).max(1),
+            input_reported: running && self.snapshot.input_block_frames > 0,
+            output_reported: running && self.snapshot.output_step_frames > 0,
         }
     }
 
@@ -575,6 +577,10 @@ pub(crate) struct LatencyParts {
     pub(crate) output_step: u32,
     pub(crate) input_rate: u32,
     pub(crate) output_rate: u32,
+    /// The input block is the driver's, not the size asked for while stopped.
+    pub(crate) input_reported: bool,
+    /// The output step is the driver's, not the size asked for while stopped.
+    pub(crate) output_reported: bool,
 }
 
 impl LatencyParts {

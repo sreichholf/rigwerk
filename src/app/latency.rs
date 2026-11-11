@@ -159,12 +159,12 @@ impl MeasuredLatency {
     /// date.  `stale` is the reason from [`Self::stale_reason`].
     pub(crate) fn summary(&self, stale: Option<&str>) -> String {
         let mut text = format!(
-            "{:.1} ms · {} smp · OUT → {} → IN · {} → {} · {} / {} · {} in, {} out · {}",
+            "{:.1} ms · {} smp · OUT {} → {} → IN {} · {} / {} · {} in, {} out · {}",
             self.latency_ms,
             self.samples,
+            display_name(&self.output_name, &self.output_id),
             self.loopback.label(),
             display_name(&self.input_name, &self.input_id),
-            display_name(&self.output_name, &self.output_id),
             rate_label(self.input_rate),
             rate_label(self.output_rate),
             self.input_buffer,
@@ -264,10 +264,23 @@ impl RigWerkApp {
         }
     }
 
-    /// A short, stable name for how the clock output opens, so a measurement
-    /// made in one mode is not reused in another.  The long status line is
-    /// for display; this is the comparison key.
+    /// A short, stable name for how the clock output opened, so a measurement
+    /// made in one mode is not reused in another.  While the bridge runs this
+    /// is the mode the driver actually opened, not the one that was asked
+    /// for: a refused exclusive or low-latency open is the fallback.  The
+    /// long status line stays display-only.
     pub(crate) fn output_mode_key(&self) -> &'static str {
+        if self.engine.state == crate::audio::EngineState::Running {
+            if let Some(opened) = opened_output_mode_key(&self.snapshot.output_mode) {
+                return opened;
+            }
+        }
+        self.requested_output_mode_key()
+    }
+
+    /// The mode the settings ask for, used before the driver has published
+    /// what it opened and while the bridge is stopped.
+    fn requested_output_mode_key(&self) -> &'static str {
         if self.selected_output().asio_clsid.is_some() {
             return "asio";
         }
@@ -283,6 +296,40 @@ impl RigWerkApp {
             "standard"
         }
     }
+}
+
+/// The comparison token for a mode string the driver published.  `None`
+/// when nothing has been published yet.  A line that says the attempt was
+/// refused names the fallback that is actually running, not the request.
+fn opened_output_mode_key(mode: &str) -> Option<&'static str> {
+    opened_output_mode_key_on(mode, cfg!(target_os = "windows"))
+}
+
+pub(crate) fn opened_output_mode_key_on(mode: &str, windows: bool) -> Option<&'static str> {
+    let mode = mode.trim();
+    if mode.is_empty() {
+        return None;
+    }
+    let fallback = if windows { "shared" } else { "standard" };
+    if mode.contains("refused") {
+        return Some(fallback);
+    }
+    if mode.starts_with("ASIO") {
+        return Some("asio");
+    }
+    if mode.starts_with("Exclusive") {
+        return Some("exclusive");
+    }
+    if mode.starts_with("REAL") {
+        return Some("real-style");
+    }
+    if mode.starts_with("Low latency") {
+        return Some("low-latency");
+    }
+    if mode.starts_with("Shared") || mode.starts_with("Standard") || mode.starts_with("PipeWire") {
+        return Some(fallback);
+    }
+    None
 }
 
 #[cfg(test)]

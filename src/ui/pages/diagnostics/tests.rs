@@ -189,7 +189,10 @@ fn the_report_keeps_the_estimate_and_the_measurement_apart() {
     assert!(text.contains("Latency budget:"), "{text}");
     assert!(text.contains("Estimated path:"), "{text}");
     assert!(text.contains("Measured loopback: 23.4 ms"), "{text}");
-    assert!(text.contains("OUT → cable → IN"), "{text}");
+    assert!(
+        text.contains("OUT missing:output → cable → IN missing:input"),
+        "{text}"
+    );
     assert!(text.contains("2023-11-14 22:13 UTC"), "{text}");
     // The estimate and the measurement cover different legs; they are never
     // subtracted from each other.

@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 use super::{
-    analyze_capture, click_waveform, round_trip_ms, Calibration, CalibrationEmitter,
-    CalibrationFailure, CalibrationState, CAPTURE_SECONDS, CLICK_LEVEL, CLICK_SECONDS,
-    MAX_CLICK_SAMPLES,
+    analyze_capture, analyze_channels, click_waveform, round_trip_ms, Calibration,
+    CalibrationEmitter, CalibrationFailure, CalibrationState, CAPTURE_SECONDS, CLICK_LEVEL,
+    CLICK_SECONDS, MAX_CLICK_SAMPLES,
 };
 
 /// A deterministic noise source, so a test never depends on a hardware RNG
@@ -252,9 +252,11 @@ fn a_finished_capture_needs_the_tail_before_it_reports_ready() {
         calibration.capture_frame(0.0, 0.0);
     }
     assert_eq!(calibration.state(), CalibrationState::Ready);
-    let mut copy = Vec::new();
-    assert_eq!(calibration.copy_capture(&mut copy), wanted);
-    assert_eq!(copy.len(), wanted);
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    assert_eq!(calibration.copy_capture(&mut left, &mut right), wanted);
+    assert_eq!(left.len(), wanted);
+    assert_eq!(right.len(), wanted);
     calibration.finish();
     assert_eq!(calibration.state(), CalibrationState::Idle);
 }
@@ -382,6 +384,108 @@ fn a_cancel_before_capture_leaves_the_state_idle() {
     }
     assert_eq!(calibration.state(), CalibrationState::Idle);
     assert_eq!(calibration.captured(), 0);
+}
+
+#[test]
+fn a_stale_frame_cannot_publish_into_the_next_arm() {
+    let rate = 48_000;
+    let click = click_waveform(rate);
+    let calibration = Calibration::new();
+    calibration.arm(&click, rate, 128, 128).expect("armed");
+    calibration.note_ducked();
+    for _ in 0..300 {
+        calibration.capture_frame(0.25, -0.25);
+    }
+    let stale = calibration.generation();
+    let index = calibration.captured();
+    assert!(index > 10, "the first arm did not capture");
+    // The retry path finishes and arms again with a callback still holding
+    // the old generation.
+    calibration.finish();
+    calibration.arm(&click, rate, 128, 128).expect("rearmed");
+    assert_eq!(calibration.state(), CalibrationState::Armed);
+    assert_eq!(calibration.captured(), 0);
+    assert!(
+        !calibration.commit_frame(stale, -1.0, 1.0),
+        "the old generation published a frame"
+    );
+    assert_eq!(calibration.captured(), 0);
+    assert_eq!(calibration.state(), CalibrationState::Armed);
+}
+
+#[test]
+fn an_inverted_pair_still_correlates_on_the_louder_channel() {
+    let rate = 48_000;
+    let template = click_waveform(rate);
+    let left = vec![0.0f32; rate as usize / 2];
+    let mut right = vec![0.0f32; left.len()];
+    let at = (0.2 * rate as f32) as usize;
+    for (slot, sample) in right[at..at + template.len()].iter_mut().zip(&template) {
+        *slot = -sample;
+    }
+    // The sum of the two channels is silence.  Either channel on its own is
+    // the click.
+    let analysis = analyze_channels(&left, &right, &template, rate).expect("the right channel");
+    assert!(analysis.peak.abs_diff(at) <= 1, "peak {}", analysis.peak);
+    assert!(analysis.score > 0.9, "score {}", analysis.score);
+}
+
+#[test]
+fn the_emitted_click_correlates_at_the_input_rate() {
+    let output_rate = 48_000u32;
+    let click = click_waveform(output_rate);
+    let calibration = Calibration::new();
+    calibration.arm(&click, output_rate, 1, 1).expect("armed");
+    let mut emitter = CalibrationEmitter::new();
+    for _ in 0..(super::DUCK_SECONDS * output_rate as f32) as usize + 2 {
+        let (target, step) = emitter.begin(&calibration, output_rate, std::time::Instant::now());
+        emitter.next(&calibration, target, step);
+    }
+    for _ in 0..(super::SETTLE_SECONDS * output_rate as f32) as usize + 2 {
+        calibration.capture_frame(0.0, 0.0);
+    }
+    let (target, step) = emitter.begin(&calibration, output_rate, std::time::Instant::now());
+    assert_eq!(calibration.state(), CalibrationState::Emitting);
+    let mut emitted = Vec::new();
+    for _ in 0..click.len() {
+        let (_, sample) = emitter.next(&calibration, target, step);
+        emitted.push(sample);
+    }
+    assert_eq!(
+        emitted, click,
+        "the mixer did not emit the click it was armed with"
+    );
+
+    for input_rate in [48_000u32, 44_100] {
+        let played = if input_rate == output_rate {
+            emitted.clone()
+        } else {
+            let len = (emitted.len() as f32 * input_rate as f32 / output_rate as f32) as usize;
+            (0..len)
+                .map(|index| {
+                    let source = index as f32 * output_rate as f32 / input_rate as f32;
+                    let low = source.floor() as usize;
+                    let high = (low + 1).min(emitted.len() - 1);
+                    let t = source - low as f32;
+                    emitted[low] * (1.0 - t) + emitted[high] * t
+                })
+                .collect()
+        };
+        let mut left = vec![0.0f32; (0.6 * input_rate as f32) as usize];
+        let right = vec![0.0f32; left.len()];
+        let at = (0.15 * input_rate as f32) as usize;
+        for (slot, sample) in left[at..at + played.len()].iter_mut().zip(&played) {
+            *slot = *sample;
+        }
+        let template = click_waveform(input_rate);
+        let analysis =
+            analyze_channels(&left, &right, &template, input_rate).expect("the emitted click");
+        assert!(
+            analysis.peak.abs_diff(at) <= 2,
+            "{input_rate} Hz: peak {} expected {at}",
+            analysis.peak
+        );
+    }
 }
 
 #[test]
