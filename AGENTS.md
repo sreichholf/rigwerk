@@ -12,6 +12,19 @@ open items are done.  The sink monitor behind the silence row reads a
 live PipeWire graph (see "A PipeWire graph without hardware"), but a
 sink starving under Low latency has not been reproduced.
 
+## Start from master
+
+Always fetch and base the work on the latest `origin/master` unless the
+user explicitly asks for another base:
+
+```bash
+git fetch origin
+git switch -c <area>/<topic> origin/master
+```
+
+If the branch has already fallen behind, rebase it onto `origin/master`
+before starting. Do not continue on a stale or already-merged branch.
+
 ## Commands
 
 While editing, run the test you are changing:
