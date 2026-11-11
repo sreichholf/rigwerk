@@ -13,7 +13,7 @@ use crate::app::{Page, RigWerkApp};
 use crate::audio::{EqSlot, GateSlot, PluginView};
 use crate::ui::pages::mixer::chain::{
     bypassed_color, eq_summary, gate_summary, output_summary, path_summary, stage_color,
-    ChainSelection,
+    ChainSelection, CHAIN_BYPASS_HINT,
 };
 use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
 use crate::ui::pages::mixer::path_stage::{path_inspector, path_toolbar, PathAction, PathMeters};
@@ -23,8 +23,8 @@ use crate::ui::theme::{
     RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    arrow_button, db_slider, fit_text, hinted_tab, meter_row, micro_label, mono, paint_tag,
-    styled_slider, tag_width,
+    arrow_button, bypass_pill, db_slider, fit_text, hinted_tab, meter_row, micro_label, mono,
+    paint_tag, styled_slider, tag_width,
 };
 
 const ROW_H: f32 = 58.0;
@@ -32,6 +32,8 @@ const PANE_HEAD_H: f32 = 36.0;
 const PANE_PAD_X: f32 = 14.0;
 
 pub(super) enum RackAction {
+    /// Path-level insert bypass.  Does not write each slot's own bypass.
+    ChainBypass(bool),
     Bypass(usize, bool),
     Mix(usize, f32),
     Configure(usize),
@@ -199,6 +201,7 @@ impl RigWerkApp {
         actions.extend(path_actions.into_iter().map(RackAction::Path));
         for action in actions {
             match action {
+                RackAction::ChainBypass(bypass) => self.set_chain_bypass(bypass),
                 RackAction::Bypass(index, bypass) => self.set_plugin_bypass(index, bypass),
                 RackAction::Mix(index, mix) => self.set_plugin_mix(index, mix),
                 RackAction::Configure(index) => self.open_plugin_editor(index),
@@ -344,16 +347,48 @@ impl RigWerkApp {
                     FontId::new(ts(10.0), FontFamily::Proportional),
                     if plugins_selected { TEXT } else { AMBER },
                 );
-                ui.painter().text(
-                    egui::pos2(group_rect.right() - 10.0, group_rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    "reorder",
-                    FontId::new(ts(9.5), FontFamily::Proportional),
+                let chain_bypass = self.path().mix.chain_bypass;
+                let reorder_font = FontId::new(ts(9.5), FontFamily::Proportional);
+                let reorder = ui
+                    .painter()
+                    .layout_no_wrap("reorder".to_owned(), reorder_font, DIM);
+                let pill_w = 40.0;
+                let reorder_right = group_rect.right() - 8.0 - pill_w - 8.0;
+                ui.painter().galley(
+                    egui::pos2(
+                        reorder_right - reorder.size().x,
+                        group_rect.center().y - reorder.size().y / 2.0,
+                    ),
+                    reorder,
                     DIM,
                 );
+                let pill_rect = egui::Rect::from_min_size(
+                    egui::pos2(
+                        group_rect.right() - 8.0 - pill_w,
+                        group_rect.center().y - 8.0,
+                    ),
+                    egui::vec2(pill_w, 16.0),
+                );
+                let mut pill_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(pill_rect)
+                        .layout(Layout::right_to_left(Align::Center)),
+                );
+                let mut toggled = false;
+                if bypass_pill(&mut pill_ui, chain_bypass)
+                    .on_hover_text(CHAIN_BYPASS_HINT)
+                    .clicked()
+                {
+                    toggled = true;
+                    actions.push(RackAction::ChainBypass(!chain_bypass));
+                }
+                let pointer = ui.input(|input| input.pointer.interact_pos());
+                let on_pill = pointer.is_some_and(|pos| pill_rect.contains(pos));
                 if group_response
                     .on_hover_text("Insert group — reorder plugins below")
                     .clicked()
+                    && !on_pill
+                    && !toggled
                 {
                     *select = Some(ChainSelection::Plugins);
                 }

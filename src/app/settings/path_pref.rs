@@ -4,9 +4,10 @@ use super::serde_util::skip_unreadable;
 use crate::audio::{EqSettings, GateSettings, PathMix, PluginPref, MAX_PATHS};
 
 /// One signal path: its name and colour (UI data), its chain settings, its
-/// plugins and its level, mute and solo.  How it reaches each device lives
-/// with the device (`OutputDeviceSettings::path_map`, indexed by the path's
-/// position in the saved list).
+/// plugins, whether that insert chain is bypassed, and its level, mute and
+/// solo.  How it reaches each device lives with the device
+/// (`OutputDeviceSettings::path_map`, indexed by the path's position in the
+/// saved list).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct PathPref {
@@ -26,6 +27,10 @@ pub(crate) struct PathPref {
     /// The insert chain.  An entry that cannot be read is skipped.
     #[serde(deserialize_with = "skip_unreadable")]
     pub(crate) plugins: Vec<PluginPref>,
+    /// Skips every insert's processing without changing each insert's own
+    /// bypass.  Older saves have no field and stay off.
+    #[serde(default)]
+    pub(crate) chain_bypass: bool,
     /// Path level, dB.
     pub(crate) level_db: f32,
     pub(crate) mute: bool,
@@ -65,6 +70,7 @@ impl PathPref {
             eq_post: mix.eqs[1],
             gate: mix.gate,
             plugins,
+            chain_bypass: mix.chain_bypass,
             level_db: mix.level_db,
             mute: mix.mute,
             solo: mix.solo,
@@ -82,6 +88,7 @@ impl PathPref {
             level_db: self.level_db,
             mute: self.mute,
             solo: self.solo,
+            chain_bypass: self.chain_bypass,
         }
         .sanitized()
     }

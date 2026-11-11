@@ -172,3 +172,60 @@ fn an_unknown_id_is_ignored() {
     assert_eq!(classify_running_change(&cached, 9), RunningSync::Ignore);
     assert_eq!(classify_running_change(&[], 3), RunningSync::Ignore);
 }
+
+#[test]
+fn chain_bypass_skips_the_callback_and_leaves_stored_bypass_alone() {
+    let path = PathControls::new(48_000);
+    path.insert_delay_for_test(16);
+    path.insert_delay_for_test(8);
+    path.edit_chain(|chain| chain.set_bypass(1, true));
+    assert_eq!(path.latency_samples(), 24);
+    let saved = path.plugin_prefs();
+    assert!(!saved[0].bypass);
+    assert!(saved[1].bypass);
+
+    let mut mix = path.mix();
+    assert!(!mix.chain_bypass);
+    mix.chain_bypass = true;
+    path.set_mix(&mix);
+    assert!(path.chain_bypassed());
+    assert!(path.mix().chain_bypass);
+
+    let mut left = vec![0.0f32; 64];
+    let mut right = vec![0.0f32; 64];
+    left[0] = 1.0;
+    right[1] = 1.0;
+    assert!(path.process_plugins(&mut left, &mut right, 64));
+    assert_eq!(left[24], 1.0, "latency still delays the block");
+    assert_eq!(right[25], 1.0);
+    assert_eq!(path.latency_samples(), 24);
+    let report = path.plugin_lock_report();
+    assert_eq!(report.inserts[0], LockStats::default());
+    assert_eq!(report.inserts[1], LockStats::default());
+    let saved = path.plugin_prefs();
+    assert!(!saved[0].bypass);
+    assert!(saved[1].bypass);
+
+    mix.chain_bypass = false;
+    path.set_mix(&mix);
+    assert!(!path.chain_bypassed());
+    path.reset_plugin_lock_counters();
+    let mut left = vec![0.0f32; 64];
+    let mut right = vec![0.0f32; 64];
+    assert!(path.process_plugins(&mut left, &mut right, 64));
+    let report = path.plugin_lock_report();
+    assert_eq!(
+        report.inserts[0],
+        LockStats {
+            attempts: 1,
+            skips: 0,
+        },
+        "the insert processes again"
+    );
+    assert_eq!(report.inserts[1], LockStats::default());
+    let saved = path.plugin_prefs();
+    assert!(!saved[0].bypass);
+    assert!(saved[1].bypass);
+    assert_eq!(path.latency_samples(), 24);
+    drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+}

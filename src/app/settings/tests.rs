@@ -1291,3 +1291,38 @@ fn tuner_page_key_round_trips() {
     assert!(page_from_key("tuner") == Page::Tuner);
     assert!(page_from_key(" Tuner ") == Page::Tuner);
 }
+
+#[test]
+fn chain_bypass_round_trips_and_an_old_path_stays_off() {
+    let mut running = plugin("C:/Plugins/Amp.vst3", PluginFormat::Vst3);
+    running.bypass = false;
+    let bypassed = plugin("C:/Plugins/Verb.vst3", PluginFormat::Vst3);
+    let preferences = Preferences {
+        paths: vec![PathPref {
+            name: "Main".to_owned(),
+            chain_bypass: true,
+            plugins: vec![running, bypassed],
+            ..PathPref::default()
+        }],
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.schema_version, PREFERENCES_SCHEMA);
+    let path = &back.paths[0];
+    assert!(path.chain_bypass);
+    assert!(!path.plugins[0].bypass);
+    assert!(path.plugins[1].bypass);
+
+    // A save from before the field: the path loads, chain bypass stays off,
+    // and the insert's own bypass is still there.
+    let raw = r#"(paths:[(name:"Main",plugins:[(path:"A.vst3",name:"Amp",bypass:true)])])"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let old = loaded.preferences.expect("readable");
+    assert_eq!(old.schema_version, PREFERENCES_SCHEMA);
+    assert!(!old.paths[0].chain_bypass);
+    assert!(old.paths[0].plugins[0].bypass);
+    assert_eq!(old.paths[0].plugins[0].name, "Amp");
+}

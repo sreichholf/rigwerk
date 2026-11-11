@@ -172,6 +172,26 @@ pub(crate) fn output_summary(output_gain: f32, mute: bool, devices: usize) -> St
     )
 }
 
+/// Tooltip for the path-level insert bypass, shared by Live and Mixer.
+pub(crate) const CHAIN_BYPASS_HINT: &str =
+    "Skips the inserts on this path and keeps their latency.";
+
+/// Turns the Live PLUGINS stage hot while the path's chain bypass is on:
+/// amber, and the summary reads `bypassed`.  Off leaves the stages as
+/// [`live_chain_entries`] built them.
+pub(crate) fn apply_chain_bypass(entries: &mut [ChainEntry], chain_bypass: bool) {
+    if !chain_bypass {
+        return;
+    }
+    if let Some(plugins) = entries
+        .iter_mut()
+        .find(|entry| entry.selection == ChainSelection::Plugins)
+    {
+        plugins.summary = "bypassed".to_owned();
+        plugins.live = true;
+    }
+}
+
 pub(crate) fn plugin_group_summary(views: &[PluginView]) -> (String, bool) {
     let active = views
         .iter()
