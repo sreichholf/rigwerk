@@ -4,6 +4,7 @@
 //! or Output card here for a moment.
 
 mod bridge_card;
+mod calibration;
 mod chain_strip;
 mod driver_line;
 mod health;

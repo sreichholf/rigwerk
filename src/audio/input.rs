@@ -103,12 +103,17 @@ where
                 let mut peak_l = 0.0f32;
                 let mut peak_r = 0.0f32;
                 for frame in data.chunks(channels) {
-                    let mut left = f32::from_sample(frame[0]) * gain;
-                    let mut right = if channels > 1 {
-                        f32::from_sample(frame[1]) * gain
+                    let raw_left = f32::from_sample(frame[0]);
+                    let raw_right = if channels > 1 {
+                        f32::from_sample(frame[1])
                     } else {
-                        left
+                        raw_left
                     };
+                    // A calibration capture is raw, so a hot input gain
+                    // cannot be mistaken for the device clipping.
+                    gain_shared.capture_calibration(raw_left, raw_right);
+                    let mut left = raw_left * gain;
+                    let mut right = raw_right * gain;
                     if !enabled_l {
                         left = 0.0;
                     }

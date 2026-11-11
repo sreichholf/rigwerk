@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 use super::path_pref::{default_path_name, sanitize_paths, PathPref};
 use super::preset::Preset;
-use super::serde_util::skip_unreadable;
+use super::serde_util::{skip_unreadable, skip_unreadable_option};
+use crate::app::latency::MeasuredLatency;
 use crate::app::Page;
 use crate::audio::{
     CushionMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings, PluginPref,
@@ -115,6 +116,11 @@ pub(crate) struct Preferences {
     /// Extra output devices.  An entry that cannot be read is skipped.
     #[serde(deserialize_with = "skip_unreadable")]
     pub(crate) followers: Vec<FollowerPref>,
+    /// The last measured loopback, with the input, output, rates, buffers
+    /// and output mode it was made under.  Missing on older saves; an entry
+    /// that cannot be read is treated as missing (the app re-measures).
+    #[serde(default, deserialize_with = "skip_unreadable_option")]
+    pub(crate) measured_latency: Option<MeasuredLatency>,
 }
 
 impl Default for Preferences {
@@ -164,6 +170,7 @@ impl Default for Preferences {
             prefer_plugin_interface: false,
             clock_device: OutputDeviceSettings::default(),
             followers: Vec::new(),
+            measured_latency: None,
         }
     }
 }
@@ -549,6 +556,12 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
         .min(preferences.paths.len().saturating_sub(1));
     preferences.clock_device = preferences.clock_device.sanitized();
     sanitize_followers(&mut preferences.followers);
+    // A measurement that cannot describe a real path is dropped; the app
+    // then asks for a new one instead of showing a number that never was.
+    preferences.measured_latency = preferences
+        .measured_latency
+        .take()
+        .and_then(MeasuredLatency::sanitized);
     for preset in &mut preferences.sessions {
         preset.migrate_paths(&current);
         sanitize_preset(preset);
@@ -650,6 +663,8 @@ struct StoredCounts {
     plugins: Vec<IgnoredAny>,
     followers: Vec<IgnoredAny>,
     paths: Vec<StoredPathCounts>,
+    /// Present when a measurement was stored, readable or not.
+    measured_latency: Option<IgnoredAny>,
 }
 
 /// How many inserts one stored path held.
@@ -661,11 +676,17 @@ struct StoredPathCounts {
 
 /// "1 saved patch(es) and 2 plugin insert(s)": only the lists that lost
 /// entries, or `None` when nothing was skipped.
-fn skipped_summary(sessions: usize, plugins: usize, followers: usize) -> Option<String> {
+fn skipped_summary(
+    sessions: usize,
+    plugins: usize,
+    followers: usize,
+    measurements: usize,
+) -> Option<String> {
     let parts: Vec<String> = [
         (sessions, "saved patch(es)"),
         (plugins, "plugin insert(s)"),
         (followers, "output device(s)"),
+        (measurements, "measurement(s)"),
     ]
     .into_iter()
     .filter(|(count, _)| *count > 0)
@@ -723,28 +744,36 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
     };
     let mut notices = Vec::new();
     let counts: StoredCounts = ron::from_str(raw).unwrap_or_default();
-    let skipped_sessions = counts
-        .sessions
-        .len()
-        .saturating_sub(preferences.sessions.len());
+    // List lengths before sanitizing: a follower the cap drops is not an
+    // unreadable entry, and the duplicate virtual out is dropped on purpose.
+    let sessions_loaded = preferences.sessions.len();
+    let plugins_loaded = preferences.plugins.len()
+        + preferences
+            .paths
+            .iter()
+            .map(|path| path.plugins.len())
+            .sum::<usize>();
+    let followers_loaded = preferences.followers.len();
+    // Sanitizing can still drop a measurement that parsed but cannot describe
+    // a real path; the measurement notice is counted after it runs.
+    sanitize_preferences(&mut preferences);
+    let skipped_sessions = counts.sessions.len().saturating_sub(sessions_loaded);
     let stored_plugins = counts.plugins.len()
         + counts
             .paths
             .iter()
             .map(|path| path.plugins.len())
             .sum::<usize>();
-    let loaded_plugins = preferences.plugins.len()
-        + preferences
-            .paths
-            .iter()
-            .map(|path| path.plugins.len())
-            .sum::<usize>();
-    let skipped_plugins = stored_plugins.saturating_sub(loaded_plugins);
-    let skipped_followers = counts
-        .followers
-        .len()
-        .saturating_sub(preferences.followers.len());
-    if let Some(skipped) = skipped_summary(skipped_sessions, skipped_plugins, skipped_followers) {
+    let skipped_plugins = stored_plugins.saturating_sub(plugins_loaded);
+    let skipped_followers = counts.followers.len().saturating_sub(followers_loaded);
+    let skipped_measurements =
+        usize::from(counts.measured_latency.is_some() && preferences.measured_latency.is_none());
+    if let Some(skipped) = skipped_summary(
+        skipped_sessions,
+        skipped_plugins,
+        skipped_followers,
+        skipped_measurements,
+    ) {
         notices.push(format!(
             "Skipped {skipped} that could not be read. The original settings are kept as \
              “{backup_key}”."
@@ -760,9 +789,6 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
     // Layout 1 without `paths` is migrated by `sanitize_preferences`; the
     // other field defaults cover older layouts.
     preferences.schema_version = PREFERENCES_SCHEMA;
-    // Rates, buffers, gains and the cushion are checked here, and again
-    // when a patch is applied. A NaN gain never reaches `10^(dB/20)`.
-    sanitize_preferences(&mut preferences);
     LoadedPreferences {
         preferences: Some(preferences),
         backup: if notices.is_empty() { None } else { backup },

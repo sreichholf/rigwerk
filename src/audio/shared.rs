@@ -1,6 +1,9 @@
 //! State shared between the input callback, the output callback and the
 //! UI: the ring buffer, the cushion (its fill target), meters, the master
 //! and device settings, the signal paths and what each side really runs at.
+//! An armed round-trip measurement lives here too ([`super::calibration`]):
+//! its capture buffer and click are allocated with the session, so the
+//! callbacks only touch atomics.
 //!
 //! Everything a path owns (routing, mono, channel enable, EQs, gate, plugin
 //! chain, level, mute, solo) lives in [`PathControls`], one per path slot in
@@ -29,6 +32,8 @@ use super::plugins::PluginPref;
 use super::plugins::PluginView;
 use super::scope::ScopeLane;
 use super::types::{CushionMode, Snapshot};
+
+use super::calibration::Calibration;
 
 pub(crate) use super::scope::SCOPE_LEN;
 
@@ -139,6 +144,9 @@ pub(crate) struct Shared {
     /// of the paths' peaks, which come from different blocks).  Written by
     /// the mixer at the end of each block, read by the Live overload issue.
     pub(crate) total_dsp: DspCell,
+    /// The armed round-trip measurement, or idle.  The capture buffer and the
+    /// click are preallocated here so no callback ever allocates for one.
+    pub(crate) calibration: Calibration,
 }
 
 impl Shared {
@@ -194,6 +202,7 @@ impl Shared {
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
             paths: std::array::from_fn(|_| PathControls::new(sample_rate)),
             total_dsp: DspCell::default(),
+            calibration: Calibration::new(),
         };
         shared.paths[0].set_state(PathState::Active);
         shared
@@ -493,6 +502,9 @@ impl Shared {
         self.path_delay_ns
             .store(PATH_DELAY_UNKNOWN, Ordering::Relaxed);
         self.set_output_mode("");
+        // A measurement belongs to the session it was armed in; a restarted
+        // bridge must not inherit a duck or a half-filled capture.
+        self.calibration.finish();
     }
 
     /// Records the graph/device delay past our playback node, in nanoseconds.
@@ -841,6 +853,13 @@ impl Shared {
 
     pub(crate) fn output_gain(&self) -> f32 {
         f32::from_bits(self.output_gain.load(Ordering::Relaxed))
+    }
+
+    /// One raw input frame for an armed round-trip measurement, before the
+    /// input gain and channel enable.  Called by every capture callback;
+    /// one relaxed load when no measurement is armed.
+    pub(crate) fn capture_calibration(&self, left: f32, right: f32) {
+        self.calibration.capture_frame(left, right);
     }
 
     /// Called by the one input producer.  Never blocks: a full ring counts an

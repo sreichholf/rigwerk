@@ -138,6 +138,9 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
                 (Some(only), None) | (None, Some(only)) => (only, only),
                 (None, None) => (0.0, 0.0),
             };
+            // Raw, before gain; the direct path's one callback both captures
+            // and plays, so a measurement here still sees the physical loop.
+            shared.capture_calibration(raw_l, raw_r);
             let left = if enabled_l { raw_l * gain } else { 0.0 };
             let right = if enabled_r { raw_r * gain } else { 0.0 };
             peak_l = peak_l.max(left.abs());

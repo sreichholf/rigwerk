@@ -211,13 +211,17 @@ impl AsioCallbackContext {
         let mut peak_r = 0.0f32;
         self.shared.note_input_frames(self.frames);
         for frame in 0..self.frames {
-            let mut left = unsafe { read_asio_sample(left_ptr, frame, left_type) } * gain;
-            let mut right = match right {
-                Some((pointer, sample_type)) => {
-                    (unsafe { read_asio_sample(pointer, frame, sample_type) }) * gain
-                }
-                None => left,
+            let raw_left = unsafe { read_asio_sample(left_ptr, frame, left_type) };
+            let raw_right = match right {
+                Some((pointer, sample_type)) => unsafe {
+                    read_asio_sample(pointer, frame, sample_type)
+                },
+                None => raw_left,
             };
+            // Raw, before gain: a calibration must see the driver's level.
+            self.shared.capture_calibration(raw_left, raw_right);
+            let mut left = raw_left * gain;
+            let mut right = raw_right * gain;
             if !enabled_l {
                 left = 0.0;
             }

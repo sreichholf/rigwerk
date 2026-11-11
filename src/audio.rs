@@ -22,6 +22,8 @@
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
 //! - `mixer` / `resampler`: turning ring frames into output frames.
+//! - `calibration`: the click, the capture buffer and the correlator behind
+//!   the measured loopback (the estimate is added separately).
 //! - `follower`: generic multi-output (each follower mixed and mapped on the
 //!   clock callback → own ring + cpal stream).
 //! - `ring`: lock-free multi-lane SPSC ring for each generic follower.
@@ -33,6 +35,7 @@
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
 
 mod bridge;
+mod calibration;
 pub(crate) mod clap;
 mod delay;
 mod denormal;
@@ -70,6 +73,10 @@ pub use win::wasapi::probe as probe_output_driver;
 #[cfg(test)]
 mod hardware_tests;
 
+pub(crate) use calibration::{
+    analyze_capture, click_waveform, round_trip_ms, CalibrationFailure, CalibrationState,
+    MAX_ROUND_TRIP_MS,
+};
 pub(crate) use devices::device_choice_label;
 pub(crate) use devices::is_low_latency_device;
 pub(crate) use devices::placeholder_inventory;

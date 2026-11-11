@@ -33,6 +33,15 @@ run in a low latency mode (on Windows: shared, low-latency shared or
 exclusive WASAPI), and a driver check shows the buffer the device actually
 uses.
 
+The health card also keeps the last **measured** loopback. **Measure…**
+plays a short click through a cable from the output back into the input
+(or a microphone in front of the speaker), hears it return and reports the
+loopback's delay with the rates, buffers and output mode it was measured
+under. That is a measurement; the PATH and HEARD tiles above it stay
+estimates. A stored result is marked stale, with the reason, when the
+input, output, rate, buffer or output mode changes. The main output is
+muted for the whole short capture, not only while the click plays.
+
 When something needs attention, an Issues strip appears at the top and says
 what is wrong and what to do: a path nobody hears, a chain too heavy for
 the buffer, an output that went quiet. Tick auto-start to start the bridge

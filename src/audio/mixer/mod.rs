@@ -54,6 +54,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use super::calibration::CalibrationEmitter;
 use super::delay::DelayLine;
 use super::denormal::DenormalGuard;
 use super::output_map::{
@@ -179,6 +180,9 @@ pub(crate) struct OutputMixer {
     feeding: [Option<u64>; MAX_FOLLOWERS],
     /// Every live path's DSP time per block together (`Shared::total_dsp`).
     total_dsp: DspMeter,
+    /// The measured-round-trip duck and click on the clock output.  Only this
+    /// callback touches it; the armed state itself is on `Shared`.
+    calibration: CalibrationEmitter,
 }
 
 impl OutputMixer {
@@ -214,6 +218,7 @@ impl OutputMixer {
             live_followers: 0,
             feeding: [None; MAX_FOLLOWERS],
             total_dsp: DspMeter::default(),
+            calibration: CalibrationEmitter::new(),
         }
     }
 
@@ -390,10 +395,17 @@ impl OutputMixer {
     /// one clock read per path and stage, no allocation, no lock) and the
     /// block's total over every path published, then the master level on
     /// each path's frame, the meters and the scope.  Each finished frame
-    /// goes to `write` with the clock device's mapper, the live followers'
-    /// mappers, every live path's frame (the mappers sum them) and the
-    /// stereo sum of the paths' taps, and the frame counter advances.
-    fn finish_block(&mut self, shared: &Shared, frames: usize, mut write: impl WriteFrame) {
+    /// goes to `write` with the clock device's mapped frame (after its duck
+    /// and any calibration click), the live followers' mappers, every live
+    /// path's frame (the mappers sum them) and the stereo sum of the paths'
+    /// taps, and the frame counter advances.
+    fn finish_block(
+        &mut self,
+        shared: &Shared,
+        frames: usize,
+        now: Instant,
+        mut write: impl WriteFrame,
+    ) {
         let live = self.live;
         // Every front runs before any plugin can touch the float mode.
         let mut mark = Instant::now();
@@ -427,11 +439,21 @@ impl OutputMixer {
         let followers = &mut self.followers[..self.live_followers];
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
+        // An armed measurement ducks the clock output and plays its click
+        // after the device map, so the fixed click level does not depend on
+        // the master or the device fader.  The scope and meters see the same
+        // duck, so the Live page shows the muted path while it measures.
+        let (duck_target, duck_step) =
+            self.calibration
+                .begin(&shared.calibration, self.output_rate, now);
         for index in 0..frames {
             // Mute, monitor and the level are one ramp, so any of them can
             // move without a step.  It scales each path before the device
             // maps sum them, so one path is exactly `(x * gain) * weight`.
             let gain = self.gain.next();
+            let (duck, click) = self
+                .calibration
+                .next(&shared.calibration, duck_target, duck_step);
             // The stereo sum for the meters and the scope.  It starts from
             // the first path's frame itself, so one path passes bit for bit.
             let mut sum: Option<[f32; 4]> = None;
@@ -459,11 +481,23 @@ impl OutputMixer {
                     }
                 });
             }
-            let out = sum.unwrap_or([0.0; 4]);
+            let mut out = sum.unwrap_or([0.0; 4]);
+            if duck != 1.0 || click != 0.0 {
+                for value in out.iter_mut() {
+                    *value *= duck;
+                }
+                out[0] += click;
+                out[1] += click;
+            }
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
-            write(&mut self.device, followers, index, &self.lines, out);
+            let mapped = self.device.mapped_channels();
+            let clock = self
+                .device
+                .map_paths(&self.lines)
+                .ducked(duck, click, mapped);
+            write(&clock, followers, index, &self.lines, out);
         }
 
         shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
@@ -518,8 +552,8 @@ impl OutputMixer {
             shared,
             input_left,
             input_right,
-            |device, followers, index, paths, _| {
-                write(0, index, device.map_paths(paths));
+            |clock, followers, index, paths, _| {
+                write(0, index, clock);
                 for (follower, mapper) in followers.iter_mut().enumerate() {
                     write(follower + 1, index, mapper.map_paths(paths));
                 }
@@ -559,12 +593,9 @@ impl OutputMixer {
         input_right: &[f32],
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
-        self.render_direct_with(
-            shared,
-            input_left,
-            input_right,
-            |device, _, index, paths, _| write(index, device.map_paths(paths)),
-        );
+        self.render_direct_with(shared, input_left, input_right, |clock, _, index, _, _| {
+            write(index, clock)
+        });
     }
 
     /// [`Self::render_direct`] handing over the four mixer taps instead of
@@ -593,12 +624,16 @@ impl OutputMixer {
         // The same flush-to-zero mode as `render`, for the EQ, gate and
         // inserts of this block.
         let _denormals = DenormalGuard::new();
+        // The block's clock stamp is taken here, at the callback's entry, so
+        // the calibration measures from the frames' position and not from
+        // when the inserts happened to finish.
+        let now = Instant::now();
         let frames = input_left.len().min(input_right.len());
         self.begin_block(shared, frames);
         for index in 0..frames {
             self.stage_front(index, input_left[index], input_right[index]);
         }
-        self.finish_block(shared, frames, write);
+        self.finish_block(shared, frames, now, write);
         // There is no clock offset to report on a single clock.
         self.drift_ppm = 0.0;
         shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
@@ -613,9 +648,7 @@ impl OutputMixer {
         frames: usize,
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
-        self.render_with(shared, frames, |device, _, index, paths, _| {
-            write(index, device.map_paths(paths))
-        });
+        self.render_with(shared, frames, |clock, _, index, _, _| write(index, clock));
     }
 
     /// [`Self::render`] handing over the four mixer taps (only 0/1 carry the
@@ -634,6 +667,7 @@ impl OutputMixer {
         // Decaying EQ and gate states must not drop into the slow subnormal
         // range; the inserts run inside this block and get the same mode.
         let _denormals = DenormalGuard::new();
+        let now = Instant::now();
         self.follow_source_rate(shared);
         self.begin_block(shared, frames);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
@@ -748,14 +782,19 @@ impl OutputMixer {
         // Each generic follower gets its own sum of the paths, mapped onto
         // its device channels, through its ring (see `follower`).
         let feeding = self.feeding;
-        self.finish_block(shared, frames, |device, followers, index, paths, out| {
-            write(device, followers, index, paths, out);
-            for (slot, mapper) in followers.iter_mut().enumerate() {
-                if let Some(generation) = feeding[slot] {
-                    shared.push_follower_frame(slot, generation, mapper.map_paths(paths));
+        self.finish_block(
+            shared,
+            frames,
+            now,
+            |clock, followers, index, paths, out| {
+                write(clock, followers, index, paths, out);
+                for (slot, mapper) in followers.iter_mut().enumerate() {
+                    if let Some(generation) = feeding[slot] {
+                        shared.push_follower_frame(slot, generation, mapper.map_paths(paths));
+                    }
                 }
-            }
-        });
+            },
+        );
 
         if missed {
             shared.underruns.fetch_add(1, Ordering::Relaxed);
@@ -783,14 +822,15 @@ impl OutputMixer {
     }
 }
 
-/// Receives one finished frame: the clock device's mapper, the live
-/// followers' mappers, the paths' delay lines (each holding the path's
-/// frame after the master as its newest entry) for the mappers to align
-/// and sum, and the unaligned stereo sum of the paths' four taps.
-trait WriteFrame: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathLines, [f32; 4]) {}
+/// Receives one finished frame: the clock device's mapped frame (already
+/// ducked and carrying any calibration click), the live followers' mappers,
+/// the paths' delay lines (each holding the path's frame after the master as
+/// its newest entry) for the mappers to align and sum, and the unaligned
+/// stereo sum of the paths' four taps.
+trait WriteFrame: FnMut(&DeviceFrame, &mut [DeviceMapper], usize, &PathLines, [f32; 4]) {}
 
 impl<F> WriteFrame for F where
-    F: FnMut(&mut DeviceMapper, &mut [DeviceMapper], usize, &PathLines, [f32; 4])
+    F: FnMut(&DeviceFrame, &mut [DeviceMapper], usize, &PathLines, [f32; 4])
 {
 }
 
