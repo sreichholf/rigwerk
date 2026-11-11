@@ -1,10 +1,12 @@
 //! ASIO on Windows: the driver callbacks and the paths that use ASIO on
-//! one or both sides of the bridge.
+//! one or both sides of the bridge.  `controlPanel` is posted to the bridge
+//! thread that created the driver and run between callbacks.
 
 mod callback;
 mod duplex;
 mod input;
 mod output;
+mod panel;
 mod samples;
 
 pub(crate) use input::run_asio_bridge;

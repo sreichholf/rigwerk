@@ -1,4 +1,6 @@
-//! Playback through an ASIO driver, fed by any input.
+//! Playback through an ASIO driver, fed by any input.  The output driver is
+//! created on `rigwerk-asio-output`, so its control panel is opened on that
+//! thread between callbacks.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
@@ -16,12 +18,14 @@ use super::callback::{
 };
 use super::duplex::run_asio_duplex_bridge;
 use super::input::run_asio_input_only;
+use super::panel::service_asio_panel;
 use super::samples::write_asio_sample;
 use super::ASIO_OUTPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
 use crate::audio::devices::pick_input_config;
 use crate::audio::follower::FollowerOutputs;
 use crate::audio::input::{make_input_stream, open_input_device};
+use crate::audio::AsioPanelSide;
 
 pub(crate) fn run_asio_output_bridge(
     config: &StartConfig,
@@ -338,7 +342,13 @@ pub(crate) fn run_asio_output_loop(
     let wait = wait_for_callbacks(
         registration.signal(),
         || worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed),
-        || {},
+        || {
+            let stopping =
+                worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed);
+            // This thread created the output driver.  A stop already in
+            // flight must not open the panel on its way out.
+            !stopping && service_asio_panel(&driver, &shared, &[AsioPanelSide::Output])
+        },
     );
     match wait {
         CallbackWait::Stopped => {}

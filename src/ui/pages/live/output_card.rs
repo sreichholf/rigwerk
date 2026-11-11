@@ -1,4 +1,6 @@
 //! The output card: device, REAL-style, output clock, level and meters.
+//! When the output is ASIO, a Panel chip sits with the channel chips and
+//! asks that output's bridge to open its driver's control panel.
 
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
@@ -6,7 +8,7 @@ use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke, Vec2}
 use crate::app::devices::is_wrapper_driver;
 use crate::app::settings::{rate_label, BUFFERS, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB, RATES};
 use crate::app::RigWerkApp;
-use crate::audio::{DeviceItem, EngineState};
+use crate::audio::{AsioPanelSide, DeviceItem, EngineState};
 use crate::ui::pages::live::driver_line::driver_line;
 use crate::ui::pages::mixer::output_devices::gain_reduction_text;
 use crate::ui::theme::ts;
@@ -119,6 +121,7 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             channel_chip(ui, "OUT 1", &mut self.path_mut().mix.output_enabled[0], BLUE);
             channel_chip(ui, "OUT 2", &mut self.path_mut().mix.output_enabled[1], BLUE);
+            self.asio_panel_chip(ui, AsioPanelSide::Output, BLUE);
             if self.selected_output().asio_clsid.is_some() {
                     ui.label(
                         RichText::new("ASIO direct")

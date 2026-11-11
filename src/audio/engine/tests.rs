@@ -1,4 +1,25 @@
 use super::AudioEngine;
+use crate::audio::{AsioPanelSide, EngineState};
+
+#[test]
+fn the_panel_stays_unavailable_until_the_bridge_is_running() {
+    let mut engine = AudioEngine::new(48_000);
+    engine.asio_input_clsid = Some(0xA510);
+    engine.asio_output_clsid = Some(0xB0);
+    assert_eq!(engine.open_asio_driver(AsioPanelSide::Input), None);
+    engine.state = EngineState::Starting;
+    assert_eq!(engine.open_asio_driver(AsioPanelSide::Input), None);
+    engine.state = EngineState::Running;
+    assert_eq!(engine.open_asio_driver(AsioPanelSide::Input), Some(0xA510));
+    assert_eq!(engine.open_asio_driver(AsioPanelSide::Output), Some(0xB0));
+    engine.stop();
+    engine.state = EngineState::Running;
+    assert_eq!(
+        engine.open_asio_driver(AsioPanelSide::Input),
+        None,
+        "stopping forgets which driver was open"
+    );
+}
 
 #[test]
 fn the_bridge_status_is_part_of_the_snapshot() {

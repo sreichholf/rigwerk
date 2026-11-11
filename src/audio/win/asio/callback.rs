@@ -361,17 +361,19 @@ pub(crate) enum CallbackWait {
 
 /// Waits for the bridge stop flag while watching the driver callback.  The
 /// watchdog checks every 80 ms; a failed callback wakes it at once.
-/// `tick` runs each pass (follower supervisor sync, etc.).
+/// `tick` runs each pass (follower supervisor sync, an ASIO control-panel
+/// request).  When `tick` returns `true` it blocked this thread inside the
+/// driver's panel, and that wait is not counted as a missing callback.
 pub(crate) fn wait_for_callbacks(
     signal: &AsioSignal,
     mut stopped: impl FnMut() -> bool,
-    mut tick: impl FnMut(),
+    mut tick: impl FnMut() -> bool,
 ) -> CallbackWait {
     let mut last_count = 0;
     let resets = RESET_REQUESTS.load(Ordering::Relaxed);
     let mut last_callback = Instant::now();
     loop {
-        tick();
+        let blocked = tick();
         if stopped() {
             return CallbackWait::Stopped;
         }
@@ -384,6 +386,11 @@ pub(crate) fn wait_for_callbacks(
         let count = signal.callbacks.load(Ordering::Relaxed);
         if count != last_count {
             last_count = count;
+            last_callback = Instant::now();
+        }
+        if blocked {
+            // The tick ran the driver's control panel.  Silence during that
+            // call is not an unplugged interface.
             last_callback = Instant::now();
         }
         if last_callback.elapsed() >= Duration::from_secs(2) {

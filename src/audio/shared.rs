@@ -4,7 +4,9 @@
 //! really runs at.
 //! An armed round-trip measurement lives here too ([`super::calibration`]):
 //! its capture buffer and click are allocated with the session, so the
-//! callbacks only touch atomics.
+//! callbacks only touch atomics.  An ASIO control-panel request lives here
+//! too: the UI sets it, and the bridge thread that owns the driver takes it
+//! between callbacks.
 //!
 //! Everything a path owns (routing, mono, channel enable, EQs, gate, plugin
 //! chain, level, mute, solo) lives in [`PathControls`], one per path slot in
@@ -34,6 +36,7 @@ use super::plugins::PluginView;
 use super::scope::ScopeLane;
 use super::types::{CushionMode, Snapshot};
 
+use super::asio_panel::AsioPanelRequests;
 use super::calibration::Calibration;
 
 pub(crate) use super::scope::SCOPE_LEN;
@@ -166,6 +169,9 @@ pub(crate) struct Shared {
     /// The armed round-trip measurement, or idle.  The capture buffer and the
     /// click are preallocated here so no callback ever allocates for one.
     pub(crate) calibration: Calibration,
+    /// Requests to open an ASIO driver's control panel.  The UI sets a side;
+    /// the bridge thread that created that driver takes it between callbacks.
+    pub(crate) asio_panel: AsioPanelRequests,
 }
 
 impl Shared {
@@ -227,6 +233,7 @@ impl Shared {
             paths: std::array::from_fn(|_| PathControls::new(sample_rate)),
             total_dsp: DspCell::default(),
             calibration: Calibration::new(),
+            asio_panel: AsioPanelRequests::new(),
         };
         shared.paths[0].set_state(PathState::Active);
         shared
@@ -532,6 +539,9 @@ impl Shared {
         // A measurement belongs to the session it was armed in; a restarted
         // bridge must not inherit a duck or a half-filled capture.
         self.calibration.finish();
+        // A panel request belongs to the session that was running.  A fresh
+        // start must not open a panel on the driver's behalf.
+        self.asio_panel.clear_requests();
     }
 
     /// Records the graph/device delay past our playback node, in nanoseconds.

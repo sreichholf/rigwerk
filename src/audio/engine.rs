@@ -1,5 +1,6 @@
 //! The engine the UI talks to: start, stop, poll and live settings.  The
-//! bridge itself runs on its own thread.
+//! bridge itself runs on its own thread.  An ASIO control-panel click is
+//! posted here and opened on that thread, never on the UI thread.
 
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
@@ -8,6 +9,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::asio_panel::AsioPanelSide;
 use super::bridge::run_bridge;
 use super::calibration::CalibrationState;
 #[cfg(target_os = "linux")]
@@ -62,6 +64,13 @@ pub struct AudioEngine {
     last_input_frames_at: Instant,
     /// Whether this session should be receiving input blocks while it runs.
     input_expected: bool,
+    /// ASIO CLSID this session opened on the input.  `None` when the input
+    /// is not ASIO.  Cleared when the bridge stops, and reported only while
+    /// `Running`, so the panel stays disabled until that driver is open.
+    asio_input_clsid: Option<u128>,
+    /// ASIO CLSID this session opened on the output.  `None` when playback
+    /// is not ASIO.  Same lifetime as [`Self::asio_input_clsid`].
+    asio_output_clsid: Option<u128>,
     /// The quantum that was forced before RigWerk changed it, restored on stop.
     /// Meaningful only while `quantum_forced` is set. 0 means the store had no
     /// force, which is different from a read that failed (that does not set
@@ -103,6 +112,8 @@ impl AudioEngine {
             last_input_frames: 0,
             last_input_frames_at: Instant::now(),
             input_expected: false,
+            asio_input_clsid: None,
+            asio_output_clsid: None,
             #[cfg(target_os = "linux")]
             previous_quantum: 0,
             #[cfg(target_os = "linux")]
@@ -154,6 +165,34 @@ impl AudioEngine {
     /// A quantum failure that should stay visible after the status line moves on.
     pub(crate) fn quantum_note(&self) -> Option<&str> {
         self.quantum_note.as_deref()
+    }
+
+    /// Posts a request for the bridge thread that owns `side`'s driver to
+    /// open its control panel.  The driver stays closed until that thread
+    /// takes the flag between callbacks.
+    pub(crate) fn request_asio_panel(&self, side: AsioPanelSide) {
+        self.shared.asio_panel.request(side);
+    }
+
+    /// The ASIO driver the running bridge opened on `side`.  `None` unless
+    /// the engine is `Running`, so the panel control stays disabled until
+    /// that driver is actually open.
+    pub(crate) fn open_asio_driver(&self, side: AsioPanelSide) -> Option<u128> {
+        if self.state != EngineState::Running {
+            return None;
+        }
+        match side {
+            AsioPanelSide::Input => self.asio_input_clsid,
+            AsioPanelSide::Output => self.asio_output_clsid,
+        }
+    }
+
+    /// Drops the session's ASIO identity and any panel request the bridge
+    /// has not taken yet.  A panel that is already open still finishes.
+    fn forget_asio_panel(&mut self) {
+        self.asio_input_clsid = None;
+        self.asio_output_clsid = None;
+        self.shared.asio_panel.clear_requests();
     }
 
     /// The peak on the clock sink's monitor since the last read, while a
@@ -452,6 +491,13 @@ impl AudioEngine {
         // A late error from that same session must not turn Stopping into
         // Error; the watchdog is the only failure path while stopping.
         if self.state == EngineState::Stopping {
+            if self.shared.asio_panel.is_open() {
+                // controlPanel is still running on the bridge thread.  The
+                // stop flag is noticed when the panel returns, so this wait
+                // is not a driver that refused to release the device.
+                self.stopping_since = Some(Instant::now());
+                return;
+            }
             if self.handle.is_none() && self.lingering.is_empty() {
                 self.finish_stop();
             } else if self
@@ -519,6 +565,14 @@ impl AudioEngine {
                 }
             }
             EngineState::Running => {
+                // The control panel blocks the bridge thread, and some
+                // drivers pause callbacks until it closes.  That wait is
+                // not a stalled device.
+                if self.shared.asio_panel.is_open() {
+                    let now = Instant::now();
+                    self.last_frames_at = now;
+                    self.last_input_frames_at = now;
+                }
                 let frames = self.shared.frames.load(Ordering::Relaxed);
                 if frames != self.last_frames {
                     self.last_frames = frames;
@@ -748,6 +802,8 @@ impl AudioEngine {
         // Every real bridge path opens an input; the heartbeat only holds the
         // input side to it when the start actually asked for one.
         self.input_expected = config.input_id.is_some() || config.asio_clsid.is_some();
+        self.asio_input_clsid = config.asio_clsid;
+        self.asio_output_clsid = config.output_asio_clsid;
 
         // The closure gets the new session's `Arc` and nothing older, so this
         // bridge's writes cannot reach a later start either.
@@ -785,6 +841,7 @@ impl AudioEngine {
     /// moved to `lingering`; `poll` joins it once it finishes and only then
     /// moves the engine back to `Idle`.
     pub fn stop(&mut self) {
+        self.forget_asio_panel();
         self.stop.store(true, Ordering::Relaxed);
         self.reap_finished_bridge();
 
@@ -812,6 +869,7 @@ impl AudioEngine {
 
     /// Enters `Idle` after every bridge thread has confirmed teardown.
     fn finish_stop(&mut self) {
+        self.forget_asio_panel();
         self.shared.running.store(false, Ordering::Relaxed);
         // A half-done measurement belongs to the session that just ended; the
         // next start gets a fresh one.  Nothing audible was forced here.
@@ -899,6 +957,7 @@ impl AudioEngine {
     /// but is still alive (a WASAPI or ASIO output that stopped, a device
     /// loss) would otherwise keep its devices and block the next start.
     fn enter_error(&mut self) {
+        self.forget_asio_panel();
         self.stop.store(true, Ordering::Relaxed);
         self.state = EngineState::Error;
         self.started_at = None;

@@ -1,5 +1,6 @@
 //! ASIO input into a system output, and an ASIO input on its own (feeding
-//! a separate ASIO output).
+//! a separate ASIO output).  This thread creates the input driver, so its
+//! control panel is opened here between callbacks, not from the UI thread.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -10,10 +11,12 @@ use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
     CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
+use super::panel::service_asio_panel;
 use super::ASIO_INPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
 use crate::audio::follower::FollowerOutputs;
 use crate::audio::output::open_output;
+use crate::audio::AsioPanelSide;
 
 pub(crate) fn run_asio_bridge(
     config: &StartConfig,
@@ -157,7 +160,12 @@ pub(crate) fn run_asio_bridge(
     let wait = wait_for_callbacks(
         registration.signal(),
         || stop.load(Ordering::Relaxed),
-        || followers.sync(&shared),
+        || {
+            followers.sync(&shared);
+            // A stop already in flight must not open the panel on its way out.
+            !stop.load(Ordering::Relaxed)
+                && service_asio_panel(&driver, &shared, &[AsioPanelSide::Input])
+        },
     );
     match wait {
         CallbackWait::Stopped => {}
@@ -308,7 +316,11 @@ pub(crate) fn run_asio_input_only(
     let wait = wait_for_callbacks(
         registration.signal(),
         || stop.load(Ordering::Relaxed),
-        &mut tick,
+        || {
+            tick();
+            !stop.load(Ordering::Relaxed)
+                && service_asio_panel(&driver, shared, &[AsioPanelSide::Input])
+        },
     );
     match wait {
         CallbackWait::Stopped => {}
