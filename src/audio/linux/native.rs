@@ -649,12 +649,16 @@ fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, stride: usize, f
     let mut peak_r = 0.0f32;
     for frame in 0..frames {
         let base = frame * stride;
-        let mut left = sample_at(bytes, base) * gain;
-        let mut right = if channels > 1 {
-            sample_at(bytes, base + 4) * gain
+        let raw_left = sample_at(bytes, base);
+        let raw_right = if channels > 1 {
+            sample_at(bytes, base + 4)
         } else {
-            left
+            raw_left
         };
+        // Raw, before gain: a calibration must see the converter's level.
+        shared.capture_calibration(raw_left, raw_right);
+        let mut left = raw_left * gain;
+        let mut right = raw_right * gain;
         if !enabled_l {
             left = 0.0;
         }

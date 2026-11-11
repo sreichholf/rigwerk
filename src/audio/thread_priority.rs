@@ -44,9 +44,12 @@ fn promote_current_thread() -> bool {
     let Some(priority) = allowed_priority() else {
         return false;
     };
-    let param = libc::sched_param {
-        sched_priority: priority,
-    };
+    // All-zero is a valid `sched_param` everywhere Linux libc defines one;
+    // only the priority matters to `SCHED_FIFO`.  (musl's newer libc crate
+    // layout adds private padding fields that a struct literal cannot name.)
+    // SAFETY: `sched_param` is a plain C struct whose zero value is valid.
+    let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+    param.sched_priority = priority;
     // SCHED_RESET_ON_FORK keeps a child process from inheriting real time.
     // SAFETY: plain syscall on the calling thread with a valid parameter.
     unsafe {

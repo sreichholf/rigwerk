@@ -1359,3 +1359,134 @@ fn a_new_path_stays_silent_until_its_plugins_open_then_fades_in() {
     assert!(largest_step(&out) < 0.5 / 100.0);
     assert_eq!(out[399], [1.0, -0.5, 0.0, 0.0]);
 }
+
+#[test]
+fn a_calibration_click_reaches_the_clock_output_with_the_mix_ducked() {
+    let (mut mixer, shared) = steady_mixer((0.25, 0.25));
+    let click = super::super::calibration::click_waveform(48_000);
+    shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+
+    // The mix ramps to silence first; the frame there is silent.
+    let mut ducked = Vec::new();
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, mapped| ducked.push(mapped.sample(0)));
+    }
+    // The duck is a ramp; by the end of it the clock output is silent.
+    assert!(
+        ducked[ducked.len() - 64..]
+            .iter()
+            .all(|sample| sample.abs() < 1e-6),
+        "the mix did not reach silence before the measurement"
+    );
+
+    // The input now captures the settle window; the click may play.
+    for _ in 0..4_000 {
+        shared.calibration.capture_frame(0.0, 0.0);
+    }
+    let mut played = Vec::new();
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, mapped| played.push(mapped.sample(0)));
+    }
+    assert_eq!(&played[..click.len()], click.as_slice());
+}
+
+#[test]
+fn a_calibration_click_leaves_on_the_channels_the_clock_map_plays() {
+    use super::super::output_map::{ChannelMap, PathMapSettings};
+
+    let shared = Shared::new(48_000);
+    shared.set_source_rate(48_000);
+    shared.set_cushion(CushionMode::Manual, 100.0);
+    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    let bypassed = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    shared.set_eq(EqSlot::Pre, bypassed);
+    shared.set_eq(EqSlot::Post, bypassed);
+    // The clock map plays the mix on channels 3 and 4 (0-based), not 0/1.
+    shared.clock_device.set(&OutputDeviceSettings {
+        path_map: PathMapSettings::first(ChannelMap {
+            left: 1 << 3,
+            right: 1 << 4,
+        }),
+        ..OutputDeviceSettings::default()
+    });
+    for _ in 0..5_000 {
+        shared.push_frame(0.25, 0.25);
+    }
+    let mut mixer = OutputMixer::new(48_000, 6);
+    let click = super::super::calibration::click_waveform(48_000);
+    shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+
+    let mut ducked: Vec<[f32; 6]> = Vec::new();
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, mapped| {
+            ducked.push(std::array::from_fn(|channel| mapped.sample(channel)));
+        });
+    }
+    assert!(
+        ducked[ducked.len() - 64..]
+            .iter()
+            .all(|frame| frame.iter().all(|sample| sample.abs() < 1e-6)),
+        "the mapped mix did not reach silence"
+    );
+
+    for _ in 0..4_000 {
+        shared.calibration.capture_frame(0.0, 0.0);
+    }
+    let mut played: Vec<[f32; 6]> = Vec::new();
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, mapped| {
+            played.push(std::array::from_fn(|channel| mapped.sample(channel)));
+        });
+    }
+    for (index, expected) in click.iter().enumerate() {
+        assert_eq!(played[index][3], *expected, "left at frame {index}");
+        assert_eq!(played[index][4], *expected, "right at frame {index}");
+        for untouched in [0, 1, 2, 5] {
+            assert_eq!(
+                played[index][untouched], 0.0,
+                "channel {untouched} at frame {index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_calibration_click_on_a_mono_output_uses_its_only_channel() {
+    let shared = Shared::new(48_000);
+    shared.set_source_rate(48_000);
+    shared.set_cushion(CushionMode::Manual, 100.0);
+    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    let bypassed = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    shared.set_eq(EqSlot::Pre, bypassed);
+    shared.set_eq(EqSlot::Post, bypassed);
+    for _ in 0..5_000 {
+        shared.push_frame(0.25, 0.25);
+    }
+    let mut mixer = OutputMixer::new(48_000, 1);
+    let click = super::super::calibration::click_waveform(48_000);
+    shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, _| {});
+    }
+    for _ in 0..4_000 {
+        shared.calibration.capture_frame(0.0, 0.0);
+    }
+    let mut played = Vec::new();
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, mapped| {
+            played.push((mapped.sample(0), mapped.sample(1)));
+        });
+    }
+    for (index, expected) in click.iter().enumerate() {
+        assert_eq!(played[index].0, *expected, "channel 0 at frame {index}");
+        // The device has one channel; the next one reads silence.
+        assert_eq!(played[index].1, 0.0, "extra channel at frame {index}");
+    }
+}

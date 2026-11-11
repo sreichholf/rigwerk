@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::bridge::run_bridge;
+use super::calibration::CalibrationState;
 #[cfg(target_os = "linux")]
 use super::linux::pipewire;
 #[cfg(target_os = "linux")]
@@ -341,6 +342,68 @@ impl AudioEngine {
     /// alignment without loading one.  Only used before a bridge runs.
     pub fn screenshot_path_latency(&self, slot: usize, samples: u32) {
         self.shared.path(slot).screenshot_latency(samples);
+    }
+
+    /// Arms a measured loopback on the running bridge.  `click` must
+    /// already be generated for the running output rate (the app does that on
+    /// this thread), `input_rate` is the rate the capture really runs at, and
+    /// `input_block` / `output_step` are the two callback sizes (capture
+    /// waits two input blocks, or one output step if that is longer, after
+    /// the duck).  The engine refuses while no bridge runs: the loopback needs
+    /// both devices open, and the audio thread that would duck and play the
+    /// click only exists then.
+    pub fn arm_calibration(
+        &self,
+        click: &[f32],
+        input_rate: u32,
+        input_block: u32,
+        output_step: u32,
+    ) -> Result<(), String> {
+        if !self.shared.running.load(Ordering::Relaxed) {
+            return Err(
+                "Start the bridge first: the loopback needs the input and output open.".to_owned(),
+            );
+        }
+        self.shared
+            .calibration
+            .arm(click, input_rate, input_block, output_step)
+    }
+
+    /// Where the armed measurement is.
+    pub fn calibration_state(&self) -> CalibrationState {
+        self.shared.calibration.state()
+    }
+
+    /// Cancels an armed or running measurement.  The mixer ramps the mix
+    /// back on its next block; no preference was changed.
+    pub fn cancel_calibration(&self) {
+        self.shared.calibration.finish();
+    }
+
+    /// Copies both channels of the captured loopback (UI thread, after `Ready`).
+    pub fn calibration_capture(&self, left: &mut Vec<f32>, right: &mut Vec<f32>) -> usize {
+        self.shared.calibration.copy_capture(left, right)
+    }
+
+    /// How many capture frames are in and how many the window holds.
+    pub fn calibration_progress(&self) -> (usize, usize) {
+        let calibration = &self.shared.calibration;
+        (calibration.captured(), calibration.limit())
+    }
+
+    /// The input-domain stamp of the first captured frame.
+    pub fn calibration_capture_start_ns(&self) -> u64 {
+        self.shared.calibration.capture_start_ns()
+    }
+
+    /// The clock stamp of the click's first sample.
+    pub fn calibration_emitted_ns(&self) -> u64 {
+        self.shared.calibration.emitted_ns()
+    }
+
+    /// The input stamp of the frame that completed the capture window.
+    pub fn calibration_capture_end_ns(&self) -> u64 {
+        self.shared.calibration.capture_end_ns()
     }
 
     /// Sets the clock device's channel map, level and mute (sanitized here).
@@ -721,6 +784,9 @@ impl AudioEngine {
             }
             self.started_at = None;
             self.shared.running.store(false, Ordering::Relaxed);
+            // A measurement must not keep the output ducked while the bridge
+            // is stopping; the mixer ramps back on its way out.
+            self.shared.calibration.finish();
             self.release_quantum();
             self.close_sink_monitor();
             return;
@@ -732,6 +798,9 @@ impl AudioEngine {
     /// Enters `Idle` after every bridge thread has confirmed teardown.
     fn finish_stop(&mut self) {
         self.shared.running.store(false, Ordering::Relaxed);
+        // A half-done measurement belongs to the session that just ended; the
+        // next start gets a fresh one.  Nothing audible was forced here.
+        self.shared.calibration.finish();
         // No mixer runs any more: what it published is stale.
         for path in &self.shared.paths {
             path.store_dsp_time(DspTime::default());

@@ -165,3 +165,44 @@ fn the_report_includes_status_notes_and_the_log() {
     assert_eq!(written, text);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn the_report_keeps_the_estimate_and_the_measurement_apart() {
+    let mut app = blank_app();
+    let conditions = app.latency_conditions();
+    app.measured_latency = Some(crate::app::latency::MeasuredLatency {
+        latency_ms: 23.4,
+        samples: 1_123,
+        input_id: conditions.input_id.clone(),
+        output_id: conditions.output_id.clone(),
+        input_rate: conditions.input_rate,
+        output_rate: conditions.output_rate,
+        input_buffer: conditions.input_buffer,
+        output_step: conditions.output_step,
+        output_mode: conditions.output_mode.clone(),
+        measured_at: 1_700_000_000,
+        confidence: 0.9,
+        ..Default::default()
+    });
+
+    let text = app.diagnostics_text();
+    assert!(text.contains("Latency budget:"), "{text}");
+    assert!(text.contains("Estimated path:"), "{text}");
+    assert!(text.contains("Measured loopback: 23.4 ms"), "{text}");
+    assert!(
+        text.contains("OUT missing:output → cable → IN missing:input"),
+        "{text}"
+    );
+    assert!(text.contains("2023-11-14 22:13 UTC"), "{text}");
+    // The estimate and the measurement cover different legs; they are never
+    // subtracted from each other.
+    assert!(!text.contains("minus estimate"), "{text}");
+    assert!(text.contains("cover different legs"), "{text}");
+    assert!(!text.contains("stale:"), "{text}");
+
+    // A measurement from another device pair is reported as stale, with the
+    // reason, instead of being reused.
+    app.measured_latency.as_mut().expect("stored").input_id = "hw:Elsewhere".to_owned();
+    let text = app.diagnostics_text();
+    assert!(text.contains("stale: the input changed to"), "{text}");
+}

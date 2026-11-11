@@ -304,6 +304,33 @@ impl DeviceFrame {
         }
     }
 
+    /// This frame with the calibration duck applied and the click added to
+    /// `mapped` (bit `n` = device channel `n`) after the scaling, so the
+    /// measurement keeps its fixed level regardless of the device fader and
+    /// leaves on the channels the clock map really plays.  An empty mask
+    /// falls back to channel 0 (and 1 when the device has it).
+    #[inline]
+    pub(crate) fn ducked(&self, gain: f32, click: f32, mapped: u32) -> Self {
+        let mut frame = Self {
+            samples: self.samples,
+            channels: self.channels,
+        };
+        if gain == 1.0 && click == 0.0 {
+            // Unity must not touch a sample: `x * 1.0 + 0.0` would turn a
+            // negative zero into a positive one and break bit identity.
+            return frame;
+        }
+        let mask = if mapped == 0 { 0b11 } else { mapped };
+        let lanes = frame_lanes(self.channels);
+        for (channel, sample) in frame.samples[..lanes].iter_mut().enumerate() {
+            *sample *= gain;
+            if channel < MAX_OUTPUT_CHANNELS && mask & (1 << channel) != 0 {
+                *sample += click;
+            }
+        }
+        frame
+    }
+
     /// The frame as lanes, [`frame_lanes`] of them for its channel count;
     /// lane `n` is channel `n`, the last lane of a device with more than
     /// [`MAX_OUTPUT_CHANNELS`] channels is the shared slot.
@@ -354,6 +381,9 @@ pub(crate) struct DeviceMapper {
     /// The paths this device played in the last block.  A path that starts
     /// playing here snaps its tap (its weights fade in from 0 anyway).
     routed: [bool; MAX_PATHS],
+    /// Device channels any live path's map reaches (bit `n` = channel `n`),
+    /// read with the block's controls.  The calibration click goes there.
+    mapped: u32,
     frame: DeviceFrame,
     peaks: [f32; MAX_OUTPUT_CHANNELS],
 }
@@ -369,6 +399,8 @@ impl DeviceMapper {
             live: LiveSlots::default(),
             taps: [DelayTap::default(); MAX_PATHS],
             routed: [false; MAX_PATHS],
+            // The default map reaches both channels.
+            mapped: 0b11,
             frame: DeviceFrame {
                 samples: [0.0; SLOTS],
                 channels,
@@ -422,6 +454,18 @@ impl DeviceMapper {
         let (unused, gain) = controls.load_device();
         let maps: [ChannelMap; MAX_PATHS] = std::array::from_fn(|path| controls.path_map(path));
         let mask = live.mask();
+        let mut mapped = 0u32;
+        for path in live.iter() {
+            for channel in 0..self.channels.min(MAX_OUTPUT_CHANNELS) {
+                let (left, right) = maps[path].sides_at(self.channels, channel);
+                if left || right {
+                    mapped |= 1 << channel;
+                }
+            }
+        }
+        // A device with no live path routed anywhere still gets a click on
+        // its first channel (or two) rather than none at all.
+        self.mapped = if mapped == 0 { 0b11 } else { mapped };
         self.align_paths(controls, &maps, mask, unused, timing);
         for path in live.iter() {
             let ramp = self.adopted && self.live.contains(path);
@@ -552,6 +596,12 @@ impl DeviceMapper {
     /// what a removed path still has to play here after its fade.
     pub(crate) fn tap_delay(&self, path: usize) -> u32 {
         self.taps[path].longest()
+    }
+
+    /// Device channels any live path's map reaches this block (bit `n` =
+    /// channel `n`), or the 0/1 fallback when nothing is routed.
+    pub(crate) fn mapped_channels(&self) -> u32 {
+        self.mapped
     }
 
     /// Publishes this block's per-channel peaks.

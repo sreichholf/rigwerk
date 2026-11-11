@@ -14,7 +14,7 @@ use egui::RichText;
 use crate::app::{RigWerkApp, ACTIVITY_LOG_CAP};
 use crate::audio::EngineState;
 use crate::ui::theme::ts;
-use crate::ui::theme::{AMBER, BORDER, CARD, DIM, MUTED, RED, TEAL, TEXT};
+use crate::ui::theme::{AMBER, BORDER, CARD, DIM, GREEN, MUTED, RED, TEAL, TEXT};
 use crate::ui::widgets::{card, ghost_button, micro_label, mono, status_dot};
 
 /// One path's DSP line: "0.21 ms avg · 0.40 ms peak of 10.7 ms · 2% / 4%",
@@ -96,6 +96,27 @@ fn chain_lock_text(report: &crate::audio::PluginLockReport) -> String {
     }
 }
 
+/// One latency-budget line: part, value, where the number comes from, and
+/// what it covers.
+fn budget_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    value_color: egui::Color32,
+    source: &str,
+    detail: &str,
+) {
+    ui.horizontal_top(|ui| {
+        ui.add_sized([150.0, 14.0], egui::Label::new(mono(label, TEXT, 8.8)));
+        ui.add_sized(
+            [86.0, 14.0],
+            egui::Label::new(mono(value, value_color, 9.5)),
+        );
+        ui.add_sized([64.0, 14.0], egui::Label::new(mono(source, DIM, 8.0)));
+        ui.add(egui::Label::new(RichText::new(detail).size(ts(9.5)).color(DIM)).wrap());
+    });
+}
+
 fn engine_state_label(state: EngineState) -> &'static str {
     match state {
         EngineState::Preview => "Preview active",
@@ -156,6 +177,7 @@ impl RigWerkApp {
             Some(note) => lines.push(format!("Quantum: {note}")),
             None => lines.push("Quantum: none".to_owned()),
         }
+        lines.extend(self.latency_budget().text_lines());
         lines.push("Signal paths (chain latency · DSP time per block):".to_owned());
         for (info, dsp) in self.path_dsp_lines() {
             lines.push(format!(
@@ -307,6 +329,96 @@ impl RigWerkApp {
                     .wrap(),
                 );
             });
+        });
+
+        ui.add_space(10.0);
+        card(ui, CARD, BORDER, |ui| {
+            ui.set_width(width - 32.0);
+            ui.horizontal(|ui| {
+                ui.label(micro_label(
+                    "LATENCY BUDGET · ESTIMATE AND MEASUREMENT",
+                    DIM,
+                ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let measuring = self.calibration.is_measuring();
+                    let blocker = self.calibration_blocker();
+                    if ghost_button(ui, "Measure loopback…", 168.0) {
+                        self.calibration.open = true;
+                    }
+                    if measuring {
+                        ui.label(mono("measuring", AMBER, 8.5)).on_hover_text(
+                            "The clock output is muted while the click is captured.",
+                        );
+                    } else if let Some(reason) = blocker {
+                        ui.label(mono("bridge needed", DIM, 8.5))
+                            .on_hover_text(reason);
+                    } else {
+                        ui.label(mono("loopback ready", GREEN, 8.5));
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            let budget = self.latency_budget();
+            for part in &budget.parts {
+                budget_row(
+                    ui,
+                    part.label,
+                    &part.value_text(),
+                    match part.source {
+                        crate::app::budget::LatencySource::Measured => TEAL,
+                        _ => MUTED,
+                    },
+                    part.source.label(),
+                    &part.detail,
+                );
+            }
+            ui.add_space(3.0);
+            budget_row(
+                ui,
+                "= ESTIMATED PATH",
+                &format!("{:.1} ms", budget.estimate_ms),
+                AMBER,
+                "estimated",
+                budget.estimate_gap.as_deref().unwrap_or(
+                    "Input block + cushion + plugin chain + output step + after-node delay, at the rates they run at. The Live US readout is the bridge alone, so it differs from this by the chain and the after-node delay; alignment trims are not included.",
+                ),
+            );
+            ui.add_space(3.0);
+            match &budget.measured {
+                Some(measured) => budget_row(
+                    ui,
+                    "MEASURED LOOPBACK",
+                    &format!("{:.1} ms", measured.latency_ms),
+                    if budget.stale.is_some() { AMBER } else { TEAL },
+                    "measured",
+                    &measured.summary(budget.stale.as_deref()),
+                ),
+                None => budget_row(
+                    ui,
+                    "MEASURED LOOPBACK",
+                    "not measured",
+                    MUTED,
+                    "—",
+                    "Measure on Live with a cable or microphone loopback. The estimate above is not a measurement.",
+                ),
+            }
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(crate::app::budget::LEGS_NOTE)
+                        .size(ts(10.0))
+                        .color(DIM),
+                )
+                .wrap(),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(
+                    "Reported means the driver, graph or a plugin said so; planned is the size asked for before the driver has opened; setting is RigWerk's own cushion; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
+                )
+                .size(ts(10.0))
+                .color(DIM),
+            );
         });
 
         ui.add_space(10.0);

@@ -5,10 +5,13 @@
 
 pub(crate) mod alignment;
 pub(crate) mod bridge;
+pub(crate) mod budget;
+pub(crate) mod calibration;
 pub(crate) mod cards;
 pub(crate) mod devices;
 pub(crate) mod driver_check;
 pub(crate) mod issues;
+pub(crate) mod latency;
 pub(crate) mod paths;
 pub(crate) mod plugin_gui;
 pub(crate) mod plugins;
@@ -265,6 +268,12 @@ pub struct RigWerkApp {
     /// A copy of stored preferences that could not be fully read, written
     /// under its own key on the next save so that save cannot lose it.
     preferences_backup: Option<(String, String)>,
+    /// The last measured loopback and the conditions it was made under
+    /// (persisted; see `app::latency` for staleness).
+    pub(crate) measured_latency: Option<latency::MeasuredLatency>,
+    /// The calibration panel: open, what it is doing, and how the loop is
+    /// closed.  Not persisted.
+    pub(crate) calibration: calibration::CalibrationUi,
     /// Stored low-latency input kept when startup did not find it.
     asio_held: Option<HeldDevice>,
     /// Stored system input kept when startup did not find it.
@@ -301,6 +310,7 @@ impl eframe::App for RigWerkApp {
     /// a plugin editor is open, otherwise 200 ms.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.meters(ctx);
+        self.poll_calibration();
         self.watch_devices();
         self.poll_plugin_scan();
         self.engine.service_plugins();
@@ -444,6 +454,7 @@ impl eframe::App for RigWerkApp {
         }
 
         self.plugin_editor_window(&ctx);
+        self.calibration_window(&ctx);
 
         if self.startup.is_some() {
             egui::Window::new("Starting RigWerk")
@@ -570,6 +581,7 @@ impl eframe::App for RigWerkApp {
             prefer_plugin_interface: self.prefer_plugin_interface,
             clock_device,
             followers,
+            measured_latency: self.measured_latency.clone(),
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -738,6 +750,8 @@ impl RigWerkApp {
             plugin_param_filter: String::new(),
             prefer_plugin_interface: preferences.prefer_plugin_interface,
             preferences_backup: loaded.backup,
+            measured_latency: preferences.measured_latency.clone(),
+            calibration: calibration::CalibrationUi::default(),
             asio_held: restored.asio_held,
             input_held: restored.input_held,
             output_held: restored.output_held,
@@ -954,6 +968,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         plugin_param_filter: String::new(),
         prefer_plugin_interface: false,
         preferences_backup: None,
+        measured_latency: None,
+        calibration: calibration::CalibrationUi::default(),
         asio_held: None,
         input_held: None,
         output_held: None,

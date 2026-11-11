@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::app::latency::{LoopbackKind, MeasuredLatency};
 use crate::app::Page;
 use crate::audio::{
     ChannelMap, EqSettings, GateSettings, GateSlot, OutputDeviceSettings, PluginFormat, PluginPref,
@@ -1104,4 +1105,123 @@ fn paths_are_capped_and_sanitized_on_load() {
         crate::audio::PATH_LEVEL_MAX_DB
     );
     assert_eq!(preferences.selected_path, 3);
+}
+
+fn measured_latency() -> MeasuredLatency {
+    MeasuredLatency {
+        latency_ms: 21.5,
+        samples: 1_032,
+        input_id: "asio:focusrite".to_owned(),
+        input_name: "Focusrite USB".to_owned(),
+        output_id: "wasapi:{speakers}".to_owned(),
+        output_name: "Speakers".to_owned(),
+        input_rate: 48_000,
+        output_rate: 44_100,
+        input_buffer: 128,
+        output_step: 256,
+        output_mode: "real-style".to_owned(),
+        measured_at: 1_700_000_000,
+        confidence: 0.93,
+        loopback: LoopbackKind::Microphone,
+    }
+}
+
+#[test]
+fn a_measured_latency_round_trips_with_its_conditions() {
+    let preferences = Preferences {
+        measured_latency: Some(measured_latency()),
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.measured_latency, Some(measured_latency()));
+}
+
+#[test]
+fn an_older_save_loads_without_a_measurement() {
+    let loaded = load_preferences(Some("(auto_start_bridge:true)"), BACKUP);
+    let preferences = loaded.preferences.expect("readable");
+    assert!(preferences.auto_start_bridge);
+    assert_eq!(preferences.measured_latency, None);
+}
+
+#[test]
+fn a_newer_save_is_read_through_field_defaults() {
+    let raw = r#"(measured_latency: Some((latency_ms: 12.5, samples: 600, input_id: "in", output_id: "out", input_rate: 48000, output_rate: 48000)))"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let measured = loaded
+        .preferences
+        .expect("readable")
+        .measured_latency
+        .expect("measurement");
+    assert_eq!(measured.latency_ms, 12.5);
+    assert_eq!(measured.samples, 600);
+    // Missing fields keep their defaults.
+    assert_eq!(measured.input_buffer, 0);
+    assert_eq!(measured.loopback, LoopbackKind::Cable);
+    assert_eq!(measured.confidence, 0.0);
+}
+
+#[test]
+fn a_damaged_measurement_is_skipped_not_fatal() {
+    let raw =
+        r#"(auto_start_bridge: true, measured_latency: Some((latency_ms: "hot", samples: 12)))"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("the rest still loads");
+    assert!(preferences.auto_start_bridge);
+    assert_eq!(preferences.measured_latency, None);
+    // The drop is reported like a skipped patch, and the original is kept.
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("1 measurement(s)")),
+        "{:?}",
+        loaded.notices
+    );
+    assert!(loaded.backup.is_some());
+}
+
+#[test]
+fn an_impossible_measurement_is_dropped_and_reported() {
+    let raw = r#"(measured_latency: Some((latency_ms: 12.5, samples: 0)))"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert_eq!(loaded.preferences.expect("readable").measured_latency, None);
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("1 measurement(s)")),
+        "{:?}",
+        loaded.notices
+    );
+}
+
+#[test]
+fn a_cap_dropped_output_is_not_reported_as_unreadable() {
+    let mut preferences = Preferences::default();
+    for index in 0..(MAX_FOLLOWERS + 1) {
+        preferences.followers.push(FollowerPref {
+            id: format!("out:{index}"),
+            name: format!("Out {index}"),
+            ..FollowerPref::default()
+        });
+    }
+    // A duplicate virtual out goes through the same floor rule.
+    preferences.followers.push(FollowerPref::virtual_out());
+    preferences.followers.push(FollowerPref::virtual_out());
+
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.followers.len(), MAX_FOLLOWERS);
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .all(|notice| !notice.contains("output device")),
+        "{:?}",
+        loaded.notices
+    );
 }
