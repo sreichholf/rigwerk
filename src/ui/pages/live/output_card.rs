@@ -8,6 +8,7 @@ use crate::app::settings::{rate_label, BUFFERS, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_
 use crate::app::RigWerkApp;
 use crate::audio::{DeviceItem, EngineState};
 use crate::ui::pages::live::driver_line::driver_line;
+use crate::ui::pages::mixer::output_devices::gain_reduction_text;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEXT,
@@ -258,6 +259,11 @@ impl RigWerkApp {
                 None => backend,
             };
             ui.label(RichText::new(ellipsize(&name, 30)).size(ts(9.0)).color(DIM));
+            if self.engine.state == EngineState::Running {
+                if let Some(text) = gain_reduction_text(self.snapshot.out_reduction_db) {
+                    ui.label(mono(text, AMBER, 9.0));
+                }
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(micro_label(&backend_label, BLUE))
                     .on_hover_text(self.output_mode_text());
@@ -342,6 +348,9 @@ impl RigWerkApp {
                             if response.clicked() {
                                 self.chain_selected = ChainSelection::OutputDevice(index);
                                 self.page = Page::Mixer;
+                            }
+                            if let Some(text) = gain_reduction_text(row.reduction_db) {
+                                ui.label(mono(text, AMBER, 9.0));
                             }
                         }
                     });

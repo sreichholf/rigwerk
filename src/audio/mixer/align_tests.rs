@@ -14,9 +14,10 @@ use super::OutputMixer;
 const RATE: u32 = 48_000;
 const BLOCK: usize = 256;
 
-/// A low sine: one sample moves it by at most `0.5 * 0.02`.
+/// A low sine: one sample moves it by at most `0.4 * 0.02`.  Two copies
+/// summing stay under the safety ceiling, so the alignment stays linear.
 fn signal(n: usize) -> f32 {
-    (n as f32 * 0.02).sin() * 0.5
+    (n as f32 * 0.02).sin() * 0.4
 }
 
 /// `n` frames back, silence before the start.
@@ -389,16 +390,27 @@ fn a_missed_chain_lock_fades_into_the_fallback_without_a_click() {
     shared.clock_device.set(&only);
     let mut clock = 0;
     let mut out = run(&mut mixer, &shared, &mut clock, 2).remove(0);
-    assert_eq!(out.last().unwrap()[0], 1.0, "the plugin runs");
+    // The fake plugin writes 1 and 2.  The safety ceiling holds the peak,
+    // so the left channel comes out at half the ceiling.
+    let plugin = crate::audio::safety_ceiling_linear() * 0.5;
+    assert!(
+        (out.last().unwrap()[0] - plugin).abs() < 1.0e-5,
+        "the plugin runs: {}",
+        out.last().unwrap()[0]
+    );
     {
         let _held = shared.paths[0].plugins.lock().unwrap();
         out.extend(run(&mut mixer, &shared, &mut clock, 1).remove(0));
     }
     out.extend(run(&mut mixer, &shared, &mut clock, 2).remove(0));
-    // From 1.0 to the dry sine and back: smoothed both ways.
+    // From the limited plugin level to the dry sine and back: smoothed both ways.
     let step = largest_step(&out, 0);
     assert!(step < 0.05, "largest step {step}");
-    assert_eq!(out.last().unwrap()[0], 1.0, "the plugin is back");
+    assert!(
+        (out.last().unwrap()[0] - plugin).abs() < 1.0e-5,
+        "the plugin is back: {}",
+        out.last().unwrap()[0]
+    );
     drop(shared.paths[0].edit_chain(|chain| chain.restore(Vec::new())));
 }
 

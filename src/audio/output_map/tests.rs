@@ -76,6 +76,12 @@ const PAIRS: [(f32, f32); 12] = [
     (0.123_456_79, -0.987_654_3),
 ];
 
+/// Pairs the safety ceiling does not touch.  Hot pairs are covered by
+/// [`the_safety_ceiling_holds_a_hot_signal_and_publishes_the_reduction`].
+fn under_the_ceiling((left, right): &(f32, f32)) -> bool {
+    left.abs().max(right.abs()) <= crate::audio::safety_ceiling_linear()
+}
+
 #[test]
 fn the_default_map_writes_exactly_what_the_output_always_wrote() {
     for channels in [1, 2, 3, 4, 8, 10] {
@@ -85,7 +91,7 @@ fn the_default_map_writes_exactly_what_the_output_always_wrote() {
             if block == 1 {
                 mapper.begin_block(&controls, RAMP);
             }
-            for (left, right) in PAIRS {
+            for (left, right) in PAIRS.into_iter().filter(under_the_ceiling) {
                 let mut expected = vec![0.0f32; channels];
                 old_write_frame(&mut expected, left, right);
                 let got = samples(mapper.map(left, right), channels);
@@ -97,6 +103,42 @@ fn the_default_map_writes_exactly_what_the_output_always_wrote() {
             }
         }
     }
+}
+
+#[test]
+fn the_safety_ceiling_holds_a_hot_signal_and_publishes_the_reduction() {
+    let ceiling = crate::audio::safety_ceiling_linear();
+    let (mut mapper, controls) = mapped_device(OutputDeviceSettings::default(), 2);
+    let quiet = samples(mapper.map(-0.0, 0.25), 2);
+    assert_eq!(bits(&quiet), bits(&[-0.0, 0.25]));
+
+    let hot = samples(mapper.map(1.0, -0.5), 2);
+    assert_eq!(hot[0], ceiling);
+    assert!((hot[1] + 0.5 * ceiling).abs() < 1.0e-6, "{}", hot[1]);
+    mapper.end_block(&controls);
+    let gr = controls.reduction_db();
+    assert!(
+        (gr - 1.0).abs() < 0.05,
+        "full scale is about 1 dB under: {gr}"
+    );
+
+    // Mute is after the ceiling: a snapped mute is silence, and the
+    // reduction is still the levelled signal.
+    let (mut mapper, controls) = mapped_device(
+        OutputDeviceSettings {
+            mute: true,
+            ..OutputDeviceSettings::default()
+        },
+        2,
+    );
+    let silenced = samples(mapper.map(1.0, -1.0), 2);
+    assert_eq!(silenced, [0.0, 0.0]);
+    mapper.end_block(&controls);
+    assert!(
+        controls.reduction_db() >= crate::audio::SAFETY_GR_DB,
+        "limiter runs before mute: {}",
+        controls.reduction_db()
+    );
 }
 
 #[test]
@@ -502,7 +544,7 @@ fn unmute_returns_to_exact_unity_and_the_default_output() {
     let _back = run(&mut mapper, &controls, 4, 400);
     assert_eq!(mapper.gain.next(), 1.0);
     mapper.begin_block(&controls, RAMP);
-    for (left, right) in PAIRS {
+    for (left, right) in PAIRS.into_iter().filter(under_the_ceiling) {
         let mut expected = vec![0.0f32; 4];
         old_write_frame(&mut expected, left, right);
         let got = samples(mapper.map(left, right), 4);

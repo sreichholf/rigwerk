@@ -18,7 +18,7 @@ use crate::app::settings::{
 use crate::app::RigWerkApp;
 use crate::audio::{
     CushionMode, EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
-    MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, SAFETY_GR_DB, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
 use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::pages::mixer::rack::RackAction;
@@ -53,6 +53,9 @@ pub(crate) struct OutputDeviceRow {
     pub(crate) missing: bool,
     pub(crate) publish: bool,
     pub(crate) settings: OutputDeviceSettings,
+    /// Safety-limiter gain reduction, dB.  0 when the device is not
+    /// limiting, and when the bridge is not running.
+    pub(crate) reduction_db: f32,
 }
 
 /// Channels to show for a device: what its open stream reported, else what
@@ -68,6 +71,13 @@ pub(crate) fn device_channel_count(reported: u32, inventory: usize) -> usize {
         2
     };
     channels.min(MAX_OUTPUT_CHANNELS)
+}
+
+/// Gain reduction as the rows show it, once it is past the point where
+/// Live Issues also says the device is against the ceiling.
+pub(crate) fn gain_reduction_text(reduction_db: f32) -> Option<String> {
+    (reduction_db.is_finite() && reduction_db >= SAFETY_GR_DB)
+        .then(|| format!("{reduction_db:.1} dB"))
 }
 
 /// The device level as the rows show it.
@@ -105,11 +115,12 @@ pub(crate) fn device_row_value(row: &OutputDeviceRow, state: EngineState) -> Str
     } else {
         "follower"
     };
-    format!(
-        "{role} · {} · {}",
-        device_level_text(&row.settings),
-        device_state(row, state).0
-    )
+    let level = device_level_text(&row.settings);
+    let level = match gain_reduction_text(row.reduction_db) {
+        Some(reduction) => format!("{level} · {reduction}"),
+        None => level,
+    };
+    format!("{role} · {level} · {}", device_state(row, state).0)
 }
 
 impl RigWerkApp {
@@ -155,6 +166,7 @@ impl RigWerkApp {
         } else {
             0
         };
+        let running = self.engine.state == EngineState::Running;
         let mut rows = vec![OutputDeviceRow {
             name: output.name.clone(),
             backend: output.backend.clone(),
@@ -165,6 +177,11 @@ impl RigWerkApp {
             missing: false,
             publish: false,
             settings: self.clock_device,
+            reduction_db: if running {
+                self.snapshot.out_reduction_db
+            } else {
+                0.0
+            },
         }];
         for (index, follower) in self.followers.iter().enumerate() {
             let (channels, missing) = if follower.virtual_out {
@@ -202,6 +219,15 @@ impl RigWerkApp {
                 missing,
                 publish: follower.publish,
                 settings: follower.settings,
+                reduction_db: if running {
+                    self.snapshot
+                        .follower_reduction_db
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                },
             });
         }
         rows
@@ -713,6 +739,7 @@ impl RigWerkApp {
                 row.channels,
                 &self.meter_follower_channels[follower],
                 &self.peak_follower_channels[follower],
+                row.reduction_db,
             );
         }
         ui.add_space(10.0);
@@ -896,6 +923,7 @@ impl RigWerkApp {
                 row.channels.max(2),
                 &self.meter_follower_channels[follower],
                 &self.peak_follower_channels[follower],
+                row.reduction_db,
             );
         }
         ui.add_space(10.0);
@@ -1017,12 +1045,20 @@ impl RigWerkApp {
         block(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(micro_label("DEVICE LEVEL", BLUE));
+                let reduction = if self.engine.state == EngineState::Running {
+                    self.snapshot.out_reduction_db
+                } else {
+                    0.0
+                };
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(mono(
                         device_level_text(&self.clock_device),
                         if self.clock_device.mute { RED } else { TEXT },
                         12.0,
                     ));
+                    if let Some(text) = gain_reduction_text(reduction) {
+                        ui.label(mono(text, AMBER, 12.0));
+                    }
                 });
             });
             ui.add_space(4.0);

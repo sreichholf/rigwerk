@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use super::super::delay::{DelayLine, DelayTap, TAP_FADE_SECONDS};
+use super::super::limiter::SafetyLimiter;
 use super::super::mixer::Ramp;
 use super::super::path::{LiveSlots, MAX_PATHS};
 use super::align::{plan_alignment, trim_frames, AlignmentPlan, AlignmentReport};
@@ -89,9 +90,13 @@ pub(crate) struct DeviceControls {
     /// Linear level gain (`f32` bits), already clamped.
     gain: AtomicU32,
     mute: AtomicBool,
-    /// Block peak per device channel (`f32` bits), after the map and the
-    /// device level.  Channels the device does not have read 0.
+    /// Block peak per device channel (`f32` bits), after the map, the
+    /// device level, the safety ceiling and mute.  Channels the device
+    /// does not have read 0.
     meters: [AtomicU32; MAX_OUTPUT_CHANNELS],
+    /// Safety-limiter gain reduction, dB (`f32` bits).  0 when the device
+    /// is not limiting.  Published with the meters.
+    reduction_db: AtomicU32,
     /// The device's real channel count, published when its stream opens.
     /// 0 = unknown (bridge not running); the UI falls back to the device
     /// inventory's channel count.  ASIO opens at most 4 outputs for now;
@@ -117,6 +122,7 @@ impl DeviceControls {
             gain: AtomicU32::new(1.0f32.to_bits()),
             mute: AtomicBool::new(false),
             meters: std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits())),
+            reduction_db: AtomicU32::new(0.0f32.to_bits()),
             channels: AtomicU32::new(0),
             align: AtomicBool::new(true),
             applied: std::array::from_fn(|_| AtomicU32::new(NOT_ROUTED)),
@@ -169,6 +175,7 @@ impl DeviceControls {
         for meter in &self.meters {
             meter.store(0.0f32.to_bits(), Ordering::Relaxed);
         }
+        self.reduction_db.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.channels.store(0, Ordering::Relaxed);
         self.applied_rate.store(0, Ordering::Relaxed);
     }
@@ -223,6 +230,17 @@ impl DeviceControls {
         std::array::from_fn(|channel| f32::from_bits(self.meters[channel].load(Ordering::Relaxed)))
     }
 
+    /// Safety-limiter gain reduction in dB.  0 when the device is not
+    /// limiting.
+    pub(crate) fn reduction_db(&self) -> f32 {
+        f32::from_bits(self.reduction_db.load(Ordering::Relaxed))
+    }
+
+    fn store_reduction(&self, db: f32) {
+        let db = if db.is_finite() { db.max(0.0) } else { 0.0 };
+        self.reduction_db.store(db.to_bits(), Ordering::Relaxed);
+    }
+
     /// The device's real channel count; 0 = unknown (bridge not running),
     /// so the UI falls back to the device inventory's channel count.  ASIO
     /// opens at most 4 outputs for now; the map sees that count.
@@ -256,19 +274,29 @@ impl DeviceControls {
         (self.path_map(0), unused, gain)
     }
 
-    /// The unused mode and the effective gain (0 when muted) right now.
-    fn load_device(&self) -> (UnusedChannels, f32) {
+    /// The unused mode, the level gain and the mute gain (0 or 1) right now.
+    /// Mute is its own ramp so the safety limiter can sit between the level
+    /// and the fade to silence.
+    fn load_level_and_mute(&self) -> (UnusedChannels, f32, f32) {
         let unused = if self.silent.load(Ordering::Relaxed) {
             UnusedChannels::Silent
         } else {
             UnusedChannels::MonoCopy
         };
-        let gain = if self.mute.load(Ordering::Relaxed) {
+        let level = f32::from_bits(self.gain.load(Ordering::Relaxed));
+        let mute = if self.mute.load(Ordering::Relaxed) {
             0.0
         } else {
-            f32::from_bits(self.gain.load(Ordering::Relaxed))
+            1.0
         };
-        (unused, gain)
+        (unused, level, mute)
+    }
+
+    /// The unused mode and the effective gain (0 when muted) right now.
+    #[cfg(test)]
+    fn load_device(&self) -> (UnusedChannels, f32) {
+        let (unused, level, mute) = self.load_level_and_mute();
+        (unused, if mute == 0.0 { 0.0 } else { level })
     }
 }
 
@@ -361,7 +389,9 @@ impl DeviceFrame {
 /// gain move over the same ramp as the mixer's routes, so a map, level,
 /// polarity or mute change crossfades.  Settled
 /// weights are exactly 0 or 1 and the gain exactly its target, so the
-/// default settings write the very samples the output always wrote.
+/// default settings write the very samples the output always wrote, while
+/// the sample stays under the safety ceiling.  The ceiling runs after the
+/// level and before the mute ramp.
 pub(crate) struct DeviceMapper {
     channels: usize,
     /// Weights of `[L, R, (L + R) / 2]` per path slot and channel slot.
@@ -371,6 +401,11 @@ pub(crate) struct DeviceMapper {
     /// polarity flip ramps through zero.
     path_gain: [Ramp; MAX_PATHS],
     pub(super) gain: Ramp,
+    /// Mute, ramped to silence on its own so the limiter sees the levelled
+    /// signal.  Unity copies.
+    mute_gain: Ramp,
+    /// Sample-peak ceiling after the level.  Preallocated; no per-block alloc.
+    limiter: SafetyLimiter,
     adopted: bool,
     /// The paths mapped in this block, and in the one before (a path that
     /// just went live adopts its weights instead of ramping from stale ones).
@@ -395,6 +430,8 @@ impl DeviceMapper {
             weights: [[[Ramp::new(0.0); 3]; SLOTS]; MAX_PATHS],
             path_gain: [Ramp::new(1.0); MAX_PATHS],
             gain: Ramp::new(1.0),
+            mute_gain: Ramp::new(1.0),
+            limiter: SafetyLimiter::new(48_000),
             adopted: false,
             live: LiveSlots::default(),
             taps: [DelayTap::default(); MAX_PATHS],
@@ -451,7 +488,8 @@ impl DeviceMapper {
         live: LiveSlots,
         timing: &PathTiming,
     ) {
-        let (unused, gain) = controls.load_device();
+        let (unused, level, mute) = controls.load_level_and_mute();
+        self.limiter.set_rate(timing.rate);
         let maps: [ChannelMap; MAX_PATHS] = std::array::from_fn(|path| controls.path_map(path));
         let mask = live.mask();
         let mut mapped = 0u32;
@@ -490,9 +528,11 @@ impl DeviceMapper {
         }
         self.live = live;
         if self.adopted {
-            self.gain.set_target(gain, ramp_samples);
+            self.gain.set_target(level, ramp_samples);
+            self.mute_gain.set_target(mute, ramp_samples);
         } else {
-            self.gain.snap(gain);
+            self.gain.snap(level);
+            self.mute_gain.snap(mute);
         }
         self.adopted = true;
         self.peaks = [0.0; MAX_OUTPUT_CHANNELS];
@@ -575,13 +615,26 @@ impl DeviceMapper {
         let level = |value: f32| if gain == 1.0 { value } else { value * gain };
         let mapped = self.channels.min(MAX_OUTPUT_CHANNELS);
         for channel in 0..mapped {
-            let value = level(sum_paths(&mut self.weights, self.live, channel, &sources));
-            self.frame.samples[channel] = value;
-            self.peaks[channel] = self.peaks[channel].max(value.abs());
+            self.frame.samples[channel] =
+                level(sum_paths(&mut self.weights, self.live, channel, &sources));
         }
         if self.channels > MAX_OUTPUT_CHANNELS {
             self.frame.samples[EXTRA] =
                 level(sum_paths(&mut self.weights, self.live, EXTRA, &sources));
+        }
+        // Level, then the safety ceiling, then mute.  Mute already ramps to
+        // silence, so the limiter sees the signal the fader would play.
+        let lanes = frame_lanes(self.channels);
+        self.limiter.process(&mut self.frame.samples[..lanes]);
+        let mute = self.mute_gain.next();
+        if mute != 1.0 {
+            for sample in &mut self.frame.samples[..lanes] {
+                *sample *= mute;
+            }
+        }
+        for channel in 0..mapped {
+            let value = self.frame.samples[channel].abs();
+            self.peaks[channel] = self.peaks[channel].max(value);
         }
         &self.frame
     }
@@ -609,6 +662,7 @@ impl DeviceMapper {
         for (meter, peak) in controls.meters.iter().zip(self.peaks) {
             meter.store(peak.to_bits(), Ordering::Relaxed);
         }
+        controls.store_reduction(self.limiter.reduction_db());
     }
 }
 

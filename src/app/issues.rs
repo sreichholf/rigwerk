@@ -40,6 +40,10 @@
 //!   volume, so a muted or turned-down RigWerk stream looks the same.
 //!   Only while Low latency runs and the monitor delivers blocks: without
 //!   that reading there is no row, never a guess.
+//! - a playing device against the safety ceiling (−1.0 dBFS): one warning
+//!   while any unmuted device is reducing by at least 0.5 dB, naming the
+//!   one with the most reduction.  It cannot be dismissed while it holds
+//!   and clears once the signal drops.  → Show on Output.
 //!
 //! Each follower's own (a generic "also playing on" device, by its slot),
 //! placed as `OUTPUT · <name>` on the Output card, and only while the
@@ -113,7 +117,10 @@ use crate::app::alignment::RoutingWarningKind;
 use crate::app::paths::PathInfo;
 use crate::app::settings::{cushion_from_pref, cushion_to_pref, BUFFERS};
 use crate::app::RigWerkApp;
-use crate::audio::{CushionMode, EngineState, FOLLOWER_DRIFT_LIMIT_PPM, MAX_ALIGN, MAX_FOLLOWERS};
+use crate::audio::{
+    CushionMode, EngineState, FOLLOWER_DRIFT_LIMIT_PPM, MAX_ALIGN, MAX_FOLLOWERS,
+    SAFETY_CEILING_DB, SAFETY_GR_DB,
+};
 #[cfg(target_os = "linux")]
 use crate::audio::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
 use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
@@ -382,6 +389,9 @@ pub(crate) enum IssueKey {
     /// Follower slot.
     FollowerDrift(usize),
     SinkSilent,
+    /// A playing device is against the safety ceiling.  One row: the device
+    /// with the most reduction.
+    SafetyCeiling,
 }
 
 impl IssueKey {
@@ -564,6 +574,8 @@ pub(crate) enum IssueAction {
     ShowFollower(usize),
     /// Set follower `follower`'s own cushion to Safe.
     FollowerSafeCushion(usize),
+    /// Ring the Output card.  The safety ceiling has no control of its own.
+    ShowOutput,
 }
 
 impl IssueAction {
@@ -581,6 +593,7 @@ impl IssueAction {
                 "Use Safe cushion".to_owned()
             }
             IssueAction::ShowFollower(_) => "Show in Mixer".to_owned(),
+            IssueAction::ShowOutput => "Show on Output".to_owned(),
         }
     }
 }
@@ -605,9 +618,11 @@ impl LiveIssue {
         format!("{}: {}", self.action.label(), self.title)
     }
 
-    /// Only warnings can be dismissed.
+    /// Only warnings can be dismissed.  The safety ceiling stays while a
+    /// device is still against it: it clears when the signal drops, not
+    /// when someone clicks.
     pub(crate) fn dismissable(&self) -> bool {
-        self.severity == IssueSeverity::Warning
+        self.severity == IssueSeverity::Warning && self.key != IssueKey::SafetyCeiling
     }
 
     /// The Dismiss button's accessible name.
@@ -838,6 +853,7 @@ impl RigWerkApp {
         self.driver_issue(&mut issues);
         self.underrun_issue(&mut issues);
         self.silence_issue(&mut issues);
+        self.safety_ceiling_issue(&rows, &mut issues);
         self.follower_issues(&rows, &mut issues);
         issues.sort_by_key(|issue| issue.severity);
         issues
@@ -1254,6 +1270,42 @@ impl RigWerkApp {
         });
     }
 
+    /// A playing device held at the safety ceiling.  One warning, for the
+    /// device reducing the most.  Muted, missing and unpublished virtual
+    /// devices are not playing.  The row cannot be dismissed while the
+    /// reduction holds; the next tick drops it once every device is under
+    /// the threshold.
+    fn safety_ceiling_issue(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
+        if self.engine.state != EngineState::Running {
+            return;
+        }
+        let mut worst: Option<(String, f32)> = None;
+        for row in rows {
+            if row.settings.mute || row.missing || (row.virtual_out && !row.publish) {
+                continue;
+            }
+            let gr = row.reduction_db;
+            if gr.is_finite()
+                && gr >= SAFETY_GR_DB
+                && worst.as_ref().is_none_or(|(_, top)| gr > *top)
+            {
+                worst = Some((row.name.clone(), gr));
+            }
+        }
+        let Some((name, gr)) = worst else {
+            return;
+        };
+        issues.push(LiveIssue {
+            key: IssueKey::SafetyCeiling,
+            severity: IssueSeverity::Warning,
+            title: format!("{name} is against the safety ceiling"),
+            detail: format!("−{:.1} dB · {gr:.1} dB reduction.", -SAFETY_CEILING_DB),
+            place: format!("OUTPUT · {name}"),
+            card: Some(IssueCard::Output),
+            action: IssueAction::ShowOutput,
+        });
+    }
+
     /// (g) Each follower on its own: missing, then its ring's underruns,
     /// then its drift loop.  A missing follower plays nothing, so it gets
     /// that one row only.
@@ -1426,6 +1478,9 @@ impl RigWerkApp {
                 self.chain_selected =
                     crate::ui::pages::mixer::chain::ChainSelection::OutputDevice(follower + 1);
                 self.page = Page::Mixer;
+            }
+            IssueAction::ShowOutput => {
+                self.show_issue_card(IssueCard::Output, IssueSeverity::Warning, Instant::now());
             }
             IssueAction::FollowerSafeCushion(follower) => {
                 let Some(pref) = self.followers.get_mut(follower) else {

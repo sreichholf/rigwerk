@@ -158,16 +158,23 @@ pub struct Snapshot {
     pub in_r: f32,
     pub out_l: f32,
     pub out_r: f32,
-    /// Block peak per clock-device channel, after its channel map and level.
-    /// Channels the device does not have read 0.
+    /// Block peak per clock-device channel, after its channel map, level,
+    /// safety ceiling and mute.  Channels the device does not have read 0.
     pub out_channels: [f32; MAX_OUTPUT_CHANNELS],
+    /// Safety-limiter gain reduction on the clock device, dB.  0 when it
+    /// is not limiting.
+    pub out_reduction_db: f32,
     /// The clock device's real channel count (0 until its first block).
     pub output_channels: u32,
     /// How many followers the engine currently maps (≤ [`MAX_FOLLOWERS`]).
     #[allow(dead_code)] // Exposed for Live / Mixer follower summaries.
     pub follower_count: usize,
-    /// Block peak per follower channel, after that follower's map and level.
+    /// Block peak per follower channel, after that follower's map, level,
+    /// safety ceiling and mute.
     pub follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+    /// Safety-limiter gain reduction per follower, dB.  0 when not limiting.
+    /// The virtual publish device is one of these slots.
+    pub follower_reduction_db: [f32; MAX_FOLLOWERS],
     /// Each follower's real channel count (0 until published).
     pub follower_channel_counts: [u32; MAX_FOLLOWERS],
     /// Generic followers that failed to open or were lost, and are being

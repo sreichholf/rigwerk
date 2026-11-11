@@ -37,6 +37,7 @@ I do?” never share one place.
 | | Bridge stopped on a lost device (after the alert) | |
 | | Per follower: not playing, underruns, drift at limit | |
 | | Sink silent under Low latency | |
+| | Device against the safety ceiling (−1.0 dBFS) | |
 
 Severity rule: **Error** is reserved for audio breaking (DSP past the block,
 an underrun burst, a bridge stopped on a lost device).
@@ -139,6 +140,14 @@ Built:
   an atomic.  No blocks (no PipeWire, not linked, suspended, other
   platforms) → no reading → no row.  → **Turn Low latency off** (the plan's
   “Use safer latency”).
+- **Safety ceiling** (Warning, Output card): a playing device (bridge running,
+  not muted, not missing, and a virtual device only while it is published)
+  whose sample-peak limiter is reducing by at least 0.5 dB.  One row, naming
+  the device with the most reduction: “<device> is against the safety
+  ceiling”, detail “−1.0 dB · 3.2 dB reduction.”  No dismiss while it holds;
+  the next tick drops it once every device is under 0.5 dB.  The ceiling is
+  a fixed −1.0 dBFS after each device’s level and before mute, with no
+  lookahead.  → **Show on Output**.
 - **Per follower** (`OUTPUT · <name>`, Output card, keyed by follower slot,
   only while the bridge runs):
   - Warning “<name> is not playing”: its stream failed to open or was lost
@@ -220,7 +229,7 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 
 | Assumption | Today |
 |---|---|
-| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun, device-lost, per-follower, sink-silent producers |
+| Shared Issues strip | On Live: routing, alignment, DSP, quantum, driver, underrun, device-lost, per-follower, sink-silent, safety-ceiling producers |
 | Strip state | Moves per tick, not per draw; a new Error expands it |
 | Per-output preferred quantum | No: global force-quantum + `node.latency` |
 | Sink monitor meters | Clock sink only, PipeWire only, only under Low latency; peak, no UI meter |
@@ -234,7 +243,7 @@ A quantum step table (`64 → 128 → 256 → off`) is a separate product decisi
 - [x] Strip on Live: hidden when empty, collapse, counts, one action per row
 - [x] Producers: unaligned sum, alignment limit, routed nowhere, DSP overload,
   quantum, driver unchecked, underruns, device lost, per follower, sink
-  silent
+  silent, safety ceiling
 - [x] Open items 1–2: card judgments migrated, underruns as a producer
 - [x] Open item 3: strip state per tick, Error expands, device-lost row
 - [x] Open item 4: filters, Dismiss, Show on <card>

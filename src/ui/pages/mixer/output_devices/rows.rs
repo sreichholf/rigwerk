@@ -6,11 +6,13 @@ use egui::{
     Stroke, Vec2,
 };
 
-use super::{device_level_text, device_row_value, device_state, OutputDeviceRow};
+use super::{
+    device_level_text, device_row_value, device_state, gain_reduction_text, OutputDeviceRow,
+};
 use crate::audio::{EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, BLUE, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL, TEXT,
+    with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
     db_slider, fit_text, meter_row, micro_label, mono, paint_tag, row_info, show_focus_ring,
@@ -36,6 +38,7 @@ pub(super) fn device_level_block(
     channels: usize,
     meters: &[f32],
     peaks: &[f32],
+    reduction_db: f32,
 ) {
     block(ui, |ui| {
         ui.horizontal(|ui| {
@@ -46,6 +49,9 @@ pub(super) fn device_level_block(
                     if settings.mute { RED } else { TEXT },
                     12.0,
                 ));
+                if let Some(text) = gain_reduction_text(reduction_db) {
+                    ui.label(mono(text, AMBER, 12.0));
+                }
             });
         });
         ui.add_space(4.0);
@@ -232,9 +238,16 @@ pub(super) fn chain_device_row(
         controls_left = remove_rect.left();
     }
     let level = device_level_text(&row.settings);
-    let level_galley =
-        ui.painter()
-            .layout_no_wrap(level, level_font, if mute { RED } else { MUTED });
+    let level_color = if mute { RED } else { MUTED };
+    let level_galley = ui
+        .painter()
+        .layout_no_wrap(level, level_font.clone(), level_color);
+    let gr_galley = gain_reduction_text(row.reduction_db)
+        .map(|text| ui.painter().layout_no_wrap(text, level_font, AMBER));
+    let gr_span = gr_galley
+        .as_ref()
+        .map(|galley| galley.size().x + 6.0)
+        .unwrap_or(0.0);
     let level_right = controls_left - 8.0;
     let level_w = level_galley.size().x;
     ui.painter().galley(
@@ -243,8 +256,19 @@ pub(super) fn chain_device_row(
             inner.center().y - level_galley.size().y * 0.5,
         ),
         level_galley,
-        MUTED,
+        level_color,
     );
+    if let Some(galley) = gr_galley {
+        let width = galley.size().x;
+        ui.painter().galley(
+            egui::pos2(
+                level_right - level_w - 6.0 - width,
+                inner.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            AMBER,
+        );
+    }
 
     // Left side: state dot, then the two text lines.
     let (_, state_color) = device_state(row, state);
@@ -253,7 +277,7 @@ pub(super) fn chain_device_row(
         .circle_filled(dot, 4.0, with_alpha(state_color, 60));
     ui.painter().circle_filled(dot, 2.4, state_color);
     let text_x = inner.left() + 16.0;
-    let text_right = level_right - level_w - 10.0;
+    let text_right = level_right - level_w - gr_span - 10.0;
     let (tag, tag_color) = if row.clock {
         (Some("CLOCK"), BLUE)
     } else if row.virtual_out {
@@ -354,10 +378,28 @@ pub(super) fn list_device_row(
         .circle_filled(dot, 4.0, with_alpha(state_color, 60));
     ui.painter().circle_filled(dot, 2.4, state_color);
 
-    // Fixed columns from the right: state, level, tag.
+    // Fixed columns from the right: state, level, gain reduction, tag.
     let state_x = rect.right() - 12.0;
     let level_x = state_x - 80.0;
-    let tag_x = level_x - 70.0 - tag_width(ui, "VIRTUAL");
+    let level_text = device_level_text(&row.settings);
+    let level_font = FontId::new(ts(9.0), FontFamily::Monospace);
+    let level_w = ui
+        .painter()
+        .layout_no_wrap(level_text.clone(), level_font.clone(), MUTED)
+        .size()
+        .x;
+    let gr = gain_reduction_text(row.reduction_db);
+    let gr_w = gr
+        .as_ref()
+        .map(|text| {
+            ui.painter()
+                .layout_no_wrap(text.clone(), level_font.clone(), AMBER)
+                .size()
+                .x
+                + 6.0
+        })
+        .unwrap_or(0.0);
+    let tag_x = level_x - 70.0 - gr_w - tag_width(ui, "VIRTUAL");
     ui.painter().text(
         egui::pos2(state_x, center_y),
         Align2::RIGHT_CENTER,
@@ -368,10 +410,19 @@ pub(super) fn list_device_row(
     ui.painter().text(
         egui::pos2(level_x, center_y),
         Align2::RIGHT_CENTER,
-        device_level_text(&row.settings),
-        FontId::new(ts(9.0), FontFamily::Monospace),
+        level_text,
+        level_font.clone(),
         if row.settings.mute { RED } else { MUTED },
     );
+    if let Some(text) = gr {
+        ui.painter().text(
+            egui::pos2(level_x - level_w - 6.0, center_y),
+            Align2::RIGHT_CENTER,
+            text,
+            level_font,
+            AMBER,
+        );
+    }
     if row.clock {
         paint_tag(ui, egui::pos2(tag_x, center_y), "CLOCK", BLUE);
     } else if row.virtual_out {

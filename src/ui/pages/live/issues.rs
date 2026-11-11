@@ -289,7 +289,10 @@ impl RigWerkApp {
 /// One issue row; returns the click on one of its buttons.
 fn issue_row(ui: &mut egui::Ui, issue: &LiveIssue) -> Option<StripClick> {
     let mut click = None;
-    let show_label = issue.show_label();
+    // Show on Output is already the primary button for the safety ceiling.
+    let show_label = issue
+        .show_label()
+        .filter(|_| issue.action != IssueAction::ShowOutput);
     ui.horizontal(|ui| {
         severity_tag(ui, issue.severity);
         let mut buttons_w = button_width(ui, &issue.action.label());

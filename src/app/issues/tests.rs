@@ -1052,3 +1052,79 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_underruns() {
     );
     app.engine.state = EngineState::Idle;
 }
+
+#[test]
+fn a_device_against_the_ceiling_warns_until_the_signal_drops() {
+    let mut app = blank_app();
+    with_real_output(&mut app);
+    app.engine.state = EngineState::Running;
+    app.snapshot.out_reduction_db = 1.0;
+    app.inventory.outputs.push(DeviceItem {
+        id: "test:hp".to_owned(),
+        name: "Headphones".to_owned(),
+        backend: "ALSA".to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    });
+    let headphones = FollowerPref {
+        id: "test:hp".to_owned(),
+        name: "Headphones".to_owned(),
+        ..FollowerPref::default()
+    };
+    let mut hidden = FollowerPref::virtual_out();
+    hidden.publish = false;
+    hidden.name = "RigWerk Out".to_owned();
+    app.followers.push(headphones);
+    app.followers.push(hidden);
+    app.snapshot.follower_reduction_db[0] = 3.2;
+    app.snapshot.follower_reduction_db[1] = 9.0;
+
+    let now = Instant::now();
+    app.tick_issues(now);
+    let issue = app
+        .issue_view()
+        .visible
+        .into_iter()
+        .find(|issue| issue.key == IssueKey::SafetyCeiling)
+        .expect("the ceiling row");
+    assert_eq!(issue.title, "Headphones is against the safety ceiling");
+    assert_eq!(issue.detail, "−1.0 dB · 3.2 dB reduction.");
+    assert_eq!(issue.card, Some(IssueCard::Output));
+    assert_eq!(issue.action, IssueAction::ShowOutput);
+    assert!(!issue.dismissable());
+    app.dismiss_issue(IssueKey::SafetyCeiling);
+    assert!(
+        !app.issue_state.dismissed.contains(&IssueKey::SafetyCeiling),
+        "a held ceiling cannot be dismissed"
+    );
+    app.tick_issues(now);
+    assert!(app
+        .issue_view()
+        .visible
+        .iter()
+        .any(|issue| issue.key == IssueKey::SafetyCeiling));
+    app.apply_issue_action(IssueAction::ShowOutput);
+    assert!(app
+        .card_highlight(IssueCard::Output, Instant::now())
+        .is_some());
+
+    app.snapshot.out_reduction_db = 0.0;
+    app.snapshot.follower_reduction_db = [0.0; crate::audio::MAX_FOLLOWERS];
+    app.tick_issues(now);
+    assert!(app
+        .live_issues()
+        .iter()
+        .all(|issue| issue.key != IssueKey::SafetyCeiling));
+
+    app.snapshot.out_reduction_db = 3.2;
+    app.engine.state = EngineState::Idle;
+    app.tick_issues(now);
+    assert!(
+        app.live_issues()
+            .iter()
+            .all(|issue| issue.key != IssueKey::SafetyCeiling),
+        "a stop clears a stale reduction"
+    );
+}

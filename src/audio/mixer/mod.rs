@@ -23,7 +23,8 @@
 //!    chain latencies are read once per block.
 //! 6. The sum: each device mapper maps every live path with that path's
 //!    channel map, level and polarity on that device and adds them per
-//!    channel, then applies the device level and mute.  A plain stereo sum
+//!    channel, then applies the device level, the safety ceiling and the
+//!    mute.  A plain stereo sum
 //!    of the paths, after the master but not aligned, feeds the master
 //!    meters and the scope.
 //!    On the ring path, each generic follower's mapped frame goes into
@@ -48,8 +49,8 @@
 //! ring and the PipeWire duplex graph) publish it, through `finish_block`.
 //!
 //! One path at 0 dB (path and device level), unmuted, normal polarity is
-//! bit-identical to the chain before paths existed: every unity gain is a
-//! copy, not a multiply.
+//! bit-identical to the chain before paths existed, while the sample stays
+//! under the safety ceiling: every unity gain is a copy, not a multiply.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
