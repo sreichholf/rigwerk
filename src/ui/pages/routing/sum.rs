@@ -9,9 +9,10 @@ use egui::{
 };
 
 use crate::app::alignment::DeviceAlignment;
+use crate::app::output_devices::OutputDeviceRow;
 use crate::app::paths::PathInfo;
 use crate::audio::{OutputDeviceSettings, PathMapSettings, MAX_ALIGN};
-use crate::ui::pages::mixer::output_devices::{block, OutputDeviceRow};
+use crate::ui::pages::mixer::output_devices::block;
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER_SOFT, CARD, DIM, MUTED, RED, TEXT};
 use crate::ui::widgets::{
@@ -20,6 +21,7 @@ use crate::ui::widgets::{
 
 use super::outputs::MapEdit;
 use super::paths::{level_stepper, trim_stepper};
+use crate::ui::theme::path_colour;
 
 /// Under the sum block when several paths play on one device.
 pub(crate) const SUM_NOTE: &str =
@@ -141,7 +143,8 @@ fn sum_row(
 ) {
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(Vec2::new(8.0, 18.0), Sense::hover());
-        ui.painter().circle_filled(dot.center(), 4.0, info.colour);
+        ui.painter()
+            .circle_filled(dot.center(), 4.0, path_colour(info.colour_index));
         ui.label(RichText::new(&info.name).size(ts(10.5)).color(TEXT));
         ui.label(mono(format!("{:.1} ms", info.latency_ms), DIM, 8.5))
             .on_hover_text("The path's own chain latency (its plugins)");
@@ -245,7 +248,11 @@ fn latency_bars(ui: &mut egui::Ui, view: &SumView) {
             let pad = (arrival(info) - own).max(0.0);
             let x = |ms: f32| track.left() + track.width() * (ms / scale).min(1.0);
             let own_rect = egui::Rect::from_min_max(track.min, egui::pos2(x(own), track.bottom()));
-            painter.rect_filled(own_rect, CornerRadius::ZERO, with_alpha(info.colour, 230));
+            painter.rect_filled(
+                own_rect,
+                CornerRadius::ZERO,
+                with_alpha(path_colour(info.colour_index), 230),
+            );
             if pad > 0.0 {
                 let pad_rect = egui::Rect::from_min_max(
                     egui::pos2(x(own), track.top()),

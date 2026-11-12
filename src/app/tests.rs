@@ -1,3 +1,4 @@
+use crate::app::LogTone;
 use std::collections::HashMap;
 
 use eframe::egui;
@@ -404,7 +405,7 @@ fn the_activity_log_keeps_hundreds_of_entries() {
     let mut app = blank_app();
     let extra = 25;
     for index in 0..(ACTIVITY_LOG_CAP + extra) {
-        app.push_log(format!("entry {index}"), crate::ui::theme::MUTED);
+        app.push_log(format!("entry {index}"), LogTone::Muted);
     }
     assert_eq!(app.log.len(), ACTIVITY_LOG_CAP);
     assert_eq!(app.log[0].text, format!("entry {extra}"));

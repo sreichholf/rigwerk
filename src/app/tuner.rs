@@ -2,6 +2,7 @@
 //! the auto-mute rule.  All DSP lives in [`crate::audio::tuner`]; this module
 //! only decides when it runs and with which settings.
 
+use crate::app::LogTone;
 use std::time::{Duration, Instant};
 
 use crate::app::settings::Preferences;
@@ -10,8 +11,6 @@ use crate::audio::{
     tuning_index, AudioEngine, EngineState, TunerAnalysis, TunerChannel, TunerFrame,
     TunerTolerance, Tuning, DEFAULT_PRESET_ID, PRESETS, TAP_COPY_FRAMES,
 };
-use crate::ui::theme::{AMBER, MUTED, TEAL};
-
 /// The A4 reference the page offers.  415 is the bottom of the baroque range
 /// and 466 the top of the classical one.
 pub(crate) const REFERENCE_MIN_HZ: f32 = 415.0;
@@ -258,9 +257,9 @@ impl RigWerkApp {
         }
         if page == Page::Tuner {
             if self.tuner.auto_muted(page, self.engine.state) {
-                self.push_log("Tuner open — output muted by auto-mute.", AMBER);
+                self.push_log("Tuner open — output muted by auto-mute.", LogTone::Amber);
             } else {
-                self.push_log("Tuner open.", TEAL);
+                self.push_log("Tuner open.", LogTone::Teal);
             }
         } else if self.last_page == Page::Tuner
             && self.tuner.auto_muted(self.last_page, self.engine.state)
@@ -269,9 +268,9 @@ impl RigWerkApp {
             // releases only this layer, so a master mute that is still on
             // keeps the output silent.
             if self.mute {
-                self.push_log("Tuner closed — output still muted.", MUTED);
+                self.push_log("Tuner closed — output still muted.", LogTone::Muted);
             } else {
-                self.push_log("Tuner closed — output restored.", MUTED);
+                self.push_log("Tuner closed — output restored.", LogTone::Muted);
             }
         }
         self.last_page = page;

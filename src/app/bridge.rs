@@ -4,9 +4,9 @@
 use std::time::Instant;
 
 use crate::app::devices::is_wrapper_driver;
+use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{self, EngineState, StartConfig};
-use crate::ui::theme::{AMBER, BLUE, MUTED, RED};
 
 impl RigWerkApp {
     pub(crate) fn is_active(&self) -> bool {
@@ -49,13 +49,13 @@ impl RigWerkApp {
 
     pub(crate) fn start_bridge(&mut self) {
         if self.startup.is_some() {
-            self.push_log("Still finding audio devices…", MUTED);
+            self.push_log("Still finding audio devices…", LogTone::Muted);
             return;
         }
         if self.engine.state == EngineState::Stopping {
             self.push_log(
                 "The previous bridge is still releasing its audio device.",
-                AMBER,
+                LogTone::Amber,
             );
             return;
         }
@@ -64,8 +64,7 @@ impl RigWerkApp {
             // while the previous driver still owns its device.
             self.push_log(
                 "The previous bridge is still releasing its audio device. Preview starts once it has finished.",
-                AMBER,
-            );
+                LogTone::Amber);
             return;
         }
         self.bridge_restart_pending = false;
@@ -77,12 +76,12 @@ impl RigWerkApp {
         self.driver_checked = false;
         self.issue_state.new_session();
         self.issue_state.device_lost = None;
-        self.engine.set_gains(self.input_gain, self.output_gain);
+        self.apply_gains();
         if self.is_preview() {
             self.engine.start_preview();
             self.push_log(
                 "Preview bridge active — animated, no hardware opened.",
-                AMBER,
+                LogTone::Amber,
             );
             return;
         }
@@ -93,19 +92,7 @@ impl RigWerkApp {
         let pipewire_low_latency = self.low_latency_output && audio::is_pipewire_device(&output);
         #[cfg(not(target_os = "linux"))]
         let pipewire_low_latency = false;
-        let clock_host = output.asio_clsid.is_none();
-        #[cfg(target_os = "windows")]
-        let (real_style_output, exclusive_output) = if clock_host {
-            match self.wasapi_output_mode {
-                audio::WasapiOutputMode::Shared => (false, false),
-                audio::WasapiOutputMode::RealStyle => (true, false),
-                audio::WasapiOutputMode::Exclusive => (false, true),
-            }
-        } else {
-            (false, false)
-        };
-        #[cfg(not(target_os = "windows"))]
-        let (real_style_output, exclusive_output) = (self.low_latency_output && clock_host, false);
+        let (real_style_output, exclusive_output) = self.output_start_flags();
         let config = StartConfig {
             asio_clsid: input.asio_clsid,
             input_id: if input.asio_clsid.is_some() {
@@ -129,7 +116,7 @@ impl RigWerkApp {
                 "Linking {} input to {} output…",
                 input.backend, output.backend
             ),
-            BLUE,
+            LogTone::Blue,
         );
         // Read the planned period before the bridge opens the same device.
         // Doing it afterwards races the stream open and can fail the probe.
@@ -148,10 +135,10 @@ impl RigWerkApp {
         if self.engine.state == EngineState::Stopping {
             self.push_log(
                 "Stopping the bridge — the devices release when the driver finishes.",
-                MUTED,
+                LogTone::Muted,
             );
         } else {
-            self.push_log("Bridge stopped. Devices released.", MUTED);
+            self.push_log("Bridge stopped. Devices released.", LogTone::Muted);
         }
     }
 
@@ -176,7 +163,7 @@ impl RigWerkApp {
         }
         self.push_log(
             "Bridge settings changed — reconnecting with the new setup.",
-            BLUE,
+            LogTone::Blue,
         );
         self.stop_bridge();
         self.bridge_restart_pending = true;
@@ -190,7 +177,12 @@ impl RigWerkApp {
         self.device_alert = Some(alert);
     }
 
-    pub(crate) fn meters(&mut self, ctx: &egui::Context) {
+    /// Pushes mix state, polls the bridge, and handles a lost device.
+    ///
+    /// Returns the master-mute flag captured before any stop this pass
+    /// performs.  [`Self::smooth_meters`] uses that same flag: recomputing
+    /// it after a disconnect would change the frame the device was lost.
+    pub(crate) fn publish_engine(&mut self) -> bool {
         // One mute for the engine and for the meters below.  Preview draws
         // its levels here instead of reading them back, so a second check
         // would leave those meters moving while the tuner layer holds.
@@ -213,7 +205,7 @@ impl RigWerkApp {
         if let Some(error) = self.visible_error().map(str::to_owned) {
             let message = format!("Bridge error: {error}");
             if !self.log.iter().any(|entry| entry.text == message) {
-                self.push_log(message, RED);
+                self.push_log(message, LogTone::Red);
             }
         }
         // A quantum failure is stored beside the live status line, which moves
@@ -221,7 +213,7 @@ impl RigWerkApp {
         // it survives that.
         if let Some(note) = self.engine.quantum_note().map(str::to_owned) {
             if !self.log.iter().any(|entry| entry.text == note) {
-                self.push_log(note, AMBER);
+                self.push_log(note, LogTone::Amber);
             }
         }
         if self.engine.state != EngineState::Stopping
@@ -238,12 +230,23 @@ impl RigWerkApp {
             self.engine.clear_error();
             self.bridge_signature = 0;
             self.bridge_restart_pending = false;
-            self.push_log("A bridge device was disconnected — bridge stopped.", RED);
+            self.push_log(
+                "A bridge device was disconnected — bridge stopped.",
+                LogTone::Red,
+            );
             self.alert_lost_device(format!(
                 "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
             ));
         }
-        let time = ctx.input(|input| input.time) as f32;
+        output_muted
+    }
+
+    /// Smooths the meters and copies the scope.  Does not start or stop
+    /// the bridge.  `time` is the egui clock, in seconds, for the preview
+    /// stand-in.  `output_muted` is the flag [`Self::publish_engine`]
+    /// captured before this pass.
+    pub(crate) fn smooth_meters(&mut self, time: f64, output_muted: bool) {
+        let time = time as f32;
         let dt = self
             .last_meter_tick
             .elapsed()
@@ -554,7 +557,7 @@ impl RigWerkApp {
             } else {
                 "Low-latency output off: normal output buffer, PipeWire quantum released."
             },
-            if on { AMBER } else { MUTED },
+            if on { LogTone::Amber } else { LogTone::Muted },
         );
     }
 
@@ -563,6 +566,39 @@ impl RigWerkApp {
     pub(crate) fn set_wasapi_output_mode(&mut self, mode: audio::WasapiOutputMode) {
         self.wasapi_output_mode = mode;
         self.low_latency_output = matches!(mode, audio::WasapiOutputMode::RealStyle);
+    }
+
+    /// Pushes the stored input and output gains.
+    pub(crate) fn apply_gains(&self) {
+        self.engine.set_gains(self.input_gain, self.output_gain);
+    }
+
+    /// Pushes the stored cushion mode and size.
+    pub(crate) fn apply_cushion(&self) {
+        self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
+    }
+
+    /// `(real_style_output, exclusive_output)` for [`StartConfig`].
+    ///
+    /// An ASIO clock ignores the WASAPI mode and the low-latency flag.
+    /// On Windows the mode enum decides; elsewhere low latency is the
+    /// real-style flag and exclusive stays off.  Both persisted fields stay.
+    pub(crate) fn output_start_flags(&self) -> (bool, bool) {
+        if self.selected_output().asio_clsid.is_some() {
+            return (false, false);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            match self.wasapi_output_mode {
+                audio::WasapiOutputMode::Shared => (false, false),
+                audio::WasapiOutputMode::RealStyle => (true, false),
+                audio::WasapiOutputMode::Exclusive => (false, true),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            (self.low_latency_output, false)
+        }
     }
 }
 

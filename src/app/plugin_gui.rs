@@ -11,6 +11,7 @@
 //! set flags on its host; [`ClapGuiWindow::service`] follows them once per
 //! frame.
 
+use crate::app::LogTone;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,8 +21,6 @@ use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{ClapPlugin, GuiVisibility, HostState, ParentWindow, ResizeHints};
 use crate::audio::{plugin_instance_id, EngineState, PluginHandle, PluginView};
-use crate::ui::theme::{GREEN, RED};
-
 /// How often a Linux VST3 editor's run loop is serviced while a bridge runs.
 /// Every frame would hold the instance lock often enough for the audio
 /// callback to miss many blocks; at about 30 Hz the editor still paints.
@@ -166,14 +165,14 @@ impl RigWerkApp {
             }
         };
         if opened {
-            self.push_log("Opened the plugin's own interface.", GREEN);
+            self.push_log("Opened the plugin's own interface.", LogTone::Green);
         }
         opened
     }
 
     fn gui_error(&mut self, error: String) {
         let message = format!("This effect has no interface it can open here: {error}");
-        self.push_log(message.clone(), RED);
+        self.push_log(message.clone(), LogTone::Red);
         self.plugin_browser.notice = Some((message, Instant::now()));
     }
 

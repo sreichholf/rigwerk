@@ -11,10 +11,9 @@
 //! latency alignment (on by default, `app::alignment`) lines them up, so a
 //! latent amp sim on one of them does not comb filter.
 
+use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{ChannelMap, PathMapSettings};
-use crate::ui::theme::TEAL;
-
 /// The input routing that keeps IN 1 on L and IN 2 on R.
 const STEREO_IN: [[bool; 4]; 2] = [[true, false, false, false], [false, true, false, false]];
 /// IN 1 on both L and R (a mono guitar).
@@ -169,7 +168,7 @@ impl RigWerkApp {
         self.push_paths_to_engine();
         self.push_devices_to_engine();
         self.routing_last_card = Some(card);
-        self.push_log(format!("Routing card: {}.", card.label()), TEAL);
+        self.push_log(format!("Routing card: {}.", card.label()), LogTone::Teal);
         true
     }
 

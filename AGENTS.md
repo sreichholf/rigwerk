@@ -105,9 +105,8 @@ WirePlumber linked a stream.
 - `src/audio`: the bridge, DSP, and device backends. `audio.rs` is the
   map of that crate.
 - `src/app`: window state, startup, preferences, device selection, and
-  bridge control. It does not draw. The frame shell still lives in
-  `app.rs`; that is debt under Separation, and new paint does not go
-  there.
+  bridge control. It does not draw. The frame shell lives in
+  `ui/frame.rs`.
 - `src/ui`: egui. One module per sidebar page under `ui/pages`. Shared
   controls live in `ui/widgets`. Colours and type scale live in
   `ui/theme.rs`.
@@ -161,32 +160,7 @@ them in a new type:
   `OutputDeviceSettings`, `PluginPref`).  Do not add a parallel struct.
 
 `RigWerkApp` is the composition root.  Its methods are implemented from
-`app/` and from `ui/pages`.  That split stays.  What does not stay is
-`app` depending on `ui`.
-
-Known debt.  Do not spread it, and do not fix it with a rewrite.  One
-step is one PR.  Do not start the next step until the one before it is
-on `master`.
-
-1. Move `impl eframe::App` (the frame, the modals, `handle_panic_mute`)
-   from `app.rs` into `ui`.  Leave `logic` and `save` in `app`.
-2. Move `ChainSelection` to `app` (it is which stage is selected, and
-   `app` already stores it).  Leave `stage_color` in `ui`.  Move
-   `OutputDeviceRow` and `output_device_rows` to `app`, so `app::issues`
-   stops importing `ui`.  The row is plain data; `device_state` keeps
-   the colour and stays in `ui`.
-3. The activity log stores a small tone enum, not a `Color32`.  `ui`
-   maps the enum when Diagnostics draws the line.  A path colour is an
-   index into the theme palette, not a `Color32` stored in `app`.
-   `meters` pushes engine state and then smooths the meters: split
-   those two, and the engine half must not take `egui::Context`.
-4. Pages that call `engine.set_gains`, `engine.set_cushion`, or write
-   `path().mix` directly go through one `RigWerkApp` setter each.
-   `add_path` reads the mix through `AudioEngine`, not `engine.shared`.
-   Tests may still touch `shared`.
-5. One helper turns `wasapi_output_mode` / `low_latency_output` into
-   the start-config flags.  `app/bridge.rs` and `app/latency.rs` both
-   use it.
+`app/` and from `ui/pages`.  That split stays.
 
 ## Keep it simple
 

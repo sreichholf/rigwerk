@@ -19,40 +19,26 @@
 //! A removed path keeps its device entries while it fades out, so it fades
 //! where it played; the next path in that slot overwrites them.
 
-use eframe::egui::Color32;
-
+use crate::app::chain::ChainSelection;
 use crate::app::settings::{default_path_name, FollowerPref, PathPref};
+use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{
-    path_level_gain, sanitize_path_level, OutputDeviceSettings, PathMapSettings, PathMix,
-    PathState, MAX_PATHS,
+    path_level_gain, sanitize_path_level, EqSettings, GateSettings, OutputDeviceSettings,
+    PathMapSettings, PathMix, PathState, MAX_PATHS,
 };
-use crate::ui::pages::mixer::chain::ChainSelection;
-use crate::ui::theme::{AMBER, TEAL};
 
-/// The path colours, by [`SignalPath::colour`].
-pub(crate) const PATH_COLOURS: [Color32; MAX_PATHS] = [
-    Color32::from_rgb(56, 221, 191),
-    Color32::from_rgb(199, 146, 255),
-    Color32::from_rgb(255, 184, 91),
-    Color32::from_rgb(255, 143, 177),
-];
-
-/// One live path's UI data (name, colour) and the settings pushed to the
-/// engine.
+/// One live path's UI data (name, colour index) and the settings pushed to
+/// the engine.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SignalPath {
     pub(crate) name: String,
-    /// Index into [`PATH_COLOURS`].
+    /// Index into the path palette.  The colour is chosen when a row is drawn.
     pub(crate) colour: u8,
     pub(crate) mix: PathMix,
 }
 
 impl SignalPath {
-    pub(crate) fn colour(&self) -> Color32 {
-        PATH_COLOURS[self.colour as usize % MAX_PATHS]
-    }
-
     pub(crate) fn from_pref(pref: &PathPref) -> Self {
         Self {
             name: pref.name.clone(),
@@ -89,7 +75,7 @@ pub(crate) struct InsertKey {
 pub(crate) struct PathInfo {
     pub(crate) slot: usize,
     pub(crate) name: String,
-    pub(crate) colour: Color32,
+    /// Index into the path palette.
     pub(crate) colour_index: u8,
     /// Built-in stages that are on (pre EQ, gate, post EQ) plus inserts.
     pub(crate) stages: usize,
@@ -240,7 +226,6 @@ impl RigWerkApp {
                 Some(PathInfo {
                     slot,
                     name: path.name.clone(),
-                    colour: path.colour(),
                     colour_index: path.colour,
                     stages: builtins + inserts,
                     inserts,
@@ -326,7 +311,7 @@ impl RigWerkApp {
         let path = SignalPath {
             name: self.new_path_name(),
             colour: self.free_colour(),
-            mix: self.engine.shared.path(slot).mix(),
+            mix: self.engine.path_mix(slot),
         };
         self.paths[slot] = Some(path);
         self.path_order.retain(|&other| other != slot);
@@ -336,7 +321,10 @@ impl RigWerkApp {
         }
         self.push_devices_to_engine();
         self.select_path(slot);
-        self.push_log(format!("Added path {}, muted.", self.path().name), TEAL);
+        self.push_log(
+            format!("Added path {}, muted.", self.path().name),
+            LogTone::Teal,
+        );
         Some(slot)
     }
 
@@ -376,7 +364,7 @@ impl RigWerkApp {
                 original.name,
                 self.path().name
             ),
-            TEAL,
+            LogTone::Teal,
         );
         Some(slot)
     }
@@ -409,7 +397,7 @@ impl RigWerkApp {
             self.select_path(next);
         }
         if let Some(removed) = removed {
-            self.push_log(format!("Removed path {}.", removed.name), AMBER);
+            self.push_log(format!("Removed path {}.", removed.name), LogTone::Amber);
         }
         true
     }
@@ -418,6 +406,39 @@ impl RigWerkApp {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
             path.mix.level_db = sanitize_path_level(level_db);
         }
+    }
+
+    /// The edited path's EQ.  Goes through [`Self::path_mut`], so a stale
+    /// selection is repaired the same way a direct edit was.
+    pub(crate) fn set_path_eq(&mut self, index: usize, eq: EqSettings) {
+        self.path_mut().mix.eqs[index] = eq;
+    }
+
+    /// The edited path's gate.
+    pub(crate) fn set_path_gate(&mut self, gate: GateSettings) {
+        self.path_mut().mix.gate = gate;
+    }
+
+    /// One cell of the edited path's input matrix.
+    pub(crate) fn set_path_route(&mut self, input: usize, side: usize, on: bool) {
+        self.path_mut().mix.routes[input][side] = on;
+    }
+
+    /// Mono sum for one path slot.
+    pub(crate) fn set_path_mono(&mut self, slot: usize, mono: bool) {
+        if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
+            path.mix.mono = mono;
+        }
+    }
+
+    /// Mono sum for the edited path.
+    pub(crate) fn set_edited_mono(&mut self, mono: bool) {
+        self.path_mut().mix.mono = mono;
+    }
+
+    /// The edited path's output-channel enables.
+    pub(crate) fn set_path_output_enabled(&mut self, enabled: [bool; 2]) {
+        self.path_mut().mix.output_enabled = enabled;
     }
 
     /// Skips every insert on the selected path.  Each insert's own bypass

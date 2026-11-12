@@ -13,10 +13,10 @@
 //! Mix -> outputs, no per-path chrome.
 
 mod outputs;
-pub(crate) use outputs::channel_list;
 mod paths;
 mod sum;
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Sense, Stroke, Vec2,
@@ -26,7 +26,8 @@ use crate::app::paths::PathInfo;
 use crate::app::RigWerkApp;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT,
+    path_colour, with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL,
+    TEXT,
 };
 use crate::ui::widgets::{
     card, card_fixed, ellipsize, horizontal_line, micro_label, mono, row_info, show_focus_ring,
@@ -477,14 +478,14 @@ impl RigWerkApp {
                     let routed = self.path().mix.routes[input][side];
                     if route_cell(ui, routed, input, side) {
                         let on = !routed;
-                        self.path_mut().mix.routes[input][side] = on;
+                        self.set_path_route(input, side, on);
                         self.push_paths_to_engine();
                         self.push_log(
                             format!(
                                 "Route {role} -> {column} {}.",
                                 if on { "enabled" } else { "muted" }
                             ),
-                            if on { TEAL } else { MUTED },
+                            if on { LogTone::Teal } else { LogTone::Muted },
                         );
                     }
                 }
@@ -547,7 +548,7 @@ impl RigWerkApp {
                 ui.horizontal(|ui| {
                     ui.add_space(ROW_HEADER_W);
                     for info in infos {
-                        path_group_header(ui, &info.name, info.colour, group_w);
+                        path_group_header(ui, &info.name, path_colour(info.colour_index), group_w);
                         ui.add_space(gap);
                     }
                 });
@@ -571,8 +572,14 @@ impl RigWerkApp {
                                 };
                                 let mut routes = path.mix.routes;
                                 let routed = routes[input][side];
-                                if path_route_cell(ui, routed, input, side, &info.name, info.colour)
-                                {
+                                if path_route_cell(
+                                    ui,
+                                    routed,
+                                    input,
+                                    side,
+                                    &info.name,
+                                    path_colour(info.colour_index),
+                                ) {
                                     routes[input][side] = !routed;
                                     self.set_path_routes(info.slot, routes);
                                     self.push_paths_to_engine();
@@ -583,7 +590,11 @@ impl RigWerkApp {
                                             if side == 0 { "L" } else { "R" },
                                             if routed { "muted" } else { "enabled" }
                                         ),
-                                        if routed { MUTED } else { TEAL },
+                                        if routed {
+                                            LogTone::Muted
+                                        } else {
+                                            LogTone::Teal
+                                        },
                                     );
                                 }
                             }
@@ -627,7 +638,7 @@ impl RigWerkApp {
                     continue;
                 };
                 ui.horizontal(|ui| {
-                    status_dot(ui, info.colour);
+                    status_dot(ui, path_colour(info.colour_index));
                     let font = egui::FontId::new(ts(10.0), FontFamily::Proportional);
                     let name = crate::ui::widgets::fit_text(ui, &info.name, &font, 70.0);
                     let (rect, _) = ui.allocate_exact_size(Vec2::new(72.0, 18.0), Sense::hover());
@@ -640,9 +651,7 @@ impl RigWerkApp {
                         mono = true;
                     }
                 });
-                if let Some(path) = self.paths[info.slot].as_mut() {
-                    path.mix.mono = mono;
-                }
+                self.set_path_mono(info.slot, mono);
                 ui.add_space(2.0);
             }
         } else {
@@ -656,7 +665,7 @@ impl RigWerkApp {
                 }
             });
             if mono != self.path().mix.mono {
-                self.path_mut().mix.mono = mono;
+                self.set_edited_mono(mono);
             }
         }
         ui.add_space(10.0);

@@ -672,6 +672,12 @@ impl AudioEngine {
         self.shared.path(path).set_plugin_bypass(index, bypass);
     }
 
+    /// The mix path `slot` is running with.  `add_path` copies it so the
+    /// app does not reach through [`Self::shared`].
+    pub(crate) fn path_mix(&self, slot: usize) -> PathMix {
+        self.shared.path(slot).mix()
+    }
+
     pub fn set_plugin_mix(&self, path: usize, index: usize, mix: f32) {
         self.shared.path(path).set_plugin_mix(index, mix);
     }

@@ -20,10 +20,10 @@ use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
 use crate::app::issues::IssueCard;
-use crate::app::{Page, RigWerkApp};
+use crate::app::{LogTone, Page, RigWerkApp};
 use crate::audio::AsioPanelSide;
 use crate::ui::theme::ts;
-use crate::ui::theme::{with_alpha, BLUE, BORDER, CARD, DIM, MUTED, RED, TEAL};
+use crate::ui::theme::{log_colour, with_alpha, BLUE, BORDER, CARD, DIM, MUTED, TEAL};
 use crate::ui::widgets::{card_fixed, ellipsize, micro_label, mono, status_dot, tab_button_sized};
 
 impl RigWerkApp {
@@ -180,8 +180,8 @@ impl RigWerkApp {
 
     /// Publish status for RigWerk Out: on, off, or missing.
     pub(crate) fn publish_banner(&mut self, ui: &mut egui::Ui, width: f32) {
+        use crate::app::chain::ChainSelection;
         use crate::audio::VIRTUAL_OUT_NAME;
-        use crate::ui::pages::mixer::chain::ChainSelection;
         use crate::ui::theme::GREEN;
 
         let virtual_index = self.followers.iter().position(|f| f.virtual_out);
@@ -258,9 +258,15 @@ impl RigWerkApp {
             .log
             .last()
             .map(|entry| (entry.at.clone(), entry.text.clone(), entry.tone))
-            .unwrap_or_else(|| ("00:00".to_owned(), "Bridge ready.".to_owned(), MUTED));
+            .unwrap_or_else(|| {
+                (
+                    "00:00".to_owned(),
+                    "Bridge ready.".to_owned(),
+                    LogTone::Muted,
+                )
+            });
         let latest = if let Some(error) = self.visible_error() {
-            (latest.0, format!("Bridge error: {error}"), RED)
+            (latest.0, format!("Bridge error: {error}"), LogTone::Red)
         } else {
             latest
         };
@@ -299,7 +305,7 @@ impl RigWerkApp {
                                 ui.label(micro_label("RECENT ACTIVITY", DIM));
                                 ui.add_space(8.0);
                                 ui.label(mono(&latest.0, DIM, 8.5));
-                                status_dot(ui, latest.2);
+                                status_dot(ui, log_colour(latest.2));
                                 ui.label(
                                     RichText::new(ellipsize(&latest.1, 96))
                                         .size(ts(9.2))

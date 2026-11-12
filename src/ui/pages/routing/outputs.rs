@@ -15,25 +15,28 @@
 //! (`RigWerkApp::routing_warnings`) sit above the matrix.  Alignment only
 //! lines up the paths on one device, never devices with each other.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense,
     Stroke, Vec2,
 };
 
-use crate::app::alignment::{RoutingWarning, RoutingWarningKind};
+use crate::app::alignment::{channel_list, RoutingWarning, RoutingWarningKind};
 use crate::app::cards::Card;
+use crate::app::chain::ChainSelection;
+use crate::app::output_devices::OutputDeviceRow;
 use crate::app::paths::PathInfo;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{
     ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
     UnusedChannels, MAX_OUTPUT_CHANNELS,
 };
-use crate::ui::pages::mixer::chain::ChainSelection;
-use crate::ui::pages::mixer::output_devices::{block, device_state, OutputDeviceRow};
+use crate::ui::pages::mixer::output_devices::{block, device_state};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, DIM, GREEN, MUTED, RED, TEAL, TEXT,
+    path_colour, with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, DIM, GREEN, MUTED, RED, TEAL,
+    TEXT,
 };
 use crate::ui::widgets::{
     card, clock_tag, fit_text, horizontal_line, micro_label, mono, paint_tag, path_chip,
@@ -455,15 +458,6 @@ pub(crate) fn shows_unused_choice_paths(
         })
 }
 
-/// "Out 1, Out 2" for 0-based channels.
-pub(crate) fn channel_list(channels: &[usize]) -> String {
-    channels
-        .iter()
-        .map(|channel| format!("Out {}", channel + 1))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// The red (Sum) or amber (Shift) banner over a device's matrix.  With
 /// the device's alignment off it offers to turn it on (pushed to `edits`).
 fn warning_banner(
@@ -626,7 +620,7 @@ impl RigWerkApp {
                 if !self.apply_card(card) {
                     self.push_log(
                         format!("{}: no free path slot yet, try again.", card.label()),
-                        AMBER,
+                        LogTone::Amber,
                     );
                 }
             }
@@ -712,7 +706,7 @@ impl RigWerkApp {
                         row.name,
                         path_level_text(level)
                     ),
-                    TEAL,
+                    LogTone::Teal,
                 );
             }
             MapEdit::Invert { slot, invert } => {
@@ -726,7 +720,11 @@ impl RigWerkApp {
                         row.name,
                         if invert { "flipped" } else { "normal" }
                     ),
-                    if invert { AMBER } else { TEAL },
+                    if invert {
+                        LogTone::Amber
+                    } else {
+                        LogTone::Teal
+                    },
                 );
             }
             MapEdit::Trim {
@@ -747,7 +745,7 @@ impl RigWerkApp {
                         row.name,
                         trim_text(trim)
                     ),
-                    TEAL,
+                    LogTone::Teal,
                 );
             }
             MapEdit::Align(align) => {
@@ -762,7 +760,7 @@ impl RigWerkApp {
                             "off, each path plays as its chain finishes"
                         }
                     ),
-                    if align { TEAL } else { AMBER },
+                    if align { LogTone::Teal } else { LogTone::Amber },
                 );
             }
             MapEdit::Unused(mode) => {
@@ -778,7 +776,7 @@ impl RigWerkApp {
                             UnusedChannels::MonoCopy => "play a mono copy",
                         }
                     ),
-                    TEAL,
+                    LogTone::Teal,
                 );
             }
         }
@@ -796,7 +794,11 @@ impl RigWerkApp {
         };
         self.push_log(
             format!("{prefix}: {}.", summary.text),
-            if summary.silent { AMBER } else { TEAL },
+            if summary.silent {
+                LogTone::Amber
+            } else {
+                LogTone::Teal
+            },
         );
     }
 
@@ -810,7 +812,10 @@ impl RigWerkApp {
         infos: &[PathInfo],
     ) -> DeviceLine {
         let reaching = paths_reaching(&row.settings, row.channels, infos);
-        let dots = reaching.iter().map(|info| info.colour).collect();
+        let dots = reaching
+            .iter()
+            .map(|info| path_colour(info.colour_index))
+            .collect();
         let warning = self
             .routing_warnings(device)
             .first()
@@ -1125,7 +1130,7 @@ impl RigWerkApp {
                 for info in infos {
                     let chip = path_chip(
                         ui,
-                        info.colour,
+                        path_colour(info.colour_index),
                         &info.name,
                         info.mute,
                         info.slot == path,
@@ -1178,7 +1183,7 @@ impl RigWerkApp {
                                     ui,
                                     &format!("{} {letter}", info.name),
                                     &format!("path {} · after path level", position + 1),
-                                    info.colour,
+                                    path_colour(info.colour_index),
                                     info.audible,
                                 );
                                 for channel in 0..channels {
@@ -1189,7 +1194,7 @@ impl RigWerkApp {
                                         &info.name,
                                         letter,
                                         channel,
-                                        info.colour,
+                                        path_colour(info.colour_index),
                                     ) {
                                         cell(info.slot, side, channel, !on);
                                     }

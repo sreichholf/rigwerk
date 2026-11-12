@@ -1,6 +1,7 @@
 //! Everything drawn on screen: theme, shared widgets, the window shell and
 //! one file per page.
 
+pub(crate) mod frame;
 pub(crate) mod icons;
 pub(crate) mod pages;
 pub(crate) mod scope;

@@ -5,6 +5,8 @@ use egui::{
     Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Sense, Stroke, Vec2,
 };
 
+use crate::app::chain::ChainSelection;
+use crate::app::output_devices::OutputDeviceRow;
 use crate::app::paths::PathInfo;
 use crate::app::settings::{
     INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB,
@@ -13,14 +15,13 @@ use crate::app::{Page, RigWerkApp};
 use crate::audio::{EqSlot, GateSlot, PluginView};
 use crate::ui::pages::mixer::chain::{
     bypassed_color, eq_summary, gate_summary, output_summary, path_summary, stage_color,
-    ChainSelection, CHAIN_BYPASS_HINT,
+    CHAIN_BYPASS_HINT,
 };
-use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
 use crate::ui::pages::mixer::path_stage::{path_inspector, path_toolbar, PathAction, PathMeters};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED,
-    RED, TEAL, TEXT,
+    path_colour, with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, CARD_RAISED, DIM,
+    GREEN, MUTED, RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
     arrow_button, bypass_pill, db_slider, fit_text, hinted_tab, meter_row, micro_label, mono,
@@ -202,7 +203,9 @@ impl RigWerkApp {
         for action in actions {
             match action {
                 RackAction::ChainBypass(bypass) => self.set_chain_bypass(bypass),
-                RackAction::Bypass(index, bypass) => self.set_plugin_bypass(index, bypass),
+                RackAction::Bypass(index, bypass) => {
+                    self.set_plugin_bypass(self.selected_path, index, bypass);
+                }
                 RackAction::Mix(index, mix) => self.set_plugin_mix(index, mix),
                 RackAction::Configure(index) => self.open_plugin_editor(index),
                 RackAction::Remove(index) => {
@@ -257,7 +260,7 @@ impl RigWerkApp {
             ui,
             &title,
             Some("plugs reorder only"),
-            path_stage.map(|info| info.colour),
+            path_stage.map(|info| path_colour(info.colour_index)),
         );
         ui.add_space(8.0);
 
@@ -455,7 +458,7 @@ impl RigWerkApp {
                 if let Some(info) = path_stage {
                     if stage_row(
                         ui,
-                        info.colour,
+                        path_colour(info.colour_index),
                         "Path",
                         &path_summary(info.level_db, info.mute, info.solo),
                         if info.mute {
@@ -625,7 +628,7 @@ impl RigWerkApp {
             INPUT_GAIN_MAX_DB,
             (TEAL, "Input gain"),
         ) {
-            self.engine.set_gains(self.input_gain, self.output_gain);
+            self.apply_gains();
         }
         ui.add_space(10.0);
         meter_row(ui, "L", self.meter_in_l, self.peak_in_l, TEAL);
@@ -695,7 +698,7 @@ impl RigWerkApp {
             OUTPUT_GAIN_MAX_DB,
             (BLUE, "Output gain"),
         ) {
-            self.engine.set_gains(self.input_gain, self.output_gain);
+            self.apply_gains();
         }
         ui.add_space(10.0);
         meter_row(ui, "L", self.meter_out_l, self.peak_out_l, BLUE);

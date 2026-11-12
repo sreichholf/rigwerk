@@ -2,10 +2,10 @@ use crate::app::settings::{
     DEFAULT_BUFFER, DEFAULT_INPUT_GAIN, DEFAULT_SAMPLE_RATE, INPUT_GAIN_MIN_DB, MIN_OUTPUT_BUFFER,
     OUTPUT_GAIN_MAX_DB, RATES,
 };
+use crate::app::LogTone;
 use crate::app::Page;
 use crate::app::RigWerkApp;
 use crate::audio::{CushionMode, DeviceItem, PluginFormat, PluginPref};
-use crate::ui::theme::{BLUE, RED};
 
 fn device(id: &str, name: &str, backend: &str) -> DeviceItem {
     DeviceItem {
@@ -84,7 +84,7 @@ fn a_missing_device_is_an_error_and_the_mix_still_applies() {
     assert!(app
         .log
         .iter()
-        .any(|entry| entry.text.contains("was not found") && entry.tone == RED));
+        .any(|entry| entry.text.contains("was not found") && entry.tone == LogTone::Red));
     let linear = app.engine.shared.input_gain();
     assert!(linear.is_finite());
     assert!((linear - 10.0f32.powf(4.5 / 20.0)).abs() < 1e-4);
@@ -142,7 +142,7 @@ fn applying_a_preset_rejects_nan_gain_and_unknown_rate() {
             .iter()
             .find(|entry| entry.text.contains("Loaded patch"))
             .map(|entry| entry.tone),
-        Some(BLUE)
+        Some(LogTone::Blue)
     );
 }
 

@@ -1,5 +1,6 @@
 //! Sessions: save, load and delete patches.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Align2, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText, Sense, Stroke,
@@ -227,7 +228,7 @@ impl RigWerkApp {
                         ui.add_space(5.0);
                         if ghost_button(ui, "Start from blank", ui.available_width()) {
                             self.session_name = "Untitled patch".to_owned();
-                            self.push_log("New blank patch ready.", MUTED);
+                            self.push_log("New blank patch ready.", LogTone::Muted);
                         }
                     });
                 },

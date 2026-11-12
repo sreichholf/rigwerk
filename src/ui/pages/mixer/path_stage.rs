@@ -6,15 +6,17 @@
 //! path there are no chips and no Path stage, so the page reads as before;
 //! only the "+ Path" button is new.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Stroke, Vec2};
 
-use crate::app::paths::{PathInfo, PATH_COLOURS};
+use crate::app::paths::PathInfo;
 use crate::app::RigWerkApp;
 use crate::audio::{MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BORDER_SOFT, CARD_RAISED, DIM, GREEN, MUTED, RED, TEAL, TEXT,
+    path_colour, with_alpha, AMBER, BORDER_SOFT, CARD_RAISED, DIM, GREEN, MUTED, PATH_COLOURS, RED,
+    TEAL, TEXT,
 };
 use crate::ui::widgets::{
     colour_swatch, db_slider, fit_text, meter_row, micro_label, mono, path_chip, path_level_text,
@@ -60,7 +62,7 @@ impl RigWerkApp {
                 if !self.rename_path(slot, &name) {
                     self.push_log(
                         format!("Another path is already called {}.", name.trim()),
-                        AMBER,
+                        LogTone::Amber,
                     );
                 }
             }
@@ -102,7 +104,7 @@ pub(crate) fn path_toolbar(
         for info in infos {
             let response = path_chip(
                 ui,
-                info.colour,
+                path_colour(info.colour_index),
                 &info.name,
                 info.mute,
                 info.selected,
@@ -265,7 +267,8 @@ pub(super) fn path_inspector(
 ) {
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
-        ui.painter().circle_filled(dot.center(), 5.0, info.colour);
+        ui.painter()
+            .circle_filled(dot.center(), 5.0, path_colour(info.colour_index));
         // Leave room for MUTE and SOLO; a long name is cut, not overlapped.
         let font = FontId::new(ts(16.0), FontFamily::Proportional);
         let title = fit_text(
@@ -314,13 +317,28 @@ pub(super) fn path_inspector(
         &mut level,
         PATH_LEVEL_MIN_DB,
         PATH_LEVEL_MAX_DB,
-        (info.colour, format!("{} level", info.name)),
+        (
+            path_colour(info.colour_index),
+            format!("{} level", info.name),
+        ),
     ) {
         actions.push(PathAction::Level(info.slot, level));
     }
     ui.add_space(10.0);
-    meter_row(ui, "L", meters.level[0], meters.peak[0], info.colour);
-    meter_row(ui, "R", meters.level[1], meters.peak[1], info.colour);
+    meter_row(
+        ui,
+        "L",
+        meters.level[0],
+        meters.peak[0],
+        path_colour(info.colour_index),
+    );
+    meter_row(
+        ui,
+        "R",
+        meters.level[1],
+        meters.peak[1],
+        path_colour(info.colour_index),
+    );
     ui.label(
         RichText::new("Meters after the path level, mute and solo, before the master.")
             .size(ts(9.5))

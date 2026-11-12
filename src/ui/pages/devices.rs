@@ -1,5 +1,6 @@
 //! Devices: every input and output the scan found.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense,
@@ -219,7 +220,7 @@ impl RigWerkApp {
                             self.asio_idx = index;
                             self.use_asio_input = true;
                             self.accept_asio_device();
-                            self.push_log(format!("Input set to {name}."), TEAL);
+                            self.push_log(format!("Input set to {name}."), LogTone::Teal);
                         }
                         if let Some((index, name)) = device_group(
                             ui,
@@ -232,7 +233,10 @@ impl RigWerkApp {
                             self.input_idx = index;
                             self.use_asio_input = false;
                             self.accept_input_device();
-                            self.push_log(format!("Input set to {name} (system input)."), BLUE);
+                            self.push_log(
+                                format!("Input set to {name} (system input)."),
+                                LogTone::Blue,
+                            );
                         }
                         ui.add_space(5.0);
                         horizontal_line(ui, BORDER_SOFT);
@@ -280,7 +284,7 @@ impl RigWerkApp {
                         ) {
                             self.output_idx = index;
                             self.accept_output_device();
-                            self.push_log(format!("Output set to {name}."), BLUE);
+                            self.push_log(format!("Output set to {name}."), LogTone::Blue);
                         }
                         if let Some((index, name)) = device_group(
                             ui,
@@ -292,7 +296,7 @@ impl RigWerkApp {
                         ) {
                             self.output_idx = index;
                             self.accept_output_device();
-                            self.push_log(format!("Output set to {name}."), BLUE);
+                            self.push_log(format!("Output set to {name}."), LogTone::Blue);
                         }
                         ui.add_space(5.0);
                         horizontal_line(ui, BORDER_SOFT);

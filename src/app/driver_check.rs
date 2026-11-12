@@ -14,11 +14,8 @@ use std::thread;
 use std::time::Instant;
 
 use crate::app::settings::rate_label;
-use crate::app::RigWerkApp;
+use crate::app::{LogTone, RigWerkApp};
 use crate::audio::EngineState;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::ui::theme::BLUE;
-use crate::ui::theme::{AMBER, GREEN};
 
 /// Whether a driver result is good news or a limitation worth attention.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,9 +98,9 @@ impl RigWerkApp {
         if log && changed {
             if let Some(info) = &self.quantum {
                 let tone = if info.fits && info.low_latency {
-                    GREEN
+                    LogTone::Green
                 } else {
-                    AMBER
+                    LogTone::Amber
                 };
                 if !self.log.iter().any(|entry| entry.text == info.note) {
                     self.push_log(info.note.clone(), tone);
@@ -496,13 +493,12 @@ impl RigWerkApp {
                         rate_label(actual.rate),
                         actual.frames
                     ),
-                    AMBER,
-                );
+                    LogTone::Amber);
             }
         }
         if let Some(text) = self.quantum_problem() {
             if !self.log.iter().any(|entry| entry.text == text) {
-                self.push_log(text, AMBER);
+                self.push_log(text, LogTone::Amber);
             }
         }
     }
@@ -542,7 +538,10 @@ impl RigWerkApp {
                 EngineState::Running | EngineState::Starting | EngineState::Stopping
             ) {
                 if manual {
-                    self.push_log("Stop the bridge before checking its output driver.", AMBER);
+                    self.push_log(
+                        "Stop the bridge before checking its output driver.",
+                        LogTone::Amber,
+                    );
                 }
                 return;
             }
@@ -575,13 +574,19 @@ impl RigWerkApp {
             match spawned {
                 Ok(_) => {
                     if manual {
-                        self.push_log(format!("Checking {log_name}'s output driver…"), BLUE);
+                        self.push_log(
+                            format!("Checking {log_name}'s output driver…"),
+                            LogTone::Blue,
+                        );
                     }
                     self.driver_probe_job = Some(receiver);
                 }
                 Err(error) => {
                     if manual {
-                        self.push_log(format!("Could not start the driver check: {error}"), AMBER);
+                        self.push_log(
+                            format!("Could not start the driver check: {error}"),
+                            LogTone::Amber,
+                        );
                     }
                 }
             }
@@ -593,7 +598,10 @@ impl RigWerkApp {
                 EngineState::Running | EngineState::Starting | EngineState::Stopping
             ) {
                 if manual {
-                    self.push_log("Stop the bridge before checking its output driver.", AMBER);
+                    self.push_log(
+                        "Stop the bridge before checking its output driver.",
+                        LogTone::Amber,
+                    );
                 }
                 return;
             }
@@ -633,13 +641,19 @@ impl RigWerkApp {
             match spawned {
                 Ok(_) => {
                     if manual {
-                        self.push_log(format!("Checking {log_name}'s output driver…"), BLUE);
+                        self.push_log(
+                            format!("Checking {log_name}'s output driver…"),
+                            LogTone::Blue,
+                        );
                     }
                     self.driver_probe_job = Some(receiver);
                 }
                 Err(error) => {
                     if manual {
-                        self.push_log(format!("Could not start the driver check: {error}"), AMBER);
+                        self.push_log(
+                            format!("Could not start the driver check: {error}"),
+                            LogTone::Amber,
+                        );
                     }
                 }
             }
@@ -675,14 +689,14 @@ impl RigWerkApp {
                                 actual.frames,
                                 block_ms(actual.frames, actual.rate)
                             ),
-                            GREEN,
+                            LogTone::Green,
                         );
                     }
                     Ok(_) => {}
                     Err(reason) => {
                         let message = format!("{name}: {reason}");
                         if !self.log.iter().any(|entry| entry.text == message) {
-                            self.push_log(message, AMBER);
+                            self.push_log(message, LogTone::Amber);
                         }
                     }
                 }

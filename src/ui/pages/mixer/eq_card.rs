@@ -1,5 +1,6 @@
 //! Built-in EQ inspector: one of the two master-bus EQs (pre or post inserts).
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense,
@@ -249,12 +250,12 @@ impl RigWerkApp {
                     } else {
                         format!("{name} bypassed.")
                     },
-                    AMBER,
+                    LogTone::Amber,
                 );
             } else if eq == current.flat() && current != current.flat() {
-                self.push_log(format!("{name} reset to flat."), AMBER);
+                self.push_log(format!("{name} reset to flat."), LogTone::Amber);
             }
-            self.path_mut().mix.eqs[slot.index()] = eq;
+            self.set_path_eq(slot.index(), eq);
             self.push_paths_to_engine();
         }
     }

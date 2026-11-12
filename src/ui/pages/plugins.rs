@@ -1,6 +1,7 @@
 //! Plugins: browse installed VST3 and CLAP effects. The insert chain itself
 //! lives on the Mixer rack; this page is the library.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense,
@@ -12,8 +13,8 @@ use crate::app::RigWerkApp;
 use crate::audio::PluginParamView;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL,
-    TEXT,
+    path_colour, with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, GREEN, MUTED,
+    RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
     card, ellipsize, fit_text, ghost_button, horizontal_line, micro_label, mono, path_chip,
@@ -279,7 +280,7 @@ impl RigWerkApp {
         let owner = (self.path_count() > 1)
             .then(|| self.paths.get(key.path).and_then(Option::as_ref))
             .flatten()
-            .map(|path| (path.colour(), path.name.clone()));
+            .map(|path| (path_colour(path.colour), path.name.clone()));
 
         let mut open = true;
         let mut close = false;
@@ -624,7 +625,7 @@ impl RigWerkApp {
             self.set_plugin_parameter(key, id, value);
         }
         if toggle_bypass {
-            self.engine.set_plugin_bypass(key.path, index, !bypass);
+            self.set_plugin_bypass(key.path, index, !bypass);
         }
         if open_gui {
             self.open_plugin_gui(key);
@@ -651,7 +652,7 @@ impl RigWerkApp {
                     .iter()
                     .map(|info| {
                         (
-                            info.colour,
+                            path_colour(info.colour_index),
                             info.name.clone(),
                             self.engine.plugin_views(info.slot),
                         )
@@ -721,8 +722,7 @@ impl RigWerkApp {
                     } else {
                         "The RigWerk control panel will open first."
                     },
-                    if prefer { TEAL } else { MUTED },
-                );
+                    if prefer { LogTone::Teal } else { LogTone::Muted });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ghost_button(ui, if scanning { "Scanning…" } else { "Rescan" }, 112.0)
@@ -765,7 +765,7 @@ impl RigWerkApp {
                 for info in &paths {
                     if path_chip(
                         ui,
-                        info.colour,
+                        path_colour(info.colour_index),
                         &info.name,
                         info.mute,
                         info.selected,

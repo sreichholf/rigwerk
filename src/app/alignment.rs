@@ -20,6 +20,15 @@
 use crate::app::RigWerkApp;
 use crate::audio::{AlignmentReport, MAX_PATHS};
 
+/// "Out 1, Out 2" for 0-based channels.
+pub(crate) fn channel_list(channels: &[usize]) -> String {
+    channels
+        .iter()
+        .map(|channel| format!("Out {}", channel + 1))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// What the alignment does on one output device.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct DeviceAlignment {

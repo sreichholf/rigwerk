@@ -2,6 +2,7 @@
 //! When the output is ASIO, a Panel chip sits with the channel chips and
 //! asks that output's bridge to open its driver's control panel.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
@@ -118,9 +119,10 @@ impl RigWerkApp {
         }
         ui.add_space(2.0);
 
+        let mut enabled = self.path().mix.output_enabled;
         ui.horizontal(|ui| {
-            channel_chip(ui, "OUT 1", &mut self.path_mut().mix.output_enabled[0], BLUE);
-            channel_chip(ui, "OUT 2", &mut self.path_mut().mix.output_enabled[1], BLUE);
+            channel_chip(ui, "OUT 1", &mut enabled[0], BLUE);
+            channel_chip(ui, "OUT 2", &mut enabled[1], BLUE);
             self.asio_panel_chip(ui, AsioPanelSide::Output, BLUE);
             if self.selected_output().asio_clsid.is_some() {
                     ui.label(
@@ -196,6 +198,9 @@ impl RigWerkApp {
                 self.mute = !self.mute;
             }
         });
+        if enabled != self.path().mix.output_enabled {
+            self.set_path_output_enabled(enabled);
+        }
 
         ui.add_space(5.0);
         self.output_clock_controls(ui);
@@ -233,7 +238,7 @@ impl RigWerkApp {
             OUTPUT_GAIN_MAX_DB,
             BLUE,
         ) {
-            self.engine.set_gains(self.input_gain, self.output_gain);
+            self.apply_gains();
         }
         ui.add_space(4.0);
         meter_row(ui, "L", self.meter_out_l, self.peak_out_l, BLUE);
@@ -277,8 +282,8 @@ impl RigWerkApp {
     /// One row under the Output body: a hairline, then the label, follower
     /// chips and + add.
     pub(crate) fn also_playing_on(&mut self, ui: &mut egui::Ui) {
+        use crate::app::chain::ChainSelection;
         use crate::app::Page;
-        use crate::ui::pages::mixer::chain::ChainSelection;
         use crate::ui::widgets::horizontal_line;
 
         let rows = self.output_device_rows();
@@ -404,7 +409,11 @@ impl RigWerkApp {
                         "WASAPI clock: Exclusive — this device only; shared buffer if refused."
                     }
                 },
-                if active { AMBER } else { MUTED },
+                if active {
+                    LogTone::Amber
+                } else {
+                    LogTone::Muted
+                },
             );
         }
     }
@@ -444,8 +453,7 @@ impl RigWerkApp {
                     } else {
                         format!("Output clock set to {}.", rate_label(rate))
                     },
-                    BLUE,
-                );
+                    LogTone::Blue);
             }
             let mut buffer = self.output_buffer;
             egui::ComboBox::from_id_salt("output_buffer")
@@ -472,7 +480,7 @@ impl RigWerkApp {
                 });
             if buffer != self.output_buffer {
                 self.output_buffer = buffer;
-                self.push_log(format!("Output buffer set to {buffer} samples."), BLUE);
+                self.push_log(format!("Output buffer set to {buffer} samples."), LogTone::Blue);
             }
         });
     }

@@ -9,11 +9,11 @@ use super::{
     UNDERRUN_BURST_WINDOW, UNDERRUN_QUIET,
 };
 use crate::app::cards::Card;
+use crate::app::chain::ChainSelection;
 use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
 use crate::app::settings::{cushion_to_pref, FollowerPref};
 use crate::app::{blank_app, Page, RigWerkApp};
 use crate::audio::{ChannelMap, CushionMode, DeviceItem, EngineState, PathMapSettings, MAX_ALIGN};
-use crate::ui::pages::mixer::chain::ChainSelection;
 
 /// A real (not demo) clock output the driver check can read.
 fn with_real_output(app: &mut RigWerkApp) {

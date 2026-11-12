@@ -31,6 +31,31 @@ pub(crate) const AMBER: Color32 = Color32::from_rgb(255, 184, 91);
 pub(crate) const RED: Color32 = Color32::from_rgb(255, 112, 112);
 pub(crate) const GREEN: Color32 = Color32::from_rgb(96, 216, 144);
 
+/// Path palette.  The index is what `app` stores; this is the colour a row
+/// paints.  Same order as the saved `colour` field.
+pub(crate) const PATH_COLOURS: [Color32; crate::audio::MAX_PATHS] = [
+    Color32::from_rgb(56, 221, 191),
+    Color32::from_rgb(199, 146, 255),
+    Color32::from_rgb(255, 184, 91),
+    Color32::from_rgb(255, 143, 177),
+];
+
+pub(crate) fn path_colour(index: u8) -> Color32 {
+    PATH_COLOURS[index as usize % crate::audio::MAX_PATHS]
+}
+
+pub(crate) fn log_colour(tone: crate::app::LogTone) -> Color32 {
+    use crate::app::LogTone;
+    match tone {
+        LogTone::Muted => MUTED,
+        LogTone::Blue => BLUE,
+        LogTone::Amber => AMBER,
+        LogTone::Teal => TEAL,
+        LogTone::Green => GREEN,
+        LogTone::Red => RED,
+    }
+}
+
 pub(crate) fn configure_style(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.all_styles_mut(|style| {
