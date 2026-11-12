@@ -26,6 +26,11 @@ git switch -c <area>/<topic> origin/master
 If the branch has already fallen behind, rebase it onto `origin/master`
 before starting. Do not continue on a stale or already-merged branch.
 
+## Subagents
+
+Never use a fast subagent unless the user explicitly asks for one.  A
+fast model is one whose name ends in `-fast`.
+
 ## Commands
 
 While editing, run the test you are changing:
