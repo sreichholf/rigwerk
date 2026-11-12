@@ -1,9 +1,9 @@
-//! A small VST3 and CLAP insert chain for the master bus.
+//! VST3 and CLAP insert chains, one per signal path.
 //!
 //! Plugins are discovered and loaded through `vst3-host` or the CLAP host in
-//! [`super::clap`]; the chain lives in [`super::shared::Shared`] so the playback
-//! callback can process it.  The UI only ever holds descriptors, never the
-//! plugin objects themselves.
+//! [`super::clap`]; each path's chain lives on that path in
+//! [`super::shared::Shared`] so the playback callback can process it.  The UI
+//! only ever holds descriptors, never the plugin objects themselves.
 
 mod chain;
 mod load;

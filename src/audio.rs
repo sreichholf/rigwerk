@@ -21,6 +21,8 @@
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
 //! - `shared`: the ring buffer, cushion, meters and tuner tap both sides share.
 //! - `path`: one signal path's controls (routing, EQs, gate, inserts).
+//! - `plugins`: the VST3 and CLAP chain on each path.  The UI holds views.
+//! - `scope`: decimated peak-hold lanes.  Drawing them is `ui/scope`.
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
 //! - `mixer` / `resampler`: turning ring frames into output frames.

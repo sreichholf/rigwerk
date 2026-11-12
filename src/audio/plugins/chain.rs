@@ -1,4 +1,4 @@
-//! The master insert chain.
+//! One signal path's insert chain.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};

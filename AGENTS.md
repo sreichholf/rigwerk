@@ -5,7 +5,8 @@ Defaults for coding agents (and humans) working on RigWerk.
 The MSRV is Rust 1.95.0 (`rust-toolchain.toml`). Leave that pin unless the
 dependency that forced it changes. The license is GPL-3.0-or-later.
 
-`REVIEW.md` and `REVIEW-FIXES.md` record a finished review.
+`REVIEW.md` and `REVIEW-FIXES.md` record a finished review.  The
+must-fix list in `REVIEW.md` is history.
 `docs/mockups/dual-out-plan.md` records the multi-output work that has
 landed. `docs/mockups/live-issues-plan.md` records the Live Issues strip; its
 open items are done.  The sink monitor behind the silence row reads a
@@ -104,7 +105,9 @@ WirePlumber linked a stream.
 - `src/audio`: the bridge, DSP, and device backends. `audio.rs` is the
   map of that crate.
 - `src/app`: window state, startup, preferences, device selection, and
-  bridge control. Nothing in here draws.
+  bridge control. It does not draw. The frame shell still lives in
+  `app.rs`; that is debt under Separation, and new paint does not go
+  there.
 - `src/ui`: egui. One module per sidebar page under `ui/pages`. Shared
   controls live in `ui/widgets`. Colours and type scale live in
   `ui/theme.rs`.
@@ -120,6 +123,87 @@ Read the `//!` at the top of a file before editing it. That comment is
 the contract. Match the comment style around you: module docs say what
 the file is for and the constraint that is easy to miss, and sentences
 in those comments are separated by two spaces.
+
+## Separation
+
+Dependencies point one way: `ui` → `app` → `audio`.  `audio` does not
+import `app` or `ui`, and it does not import egui.
+
+- `audio` is DSP, the bridge thread, device backends, and plugin
+  instances.  A page holds `PluginView`, never an instance.
+  `PluginGuiWindow` (`app/plugin_gui.rs`) is the editor, and the only
+  place outside `audio` that holds an instance lock.  Do not put another
+  `Arc<Mutex<Plugin>>` on a page, and do not move that window into
+  `audio` (the audio crate does not own a window).
+- `app` is state, startup, preferences, device selection, and bridge
+  control.  It does not draw, and it does not import `ui`.  A method
+  that changes the engine, a preference, or path state is implemented
+  in `app/`.
+- `ui` draws.  A page calls a `RigWerkApp` method.  It does not read
+  `engine.shared`.  It does not call `engine.set_*` for a value an app
+  field already stores (gains, cushion, path mix): add the setter on
+  `RigWerkApp` and call that.
+
+These splits are already right.  Do not merge them and do not wrap
+them in a new type:
+
+- `app::calibration` decides when to arm; `audio::calibration` is the
+  click, the capture, and the correlator.  The estimate stays in
+  `app::budget`.
+- `app::bridge` starts, stops, and publishes the numbers the screens
+  show; `audio::bridge` is the bridge thread.
+- `app::tuner` is the saved settings and the auto-mute; `audio::tuner`
+  is the pitch detector.
+- `app::plugins` scans and inserts; `audio::plugins` is one chain per
+  path.
+- `app::devices` selects and watches; `audio::devices` discovers.
+- Preferences store the audio types (`EqSettings`, `GateSettings`,
+  `OutputDeviceSettings`, `PluginPref`).  Do not add a parallel struct.
+
+`RigWerkApp` is the composition root.  Its methods are implemented from
+`app/` and from `ui/pages`.  That split stays.  What does not stay is
+`app` depending on `ui`.
+
+Known debt.  Do not spread it, and do not fix it with a rewrite.  One
+step is one PR.  Do not start the next step until the one before it is
+on `master`.
+
+1. Move `impl eframe::App` (the frame, the modals, `handle_panic_mute`)
+   from `app.rs` into `ui`.  Leave `logic` and `save` in `app`.
+2. Move `ChainSelection` to `app` (it is which stage is selected, and
+   `app` already stores it).  Leave `stage_color` in `ui`.  Move
+   `OutputDeviceRow` and `output_device_rows` to `app`, so `app::issues`
+   stops importing `ui`.  The row is plain data; `device_state` keeps
+   the colour and stays in `ui`.
+3. The activity log stores a small tone enum, not a `Color32`.  `ui`
+   maps the enum when Diagnostics draws the line.  A path colour is an
+   index into the theme palette, not a `Color32` stored in `app`.
+   `meters` pushes engine state and then smooths the meters: split
+   those two, and the engine half must not take `egui::Context`.
+4. Pages that call `engine.set_gains`, `engine.set_cushion`, or write
+   `path().mix` directly go through one `RigWerkApp` setter each.
+   `add_path` reads the mix through `AudioEngine`, not `engine.shared`.
+   Tests may still touch `shared`.
+5. One helper turns `wasapi_output_mode` / `low_latency_output` into
+   the start-config flags.  `app/bridge.rs` and `app/latency.rs` both
+   use it.
+
+## Keep it simple
+
+- A long file that is one algorithm or one page stays one file.
+  `audio/tuner.rs`, `audio/shared.rs`, `audio/engine.rs`,
+  `app/issues.rs`, and the routing matrices are not split for length.
+- Do not add a trait, a newtype, or a wrapper that exists for one call
+  site.
+- One numeric setting touches the preference field,
+  `sanitize_preferences` (or that type's `sanitized`), the `RigWerkApp`
+  field, an engine setter, and the widget.  That is the path.  Clamp in
+  `sanitize_preferences`, not in the widget.
+- `REVIEW.md` is a finished review.  Do not treat its must-fix list as
+  open work.
+- `audio.rs` is the in-crate map for `app` and `ui`.  There is no
+  library API.  New items are `pub(crate)` unless that file already
+  re-exports the same kind of type.
 
 ## Audio thread
 

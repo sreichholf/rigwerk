@@ -1,7 +1,8 @@
 //! The RigWerk window: app state, start-up, the frame loop and saving.
 //!
 //! Logic is grouped in `app/` (settings, devices, bridge control, patches,
-//! screenshots, tuner); everything drawn on screen lives in `ui/`.
+//! screenshots, tuner).  Drawing belongs in `ui/`.  The frame shell
+//! (`impl eframe::App`) still lives in this file; new paint does not.
 
 pub(crate) mod alignment;
 pub(crate) mod bridge;
@@ -186,7 +187,7 @@ pub struct RigWerkApp {
     /// Level, mute and per-path channel maps of the clock device (the
     /// selected output), pushed to the engine every frame.
     pub(crate) clock_device: OutputDeviceSettings,
-    /// Extra output devices. Stored only; nothing plays them yet.
+    /// Extra output devices.  Pushed live by `push_followers_to_engine`.
     pub(crate) followers: Vec<FollowerPref>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
