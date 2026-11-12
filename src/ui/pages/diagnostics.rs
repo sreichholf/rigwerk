@@ -6,6 +6,7 @@
 //! bridge's own status string beside that, and keeps scan notes and quantum
 //! failures that the live status line replaces.
 
+use crate::app::LogTone;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
@@ -14,7 +15,9 @@ use egui::RichText;
 use crate::app::{RigWerkApp, ACTIVITY_LOG_CAP};
 use crate::audio::EngineState;
 use crate::ui::theme::ts;
-use crate::ui::theme::{AMBER, BORDER, CARD, DIM, GREEN, MUTED, RED, TEAL, TEXT};
+use crate::ui::theme::{
+    log_colour, path_colour, AMBER, BORDER, CARD, DIM, GREEN, MUTED, RED, TEAL, TEXT,
+};
 use crate::ui::widgets::{card, ghost_button, micro_label, mono, status_dot};
 
 /// One path's DSP line: "0.21 ms avg · 0.40 ms peak of 10.7 ms · 2% / 4%",
@@ -436,7 +439,7 @@ impl RigWerkApp {
                     ui.end_row();
                     for (info, dsp) in self.path_dsp_lines() {
                         ui.horizontal(|ui| {
-                            status_dot(ui, info.colour);
+                            status_dot(ui, path_colour(info.colour_index));
                             ui.label(RichText::new(&info.name).size(ts(11.0)).color(TEXT));
                         });
                         ui.label(mono(format!("{:.1} ms", info.latency_ms), MUTED, 9.5));
@@ -499,7 +502,7 @@ impl RigWerkApp {
                         continue;
                     }
                     ui.horizontal(|ui| {
-                        status_dot(ui, info.colour);
+                        status_dot(ui, path_colour(info.colour_index));
                         ui.label(RichText::new(&info.name).size(ts(11.0)).color(TEXT));
                     });
                     ui.horizontal(|ui| {
@@ -550,7 +553,7 @@ impl RigWerkApp {
             ui.add_space(6.0);
             if ghost_button(ui, "Reset all", 120.0) {
                 self.engine.reset_plugin_lock_counters();
-                self.push_log("Plugin lock counters reset.", TEAL);
+                self.push_log("Plugin lock counters reset.", LogTone::Teal);
             }
         });
 
@@ -575,15 +578,16 @@ impl RigWerkApp {
             if ghost_button(ui, "Copy", 120.0) {
                 let report = self.diagnostics_text();
                 ui.ctx().copy_text(report);
-                self.push_log("Diagnostics copied to the clipboard.", TEAL);
+                self.push_log("Diagnostics copied to the clipboard.", LogTone::Teal);
             }
             if ghost_button(ui, "Export", 120.0) {
                 let path = diagnostics_export_path();
                 match self.write_diagnostics(&path) {
-                    Ok(()) => {
-                        self.push_log(format!("Diagnostics exported to {}.", path.display()), TEAL)
-                    }
-                    Err(error) => self.push_log(error, RED),
+                    Ok(()) => self.push_log(
+                        format!("Diagnostics exported to {}.", path.display()),
+                        LogTone::Teal,
+                    ),
+                    Err(error) => self.push_log(error, LogTone::Red),
                 }
             }
             ui.label(mono(
@@ -613,7 +617,7 @@ impl RigWerkApp {
                 for entry in self.log.iter().rev() {
                     ui.horizontal(|ui| {
                         ui.label(mono(&entry.at, DIM, 9.0));
-                        status_dot(ui, entry.tone);
+                        status_dot(ui, log_colour(entry.tone));
                         ui.add(
                             egui::Label::new(
                                 RichText::new(&entry.text).size(ts(11.0)).color(MUTED),

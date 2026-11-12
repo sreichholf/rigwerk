@@ -1,6 +1,7 @@
 //! Which devices are selected, what they are, and keeping the lists current
 //! when devices are plugged in or out.
 
+use crate::app::LogTone;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use std::sync::OnceLock;
@@ -10,8 +11,6 @@ use std::time::Instant;
 
 use crate::app::RigWerkApp;
 use crate::audio::{self, DeviceItem, Inventory};
-use crate::ui::theme::{AMBER, BLUE, GREEN, MUTED, RED};
-
 /// How many scans must miss a selected device before it counts as unplugged.
 const UNPLUG_SCANS: u8 = 2;
 
@@ -494,7 +493,7 @@ impl RigWerkApp {
                     self.refresh_quantum_check(true);
                 }
                 if !changed && self.manual_scan {
-                    self.push_log("Scan complete — no device changes.", GREEN);
+                    self.push_log("Scan complete — no device changes.", LogTone::Green);
                     self.start_output_driver_check(true);
                 }
                 self.manual_scan = false;
@@ -552,11 +551,11 @@ impl RigWerkApp {
 
     pub(crate) fn rescan(&mut self) {
         if self.device_scan.is_some() {
-            self.push_log("Already scanning audio devices…", MUTED);
+            self.push_log("Already scanning audio devices…", LogTone::Muted);
             return;
         }
         self.manual_scan = true;
-        self.push_log("Scanning audio devices…", BLUE);
+        self.push_log("Scanning audio devices…", LogTone::Blue);
         self.start_device_scan();
     }
 
@@ -622,8 +621,7 @@ impl RigWerkApp {
                         format!(
                             "{name} missed one device scan. It stays selected until a second scan misses it too."
                         ),
-                        AMBER,
-                    );
+                        LogTone::Amber);
                 }
             }
         }
@@ -648,8 +646,7 @@ impl RigWerkApp {
                             "{} missed one device scan. It stays selected until a second scan misses it too.",
                             output.name
                         ),
-                        AMBER,
-                    );
+                        LogTone::Amber);
                 }
             }
         }
@@ -665,7 +662,7 @@ impl RigWerkApp {
                 continue;
             }
             if !self.log.iter().any(|entry| entry.text == *note) {
-                self.push_log(note.clone(), AMBER);
+                self.push_log(note.clone(), LogTone::Amber);
             }
         }
     }
@@ -796,8 +793,7 @@ impl RigWerkApp {
                 format!(
                     "Device change applied · {asio_count} low-latency / {output_count} output devices."
                 ),
-                BLUE,
-            );
+                LogTone::Blue);
             self.log_scan_notes(&scan_notes);
             return true;
         }
@@ -816,14 +812,17 @@ impl RigWerkApp {
             self.engine.stop();
             self.engine.clear_error();
             self.bridge_signature = 0;
-            self.push_log(format!("{subject} {verb} unplugged — bridge stopped."), RED);
+            self.push_log(
+                format!("{subject} {verb} unplugged — bridge stopped."),
+                LogTone::Red,
+            );
             self.alert_lost_device(format!(
                 "{subject} {verb} unplugged, so the bridge was stopped. Reconnect the device, then start the bridge again."
             ));
         } else {
             self.push_log(
                 format!("{subject} {verb} unplugged. Choose another device."),
-                AMBER,
+                LogTone::Amber,
             );
             self.device_alert = Some(format!(
                 "{subject} {verb} unplugged. Choose another device before starting the bridge."

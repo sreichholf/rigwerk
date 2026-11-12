@@ -1,8 +1,8 @@
+use crate::app::LogTone;
 use std::path::PathBuf;
 
 use crate::app::blank_app;
 use crate::audio::claim_main_thread;
-use crate::ui::theme::MUTED;
 
 #[test]
 fn the_report_names_the_chain_and_insert_counts() {
@@ -129,7 +129,7 @@ fn the_report_includes_status_notes_and_the_log() {
     app.inventory
         .notes
         .push("ASIO registry scan: boom".to_owned());
-    app.push_log("Bridge ready.", MUTED);
+    app.push_log("Bridge ready.", LogTone::Muted);
     app.engine.note_quantum_failure(
         "PipeWire quantum was not restored: pw-metadata not available".to_owned(),
     );

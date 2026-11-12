@@ -108,12 +108,14 @@
 //! latency, the WASAPI mode and the cushion, and a follower's own cushion
 //! in the Mixer.
 
+use crate::app::LogTone;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 pub(crate) use silence::{SilenceInput, SilenceWatch};
 
 use crate::app::alignment::RoutingWarningKind;
+use crate::app::output_devices::OutputDeviceRow;
 use crate::app::paths::PathInfo;
 use crate::app::settings::{cushion_from_pref, cushion_to_pref, BUFFERS};
 use crate::app::RigWerkApp;
@@ -123,7 +125,6 @@ use crate::audio::{
 };
 #[cfg(target_os = "linux")]
 use crate::audio::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
-use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
 
 /// The smoothed DSP share of the block that raises the warning, and the
 /// share it has to drop under to clear it.
@@ -920,7 +921,7 @@ impl RigWerkApp {
                 detail: format!(
                     "{} meet on {} up to {spread:.1} ms apart: a comb filter (thin, hollow sound). {}",
                     names.join(" and "),
-                    crate::ui::pages::routing::channel_list(&warning.channels),
+                    crate::app::alignment::channel_list(&warning.channels),
                     if align {
                         "Their trims pull them apart."
                     } else {
@@ -1445,7 +1446,7 @@ impl RigWerkApp {
                     .map_or_else(|| "Output device".to_owned(), |row| row.name.clone());
                 self.push_log(
                     format!("{name}: alignment on, the paths line up again."),
-                    crate::ui::theme::TEAL,
+                    LogTone::Teal,
                 );
             }
             IssueAction::ShowRouting(device) => {
@@ -1460,23 +1461,22 @@ impl RigWerkApp {
                 self.output_buffer = frames;
                 self.push_log(
                     format!("Output buffer set to {frames} samples."),
-                    crate::ui::theme::BLUE,
+                    LogTone::Blue,
                 );
             }
             IssueAction::LowLatencyOff => self.set_low_latency_output(false),
             IssueAction::SharedOutput => {
                 self.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Shared);
-                self.push_log("WASAPI clock: Shared output.", crate::ui::theme::MUTED);
+                self.push_log("WASAPI clock: Shared output.", LogTone::Muted);
             }
             IssueAction::SafeCushion => {
                 self.cushion_mode = CushionMode::Safe;
-                self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
-                self.push_log("Cushion: Safe.", crate::ui::theme::AMBER);
+                self.apply_cushion();
+                self.push_log("Cushion: Safe.", LogTone::Amber);
             }
             IssueAction::ShowFollower(follower) => {
                 // Row 0 is the clock device.
-                self.chain_selected =
-                    crate::ui::pages::mixer::chain::ChainSelection::OutputDevice(follower + 1);
+                self.chain_selected = crate::app::chain::ChainSelection::OutputDevice(follower + 1);
                 self.page = Page::Mixer;
             }
             IssueAction::ShowOutput => {
@@ -1493,7 +1493,7 @@ impl RigWerkApp {
                     pref.name.clone()
                 };
                 self.push_followers_to_engine();
-                self.push_log(format!("{name}: cushion Safe."), crate::ui::theme::AMBER);
+                self.push_log(format!("{name}: cushion Safe."), LogTone::Amber);
             }
         }
     }

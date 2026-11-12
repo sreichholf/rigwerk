@@ -13,13 +13,12 @@
 //! `poll_calibration` clears any measurement state the app is not tracking,
 //! so a cancel racing a callback cannot leave the clock output ducked.
 
+use crate::app::LogTone;
 use std::time::{Duration, Instant};
 
 use crate::app::latency::{LatencyConditions, LoopbackKind, MeasuredLatency};
 use crate::app::RigWerkApp;
 use crate::audio::{self, analyze_channels, CalibrationFailure, CalibrationState, EngineState};
-use crate::ui::theme::{AMBER, MUTED, TEAL};
-
 /// How long a measurement may take before the app gives up.  The capture
 /// window is shorter; this covers the input starting and any callback stall.
 pub(crate) const CALIBRATION_TIMEOUT: Duration = Duration::from_secs(4);
@@ -134,8 +133,7 @@ impl RigWerkApp {
                 };
                 self.push_log(
                     "Measuring the loopback: the mix is muted and a short click plays. Keep the loopback connected.",
-                    AMBER,
-                );
+                    LogTone::Amber);
             }
             Err(reason) => {
                 self.calibration.phase = CalibrationPhase::Failed { reason };
@@ -148,7 +146,7 @@ impl RigWerkApp {
     pub(crate) fn cancel_calibration(&mut self) {
         self.engine.cancel_calibration();
         if self.calibration.is_measuring() {
-            self.push_log("Latency measurement cancelled.", MUTED);
+            self.push_log("Latency measurement cancelled.", LogTone::Muted);
         }
         self.calibration.phase = CalibrationPhase::Idle;
     }
@@ -270,8 +268,7 @@ impl RigWerkApp {
                         measured.loopback.label(),
                         measured.confidence * 100.0
                     ),
-                    TEAL,
-                );
+                    LogTone::Teal);
                 self.measured_latency = Some(measured);
                 self.calibration.phase = CalibrationPhase::Done;
             }
@@ -296,14 +293,20 @@ impl RigWerkApp {
             CalibrationFailure::OutOfWindow => "The click came back outside the 1.2 second window, or the timing did not make sense. A longer loop needs a direct path.".to_owned(),
             CalibrationFailure::Timing => "The capture lost input blocks (its elapsed time does not match the frames it holds), so the delay would be understated. Try again with a lighter load or a larger input buffer.".to_owned(),
         };
-        self.push_log(format!("Latency measurement failed: {reason}"), AMBER);
+        self.push_log(
+            format!("Latency measurement failed: {reason}"),
+            LogTone::Amber,
+        );
         self.calibration.phase = CalibrationPhase::Failed { reason };
     }
 
     /// Stops a measurement the app cannot finish and says why.
     fn abort_calibration(&mut self, reason: &str) {
         self.engine.cancel_calibration();
-        self.push_log(format!("Latency measurement stopped: {reason}"), AMBER);
+        self.push_log(
+            format!("Latency measurement stopped: {reason}"),
+            LogTone::Amber,
+        );
         self.calibration.phase = CalibrationPhase::Failed {
             reason: reason.to_owned(),
         };

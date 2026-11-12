@@ -2,6 +2,7 @@
 //! the input is ASIO, a Panel chip sits with the channel chips and asks
 //! the bridge to open that driver's control panel.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{Align, Layout, RichText};
 
@@ -98,7 +99,7 @@ impl RigWerkApp {
             INPUT_GAIN_MAX_DB,
             TEAL,
         ) {
-            self.engine.set_gains(self.input_gain, self.output_gain);
+            self.apply_gains();
         }
 
         ui.add_space(4.0);
@@ -147,7 +148,7 @@ impl RigWerkApp {
                 );
             if rate != self.sample_rate {
                 self.sample_rate = rate;
-                self.push_log(format!("Input clock set to {}.", rate_label(rate)), BLUE);
+                self.push_log(format!("Input clock set to {}.", rate_label(rate)), LogTone::Blue);
             }
             let mut buffer = self.buffer_size;
             egui::ComboBox::from_id_salt("buffer_size")
@@ -162,7 +163,7 @@ impl RigWerkApp {
                 .on_hover_text("Input buffer: the block size asked of the input device.");
             if buffer != self.buffer_size {
                 self.buffer_size = buffer;
-                self.push_log(format!("Input buffer set to {buffer} samples."), BLUE);
+                self.push_log(format!("Input buffer set to {buffer} samples."), LogTone::Blue);
             }
         });
     }

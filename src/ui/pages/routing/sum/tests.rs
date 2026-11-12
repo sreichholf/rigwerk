@@ -1,5 +1,6 @@
-use super::super::outputs::{channel_list, MapEdit};
+use super::super::outputs::MapEdit;
 use super::latency_line;
+use crate::app::alignment::channel_list;
 use crate::app::blank_app;
 use crate::app::cards::Card;
 use crate::ui::widgets::{accesskit_frame, node_named};

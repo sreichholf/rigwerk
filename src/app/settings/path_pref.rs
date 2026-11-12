@@ -12,7 +12,7 @@ use crate::audio::{EqSettings, GateSettings, PathMix, PluginPref, MAX_PATHS};
 #[serde(default)]
 pub(crate) struct PathPref {
     pub(crate) name: String,
-    /// Index into the path palette (`app::paths::PATH_COLOURS`).
+    /// Index into the path palette.
     pub(crate) colour: u8,
     /// The 2 × 4 input routing; only taps 1/2 (the path's L/R) are used.
     pub(crate) routes: [[bool; 4]; 2],

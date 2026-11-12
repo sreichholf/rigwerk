@@ -1,8 +1,9 @@
 use super::{
-    chain_device_row, device_channel_count, device_level_text, device_row_value, device_state,
-    gain_reduction_text, list_device_row, title_name_width, OutputDeviceRow,
+    chain_device_row, device_level_text, device_row_value, device_state, gain_reduction_text,
+    list_device_row, title_name_width,
 };
-use crate::audio::{EngineState, OutputDeviceSettings, MAX_OUTPUT_CHANNELS};
+use crate::app::output_devices::OutputDeviceRow;
+use crate::audio::{EngineState, OutputDeviceSettings};
 use crate::ui::widgets::fit_text;
 use crate::ui::widgets::{accesskit_frame, node_named};
 use eframe::egui::{self, accesskit::Toggled};
@@ -24,16 +25,6 @@ fn clock_row(level_db: f32, mute: bool) -> OutputDeviceRow {
             ..OutputDeviceSettings::default()
         },
     }
-}
-
-#[test]
-fn channel_count_prefers_the_stream_then_the_scan() {
-    assert_eq!(device_channel_count(6, 2), 6);
-    assert_eq!(device_channel_count(0, 4), 4);
-    assert_eq!(device_channel_count(0, 0), 2);
-    assert_eq!(device_channel_count(1, 0), 1);
-    assert_eq!(device_channel_count(32, 2), MAX_OUTPUT_CHANNELS);
-    assert_eq!(device_channel_count(0, 16), MAX_OUTPUT_CHANNELS);
 }
 
 #[test]

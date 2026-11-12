@@ -2,6 +2,7 @@
 //! node has no ring, so the strip is one line.  A ring shows its fill, the
 //! drift reading and the cushion.  Manual cushion adds a size row.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText, Sense,
@@ -70,12 +71,12 @@ impl RigWerkApp {
             let response = manual_cushion_size(ui, &mut ms);
             if response.changed() {
                 self.cushion_ms = ms;
-                self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
+                self.apply_cushion();
             }
             if response.drag_stopped() || (response.changed() && !response.dragged()) {
                 self.push_log(
                     format!("Manual cushion set to {:.1} ms.", self.cushion_ms),
-                    AMBER,
+                    LogTone::Amber,
                 );
             }
         }
@@ -129,8 +130,7 @@ impl RigWerkApp {
                 } else {
                     "Drift correction disabled — clocks may slip."
                 },
-                if self.drift { GREEN } else { AMBER },
-            );
+                if self.drift { LogTone::Green } else { LogTone::Amber });
         }
     }
 
@@ -147,9 +147,9 @@ impl RigWerkApp {
                         format!("Cushion: Manual, {:.1} ms.", self.cushion_ms)
                     }
                 },
-                AMBER,
+                LogTone::Amber,
             );
-            self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
+            self.apply_cushion();
         }
     }
 }

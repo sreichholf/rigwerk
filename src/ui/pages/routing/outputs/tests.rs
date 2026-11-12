@@ -3,12 +3,13 @@ use super::{
     shows_unused_choice, shows_unused_choice_paths, MapEdit, RoutingAction,
 };
 use crate::app::cards::Card;
+use crate::app::chain::ChainSelection;
+use crate::app::output_devices::OutputDeviceRow;
 use crate::app::{blank_app, Page};
 use crate::audio::{
     ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, UnusedChannels,
 };
-use crate::ui::pages::mixer::chain::ChainSelection;
-use crate::ui::pages::mixer::output_devices::OutputDeviceRow;
+use crate::ui::theme::path_colour;
 use crate::ui::theme::{AMBER, MUTED, RED};
 use crate::ui::widgets::{accesskit_frame, node_named};
 use eframe::egui::{self, accesskit::Toggled};
@@ -317,7 +318,13 @@ fn device_rows_name_their_paths_and_warn() {
     let aligned = line(&app);
     assert_eq!(aligned.text, "2 paths · 0.0 ms");
     assert_eq!(aligned.color, MUTED);
-    assert_eq!(aligned.dots, vec![infos[0].colour, infos[1].colour]);
+    assert_eq!(
+        aligned.dots,
+        vec![
+            path_colour(infos[0].colour_index),
+            path_colour(infos[1].colour_index)
+        ]
+    );
 
     // Unaligned, and the second path trimmed: they arrive apart.
     app.set_device_align(0, false);
@@ -346,7 +353,7 @@ fn device_rows_name_their_paths_and_warn() {
     app.clock_device.path_map[infos[0].slot].map = ChannelMap { left: 0, right: 0 };
     let one = line(&app);
     assert_eq!(one.text, "Path 2 · L/R");
-    assert_eq!(one.dots, vec![infos[1].colour]);
+    assert_eq!(one.dots, vec![path_colour(infos[1].colour_index)]);
 }
 
 #[test]

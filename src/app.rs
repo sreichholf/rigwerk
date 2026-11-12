@@ -1,17 +1,20 @@
-//! The RigWerk window: app state, start-up, the frame loop and saving.
+//! The RigWerk window: app state, start-up, and the logic and save the frame calls.
 //!
 //! Logic is grouped in `app/` (settings, devices, bridge control, patches,
-//! screenshots, tuner); everything drawn on screen lives in `ui/`.
+//! screenshots, tuner).  Drawing belongs in `ui/`.  The frame shell
+//! (`impl eframe::App`) lives in `ui/frame.rs`; this file does not paint.
 
 pub(crate) mod alignment;
 pub(crate) mod bridge;
 pub(crate) mod budget;
 pub(crate) mod calibration;
 pub(crate) mod cards;
+pub(crate) mod chain;
 pub(crate) mod devices;
 pub(crate) mod driver_check;
 pub(crate) mod issues;
 pub(crate) mod latency;
+pub(crate) mod output_devices;
 pub(crate) mod paths;
 pub(crate) mod plugin_gui;
 pub(crate) mod plugins;
@@ -26,7 +29,6 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui::{Align2, Color32, Margin, RichText, Vec2};
 
 use crate::app::devices::{inventory_fingerprint, HeldDevice};
 use crate::app::screenshot::ScreenshotJob;
@@ -39,11 +41,6 @@ use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate
 use crate::audio::{
     self, AudioEngine, CushionMode, EngineState, EqSlot, Inventory, OutputDeviceSettings, Snapshot,
     WasapiOutputMode, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
-};
-use crate::ui::theme::ts;
-use crate::ui::theme::{
-    configure_style, with_alpha, AMBER, BG, BLUE, BORDER, CARD, DIM, GREEN, MUTED, SIDEBAR, TEAL,
-    TEXT,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,9 +78,9 @@ pub(crate) fn initial_page() -> Page {
 
 /// Test hook for screenshots of a Mixer stage: `RIGWERK_MIXER_STAGE=output`
 /// (or `device` for the clock device). Normal launches open the last EQ.
-fn initial_mixer_stage() -> Option<crate::ui::pages::mixer::chain::ChainSelection> {
+fn initial_mixer_stage() -> Option<chain::ChainSelection> {
     let key = std::env::var("RIGWERK_MIXER_STAGE").ok()?;
-    crate::ui::pages::mixer::chain::ChainSelection::from_key(&key.to_lowercase())
+    chain::ChainSelection::from_key(&key.to_lowercase())
 }
 
 /// The page to open on launch: the one left open last time, unless a
@@ -126,15 +123,22 @@ fn repaint_interval(state: EngineState, plugin_editor_open: bool) -> Duration {
 /// there after ordinary bridge chatter.
 pub(crate) const ACTIVITY_LOG_CAP: usize = 400;
 
-/// Command and shift, and nothing else.  Command is Ctrl on Windows and
-/// Linux, and Command on macOS.  `matches_exact` rejects Alt; egui's
-/// `consume_key` would treat that extra modifier as optional.
-const PANIC_MUTE_MODIFIERS: egui::Modifiers = egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT);
+/// How an activity-log line is drawn.  Diagnostics maps this to a theme
+/// colour; the log itself does not store a `Color32`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LogTone {
+    Muted,
+    Blue,
+    Amber,
+    Teal,
+    Green,
+    Red,
+}
 
 pub(crate) struct LogEntry {
     pub(crate) at: String,
     pub(crate) text: String,
-    pub(crate) tone: Color32,
+    pub(crate) tone: LogTone,
 }
 
 pub struct RigWerkApp {
@@ -186,12 +190,12 @@ pub struct RigWerkApp {
     /// Level, mute and per-path channel maps of the clock device (the
     /// selected output), pushed to the engine every frame.
     pub(crate) clock_device: OutputDeviceSettings,
-    /// Extra output devices. Stored only; nothing plays them yet.
+    /// Extra output devices.  Pushed live by `push_followers_to_engine`.
     pub(crate) followers: Vec<FollowerPref>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
     /// Selected stage in the Mixer rack / Live chain strip.
-    pub(crate) chain_selected: crate::ui::pages::mixer::chain::ChainSelection,
+    pub(crate) chain_selected: chain::ChainSelection,
     /// Output device shown on Signal Routing (not persisted; apart from the
     /// Mixer's selection).
     pub(crate) routing_device: usize,
@@ -311,19 +315,18 @@ pub struct RigWerkApp {
     #[cfg(target_os = "linux")]
     quantum_live_at: Instant,
     /// Preferences kept until the first background device scan finishes, so
-    /// the window can paint before hosts are probed.
-    startup: Option<StartupGate>,
+    /// the window can paint before hosts are probed.  The frame reads this
+    /// to show the startup window.
+    pub(crate) startup: Option<StartupGate>,
 }
 
-impl eframe::App for RigWerkApp {
-    /// Non-painting maintenance.  eframe also calls this while the window is
-    /// hidden or minimized, with no egui pass, so engine watchdogs, device
-    /// watching, plugin main-thread/timer servicing and the Live Issues
-    /// state keep running.  The timed repaint request at the end is what
-    /// keeps those hidden passes coming: 16 ms while the bridge is live or
-    /// a plugin editor is open, otherwise 200 ms.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.meters(ctx);
+impl RigWerkApp {
+    /// Device watching, plugin service, and the repaint tick.
+    ///
+    /// The frame calls this after [`Self::publish_engine`] and
+    /// [`Self::smooth_meters`], in that order.  eframe also calls `logic`
+    /// while the window is hidden, so this keeps running with no egui pass.
+    pub(crate) fn run_logic(&mut self, ctx: &egui::Context) {
         self.poll_calibration();
         self.log_tuner_page();
         self.tuner.poll(
@@ -349,205 +352,9 @@ impl eframe::App for RigWerkApp {
         ctx.request_repaint_after(interval);
     }
 
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Once per frame, before any page.  A control that only exists on
-        // Live or Mixer would miss the chord everywhere else.
-        self.handle_panic_mute(root.ctx());
-
-        let ctx = root.ctx().clone();
-        // Screenshots need a painted frame, so they stay on the drawing side.
-        self.handle_screenshot(&ctx);
-
-        egui::Panel::left("rigwerk_nav")
-            .exact_size(224.0)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(SIDEBAR)
-                    .inner_margin(Margin::symmetric(16, 22)),
-            )
-            .show(root, |ui| {
-                self.sidebar(ui);
-            });
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin {
-                left: 26,
-                right: 26,
-                top: 20,
-                bottom: 18,
-            }))
-            .show(root, |ui| {
-                // Mixer and Plugins scroll inside their own panes and fill the
-                // remaining height, so they stay outside the page ScrollArea.
-                if matches!(self.page, Page::Mixer | Page::Plugins) {
-                    self.header(ui);
-                    ui.add_space(14.0);
-                    if self.page == Page::Mixer {
-                        self.mixer_page(ui);
-                    } else {
-                        self.plugins_page(ui);
-                    }
-                    return;
-                }
-                let mut page_scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
-                if let Some(offset) = self
-                    .screenshot
-                    .as_ref()
-                    .and_then(|_| screenshot::screenshot_scroll())
-                {
-                    page_scroll = page_scroll.vertical_scroll_offset(offset);
-                }
-                page_scroll.show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    self.header(ui);
-                    // The tuner skips the usual 14 px header gap and the
-                    // 18 px page bottom gap (it keeps 2 px); the panel's own
-                    // 18 px bottom margin is unchanged.
-                    if self.page != Page::Tuner {
-                        ui.add_space(14.0);
-                    }
-                    match self.page {
-                        Page::Live => self.live_page(ui, &ctx),
-                        Page::Mixer => self.mixer_page(ui),
-                        Page::Tuner => self.tuner_page(ui),
-                        Page::Routing => self.routing_page(ui),
-                        Page::Devices => self.devices_page(ui),
-                        Page::Sessions => self.sessions_page(ui),
-                        Page::Plugins => self.plugins_page(ui),
-                        Page::Guide => self.guide_page(ui),
-                        Page::Diagnostics => self.diagnostics_page(ui),
-                    }
-                    ui.add_space(if self.page == Page::Tuner { 2.0 } else { 18.0 });
-                });
-            });
-
-        if self.show_about {
-            // Fixed outer size so the window frame (and its right border) stays
-            // fully on-screen; inner content is capped below that.
-            egui::Window::new("About RigWerk")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .fixed_size(Vec2::new(420.0, 340.0))
-                .frame(
-                    egui::Frame::new()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0, BORDER))
-                        .corner_radius(egui::CornerRadius::same(12))
-                        .inner_margin(Margin::same(16)),
-                )
-                .show(&ctx, |ui| {
-                    ui.set_max_width(388.0);
-                    ui.heading("RigWerk");
-                    ui.label(
-                        RichText::new(
-                            "An independent-clock audio bridge. Capture and playback keep their own rates; a short ring absorbs the drift. Extra outputs can follow the finished mix.",
-                        )
-                        .color(MUTED),
-                    );
-                    ui.add_space(10.0);
-                    ui.label(
-                        RichText::new(
-                            "Windows: ASIO and WASAPI (DirectSound and MME when the host lists them). Mixer can add WASAPI followers; Publish uses an installed virtual cable such as VB-Audio Cable. Linux: PipeWire is the low-latency path (own nodes linked to the source and sink you pick), with direct ALSA hw: available and PulseAudio on the system side. PipeWire clocks can add follower sinks and RigWerk Out. The ALSA period is compared with the PipeWire quantum instead of hiding a mismatch.",
-                        )
-                        .size(ts(10.5))
-                        .color(GREEN),
-                    );
-                    ui.label(
-                        RichText::new(
-                            "Pick any listed input and output. Whether one interface can do both jobs at once depends on its driver; RigWerk reports what that driver allows instead of guessing.",
-                        )
-                        .size(ts(10.0))
-                        .color(MUTED),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(format!(
-                            "Version {} · preview build",
-                            env!("CARGO_PKG_VERSION")
-                        ))
-                        .color(DIM),
-                    );
-                    ui.add_space(8.0);
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Close").color(TEAL))
-                                .fill(with_alpha(TEAL, 14))
-                                .stroke(egui::Stroke::new(1.0, with_alpha(TEAL, 45)))
-                                .corner_radius(egui::CornerRadius::same(7)),
-                        )
-                        .clicked()
-                    {
-                        self.show_about = false;
-                    }
-                });
-        }
-
-        self.plugin_editor_window(&ctx);
-        self.calibration_window(&ctx);
-
-        if self.startup.is_some() {
-            egui::Window::new("Starting RigWerk")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .fixed_size(Vec2::new(360.0, 120.0))
-                .frame(
-                    egui::Frame::new()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0, BORDER))
-                        .corner_radius(egui::CornerRadius::same(12))
-                        .inner_margin(Margin::same(18)),
-                )
-                .show(&ctx, |ui| {
-                    ui.label(
-                        RichText::new("Finding audio devices…")
-                            .size(ts(14.0))
-                            .color(TEXT),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(
-                            "The window is ready. Device lists fill in as soon as the scan finishes.",
-                        )
-                        .size(ts(11.0))
-                        .color(MUTED),
-                    );
-                });
-        }
-
-        if let Some(message) = self.device_alert.clone() {
-            egui::Window::new("Audio device disconnected")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(&ctx, |ui| {
-                    ui.set_width(380.0);
-                    ui.label(RichText::new(message).size(ts(12.5)).color(TEXT));
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(
-                            "Plug the device back in (or pick another one on the Devices page), then start the bridge again.",
-                        )
-                        .size(ts(10.5))
-                        .color(MUTED),
-                    );
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Rescan devices").clicked() {
-                            self.rescan();
-                        }
-                        if ui.button("Dismiss").clicked() {
-                            self.device_alert = None;
-                        }
-                    });
-                });
-        }
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+    /// Writes preferences.  The frame's `save` forwards here.  A startup
+    /// scan still in flight does not overwrite the stored devices.
+    pub(crate) fn save_to(&mut self, storage: &mut dyn eframe::Storage) {
         // Placeholder rows must not overwrite the real stored pair while the
         // first scan is still running.
         if self.startup.is_some() {
@@ -629,50 +436,10 @@ impl eframe::App for RigWerkApp {
 }
 
 impl RigWerkApp {
-    /// Ctrl+Shift+M toggles the master mute, the same switch as the mute
-    /// button (`self.mute`; the next `meters` pass publishes it, and the
-    /// mixer ramps).  On macOS the chord is Command+Shift+M.  A second press
-    /// unmutes.  A text edit with focus keeps the key, and any modifier
-    /// other than command and shift (Alt, for one) does not count.  A held
-    /// key repeats; only the first press toggles.
-    fn handle_panic_mute(&mut self, ctx: &egui::Context) {
-        if ctx.text_edit_focused() {
-            return;
-        }
-        let pressed = ctx.input_mut(|input| {
-            let mut pressed = false;
-            input.events.retain(|event| {
-                let egui::Event::Key {
-                    key,
-                    pressed: down,
-                    repeat,
-                    modifiers,
-                    ..
-                } = event
-                else {
-                    return true;
-                };
-                if *key != egui::Key::M || !*down || !modifiers.matches_exact(PANIC_MUTE_MODIFIERS)
-                {
-                    return true;
-                }
-                if !*repeat {
-                    pressed = true;
-                }
-                false
-            });
-            pressed
-        });
-        if pressed {
-            self.mute = !self.mute;
-        }
-    }
-
     pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
         // eframe builds the app on its UI thread, which is the thread that
         // services CLAP plugins; record it before any plugin can load.
         crate::audio::clap::mark_main_thread();
-        configure_style(&cc.egui_ctx);
         // A screenshot run must be reproducible and must never open audio
         // hardware, so it starts from defaults instead of saved settings.
         let raw_preferences = if screenshot.is_some() {
@@ -768,13 +535,11 @@ impl RigWerkApp {
             } else {
                 EqSlot::Pre
             },
-            chain_selected: crate::ui::pages::mixer::chain::ChainSelection::from_eq_edit(
-                if preferences.eq_edit == 1 {
-                    EqSlot::Post
-                } else {
-                    EqSlot::Pre
-                },
-            ),
+            chain_selected: chain::ChainSelection::from_eq_edit(if preferences.eq_edit == 1 {
+                EqSlot::Post
+            } else {
+                EqSlot::Pre
+            }),
             routing_device: 0,
             routing_preset_path: None,
             routing_last_card: None,
@@ -852,7 +617,7 @@ impl RigWerkApp {
         if let Some(stage) = initial_mixer_stage() {
             app.select_chain(stage);
         }
-        app.engine.set_gains(app.input_gain, app.output_gain);
+        app.apply_gains();
         app.engine
             .set_master(app.mute, app.monitor, app.input_channels, app.drift);
         // Old files (and no file) load as one path.
@@ -863,13 +628,13 @@ impl RigWerkApp {
             followers,
             preferences.selected_path,
         );
-        app.engine.set_cushion(app.cushion_mode, app.cushion_ms);
+        app.apply_cushion();
         if !screenshot_mode {
             app.begin_plugin_scan();
         }
-        app.push_log("Looking for audio devices…", BLUE);
+        app.push_log("Looking for audio devices…", LogTone::Blue);
         for notice in loaded.notices {
-            app.push_log(notice, AMBER);
+            app.push_log(notice, LogTone::Amber);
         }
         app.start_device_scan();
         app
@@ -899,20 +664,23 @@ impl RigWerkApp {
         let low_label = self.inventory.low_latency_label.clone();
         self.push_log(
             format!("{low_label} or system input: the chosen output opens independently."),
-            TEAL,
+            LogTone::Teal,
         );
         if self.inventory.asio.iter().all(|driver| driver.demo) {
             self.push_log(
                 format!("Preview driver loaded — connect a {low_label} input to go live."),
-                AMBER,
+                LogTone::Amber,
             );
         } else {
             self.push_log(
                 format!("{low_label} input detected. Ready to go live."),
-                GREEN,
+                LogTone::Green,
             );
         }
-        self.push_log("Output stays independent — shared mode is allowed.", BLUE);
+        self.push_log(
+            "Output stays independent — shared mode is allowed.",
+            LogTone::Blue,
+        );
         let input_name = self.active_input().name.clone();
         let output_name = self.selected_output().name.clone();
         let output_hint = if self.selected_output().preferred {
@@ -926,10 +694,10 @@ impl RigWerkApp {
         };
         self.push_log(
             format!("Ready: {input_name} -> {output_name}{output_hint}."),
-            TEAL,
+            LogTone::Teal,
         );
         for note in restored.notes {
-            self.push_log(note, AMBER);
+            self.push_log(note, LogTone::Amber);
         }
         self.log_scan_notes(&scan_notes);
         #[cfg(target_os = "linux")]
@@ -939,17 +707,17 @@ impl RigWerkApp {
         self.last_output_driver = None;
         self.start_output_driver_check(false);
         if self.auto_start_bridge {
-            self.push_log("Auto-start is on — starting the bridge.", BLUE);
+            self.push_log("Auto-start is on — starting the bridge.", LogTone::Blue);
             self.start_bridge();
         } else {
             self.push_log(
                 "Bridge stopped at launch. Start it when you're ready.",
-                MUTED,
+                LogTone::Muted,
             );
         }
     }
 
-    pub(crate) fn push_log(&mut self, text: impl Into<String>, tone: Color32) {
+    pub(crate) fn push_log(&mut self, text: impl Into<String>, tone: LogTone) {
         let elapsed = self.started.elapsed().as_secs();
         self.log.push(LogEntry {
             at: format!("{:02}:{:02}", elapsed / 60, elapsed % 60),
@@ -997,7 +765,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         clock_device: OutputDeviceSettings::default(),
         followers: Vec::new(),
         eq_edit: EqSlot::Pre,
-        chain_selected: crate::ui::pages::mixer::chain::ChainSelection::PreEq,
+        chain_selected: chain::ChainSelection::PreEq,
         routing_device: 0,
         routing_preset_path: None,
         routing_last_card: None,

@@ -145,7 +145,7 @@ fn names_stay_unique() {
 
 #[test]
 fn selecting_another_path_resets_its_insert_selection() {
-    use crate::ui::pages::mixer::chain::ChainSelection;
+    use crate::app::chain::ChainSelection;
     let mut app = blank_app();
     app.engine
         .restore_plugins(0, vec![insert("A.vst3"), insert("B.vst3")]);

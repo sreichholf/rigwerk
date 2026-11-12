@@ -21,6 +21,7 @@ use crate::ui::widgets::{
 };
 
 use super::outputs::RoutingAction;
+use crate::ui::theme::path_colour;
 
 /// Under the cards.
 pub(crate) const CARDS_NOTE: &str =
@@ -570,7 +571,7 @@ impl RigWerkApp {
                             "",
                             MUTED,
                             &format!("{} · {}", info.name, info.summary()),
-                            Some(info.colour),
+                            Some(path_colour(info.colour_index)),
                         );
                     }
                 });
@@ -680,7 +681,7 @@ impl RigWerkApp {
             Stroke::new(
                 1.0,
                 if info.selected {
-                    with_alpha(info.colour, 70)
+                    with_alpha(path_colour(info.colour_index), 70)
                 } else {
                     BORDER_SOFT
                 },
@@ -696,7 +697,7 @@ impl RigWerkApp {
                 sw: 0,
                 se: 0,
             },
-            info.colour,
+            path_colour(info.colour_index),
         );
         let content = rect
             .shrink2(Vec2::new(12.0, 11.0))
@@ -717,7 +718,8 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let (dot, _) = ui.allocate_exact_size(Vec2::new(10.0, 22.0), Sense::hover());
-            ui.painter().circle_filled(dot.center(), 4.0, info.colour);
+            ui.painter()
+                .circle_filled(dot.center(), 4.0, path_colour(info.colour_index));
             ui.add_space(4.0);
             let font = FontId::new(ts(12.5), FontFamily::Proportional);
             let name = fit_text(

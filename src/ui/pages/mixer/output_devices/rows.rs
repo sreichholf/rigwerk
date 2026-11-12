@@ -6,9 +6,8 @@ use egui::{
     Stroke, Vec2,
 };
 
-use super::{
-    device_level_text, device_row_value, device_state, gain_reduction_text, OutputDeviceRow,
-};
+use super::{device_level_text, device_row_value, device_state, gain_reduction_text};
+use crate::app::output_devices::OutputDeviceRow;
 use crate::audio::{EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB};
 use crate::ui::theme::ts;
 use crate::ui::theme::{

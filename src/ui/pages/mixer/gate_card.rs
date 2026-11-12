@@ -1,5 +1,6 @@
 //! Noise-gate inspector: threshold, range, hysteresis, attack/release/hold, slot.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{Align, Color32, Layout, RichText, Vec2};
 
@@ -188,7 +189,7 @@ impl RigWerkApp {
         let gate = gate.sanitized();
         if gate != current {
             if reset {
-                self.push_log("Gate reset to defaults.", AMBER);
+                self.push_log("Gate reset to defaults.", LogTone::Amber);
             } else if gate.enabled != current.enabled {
                 self.push_log(
                     if gate.enabled {
@@ -196,7 +197,7 @@ impl RigWerkApp {
                     } else {
                         "Gate bypassed.".to_owned()
                     },
-                    AMBER,
+                    LogTone::Amber,
                 );
             } else if gate.slot != current.slot {
                 self.push_log(
@@ -204,10 +205,10 @@ impl RigWerkApp {
                         GateSlot::Pre => "Gate slot: PRE inserts.",
                         GateSlot::Post => "Gate slot: POST inserts.",
                     },
-                    AMBER,
+                    LogTone::Amber,
                 );
             }
-            self.path_mut().mix.gate = gate;
+            self.set_path_gate(gate);
             self.push_paths_to_engine();
         }
     }

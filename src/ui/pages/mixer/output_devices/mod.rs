@@ -12,15 +12,16 @@ use rows::{chain_device_row, device_level_block, list_device_row, mute_button, t
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Stroke, Vec2};
 
+use crate::app::chain::ChainSelection;
+use crate::app::output_devices::OutputDeviceRow;
 use crate::app::settings::{
     cushion_from_pref, cushion_to_pref, rate_label, FollowerPref, CUSHION_MS_MAX, CUSHION_MS_MIN,
 };
 use crate::app::RigWerkApp;
 use crate::audio::{
     CushionMode, EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
-    MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, SAFETY_GR_DB, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    MAX_FOLLOWERS, SAFETY_GR_DB, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
 };
-use crate::ui::pages::mixer::chain::ChainSelection;
 use crate::ui::pages::mixer::rack::RackAction;
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, AMBER, BLUE, BORDER_SOFT, DIM, GREEN, MUTED, RED, TEXT};
@@ -34,44 +35,6 @@ pub(crate) const ADD_DEVICE_HINT_FULL: &str = "Four followers is the maximum for
 /// Soft warn when adding a WASAPI follower while the clock is ASIO.
 pub(crate) const ASIO_WASAPI_CONFLICT_HINT: &str =
     "ASIO may have locked this card — Windows can refuse the stream as in use";
-
-/// One output device as the Mixer lists it.
-#[derive(Clone, Debug)]
-pub(crate) struct OutputDeviceRow {
-    pub(crate) name: String,
-    pub(crate) backend: String,
-    /// Channels the meters show: the real count, capped at
-    /// [`MAX_OUTPUT_CHANNELS`]. See [`device_channel_count`].
-    pub(crate) channels: usize,
-    /// The device whose callback runs the chain.
-    pub(crate) clock: bool,
-    /// RigWerk Out virtual source.
-    pub(crate) virtual_out: bool,
-    /// Index into `followers` when this is not the clock device.
-    pub(crate) follower_index: Option<usize>,
-    /// Device id missing from the current inventory.
-    pub(crate) missing: bool,
-    pub(crate) publish: bool,
-    pub(crate) settings: OutputDeviceSettings,
-    /// Safety-limiter gain reduction, dB.  0 when the device is not
-    /// limiting, and when the bridge is not running.
-    pub(crate) reduction_db: f32,
-}
-
-/// Channels to show for a device: what its open stream reported, else what
-/// the device scan found, else stereo; never more than the map can address.
-// An ASIO scan may report a stub channel count; a running ASIO stream
-// publishes the real open count (capped at MAX_OUTPUT_CHANNELS).
-pub(crate) fn device_channel_count(reported: u32, inventory: usize) -> usize {
-    let channels = if reported > 0 {
-        reported as usize
-    } else if inventory > 0 {
-        inventory
-    } else {
-        2
-    };
-    channels.min(MAX_OUTPUT_CHANNELS)
-}
 
 /// Gain reduction as the rows show it, once it is past the point where
 /// Live Issues also says the device is against the ceiling.
@@ -156,81 +119,6 @@ impl RigWerkApp {
     /// Clock device is an ASIO driver (followers are still WASAPI-only).
     pub(crate) fn clock_is_asio(&self) -> bool {
         self.selected_output().asio_clsid.is_some()
-    }
-
-    /// The output devices under the master, clock device first, then followers.
-    pub(crate) fn output_device_rows(&self) -> Vec<OutputDeviceRow> {
-        let output = self.selected_output();
-        let reported = if self.engine.state == EngineState::Running {
-            self.snapshot.output_channels
-        } else {
-            0
-        };
-        let running = self.engine.state == EngineState::Running;
-        let mut rows = vec![OutputDeviceRow {
-            name: output.name.clone(),
-            backend: output.backend.clone(),
-            channels: device_channel_count(reported, output.channels),
-            clock: true,
-            virtual_out: false,
-            follower_index: None,
-            missing: false,
-            publish: false,
-            settings: self.clock_device,
-            reduction_db: if running {
-                self.snapshot.out_reduction_db
-            } else {
-                0.0
-            },
-        }];
-        for (index, follower) in self.followers.iter().enumerate() {
-            let (channels, missing) = if follower.virtual_out {
-                (2, false)
-            } else {
-                let found = self
-                    .inventory
-                    .outputs
-                    .iter()
-                    .find(|device| device.id == follower.id);
-                let channels = if self.engine.state == EngineState::Running {
-                    let count = self
-                        .snapshot
-                        .follower_channel_counts
-                        .get(index)
-                        .copied()
-                        .unwrap_or(0);
-                    device_channel_count(count, found.map(|d| d.channels).unwrap_or(2))
-                } else {
-                    device_channel_count(0, found.map(|d| d.channels).unwrap_or(2))
-                };
-                (channels, found.is_none())
-            };
-            rows.push(OutputDeviceRow {
-                name: if follower.name.is_empty() {
-                    follower.id.clone()
-                } else {
-                    follower.name.clone()
-                },
-                backend: follower.backend.clone(),
-                channels,
-                clock: false,
-                virtual_out: follower.virtual_out,
-                follower_index: Some(index),
-                missing,
-                publish: follower.publish,
-                settings: follower.settings,
-                reduction_db: if running {
-                    self.snapshot
-                        .follower_reduction_db
-                        .get(index)
-                        .copied()
-                        .unwrap_or(0.0)
-                } else {
-                    0.0
-                },
-            });
-        }
-        rows
     }
 
     /// The device rows under the Output stage in the chain list, and the

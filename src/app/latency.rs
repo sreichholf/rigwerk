@@ -284,13 +284,16 @@ impl RigWerkApp {
         if self.selected_output().asio_clsid.is_some() {
             return "asio";
         }
+        let (real_style, exclusive) = self.output_start_flags();
         if cfg!(target_os = "windows") {
-            match self.wasapi_output_mode {
-                crate::audio::WasapiOutputMode::Exclusive => "exclusive",
-                crate::audio::WasapiOutputMode::RealStyle => "real-style",
-                crate::audio::WasapiOutputMode::Shared => "shared",
+            if exclusive {
+                "exclusive"
+            } else if real_style {
+                "real-style"
+            } else {
+                "shared"
             }
-        } else if self.low_latency_output {
+        } else if real_style {
             "low-latency"
         } else {
             "standard"

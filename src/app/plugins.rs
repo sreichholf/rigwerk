@@ -1,6 +1,7 @@
 //! Finding VST3 and CLAP bundles and adding them to the selected path's
 //! insert chain.
 
+use crate::app::LogTone;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -9,8 +10,6 @@ use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{self, ClapCandidate};
 use crate::audio::{PluginFormat, PluginPref};
-use crate::ui::theme::{AMBER, GREEN, RED, TEAL};
-
 /// One plugin a scan found.  `class_id` is set when a bundle contains more
 /// than one audio class (VST3), or holds the plugin id (CLAP), so the right
 /// one can be opened later.
@@ -193,7 +192,7 @@ impl RigWerkApp {
                             "s"
                         }
                     ),
-                    TEAL,
+                    LogTone::Teal,
                 );
             }
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -294,7 +293,7 @@ impl RigWerkApp {
                         index -= 1;
                     }
                 }
-                self.chain_selected = crate::ui::pages::mixer::chain::ChainSelection::Plugin(index);
+                self.chain_selected = crate::app::chain::ChainSelection::Plugin(index);
                 // One path reads as before; with several, name the path.
                 let target = if self.path_count() > 1 {
                     format!("path {}", self.path().name)
@@ -303,7 +302,7 @@ impl RigWerkApp {
                 };
                 self.push_log(
                     format!("{} insert added to {target}.", format.label()),
-                    GREEN,
+                    LogTone::Green,
                 );
                 self.plugin_browser.notice = Some((
                     format!("Plugin added to {target}."),
@@ -313,7 +312,7 @@ impl RigWerkApp {
             Err(error) => {
                 self.push_log(
                     format!("Could not add {} plugin: {error}", format.label()),
-                    RED,
+                    LogTone::Red,
                 );
                 self.plugin_browser.notice = Some((error, std::time::Instant::now()));
             }
@@ -360,7 +359,7 @@ impl RigWerkApp {
         if self.plugin_editor.is_none() {
             self.plugin_param_filter.clear();
         }
-        self.push_log("Plugin insert removed.", AMBER);
+        self.push_log("Plugin insert removed.", LogTone::Amber);
     }
 
     pub(crate) fn move_plugin(&mut self, index: usize, delta: isize) {
@@ -381,9 +380,8 @@ impl RigWerkApp {
         }
     }
 
-    pub(crate) fn set_plugin_bypass(&mut self, index: usize, bypass: bool) {
-        self.engine
-            .set_plugin_bypass(self.selected_path, index, bypass);
+    pub(crate) fn set_plugin_bypass(&mut self, path: usize, index: usize, bypass: bool) {
+        self.engine.set_plugin_bypass(path, index, bypass);
     }
 
     pub(crate) fn set_plugin_mix(&mut self, index: usize, mix: f32) {
@@ -429,7 +427,10 @@ impl RigWerkApp {
         if let Err(error) = self.engine.reset_plugin_parameters(key.path, key.insert) {
             self.plugin_browser.notice = Some((error, std::time::Instant::now()));
         } else {
-            self.push_log("Plugin controls reset to the plugin defaults.", TEAL);
+            self.push_log(
+                "Plugin controls reset to the plugin defaults.",
+                LogTone::Teal,
+            );
         }
     }
 }

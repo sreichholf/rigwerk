@@ -8,11 +8,10 @@
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::app::chain::ChainSelection;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::EqSlot;
-use crate::ui::pages::mixer::chain::{
-    apply_chain_bypass, live_chain_entries, ChainSelection, CHAIN_BYPASS_HINT,
-};
+use crate::ui::pages::mixer::chain::{apply_chain_bypass, live_chain_entries, CHAIN_BYPASS_HINT};
 use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT};
 use crate::ui::widgets::{bypass_pill, card_fixed, ellipsize, fit_text, micro_label, mono};

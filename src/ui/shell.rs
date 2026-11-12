@@ -1,11 +1,13 @@
 //! The window shell around every page: sidebar and header.
 
+use crate::app::LogTone;
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, FontFamily, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::app::{Page, RigWerkApp};
 use crate::audio::EngineState;
 use crate::ui::icons::{draw_logo, Icon};
+use crate::ui::theme::path_colour;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, RED,
@@ -80,7 +82,7 @@ impl RigWerkApp {
                     for info in &paths {
                         if nav_path_item(
                             ui,
-                            info.colour,
+                            path_colour(info.colour_index),
                             &info.name,
                             &info.summary(),
                             self.page == Page::Mixer && info.selected,
@@ -361,7 +363,11 @@ impl RigWerkApp {
                         } else {
                             "Bridge will stay stopped when RigWerk opens."
                         },
-                        if auto_start { TEAL } else { MUTED },
+                        if auto_start {
+                            LogTone::Teal
+                        } else {
+                            LogTone::Muted
+                        },
                     );
                 }
             });

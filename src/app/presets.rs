@@ -4,9 +4,8 @@ use crate::app::devices::{
     device_restore_note, restore_device, restore_input, DeviceRestore, InputGroup,
 };
 use crate::app::settings::{cushion_from_pref, cushion_to_pref, sanitize_preset, PathPref, Preset};
+use crate::app::LogTone;
 use crate::app::RigWerkApp;
-use crate::ui::theme::{AMBER, BLUE, MUTED, RED, TEAL};
-
 impl RigWerkApp {
     pub(crate) fn save_preset(&mut self) {
         let input = self.active_input().clone();
@@ -43,7 +42,7 @@ impl RigWerkApp {
             ..Preset::default()
         };
         if preset.name.is_empty() {
-            self.push_log("Give the patch a name before saving.", AMBER);
+            self.push_log("Give the patch a name before saving.", LogTone::Amber);
             return;
         }
         self.pending_delete = None;
@@ -51,13 +50,13 @@ impl RigWerkApp {
             let name = preset.name.clone();
             self.sessions[index] = preset;
             self.selected_session = Some(index);
-            self.push_log(format!("Updated patch “{name}”."), TEAL);
+            self.push_log(format!("Updated patch “{name}”."), LogTone::Teal);
             return;
         }
         let name = preset.name.clone();
         self.sessions.insert(0, preset);
         self.selected_session = Some(0);
-        self.push_log(format!("Saved patch “{name}”."), TEAL);
+        self.push_log(format!("Saved patch “{name}”."), LogTone::Teal);
     }
 
     /// Patches are matched by name, ignoring case and surrounding spaces.
@@ -79,7 +78,7 @@ impl RigWerkApp {
             Some(current) if current > index => Some(current - 1),
             other => other,
         };
-        self.push_log(format!("Deleted patch “{}”.", removed.name), MUTED);
+        self.push_log(format!("Deleted patch “{}”.", removed.name), LogTone::Muted);
     }
 
     pub(crate) fn apply_preset(&mut self, index: usize) {
@@ -127,10 +126,10 @@ impl RigWerkApp {
             preset.followers.clone(),
             0,
         );
-        self.engine.set_gains(self.input_gain, self.output_gain);
+        self.apply_gains();
         self.engine
             .set_master(self.mute, self.monitor, self.input_channels, self.drift);
-        self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
+        self.apply_cushion();
         self.selected_session = Some(index);
         self.pending_delete = None;
         let mut device_missing = false;
@@ -192,7 +191,7 @@ impl RigWerkApp {
         // A saved device that is not connected is an error. The mix above
         // was still applied; do not report the patch as loaded.
         if !device_missing {
-            self.push_log(format!("Loaded patch “{}”.", preset.name), BLUE);
+            self.push_log(format!("Loaded patch “{}”.", preset.name), LogTone::Blue);
         }
     }
 
@@ -203,7 +202,14 @@ impl RigWerkApp {
             return false;
         };
         let missing = matches!(restore, DeviceRestore::Missing);
-        self.push_log(note, if missing { RED } else { AMBER });
+        self.push_log(
+            note,
+            if missing {
+                LogTone::Red
+            } else {
+                LogTone::Amber
+            },
+        );
         missing
     }
 }
