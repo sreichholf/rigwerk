@@ -16,7 +16,7 @@ use super::calibration::CalibrationState;
 use super::linux::pipewire;
 #[cfg(target_os = "linux")]
 use super::linux::sink_monitor::SinkMonitor;
-use super::output_map::{AlignmentReport, OutputDeviceSettings};
+use super::output_map::{AlignmentReport, OutputDeviceSettings, MAX_FOLLOWERS};
 use super::path::{DspTime, PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
 use super::shared::FollowerPlan;
@@ -733,11 +733,76 @@ impl AudioEngine {
         self.shared.path(path).reset_plugin_parameters(index)
     }
 
+    /// Arms a recording of `source` at that endpoint's opened rate and
+    /// channel count.  Returns false, and does not arm, when the bridge
+    /// cannot name a real rate and channel count for it.
+    pub(crate) fn arm_recording(
+        &self,
+        path: std::path::PathBuf,
+        source: crate::audio::record::RecordSource,
+    ) -> bool {
+        let (rate, channels) = match &source {
+            crate::audio::record::RecordSource::Clock => (
+                self.shared.output_rate.load(Ordering::Relaxed),
+                self.shared.clock_device.channels() as usize,
+            ),
+            crate::audio::record::RecordSource::Follower(slot) => {
+                if *slot >= MAX_FOLLOWERS {
+                    return false;
+                }
+                (
+                    self.follower_recording_rate(*slot),
+                    self.shared.followers[*slot].channels() as usize,
+                )
+            }
+        };
+        if rate == 0 || channels == 0 {
+            return false;
+        }
+        self.shared.recorder.arm(path, rate, channels, source)
+    }
+
+    /// Asks the writer to finish and returns immediately.  The writer keeps
+    /// its own `Arc` from arm, so the file can close after this session is
+    /// gone.  This does not join that thread.
+    pub(crate) fn disarm_recording(&self) {
+        self.shared.recorder.disarm();
+    }
+
+    /// The recording writer's latest phase, counts and error.
+    pub(crate) fn recording_status(&self) -> crate::audio::RecordStatus {
+        self.shared.recorder.status()
+    }
+
+    /// Rate follower `slot` is actually playing.
+    ///
+    /// A generic follower publishes its opened device rate when the stream
+    /// starts.  That is the rate after its resampler.  With no opened rate,
+    /// the clock rate is used only for an in-graph duplex follower: that
+    /// path writes the device buffer in the clock callback and does not
+    /// resample.  A generic follower converts rate, and plays the ring bit
+    /// for bit only when its own rate is the clock rate, so a missing
+    /// opened rate is not guessed.
+    fn follower_recording_rate(&self, slot: usize) -> u32 {
+        let opened = self.shared.follower_bus(slot).playback_rate();
+        if opened > 0 {
+            return opened;
+        }
+        if self.shared.direct.load(Ordering::Relaxed) {
+            self.shared.output_rate.load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
     /// Swaps in a fresh session that inherits the settings which outlive a
     /// bridge start.  Every older bridge keeps the `Arc<Shared>` it was
     /// started with, so none of them can write into the session the UI now
     /// uses.
     fn replace_session(&mut self) {
+        // The old writer finishes on the Arc it kept at arm.  Shared::new
+        // below builds a fresh recorder for the session that replaces it.
+        self.disarm_recording();
         let previous = Arc::clone(&self.shared);
         let mut session = Shared::new(self.sample_rate);
         session.adopt_settings_from(&previous);
@@ -847,6 +912,9 @@ impl AudioEngine {
     /// moved to `lingering`; `poll` joins it once it finishes and only then
     /// moves the engine back to `Idle`.
     pub fn stop(&mut self) {
+        // Before the bridge is asked to stop, so the writer can finish
+        // without this call waiting on it.
+        self.disarm_recording();
         self.forget_asio_panel();
         self.stop.store(true, Ordering::Relaxed);
         self.reap_finished_bridge();
@@ -963,6 +1031,9 @@ impl AudioEngine {
     /// but is still alive (a WASAPI or ASIO output that stopped, a device
     /// loss) would otherwise keep its devices and block the next start.
     fn enter_error(&mut self) {
+        // A stalled bridge does not go through `stop` first.  Disarm still
+        // returns immediately; the writer closes the file on its own.
+        self.disarm_recording();
         self.forget_asio_panel();
         self.stop.store(true, Ordering::Relaxed);
         self.state = EngineState::Error;

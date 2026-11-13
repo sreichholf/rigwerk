@@ -29,6 +29,7 @@ use crate::audio::denormal::DenormalGuard;
 use crate::audio::input::{make_input_stream, open_input_device};
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
+use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::Shared;
 use crate::audio::types::{DeviceItem, StartConfig};
 
@@ -498,6 +499,14 @@ fn run_graph(
                                     .copy_from_slice(&mapped.sample(0).to_le_bytes());
                                 bytes[start + 4..start + 8]
                                     .copy_from_slice(&mapped.sample(1).to_le_bytes());
+                                // F32LE stereo, the format `enum_format` negotiates.
+                                // Two channels, eight bytes: the clock node only.
+                                push_device_frame(
+                                    &data.shared.recorder,
+                                    RecordSource::Clock,
+                                    mapped,
+                                    2,
+                                );
                             }
                         });
                         frames

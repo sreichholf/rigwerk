@@ -75,6 +75,7 @@ impl FollowerOutputs {
                     shared
                         .follower_ring_active(slot)
                         .store(false, Ordering::Release);
+                    shared.follower_bus(slot).set_playback_rate(0);
                 }
                 // Do not clear retry_at here when the slot is still wanted —
                 // a missing device keeps its backoff.
@@ -100,6 +101,7 @@ impl FollowerOutputs {
                 shared
                     .follower_ring_active(slot)
                     .store(false, Ordering::Release);
+                shared.follower_bus(slot).set_playback_rate(0);
             }
 
             if let Some(at) = self.retry_at[slot] {
@@ -152,6 +154,7 @@ impl FollowerOutputs {
                 shared
                     .follower_ring_active(slot)
                     .store(false, Ordering::Release);
+                shared.follower_bus(slot).set_playback_rate(0);
             }
             self.retry_at[slot] = None;
         }

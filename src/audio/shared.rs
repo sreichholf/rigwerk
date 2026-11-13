@@ -6,7 +6,9 @@
 //! its capture buffer and click are allocated with the session, so the
 //! callbacks only touch atomics.  An ASIO control-panel request lives here
 //! too: the UI sets it, and the bridge thread that owns the driver takes it
-//! between callbacks.
+//! between callbacks.  A recording of the frame one endpoint is about to
+//! play lives here too ([`super::record`]): the callbacks only push, and
+//! the writer runs off the audio thread.
 //!
 //! Everything a path owns (routing, mono, channel enable, EQs, gate, plugin
 //! chain, level, mute, solo) lives in [`PathControls`], one per path slot in
@@ -15,13 +17,11 @@
 //! ...) act on path 0 and are kept for tests.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Sentinel for [`Shared::path_delay_ns`]: no PipeWire path delay sampled yet.
 const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
 
 #[cfg(test)]
 use super::eq::{EqSettings, EqSlot};
@@ -38,6 +38,7 @@ use super::types::{CushionMode, Snapshot};
 
 use super::asio_panel::AsioPanelRequests;
 use super::calibration::Calibration;
+use super::record::Recorder;
 
 pub(crate) use super::scope::SCOPE_LEN;
 
@@ -172,6 +173,10 @@ pub(crate) struct Shared {
     /// Requests to open an ASIO driver's control panel.  The UI sets a side;
     /// the bridge thread that created that driver takes it between callbacks.
     pub(crate) asio_panel: AsioPanelRequests,
+    /// The endpoint recording.  [`Recorder::new`] does not spawn; arming
+    /// starts the writer, which keeps its own `Arc` so it can finish after
+    /// this session is dropped.
+    pub(crate) recorder: Arc<Recorder>,
 }
 
 impl Shared {
@@ -234,6 +239,7 @@ impl Shared {
             total_dsp: DspCell::default(),
             calibration: Calibration::new(),
             asio_panel: AsioPanelRequests::new(),
+            recorder: Arc::new(Recorder::new()),
         };
         shared.paths[0].set_state(PathState::Active);
         shared

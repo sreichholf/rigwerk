@@ -6,6 +6,7 @@
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::write_frame;
+use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::Shared;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -669,6 +670,9 @@ unsafe fn run(
             }
         };
         mixer.render(&shared, frames as usize, |index, mapped| {
+            if channels > 0 {
+                push_device_frame(&shared.recorder, RecordSource::Clock, mapped, channels);
+            }
             write_exclusive_frame(data, kind, channels, index, mapped);
         });
         if let Err(error) = session.render.ReleaseBuffer(frames, 0) {

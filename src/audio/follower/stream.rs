@@ -10,6 +10,7 @@ use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
 
 use super::super::devices::pick_output_config;
 use super::super::output::{clamp_output_buffer, explain_output_error, write_frame};
+use super::super::record::{push_device_frame, RecordSource};
 use super::super::shared::Shared;
 use super::super::thread_priority::PromoteOnce;
 use super::mixer::FollowerMixer;
@@ -68,6 +69,9 @@ pub(crate) fn open_follower(
     stream
         .play()
         .map_err(|error| format!("Starting follower: {error}"))?;
+    // The opened device rate.  The ring's source rate stays the clock rate,
+    // which is not what this stream plays when the two differ.
+    shared.follower_bus(slot).set_playback_rate(rate);
     Ok(OpenedFollower {
         _stream: stream,
         device_id: device_id.to_owned(),
@@ -126,6 +130,16 @@ where
                 promote.run();
                 let frames = data.len() / channels;
                 mixer.render(&mix_shared, frames, |index, mapped| {
+                    // After this mixer's resampler and dropout fade: the
+                    // frame the cable (or any other follower) actually plays.
+                    if channels > 0 {
+                        push_device_frame(
+                            &mix_shared.recorder,
+                            RecordSource::Follower(slot),
+                            mapped,
+                            channels,
+                        );
+                    }
                     write_frame(&mut data[index * channels..(index + 1) * channels], mapped);
                 });
             },
