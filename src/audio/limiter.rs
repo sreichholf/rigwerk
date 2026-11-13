@@ -66,6 +66,12 @@ impl SafetyLimiter {
         self.release = (-1.0 / samples).exp();
     }
 
+    /// Whether the gain is below unity: a cheap test for the callback,
+    /// where [`Self::reduction_db`] would take a logarithm.
+    pub(crate) fn is_limiting(&self) -> bool {
+        self.gain < 1.0
+    }
+
     /// Gain reduction right now, in dB.  0 when the gain is unity.
     pub(crate) fn reduction_db(&self) -> f32 {
         if self.gain >= 1.0 {

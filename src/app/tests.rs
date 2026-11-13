@@ -143,6 +143,7 @@ fn save_writes_the_output_devices() {
         }),
         unused: UnusedChannels::Silent,
         align: false,
+        click_mask: 0,
     };
     app.followers = vec![FollowerPref {
         id: "hw:Phones".to_owned(),
@@ -154,6 +155,21 @@ fn save_writes_the_output_devices() {
     let (_, saved) = save_text(&mut app);
     assert_eq!(saved.clock_device, app.clock_device);
     assert_eq!(saved.followers, app.followers);
+}
+
+#[test]
+fn a_relaunch_loads_the_metronome_stopped() {
+    let mut app = blank_app();
+    app.metronome_running = true;
+    app.metronome_bpm = 90.0;
+    app.metronome_rhythm = crate::audio::ClickRhythm::SixEight;
+    app.metronome_level_db = -3.0;
+    // `save_text` reloads through `load_preferences`, as a launch does.
+    let (_, saved) = save_text(&mut app);
+    assert!(!saved.metronome_running);
+    assert_eq!(saved.metronome_bpm, 90.0);
+    assert_eq!(saved.metronome_rhythm, crate::audio::ClickRhythm::SixEight);
+    assert_eq!(saved.metronome_level_db, -3.0);
 }
 
 #[test]

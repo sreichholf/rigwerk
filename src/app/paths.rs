@@ -24,8 +24,9 @@ use crate::app::settings::{default_path_name, FollowerPref, PathPref};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{
-    path_level_gain, sanitize_path_level, EqSettings, GateSettings, OutputDeviceSettings,
-    PathMapSettings, PathMix, PathState, MAX_PATHS,
+    low_bits, path_level_gain, sanitize_path_level, EqSettings, GateSettings, MapPreset,
+    OutputDeviceSettings, PathMapSettings, PathMix, PathState, UnusedChannels, MAX_OUTPUT_CHANNELS,
+    MAX_PATHS,
 };
 
 /// One live path's UI data (name, colour index) and the settings pushed to
@@ -536,6 +537,48 @@ impl RigWerkApp {
     pub(crate) fn device_path_map(&self, device: usize, slot: usize) -> Option<PathMapSettings> {
         let settings = self.device_settings().get(device).copied()?;
         settings.path_map.get(slot).copied()
+    }
+
+    /// Puts music on channels 1 and 2 and the click alone on 3 and 4 of
+    /// output device `device` (0 = clock, then followers).  An unrouted
+    /// path stays unrouted.  Level, mute, alignment, trims and polarity
+    /// stay.  Bits of the click mask at or past the device width stay too.
+    pub(crate) fn apply_click_pair(&mut self, device: usize) {
+        let channels = self.device_channels(device);
+        let Some(settings) = self.device_settings_mut().nth(device) else {
+            return;
+        };
+        for slot in 0..MAX_PATHS {
+            let map = settings.path_map[slot].map;
+            if map.is_empty() {
+                continue;
+            }
+            settings.path_map[slot].map = map.with_preset(MapPreset::Stereo12, channels);
+        }
+        settings.unused = UnusedChannels::Silent;
+        // Channels 3 and 4 are bits 2 and 3.  Bits outside this device's
+        // width are kept, so a smaller device does not forget a wider mask.
+        let width = low_bits(channels);
+        settings.click_mask = (settings.click_mask & !width) | (0b0000_1100 & width);
+    }
+
+    /// Puts the click on channel `channel` of output device `device` (0 =
+    /// clock, then followers), or takes it off.  Only that bit of the click
+    /// mask moves; routing is unchanged.  The frame pushes it with the
+    /// device settings.
+    pub(crate) fn set_click_channel(&mut self, device: usize, channel: usize, on: bool) {
+        if channel >= MAX_OUTPUT_CHANNELS {
+            return;
+        }
+        let Some(settings) = self.device_settings_mut().nth(device) else {
+            return;
+        };
+        let bit = 1u8 << channel;
+        if on {
+            settings.click_mask |= bit;
+        } else {
+            settings.click_mask &= !bit;
+        }
     }
 
     /// Sets path `slot`'s map, level, polarity and trim on output device

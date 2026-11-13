@@ -7,7 +7,10 @@
 mod rows;
 
 pub(crate) use rows::block;
-use rows::{chain_device_row, device_level_block, list_device_row, mute_button, title_name_width};
+use rows::{
+    chain_device_row, click_mask_block, device_level_block, list_device_row, mute_button,
+    title_name_width, ClickEdit,
+};
 
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Stroke, Vec2};
@@ -629,6 +632,8 @@ impl RigWerkApp {
                 &self.peak_follower_channels[follower],
                 row.reduction_db,
             );
+            ui.add_space(10.0);
+            self.click_block(ui, follower + 1, row.click_channels);
         }
         ui.add_space(10.0);
         block(ui, |ui| {
@@ -653,6 +658,25 @@ impl RigWerkApp {
                 });
             });
         });
+    }
+
+    /// The CLICK block of output device `device` (0 = clock, then
+    /// followers).  The app applies the press.
+    fn click_block(&mut self, ui: &mut egui::Ui, device: usize, channels: usize) {
+        let Some(mask) = self
+            .device_settings()
+            .get(device)
+            .map(|settings| settings.click_mask)
+        else {
+            return;
+        };
+        match click_mask_block(ui, mask, channels) {
+            Some(ClickEdit::Pair) => self.apply_click_pair(device),
+            Some(ClickEdit::Channel { channel, on }) => {
+                self.set_click_channel(device, channel, on);
+            }
+            None => {}
+        }
     }
 
     /// Cushion controls for a generic (non-PipeWire) follower.
@@ -813,6 +837,8 @@ impl RigWerkApp {
                 &self.peak_follower_channels[follower],
                 row.reduction_db,
             );
+            ui.add_space(10.0);
+            self.click_block(ui, follower + 1, row.click_channels);
         }
         ui.add_space(10.0);
         block(ui, |ui| {
@@ -974,6 +1000,8 @@ impl RigWerkApp {
                     .color(MUTED),
             );
         });
+        ui.add_space(10.0);
+        self.click_block(ui, 0, row.click_channels);
         ui.add_space(10.0);
 
         block(ui, |ui| {

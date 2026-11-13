@@ -283,3 +283,96 @@ fn plugin_editors_are_keyed_by_path_and_insert() {
     assert_eq!(app.plugin_editor, None);
     assert_eq!(app.selected_path, second);
 }
+
+#[test]
+fn apply_click_pair_routes_music_to_one_and_two_and_the_click_to_three_and_four() {
+    use crate::audio::{DeviceItem, MapPreset, UnusedChannels};
+
+    let mut app = blank_app();
+    app.inventory.outputs.push(DeviceItem {
+        id: "hw:Out".to_owned(),
+        name: "Out".to_owned(),
+        backend: "ALSA".to_owned(),
+        channels: 4,
+        demo: false,
+        preferred: true,
+        asio_clsid: None,
+    });
+    app.clock_device.level_db = -3.0;
+    app.clock_device.mute = true;
+    app.clock_device.align = false;
+    app.clock_device.click_mask = 0;
+    app.clock_device.path_map[0].level_db = -6.0;
+    app.clock_device.path_map[0].invert = true;
+    app.clock_device.path_map[0].trim_ms = 1.25;
+    app.clock_device.path_map[0].map = ChannelMap {
+        left: 0b1000_0001,
+        right: 0b1000_0010,
+    };
+    app.clock_device.path_map[1] = PathMapSettings {
+        level_db: -2.0,
+        invert: true,
+        trim_ms: 0.5,
+        map: ChannelMap { left: 0, right: 0 },
+    };
+    let wide = app.clock_device.path_map[0].map;
+    app.apply_click_pair(0);
+
+    let routed = app.clock_device.path_map[0];
+    assert_eq!(
+        routed.map,
+        wide.with_preset(MapPreset::Stereo12, 4),
+        "bits past the device width stay"
+    );
+    assert_ne!(routed.map.left & 0b1000_0000, 0);
+    assert_eq!(routed.level_db, -6.0);
+    assert!(routed.invert);
+    assert_eq!(routed.trim_ms, 1.25);
+    let empty = app.clock_device.path_map[1];
+    assert!(empty.map.is_empty(), "an unrouted path stays unrouted");
+    assert_eq!(empty.level_db, -2.0);
+    assert!(empty.invert);
+    assert_eq!(empty.trim_ms, 0.5);
+    assert_eq!(app.clock_device.unused, UnusedChannels::Silent);
+    assert_eq!(app.clock_device.click_mask, 0b1100);
+    // A bit past this device's width is kept when the pair is applied again.
+    app.clock_device.click_mask = 0b1000_0000;
+    app.apply_click_pair(0);
+    assert_eq!(app.clock_device.click_mask, 0b1000_1100);
+    assert!(app.clock_device.path_map[1].map.is_empty());
+    assert_eq!(app.clock_device.level_db, -3.0);
+    assert!(app.clock_device.mute);
+    assert!(!app.clock_device.align);
+}
+
+#[test]
+fn set_click_channel_moves_one_bit_of_one_device() {
+    let mut app = blank_app();
+    app.followers
+        .push(crate::app::settings::FollowerPref::default());
+    app.clock_device.click_mask = 0b1000_0001;
+    app.followers[0].settings.click_mask = 0;
+    let routing = app.clock_device.path_map;
+
+    app.set_click_channel(0, 2, true);
+    assert_eq!(app.clock_device.click_mask, 0b1000_0101);
+    app.set_click_channel(0, 0, false);
+    assert_eq!(app.clock_device.click_mask, 0b1000_0100);
+    app.set_click_channel(0, 2, true);
+    assert_eq!(
+        app.clock_device.click_mask, 0b1000_0100,
+        "setting twice is a no-op"
+    );
+    assert_eq!(app.clock_device.path_map, routing, "routing is unchanged");
+    assert_eq!(app.followers[0].settings.click_mask, 0);
+
+    app.set_click_channel(1, 3, true);
+    assert_eq!(app.followers[0].settings.click_mask, 0b1000);
+    assert_eq!(app.clock_device.click_mask, 0b1000_0100);
+
+    // Past the mask, or no such device: nothing moves.
+    app.set_click_channel(0, crate::audio::MAX_OUTPUT_CHANNELS, true);
+    app.set_click_channel(2, 0, true);
+    assert_eq!(app.clock_device.click_mask, 0b1000_0100);
+    assert_eq!(app.followers[0].settings.click_mask, 0b1000);
+}

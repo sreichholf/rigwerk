@@ -28,6 +28,8 @@
 //! - `mixer` / `resampler`: turning ring frames into output frames.
 //! - `calibration`: the click, the capture buffer and the correlator behind
 //!   the measured loopback (the estimate stays in `app::budget`).
+//! - `metronome`: the click generator.  One voice, mixed onto device
+//!   channels after the safety ceiling.
 //! - `follower`: generic multi-output (each follower mixed and mapped on the
 //!   clock callback → own ring + cpal stream).
 //! - `ring`: lock-free multi-lane SPSC ring for each generic follower.
@@ -59,6 +61,7 @@ pub(crate) use follower::FOLLOWER_DRIFT_LIMIT_PPM;
 mod gate;
 mod input;
 mod limiter;
+mod metronome;
 mod mixer;
 mod output;
 mod output_map;
@@ -120,6 +123,7 @@ pub(crate) use linux::native::{is_native_id, node_latency_frames, node_name as l
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
 #[cfg(test)]
 pub(crate) use mixer::OutputMixer;
+pub(crate) use output_map::low_bits;
 pub use output_map::{
     AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
     UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
@@ -131,6 +135,11 @@ pub(crate) use shared::tests::claim_main_thread;
 #[cfg(test)]
 pub(crate) use limiter::safety_ceiling_linear;
 pub(crate) use limiter::{SAFETY_CEILING_DB, SAFETY_GR_DB};
+pub(crate) use metronome::{clamp_click_level_db, clamp_metronome_bpm, click_level_gain};
+pub use metronome::{
+    ClickRhythm, CLICK_LEVEL_DEFAULT_DB, CLICK_LEVEL_MAX_DB, CLICK_LEVEL_MIN_DB, CLICK_RHYTHMS,
+    METRONOME_BPM_DEFAULT, METRONOME_BPM_MAX, METRONOME_BPM_MIN,
+};
 pub use output_map::PATH_TRIM_MAX_MS;
 pub(crate) use path::path_level_gain;
 pub(crate) use path::PathState;

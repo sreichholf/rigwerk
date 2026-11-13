@@ -29,6 +29,10 @@ pub(crate) struct AlignmentPlan {
     /// The path the others wait for: the slowest routed one, when align is
     /// on and some other routed path is faster.
     pub(crate) waits_for: Option<usize>,
+    /// The delay a routed path with no chain latency and no trim would get
+    /// here: the slowest latency with align on (0 with it off), plus the
+    /// shift a negative trim gives every path.  The metronome waits this.
+    pub(crate) dry: u32,
 }
 
 /// Works out one device's alignment from which paths it plays (`routed`),
@@ -40,7 +44,8 @@ pub(crate) struct AlignmentPlan {
 /// un-soloed included, so muting never moves the latency.  With it off,
 /// only the trim applies.  Negative results shift every routed path by the
 /// same amount, so the smallest delay is 0 (a negative trim makes the
-/// others wait instead).  Delays are clamped to [`MAX_ALIGN_DELAY`].
+/// others wait instead).  Delays are clamped to [`MAX_ALIGN_DELAY`].  The
+/// same rule for a dry, untrimmed path gives [`AlignmentPlan::dry`].
 pub(crate) fn plan_alignment(
     align: bool,
     routed: [bool; MAX_PATHS],
@@ -65,6 +70,8 @@ pub(crate) fn plan_alignment(
         let delay = (raw(path) + shift).clamp(0, MAX_ALIGN_DELAY as i64);
         plan.delays[path] = Some(delay as u32);
     }
+    let dry = if align { max } else { 0 };
+    plan.dry = (dry + shift).clamp(0, MAX_ALIGN_DELAY as i64) as u32;
     if align && routed_paths().any(|path| latency[path] < max) {
         plan.waits_for = Some(slowest);
     }

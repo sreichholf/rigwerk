@@ -23,9 +23,9 @@ use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
 use crate::app::issues::IssueCard;
 use crate::app::{LogTone, Page, RigWerkApp};
-use crate::audio::AsioPanelSide;
+use crate::audio::{AsioPanelSide, ClickRhythm};
 use crate::ui::theme::ts;
-use crate::ui::theme::{log_colour, with_alpha, BLUE, BORDER, CARD, DIM, MUTED, TEAL};
+use crate::ui::theme::{log_colour, with_alpha, AMBER, BLUE, BORDER, CARD, DIM, MUTED, TEAL};
 use crate::ui::widgets::{card_fixed, ellipsize, micro_label, mono, status_dot, tab_button_sized};
 
 impl RigWerkApp {
@@ -306,6 +306,30 @@ impl RigWerkApp {
                             |ui| {
                                 ui.set_min_height(row_h);
                                 ui.set_max_height(row_h);
+                                ui.label(micro_label("BEAT", DIM));
+                                ui.add_space(4.0);
+                                match self.snapshot.metronome_beat {
+                                    0 => {
+                                        ui.label(mono("—", DIM, 11.0));
+                                    }
+                                    1 => {
+                                        ui.label(mono("1", AMBER, 11.0));
+                                    }
+                                    beat => {
+                                        ui.label(mono(beat.to_string(), TEAL, 11.0));
+                                    }
+                                }
+                                ui.add_space(6.0);
+                                // Beat 0 is "—", so the selected signature is
+                                // fine.  A sounding beat uses the rhythm the
+                                // mixer published with it.
+                                let signature = if self.snapshot.metronome_beat == 0 {
+                                    self.metronome_rhythm.label()
+                                } else {
+                                    ClickRhythm::from_u8(self.snapshot.metronome_rhythm).label()
+                                };
+                                ui.label(mono(signature, DIM, 11.0));
+                                ui.add_space(12.0);
                                 ui.label(micro_label("RECENT ACTIVITY", DIM));
                                 ui.add_space(8.0);
                                 ui.label(mono(&latest.0, DIM, 8.5));

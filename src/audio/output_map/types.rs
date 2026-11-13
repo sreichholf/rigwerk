@@ -133,7 +133,7 @@ impl ChannelMap {
 }
 
 /// Bits of the first `channels` device channels.
-fn low_bits(channels: usize) -> u8 {
+pub(crate) fn low_bits(channels: usize) -> u8 {
     if channels >= MAX_OUTPUT_CHANNELS {
         u8::MAX
     } else {
@@ -275,9 +275,10 @@ impl PathMapSettings {
     }
 }
 
-/// Level, mute and channel maps of one output device, applied after the
-/// master.  Missing fields read as the defaults (0 dB, unmuted, L → 1,
-/// R → 2 for every path, mono copy on the rest), which is today's output.
+/// Level, mute, click mask and channel maps of one output device, applied
+/// after the master.  Missing fields read as the defaults (0 dB, unmuted,
+/// no click, L → 1, R → 2 for every path, mono copy on the rest), which is
+/// today's output.
 ///
 /// `path_map` is indexed by path slot in memory.  Saved, it is indexed by
 /// the path's position in the saved `paths` list (the app compacts it), and
@@ -296,6 +297,10 @@ pub struct OutputDeviceSettings {
     /// (see [`plan_alignment`]).  Off, only the trims apply.  On by default,
     /// and in files from before it existed.
     pub align: bool,
+    /// Which device channels carry the metronome.  Bit `n` is channel `n`
+    /// (the UI's channel `n + 1`).  0 adds the tick nowhere.  Not a path
+    /// setting: reordering paths leaves it alone.
+    pub click_mask: u8,
 }
 
 /// The saved form of [`OutputDeviceSettings`].
@@ -314,6 +319,9 @@ struct StoredDeviceSettings {
     unused: UnusedChannels,
     path_map: Vec<PathMapSettings>,
     align: bool,
+    /// Missing on older saves: the click plays nowhere.
+    #[serde(default)]
+    click_mask: u8,
 }
 
 /// A legacy `map` is stored bare (not as `Some(..)`); reads it as present.
@@ -345,6 +353,7 @@ impl From<StoredDeviceSettings> for OutputDeviceSettings {
             unused: stored.unused,
             path_map,
             align: stored.align,
+            click_mask: stored.click_mask,
         }
     }
 }
@@ -363,6 +372,7 @@ impl From<OutputDeviceSettings> for StoredDeviceSettings {
             unused: settings.unused,
             path_map: settings.path_map[..used].to_vec(),
             align: settings.align,
+            click_mask: settings.click_mask,
         }
     }
 }
@@ -375,6 +385,7 @@ impl Default for OutputDeviceSettings {
             unused: UnusedChannels::default(),
             path_map: [PathMapSettings::default(); MAX_PATHS],
             align: true,
+            click_mask: 0,
         }
     }
 }

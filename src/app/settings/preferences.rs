@@ -141,6 +141,16 @@ pub(crate) struct Preferences {
     /// recordings folder by [`sanitize_preferences`].  The writer creates it.
     #[serde(default)]
     pub(crate) record_folder: String,
+    /// Metronome transport.  Not part of a patch: applying one does not
+    /// start, stop or retune the click.  Missing fields take the defaults
+    /// below (off, 120 BPM, 4/4, −12 dB).  `metronome_running` is neither
+    /// saved nor read: a launch always starts the click stopped, and an old
+    /// file that still carries the field loads (unknown fields are ignored).
+    #[serde(skip)]
+    pub(crate) metronome_running: bool,
+    pub(crate) metronome_bpm: f32,
+    pub(crate) metronome_rhythm: crate::audio::ClickRhythm,
+    pub(crate) metronome_level_db: f32,
 }
 
 impl Default for Preferences {
@@ -199,6 +209,10 @@ impl Default for Preferences {
             tuner_auto_mute: true,
             tuner_tolerance: 1,
             record_folder: String::new(),
+            metronome_running: false,
+            metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
+            metronome_rhythm: crate::audio::ClickRhythm::FourFour,
+            metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
         }
     }
 }
@@ -584,6 +598,12 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
         crate::app::tuner::sanitise_reference(preferences.tuner_reference_hz);
     preferences.record_folder =
         crate::app::record::resolved_record_folder(&preferences.record_folder);
+    // Tempo and level are clamped here.  The app setters clamp a live edit
+    // the same way; the engine stores those values as they are.  A loaded
+    // rhythm is already a real bar (`ClickRhythm`'s serde other is 4/4).
+    preferences.metronome_bpm = crate::audio::clamp_metronome_bpm(preferences.metronome_bpm);
+    preferences.metronome_level_db =
+        crate::audio::clamp_click_level_db(preferences.metronome_level_db);
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
     let current = preferences.paths[0].clone();

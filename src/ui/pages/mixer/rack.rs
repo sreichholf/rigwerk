@@ -12,7 +12,10 @@ use crate::app::settings::{
     INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB,
 };
 use crate::app::{Page, RigWerkApp};
-use crate::audio::{EqSlot, GateSlot, PluginView};
+use crate::audio::{
+    EqSlot, GateSlot, PluginView, CLICK_LEVEL_MAX_DB, CLICK_LEVEL_MIN_DB, CLICK_RHYTHMS,
+    METRONOME_BPM_MAX, METRONOME_BPM_MIN,
+};
 use crate::ui::pages::mixer::chain::{
     bypassed_color, eq_summary, gate_summary, output_summary, path_summary, stage_color,
     CHAIN_BYPASS_HINT,
@@ -25,7 +28,7 @@ use crate::ui::theme::{
 };
 use crate::ui::widgets::{
     arrow_button, bypass_pill, db_slider, fit_text, hinted_tab, meter_row, micro_label, mono,
-    paint_tag, styled_slider, tag_width,
+    paint_tag, row_info, styled_slider, tab_button_sized, tag_width,
 };
 
 const ROW_H: f32 = 58.0;
@@ -712,7 +715,96 @@ impl RigWerkApp {
             .color(MUTED),
         );
         ui.add_space(12.0);
+        self.metronome_transport(ui);
+        ui.add_space(12.0);
         self.output_devices_block(ui, devices, select);
+    }
+
+    /// Tempo, meter and click level.  One transport for every device: which
+    /// channels hear it is set on the device.  The master mute does not
+    /// stop it.
+    fn metronome_transport(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(micro_label("METRONOME", AMBER));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let running = self.metronome_running;
+                let response = tab_button_sized(
+                    ui,
+                    if running { "STOP" } else { "START" },
+                    true,
+                    if running { AMBER } else { GREEN },
+                    9.0,
+                );
+                if response
+                    .on_hover_text("Keeps ticking when the rig is muted.")
+                    .clicked()
+                {
+                    self.set_metronome_running(!running);
+                }
+            });
+        });
+        ui.add_space(8.0);
+        ui.label(mono(format!("{:.0} BPM", self.metronome_bpm), TEXT, 12.0));
+        let mut bpm = self.metronome_bpm;
+        if styled_slider(
+            ui,
+            &mut bpm,
+            METRONOME_BPM_MIN,
+            METRONOME_BPM_MAX,
+            1.0,
+            (AMBER, "Tempo"),
+        )
+        .changed()
+        {
+            self.set_metronome_bpm(bpm);
+        }
+        ui.add_space(8.0);
+        ui.label(micro_label("RHYTHM", DIM));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            for rhythm in CLICK_RHYTHMS {
+                let active = self.metronome_rhythm == rhythm;
+                let response = tab_button_sized(ui, rhythm.label(), active, AMBER, 10.0);
+                row_info(
+                    &response,
+                    egui::Role::Button,
+                    ui.is_enabled(),
+                    format!("{} rhythm", rhythm.label()),
+                    Some(active),
+                    None,
+                );
+                if response.clicked() {
+                    self.set_metronome_rhythm(rhythm);
+                }
+            }
+        });
+        ui.label(
+            RichText::new("The one is higher and louder.")
+                .size(ts(10.5))
+                .color(MUTED),
+        );
+        ui.add_space(8.0);
+        ui.label(mono(
+            format!("{:+.1} dB", self.metronome_level_db),
+            TEXT,
+            12.0,
+        ));
+        let mut level = self.metronome_level_db;
+        if db_slider(
+            ui,
+            &mut level,
+            CLICK_LEVEL_MIN_DB,
+            CLICK_LEVEL_MAX_DB,
+            (AMBER, "Click level"),
+        ) {
+            self.set_metronome_level_db(level);
+        }
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Does not follow the master or the device fader.")
+                .size(ts(10.5))
+                .color(MUTED),
+        );
     }
 
     pub(crate) fn select_chain(&mut self, selection: ChainSelection) {

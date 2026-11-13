@@ -1,6 +1,8 @@
 use std::sync::atomic::Ordering;
 
-use crate::audio::CushionMode;
+use crate::audio::{ClickRhythm, CushionMode};
+
+const FOUR_FOUR: u8 = ClickRhythm::FourFour as u8;
 
 /// A bridge like the BT-W3 case: 128-sample input, 480-sample output step.
 fn cushion_bridge(mode: CushionMode, manual_ms: f32) -> super::Shared {
@@ -652,4 +654,83 @@ fn tap_does_not_touch_bridge_ring() {
     assert_eq!(shared.ring_frames(), 100);
     // The bridge ring still pops the frames it was given.
     assert_eq!(shared.pop_frame(), Some((0.0, 0.0)));
+}
+
+#[test]
+fn a_new_session_keeps_the_metronome_transport_but_not_the_beat() {
+    let previous = super::Shared::new(48_000);
+    previous.metronome_running.store(true, Ordering::Relaxed);
+    previous
+        .metronome_bpm
+        .store(96.0f32.to_bits(), Ordering::Relaxed);
+    previous.publish_metronome_beat(3, FOUR_FOUR);
+    let mut next = super::Shared::new(48_000);
+    next.adopt_settings_from(&previous);
+    assert!(next.metronome_running.load(Ordering::Relaxed));
+    assert_eq!(
+        f32::from_bits(next.metronome_bpm.load(Ordering::Relaxed)),
+        96.0
+    );
+    // 0 is the "—" the Live strip shows.
+    assert_eq!(next.snapshot().metronome_beat, 0);
+}
+
+#[test]
+fn a_bridge_error_clears_the_published_beat() {
+    let shared = super::Shared::new(48_000);
+    shared.publish_metronome_beat(2, FOUR_FOUR);
+    shared.set_error("device lost");
+    assert_eq!(shared.snapshot().metronome_beat, 0);
+}
+
+#[test]
+fn a_beat_written_after_the_bridge_failed_is_not_shown() {
+    // The callback can finish its block after `set_error` cleared the
+    // beat, and store its beat again.
+    let shared = super::Shared::new(48_000);
+    shared.set_error("stream error");
+    shared.publish_metronome_beat(3, FOUR_FOUR);
+    assert_eq!(shared.snapshot().metronome_beat, 0);
+    let lost = super::Shared::new(48_000);
+    lost.set_device_lost("device lost");
+    lost.publish_metronome_beat(2, FOUR_FOUR);
+    assert_eq!(lost.snapshot().metronome_beat, 0);
+    // A running bridge shows its beat.
+    let running = super::Shared::new(48_000);
+    running.running.store(true, Ordering::Relaxed);
+    running.publish_metronome_beat(2, FOUR_FOUR);
+    assert_eq!(running.snapshot().metronome_beat, 2);
+}
+
+#[test]
+fn a_stopping_bridge_shows_no_beat() {
+    let shared = super::Shared::new(48_000);
+    shared.running.store(true, Ordering::Relaxed);
+    shared.publish_metronome_beat(2, FOUR_FOUR);
+    assert_eq!(shared.snapshot().metronome_beat, 2);
+    // `AudioEngine::stop` clears `running` and leaves a lingering bridge
+    // whose mixer can still publish until its teardown ends.
+    shared.running.store(false, Ordering::Relaxed);
+    shared.publish_metronome_beat(3, FOUR_FOUR);
+    assert_eq!(shared.snapshot().metronome_beat, 0);
+}
+
+#[test]
+fn the_published_beat_and_rhythm_round_trip_in_one_value() {
+    for beat in [0u8, 1, 7, 12, u8::MAX] {
+        for rhythm in [0u8, ClickRhythm::ThreeFour as u8, u8::MAX] {
+            let packed = super::pack_metronome_beat(beat, rhythm);
+            assert_eq!(super::unpack_metronome_beat(packed), (beat, rhythm));
+        }
+    }
+    let shared = super::Shared::new(48_000);
+    shared.running.store(true, Ordering::Relaxed);
+    shared.publish_metronome_beat(3, ClickRhythm::SixEight as u8);
+    assert_eq!(shared.metronome_beat(), (3, ClickRhythm::SixEight as u8));
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.metronome_beat, 3);
+    assert_eq!(snapshot.metronome_rhythm, ClickRhythm::SixEight as u8);
+    // Stopping clears the beat, not the bar it belonged to.
+    shared.clear_metronome_beat();
+    assert_eq!(shared.metronome_beat(), (0, ClickRhythm::SixEight as u8));
 }

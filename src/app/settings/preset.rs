@@ -82,11 +82,16 @@ pub(crate) struct Preset {
     /// Clock device level, mute and channel map.  Older patches have none,
     /// which loads as today's output (L → 1, R → 2, mono copy on the rest).
     /// Applying such a patch resets it on purpose: a patch must restore the
-    /// routing, so this is not an `Option` like the EQs and the gate.
+    /// routing, so this is not an `Option` like the EQs and the gate.  The
+    /// click mask is written (the type is the one preferences store) but
+    /// never applied: the click is not part of a patch.  Loading one gives
+    /// each device the mask that physical device has now, as the clock or
+    /// a follower (matched by id and backend), or none if it is not live.
     pub(crate) clock_device: OutputDeviceSettings,
     /// Extra output devices.  An entry that cannot be read is skipped.
     /// Older patches have none; applying one clears the list on purpose,
-    /// for the same reason as [`Self::clock_device`].
+    /// for the same reason as [`Self::clock_device`].  Their click masks
+    /// are handled the same way.
     #[serde(default, deserialize_with = "skip_unreadable")]
     pub(crate) followers: Vec<FollowerPref>,
 }

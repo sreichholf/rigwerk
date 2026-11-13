@@ -1,9 +1,11 @@
 //! Preallocated stereo delay lines and crossfading read taps, for the
 //! latency alignment between signal paths and the dry side of a plugin
-//! insert.
+//! insert.  A mono line carries the metronome tick through the same
+//! alignment.
 //!
 //! A [`DelayLine`] is a ring of stereo frames, sized once outside the
-//! callback; writing and reading never allocate.  A [`DelayTap`] reads one
+//! callback; writing and reading never allocate.  [`MonoDelayLine`] is the
+//! same ring of single samples.  A [`DelayTap`] reads one
 //! line at a delay that can change while audio runs: a new delay never
 //! jumps, it crossfades linearly from the old read position to the new one
 //! over [`TAP_FADE_SECONDS`].  A settled tap reads the line as is, so a tap
@@ -92,6 +94,67 @@ impl DelayLine {
     }
 }
 
+/// [`DelayLine`] with one sample per frame.  Same rules: sized once,
+/// [`Self::read`] at `back` 0 is the sample written last, and anything
+/// older than the last [`Self::reset`] reads as silence.
+pub(crate) struct MonoDelayLine {
+    samples: Box<[f32]>,
+    /// Index of the sample written last.
+    write: usize,
+    /// How many samples were written since the last reset (saturating at
+    /// the capacity).
+    filled: usize,
+}
+
+impl MonoDelayLine {
+    /// A line that can delay by up to `max_delay` samples.  Allocates; call
+    /// it outside the callback.
+    pub(crate) fn new(max_delay: usize) -> Self {
+        Self {
+            samples: vec![0.0; max_delay + 1].into_boxed_slice(),
+            write: 0,
+            filled: 0,
+        }
+    }
+
+    /// Forgets the history: every older sample reads as silence again.
+    /// O(1), so the audio thread may call it.
+    pub(crate) fn reset(&mut self) {
+        self.filled = 0;
+    }
+
+    #[inline]
+    pub(crate) fn push(&mut self, sample: f32) {
+        let len = self.samples.len();
+        if len == 0 {
+            return;
+        }
+        self.write += 1;
+        if self.write >= len {
+            self.write = 0;
+        }
+        self.samples[self.write] = sample;
+        if self.filled < len {
+            self.filled += 1;
+        }
+    }
+
+    /// The sample written `back` samples before the last one (0 = the
+    /// last).  Silence past the history or the capacity.
+    #[inline]
+    pub(crate) fn read(&self, back: usize) -> f32 {
+        if back >= self.filled {
+            return 0.0;
+        }
+        let index = if back <= self.write {
+            self.write - back
+        } else {
+            self.write + self.samples.len() - back
+        };
+        self.samples[index]
+    }
+}
+
 /// One read position on a [`DelayLine`] whose delay can move without a
 /// jump.  The delay is in frames; [`Self::next`] adds an extra `back`
 /// offset for callers that write a whole chunk before reading it.
@@ -145,16 +208,21 @@ impl DelayTap {
     }
 
     /// The delay this tap settles on.
-    #[cfg(test)]
     pub(crate) fn target(&self) -> u32 {
         self.target
     }
 
     /// The longest delay this tap reads or will read: how many frames a
     /// line must keep running before what was written into it has all come
-    /// out through this tap.
+    /// out through this tap.  The delay faded away from counts only while
+    /// that fade runs: a settled tap no longer reads it.
     pub(crate) fn longest(&self) -> u32 {
-        self.current.max(self.previous).max(self.target)
+        let fading = if self.progress < 1.0 {
+            self.previous
+        } else {
+            0
+        };
+        self.current.max(fading).max(self.target)
     }
 
     /// Whether the tap reads one position (no fade running or pending).
@@ -167,22 +235,43 @@ impl DelayTap {
     /// settled tap reads the line as is.
     #[inline]
     pub(crate) fn next(&mut self, line: &DelayLine, back: usize) -> [f32; 2] {
+        let Some((current, previous, weight)) = self.advance() else {
+            return line.read(back + self.current as usize);
+        };
+        let new = line.read(back + current);
+        let old = line.read(back + previous);
+        [
+            old[0] + (new[0] - old[0]) * weight,
+            old[1] + (new[1] - old[1]) * weight,
+        ]
+    }
+
+    /// [`Self::next`] on a mono line.
+    #[inline]
+    pub(crate) fn next_mono(&mut self, line: &MonoDelayLine, back: usize) -> f32 {
+        let Some((current, previous, weight)) = self.advance() else {
+            return line.read(back + self.current as usize);
+        };
+        let new = line.read(back + current);
+        let old = line.read(back + previous);
+        old + (new - old) * weight
+    }
+
+    /// One sample of the crossfade: `None` when settled (read the current
+    /// delay as is), else the new and old delays and the new one's weight.
+    #[inline]
+    fn advance(&mut self) -> Option<(usize, usize, f32)> {
         if self.progress >= 1.0 {
             if self.target == self.current {
-                return line.read(back + self.current as usize);
+                return None;
             }
             self.previous = self.current;
             self.current = self.target;
             self.progress = 0.0;
         }
-        let new = line.read(back + self.current as usize);
-        let old = line.read(back + self.previous as usize);
         let weight = self.progress;
         self.progress = (self.progress + self.step).min(1.0);
-        [
-            old[0] + (new[0] - old[0]) * weight,
-            old[1] + (new[1] - old[1]) * weight,
-        ]
+        Some((self.current as usize, self.previous as usize, weight))
     }
 }
 

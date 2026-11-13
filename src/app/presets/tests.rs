@@ -328,6 +328,7 @@ fn presets_carry_the_output_devices() {
         }),
         unused: UnusedChannels::Silent,
         align: false,
+        click_mask: 0,
     };
     let followers = vec![
         FollowerPref {
@@ -366,6 +367,94 @@ fn presets_carry_the_output_devices() {
     app.apply_preset(1);
     assert_eq!(app.clock_device, OutputDeviceSettings::default());
     assert!(app.followers.is_empty());
+}
+
+#[test]
+fn applying_a_patch_keeps_the_click_mask() {
+    use crate::app::settings::FollowerPref;
+
+    let mut app = test_app();
+    let phones = FollowerPref {
+        id: "hw:Phones".to_owned(),
+        backend: "ALSA".to_owned(),
+        name: "Phones".to_owned(),
+        ..FollowerPref::default()
+    };
+    let monitor = FollowerPref {
+        id: "hw:Monitor".to_owned(),
+        backend: "ALSA".to_owned(),
+        name: "Monitor".to_owned(),
+        ..FollowerPref::default()
+    };
+    app.session_name = "Click".to_owned();
+    app.clock_device.click_mask = 0b0011;
+    app.followers = vec![phones.clone(), monitor.clone()];
+    app.followers[0].settings.click_mask = 0b0100;
+    app.followers[1].settings.click_mask = 0b1000;
+    app.save_preset();
+    // Saving still records the mask.
+    assert_eq!(app.sessions[0].clock_device.click_mask, 0b0011);
+    assert_eq!(app.sessions[0].followers[0].settings.click_mask, 0b0100);
+
+    // The click moves after the save; the patch does not move it back.
+    // Followers are matched by id and backend, not by position.
+    app.clock_device.click_mask = 0b1100;
+    app.followers = vec![monitor.clone()];
+    app.followers[0].settings.click_mask = 0b0001;
+    app.followers[0].settings.level_db = -6.0;
+    app.apply_preset(0);
+    assert_eq!(app.clock_device.click_mask, 0b1100);
+    assert_eq!(app.followers.len(), 2);
+    // Phones is not live now: no click there.
+    assert_eq!(app.followers[0].id, "hw:Phones");
+    assert_eq!(app.followers[0].settings.click_mask, 0);
+    // Monitor keeps its live mask; the rest comes from the patch.
+    assert_eq!(app.followers[1].id, "hw:Monitor");
+    assert_eq!(app.followers[1].settings.click_mask, 0b0001);
+    assert_eq!(app.followers[1].settings.level_db, 0.0);
+
+    // An older patch without a mask does not silence the click.
+    app.sessions.push(crate::app::settings::Preset {
+        name: "Old".to_owned(),
+        ..crate::app::settings::Preset::default()
+    });
+    app.apply_preset(1);
+    assert_eq!(app.clock_device.click_mask, 0b1100);
+}
+
+#[test]
+fn the_click_mask_follows_the_device_when_a_patch_swaps_clock_and_follower() {
+    use crate::app::settings::FollowerPref;
+
+    let mut app = test_app();
+    app.inventory
+        .outputs
+        .push(device("hw:Monitor", "Monitor", "ALSA"));
+    let as_follower = |id: &str, name: &str| FollowerPref {
+        id: id.to_owned(),
+        backend: "ALSA".to_owned(),
+        name: name.to_owned(),
+        ..FollowerPref::default()
+    };
+    // Saved with Speaker as the clock and Monitor as a follower.
+    app.session_name = "Speaker clock".to_owned();
+    app.output_idx = 0;
+    app.followers = vec![as_follower("hw:Monitor", "Monitor")];
+    app.save_preset();
+
+    // Now Monitor is the clock and Speaker a follower, each with its click.
+    app.output_idx = 1;
+    app.clock_device.click_mask = 0b0011;
+    app.followers = vec![as_follower("hw:Speaker", "Speaker")];
+    app.followers[0].settings.click_mask = 0b1100;
+    app.apply_preset(0);
+
+    // The masks move with the devices, not with the roles.
+    assert_eq!(app.selected_output().id, "hw:Speaker");
+    assert_eq!(app.clock_device.click_mask, 0b1100);
+    assert_eq!(app.followers.len(), 1);
+    assert_eq!(app.followers[0].id, "hw:Monitor");
+    assert_eq!(app.followers[0].settings.click_mask, 0b0011);
 }
 
 #[test]

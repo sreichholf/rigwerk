@@ -159,7 +159,8 @@ pub struct Snapshot {
     pub out_l: f32,
     pub out_r: f32,
     /// Block peak per clock-device channel, after its channel map, level,
-    /// safety ceiling and mute.  Channels the device does not have read 0.
+    /// safety ceiling, metronome and mute.  The tick is included.  Channels
+    /// the device does not have read 0.
     pub out_channels: [f32; MAX_OUTPUT_CHANNELS],
     /// Safety-limiter gain reduction on the clock device, dB.  0 when it
     /// is not limiting.
@@ -170,7 +171,7 @@ pub struct Snapshot {
     #[allow(dead_code)] // Exposed for Live / Mixer follower summaries.
     pub follower_count: usize,
     /// Block peak per follower channel, after that follower's map, level,
-    /// safety ceiling and mute.
+    /// safety ceiling, metronome and mute.  The tick is included.
     pub follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
     /// Safety-limiter gain reduction per follower, dB.  0 when not limiting.
     /// The virtual publish device is one of these slots.
@@ -219,6 +220,14 @@ pub struct Snapshot {
     /// True when input and output run in one PipeWire graph callback (the
     /// duplex node): there is no ring, cushion or drift correction.
     pub direct: bool,
+    /// Metronome beat the mixer last published.  0 when it is stopped,
+    /// otherwise `1..=clicks` of [`Self::metronome_rhythm`].  The Live page
+    /// reads this.  0 after the bridge stops or the device is lost.
+    pub metronome_beat: u8,
+    /// Rhythm discriminant the published beat belongs to.  Written with
+    /// the beat, so the strip does not pair a beat from the bar that is
+    /// still playing with a signature that is waiting for the next click.
+    pub metronome_rhythm: u8,
 }
 
 /// How the cushion between input and output (the ring buffer's fill target)
