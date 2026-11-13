@@ -13,6 +13,7 @@ use spa::sys as spa_sys;
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output_map::MAX_FOLLOWERS;
+use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::Shared;
 
 use super::links::Observed;
@@ -159,16 +160,30 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
             |device, index, mapped| {
                 let at = offset + index;
                 let base = device * 2;
+                let mut wrote = false;
                 if base + 1 < out_bufs.len() {
                     let out_l = out_bufs[base];
                     let out_r = out_bufs[base + 1];
                     // SAFETY: a non-null DSP output buffer holds `frames` samples.
                     if !out_l.is_null() {
                         unsafe { *out_l.add(at) = mapped.sample(0) };
+                        wrote = true;
                     }
                     if !out_r.is_null() {
                         unsafe { *out_r.add(at) = mapped.sample(1) };
+                        wrote = true;
                     }
+                }
+                // Stereo port pair (clock, then each follower).  Record the
+                // frame written into that device buffer.  The RigWerk Out
+                // publish below is a different endpoint and is not recorded.
+                if wrote {
+                    let source = if device == 0 {
+                        RecordSource::Clock
+                    } else {
+                        RecordSource::Follower(device - 1)
+                    };
+                    push_device_frame(&shared.recorder, source, mapped, 2);
                 }
                 if publish_active && device > 0 && published + index < MAX_FRAMES {
                     let slot = device - 1;

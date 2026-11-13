@@ -2,7 +2,8 @@
 //! its own file under `live/`.  Input and Output share one row, the same
 //! width and the same height.  The bridge is the strip under that row: one
 //! line when a PipeWire node has no ring, and the cushion when it does.
-//! The Issues strip (`live/issues.rs`) sits on top while there are issues,
+//! The record row (`live/record.rs`) sits directly under that strip.  The
+//! Issues strip (`live/issues.rs`) sits on top while there are issues,
 //! and "Show on <card>" there rings the bridge strip or the Output card.
 //! An ASIO side's Panel chip posts a request; the bridge thread opens the
 //! driver's control panel.
@@ -15,6 +16,7 @@ mod health;
 mod input_card;
 mod issues;
 mod output_card;
+mod record;
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
@@ -36,6 +38,8 @@ impl RigWerkApp {
         self.live_io_pair(ui, total);
         ui.add_space(10.0);
         self.bridge_card(ui, ctx);
+        ui.add_space(10.0);
+        self.record_row(ui);
 
         ui.add_space(10.0);
         self.publish_banner(ui, total);

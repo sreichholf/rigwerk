@@ -31,6 +31,11 @@ pub(crate) struct FollowerBus {
     pub(crate) manual_cushion_ms: AtomicU32,
     /// Rate the producer writes at (the clock device's output rate).
     pub(crate) source_rate: AtomicU32,
+    /// Rate the follower device plays at, published when its stream opens.
+    /// 0 until then.  This is not [`Self::source_rate`]: a cable whose rate
+    /// differs from the clock plays the resampled frame, and a recording
+    /// of that endpoint has to use this rate.
+    playback_rate: AtomicU32,
     pub(crate) underruns: AtomicU64,
     pub(crate) overruns: AtomicU64,
     /// Stream open failed or the device vanished; the bridge keeps running.
@@ -53,6 +58,7 @@ impl FollowerBus {
             cushion_mode: AtomicU32::new(CushionMode::Safe as u32),
             manual_cushion_ms: AtomicU32::new(10.0f32.to_bits()),
             source_rate: AtomicU32::new(0),
+            playback_rate: AtomicU32::new(0),
             underruns: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
             missing: AtomicBool::new(false),
@@ -135,6 +141,17 @@ impl FollowerBus {
     pub(crate) fn set_source_rate(&self, rate: u32) {
         self.source_rate.store(rate, Ordering::Relaxed);
         self.lift_to_floor();
+    }
+
+    /// Publishes the opened device rate (0 clears it).  The clock side's
+    /// producer rate stays on [`Self::set_source_rate`].
+    pub(crate) fn set_playback_rate(&self, rate: u32) {
+        self.playback_rate.store(rate, Ordering::Relaxed);
+    }
+
+    /// The opened device rate, or 0 when no stream has published one.
+    pub(crate) fn playback_rate(&self) -> u32 {
+        self.playback_rate.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set_target_frames(&self, frames: usize) {

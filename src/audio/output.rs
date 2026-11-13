@@ -12,6 +12,7 @@ use super::devices::pick_output_config;
 use super::linux::alsa::smallest_output_buffer;
 use super::mixer::OutputMixer;
 use super::output_map::DeviceFrame;
+use super::record::{push_device_frame, RecordSource};
 use super::shared::Shared;
 use super::thread_priority::PromoteOnce;
 #[cfg(target_os = "windows")]
@@ -274,6 +275,16 @@ where
                     .output_step_frames
                     .store(frames as u32, Ordering::Relaxed);
                 mixer.render(&mix_shared, frames, |index, mapped| {
+                    // The frame write_frame is about to convert: channel map,
+                    // level, limiter, mute and the calibration duck.
+                    if channels > 0 {
+                        push_device_frame(
+                            &mix_shared.recorder,
+                            RecordSource::Clock,
+                            mapped,
+                            channels,
+                        );
+                    }
                     write_frame(&mut data[index * channels..(index + 1) * channels], mapped);
                 });
             },

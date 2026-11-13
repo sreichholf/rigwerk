@@ -137,6 +137,10 @@ pub(crate) struct Preferences {
     pub(crate) tuner_auto_mute: bool,
     /// 0 tight, 1 standard, 2 live; the labels carry the cent values.
     pub(crate) tuner_tolerance: u8,
+    /// Directory takes are written into.  Empty is replaced with the default
+    /// recordings folder by [`sanitize_preferences`].  The writer creates it.
+    #[serde(default)]
+    pub(crate) record_folder: String,
 }
 
 impl Default for Preferences {
@@ -194,6 +198,7 @@ impl Default for Preferences {
             tuner_listen: 0,
             tuner_auto_mute: true,
             tuner_tolerance: 1,
+            record_folder: String::new(),
         }
     }
 }
@@ -577,6 +582,8 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     );
     preferences.tuner_reference_hz =
         crate::app::tuner::sanitise_reference(preferences.tuner_reference_hz);
+    preferences.record_folder =
+        crate::app::record::resolved_record_folder(&preferences.record_folder);
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
     let current = preferences.paths[0].clone();

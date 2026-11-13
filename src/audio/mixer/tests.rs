@@ -3,8 +3,9 @@ use std::sync::atomic::Ordering;
 use super::super::eq::{EqSettings, EqSlot};
 use super::super::output::write_frame;
 use super::super::output_map::{
-    old_write_frame, ChannelMap, OutputDeviceSettings, PathMapSettings, UnusedChannels,
+    old_write_frame, ChannelMap, DeviceFrame, OutputDeviceSettings, PathMapSettings, UnusedChannels,
 };
+use super::super::record::{push_device_frame, RecordPhase, RecordSource};
 use super::super::shared::Shared;
 use super::super::types::CushionMode;
 use super::{route_frame, OutputMixer, Ramp, CONTROL_RAMP_SECONDS};
@@ -1504,4 +1505,186 @@ fn a_calibration_click_on_a_mono_output_uses_its_only_channel() {
         // The device has one channel; the next one reads silence.
         assert_eq!(played[index].1, 0.0, "extra channel at frame {index}");
     }
+}
+
+/// The file the recorder closed, as interleaved f32.  IEEE float (format 3)
+/// and extensible float are both accepted.  Other chunks are skipped.
+fn read_f32_wav(path: &std::path::Path) -> Vec<f32> {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    assert!(bytes.len() >= 12, "wav header is short");
+    assert_eq!(&bytes[0..4], b"RIFF", "not a RIFF file");
+    assert_eq!(&bytes[8..12], b"WAVE", "not a WAVE file");
+    let mut offset = 12usize;
+    let mut format = None;
+    let mut bits = 0u16;
+    let mut data: Option<&[u8]> = None;
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let start = offset + 8;
+        let end = start + size;
+        assert!(end <= bytes.len(), "chunk {id:?} overruns the file");
+        if id == b"fmt " {
+            assert!(size >= 16, "fmt chunk is short");
+            format = Some(u16::from_le_bytes(
+                bytes[start..start + 2].try_into().unwrap(),
+            ));
+            bits = u16::from_le_bytes(bytes[start + 14..start + 16].try_into().unwrap());
+        } else if id == b"data" {
+            data = Some(&bytes[start..end]);
+        }
+        offset = end + (size & 1);
+    }
+    let format = format.expect("wav has no fmt chunk");
+    let data = data.expect("wav has no data chunk");
+    assert_eq!(bits, 32, "recording is 32-bit float, got {bits} bits");
+    assert!(
+        format == 3 || format == 0xFFFE,
+        "recording format {format} is not IEEE float"
+    );
+    assert_eq!(
+        data.len() % 4,
+        0,
+        "float data is not a whole number of samples"
+    );
+    data.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
+fn wait_for_phase(
+    recorder: &super::super::record::Recorder,
+    ready: impl Fn(&RecordPhase) -> bool,
+) -> super::super::record::RecordStatus {
+    let start = std::time::Instant::now();
+    loop {
+        let status = recorder.status();
+        if ready(&status.phase) || matches!(&status.phase, RecordPhase::Failed) {
+            return status;
+        }
+        if start.elapsed() >= std::time::Duration::from_secs(2) {
+            panic!(
+                "recording did not reach the expected phase within 2s ({} frames, error: {})",
+                status.frames,
+                status.error.clone().unwrap_or_else(|| "none".to_owned())
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn wait_until_recording(recorder: &super::super::record::Recorder) {
+    let status = wait_for_phase(recorder, |phase| matches!(phase, RecordPhase::Recording));
+    assert!(
+        matches!(&status.phase, RecordPhase::Recording),
+        "recording did not start: {}",
+        status.error.unwrap_or_else(|| "no error".to_owned())
+    );
+}
+
+fn wait_until_idle(
+    recorder: &super::super::record::Recorder,
+) -> super::super::record::RecordStatus {
+    let status = wait_for_phase(recorder, |phase| matches!(phase, RecordPhase::Idle));
+    assert!(
+        matches!(&status.phase, RecordPhase::Idle),
+        "recording failed: {}",
+        status.error.unwrap_or_else(|| "no error".to_owned())
+    );
+    status
+}
+
+fn recording_file(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("rigwerk-{name}-{}-{nanos}.wav", std::process::id()))
+}
+
+fn sample_bits(samples: &[f32]) -> Vec<u32> {
+    samples.iter().map(|sample| sample.to_bits()).collect()
+}
+
+/// The wav is the device frame after the safety limiter, not the pre-limiter
+/// master sum the scope sees.
+#[test]
+fn recording_keeps_the_limited_device_frame() {
+    let (mut mixer, shared) = steady_mixer((1.0, -1.0));
+    let channels = 2usize;
+    let rate = 48_000u32;
+    shared.set_output(rate, 64, "test");
+    mixer.publish_device_channels(&shared);
+    assert_eq!(shared.clock_device.channels() as usize, channels);
+    let path = recording_file("limited");
+    assert!(
+        shared
+            .recorder
+            .arm(path.clone(), rate, channels, RecordSource::Clock),
+        "arming the clock endpoint"
+    );
+    wait_until_recording(&shared.recorder);
+
+    let frames = 64;
+    let mut written = Vec::with_capacity(frames * channels);
+    mixer.render(&shared, frames, |_, mapped| {
+        if channels > 0 {
+            push_device_frame(&shared.recorder, RecordSource::Clock, mapped, channels);
+        }
+        for channel in 0..channels {
+            written.push(mapped.sample(channel));
+        }
+    });
+    let ceiling = crate::audio::safety_ceiling_linear();
+    // The master meters are the sum before the device limiter.  Full scale
+    // there, the ceiling on the frame that was pushed.
+    assert_eq!(f32::from_bits(shared.out_l.load(Ordering::Relaxed)), 1.0);
+    assert_eq!(f32::from_bits(shared.out_r.load(Ordering::Relaxed)), 1.0);
+    assert!(shared.clock_device.reduction_db() > 0.0);
+    assert!(written.iter().all(|sample| sample.abs() <= ceiling));
+    assert!(written.iter().any(|sample| sample.abs() == ceiling));
+    assert!(written
+        .iter()
+        .any(|sample| (sample.abs() - 1.0).abs() > 1.0e-3));
+
+    shared.recorder.disarm();
+    let _status = wait_until_idle(&shared.recorder);
+    let samples = read_f32_wav(&path);
+    assert_eq!(sample_bits(&samples), sample_bits(&written));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Clock pushes while a follower endpoint is armed stay out of the file.
+#[test]
+fn recording_a_follower_source_ignores_clock_frames() {
+    let shared = Shared::new(48_000);
+    shared.followers[0].set_channels(2);
+    shared.follower_bus(0).set_playback_rate(48_000);
+    let path = recording_file("follower");
+    assert!(shared
+        .recorder
+        .arm(path.clone(), 48_000, 2, RecordSource::Follower(0),));
+    wait_until_recording(&shared.recorder);
+
+    let clock = DeviceFrame::from_lanes(&[0.9, -0.9], 2);
+    let follower = DeviceFrame::from_lanes(&[0.25, -0.5], 2);
+    let frames = 8;
+    for _ in 0..frames {
+        push_device_frame(&shared.recorder, RecordSource::Clock, &clock, 2);
+        push_device_frame(&shared.recorder, RecordSource::Follower(0), &follower, 2);
+        // Another follower slot is a different endpoint.
+        push_device_frame(&shared.recorder, RecordSource::Follower(1), &clock, 2);
+    }
+
+    shared.recorder.disarm();
+    let _status = wait_until_idle(&shared.recorder);
+    let samples = read_f32_wav(&path);
+    let mut expected = Vec::with_capacity(frames * 2);
+    for _ in 0..frames {
+        expected.extend_from_slice(&[0.25, -0.5]);
+    }
+    assert_eq!(sample_bits(&samples), sample_bits(&expected));
+    assert!(samples.iter().all(|sample| sample.abs() != 0.9));
+    let _ = std::fs::remove_file(&path);
 }

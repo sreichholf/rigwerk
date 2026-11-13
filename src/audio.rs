@@ -31,6 +31,8 @@
 //! - `follower`: generic multi-output (each follower mixed and mapped on the
 //!   clock callback → own ring + cpal stream).
 //! - `ring`: lock-free multi-lane SPSC ring for each generic follower.
+//! - `record`: one armed endpoint into a WAV file.  The callback only
+//!   pushes; a writer thread owns the disk.
 //! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
 //! - `gate`: the built-in noise gate (PRE or POST inserts).
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
@@ -62,6 +64,7 @@ mod output;
 mod output_map;
 mod path;
 mod plugins;
+mod record;
 mod resampler;
 mod ring;
 mod scope;
@@ -139,6 +142,7 @@ pub(crate) use plugins::service_clap;
 pub(crate) use plugins::MAX_ALIGN;
 pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
+pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
 pub(crate) use shared::{FollowerLink, FollowerPlan, SCOPE_LEN};
 pub(crate) use tuner::{
     cents_to_ratio, note_name, octave, tuning_index, StringReading, TuneState, TunerAnalysis,

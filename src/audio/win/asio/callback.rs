@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use azo::sys::SampleType;
 
 use crate::audio::mixer::OutputMixer;
+use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::Shared;
 
 use super::samples::{read_asio_sample, write_asio_sample};
@@ -170,6 +171,10 @@ impl AsioCallbackContext {
             // A driver with one output now plays the L/R average (the mono
             // rule, as on cpal) instead of L alone.
             mixer.render(&self.shared, self.frames, |frame, mapped| {
+                let channels = buffers.len();
+                if channels > 0 {
+                    push_device_frame(&self.shared.recorder, RecordSource::Clock, mapped, channels);
+                }
                 for (channel, buffer) in buffers.iter().enumerate() {
                     let value = mapped.sample(channel);
                     let sample_type = types

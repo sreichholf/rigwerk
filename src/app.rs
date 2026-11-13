@@ -1,7 +1,7 @@
 //! The RigWerk window: app state, start-up, and the logic and save the frame calls.
 //!
-//! Logic is grouped in `app/` (settings, devices, bridge control, patches,
-//! screenshots, tuner).  Drawing belongs in `ui/`.  The frame shell
+//! Logic is grouped in `app/` (settings, devices, bridge control, recording,
+//! patches, screenshots, tuner).  Drawing belongs in `ui/`.  The frame shell
 //! (`impl eframe::App`) lives in `ui/frame.rs`; this file does not paint.
 
 pub(crate) mod alignment;
@@ -19,6 +19,7 @@ pub(crate) mod paths;
 pub(crate) mod plugin_gui;
 pub(crate) mod plugins;
 pub(crate) mod presets;
+pub(crate) mod record;
 pub(crate) mod screenshot;
 pub(crate) mod settings;
 pub(crate) mod startup;
@@ -242,6 +243,9 @@ pub struct RigWerkApp {
     #[cfg(target_os = "linux")]
     pub(crate) quantum: Option<audio::QuantumInfo>,
     pub(crate) session_name: String,
+    /// Directory takes are written into.  Empty is replaced on load; the
+    /// writer creates it.
+    pub(crate) record_folder: String,
     pub(crate) sessions: Vec<Preset>,
     pub(crate) selected_session: Option<usize>,
     pub(crate) pending_delete: Option<usize>,
@@ -428,6 +432,7 @@ impl RigWerkApp {
             tuner_listen: self.tuner.listen.to_u8(),
             tuner_auto_mute: self.tuner.auto_mute,
             tuner_tolerance: self.tuner.tolerance.to_u8(),
+            record_folder: self.record_folder.clone(),
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -566,6 +571,7 @@ impl RigWerkApp {
             #[cfg(target_os = "linux")]
             quantum: None,
             session_name: preferences.session_name.clone(),
+            record_folder: preferences.record_folder.clone(),
             sessions,
             selected_session,
             pending_delete: None,
@@ -792,6 +798,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         #[cfg(target_os = "linux")]
         quantum: None,
         session_name: "My guitar rig".to_owned(),
+        record_folder: String::new(),
         sessions: Vec::new(),
         selected_session: None,
         pending_delete: None,

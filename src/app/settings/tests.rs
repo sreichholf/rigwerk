@@ -1326,3 +1326,36 @@ fn chain_bypass_round_trips_and_an_old_path_stays_off() {
     assert!(old.paths[0].plugins[0].bypass);
     assert_eq!(old.paths[0].plugins[0].name, "Amp");
 }
+
+#[test]
+fn record_folder_missing_or_empty_sanitises_without_a_schema_bump() {
+    assert_eq!(PREFERENCES_SCHEMA, 2);
+    let expected = crate::app::record::default_record_folder();
+
+    // A save from before the field existed still loads, and the layout
+    // number stays 2: the field defaults, then an empty folder is filled in.
+    let missing = load_preferences(Some(r#"(session_name:"Old")"#), BACKUP);
+    assert!(missing.notices.is_empty(), "{:?}", missing.notices);
+    let missing = missing.preferences.expect("readable");
+    assert_eq!(missing.schema_version, PREFERENCES_SCHEMA);
+    assert_eq!(missing.session_name, "Old");
+    assert_eq!(missing.record_folder, expected);
+
+    let empty = load_preferences(Some(r#"(record_folder:"")"#), BACKUP);
+    assert!(empty.notices.is_empty(), "{:?}", empty.notices);
+    assert_eq!(empty.preferences.expect("readable").record_folder, expected);
+
+    let blank = load_preferences(Some(r#"(record_folder:"   ")"#), BACKUP);
+    assert!(blank.notices.is_empty(), "{:?}", blank.notices);
+    assert_eq!(blank.preferences.expect("readable").record_folder, expected);
+
+    let custom = Preferences {
+        record_folder: "  D:/Takes  ".to_owned(),
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&custom)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.schema_version, 2);
+    assert_eq!(back.record_folder, "D:/Takes");
+}
