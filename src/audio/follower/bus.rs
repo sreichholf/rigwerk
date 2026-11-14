@@ -2,17 +2,42 @@
 //! finished device channels here (its own sum of the paths, aligned and
 //! mapped); the follower's own cpal stream drains them with the same
 //! ring → resampler → drift loop the clock path uses, without the chain.
+//!
+//! A device of up to 4 channels gets twice its lanes: the played frame,
+//! then the click-free frame a take records ([`carries_record`]).  The
+//! layout is fixed when the ring is laid out for the device.  Past 4
+//! channels both would not fit in [`FRAME_LANES`], so the ring carries
+//! the played frame only and that follower's take keeps the click.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::super::output_map::{frame_lanes, DeviceFrame};
+use super::super::output_map::{frame_lanes, DeviceFrame, FRAME_LANES};
 use super::super::ring::{FrameRing, LaneFrame};
 use super::super::types::CushionMode;
 
+/// Whether a `channels`-channel follower's ring also carries the
+/// click-free lanes: both halves fit in [`FRAME_LANES`] (4 channels or
+/// fewer).
+pub(crate) fn carries_record(channels: usize) -> bool {
+    frame_lanes(channels) * 2 <= FRAME_LANES
+}
+
+/// Ring lanes per frame for a `channels`-channel follower: its
+/// [`frame_lanes`], doubled when it [`carries_record`].
+pub(crate) fn ring_lanes(channels: usize) -> usize {
+    let lanes = frame_lanes(channels);
+    if carries_record(channels) {
+        lanes * 2
+    } else {
+        lanes
+    }
+}
+
 /// One generic follower's playback bus: SPSC ring plus its own cushion.
 pub(crate) struct FollowerBus {
-    /// One lane per device channel (see [`frame_lanes`]).
+    /// [`ring_lanes`] per frame: one lane per device channel (see
+    /// [`frame_lanes`]), then the click-free ones when it [`carries_record`].
     pub(crate) ring: FrameRing,
     /// The device's channel count, set before the stream opens; the clock
     /// side maps the follower onto this many channels.
@@ -88,7 +113,7 @@ impl FollowerBus {
         self.channels
             .store(channels.min(u32::MAX as usize) as u32, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::AcqRel);
-        self.ring.set_lanes(frame_lanes(channels));
+        self.ring.set_lanes(ring_lanes(channels));
         self.lift_to_floor();
     }
 
@@ -102,9 +127,19 @@ impl FollowerBus {
         self.channels.load(Ordering::Relaxed) as usize
     }
 
-    /// Producer side: one mapped device frame.
+    /// Producer side: one mapped device frame, with its click-free lanes
+    /// after the played ones when the ring [`carries_record`].
     pub(crate) fn push_frame(&self, frame: &DeviceFrame) {
-        self.push_lanes(frame.lanes());
+        let wet = frame.lanes();
+        let count = wet.len();
+        if count * 2 <= FRAME_LANES && carries_record(self.device_channels()) {
+            let mut both = [0.0f32; FRAME_LANES];
+            both[..count].copy_from_slice(wet);
+            both[count..count * 2].copy_from_slice(frame.record_lanes());
+            self.push_lanes(&both[..count * 2]);
+        } else {
+            self.push_lanes(wet);
+        }
     }
 
     /// Producer side: one frame as lanes (missing lanes are silence).

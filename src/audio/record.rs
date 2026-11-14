@@ -18,6 +18,13 @@
 //! drains the queue as it runs and patches the WAV sizes about once a
 //! second, so a crash leaves a readable file of whatever already reached
 //! disk.
+//!
+//! A take is the endpoint's frame without the metronome tick and the
+//! calibration click, unless [`Recorder::set_with_click`] asks for the
+//! frame as played.  The flag is read per frame, so it applies mid-take.
+//! A generic follower with more than 4 channels cannot carry the
+//! click-free frame through its ring, so its take keeps the click (see
+//! `follower::bus`).
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -315,6 +322,10 @@ impl Drop for Inflight<'_> {
 /// Handle the engine keeps.  Cheap to create: no thread, no ring, no file.
 pub(crate) struct Recorder {
     inner: Arc<Inner>,
+    /// Whether a take carries the metronome tick and the calibration click
+    /// ("Record the click").  Off by default.  Read per pushed frame, so a
+    /// change lands on the next frame, also mid-take.
+    with_click: AtomicBool,
 }
 
 impl Recorder {
@@ -322,7 +333,18 @@ impl Recorder {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Inner::new()),
+            with_click: AtomicBool::new(false),
         }
+    }
+
+    /// Records the frame the endpoint plays (`true`) or the click-free one.
+    pub(crate) fn set_with_click(&self, with_click: bool) {
+        self.with_click.store(with_click, Ordering::Relaxed);
+    }
+
+    /// Whether a take carries the metronome tick and the calibration click.
+    pub(crate) fn with_click(&self) -> bool {
+        self.with_click.load(Ordering::Relaxed)
     }
 
     /// Audio thread.  Wait-free.  Copies `frame` (one sample per channel).
@@ -477,9 +499,10 @@ impl Drop for Recorder {
 }
 
 /// Audio thread helper.  Stack buffer only.  Copies `channels` samples via
-/// [`DeviceFrame::sample`] and pushes them.  `channels` is the endpoint's
-/// channel count.  Past [`FRAME_LANES`] there is no distinct slot, and a
-/// take never arms more than that, so the copy stops there.
+/// [`DeviceFrame::sample`], or [`DeviceFrame::record_sample`] while the
+/// recorder leaves the click out, and pushes them.  `channels` is the
+/// endpoint's channel count.  Past [`FRAME_LANES`] there is no distinct
+/// slot, and a take never arms more than that, so the copy stops there.
 #[inline]
 pub(crate) fn push_device_frame(
     recorder: &Recorder,
@@ -489,8 +512,13 @@ pub(crate) fn push_device_frame(
 ) {
     let count = channels.min(FRAME_LANES);
     let mut frame = [0.0f32; FRAME_LANES];
+    let with_click = recorder.with_click();
     for (channel, slot) in frame.iter_mut().enumerate().take(count) {
-        *slot = mapped.sample(channel);
+        *slot = if with_click {
+            mapped.sample(channel)
+        } else {
+            mapped.record_sample(channel)
+        };
     }
     recorder.push(source, &frame[..count]);
 }

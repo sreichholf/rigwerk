@@ -141,6 +141,10 @@ pub(crate) struct Preferences {
     /// recordings folder by [`sanitize_preferences`].  The writer creates it.
     #[serde(default)]
     pub(crate) record_folder: String,
+    /// Whether takes carry the metronome tick and the calibration click.
+    /// Off: a take is the output without them.
+    #[serde(default)]
+    pub(crate) record_click: bool,
     /// Metronome transport.  Not part of a patch: applying one does not
     /// start, stop or retune the click.  Missing fields take the defaults
     /// below (off, 120 BPM, 4/4, −12 dB).  `metronome_running` is neither
@@ -209,6 +213,7 @@ impl Default for Preferences {
             tuner_auto_mute: true,
             tuner_tolerance: 1,
             record_folder: String::new(),
+            record_click: false,
             metronome_running: false,
             metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
             metronome_rhythm: crate::audio::ClickRhythm::FourFour,

@@ -256,3 +256,104 @@ fn a_relaid_ring_takes_no_frames_from_an_older_block() {
     shared.push_follower_frame(0, bus.generation(), &frame);
     assert_eq!(bus.ring_frames(), 1);
 }
+
+/// Pushes `frames` of a frame whose played lanes are 0.75 and click-free
+/// lanes 0.25 through the clock side's entry point, then plays the
+/// follower at `device_rate` until it has run dry and faded out.  Returns
+/// each played frame's `(sample, record_sample)` on every channel.
+fn played_and_recorded(
+    channels: usize,
+    device_rate: u32,
+    frames: usize,
+) -> (Shared, Vec<Vec<(f32, f32)>>) {
+    let shared = one_follower_at(44_100, channels, 1.0);
+    shared
+        .follower_ring_active(0)
+        .store(true, Ordering::Relaxed);
+    let bus = shared.follower_bus(0);
+    let frame = super::super::output_map::DeviceFrame::from_both_lanes(
+        &vec![0.75; channels],
+        &vec![0.25; channels],
+        channels,
+    );
+    for _ in 0..frames {
+        shared.push_follower_frame(0, bus.generation(), &frame);
+    }
+    let mut mixer = FollowerMixer::new(0, device_rate, channels);
+    let mut out = Vec::new();
+    mixer.render(&shared, frames + 512, |_, mapped| {
+        out.push(
+            (0..channels)
+                .map(|channel| (mapped.sample(channel), mapped.record_sample(channel)))
+                .collect(),
+        );
+    });
+    (shared, out)
+}
+
+#[test]
+fn a_narrow_follower_carries_the_click_free_lanes_through_its_ring() {
+    for channels in [1, 2, 3, 4] {
+        let (shared, out) = played_and_recorded(channels, 48_000, 2_000);
+        assert_eq!(shared.follower_bus(0).ring.lanes(), channels * 2);
+        // Through the resampler (44.1 → 48 kHz) and the dropout fade, the
+        // click-free half keeps its own value under the same gain.
+        let mut faded = false;
+        let mut full = false;
+        for frame in &out {
+            for &(wet, record) in frame {
+                assert!(
+                    (wet - 3.0 * record).abs() < 1.0e-5,
+                    "{channels} ch: {wet} vs {record}"
+                );
+                full |= (record - 0.25).abs() < 1.0e-5;
+                faded |= record > 0.0 && record < 0.24;
+            }
+        }
+        assert!(full, "{channels} ch: the click-free frame plays");
+        assert!(faded, "{channels} ch: the fade reaches it");
+    }
+}
+
+#[test]
+fn a_wide_follower_records_the_played_lanes() {
+    for channels in [5, 8, 9, 10] {
+        let (shared, out) = played_and_recorded(channels, 44_100, 2_000);
+        assert_eq!(
+            shared.follower_bus(0).ring.lanes(),
+            super::super::output_map::frame_lanes(channels)
+        );
+        let played = out
+            .iter()
+            .flatten()
+            .filter(|(wet, _)| (*wet - 0.75).abs() < 1.0e-6)
+            .count();
+        assert!(played > 0, "{channels} ch");
+        for &(wet, record) in out.iter().flatten() {
+            assert_eq!(wet.to_bits(), record.to_bits(), "{channels} ch");
+        }
+    }
+}
+
+#[test]
+fn the_ring_doubles_its_lanes_up_to_four_channels() {
+    use super::super::output_map::FRAME_LANES;
+    use super::bus::{carries_record, ring_lanes};
+    let expected = [
+        (1, true, 2),
+        (2, true, 4),
+        (3, true, 6),
+        (4, true, 8),
+        (5, false, 5),
+        (8, false, 8),
+        // Past eight channels the shared slot is the ninth lane.
+        (9, false, 9),
+        (10, false, 9),
+        (32, false, 9),
+    ];
+    for (channels, carries, lanes) in expected {
+        assert_eq!(carries_record(channels), carries, "{channels} ch");
+        assert_eq!(ring_lanes(channels), lanes, "{channels} ch");
+        assert!(ring_lanes(channels) <= FRAME_LANES);
+    }
+}

@@ -657,6 +657,18 @@ fn tap_does_not_touch_bridge_ring() {
 }
 
 #[test]
+fn a_new_session_keeps_record_the_click() {
+    let previous = super::Shared::new(48_000);
+    let mut next = super::Shared::new(48_000);
+    next.adopt_settings_from(&previous);
+    assert!(!next.recorder.with_click());
+    previous.recorder.set_with_click(true);
+    let mut next = super::Shared::new(48_000);
+    next.adopt_settings_from(&previous);
+    assert!(next.recorder.with_click());
+}
+
+#[test]
 fn a_new_session_keeps_the_metronome_transport_but_not_the_beat() {
     let previous = super::Shared::new(48_000);
     previous.metronome_running.store(true, Ordering::Relaxed);

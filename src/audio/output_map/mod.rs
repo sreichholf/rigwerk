@@ -72,6 +72,13 @@
 //! music limiter's gain.  The mute ramp then scales the music and the tick
 //! together.  Peak meters include the tick, after the mute.
 //!
+//! Each frame also keeps a click-free copy of its lanes, taken after the
+//! ceiling and before the tick, so the click limiter never touches it.
+//! The same mute ramp and the clock's calibration duck scale it, but the
+//! calibration click is never added.  That copy is what a take records
+//! while "Record the click" is off (see `record`).  The played lanes stay
+//! bit for bit what they were without it.
+//!
 //! The tick has no chain latency and no trim, so on each device it waits
 //! the alignment delay a dry, untrimmed path would get there (see
 //! "Alignment"), from a preallocated mono line in the mapper.  Clicks then

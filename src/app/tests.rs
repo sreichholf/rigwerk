@@ -132,6 +132,21 @@ fn finish_startup_scan_restores_saved_devices_and_clears_the_gate() {
 }
 
 #[test]
+fn record_the_click_reaches_the_engine_and_the_save() {
+    let mut app = blank_app();
+    assert!(!app.record_click);
+    assert!(!app.engine.shared.recorder.with_click());
+    app.set_record_click(true);
+    assert!(app.engine.shared.recorder.with_click());
+    let (_, saved) = save_text(&mut app);
+    assert!(saved.record_click);
+    app.set_record_click(false);
+    assert!(!app.engine.shared.recorder.with_click());
+    let (_, saved) = save_text(&mut app);
+    assert!(!saved.record_click);
+}
+
+#[test]
 fn save_writes_the_output_devices() {
     let mut app = blank_app();
     app.clock_device = OutputDeviceSettings {

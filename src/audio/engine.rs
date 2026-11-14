@@ -790,6 +790,13 @@ impl AudioEngine {
         self.shared.recorder.disarm();
     }
 
+    /// Whether takes carry the metronome tick and the calibration click.
+    /// Applies from the next frame, also mid-take, and every new session
+    /// inherits it.
+    pub(crate) fn set_record_click(&self, with_click: bool) {
+        self.shared.recorder.set_with_click(with_click);
+    }
+
     /// The recording writer's latest phase, counts and error.
     pub(crate) fn recording_status(&self) -> crate::audio::RecordStatus {
         self.shared.recorder.status()
