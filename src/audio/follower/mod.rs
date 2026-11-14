@@ -2,8 +2,10 @@
 //! device, each on its own stream and clock.
 //!
 //! PipeWire duplex keeps its in-graph fan-out (`render_direct_devices`).
-//! This path is for ALSA / cpal clock devices and WASAPI followers on
-//! Windows.
+//! This path is for ALSA / cpal clock devices (also on the PipeWire
+//! two-stream bridge with a cpal clock) and WASAPI followers on Windows.
+//! With a PipeWire clock, that bridge drains the same rings into one
+//! PipeWire playback stream per node follower (`linux::native`).
 //!
 //! # Flow
 //!
@@ -60,8 +62,14 @@ mod supervisor;
 mod tests;
 
 pub(crate) use bus::FollowerBus;
+#[cfg(target_os = "linux")]
+pub(crate) use mixer::FollowerMixer;
 pub(crate) use mixer::DRIFT_LIMIT_PPM as FOLLOWER_DRIFT_LIMIT_PPM;
+#[cfg(target_os = "linux")]
+pub(crate) use stream::lay_out_ring;
 pub(crate) use supervisor::FollowerOutputs;
+#[cfg(target_os = "linux")]
+pub(crate) use supervisor::FollowerSlots;
 
 /// Whether `device_id` should play through a generic follower ring (cpal),
 /// not through a PipeWire graph link.  On Windows only WASAPI endpoints

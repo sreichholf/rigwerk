@@ -1,7 +1,58 @@
 use super::{
-    capture_window, endpoint_kind, is_alsa_shim, is_native_id, node_latency_frames, node_name,
-    path_delay_ns, playback_frames, EndpointKind,
+    capture_window, endpoint_kind, follower_node_name, is_alsa_shim, is_native_id, node_followers,
+    node_latency_frames, node_name, path_delay_ns, playback_frames, EndpointKind, CAPTURE_NODE,
+    PLAYBACK_NODE,
 };
+use crate::audio::output_map::{MAX_FOLLOWERS, VIRTUAL_OUT_ID};
+use crate::audio::shared::{FollowerLink, FollowerPlan};
+
+#[test]
+fn the_two_stream_bridge_plays_each_pipewire_node_follower_to_its_node() {
+    let node = |name: &str| FollowerLink {
+        device_id: format!("pipewire:{name}"),
+        node_name: name.to_owned(),
+        ..FollowerLink::default()
+    };
+    let mut plan = FollowerPlan {
+        count: 3,
+        ..FollowerPlan::default()
+    };
+    // A node that is missing (no name yet), RigWerk Out, then a node; a node
+    // past the count is not live.
+    plan.slots[0] = FollowerLink {
+        node_name: String::new(),
+        ..node("alsa_output.usb")
+    };
+    plan.slots[1] = FollowerLink {
+        device_id: VIRTUAL_OUT_ID.to_owned(),
+        node_name: "RigWerk Out".to_owned(),
+        virtual_out: true,
+        publish: true,
+    };
+    plan.slots[2] = node("alsa_output.hdmi");
+    plan.slots[3] = node("alsa_output.spdif");
+    assert_eq!(
+        node_followers(&plan),
+        vec![(2, "alsa_output.hdmi".to_owned())]
+    );
+    // A generic device has no node name: its own cpal stream plays it.
+    plan.slots[2] = FollowerLink {
+        device_id: "alsa:hw:1,0".to_owned(),
+        ..FollowerLink::default()
+    };
+    assert!(node_followers(&plan).is_empty());
+}
+
+#[test]
+fn each_follower_slot_gets_its_own_stream_name() {
+    let names: Vec<String> = (0..MAX_FOLLOWERS).map(follower_node_name).collect();
+    assert_eq!(names[0], "RigWerk Follower 1");
+    for (index, name) in names.iter().enumerate() {
+        assert!(names[index + 1..].iter().all(|other| other != name));
+        assert_ne!(name, CAPTURE_NODE);
+        assert_ne!(name, PLAYBACK_NODE);
+    }
+}
 
 #[test]
 fn native_ids_are_node_names_and_the_alsa_plugin_is_not() {

@@ -319,6 +319,58 @@ fn a_port_change_is_visible_without_processing_a_block() {
 }
 
 #[test]
+fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
+    use super::super::clap::tests::fake_plugin_for_test;
+    use super::slot::ProcessFailure;
+    use super::PluginChain;
+
+    let mut chain = PluginChain::new(48_000);
+    chain.insert_clap_for_test(fake_plugin_for_test(true));
+    assert_eq!(chain.active(), 1);
+    let mut left = vec![0.5f32; 64];
+    let mut right = vec![0.5f32; 64];
+    assert!(chain.process(&mut left, &mut right, 64), "a slot failed");
+
+    // The audio thread kept the plugin's own error and wrote no text.
+    let slot = chain.slot_mut_for_test(0);
+    assert!(matches!(
+        slot.process_failure,
+        Some(ProcessFailure::Clap(
+            "The CLAP plugin reported a processing error."
+        ))
+    ));
+    assert!(slot.error.is_none());
+    assert!(slot.failed());
+    assert_eq!(chain.active(), 0, "the failed insert left the chain");
+    // The block is the input.
+    assert!(left.iter().chain(&right).all(|&sample| sample == 0.5));
+
+    // The text is written when the UI thread builds the views.
+    assert_eq!(
+        chain.views()[0].error.as_deref(),
+        Some("Processing failed: The CLAP plugin reported a processing error.")
+    );
+    // A failed insert is not run again, so it does not fail again.
+    assert!(!chain.process(&mut left, &mut right, 64));
+}
+
+#[test]
+fn a_vst3_processing_failure_is_formatted_from_its_error() {
+    use super::slot::ProcessFailure;
+
+    let mut slot = Slot::empty(PluginPref::default());
+    slot.process_failure = Some(ProcessFailure::Vst3(vst3_host::Error::ProcessFailed(1)));
+    assert!(slot.failed());
+    assert_eq!(
+        slot.view().error.as_deref(),
+        Some("Processing failed: Plugin process() failed: 0x1")
+    );
+    // A load error still comes first.
+    slot.error = Some("Failed to load".to_owned());
+    assert_eq!(slot.resolved_error().as_deref(), Some("Failed to load"));
+}
+
+#[test]
 fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
@@ -343,7 +395,9 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     chain.set_bypass(1, true);
     assert_eq!(chain.latency_samples(), 112);
     // A failed insert is out of the chain.
-    chain.slot_mut_for_test(0).error = Some("Processing failed".to_owned());
+    chain.slot_mut_for_test(0).process_failure = Some(super::slot::ProcessFailure::Clap(
+        "The CLAP plugin reported a processing error.",
+    ));
     assert_eq!(chain.latency_samples(), 96);
 
     let views = chain.views();

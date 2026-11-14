@@ -5,8 +5,9 @@ plans and the code review has landed; that history is in git.
 
 ## Features
 
-- Native PipeWire playback on two streams (not the duplex node) does not
-  play to followers.  `audio/linux/native.rs` has no `FollowerOutputs`.
+- RigWerk Out is published by the PipeWire duplex node alone.  The
+  two-stream bridge (a mixed bridge, or the duplex fallback) does not
+  play it; its other followers play.
 - A take on a follower with more than four channels still includes the
   metronome click: only narrower followers carry the click-free lanes
   through their ring.
@@ -22,13 +23,22 @@ plans and the code review has landed; that history is in git.
 Recorded when the review fixes landed (November 2026), not re-checked
 since.
 
-- **Plugin chain lock.**  When the audio thread finds the chain locked, it
-  plays that block dry, without a crossfade.  Short holds that can collide:
-  a plugin reload for a new output rate, opening an editor for a slot that
-  was never loaded, cloning the plugin views, a parameter sync, and VST3
-  editor servicing (vst3-host has no lock-free path).
-- A plugin processing error formats a string on the audio thread, once per
-  failure.
+- **Plugin chain lock.**  When the audio thread finds the chain locked, the
+  plugin output for that chunk is lost: the path plays its input delayed
+  by the chain latency, so timing holds but the inserts' sound drops out.
+  The step into that dry fallback is declicked over 2 ms; once the chain
+  runs again it waits one latency, then crossfades back over 5 ms.  Short
+  holds that can collide: a plugin reload for a new output rate, opening an
+  editor for a slot that was never loaded, cloning the plugin views, a
+  parameter sync, and VST3 editor servicing (vst3-host has no lock-free
+  path).
+- **VST3 level lock.**  vst3-host's `Plugin::process_audio` takes a
+  blocking `Mutex` (`audio_levels.lock()`) after every block, on the audio
+  thread.  This is upstream, not RigWerk's code.
+- **CLAP log.**  `host_log` (`clap/host.rs`) builds a `String` and replaces
+  `last_log` (under `try_lock`) on whatever thread logs, so a plugin that
+  logs from `process` allocates and frees on the audio thread.  Nothing
+  reads `last_log`.
 - **Stuck drivers.**  A driver that never returns from open or teardown
   leaves a parked bridge thread and an error; RigWerk asks for a restart
   but cannot release the driver.
