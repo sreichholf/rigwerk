@@ -399,7 +399,7 @@ fn run_graph(
         None
     };
 
-    let _capture_listener = if let Some(stream) = capture.as_ref() {
+    let capture_listener = if let Some(stream) = capture.as_ref() {
         let capture_shared = Arc::clone(&shared);
         let state_shared = Arc::clone(&shared);
         let data = CaptureData {
@@ -465,7 +465,7 @@ fn run_graph(
         None
     };
 
-    let _playback_listener = if let Some(stream) = playback.as_ref() {
+    let playback_listener = if let Some(stream) = playback.as_ref() {
         let state_shared = Arc::clone(&shared);
         // The playback stream is always negotiated as F32LE stereo (FL/FR,
         // see `enum_format`), so the device map applies to two channels.
@@ -526,90 +526,101 @@ fn run_graph(
         None
     };
 
-    if let Some(stream) = capture.as_ref() {
-        let mut params = [pod(&capture_format)?];
-        stream
-            .connect(
-                spa::utils::Direction::Input,
-                None,
-                pw::stream::StreamFlags::AUTOCONNECT
-                    | pw::stream::StreamFlags::MAP_BUFFERS
-                    | pw::stream::StreamFlags::RT_PROCESS,
-                &mut params,
-            )
-            .map_err(|error| format!("Connecting PipeWire input: {error}"))?;
-    }
-    if let Some(stream) = playback.as_ref() {
-        let mut params = [pod(&playback_format)?];
-        stream
-            .connect(
-                spa::utils::Direction::Output,
-                None,
-                pw::stream::StreamFlags::AUTOCONNECT
-                    | pw::stream::StreamFlags::MAP_BUFFERS
-                    | pw::stream::StreamFlags::RT_PROCESS,
-                &mut params,
-            )
-            .map_err(|error| format!("Connecting PipeWire output: {error}"))?;
-    }
-
-    // Generic followers, for a cpal clock only (a PipeWire clock is offered
-    // PipeWire node followers): their own cpal streams, synced from a
-    // supervisor thread as in `bridge.rs`.  Opening a cpal device blocks, so
-    // it stays off this main loop.  The scope joins that thread, which drops
-    // the followers, before the streams below go.
-    //
-    // PipeWire node followers, for a PipeWire clock: one playback stream
-    // each, created and retried from the main loop's timer (a stream
-    // connects without blocking).  The timer owns them, so they close
-    // before the streams below too.
-    let tick: Box<dyn Fn(bool)> = if output_native {
-        let nodes = RefCell::new(FollowerSlots::<NodeFollower>::new());
-        let shared = Arc::clone(&shared);
-        let core = core.clone();
-        let buffer_frames = config.output_buffer;
-        let latency = latency_text(
-            node_latency_frames(config.pipewire_low_latency, buffer_frames),
-            output_rate,
-        );
-        Box::new(move |closing| {
-            if closing {
-                // Clear the ring-active flags before the streams go.
-                nodes.borrow_mut().close_all(&shared);
-                return;
-            }
-            let wanted = node_followers(&shared.follower_plan());
-            nodes.borrow_mut().sync(&shared, &wanted, |slot, node| {
-                open_node_follower(
-                    &core,
-                    &shared,
-                    slot,
-                    node,
-                    output_rate,
-                    buffer_frames,
-                    &latency,
+    // From the first connect on, a process callback may run on the data loop.
+    let result = (|| {
+        if let Some(stream) = capture.as_ref() {
+            let mut params = [pod(&capture_format)?];
+            stream
+                .connect(
+                    spa::utils::Direction::Input,
+                    None,
+                    pw::stream::StreamFlags::AUTOCONNECT
+                        | pw::stream::StreamFlags::MAP_BUFFERS
+                        | pw::stream::StreamFlags::RT_PROCESS,
+                    &mut params,
                 )
-            });
-        })
-    } else {
-        Box::new(|_| {})
-    };
-    tick(false);
-    let done = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        if !output_native {
-            scope.spawn(|| {
-                let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
-                while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
-                    followers.sync(&shared);
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            });
+                .map_err(|error| format!("Connecting PipeWire input: {error}"))?;
         }
-        let result = run_until_stop(&mainloop, &stop, tick);
-        done.store(true, Ordering::Relaxed);
-        result
-    })
+        if let Some(stream) = playback.as_ref() {
+            let mut params = [pod(&playback_format)?];
+            stream
+                .connect(
+                    spa::utils::Direction::Output,
+                    None,
+                    pw::stream::StreamFlags::AUTOCONNECT
+                        | pw::stream::StreamFlags::MAP_BUFFERS
+                        | pw::stream::StreamFlags::RT_PROCESS,
+                    &mut params,
+                )
+                .map_err(|error| format!("Connecting PipeWire output: {error}"))?;
+        }
+
+        // Generic followers, for a cpal clock only (a PipeWire clock is offered
+        // PipeWire node followers): their own cpal streams, synced from a
+        // supervisor thread as in `bridge.rs`.  Opening a cpal device blocks, so
+        // it stays off this main loop.  The scope joins that thread, which drops
+        // the followers, before the streams below go.
+        //
+        // PipeWire node followers, for a PipeWire clock: one playback stream
+        // each, created and retried from the main loop's timer (a stream
+        // connects without blocking).  The timer owns them, so they close
+        // before the streams below too.
+        let tick: Box<dyn Fn(bool)> = if output_native {
+            let nodes = RefCell::new(FollowerSlots::<NodeFollower>::new());
+            let shared = Arc::clone(&shared);
+            let core = core.clone();
+            let buffer_frames = config.output_buffer;
+            let latency = latency_text(
+                node_latency_frames(config.pipewire_low_latency, buffer_frames),
+                output_rate,
+            );
+            Box::new(move |closing| {
+                if closing {
+                    // Clear the ring-active flags before the streams go.
+                    nodes.borrow_mut().close_all(&shared);
+                    return;
+                }
+                let wanted = node_followers(&shared.follower_plan());
+                nodes.borrow_mut().sync(&shared, &wanted, |slot, node| {
+                    open_node_follower(
+                        &core,
+                        &shared,
+                        slot,
+                        node,
+                        output_rate,
+                        buffer_frames,
+                        &latency,
+                    )
+                });
+            })
+        } else {
+            Box::new(|_| {})
+        };
+        tick(false);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            if !output_native {
+                scope.spawn(|| {
+                    let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
+                    while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
+                        followers.sync(&shared);
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                });
+            }
+            let result = run_until_stop(&mainloop, &stop, tick);
+            done.store(true, Ordering::Relaxed);
+            result
+        })
+    })();
+    // Out of the data loop first, so no process callback still reads a
+    // listener's data when it goes; the streams are destroyed last.
+    for stream in [capture.as_ref(), playback.as_ref()].into_iter().flatten() {
+        let _ = stream.disconnect();
+    }
+    drop(capture_listener);
+    drop(playback_listener);
+    result
 }
 
 /// Runs `mainloop` until `stop` is set, calling `tick(false)` on each 50 ms
