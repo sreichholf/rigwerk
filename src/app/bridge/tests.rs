@@ -172,3 +172,73 @@ fn path_delay_is_ignored_while_stopped() {
     assert!(app.latency_caption().ends_with(" ms"));
     assert!(!app.latency_caption().contains('·'));
 }
+
+#[test]
+fn tuner_auto_mute_silences_the_click_and_the_master_mute_does_not() {
+    use std::sync::atomic::Ordering;
+
+    let engine_running =
+        |app: &RigWerkApp| app.engine.shared.metronome_running.load(Ordering::Relaxed);
+    let mut app = latency_app();
+    app.engine.state = EngineState::Running;
+    app.tuner.auto_mute = true;
+    app.page = crate::app::Page::Live;
+    app.set_metronome_running(true);
+    assert!(engine_running(&app));
+
+    // The person's own mute leaves the click ticking.
+    app.mute = true;
+    app.apply_metronome();
+    assert!(engine_running(&app));
+
+    // The tuner's layer silences it, without forgetting the transport.
+    app.mute = false;
+    app.page = crate::app::Page::Tuner;
+    app.apply_metronome();
+    assert!(!engine_running(&app));
+    assert!(app.metronome_running);
+
+    // Auto-mute off, or the tuner closed: the click plays again.
+    app.tuner.auto_mute = false;
+    app.apply_metronome();
+    assert!(engine_running(&app));
+    app.tuner.auto_mute = true;
+    app.apply_metronome();
+    assert!(!engine_running(&app));
+    app.page = crate::app::Page::Live;
+    app.apply_metronome();
+    assert!(engine_running(&app));
+
+    // A stopped click stays stopped everywhere.
+    app.set_metronome_running(false);
+    assert!(!engine_running(&app));
+}
+
+#[test]
+fn a_frame_pushes_the_click_only_when_the_tuner_layer_changes() {
+    use std::sync::atomic::Ordering;
+
+    fn shared_running(app: &RigWerkApp) -> &std::sync::atomic::AtomicBool {
+        &app.engine.shared.metronome_running
+    }
+    let mut app = latency_app();
+    app.engine.state = EngineState::Running;
+    app.tuner.auto_mute = true;
+    app.page = crate::app::Page::Live;
+    app.set_metronome_running(true);
+    assert!(shared_running(&app).load(Ordering::Relaxed));
+
+    // Nothing changed: the frame leaves the engine's flag alone.
+    shared_running(&app).store(false, Ordering::Relaxed);
+    app.follow_metronome_audible();
+    assert!(!shared_running(&app).load(Ordering::Relaxed));
+
+    // Opening the tuner, then leaving it, pushes each change.
+    shared_running(&app).store(true, Ordering::Relaxed);
+    app.page = crate::app::Page::Tuner;
+    app.follow_metronome_audible();
+    assert!(!shared_running(&app).load(Ordering::Relaxed));
+    app.page = crate::app::Page::Live;
+    app.follow_metronome_audible();
+    assert!(shared_running(&app).load(Ordering::Relaxed));
+}

@@ -118,14 +118,56 @@ impl RigWerkApp {
         self.set_wasapi_output_mode(mode);
         self.cushion_mode = cushion_from_pref(preset.cushion_mode);
         self.cushion_ms = preset.cushion_ms;
+        // The click is not part of a patch: it stays with the physical
+        // device.  Each device the patch uses (its clock and each follower)
+        // gets the mask that device has now, as the clock or as a follower,
+        // matched by id and backend; a device that is not live gets none.
+        // The patch's clock is the output it restores to, or the current
+        // output when that is not found (it stays the clock).
+        let current_output = self.selected_output();
+        let live: Vec<(&str, &str, u8)> = std::iter::once((
+            current_output.id.as_str(),
+            current_output.backend.as_str(),
+            self.clock_device.click_mask,
+        ))
+        .chain(self.followers.iter().map(|live| {
+            (
+                live.id.as_str(),
+                live.backend.as_str(),
+                live.settings.click_mask,
+            )
+        }))
+        .collect();
+        let live_mask = |id: &str, backend: &str| {
+            live.iter()
+                .find(|(live_id, live_backend, _)| {
+                    *live_id == id && live_backend.eq_ignore_ascii_case(backend)
+                })
+                .map_or(0, |&(_, _, mask)| mask)
+        };
+        let patch_output = restore_device(
+            &self.inventory.outputs,
+            &preset.output_id,
+            &preset.output_backend,
+            &preset.output,
+        )
+        .index()
+        .and_then(|index| self.inventory.outputs.get(index))
+        .unwrap_or(current_output);
+        let mut clock = preset.clock_device;
+        clock.click_mask = live_mask(&patch_output.id, &patch_output.backend);
+        let followers: Vec<_> = preset
+            .followers
+            .iter()
+            .cloned()
+            .map(|mut follower| {
+                follower.settings.click_mask = live_mask(&follower.id, &follower.backend);
+                follower
+            })
+            .collect();
         // The device maps are in the patch's path order; installing maps
         // them onto the slots the paths land in.
-        self.install_paths(
-            &preset.paths,
-            preset.clock_device,
-            preset.followers.clone(),
-            0,
-        );
+        self.install_paths(&preset.paths, clock, followers, 0);
         self.apply_gains();
         self.engine
             .set_master(self.mute, self.monitor, self.input_channels, self.drift);

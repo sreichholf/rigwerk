@@ -14,6 +14,8 @@ pub(crate) struct OutputDeviceRow {
     /// Channels the meters show: the real count, capped at
     /// [`MAX_OUTPUT_CHANNELS`]. See [`device_channel_count`].
     pub(crate) channels: usize,
+    /// Channels the click-mask chips offer.  See [`click_channels`].
+    pub(crate) click_channels: usize,
     /// The device whose callback runs the chain.
     pub(crate) clock: bool,
     /// RigWerk Out virtual source.
@@ -44,6 +46,22 @@ pub(crate) fn device_channel_count(reported: u32, inventory: usize) -> usize {
     channels.min(MAX_OUTPUT_CHANNELS)
 }
 
+/// Channels the Mixer offers for a click mask.  A native PipeWire node
+/// (`pipewire:` id) is opened stereo: the playback stream and the duplex
+/// node both map two channels, even when the sink reports more.  A chip
+/// past channel 2 would toggle a lane that is never written.  A device
+/// opened through cpal, the ALSA `pipewire` PCM included, keeps its
+/// measured count, so this limits only the chips, never `channels`.
+pub(crate) fn click_channels(device_id: &str, channels: usize) -> usize {
+    #[cfg(target_os = "linux")]
+    if crate::audio::is_native_id(device_id) {
+        return channels.min(2);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = device_id;
+    channels
+}
+
 impl RigWerkApp {
     /// The output devices under the master, clock device first, then followers.
     pub(crate) fn output_device_rows(&self) -> Vec<OutputDeviceRow> {
@@ -54,10 +72,12 @@ impl RigWerkApp {
             0
         };
         let running = self.engine.state == EngineState::Running;
+        let channels = device_channel_count(reported, output.channels);
         let mut rows = vec![OutputDeviceRow {
             name: output.name.clone(),
             backend: output.backend.clone(),
-            channels: device_channel_count(reported, output.channels),
+            channels,
+            click_channels: click_channels(&output.id, channels),
             clock: true,
             virtual_out: false,
             follower_index: None,
@@ -100,6 +120,7 @@ impl RigWerkApp {
                 },
                 backend: follower.backend.clone(),
                 channels,
+                click_channels: click_channels(&follower.id, channels),
                 clock: false,
                 virtual_out: follower.virtual_out,
                 follower_index: Some(index),

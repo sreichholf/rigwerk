@@ -13,6 +13,7 @@ fn clock_row(level_db: f32, mute: bool) -> OutputDeviceRow {
         name: "AKG N9 Hybrid".to_owned(),
         backend: "PipeWire".to_owned(),
         channels: 2,
+        click_channels: 2,
         clock: true,
         virtual_out: false,
         follower_index: None,

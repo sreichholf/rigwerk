@@ -519,6 +519,7 @@ fn output_devices() -> (OutputDeviceSettings, Vec<FollowerPref>) {
         }),
         unused: UnusedChannels::Silent,
         align: false,
+        click_mask: 0,
     };
     let followers = vec![
         FollowerPref {
@@ -561,6 +562,7 @@ fn old_saves_without_output_devices_use_defaults() {
         unused: UnusedChannels::MonoCopy,
         // Files from before the switch existed align.
         align: true,
+        click_mask: 0,
     };
     assert_eq!(OutputDeviceSettings::default(), today);
     assert_eq!(preferences.clock_device, today);
@@ -1358,4 +1360,114 @@ fn record_folder_missing_or_empty_sanitises_without_a_schema_bump() {
     let back = loaded.preferences.expect("readable");
     assert_eq!(back.schema_version, 2);
     assert_eq!(back.record_folder, "D:/Takes");
+}
+
+#[test]
+fn preferences_round_trip_the_metronome_and_stay_on_schema_2() {
+    assert_eq!(PREFERENCES_SCHEMA, 2);
+    let preferences = Preferences {
+        metronome_running: true,
+        metronome_bpm: 100.0,
+        metronome_rhythm: crate::audio::ClickRhythm::SixEight,
+        metronome_level_db: -6.0,
+        clock_device: OutputDeviceSettings {
+            click_mask: 0b1100,
+            ..OutputDeviceSettings::default()
+        },
+        followers: vec![FollowerPref {
+            settings: OutputDeviceSettings {
+                click_mask: 0b0001,
+                ..OutputDeviceSettings::default()
+            },
+            ..FollowerPref::default()
+        }],
+        ..Preferences::default()
+    };
+    let text = stored(&preferences);
+    // The transport is not written, so a launch cannot start the click.
+    assert!(!text.contains("metronome_running"), "{text}");
+    assert!(text.contains("metronome_bpm"), "{text}");
+    let loaded = load_preferences(Some(&text), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.schema_version, 2);
+    assert!(!back.metronome_running);
+    assert_eq!(back.metronome_bpm, 100.0);
+    assert_eq!(back.metronome_rhythm, crate::audio::ClickRhythm::SixEight);
+    assert_eq!(back.metronome_level_db, -6.0);
+    assert_eq!(back.clock_device.click_mask, 0b1100);
+    assert_eq!(back.followers[0].settings.click_mask, 0b0001);
+}
+
+#[test]
+fn old_preferences_load_the_metronome_off() {
+    let loaded = load_preferences(Some(r#"(session_name:"Old")"#), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let preferences = loaded.preferences.expect("readable");
+    assert_eq!(preferences.schema_version, 2);
+    assert!(!preferences.metronome_running);
+    assert_eq!(preferences.metronome_bpm, 120.0);
+    assert_eq!(
+        preferences.metronome_rhythm,
+        crate::audio::ClickRhythm::FourFour
+    );
+    assert_eq!(preferences.metronome_level_db, -12.0);
+    assert_eq!(preferences.clock_device.click_mask, 0);
+    assert!(preferences.followers.is_empty());
+}
+
+#[test]
+fn a_save_that_wrote_the_metronome_running_loads_it_stopped() {
+    let loaded = load_preferences(
+        Some(r#"(schema_version:2,metronome_running:true,metronome_bpm:90.0)"#),
+        BACKUP,
+    );
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    assert!(loaded.backup.is_none());
+    let preferences = loaded.preferences.expect("readable");
+    assert!(!preferences.metronome_running);
+    assert_eq!(preferences.metronome_bpm, 90.0);
+}
+
+#[test]
+fn preferences_clamp_a_nan_tempo_and_an_unknown_rhythm() {
+    let nan = load_preferences(
+        Some(r#"(metronome_bpm:NaN,metronome_rhythm:waltz,metronome_level_db:NaN)"#),
+        BACKUP,
+    );
+    assert!(nan.notices.is_empty(), "{:?}", nan.notices);
+    let nan = nan.preferences.expect("readable");
+    assert_eq!(nan.metronome_bpm, 120.0);
+    assert_eq!(nan.metronome_rhythm, crate::audio::ClickRhythm::FourFour);
+    assert_eq!(nan.metronome_level_db, -12.0);
+
+    let hot = load_preferences(
+        Some(r#"(metronome_bpm:999.0,metronome_level_db:12.0)"#),
+        BACKUP,
+    );
+    let hot = hot.preferences.expect("readable");
+    assert_eq!(hot.metronome_bpm, 240.0);
+    assert_eq!(hot.metronome_rhythm, crate::audio::ClickRhythm::FourFour);
+    assert_eq!(hot.metronome_level_db, 0.0);
+}
+
+#[test]
+fn preferences_preset_keeps_the_click_mask_and_not_the_transport() {
+    let preset = Preset {
+        clock_device: OutputDeviceSettings {
+            click_mask: 0b1100,
+            ..OutputDeviceSettings::default()
+        },
+        followers: vec![FollowerPref::default()],
+        ..Preset::default()
+    };
+    let text = ron::to_string(&preset).expect("preset");
+    assert!(text.contains("clock_device"), "{text}");
+    assert!(text.contains("followers"), "{text}");
+    assert!(!text.contains("metronome_bpm"), "{text}");
+    assert!(!text.contains("metronome_running"), "{text}");
+    assert!(!text.contains("metronome_rhythm"), "{text}");
+    assert!(!text.contains("metronome_level_db"), "{text}");
+    let back: Preset = ron::from_str(&text).expect("preset");
+    assert_eq!(back.clock_device.click_mask, 0b1100);
 }

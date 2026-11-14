@@ -68,6 +68,23 @@ fn a_tap_crossfades_to_a_new_delay_and_settles() {
 }
 
 #[test]
+fn a_settled_tap_no_longer_counts_the_delay_it_left() {
+    let mut line = DelayLine::new(64);
+    let mut tap = DelayTap::new(40);
+    tap.set_target(4, 10.0);
+    assert_eq!(tap.longest(), 40, "the old delay before the fade starts");
+    line.push([0.0, 0.0]);
+    tap.next(&line, 0);
+    assert_eq!(tap.longest(), 40, "and while it runs");
+    for _ in 0..20 {
+        line.push([0.0, 0.0]);
+        tap.next(&line, 0);
+    }
+    assert!(tap.is_settled());
+    assert_eq!(tap.longest(), 4);
+}
+
+#[test]
 fn a_change_during_a_fade_follows_once_it_ends() {
     let mut line = DelayLine::new(64);
     let mut tap = DelayTap::new(0);

@@ -1688,3 +1688,532 @@ fn recording_a_follower_source_ignores_clock_frames() {
     assert!(samples.iter().all(|sample| sample.abs() != 0.9));
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn the_published_beat_keeps_the_rhythm_that_is_playing() {
+    use crate::audio::ClickRhythm;
+
+    let (_, shared) = steady_mixer((0.0, 0.0));
+    let mut mixer = OutputMixer::new(48_000, 2);
+    shared.direct.store(true, Ordering::Relaxed);
+    arm_click(&shared);
+    let silence = |mixer: &mut OutputMixer, frames: usize| {
+        let input = vec![0.0f32; frames];
+        mixer.render_direct_devices(&shared, &input, &input, |_, _, _| {});
+    };
+    silence(&mut mixer, 64);
+    assert_eq!(shared.metronome_beat().0, 1);
+    assert_eq!(shared.metronome_beat().1, ClickRhythm::FourFour as u8);
+    shared
+        .metronome_rhythm
+        .store(ClickRhythm::ThreeFour as u8, Ordering::Relaxed);
+    silence(&mut mixer, 64);
+    assert_eq!(
+        shared.metronome_beat().0,
+        1,
+        "the beat in progress stays beat 1"
+    );
+    assert_eq!(
+        shared.metronome_beat().1,
+        ClickRhythm::FourFour as u8,
+        "the strip still names the bar that beat belongs to"
+    );
+    // One more click: 120 BPM at 48 kHz is 24_000 samples, and about 128
+    // of this beat are already behind us.
+    silence(&mut mixer, 24_000);
+    assert_eq!(
+        shared.metronome_beat().0,
+        1,
+        "the new bar starts on the one"
+    );
+    assert_eq!(shared.metronome_beat().1, ClickRhythm::ThreeFour as u8);
+}
+
+fn arm_click(shared: &Shared) {
+    shared.metronome_running.store(true, Ordering::Relaxed);
+    shared
+        .metronome_bpm
+        .store(120.0f32.to_bits(), Ordering::Relaxed);
+    shared
+        .metronome_rhythm
+        .store(crate::audio::ClickRhythm::FourFour as u8, Ordering::Relaxed);
+    shared.metronome_gain.store(
+        crate::audio::click_level_gain(0.0).to_bits(),
+        Ordering::Relaxed,
+    );
+}
+
+fn follower_plan() -> super::super::shared::FollowerPlan {
+    use super::super::shared::{FollowerLink, FollowerPlan};
+    let mut plan = FollowerPlan {
+        count: 1,
+        ..FollowerPlan::default()
+    };
+    plan.slots[0] = FollowerLink {
+        device_id: "test:follower".to_owned(),
+        ..FollowerLink::default()
+    };
+    plan
+}
+
+fn direct_pair(
+    clock_mask: u8,
+    follower: OutputDeviceSettings,
+    running: bool,
+) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let (_, shared) = steady_mixer((0.4, -0.2));
+    let mut mixer = OutputMixer::new(48_000, 4);
+    shared.clock_device.set(&OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: clock_mask,
+        ..OutputDeviceSettings::default()
+    });
+    shared.direct.store(true, Ordering::Relaxed);
+    shared.set_followers(&[follower], &follower_plan(), &[]);
+    if running {
+        arm_click(&shared);
+    }
+    let frames = 64;
+    let mut clock = Vec::new();
+    let mut followed = Vec::new();
+    mixer.render_direct_devices(&shared, &[0.4; 64], &[-0.2; 64], |device, _, mapped| {
+        let count = if device == 0 { 4 } else { 2 };
+        let frame = (0..count).map(|channel| mapped.sample(channel)).collect();
+        if device == 0 {
+            clock.push(frame);
+        } else {
+            followed.push(frame);
+        }
+    });
+    assert_eq!(clock.len(), frames);
+    assert_eq!(followed.len(), frames);
+    (clock, followed)
+}
+
+fn bits_of(frames: &[Vec<f32>]) -> Vec<Vec<u32>> {
+    frames
+        .iter()
+        .map(|frame| frame.iter().map(|sample| sample.to_bits()).collect())
+        .collect()
+}
+
+#[test]
+fn the_clock_mask_does_not_tick_on_the_follower() {
+    let follower = OutputDeviceSettings {
+        click_mask: 0,
+        ..OutputDeviceSettings::default()
+    };
+    let (clock, followed) = direct_pair(0b1100, follower, true);
+    let (quiet_clock, quiet_followed) = direct_pair(0b1100, follower, false);
+    assert_eq!(bits_of(&followed), bits_of(&quiet_followed));
+    assert_eq!(
+        bits_of(
+            &clock
+                .iter()
+                .map(|frame| frame[..2].to_vec())
+                .collect::<Vec<_>>()
+        ),
+        bits_of(
+            &quiet_clock
+                .iter()
+                .map(|frame| frame[..2].to_vec())
+                .collect::<Vec<_>>()
+        )
+    );
+    assert!(
+        clock
+            .iter()
+            .zip(&quiet_clock)
+            .any(|(frame, quiet)| frame[2].to_bits() != quiet[2].to_bits()),
+        "the masked clock channel should carry the tick"
+    );
+}
+
+#[test]
+fn the_follower_mask_ticks_there_and_not_on_the_clock() {
+    let follower = OutputDeviceSettings {
+        click_mask: 0b0001,
+        ..OutputDeviceSettings::default()
+    };
+    let (clock, followed) = direct_pair(0, follower, true);
+    let (quiet_clock, quiet_followed) = direct_pair(0, follower, false);
+    assert_eq!(bits_of(&clock), bits_of(&quiet_clock));
+    assert!(
+        followed
+            .iter()
+            .zip(&quiet_followed)
+            .any(|(frame, quiet)| frame[0].to_bits() != quiet[0].to_bits()),
+        "the masked follower channel should carry the tick"
+    );
+
+    // The ring path writes the same sample into the follower frame.
+    let run = |running: bool| {
+        let (mut mixer, shared) = two_path_mixer((0.4, -0.2), 2);
+        shared.clock_device.set(&OutputDeviceSettings {
+            click_mask: 0,
+            ..OutputDeviceSettings::default()
+        });
+        let follower = OutputDeviceSettings {
+            unused: UnusedChannels::Silent,
+            click_mask: 0b0100,
+            ..OutputDeviceSettings::default()
+        };
+        shared.set_followers(
+            &[follower],
+            &follower_plan(),
+            &[(CushionMode::Manual, 10.0)],
+        );
+        let bus = shared.follower_bus(0);
+        bus.set_device_channels(4);
+        bus.reset_playback();
+        shared
+            .follower_ring_active(0)
+            .store(true, Ordering::Relaxed);
+        if running {
+            arm_click(&shared);
+        }
+        let clock = device_frames(&mut mixer, &shared, 2, 64);
+        let mut popped = Vec::new();
+        let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
+        while bus.pop_frame(&mut frame) {
+            popped.push(frame[..4].to_vec());
+        }
+        (clock, popped)
+    };
+    let (clock, followed) = run(true);
+    let (quiet_clock, quiet_followed) = run(false);
+    assert_eq!(bits_of(&clock), bits_of(&quiet_clock));
+    assert_eq!(followed.len(), 64);
+    assert!(
+        followed
+            .iter()
+            .zip(&quiet_followed)
+            .any(|(frame, quiet)| frame[2].to_bits() != quiet[2].to_bits()),
+        "the ring frame should carry the tick on the masked channel"
+    );
+}
+
+#[test]
+fn master_mute_and_a_path_mute_leave_the_tick() {
+    let tick_device = OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0100,
+        ..OutputDeviceSettings::default()
+    };
+    let run = |master: bool, path: bool| {
+        let (_, shared) = steady_mixer((0.4, -0.2));
+        let mut mixer = OutputMixer::new(48_000, 4);
+        shared.clock_device.set(&tick_device);
+        if master {
+            shared.mute.store(true, Ordering::Relaxed);
+        }
+        if path {
+            shared.paths[0].set_mute(true);
+        }
+        arm_click(&shared);
+        let frames = device_frames(&mut mixer, &shared, 4, 64);
+        let music_silent = frames
+            .iter()
+            .all(|frame| frame[0] == 0.0 && frame[1] == 0.0);
+        let ticked = frames.iter().any(|frame| frame[2] != 0.0);
+        let master_peak = f32::from_bits(shared.out_l.load(Ordering::Relaxed));
+        (music_silent, ticked, master_peak)
+    };
+    let (silent, ticked, peak) = run(true, false);
+    assert!(silent, "master mute silences the music");
+    assert!(ticked, "the tick stays");
+    assert_eq!(
+        peak, 0.0,
+        "the master meter is the path sum, before the tick"
+    );
+    let (silent, ticked, peak) = run(false, true);
+    assert!(silent, "a path mute silences the music");
+    assert!(ticked, "the tick stays");
+    assert_eq!(peak, 0.0);
+}
+
+#[test]
+fn device_mute_on_the_clock_does_not_mute_the_follower_tick() {
+    let clock = OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0100,
+        ..OutputDeviceSettings::default()
+    };
+    // Channel 2 of a stereo follower is past its width, so the tick-only
+    // lane is channel 1 (bit 1), with the music kept on channel 0.
+    let follower = OutputDeviceSettings {
+        path_map: PathMapSettings::first(ChannelMap {
+            left: 0b0001,
+            right: 0,
+        }),
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0010,
+        ..OutputDeviceSettings::default()
+    };
+    let (_, shared) = steady_mixer((0.4, -0.2));
+    let mut mixer = OutputMixer::new(48_000, 4);
+    shared.clock_device.set(&clock);
+    shared.direct.store(true, Ordering::Relaxed);
+    shared.set_followers(&[follower], &follower_plan(), &[]);
+    arm_click(&shared);
+    // Adopt the unmuted devices and start the voice.
+    mixer.render_direct_devices(&shared, &[0.4; 64], &[-0.2; 64], |_, _, _| {});
+    shared.clock_device.set(&OutputDeviceSettings {
+        mute: true,
+        ..clock
+    });
+    let mut clock_tick = Vec::new();
+    let mut follower_tick = Vec::new();
+    mixer.render_direct_devices(&shared, &[0.4; 400], &[-0.2; 400], |device, _, mapped| {
+        if device == 0 {
+            clock_tick.push(mapped.sample(2));
+        } else {
+            follower_tick.push(mapped.sample(1));
+        }
+    });
+    assert!(clock_tick.len() > 289);
+    assert!(
+        clock_tick[..32].iter().any(|sample| *sample != 0.0),
+        "the mute ramp is not a cut"
+    );
+    // 1/288 is not exact in f32, so the ramp lands on 0 one sample past the
+    // nominal length.  The voice is still inside its envelope after that.
+    assert!(
+        clock_tick[289..].iter().all(|sample| *sample == 0.0),
+        "the clock tick has ramped out"
+    );
+    assert!(
+        follower_tick[289..].iter().any(|sample| *sample != 0.0),
+        "the other device keeps ticking"
+    );
+}
+
+#[test]
+fn an_armed_measurement_ducks_the_tick_on_every_device() {
+    fn capture(running: bool) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let (_, shared) = steady_mixer((0.25, 0.25));
+        let mut mixer = OutputMixer::new(48_000, 2);
+        let masked = OutputDeviceSettings {
+            click_mask: 0b0001,
+            ..OutputDeviceSettings::default()
+        };
+        shared.clock_device.set(&masked);
+        shared.direct.store(true, Ordering::Relaxed);
+        shared.set_followers(&[masked], &follower_plan(), &[]);
+        if running {
+            arm_click(&shared);
+        }
+        let click = super::super::calibration::click_waveform(48_000);
+        shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+        let mut clock = Vec::new();
+        let mut followed = Vec::new();
+        let take = |mixer: &mut OutputMixer,
+                    clock: &mut Vec<Vec<f32>>,
+                    followed: &mut Vec<Vec<f32>>| {
+            mixer.render_direct_devices(&shared, &[0.25; 64], &[0.25; 64], |device, _, mapped| {
+                let frame = vec![mapped.sample(0), mapped.sample(1)];
+                if device == 0 {
+                    clock.push(frame);
+                } else {
+                    followed.push(frame);
+                }
+            });
+        };
+        for _ in 0..40 {
+            take(&mut mixer, &mut clock, &mut followed);
+        }
+        for _ in 0..4_000 {
+            shared.calibration.capture_frame(0.0, 0.0);
+        }
+        for _ in 0..40 {
+            take(&mut mixer, &mut clock, &mut followed);
+        }
+        (clock, followed)
+    }
+    let (clock, followed) = capture(true);
+    let (quiet_clock, quiet_followed) = capture(false);
+    assert_eq!(bits_of(&clock), bits_of(&quiet_clock));
+    assert_eq!(bits_of(&followed), bits_of(&quiet_followed));
+}
+
+#[test]
+fn a_measurement_fades_a_sounding_tick_instead_of_cutting_it() {
+    // Channel 2 carries only the tick, so the calibration click (on the
+    // mapped pair) and the music stay off it.
+    fn tick_lane(arm: bool) -> Vec<f32> {
+        let (_, shared) = steady_mixer((0.25, 0.25));
+        let mut mixer = OutputMixer::new(48_000, 4);
+        shared.clock_device.set(&OutputDeviceSettings {
+            unused: UnusedChannels::Silent,
+            click_mask: 0b0100,
+            ..OutputDeviceSettings::default()
+        });
+        shared.direct.store(true, Ordering::Relaxed);
+        arm_click(&shared);
+        let mut lane = Vec::new();
+        let take = |mixer: &mut OutputMixer, lane: &mut Vec<f32>| {
+            mixer.render_direct_devices(&shared, &[0.25; 64], &[0.25; 64], |device, _, mapped| {
+                if device == 0 {
+                    lane.push(mapped.sample(2));
+                }
+            });
+        };
+        // The accent fires on the first sample and is still loud at 64.
+        take(&mut mixer, &mut lane);
+        if arm {
+            let click = super::super::calibration::click_waveform(48_000);
+            shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+        }
+        for _ in 0..8 {
+            take(&mut mixer, &mut lane);
+        }
+        lane
+    }
+    let ducked = tick_lane(true);
+    let plain = tick_lane(false);
+    assert_eq!(
+        bits_of(&[ducked[..64].to_vec()]),
+        bits_of(&[plain[..64].to_vec()])
+    );
+    // The tick is the plain tick times a gain that falls from 1 to 0
+    // without a jump: no step at the block boundary.
+    let ramp = (CONTROL_RAMP_SECONDS * 48_000.0) as usize;
+    let mut last = 1.0f32;
+    for index in 64..64 + ramp + 2 {
+        if plain[index].abs() < 1.0e-3 {
+            continue;
+        }
+        let gain = ducked[index] / plain[index];
+        assert!(
+            (-1.0e-4..=last + 1.0e-4).contains(&gain),
+            "sample {index}: gain {gain} after {last}"
+        );
+        if index == 64 {
+            assert!(gain > 0.99, "the first ducked sample is not cut: {gain}");
+        }
+        last = gain;
+    }
+    assert!(
+        ducked[64 + ramp + 2..].iter().all(|sample| *sample == 0.0),
+        "the tick is silent once the ramp ends"
+    );
+}
+
+/// A stereo follower with the music on channel 0 only, the tick on
+/// channel 1, and path 0 trimmed by −5 ms (240 frames at 48 kHz): a dry
+/// path would wait 240 frames there, so the tick waits in that follower's
+/// click line.
+fn trimmed_tick_follower(channel_bit: u8) -> OutputDeviceSettings {
+    let mut follower = OutputDeviceSettings {
+        path_map: PathMapSettings::first(ChannelMap {
+            left: 0b0001,
+            right: 0,
+        }),
+        unused: UnusedChannels::Silent,
+        click_mask: channel_bit,
+        ..OutputDeviceSettings::default()
+    };
+    follower.path_map[0].trim_ms = -5.0;
+    follower
+}
+
+#[test]
+fn a_measurement_ducks_a_tick_already_waiting_in_the_alignment_delay() {
+    fn follower_tick(arm: bool) -> Vec<f32> {
+        let (_, shared) = steady_mixer((0.25, 0.25));
+        let mut mixer = OutputMixer::new(48_000, 2);
+        shared.direct.store(true, Ordering::Relaxed);
+        shared.set_followers(&[trimmed_tick_follower(0b0010)], &follower_plan(), &[]);
+        arm_click(&shared);
+        let mut lane = Vec::new();
+        let take = |mixer: &mut OutputMixer, lane: &mut Vec<f32>| {
+            mixer.render_direct_devices(&shared, &[0.25; 64], &[0.25; 64], |device, _, mapped| {
+                if device == 1 {
+                    lane.push(mapped.sample(1));
+                }
+            });
+        };
+        // The accent fires on the first sample and is queued for 240 frames.
+        take(&mut mixer, &mut lane);
+        if arm {
+            let click = super::super::calibration::click_waveform(48_000);
+            shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+        }
+        for _ in 0..12 {
+            take(&mut mixer, &mut lane);
+        }
+        lane
+    }
+    let ducked = follower_tick(true);
+    let plain = follower_tick(false);
+    assert!(
+        plain[..241].iter().all(|sample| *sample == 0.0) && plain[241] != 0.0,
+        "the tick waits the dry delay (its first sample is sin 0): {:?}",
+        &plain[236..246]
+    );
+    // The queued accent comes out while the duck is already pulling the
+    // tick down: it is scaled by at most that ramp, not played at full level.
+    let ramp = (CONTROL_RAMP_SECONDS * 48_000.0) as usize;
+    for index in 240..64 + ramp + 2 {
+        if plain[index].abs() < 1.0e-3 {
+            continue;
+        }
+        let gain = ducked[index] / plain[index];
+        let duck = (1.0 - (index - 64) as f32 / ramp as f32).max(0.0);
+        assert!(
+            (-1.0e-4..=duck + 1.0e-3).contains(&gain),
+            "sample {index}: gain {gain} over the duck {duck}"
+        );
+    }
+    assert!(
+        ducked[64 + ramp + 2..].iter().all(|sample| *sample == 0.0),
+        "nothing queued plays into the measurement"
+    );
+}
+
+#[test]
+fn a_follower_that_resumes_feeding_does_not_play_stale_ticks() {
+    // Follower blocks: fed or not, per block.  The click lane of the last
+    // block (fed in both runs) must not depend on what the first queued.
+    fn last_block(first_fed: bool) -> Vec<u32> {
+        let (mut mixer, shared) = two_path_mixer((0.4, -0.2), 2);
+        shared.clock_device.set(&OutputDeviceSettings {
+            click_mask: 0,
+            ..OutputDeviceSettings::default()
+        });
+        shared.set_followers(
+            &[trimmed_tick_follower(0b0010)],
+            &follower_plan(),
+            &[(CushionMode::Manual, 10.0)],
+        );
+        let bus = shared.follower_bus(0);
+        bus.set_device_channels(2);
+        bus.reset_playback();
+        arm_click(&shared);
+        let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
+        let mut block = |fed: bool| {
+            shared.follower_ring_active(0).store(fed, Ordering::Relaxed);
+            let _ = device_frames(&mut mixer, &shared, 2, 64);
+            let mut lane = Vec::new();
+            while bus.pop_frame(&mut frame) {
+                lane.push(frame[1].to_bits());
+            }
+            lane
+        };
+        let first = block(first_fed);
+        assert_eq!(first.len(), if first_fed { 64 } else { 0 });
+        assert!(block(false).is_empty());
+        let mut last = Vec::new();
+        for _ in 0..8 {
+            last.extend(block(true));
+        }
+        last
+    }
+    let resumed = last_block(true);
+    let fresh = last_block(false);
+    assert_eq!(resumed.len(), 512);
+    assert_eq!(
+        resumed, fresh,
+        "the accent queued before the gap played late"
+    );
+}

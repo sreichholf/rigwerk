@@ -183,3 +183,15 @@ fn arm_recording_stop_lets_the_writer_finish() {
     wait_until_idle(&engine);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn stopping_the_bridge_clears_the_published_beat() {
+    let mut engine = AudioEngine::new(48_000);
+    engine
+        .shared
+        .publish_metronome_beat(4, crate::audio::ClickRhythm::FourFour as u8);
+    engine.stop();
+    assert_eq!(engine.state, EngineState::Idle);
+    // 0 is the "—" the Live strip shows.
+    assert_eq!(engine.snapshot().metronome_beat, 0);
+}

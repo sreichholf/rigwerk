@@ -8,14 +8,17 @@ use egui::{
 
 use super::{device_level_text, device_row_value, device_state, gain_reduction_text};
 use crate::app::output_devices::OutputDeviceRow;
-use crate::audio::{EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB};
+use crate::audio::{
+    EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
+    MAX_OUTPUT_CHANNELS,
+};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEAL, TEXT,
 };
 use crate::ui::widgets::{
-    db_slider, fit_text, meter_row, micro_label, mono, paint_tag, row_info, show_focus_ring,
-    tag_width,
+    channel_chip, db_slider, fit_text, hinted_tab, meter_row, micro_label, mono, paint_tag,
+    row_info, show_focus_ring, tag_width,
 };
 
 /// A framed block in the output inspectors.
@@ -74,6 +77,63 @@ pub(super) fn device_level_block(
                 .color(MUTED),
         );
     });
+}
+
+/// A press in [`click_mask_block`].  The page hands it to `RigWerkApp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClickEdit {
+    /// "Click on 3/4": the app also rewrites the path maps.
+    Pair,
+    /// One channel chip turned the click on or off there.
+    Channel { channel: usize, on: bool },
+}
+
+/// Which channels of this device carry the click.  Draws `click_mask` and
+/// returns the press, if any; it changes nothing itself.
+pub(super) fn click_mask_block(
+    ui: &mut egui::Ui,
+    click_mask: u8,
+    channels: usize,
+) -> Option<ClickEdit> {
+    let mut edit = None;
+    block(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(micro_label("CLICK", AMBER));
+            if channels >= 4 {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if hinted_tab(
+                        ui,
+                        "Click on 3/4",
+                        false,
+                        AMBER,
+                        "Music on 1 and 2, the click alone on 3 and 4. An unrouted path stays unrouted.",
+                    ) {
+                        edit = Some(ClickEdit::Pair);
+                    }
+                });
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            let shown = channels.min(MAX_OUTPUT_CHANNELS);
+            for channel in 0..shown {
+                let was = (click_mask & (1u8 << channel)) != 0;
+                let mut on = was;
+                let label = (channel + 1).to_string();
+                channel_chip(ui, &label, &mut on, AMBER);
+                if on != was {
+                    edit = Some(ClickEdit::Channel { channel, on });
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("These channels only. Routing is unchanged.")
+                .size(ts(10.5))
+                .color(MUTED),
+        );
+    });
+    edit
 }
 
 /// Width left for the inspector title's device name after the CLOCK tag and

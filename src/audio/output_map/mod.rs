@@ -56,6 +56,36 @@
 //! runs for the clock device and every follower, including the virtual
 //! publish device, because each of them is mapped here.
 //!
+//! # Metronome
+//!
+//! After the ceiling and before the mute, the metronome sample is added
+//! to lanes whose click-mask bit is set, and only when that sample is not
+//! exactly 0.  A zero sample writes nothing, so a negative zero on an
+//! unmapped lane stays a negative zero.  Mask 0 adds the tick nowhere:
+//! there is no fallback onto the first channels.  The shared extra lane
+//! (channels past [`MAX_OUTPUT_CHANNELS`]) is never written.  Those lanes
+//! then pass through their own limiter, so a tick that shares a channel
+//! with loud music gains the sum down instead of flattening it, and that
+//! reduction is published with the music limiter's.  That limiter runs on
+//! the masked lanes between ticks too, so music it gained down comes back
+//! on its release, not in one step.  A channel the tick missed keeps the
+//! music limiter's gain.  The mute ramp then scales the music and the tick
+//! together.  Peak meters include the tick, after the mute.
+//!
+//! The tick has no chain latency and no trim, so on each device it waits
+//! the alignment delay a dry, untrimmed path would get there (see
+//! "Alignment"), from a preallocated mono line in the mapper.  Clicks then
+//! land with the device's aligned music, a trim on one path does not move
+//! them, and an aligned device does not flam.  A change of that delay
+//! crossfades like a path's tap while ticks are queued; while the line is
+//! silent the tap moves at once, so the next tick plays once.  Once the
+//! last tick has left every read position the line is reset and skipped,
+//! and with the click limiter released a stopped metronome costs nothing
+//! per frame.  A block with frames in which a device was not mapped (a
+//! follower whose ring was not fed) resets it too, so ticks from before
+//! the gap never play late.  A measurement ducks the tick after that line,
+//! on its own ramp, so a tick already waiting does not play into it.
+//!
 //! # Alignment
 //!
 //! Plugins delay their path by their latency, so two paths that meet on
@@ -92,6 +122,7 @@ pub(crate) use mapper::{
     frame_lanes, DeviceControls, DeviceFrame, DeviceMapper, PathLines, PathTiming,
     SLOTS as FRAME_LANES,
 };
+pub(crate) use types::low_bits;
 pub use types::{
     ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings, UnusedChannels,
     DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, PATH_TRIM_MAX_MS,

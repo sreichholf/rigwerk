@@ -23,10 +23,13 @@
 //!    chain latencies are read once per block.
 //! 6. The sum: each device mapper maps every live path with that path's
 //!    channel map, level and polarity on that device and adds them per
-//!    channel, then applies the device level, the safety ceiling and the
-//!    mute.  A plain stereo sum
-//!    of the paths, after the master but not aligned, feeds the master
-//!    meters and the scope.
+//!    channel, then applies the device level, the safety ceiling, the
+//!    metronome and the mute.  The tick is added after the ceiling and
+//!    before the mute, on that device's click mask, and a zero sample
+//!    does not write a lane.  It waits that device's largest alignment
+//!    delay first.  A plain stereo sum of the paths, after the
+//!    master but not aligned, feeds the master meters and the scope.
+//!    That sum does not include the metronome.
 //!    On the ring path, each generic follower's mapped frame goes into
 //!    that follower's ring; its own stream plays it (see `follower`).
 //!
@@ -56,8 +59,10 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::calibration::CalibrationEmitter;
+use super::click_level_gain;
 use super::delay::DelayLine;
 use super::denormal::DenormalGuard;
+use super::metronome::{Metronome, CLICK_LEVEL_DEFAULT_DB};
 use super::output_map::{
     DeviceFrame, DeviceMapper, PathLines, PathTiming, MAX_ALIGN_DELAY, MAX_FOLLOWERS,
 };
@@ -184,6 +189,17 @@ pub(crate) struct OutputMixer {
     /// The measured-round-trip duck and click on the clock output.  Only this
     /// callback touches it; the armed state itself is on `Shared`.
     calibration: CalibrationEmitter,
+    /// One click for every device.  Each mapper adds the sample on its own
+    /// mask.  Not on a follower mixer: the tick is already in the lanes.
+    metronome: Metronome,
+    /// Click level.  The first block snaps, then it ramps with the master.
+    /// A measurement does not move it: each mapper ducks the tick after its
+    /// click line (`duck_click`).
+    click_gain: Ramp,
+    click_adopted: bool,
+    /// Output rate the in-beat phase and interval were scaled to.  0 until
+    /// the first block.
+    click_rate: u32,
 }
 
 impl OutputMixer {
@@ -220,6 +236,10 @@ impl OutputMixer {
             feeding: [None; MAX_FOLLOWERS],
             total_dsp: DspMeter::default(),
             calibration: CalibrationEmitter::new(),
+            metronome: Metronome::new(),
+            click_gain: Ramp::new(click_level_gain(CLICK_LEVEL_DEFAULT_DB)),
+            click_adopted: false,
+            click_rate: 0,
         }
     }
 
@@ -347,8 +367,33 @@ impl OutputMixer {
             self.gain.snap(gain);
             self.gain_adopted = true;
         }
+        // The click level ramps like the master.  The first block snaps.
+        // A measurement ducks the tick in each mapper, after its click line
+        // (`duck_click`), so a tick already waiting out an alignment delay
+        // fades with the ones not yet generated.  The callback does not read
+        // the calibration atomic again until the next block.
+        let ducking = shared.calibration.state().ducking();
+        let click_gain = f32::from_bits(shared.metronome_gain.load(Ordering::Relaxed));
+        if self.click_adopted {
+            self.click_gain.set_target(click_gain, samples);
+        } else {
+            self.click_gain.snap(click_gain);
+            self.click_adopted = true;
+        }
+        if self.click_rate != 0 && self.click_rate != self.output_rate {
+            let ratio = self.output_rate as f64 / self.click_rate as f64;
+            self.metronome.scale(ratio);
+        }
+        self.click_rate = self.output_rate;
+        self.metronome.latch(
+            shared.metronome_running.load(Ordering::Relaxed),
+            f32::from_bits(shared.metronome_bpm.load(Ordering::Relaxed)),
+            super::metronome::ClickRhythm::from_u8(shared.metronome_rhythm.load(Ordering::Relaxed)),
+            self.output_rate,
+        );
         self.device
-            .begin_paths(&shared.clock_device, samples, self.live, &timing);
+            .begin_paths(&shared.clock_device, samples, self.live, &timing, frames);
+        self.device.duck_click(ducking, samples);
         // Every follower is summed and mapped here, like the clock device:
         // in-graph on the PipeWire duplex path, otherwise for a generic
         // follower's ring.  One without a running stream maps nothing and
@@ -369,7 +414,9 @@ impl OutputMixer {
                 samples,
                 self.live,
                 &timing,
+                frames,
             );
+            self.followers[index].duck_click(ducking, samples);
             if !feeding && !direct {
                 // Mapped, but nothing plays it: no alignment to show.  (The
                 // duplex graph plays every follower in-graph.)
@@ -378,6 +425,11 @@ impl OutputMixer {
         }
         for follower in &shared.followers[self.live_followers..] {
             follower.clear_alignment();
+        }
+        // A slot that is not live maps nothing; one that comes back must
+        // not play the ticks it queued before.
+        for mapper in &mut self.followers[self.live_followers..] {
+            mapper.silence_click_line();
         }
     }
 
@@ -398,8 +450,11 @@ impl OutputMixer {
     /// each path's frame, the meters and the scope.  Each finished frame
     /// goes to `write` with the clock device's mapped frame (after its duck
     /// and any calibration click), the live followers' mappers, every live
-    /// path's frame (the mappers sum them) and the stereo sum of the paths'
-    /// taps, and the frame counter advances.
+    /// path's frame (the mappers sum them), the stereo sum of the paths'
+    /// taps, and the metronome sample.  The tick is added inside each
+    /// mapper, after the ceiling and before mute, on that device's click
+    /// mask.  A zero sample does not write a lane.  The frame counter
+    /// advances at the end of the block.
     fn finish_block(
         &mut self,
         shared: &Shared,
@@ -493,13 +548,31 @@ impl OutputMixer {
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
+            // The metronome is not in the path sum above.  Advance it, then
+            // hand the same sample to every device.  Stopping leaves a click
+            // that is already sounding to finish; each mapper's duck ramp,
+            // not a hard gate, takes it out for a measurement.  A silent
+            // voice or a settled gain of 0 stays exact 0 and is not
+            // multiplied.
+            let voice = self.metronome.next();
+            let tick_gain = self.click_gain.next();
+            let tick = if voice == 0.0 || tick_gain == 0.0 {
+                0.0
+            } else {
+                voice * tick_gain
+            };
             let mapped = self.device.mapped_channels();
             let clock = self
                 .device
-                .map_paths(&self.lines)
+                .map_paths(&self.lines, tick)
                 .ducked(duck, click, mapped);
-            write(&clock, followers, index, &self.lines, out);
+            write(&clock, followers, index, &self.lines, out, tick);
         }
+
+        // The beat and the rhythm it belongs to move together.  A change
+        // that is still waiting for the next click keeps the old pair, so
+        // the Live strip cannot show a beat the new bar does not have.
+        shared.publish_metronome_beat(self.metronome.beat(), self.metronome.rhythm() as u8);
 
         shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
         shared.out_l.store(peak_l.to_bits(), Ordering::Relaxed);
@@ -553,10 +626,10 @@ impl OutputMixer {
             shared,
             input_left,
             input_right,
-            |clock, followers, index, paths, _| {
+            |clock, followers, index, paths, _, tick| {
                 write(0, index, clock);
                 for (follower, mapper) in followers.iter_mut().enumerate() {
-                    write(follower + 1, index, mapper.map_paths(paths));
+                    write(follower + 1, index, mapper.map_paths(paths, tick));
                 }
             },
         );
@@ -594,9 +667,12 @@ impl OutputMixer {
         input_right: &[f32],
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
-        self.render_direct_with(shared, input_left, input_right, |clock, _, index, _, _| {
-            write(index, clock)
-        });
+        self.render_direct_with(
+            shared,
+            input_left,
+            input_right,
+            |clock, _, index, _, _, _| write(index, clock),
+        );
     }
 
     /// [`Self::render_direct`] handing over the four mixer taps instead of
@@ -609,7 +685,7 @@ impl OutputMixer {
         input_right: &[f32],
         mut write: impl FnMut(usize, [f32; 4]),
     ) {
-        self.render_direct_with(shared, input_left, input_right, |_, _, index, _, out| {
+        self.render_direct_with(shared, input_left, input_right, |_, _, index, _, out, _| {
             write(index, out)
         });
     }
@@ -649,7 +725,9 @@ impl OutputMixer {
         frames: usize,
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
-        self.render_with(shared, frames, |clock, _, index, _, _| write(index, clock));
+        self.render_with(shared, frames, |clock, _, index, _, _, _| {
+            write(index, clock)
+        });
     }
 
     /// [`Self::render`] handing over the four mixer taps (only 0/1 carry the
@@ -661,7 +739,7 @@ impl OutputMixer {
         frames: usize,
         mut write: impl FnMut(usize, [f32; 4]),
     ) {
-        self.render_with(shared, frames, |_, _, index, _, out| write(index, out));
+        self.render_with(shared, frames, |_, _, index, _, out, _| write(index, out));
     }
 
     fn render_with(&mut self, shared: &Shared, frames: usize, mut write: impl WriteFrame) {
@@ -787,11 +865,11 @@ impl OutputMixer {
             shared,
             frames,
             now,
-            |clock, followers, index, paths, out| {
-                write(clock, followers, index, paths, out);
+            |clock, followers, index, paths, out, tick| {
+                write(clock, followers, index, paths, out, tick);
                 for (slot, mapper) in followers.iter_mut().enumerate() {
                     if let Some(generation) = feeding[slot] {
-                        shared.push_follower_frame(slot, generation, mapper.map_paths(paths));
+                        shared.push_follower_frame(slot, generation, mapper.map_paths(paths, tick));
                     }
                 }
             },
@@ -826,12 +904,14 @@ impl OutputMixer {
 /// Receives one finished frame: the clock device's mapped frame (already
 /// ducked and carrying any calibration click), the live followers' mappers,
 /// the paths' delay lines (each holding the path's frame after the master as
-/// its newest entry) for the mappers to align and sum, and the unaligned
-/// stereo sum of the paths' four taps.
-trait WriteFrame: FnMut(&DeviceFrame, &mut [DeviceMapper], usize, &PathLines, [f32; 4]) {}
+/// its newest entry) for the mappers to align and sum, the unaligned stereo
+/// sum of the paths' four taps, and the metronome sample.  The tick is added
+/// inside each mapper, after the ceiling and before mute, on that device's
+/// click mask.  A zero sample does not write a lane.
+trait WriteFrame: FnMut(&DeviceFrame, &mut [DeviceMapper], usize, &PathLines, [f32; 4], f32) {}
 
 impl<F> WriteFrame for F where
-    F: FnMut(&DeviceFrame, &mut [DeviceMapper], usize, &PathLines, [f32; 4])
+    F: FnMut(&DeviceFrame, &mut [DeviceMapper], usize, &PathLines, [f32; 4], f32)
 {
 }
 

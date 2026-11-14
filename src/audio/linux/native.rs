@@ -452,6 +452,8 @@ fn run_graph(
         let state_shared = Arc::clone(&shared);
         // The playback stream is always negotiated as F32LE stereo (FL/FR,
         // see `enum_format`), so the device map applies to two channels.
+        // The Mixer offers click chips for those two only, so a chip for
+        // channel 3 or 4 is not shown.
         let mut mixer = OutputMixer::new(output_rate, 2);
         mixer.follow_source_rate(&shared);
         mixer.publish_device_channels(&shared);

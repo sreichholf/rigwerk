@@ -16,6 +16,7 @@ use super::calibration::CalibrationState;
 use super::linux::pipewire;
 #[cfg(target_os = "linux")]
 use super::linux::sink_monitor::SinkMonitor;
+use super::metronome::{click_level_gain, ClickRhythm};
 use super::output_map::{AlignmentReport, OutputDeviceSettings, MAX_FOLLOWERS};
 use super::path::{DspTime, PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
@@ -248,6 +249,26 @@ impl AudioEngine {
     /// the bridge runs.
     pub fn set_cushion(&self, mode: CushionMode, manual_ms: f32) {
         self.shared.set_cushion(mode, manual_ms);
+    }
+
+    /// Metronome transport.  Stores the level as a linear gain (0 dB is 1,
+    /// so the accent peak is the safety ceiling).  Tempo and level are
+    /// already clamped on the app fields and when preferences load.  The
+    /// rhythm is the click's bar.  Takes effect on the mixer's next block.
+    pub fn set_metronome(&self, running: bool, bpm: f32, rhythm: ClickRhythm, level_db: f32) {
+        let gain = click_level_gain(level_db);
+        self.shared
+            .metronome_running
+            .store(running, Ordering::Relaxed);
+        self.shared
+            .metronome_bpm
+            .store(bpm.to_bits(), Ordering::Relaxed);
+        self.shared
+            .metronome_rhythm
+            .store(rhythm as u8, Ordering::Relaxed);
+        self.shared
+            .metronome_gain
+            .store(gain.to_bits(), Ordering::Relaxed);
     }
 
     pub fn set_gains(&self, input_db: f32, output_db: f32) {
@@ -889,6 +910,7 @@ impl AudioEngine {
                 match result {
                     Ok(Ok(())) => {
                         shared.running.store(false, Ordering::Relaxed);
+                        shared.clear_metronome_beat();
                         shared.set_status("Bridge stopped");
                     }
                     Ok(Err(error)) => shared.set_error(error),
@@ -958,6 +980,9 @@ impl AudioEngine {
             follower.clear_alignment();
         }
         self.shared.device_lost.store(false, Ordering::Relaxed);
+        // The mixer has stopped writing.  A beat it published would sit on
+        // the Live strip until the next session.
+        self.shared.clear_metronome_beat();
         self.release_quantum();
         self.close_sink_monitor();
         self.shared.set_status("Bridge stopped");

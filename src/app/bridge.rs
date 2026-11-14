@@ -77,6 +77,7 @@ impl RigWerkApp {
         self.issue_state.new_session();
         self.issue_state.device_lost = None;
         self.apply_gains();
+        self.apply_metronome();
         if self.is_preview() {
             self.engine.start_preview();
             self.push_log(
@@ -189,6 +190,8 @@ impl RigWerkApp {
         let output_muted = self.mute || self.tuner.auto_muted(self.page, self.engine.state);
         self.engine
             .set_master(output_muted, self.monitor, self.input_channels, self.drift);
+        // The click skips the master mute, but not the tuner's layer.
+        self.follow_metronome_audible();
         self.push_paths_to_engine();
         self.push_devices_to_engine();
         self.engine.poll();
@@ -571,6 +574,56 @@ impl RigWerkApp {
     /// Pushes the stored input and output gains.
     pub(crate) fn apply_gains(&self) {
         self.engine.set_gains(self.input_gain, self.output_gain);
+    }
+
+    /// Whether the click plays.  The master mute leaves it ticking, but the
+    /// tuner's auto-mute silences it with the rig: tuning needs quiet.
+    pub(crate) fn metronome_audible(&self) -> bool {
+        self.metronome_running && !self.tuner.auto_muted(self.page, self.engine.state)
+    }
+
+    /// Pushes the metronome transport.  Tempo and level are clamped on
+    /// these fields and when preferences load; the engine stores them.
+    /// `metronome_running` stays what the person chose; the engine gets
+    /// [`Self::metronome_audible`], so leaving the tuner restarts the click.
+    pub(crate) fn apply_metronome(&mut self) {
+        let audible = self.metronome_audible();
+        self.metronome_pushed = Some(audible);
+        self.engine.set_metronome(
+            audible,
+            self.metronome_bpm,
+            self.metronome_rhythm,
+            self.metronome_level_db,
+        );
+    }
+
+    /// Pushes the click again only when [`Self::metronome_audible`] moved
+    /// since the last push, which is the tuner's auto-mute.  The setters,
+    /// `start` and startup push their own edits.
+    pub(crate) fn follow_metronome_audible(&mut self) {
+        if self.metronome_pushed != Some(self.metronome_audible()) {
+            self.apply_metronome();
+        }
+    }
+
+    pub(crate) fn set_metronome_running(&mut self, running: bool) {
+        self.metronome_running = running;
+        self.apply_metronome();
+    }
+
+    pub(crate) fn set_metronome_bpm(&mut self, bpm: f32) {
+        self.metronome_bpm = audio::clamp_metronome_bpm(bpm);
+        self.apply_metronome();
+    }
+
+    pub(crate) fn set_metronome_rhythm(&mut self, rhythm: audio::ClickRhythm) {
+        self.metronome_rhythm = rhythm;
+        self.apply_metronome();
+    }
+
+    pub(crate) fn set_metronome_level_db(&mut self, level_db: f32) {
+        self.metronome_level_db = audio::clamp_click_level_db(level_db);
+        self.apply_metronome();
     }
 
     /// Pushes the stored cushion mode and size.

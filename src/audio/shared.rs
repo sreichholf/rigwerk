@@ -16,7 +16,9 @@
 //! (see the `path` module docs).  The older accessors (`set_eq`, `set_mix`,
 //! ...) act on path 0 and are kept for tests.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -120,6 +122,30 @@ pub(crate) struct Shared {
     pub(crate) output_gain: AtomicU32,
     pub(crate) mute: AtomicBool,
     pub(crate) monitor: AtomicBool,
+    /// Metronome transport.  The mixer reads these once per block.  The
+    /// displayed beat is written by the mixer and read by the UI.
+    pub(crate) metronome_running: AtomicBool,
+    /// Tempo, BPM, as `f32` bits.
+    pub(crate) metronome_bpm: AtomicU32,
+    /// [`super::metronome::ClickRhythm`] discriminant.  An unknown value
+    /// reads as 4/4.
+    pub(crate) metronome_rhythm: AtomicU8,
+    /// Linear click gain (`10^(dB/20)`), as `f32` bits.  0 dB is 1, so the
+    /// accent peak equals the safety ceiling.
+    pub(crate) metronome_gain: AtomicU32,
+    /// 0 when stopped, otherwise the beat that last fired (`1..=beats`).
+    /// The mixer writes it; the UI reads it.  Cleared when the bridge
+    /// stops, so a finished session does not keep showing the last beat.
+    /// A block that was still running when the bridge failed can write it
+    /// back, so the snapshot reads 0 once an error or a lost device is set,
+    /// and while [`Self::running`] is false (a stop request leaves a
+    /// lingering bridge's mixer publishing until its teardown ends).
+    ///
+    /// Packed with the [`super::metronome::ClickRhythm`] that beat belongs
+    /// to (see [`pack_metronome_beat`]), so one store publishes both and
+    /// one load reads a pair from the same block.  That rhythm is not the
+    /// transport setting: that one can already name the next bar.
+    metronome_beat: AtomicU16,
     pub(crate) input_enabled: [AtomicBool; 2],
     /// The clock device's channel map, level and mute (applied after the
     /// master) and its per-channel meters.
@@ -216,6 +242,16 @@ impl Shared {
             output_gain: AtomicU32::new(1.0f32.to_bits()),
             mute: AtomicBool::new(false),
             monitor: AtomicBool::new(true),
+            metronome_running: AtomicBool::new(false),
+            metronome_bpm: AtomicU32::new(super::metronome::METRONOME_BPM_DEFAULT.to_bits()),
+            metronome_rhythm: AtomicU8::new(super::metronome::ClickRhythm::FourFour as u8),
+            metronome_gain: AtomicU32::new(
+                super::click_level_gain(super::metronome::CLICK_LEVEL_DEFAULT_DB).to_bits(),
+            ),
+            metronome_beat: AtomicU16::new(pack_metronome_beat(
+                0,
+                super::metronome::ClickRhythm::FourFour as u8,
+            )),
             input_enabled: [AtomicBool::new(true), AtomicBool::new(true)],
             clock_device: DeviceControls::new(),
             followers: std::array::from_fn(|_| DeviceControls::new()),
@@ -261,6 +297,24 @@ impl Shared {
             .store(previous.mute.load(Ordering::Relaxed), Ordering::Relaxed);
         self.monitor
             .store(previous.monitor.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.metronome_running.store(
+            previous.metronome_running.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.metronome_bpm.store(
+            previous.metronome_bpm.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.metronome_rhythm.store(
+            previous.metronome_rhythm.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.metronome_gain.store(
+            previous.metronome_gain.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        // The displayed beat belongs to the session that published it.
+        // A new engine starts at "—", not on the previous session's beat.
         for (to, from) in self.input_enabled.iter().zip(&previous.input_enabled) {
             to.store(from.load(Ordering::Relaxed), Ordering::Relaxed);
         }
@@ -1019,7 +1073,36 @@ impl Shared {
         head.saturating_sub(tail).min(self.capacity_frames as u64) as usize
     }
 
+    /// Publishes the metronome beat and the rhythm it belongs to in one
+    /// store.  The mixer calls it once per block.
+    pub(crate) fn publish_metronome_beat(&self, beat: u8, rhythm: u8) {
+        self.metronome_beat
+            .store(pack_metronome_beat(beat, rhythm), Ordering::Relaxed);
+    }
+
+    /// Sets the published beat to 0 (stopped).  The rhythm byte stays.
+    pub(crate) fn clear_metronome_beat(&self) {
+        self.metronome_beat.fetch_and(0xFF00, Ordering::Relaxed);
+    }
+
+    /// The published beat and its rhythm, from one load.
+    pub(crate) fn metronome_beat(&self) -> (u8, u8) {
+        unpack_metronome_beat(self.metronome_beat.load(Ordering::Relaxed))
+    }
+
     pub(crate) fn snapshot(&self) -> Snapshot {
+        let error = self.error.lock().ok().and_then(|error| error.clone());
+        let device_lost = self.device_lost.load(Ordering::Relaxed);
+        // A callback mid-block when the bridge failed may store its beat
+        // after `set_error`, and a stopping bridge keeps mixing until its
+        // teardown ends; a bridge that is not running shows no beat.
+        let (beat, metronome_rhythm) = self.metronome_beat();
+        let running = self.running.load(Ordering::Relaxed);
+        let metronome_beat = if error.is_some() || device_lost || !running {
+            0
+        } else {
+            beat
+        };
         Snapshot {
             in_l: f32::from_bits(self.in_l.load(Ordering::Relaxed)),
             in_r: f32::from_bits(self.in_r.load(Ordering::Relaxed)),
@@ -1055,8 +1138,8 @@ impl Shared {
             ring_fill: self.ring_fill(),
             target_frames: self.target_frames(),
             drift_ppm: f32::from_bits(self.drift_ppm.load(Ordering::Relaxed)),
-            error: self.error.lock().ok().and_then(|error| error.clone()),
-            device_lost: self.device_lost.load(Ordering::Relaxed),
+            error,
+            device_lost,
             status: self
                 .status
                 .lock()
@@ -1073,6 +1156,8 @@ impl Shared {
                 .unwrap_or_default(),
             path_delay_ms: self.path_delay_ms(),
             direct: self.direct.load(Ordering::Relaxed),
+            metronome_beat,
+            metronome_rhythm,
         }
     }
 }
@@ -1155,6 +1240,17 @@ impl Shared {
     pub(crate) fn set_routes(&self, routes: [[bool; 4]; 2]) {
         self.main_path().set_routes(routes);
     }
+}
+
+/// The published metronome beat in the low byte, its rhythm in the high one.
+pub(crate) fn pack_metronome_beat(beat: u8, rhythm: u8) -> u16 {
+    u16::from(beat) | (u16::from(rhythm) << 8)
+}
+
+/// `(beat, rhythm)` from [`pack_metronome_beat`].
+pub(crate) fn unpack_metronome_beat(packed: u16) -> (u8, u8) {
+    let [beat, rhythm] = packed.to_le_bytes();
+    (beat, rhythm)
 }
 
 /// Starting ring target for a given device buffer.  Two blocks is enough to

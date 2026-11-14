@@ -163,6 +163,15 @@ pub struct RigWerkApp {
     pub(crate) input_channels: [bool; 2],
     /// The master mute.
     pub(crate) mute: bool,
+    /// Metronome transport.  The click is mixed onto device channels, so
+    /// the master mute does not stop it.
+    pub(crate) metronome_running: bool,
+    pub(crate) metronome_bpm: f32,
+    pub(crate) metronome_rhythm: crate::audio::ClickRhythm,
+    pub(crate) metronome_level_db: f32,
+    /// The audible flag [`Self::apply_metronome`] last pushed, so a frame
+    /// re-pushes the click only when the tuner's auto-mute changes it.
+    pub(crate) metronome_pushed: Option<bool>,
     pub(crate) drift: bool,
     pub(crate) monitor: bool,
     /// Linux low-latency output (PipeWire quantum / ALSA smallest period).
@@ -433,6 +442,9 @@ impl RigWerkApp {
             tuner_auto_mute: self.tuner.auto_mute,
             tuner_tolerance: self.tuner.tolerance.to_u8(),
             record_folder: self.record_folder.clone(),
+            metronome_bpm: self.metronome_bpm,
+            metronome_rhythm: self.metronome_rhythm,
+            metronome_level_db: self.metronome_level_db,
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -504,6 +516,11 @@ impl RigWerkApp {
             output_gain: preferences.output_gain,
             input_channels: preferences.input_channels,
             mute: preferences.mute,
+            metronome_running: preferences.metronome_running,
+            metronome_bpm: preferences.metronome_bpm,
+            metronome_rhythm: preferences.metronome_rhythm,
+            metronome_level_db: preferences.metronome_level_db,
+            metronome_pushed: None,
             drift: preferences.drift,
             monitor: preferences.monitor,
             low_latency_output: {
@@ -624,6 +641,7 @@ impl RigWerkApp {
             app.select_chain(stage);
         }
         app.apply_gains();
+        app.apply_metronome();
         app.engine
             .set_master(app.mute, app.monitor, app.input_channels, app.drift);
         // Old files (and no file) load as one path.
@@ -756,6 +774,11 @@ pub(crate) fn blank_app() -> RigWerkApp {
         output_gain: -1.5,
         input_channels: [true, true],
         mute: false,
+        metronome_running: false,
+        metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
+        metronome_rhythm: crate::audio::ClickRhythm::FourFour,
+        metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
+        metronome_pushed: None,
         drift: true,
         monitor: true,
         low_latency_output: true,

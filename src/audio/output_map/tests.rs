@@ -372,6 +372,7 @@ fn controls_store_the_sanitized_level_and_copy_to_a_new_session() {
         }),
         unused: UnusedChannels::Silent,
         align: false,
+        click_mask: 0,
     };
     controls.set(&settings);
     let next = DeviceControls::new();
@@ -398,12 +399,12 @@ fn live_paths_add_up_on_each_channel_and_others_are_ignored() {
         PathState::Inactive,
     ]);
     let mut mapper = DeviceMapper::new(3);
-    mapper.begin_paths(&controls, RAMP, live, &super::PathTiming::default());
+    mapper.begin_paths(&controls, RAMP, live, &super::PathTiming::default(), 64);
     let mut frames = [[0.0f32; 2]; MAX_PATHS];
     frames[0] = [0.5, -0.25];
     frames[1] = [9.0, 9.0];
     frames[2] = [0.25, 0.5];
-    let out = samples(mapper.map_frames(&frames), 3);
+    let out = samples(mapper.map_frames(&frames, 0.0), 3);
     assert_eq!(out, [0.75, 0.25, 0.125 + 0.375]);
     let next = DeviceControls::new();
     next.adopt_settings_from(&controls);
@@ -426,8 +427,8 @@ fn unreached_channels_copy_the_paths_mapped_to_the_device() {
         let controls = DeviceControls::new();
         controls.set(&settings);
         let mut mapper = DeviceMapper::new(4);
-        mapper.begin_paths(&controls, RAMP, live, &super::PathTiming::default());
-        samples(mapper.map_frames(&frames), 4)
+        mapper.begin_paths(&controls, RAMP, live, &super::PathTiming::default(), 64);
+        samples(mapper.map_frames(&frames, 0.0), 4)
     };
     // Path 1 is routed nowhere: Out 3/4 copy path 0 only.
     let mut settings = OutputDeviceSettings::default();
@@ -718,4 +719,513 @@ fn playing_channels_count_reached_and_copied_ones() {
         2,
         "mute is not routing"
     );
+}
+
+fn one_path(left: f32, right: f32) -> [[f32; 2]; MAX_PATHS] {
+    let mut frames = [[0.0; 2]; MAX_PATHS];
+    frames[0] = [left, right];
+    frames
+}
+
+fn lane_bits(frame: &[f32]) -> Vec<u32> {
+    frame.iter().map(|sample| sample.to_bits()).collect()
+}
+
+#[test]
+fn the_tick_lands_only_on_the_masked_channels() {
+    let settings = OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b1100,
+        ..OutputDeviceSettings::default()
+    };
+    let frames = one_path(0.4, -0.2);
+    let (mut with_tick, _) = mapped_device(settings, 4);
+    let (mut without, _) = mapped_device(settings, 4);
+    let ticked = samples(with_tick.map_frames(&frames, 0.25), 4);
+    let quiet = samples(without.map_frames(&frames, 0.0), 4);
+    assert_eq!(lane_bits(&ticked[..2]), lane_bits(&quiet[..2]));
+    assert_ne!(ticked[2].to_bits(), quiet[2].to_bits());
+    assert_ne!(ticked[3].to_bits(), quiet[3].to_bits());
+    assert_eq!(ticked[2], 0.25);
+    assert_eq!(ticked[3], 0.25);
+}
+
+#[test]
+fn a_zero_click_sample_does_not_write_a_lane() {
+    let (mut mapper, _) = mapped_device(OutputDeviceSettings::default(), 4);
+    let frames = one_path(-0.0, -0.0);
+    let out = samples(mapper.map_frames(&frames, 0.0), 4);
+    // Channels 1 and 2 copy the inputs.  The unmapped pair is the mono
+    // copy, which stays a negative zero.  Adding 0.0 would have cleared it.
+    assert_eq!(out[0].to_bits(), (-0.0f32).to_bits());
+    assert_eq!(out[1].to_bits(), (-0.0f32).to_bits());
+    assert_eq!(out[2].to_bits(), (-0.0f32).to_bits());
+    assert_eq!(out[3].to_bits(), (-0.0f32).to_bits());
+}
+
+#[test]
+fn a_zero_mask_adds_the_tick_nowhere() {
+    let settings = OutputDeviceSettings {
+        click_mask: 0,
+        ..OutputDeviceSettings::default()
+    };
+    let frames = one_path(0.4, -0.2);
+    let (mut with_tick, _) = mapped_device(settings, 4);
+    let (mut without, _) = mapped_device(settings, 4);
+    let ticked = samples(with_tick.map_frames(&frames, 0.5), 4);
+    let quiet = samples(without.map_frames(&frames, 0.0), 4);
+    assert_eq!(lane_bits(&ticked), lane_bits(&quiet));
+}
+
+#[test]
+fn device_mute_ramps_the_tick_out() {
+    let settings = OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0100,
+        ..OutputDeviceSettings::default()
+    };
+    let (mut mapper, controls) = mapped_device(settings, 4);
+    let frames = one_path(0.4, -0.2);
+    // Adopt the unmuted device, then point mute at silence.
+    let _ = mapper.map_frames(&frames, 0.2);
+    controls.set(&OutputDeviceSettings {
+        mute: true,
+        ..settings
+    });
+    mapper.begin_block(&controls, RAMP);
+    let tick = 0.2;
+    let mut lane = Vec::new();
+    for _ in 0..(RAMP as usize + 2) {
+        lane.push(samples(mapper.map_frames(&frames, tick), 4)[2]);
+    }
+    assert!(
+        lane[0] > 0.0 && lane[0] < tick,
+        "not a hard cut: {}",
+        lane[0]
+    );
+    assert!(lane[1] > 0.0 && lane[1] < lane[0], "the ramp keeps moving");
+    // The step is 1/288, which is not exact in f32, so the ramp lands on 0
+    // on the sample that crosses the target: one sample past the nominal length.
+    let settled = lane
+        .iter()
+        .position(|sample| *sample == 0.0)
+        .expect("mute reaches silence");
+    assert!(settled <= RAMP as usize + 1, "{settled}");
+    assert!(lane[settled..].iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn the_limiter_does_not_pump_when_the_tick_hits_the_ceiling() {
+    let settings = OutputDeviceSettings {
+        path_map: PathMapSettings::first(ChannelMap {
+            left: 0b0001,
+            right: 0,
+        }),
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0100,
+        ..OutputDeviceSettings::default()
+    };
+    let (mut mapper, controls) = mapped_device(settings, 4);
+    let out = samples(mapper.map_frames(&one_path(0.5, 0.0), 2.0), 4);
+    assert_eq!(out[0].to_bits(), 0.5f32.to_bits());
+    assert_eq!(
+        out[2].to_bits(),
+        crate::audio::safety_ceiling_linear().to_bits()
+    );
+    mapper.end_block(&controls);
+    // The music limiter did not move (channel 0 is the sample it was given).
+    // The click's own limiter did, and that reduction is what gets published.
+    assert!(controls.reduction_db() > 0.0, "{}", controls.reduction_db());
+    let again = samples(mapper.map_frames(&one_path(0.5, 0.0), 0.0), 4);
+    assert_eq!(again[0].to_bits(), 0.5f32.to_bits());
+}
+
+#[test]
+fn a_click_sharing_a_channel_is_limited_and_other_channels_are_not() {
+    let settings = OutputDeviceSettings {
+        path_map: PathMapSettings::first(ChannelMap {
+            left: 0b0011,
+            right: 0,
+        }),
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0001,
+        ..OutputDeviceSettings::default()
+    };
+    let (mut mapper, controls) = mapped_device(settings, 2);
+    let frames = one_path(0.5, 0.0);
+    let hot = samples(mapper.map_frames(&frames, 0.8), 2);
+    let ceiling = crate::audio::safety_ceiling_linear();
+    assert_eq!(hot[0].to_bits(), ceiling.to_bits());
+    assert_eq!(hot[1].to_bits(), 0.5f32.to_bits());
+    // 0.05 sits under the ceiling on top of the 0.5.  A hard clip would
+    // leave that sum alone.  The limiter still holds the gain from the
+    // sample before, so this one is quieter, and channel 2 is not.
+    let released = samples(mapper.map_frames(&frames, 0.05), 2);
+    assert!(
+        released[0] < 0.5,
+        "the shared lane is gained down, not flat-topped: {}",
+        released[0]
+    );
+    assert_eq!(released[1].to_bits(), 0.5f32.to_bits());
+    mapper.end_block(&controls);
+    assert!(controls.reduction_db() > 0.0);
+}
+
+#[test]
+fn the_click_limiter_releases_smoothly_after_the_click_ends() {
+    use crate::audio::metronome::Metronome;
+    let settings = OutputDeviceSettings {
+        path_map: PathMapSettings::first(ChannelMap {
+            left: 0b0001,
+            right: 0,
+        }),
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0001,
+        ..OutputDeviceSettings::default()
+    };
+    let (mut mapper, _) = mapped_device(settings, 2);
+    // Hot music under the ceiling, and a 0 dB accent on the same lane.
+    let music = 0.8;
+    let frames = one_path(music, 0.0);
+    let mut metronome = Metronome::new();
+    metronome.latch(true, 120.0, crate::audio::ClickRhythm::FourFour, 48_000);
+    let mut gains = Vec::new();
+    let mut end = None;
+    // The next beat is 24 000 samples away.
+    for index in 0..20_000 {
+        let tick = metronome.next();
+        if tick == 0.0 && index > 0 && end.is_none() {
+            end = Some(index);
+        }
+        let out = mapper.map_frames(&frames, tick).sample(0);
+        gains.push(out / (music + tick));
+    }
+    let end = end.expect("the click dies away");
+    assert!(
+        gains[end - 1] < 0.99,
+        "the click left a reduction behind: {}",
+        gains[end - 1]
+    );
+    let step = (gains[end] - gains[end - 1]).abs();
+    assert!(
+        step < 1.0e-3,
+        "the lane gain steps by {step} at the click's end"
+    );
+    let largest = gains[end..]
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(largest < 1.0e-3, "the release is a ramp: {largest}");
+    assert_eq!(gains[19_999], 1.0, "and it gets back to unity");
+}
+
+#[test]
+fn a_click_mask_change_while_limiting_does_not_step_a_lane() {
+    let mut settings = OutputDeviceSettings {
+        path_map: PathMapSettings::first(ChannelMap {
+            left: 0b0011,
+            right: 0,
+        }),
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0001,
+        ..OutputDeviceSettings::default()
+    };
+    let (mut mapper, controls) = mapped_device(settings, 2);
+    let music = 0.8;
+    let frames = one_path(music, 0.0);
+    // A hot tick on channel 1 leaves a reduction there.
+    mapper.map_frames(&frames, 0.8);
+    let before = samples(mapper.map_frames(&frames, 0.0), 2);
+    assert!(
+        before[0] < music,
+        "the tick left a reduction: {}",
+        before[0]
+    );
+    assert_eq!(before[1].to_bits(), music.to_bits());
+
+    // The click moves to channel 2 mid-release.
+    settings.click_mask = 0b0010;
+    controls.set(&settings);
+    mapper.begin_block(&controls, RAMP);
+    let after = samples(mapper.map_frames(&frames, 0.0), 2);
+    // The lane it left keeps releasing instead of jumping back to unity.
+    assert!(
+        after[0] < music && (after[0] - before[0]).abs() < 1.0e-2,
+        "the old lane steps from {} to {}",
+        before[0],
+        after[0]
+    );
+    // The limiter gets back to unity on both lanes, then leaves the old
+    // lane alone.
+    for _ in 0..48_000 {
+        mapper.map_frames(&frames, 0.0);
+    }
+    mapper.begin_block(&controls, RAMP);
+    let released = samples(mapper.map_frames(&frames, 0.0), 2);
+    assert_eq!(bits(&released), bits(&[music, music]));
+    // A tick on the new mask only touches channel 2.
+    let ticked = samples(mapper.map_frames(&frames, 0.1), 2);
+    assert_eq!(ticked[0].to_bits(), music.to_bits());
+    assert!(ticked[1] < music + 0.1 && ticked[1] > music);
+}
+
+/// A 4-channel device with the tick alone on channel 3 (bit 2).
+fn tick_device() -> OutputDeviceSettings {
+    OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0100,
+        ..OutputDeviceSettings::default()
+    }
+}
+
+/// Path 0 with `latency` frames of chain latency, at 48 kHz.
+fn latency_timing(latency: u32) -> PathTiming {
+    let mut timing = PathTiming::default();
+    timing.latency[0] = latency;
+    timing
+}
+
+/// Maps `frames` silent frames of every path, with a 0.25 tick on each
+/// frame in `ticks`, and returns the tick lane (channel 3).
+fn tick_lane(mapper: &mut DeviceMapper, ticks: &[usize], frames: usize) -> Vec<f32> {
+    use crate::audio::delay::DelayLine;
+    let mut lines: PathLines = std::array::from_fn(|_| DelayLine::new(256));
+    let mut lane = Vec::new();
+    for index in 0..frames {
+        for line in &mut lines {
+            line.push([0.0, 0.0]);
+        }
+        let tick = if ticks.contains(&index) { 0.25 } else { 0.0 };
+        lane.push(mapper.map_paths(&lines, tick).sample(2));
+    }
+    lane
+}
+
+/// The frames of `lane` that carry anything.
+fn ticked(lane: &[f32]) -> Vec<usize> {
+    (0..lane.len()).filter(|&i| lane[i] != 0.0).collect()
+}
+
+#[test]
+fn a_silent_click_line_is_skipped_and_still_aligns_the_next_tick() {
+    use crate::audio::delay::DelayLine;
+    use crate::audio::path::LiveSlots;
+    let controls = DeviceControls::new();
+    controls.set(&tick_device());
+    let mut mapper = DeviceMapper::new(4);
+    // Path 0 is 48 frames late, so a dry path (and the tick) waits 48.
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &latency_timing(48), 64);
+    let mut lines: PathLines = std::array::from_fn(|_| DelayLine::new(256));
+    let mut lane = Vec::new();
+    // Two ticks far apart: the line goes quiet (and is skipped) between them.
+    for index in 0..400 {
+        lines[0].push([0.0, 0.0]);
+        let tick = if index == 0 || index == 300 {
+            0.25
+        } else {
+            0.0
+        };
+        lane.push(mapper.map_paths(&lines, tick).sample(2));
+        if index == 100 {
+            assert!(
+                mapper.click_line_silent(),
+                "the line is quiet once the tick has played"
+            );
+        }
+    }
+    assert_eq!(ticked(&lane), [48, 348]);
+}
+
+#[test]
+fn a_click_line_is_silent_after_its_delay_drops_and_settles() {
+    use crate::audio::delay::DelayLine;
+    use crate::audio::path::LiveSlots;
+    let controls = DeviceControls::new();
+    controls.set(&tick_device());
+    let mut mapper = DeviceMapper::new(4);
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &latency_timing(200), 64);
+    let mut lines: PathLines = std::array::from_fn(|_| DelayLine::new(256));
+    let mut run = |mapper: &mut DeviceMapper, frames: usize, every: Option<usize>| {
+        for index in 0..frames {
+            lines[0].push([0.0, 0.0]);
+            let tick = match every {
+                Some(every) if index % every == 0 => 0.25,
+                _ => 0.0,
+            };
+            mapper.map_paths(&lines, tick);
+        }
+    };
+    run(&mut mapper, 300, Some(100));
+    // The delay drops from 200 to 10 frames while ticks keep the line busy,
+    // so the 15 ms fade runs to its end instead of being snapped.
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &latency_timing(10), 64);
+    run(&mut mapper, 1_001, Some(100));
+    // 50 frames after the last tick: past the 10 frames still read, short
+    // of the 200 the tap left.
+    run(&mut mapper, 50, None);
+    assert!(
+        mapper.click_line_silent(),
+        "the settled tap still counts the delay it faded away from"
+    );
+}
+
+#[test]
+fn a_block_without_mapping_drops_the_queued_ticks() {
+    use crate::audio::path::LiveSlots;
+    let controls = DeviceControls::new();
+    controls.set(&tick_device());
+    let mut mapper = DeviceMapper::new(4);
+    let timing = latency_timing(48);
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &timing, 64);
+    // The tick goes in, but the device stops being mapped before it is due.
+    let before = tick_lane(&mut mapper, &[0], 16);
+    assert!(before.iter().all(|sample| *sample == 0.0));
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &timing, 64);
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &timing, 64);
+    let lane = tick_lane(&mut mapper, &[], 128);
+    assert!(
+        lane.iter().all(|sample| *sample == 0.0),
+        "a stale tick played: {lane:?}"
+    );
+}
+
+#[test]
+fn a_zero_frame_block_keeps_a_queued_tick() {
+    use crate::audio::path::LiveSlots;
+    let controls = DeviceControls::new();
+    controls.set(&tick_device());
+    let mut mapper = DeviceMapper::new(4);
+    let timing = latency_timing(48);
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &timing, 64);
+    let before = tick_lane(&mut mapper, &[0], 16);
+    assert!(before.iter().all(|sample| *sample == 0.0));
+    // A block of no frames maps nothing, and is no gap.
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &timing, 0);
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &timing, 64);
+    let lane = tick_lane(&mut mapper, &[], 128);
+    assert_eq!(ticked(&lane), [32], "the tick plays on time: {lane:?}");
+    assert_eq!(lane[32], 0.25);
+}
+
+#[test]
+fn a_delay_change_while_silent_plays_the_next_tick_once() {
+    use crate::audio::path::LiveSlots;
+    let controls = DeviceControls::new();
+    controls.set(&tick_device());
+    let mut mapper = DeviceMapper::new(4);
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &latency_timing(0), 64);
+    let quiet = tick_lane(&mut mapper, &[], 64);
+    assert!(quiet.iter().all(|sample| *sample == 0.0));
+    // A plugin on path 0 now reports 48 frames: the tick waits 48 from
+    // here.  Nothing is queued, so the first tick must not be read
+    // mid-crossfade at both delays.
+    mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &latency_timing(48), 64);
+    let lane = tick_lane(&mut mapper, &[0], 128);
+    assert_eq!(ticked(&lane), [48], "one tick, at the new delay: {lane:?}");
+    assert_eq!(lane[48], 0.25);
+}
+
+#[test]
+fn the_tick_waits_the_device_alignment_delay() {
+    use crate::audio::path::LiveSlots;
+    // Path 0 is 48 frames late (1 ms at 48 kHz).  With align on, a path
+    // with no latency would wait 48 frames on this device, so the tick
+    // waits with it and lands with that path's music.
+    let run = |latency: u32| {
+        let controls = DeviceControls::new();
+        controls.set(&tick_device());
+        let mut mapper = DeviceMapper::new(4);
+        mapper.begin_paths(
+            &controls,
+            RAMP,
+            LiveSlots::main(),
+            &latency_timing(latency),
+            64,
+        );
+        tick_lane(&mut mapper, &[0], 128)
+    };
+    let aligned = run(48);
+    assert_eq!(ticked(&aligned), [48], "{aligned:?}");
+    assert_eq!(aligned[48], 0.25);
+    let unaligned = run(0);
+    assert_eq!(unaligned[0], 0.25, "no delay plays the tick at once");
+    assert!(unaligned[1..].iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn a_trim_on_one_path_does_not_move_the_tick() {
+    use crate::audio::path::{LiveSlots, PathState};
+    let live = LiveSlots::from_states([
+        PathState::Active,
+        PathState::Active,
+        PathState::Inactive,
+        PathState::Inactive,
+    ]);
+    // Path 0 is 48 frames late; path 1 has none and a 1 ms (48 frame)
+    // trim, so it waits 96.  A dry path would wait 48: so does the tick.
+    let mut settings = tick_device();
+    settings.path_map[1].trim_ms = 1.0;
+    let controls = DeviceControls::new();
+    controls.set(&settings);
+    let mut mapper = DeviceMapper::new(4);
+    mapper.begin_paths(&controls, RAMP, live, &latency_timing(48), 64);
+    let report = controls.alignment().expect("aligned");
+    assert_eq!(report.delays[1], Some(96));
+    let lane = tick_lane(&mut mapper, &[0], 160);
+    assert_eq!(ticked(&lane), [48], "{lane:?}");
+}
+
+#[test]
+fn with_align_off_a_trim_alone_does_not_delay_the_tick() {
+    use crate::audio::path::LiveSlots;
+    let run = |trim_ms: f32| {
+        let mut settings = OutputDeviceSettings {
+            align: false,
+            ..tick_device()
+        };
+        settings.path_map[0].trim_ms = trim_ms;
+        let controls = DeviceControls::new();
+        controls.set(&settings);
+        let mut mapper = DeviceMapper::new(4);
+        mapper.begin_paths(&controls, RAMP, LiveSlots::main(), &latency_timing(48), 64);
+        ticked(&tick_lane(&mut mapper, &[0], 128))
+    };
+    // The latency is not aligned and the trim is path 0's own.
+    assert_eq!(run(1.0), [0]);
+    // A negative trim makes every other path wait instead, so a dry one
+    // would wait too: the device's own alignment, not the trim.
+    assert_eq!(run(-1.0), [48]);
+}
+
+#[test]
+fn mono_copy_still_fills_a_channel_the_tick_lands_on() {
+    let frames = one_path(0.4, -0.2);
+    let tick = 0.25;
+    let mono = OutputDeviceSettings {
+        unused: UnusedChannels::MonoCopy,
+        click_mask: 0b0100,
+        ..OutputDeviceSettings::default()
+    };
+    let silent = OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        ..mono
+    };
+    let (mut copy, _) = mapped_device(mono, 4);
+    let (mut alone, _) = mapped_device(silent, 4);
+    let copied = samples(copy.map_frames(&frames, tick), 4);
+    let ticked = samples(alone.map_frames(&frames, tick), 4);
+    assert_eq!(copied[2], 0.1 + tick);
+    assert_eq!(ticked[2], tick);
+}
+
+#[test]
+fn adopt_settings_from_copies_the_click_mask() {
+    let controls = DeviceControls::new();
+    controls.set(&OutputDeviceSettings {
+        click_mask: 0b1100,
+        ..OutputDeviceSettings::default()
+    });
+    let next = DeviceControls::new();
+    next.adopt_settings_from(&controls);
+    assert_eq!(next.click_mask(), 0b1100);
 }

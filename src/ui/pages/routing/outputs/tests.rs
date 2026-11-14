@@ -179,6 +179,7 @@ fn a_device_row_reads_its_map() {
         name: "Scarlett 4i4".to_owned(),
         backend: "PipeWire".to_owned(),
         channels: 4,
+        click_channels: 4,
         clock: true,
         reduction_db: 0.0,
         settings: with_map(0b0101, 0b1010, SILENT),
