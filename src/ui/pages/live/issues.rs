@@ -1,6 +1,6 @@
 //! The Live Issues strip: under the page header, above Input / Bridge /
-//! Output (see `docs/mockups/live-issues-plan.md`).  One row per problem
-//! from `RigWerkApp::issue_view` (the last tick's issues): severity,
+//! Output.  One row per problem from `RigWerkApp::issue_view` (the last
+//! tick's issues): severity,
 //! title, one-line detail, where it is, the action button, and the
 //! secondary ones: "Show on <card>" for an issue about a Live card and
 //! Dismiss for a warning.  Hidden while

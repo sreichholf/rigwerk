@@ -1,7 +1,6 @@
-//! Live Issues: the judgments the Live page shows in one strip (see
-//! `docs/mockups/live-issues-plan.md`).  Readings stay on the cards; a
-//! problem becomes one row here, with a severity, where it is and one
-//! action that only runs on a click.
+//! Live Issues: the judgments the Live page shows in one strip.  Readings
+//! stay on the cards; a problem becomes one row here, with a severity,
+//! where it is and one action that only runs on a click.
 //!
 //! An error means the audio itself is about to break (a block nearly
 //! late); anything that only colours the sound, such as a comb filter, is

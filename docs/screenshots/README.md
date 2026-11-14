@@ -31,7 +31,7 @@ Environment variables for screenshot runs:
 | Variable | Values |
 | --- | --- |
 | `RIGWERK_PAGE` | `live`, `mixer`, `routing`, `devices`, `sessions`, `plugins`, `tuner`, `guide`, `diagnostics` |
-| `RIGWERK_MIXER_STAGE` | `input`, `pre_eq`, `plugins`, `gate`, `post_eq`, `output`, `device` (the clock device) |
+| `RIGWERK_MIXER_STAGE` | `input` (also shows the metronome), `pre_eq`, `plugins`, `gate`, `post_eq`, `path` (the selected path's level, with 2+ paths), `output`, `device` (the clock device) |
 | `RIGWERK_ROUTING_SETUP` | `showcase`; `drywet`, `sum3`, `blend`, `dualamp-off` (alignment off, the red warning), `live3` (Blend plus an empty third path) |
 | `RIGWERK_SCREENSHOT_PLUGINS` | `;` list of `<path number>=<bundle>[#<effect name>]`, used by `showcase` |
 | `RIGWERK_SCREENSHOT_START` | `1` starts the bridge before the capture |
