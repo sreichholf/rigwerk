@@ -322,6 +322,7 @@ impl Shared {
             previous.drift_enabled.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
+        self.recorder.set_with_click(previous.recorder.with_click());
         self.clock_device
             .adopt_settings_from(&previous.clock_device);
         let count = previous.follower_count.load(Ordering::Relaxed);

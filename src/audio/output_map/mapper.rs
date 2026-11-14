@@ -329,9 +329,15 @@ pub(crate) fn frame_lanes(channels: usize) -> usize {
     channels.min(SLOTS)
 }
 
-/// One mapped device frame: what each device channel plays.
+/// One mapped device frame: what each device channel plays, and the same
+/// frame without the metronome tick or the calibration click (what a take
+/// records while "Record the click" is off).  Both share the level, the
+/// music ceiling, the mute and the calibration duck.
 pub(crate) struct DeviceFrame {
     samples: [f32; SLOTS],
+    /// The click-free frame, lane for lane.  Equal to `samples` while no
+    /// tick sounds and the click limiter is at unity.
+    record: [f32; SLOTS],
     channels: usize,
 }
 
@@ -347,15 +353,28 @@ impl DeviceFrame {
         }
     }
 
+    /// [`Self::sample`] of the click-free frame: no metronome tick and no
+    /// calibration click.
+    #[inline]
+    pub(crate) fn record_sample(&self, channel: usize) -> f32 {
+        if channel >= self.channels {
+            0.0
+        } else {
+            self.record[channel.min(EXTRA)]
+        }
+    }
+
     /// This frame with the calibration duck applied and the click added to
     /// `mapped` (bit `n` = device channel `n`) after the scaling, so the
     /// measurement keeps its fixed level regardless of the device fader and
     /// leaves on the channels the clock map really plays.  An empty mask
-    /// falls back to channel 0 (and 1 when the device has it).
+    /// falls back to channel 0 (and 1 when the device has it).  The
+    /// click-free frame gets the duck but never the click.
     #[inline]
     pub(crate) fn ducked(&self, gain: f32, click: f32, mapped: u32) -> Self {
         let mut frame = Self {
             samples: self.samples,
+            record: self.record,
             channels: self.channels,
         };
         if gain == 1.0 && click == 0.0 {
@@ -371,6 +390,11 @@ impl DeviceFrame {
                 *sample += click;
             }
         }
+        if gain != 1.0 {
+            for sample in &mut frame.record[..lanes] {
+                *sample *= gain;
+            }
+        }
         frame
     }
 
@@ -383,13 +407,36 @@ impl DeviceFrame {
     }
 
     /// Rebuilds a frame for a `channels`-channel device from its lanes (see
-    /// [`Self::lanes`]).  Missing lanes read silence.
+    /// [`Self::lanes`]).  Missing lanes read silence.  The click-free frame
+    /// is the same lanes, so whatever click they hold stays in a take.
     #[inline]
     pub(crate) fn from_lanes(lanes: &[f32], channels: usize) -> Self {
+        Self::from_both_lanes(lanes, lanes, channels)
+    }
+
+    /// The click-free frame as lanes, laid out like [`Self::lanes`].
+    #[inline]
+    pub(crate) fn record_lanes(&self) -> &[f32] {
+        &self.record[..frame_lanes(self.channels)]
+    }
+
+    /// Rebuilds a frame from its lanes and its click-free lanes (see
+    /// [`Self::lanes`] and [`Self::record_lanes`]).  Missing lanes read
+    /// silence.
+    #[inline]
+    pub(crate) fn from_both_lanes(lanes: &[f32], record: &[f32], channels: usize) -> Self {
+        let count = frame_lanes(channels);
         let mut samples = [0.0; SLOTS];
-        let count = frame_lanes(channels).min(lanes.len());
-        samples[..count].copy_from_slice(&lanes[..count]);
-        Self { samples, channels }
+        let wet = count.min(lanes.len());
+        samples[..wet].copy_from_slice(&lanes[..wet]);
+        let mut clean = [0.0; SLOTS];
+        let dry = count.min(record.len());
+        clean[..dry].copy_from_slice(&record[..dry]);
+        Self {
+            samples,
+            record: clean,
+            channels,
+        }
     }
 }
 
@@ -420,6 +467,8 @@ impl DeviceFrame {
 /// to unity between them.  [`Self::map_paths`] delays the tick by the
 /// alignment delay a dry, untrimmed path gets on the device first, and the
 /// calibration duck ([`Self::duck_click`]) acts after that delay, on ticks already queued.
+/// The frame's click-free lanes are copied after the music ceiling, before
+/// the tick and its limiter, and get the same mute.
 pub(crate) struct DeviceMapper {
     channels: usize,
     /// Weights of `[L, R, (L + R) / 2]` per path slot and channel slot.
@@ -508,6 +557,7 @@ impl DeviceMapper {
             click_duck: Ramp::new(1.0),
             frame: DeviceFrame {
                 samples: [0.0; SLOTS],
+                record: [0.0; SLOTS],
                 channels,
             },
             peaks: [0.0; MAX_OUTPUT_CHANNELS],
@@ -811,9 +861,11 @@ impl DeviceMapper {
         // one sample.  Released, with no tick, it would only copy (the music
         // limiter already holds those lanes under the same ceiling), so the
         // gather is skipped.  Lanes a mask change just dropped stay in it
-        // until it is back at unity; the tick goes on the mask only.
+        // until it is back at unity; the tick goes on the mask only.  The
+        // click-free lanes are copied before the tick and get only the mute.
         let lanes = frame_lanes(self.channels);
         self.limiter.process(&mut self.frame.samples[..lanes]);
+        self.frame.record[..lanes].copy_from_slice(&self.frame.samples[..lanes]);
         if click != 0.0 || self.click_limiter.is_limiting() {
             let mut gathered = [0.0f32; MAX_OUTPUT_CHANNELS];
             let mut which = [0usize; MAX_OUTPUT_CHANNELS];
@@ -841,6 +893,9 @@ impl DeviceMapper {
         let mute = self.mute_gain.next();
         if mute != 1.0 {
             for sample in &mut self.frame.samples[..lanes] {
+                *sample *= mute;
+            }
+            for sample in &mut self.frame.record[..lanes] {
                 *sample *= mute;
             }
         }

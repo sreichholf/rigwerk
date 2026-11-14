@@ -1,9 +1,10 @@
 //! The record row under the bridge card.
 //!
 //! One line: the label, Record or Stop, elapsed time, an overrun count when
-//! the queue could not take a frame, and the take's file name.  The button calls
-//! [`RigWerkApp::start_recording`] and [`RigWerkApp::stop_recording`].  This
-//! file does not open the wav.
+//! the queue could not take a frame, "Record the click", and the take's file
+//! name.  The button calls [`RigWerkApp::start_recording`] and
+//! [`RigWerkApp::stop_recording`], the checkbox
+//! [`RigWerkApp::set_record_click`].  This file does not open the wav.
 
 use std::path::Path;
 
@@ -72,6 +73,19 @@ impl RigWerkApp {
                     ui.label(mono(rate_line, elapsed_color, 11.0));
                     if overruns > 0 {
                         ui.label(mono(overrun_label(overruns), RED, 11.0));
+                    }
+                    let mut with_click = self.record_click;
+                    if ui
+                        .checkbox(
+                            &mut with_click,
+                            RichText::new("Record the click").size(ts(10.5)).color(MUTED),
+                        )
+                        .on_hover_text(
+                            "Keep the metronome and the latency click in the take. Applies right away, also during a take. A follower with more than 4 channels always keeps its metronome.",
+                        )
+                        .changed()
+                    {
+                        self.set_record_click(with_click);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(path) = &path {

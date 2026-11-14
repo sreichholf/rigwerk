@@ -253,6 +253,28 @@ fn push_device_frame_writes_the_mapped_channels() {
 }
 
 #[test]
+fn push_device_frame_leaves_the_click_out_unless_asked() {
+    let temp = TempTake::new("click");
+    let recorder = Recorder::new();
+    assert!(!recorder.with_click());
+    assert!(recorder.arm(temp.wav(), 8, 2, RecordSource::Clock));
+    wait_phase(&recorder, RecordPhase::Recording);
+    let mapped = DeviceFrame::from_both_lanes(&[0.75, -0.5], &[0.25, -0.5], 2);
+    push_device_frame(&recorder, RecordSource::Clock, &mapped, 2);
+    // Mid-take, the next frame follows the switch.
+    recorder.set_with_click(true);
+    push_device_frame(&recorder, RecordSource::Clock, &mapped, 2);
+    recorder.set_with_click(false);
+    push_device_frame(&recorder, RecordSource::Clock, &mapped, 2);
+    let done = finish(&recorder);
+    assert!(done.error.is_none(), "{done:?}");
+    assert_eq!(
+        read_wav(&temp.wav()).samples,
+        vec![0.25, -0.5, 0.75, -0.5, 0.25, -0.5]
+    );
+}
+
+#[test]
 fn channel_count_is_clamped_and_past_stereo_the_mask_is_zero() {
     let temp = TempTake::new("clamp");
     let recorder = Recorder::new();

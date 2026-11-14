@@ -30,6 +30,10 @@
 //!    delay first.  A plain stereo sum of the paths, after the
 //!    master but not aligned, feeds the master meters and the scope.
 //!    That sum does not include the metronome.
+//!    Each device frame also carries a click-free copy, taken after the
+//!    ceiling and before the tick, with the same mute and calibration
+//!    duck but no calibration click: what a take records unless "Record
+//!    the click" is on (see `record`).
 //!    On the ring path, each generic follower's mapped frame goes into
 //!    that follower's ring; its own stream plays it (see `follower`).
 //!

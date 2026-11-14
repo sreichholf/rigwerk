@@ -3,6 +3,9 @@
 //! callback already ran those and pushed the follower's finished device
 //! channels into its ring.  This side only crosses the clock: it follows the
 //! fill, converts the rate and fades around an underrun, on every lane.
+//! Those lanes include the click-free half when the ring carries one
+//! ([`carries_record`]), and the frame is split back into both.  A wider
+//! device has none, so its take records the click.
 //!
 //! What the Live Issues strip reads comes back through the slot's
 //! [`FollowerBus`](super::FollowerBus) as atomics: the underrun count and
@@ -20,6 +23,7 @@ use super::super::output_map::{frame_lanes, DeviceFrame};
 use super::super::resampler::FrameResampler;
 use super::super::ring::LaneFrame;
 use super::super::shared::Shared;
+use super::bus::{carries_record, ring_lanes};
 
 /// Same drift gains as [`super::super::mixer::OutputMixer`].
 pub(crate) const DRIFT_LIMIT_PPM: f32 = 500.0;
@@ -51,9 +55,13 @@ pub(crate) struct FollowerMixer {
     slot: usize,
     output_rate: u32,
     source_rate: u32,
-    /// The device's channel count, and the ring lanes that carry them.
+    /// The device's channel count, and the ring lanes that carry them
+    /// (see [`ring_lanes`]).
     channels: usize,
     lanes: usize,
+    /// Whether the second half of those lanes is the click-free frame.
+    /// Fixed when the follower opens.
+    split: bool,
     resampler: FrameResampler<LaneFrame>,
     last: LaneFrame,
     fade_gain: f32,
@@ -78,7 +86,7 @@ impl FollowerMixer {
     pub(crate) fn new(slot: usize, output_rate: u32, device_channels: usize) -> Self {
         let output_rate = output_rate.max(1);
         let channels = device_channels.max(1);
-        let lanes = frame_lanes(channels);
+        let lanes = ring_lanes(channels);
         let mut resampler = FrameResampler::new(output_rate, output_rate);
         resampler.set_lanes(lanes);
         Self {
@@ -87,6 +95,7 @@ impl FollowerMixer {
             source_rate: output_rate,
             channels,
             lanes,
+            split: carries_record(channels),
             resampler,
             last: SILENCE,
             fade_gain: 1.0,
@@ -288,10 +297,13 @@ impl FollowerMixer {
             for value in &mut out[..lanes] {
                 *value *= gain;
             }
-            write(
-                index,
-                &DeviceFrame::from_lanes(&out[..lanes], self.channels),
-            );
+            let mapped = if self.split {
+                let (wet, record) = out[..lanes].split_at(frame_lanes(self.channels));
+                DeviceFrame::from_both_lanes(wet, record, self.channels)
+            } else {
+                DeviceFrame::from_lanes(&out[..lanes], self.channels)
+            };
+            write(index, &mapped);
         }
 
         let bus = shared.follower_bus(self.slot);

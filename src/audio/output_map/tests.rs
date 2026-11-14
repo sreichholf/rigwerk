@@ -1229,3 +1229,108 @@ fn adopt_settings_from_copies_the_click_mask() {
     next.adopt_settings_from(&controls);
     assert_eq!(next.click_mask(), 0b1100);
 }
+
+fn record_samples(frame: &DeviceFrame, channels: usize) -> Vec<f32> {
+    (0..channels)
+        .map(|channel| frame.record_sample(channel))
+        .collect()
+}
+
+#[test]
+fn the_click_free_lanes_leave_out_the_tick_and_keep_the_level() {
+    let settings = OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0101,
+        level_db: -6.0,
+        ..OutputDeviceSettings::default()
+    };
+    let frames = one_path(0.4, -0.2);
+    let (mut ticked, _) = mapped_device(settings, 4);
+    let (mut quiet, _) = mapped_device(settings, 4);
+    let frame = ticked.map_frames(&frames, 0.25);
+    let wet = samples(frame, 4);
+    let record = record_samples(frame, 4);
+    let plain = samples(quiet.map_frames(&frames, 0.0), 4);
+    // The played frame has the tick on the mask; the click-free one is the
+    // levelled music without it, bit for bit.
+    assert_ne!(wet[0].to_bits(), plain[0].to_bits());
+    assert_eq!(wet[2], 0.25);
+    assert_eq!(lane_bits(&record), lane_bits(&plain));
+    assert_eq!(record[2], 0.0);
+    assert!(
+        record[0] > 0.0 && record[0] < 0.4,
+        "the level applies: {}",
+        record[0]
+    );
+}
+
+#[test]
+fn device_mute_reaches_the_click_free_lanes() {
+    let settings = OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0001,
+        ..OutputDeviceSettings::default()
+    };
+    let (mut mapper, controls) = mapped_device(settings, 2);
+    let frames = one_path(0.4, -0.2);
+    let _ = mapper.map_frames(&frames, 0.2);
+    controls.set(&OutputDeviceSettings {
+        mute: true,
+        ..settings
+    });
+    mapper.begin_block(&controls, RAMP);
+    let mut first = None;
+    let mut last = Vec::new();
+    for _ in 0..(RAMP as usize + 2) {
+        last = record_samples(mapper.map_frames(&frames, 0.2), 2);
+        first.get_or_insert(last[0]);
+    }
+    let first = first.expect("mapped");
+    assert!(first > 0.0 && first < 0.4, "the mute ramps: {first}");
+    assert_eq!(last, vec![0.0, 0.0]);
+}
+
+#[test]
+fn without_a_tick_the_click_free_lanes_equal_the_played_ones() {
+    for channels in [1, 2, 4, 10] {
+        let (mut mapper, _) = mapped_device(OutputDeviceSettings::default(), channels);
+        for (left, right) in PAIRS.into_iter().filter(under_the_ceiling) {
+            let frame = mapper.map(left, right);
+            assert_eq!(
+                bits(&record_samples(frame, channels)),
+                bits(&samples(frame, channels)),
+                "{channels} ch, ({left:e}, {right:e})"
+            );
+            assert_eq!(lane_bits(frame.record_lanes()), lane_bits(frame.lanes()));
+        }
+    }
+}
+
+#[test]
+fn ducked_scales_the_click_free_lanes_without_the_calibration_click() {
+    let frame = DeviceFrame::from_both_lanes(&[0.5, -0.0, 0.25], &[0.4, -0.0, 0.2], 3);
+    let ducked = frame.ducked(0.5, 0.1, 0b001);
+    assert_eq!(samples(&ducked, 3), vec![0.25 + 0.1, -0.0, 0.125]);
+    assert_eq!(record_samples(&ducked, 3), vec![0.2, -0.0, 0.1]);
+    // A click alone leaves the click-free lanes as they were.
+    let clicked = frame.ducked(1.0, 0.1, 0b001);
+    assert_eq!(
+        lane_bits(clicked.record_lanes()),
+        lane_bits(frame.record_lanes())
+    );
+    // Unity copies both halves bit for bit, signed zeros included.
+    let unity = frame.ducked(1.0, 0.0, 0b001);
+    assert_eq!(lane_bits(unity.lanes()), lane_bits(frame.lanes()));
+    assert_eq!(
+        lane_bits(unity.record_lanes()),
+        lane_bits(frame.record_lanes())
+    );
+    assert_eq!(unity.record_sample(1).to_bits(), (-0.0f32).to_bits());
+}
+
+#[test]
+fn from_lanes_uses_the_played_lanes_for_both() {
+    let frame = DeviceFrame::from_lanes(&[0.5, -0.25], 2);
+    assert_eq!(lane_bits(frame.record_lanes()), lane_bits(frame.lanes()));
+    assert_eq!(frame.record_sample(2), 0.0);
+}

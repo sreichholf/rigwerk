@@ -24,7 +24,9 @@
 //!   frame goes into that follower's ring.
 //! - **The ring carries device channels**, one lane per channel up to
 //!   `MAX_OUTPUT_CHANNELS` plus the shared lane for channels past it
-//!   (`frame_lanes`).  Its storage is allocated once, with the bus, for two
+//!   (`frame_lanes`).  Up to 4 channels, the click-free lanes a take
+//!   records follow them (`bus::carries_record`); a wider follower's take
+//!   keeps the click.  Its storage is allocated once, with the bus, for two
 //!   seconds of every lane at the engine rate (about 3.5 MB at 48 kHz), so
 //!   the cushion ceiling (half the ring) is one second at any channel
 //!   count.  A layout generation, read at the start of each clock block,

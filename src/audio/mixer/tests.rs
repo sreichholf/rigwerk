@@ -2217,3 +2217,123 @@ fn a_follower_that_resumes_feeding_does_not_play_stale_ticks() {
         "the accent queued before the gap played late"
     );
 }
+
+/// The clock device's played and click-free frames over `blocks` blocks
+/// of 64, with the tick on channels 1 and 3 of a 4-channel device.
+fn played_and_recorded(running: bool, blocks: usize) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let (_, shared) = steady_mixer((0.4, -0.2));
+    let mut mixer = OutputMixer::new(48_000, 4);
+    shared.clock_device.set(&OutputDeviceSettings {
+        unused: UnusedChannels::Silent,
+        click_mask: 0b0101,
+        ..OutputDeviceSettings::default()
+    });
+    if running {
+        arm_click(&shared);
+    }
+    let mut played = Vec::new();
+    let mut recorded = Vec::new();
+    for _ in 0..blocks {
+        mixer.render(&shared, 64, |_, mapped| {
+            played.push((0..4).map(|channel| mapped.sample(channel)).collect());
+            recorded.push(
+                (0..4)
+                    .map(|channel| mapped.record_sample(channel))
+                    .collect(),
+            );
+        });
+    }
+    (played, recorded)
+}
+
+#[test]
+fn the_click_free_frame_has_no_tick_and_the_played_one_does() {
+    let (played, recorded) = played_and_recorded(true, 4);
+    let (quiet, quiet_recorded) = played_and_recorded(false, 4);
+    assert!(
+        played
+            .iter()
+            .zip(&quiet)
+            .any(|(frame, quiet)| frame[2].to_bits() != quiet[2].to_bits()),
+        "the masked channel should carry the tick"
+    );
+    // Without a tick the two frames agree, bit for bit, and the click-free
+    // frame with one is that same music.
+    assert_eq!(bits_of(&quiet), bits_of(&quiet_recorded));
+    assert_eq!(bits_of(&recorded), bits_of(&quiet));
+}
+
+#[test]
+fn the_click_free_frame_takes_the_calibration_duck_but_not_its_click() {
+    let (mut mixer, shared) = steady_mixer((0.25, 0.25));
+    let click = super::super::calibration::click_waveform(48_000);
+    shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, _| {});
+    }
+    for _ in 0..4_000 {
+        shared.calibration.capture_frame(0.0, 0.0);
+    }
+    let mut played = Vec::new();
+    let mut recorded = Vec::new();
+    for _ in 0..40 {
+        mixer.render(&shared, 64, |_, mapped| {
+            played.push(mapped.sample(0));
+            recorded.push(mapped.record_sample(0));
+        });
+    }
+    assert_eq!(&played[..click.len()], click.as_slice());
+    assert!(
+        recorded[..click.len()]
+            .iter()
+            .all(|sample| sample.abs() < 1e-6),
+        "the take should hold the ducked mix, not the click"
+    );
+}
+
+#[test]
+fn a_narrow_follower_ring_gets_the_tick_free_lanes_from_the_mixer() {
+    // The clock side's own producer: each popped ring frame is the played
+    // lanes, then the click-free ones.
+    fn ring_frames(running: bool) -> Vec<[u32; 4]> {
+        let (mut mixer, shared) = two_path_mixer((0.4, -0.2), 2);
+        shared.set_followers(
+            &[trimmed_tick_follower(0b0010)],
+            &follower_plan(),
+            &[(CushionMode::Manual, 10.0)],
+        );
+        let bus = shared.follower_bus(0);
+        bus.set_device_channels(2);
+        bus.reset_playback();
+        if running {
+            arm_click(&shared);
+        }
+        shared
+            .follower_ring_active(0)
+            .store(true, Ordering::Relaxed);
+        let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            let _ = device_frames(&mut mixer, &shared, 2, 64);
+            while bus.pop_frame(&mut frame) {
+                out.push([0, 1, 2, 3].map(|lane| frame[lane].to_bits()));
+            }
+        }
+        out
+    }
+    let ticked = ring_frames(true);
+    let quiet = ring_frames(false);
+    assert_eq!(ticked.len(), 512);
+    assert!(
+        ticked.iter().zip(&quiet).any(|(t, q)| t[1] != q[1]),
+        "the played lane should carry the tick"
+    );
+    for (ticked, quiet) in ticked.iter().zip(&quiet) {
+        assert_eq!(
+            ticked[2..],
+            quiet[..2],
+            "the click-free lanes are the music"
+        );
+        assert_eq!(quiet[2..], quiet[..2]);
+    }
+}

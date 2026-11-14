@@ -669,6 +669,22 @@ fn unreadable_follower_is_skipped_and_the_rest_kept() {
 }
 
 #[test]
+fn record_the_click_defaults_off_and_round_trips() {
+    assert!(!Preferences::default().record_click);
+    let old = load_preferences(Some(r#"(session_name:"Old")"#), BACKUP)
+        .preferences
+        .expect("readable");
+    assert!(!old.record_click, "an old save without the field loads off");
+    let preferences = Preferences {
+        record_click: true,
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    assert!(loaded.preferences.expect("readable").record_click);
+}
+
+#[test]
 fn nothing_stored_is_quiet() {
     let loaded = load_preferences(None, BACKUP);
     assert!(loaded.preferences.is_none());

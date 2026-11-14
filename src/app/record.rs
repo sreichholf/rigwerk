@@ -4,6 +4,8 @@
 //! builds a path and calls `AudioEngine::arm_recording`, which returns
 //! immediately.  The writer creates parent directories.  Phase, elapsed
 //! time, and overruns are read from `AudioEngine::recording_status`.
+//! "Record the click" is one preference the engine reads per frame, so it
+//! is set straight through, never re-armed.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -272,6 +274,14 @@ impl RigWerkApp {
                 .unwrap_or_else(|| "Could not start recording.".to_owned());
             self.push_log(message, LogTone::Red);
         }
+    }
+
+    /// "Record the click": whether takes carry the metronome tick and the
+    /// calibration click.  Saved with the preferences; the engine applies
+    /// it from the next frame, also during a take.
+    pub(crate) fn set_record_click(&mut self, with_click: bool) {
+        self.record_click = with_click;
+        self.engine.set_record_click(with_click);
     }
 
     /// Ask the writer to finish.  Returns immediately and does not join it.

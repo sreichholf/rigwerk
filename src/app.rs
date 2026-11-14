@@ -255,6 +255,8 @@ pub struct RigWerkApp {
     /// Directory takes are written into.  Empty is replaced on load; the
     /// writer creates it.
     pub(crate) record_folder: String,
+    /// "Record the click": takes carry the metronome and calibration click.
+    pub(crate) record_click: bool,
     pub(crate) sessions: Vec<Preset>,
     pub(crate) selected_session: Option<usize>,
     pub(crate) pending_delete: Option<usize>,
@@ -443,6 +445,7 @@ impl RigWerkApp {
             tuner_auto_mute: self.tuner.auto_mute,
             tuner_tolerance: self.tuner.tolerance.to_u8(),
             record_folder: self.record_folder.clone(),
+            record_click: self.record_click,
             metronome_bpm: self.metronome_bpm,
             metronome_rhythm: self.metronome_rhythm,
             metronome_level_db: self.metronome_level_db,
@@ -590,6 +593,7 @@ impl RigWerkApp {
             quantum: None,
             session_name: preferences.session_name.clone(),
             record_folder: preferences.record_folder.clone(),
+            record_click: preferences.record_click,
             sessions,
             selected_session,
             pending_delete: None,
@@ -643,6 +647,7 @@ impl RigWerkApp {
         }
         app.apply_gains();
         app.apply_metronome();
+        app.engine.set_record_click(app.record_click);
         app.engine
             .set_master(app.mute, app.monitor, app.input_channels, app.drift);
         // Old files (and no file) load as one path.
@@ -823,6 +828,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         quantum: None,
         session_name: "My guitar rig".to_owned(),
         record_folder: String::new(),
+        record_click: false,
         sessions: Vec::new(),
         selected_session: None,
         pending_delete: None,

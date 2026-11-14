@@ -7,8 +7,9 @@ plans and the code review has landed; that history is in git.
 
 - Native PipeWire playback on two streams (not the duplex node) does not
   play to followers.  `audio/linux/native.rs` has no `FollowerOutputs`.
-- Recordings include the metronome click: a take is what the output
-  plays.
+- A take on a follower with more than four channels still includes the
+  metronome click: only narrower followers carry the click-free lanes
+  through their ring.
 
 ## Not reproduced
 
