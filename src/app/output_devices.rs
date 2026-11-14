@@ -2,6 +2,8 @@
 //!
 //! Mixer, Routing, and Live Issues read the same list.  A row is names,
 //! flags, and settings.  The colour of a device's state stays in `ui`.
+//! [`DeviceLevel`] is one row's live meter, from the smoothed per-channel
+//! meters the bridge updates each frame (`app/bridge.rs`).
 
 use crate::app::RigWerkApp;
 use crate::audio::{EngineState, OutputDeviceSettings, MAX_OUTPUT_CHANNELS};
@@ -22,13 +24,33 @@ pub(crate) struct OutputDeviceRow {
     pub(crate) virtual_out: bool,
     /// Index into `followers` when this is not the clock device.
     pub(crate) follower_index: Option<usize>,
-    /// Device id missing from the current inventory.
+    /// Device id missing from the current inventory.  For the clock
+    /// device: the last scan did not list it, and it is held for one more.
     pub(crate) missing: bool,
     pub(crate) publish: bool,
     pub(crate) settings: OutputDeviceSettings,
     /// Safety-limiter gain reduction, dB.  0 when the device is not
     /// limiting, and when the bridge is not running.
     pub(crate) reduction_db: f32,
+}
+
+/// One output device's live level, loudest channel, as the Live strip shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DeviceLevel {
+    pub(crate) name: String,
+    /// Smoothed and peak-held linear amplitude, as `meter_row` takes them.
+    pub(crate) meter: f32,
+    pub(crate) peak: f32,
+    /// The device's own mute.  The master mute already zeroes the meters.
+    pub(crate) mute: bool,
+}
+
+/// The loudest of a device's first `channels` meters.
+pub(crate) fn loudest(levels: &[f32], channels: usize) -> f32 {
+    levels
+        .iter()
+        .take(channels)
+        .fold(0.0_f32, |loudest, level| loudest.max(*level))
 }
 
 /// Channels to show for a device: what its open stream reported, else what
@@ -73,6 +95,10 @@ impl RigWerkApp {
         };
         let running = self.engine.state == EngineState::Running;
         let channels = device_channel_count(reported, output.channels);
+        // A missed scan keeps the clock device selected (see
+        // `hold_unconfirmed_devices`), so it is still in the inventory.  The
+        // miss counter is what says the scan did not see it.
+        let clock_missing = !output.demo && self.output_misses > 0;
         let mut rows = vec![OutputDeviceRow {
             name: output.name.clone(),
             backend: output.backend.clone(),
@@ -81,7 +107,7 @@ impl RigWerkApp {
             clock: true,
             virtual_out: false,
             follower_index: None,
-            missing: false,
+            missing: clock_missing,
             publish: false,
             settings: self.clock_device,
             reduction_db: if running {
@@ -139,6 +165,32 @@ impl RigWerkApp {
             });
         }
         rows
+    }
+
+    /// Each output device's live level, in [`Self::output_device_rows`] order.
+    pub(crate) fn output_device_levels(&self) -> Vec<DeviceLevel> {
+        self.output_device_rows()
+            .into_iter()
+            .map(|row| {
+                let (meters, peaks): (&[f32], &[f32]) = match row.follower_index {
+                    None => (&self.meter_out_channels, &self.peak_out_channels),
+                    Some(index) => (
+                        self.meter_follower_channels
+                            .get(index)
+                            .map_or(&[], |meters| meters),
+                        self.peak_follower_channels
+                            .get(index)
+                            .map_or(&[], |peaks| peaks),
+                    ),
+                };
+                DeviceLevel {
+                    meter: loudest(meters, row.channels),
+                    peak: loudest(peaks, row.channels),
+                    mute: row.settings.mute,
+                    name: row.name,
+                }
+            })
+            .collect()
     }
 }
 

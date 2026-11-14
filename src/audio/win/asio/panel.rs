@@ -1,7 +1,7 @@
 //! The bridge-thread call that opens an ASIO driver's control panel.
 //!
 //! ASIO requires `controlPanel` on the thread that created the driver.
-//! That thread is the bridge (`run_asio_bridge`, `run_asio_input_only`,
+//! That thread is the bridge (`run_asio_bridge`, `PreparedAsioInput::run`,
 //! `run_asio_duplex_bridge`, or `run_asio_output_loop`), and it only calls
 //! here between callbacks.  The UI sets a flag; this takes it.  A new
 //! buffer still arrives as `kAsioResetRequest`.  This does not start a

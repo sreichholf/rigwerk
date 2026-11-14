@@ -245,3 +245,19 @@ fn sink_monitor_reads_the_default_sink() {
     println!("default sink monitor peak: {reading:?}");
     assert!(reading.is_none_or(|peak| (0.0..=16.0).contains(&peak)));
 }
+
+/// Starts the PipeWire registry watch and waits for a source or sink to be
+/// added or removed.  Nothing is opened or played.  Create one meanwhile,
+/// e.g. a null sink with `pw-cli create-node adapter`.  Run with
+/// `cargo test registry_watch_sees -- --ignored --nocapture`.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "needs a running PipeWire daemon"]
+fn registry_watch_sees_a_new_node() {
+    use std::time::Duration;
+
+    let watch = super::linux::native::registry::spawn();
+    let event = watch.recv_timeout(Duration::from_secs(20));
+    println!("registry watch: {event:?}");
+    assert!(event.is_ok(), "no source or sink came or went in 20 s");
+}

@@ -4,17 +4,26 @@
 //! each insert's own bypass.  With several paths the label names the path
 //! and counts them ("Main · 3 paths"), and the Output chip adds what the
 //! alignment delays the output by (`RigWerkApp::added_alignment_ms`).
+//! Under its text the Output chip draws one thin meter per output device
+//! (`RigWerkApp::output_device_levels`), clock device first; its hover text
+//! and AccessKit value name each device and its peak.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 
 use crate::app::chain::ChainSelection;
+use crate::app::output_devices::DeviceLevel;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::EqSlot;
 use crate::ui::pages::mixer::chain::{apply_chain_bypass, live_chain_entries, CHAIN_BYPASS_HINT};
+use crate::ui::scope::{amp_to_db, level_display_height};
 use crate::ui::theme::ts;
-use crate::ui::theme::{with_alpha, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, TEAL, TEXT};
-use crate::ui::widgets::{bypass_pill, card_fixed, ellipsize, fit_text, micro_label, mono};
+use crate::ui::theme::{
+    with_alpha, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, DIM, MUTED, RED, TEAL, TEXT,
+};
+use crate::ui::widgets::{
+    bypass_pill, card_fixed, ellipsize, fit_text, micro_label, mono, row_info,
+};
 
 /// The chain label's second line with several paths: "Main · 3 paths".
 pub(crate) fn path_count_label(name: &str, paths: usize) -> String {
@@ -24,6 +33,52 @@ pub(crate) fn path_count_label(name: &str, paths: usize) -> String {
 /// The Output chip with alignment: "+0.0 dB · +2.7 ms".
 pub(crate) fn output_summary(summary: &str, added_ms: f32) -> String {
     format!("{summary} · +{added_ms:.1} ms")
+}
+
+/// One output device's level for the Output chip: "Speakers -12.0 dBFS".
+pub(crate) fn device_level_line(level: &DeviceLevel) -> String {
+    if level.mute {
+        format!("{} muted", level.name)
+    } else if level.peak <= 0.0001 {
+        format!("{} silent", level.name)
+    } else {
+        format!("{} {:.1} dBFS", level.name, amp_to_db(level.peak))
+    }
+}
+
+/// Every output device's level, for the Output chip's AccessKit value.
+pub(crate) fn device_levels_value(levels: &[DeviceLevel]) -> String {
+    levels
+        .iter()
+        .map(device_level_line)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// One thin meter per device along the chip's bottom edge, on the
+/// −48…0 dBFS scale of the Live PEAK bars (`level_display_height`).  A
+/// muted device shows a red track and no fill.
+fn device_meters(painter: &egui::Painter, chip: egui::Rect, levels: &[DeviceLevel]) {
+    let gap = 3.0;
+    let left = chip.left() + 9.0;
+    let width = chip.width() - 18.0;
+    let count = levels.len().max(1) as f32;
+    let each = ((width - gap * (count - 1.0)) / count).max(1.0);
+    for (index, level) in levels.iter().enumerate() {
+        let x = left + index as f32 * (each + gap);
+        let track =
+            egui::Rect::from_min_size(egui::pos2(x, chip.bottom() - 5.0), Vec2::new(each, 2.0));
+        let (track_colour, fill) = if level.mute {
+            (with_alpha(RED, 90), 0.0)
+        } else {
+            (BORDER_SOFT, level_display_height(level.meter))
+        };
+        painter.rect_filled(track, CornerRadius::same(1), track_colour);
+        if fill > 0.0 {
+            let filled = egui::Rect::from_min_size(track.min, Vec2::new(each * fill, 2.0));
+            painter.rect_filled(filled, CornerRadius::same(1), BLUE);
+        }
+    }
 }
 
 impl RigWerkApp {
@@ -48,6 +103,7 @@ impl RigWerkApp {
             }
         }
         let path_line = (paths > 1).then(|| path_count_label(&self.path().name, paths));
+        let levels = self.output_device_levels();
 
         let mut open: Option<ChainSelection> = None;
         let mut toggle_bypass = false;
@@ -141,6 +197,23 @@ impl RigWerkApp {
                         egui::FontId::new(ts(10.0), egui::FontFamily::Proportional),
                         if entry.live { TEXT } else { MUTED },
                     );
+                    let output = entry.selection == ChainSelection::Output;
+                    if output {
+                        device_meters(ui.painter(), rect, &levels);
+                    }
+                    let value = if output {
+                        format!("{}; {}", entry.summary, device_levels_value(&levels))
+                    } else {
+                        entry.summary.clone()
+                    };
+                    row_info(
+                        &response,
+                        egui::Role::Button,
+                        true,
+                        entry.label,
+                        None,
+                        Some(value),
+                    );
                     let pill_rect = egui::Rect::from_min_max(
                         egui::pos2(rect.right() - 40.0, rect.top() + 3.0),
                         egui::pos2(rect.right() - 4.0, rect.top() + 20.0),
@@ -158,13 +231,19 @@ impl RigWerkApp {
                             toggle_bypass = true;
                         }
                     }
-                    let hint = if entry.selection == ChainSelection::Output && added >= 0.05 {
+                    let mut hint = if output && added >= 0.05 {
                         format!(
                             "Open this stage on the Mixer page. Aligning the paths adds up to {added:.1} ms on an output device."
                         )
                     } else {
                         "Open this stage on the Mixer page".to_owned()
                     };
+                    if output {
+                        for level in &levels {
+                            hint.push('\n');
+                            hint.push_str(&device_level_line(level));
+                        }
+                    }
                     let pointer = ui.input(|input| input.pointer.interact_pos());
                     let on_pill = plugins && pointer.is_some_and(|pos| pill_rect.contains(pos));
                     if response.on_hover_text(hint).clicked() && !on_pill && !toggle_bypass {

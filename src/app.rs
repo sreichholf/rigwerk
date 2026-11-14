@@ -315,7 +315,8 @@ pub struct RigWerkApp {
     /// not an unplug: a busy device fails a probe the same way a missing one
     /// does. The bridge stops only after a second miss.
     input_misses: u8,
-    /// Consecutive scans that did not list the selected output.
+    /// Consecutive scans that did not list the selected output.  Above 0,
+    /// the clock row in the Mixer reads missing.
     output_misses: u8,
     /// Planned ALSA period for one output setting, so the UI does not ask
     /// the device again on every frame.

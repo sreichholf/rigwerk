@@ -70,6 +70,18 @@ fn device_state_follows_the_bridge() {
 }
 
 #[test]
+fn a_missing_clock_device_has_its_own_state() {
+    let mut row = clock_row(0.0, false);
+    row.missing = true;
+    assert_eq!(device_state(&row, EngineState::Running).0, "missing");
+    assert_eq!(device_state(&row, EngineState::Idle).0, "missing");
+    assert_eq!(
+        device_row_value(&row, EngineState::Running),
+        "clock device · +0.0 dB · missing"
+    );
+}
+
+#[test]
 fn chain_device_row_exposes_name_selection_and_mute() {
     let row = clock_row(-1.5, true);
     let tree = accesskit_frame(|ui| {

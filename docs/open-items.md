@@ -5,10 +5,6 @@ plans and the code review has landed; that history is in git.
 
 ## Features
 
-- The Live chain strip's OUTPUT chip shows only the master level (and the
-  alignment delay), not each output device's level.
-- A missing clock device has no state of its own in its Mixer row; it
-  shows the bridge state.
 - Native PipeWire playback on two streams (not the duplex node) does not
   play to followers.  `audio/linux/native.rs` has no `FollowerOutputs`.
 - Recordings include the metronome click: a take is what the output
@@ -38,10 +34,6 @@ since.
 - **ASIO.**  Callback timing, driver stop and dispose, and reset requests
   are compile-checked only.  `sampleRateDidChange` is ignored (some
   drivers send it during start); only `kAsioResetRequest` ends a session.
-- **ASIO with two drivers.**  The output worker starts before the input
-  driver reports its rate, so its first callback may design the resampler
-  filter once on the audio thread (silent, no allocation up to 192 kHz).
-  Removing it needs a prepare/start split for the ASIO input.
 - **Resampler.**  Content between the output Nyquist and the lower rate
   minus 20 kHz (24–28 kHz for 96→48) is only partly rejected; it folds
   above the audible band.
@@ -49,5 +41,3 @@ since.
   seconds, so a large offset at start, or a Low-latency cushion, can
   underrun once before it has learned the offset.  A large cushion cut
   pops the excess, which the resampler turns into a short crossfade.
-- Native PipeWire nodes are refreshed on each device scan; there is no
-  registry subscription, so a new node waits for the scan interval.
