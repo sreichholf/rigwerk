@@ -1,5 +1,6 @@
 use super::{click_channels, device_channel_count};
 use crate::app::blank_app;
+use crate::app::devices::inventory_fingerprint;
 use crate::app::settings::FollowerPref;
 use crate::audio::{DeviceItem, EngineState, MAX_OUTPUT_CHANNELS};
 
@@ -54,4 +55,86 @@ fn a_pipewire_labelled_follower_keeps_its_open_channel_count() {
     assert_eq!(row.follower_index, Some(0));
     assert_eq!(row.channels, 6);
     assert_eq!(row.click_channels, 6);
+}
+
+fn output(id: &str, name: &str) -> DeviceItem {
+    DeviceItem {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        backend: "ALSA".to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    }
+}
+
+#[test]
+fn a_clock_device_the_scan_missed_reads_missing() {
+    let mut app = blank_app();
+    app.inventory.outputs.push(output("hw:Speaker", "Studio"));
+    app.inventory.outputs.push(output("hw:Phones", "Phones"));
+    app.output_idx = 0;
+    app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
+    app.engine.state = EngineState::Running;
+    assert!(!app.output_device_rows()[0].missing);
+
+    let mut gone = app.inventory.clone();
+    gone.outputs.remove(0);
+    app.apply_inventory(gone.clone());
+    let rows = app.output_device_rows();
+    assert_eq!(rows[0].name, "Studio");
+    assert!(rows[0].clock && rows[0].missing);
+
+    // The second miss moves the selection, and no scan missed the fallback.
+    app.apply_inventory(gone);
+    let rows = app.output_device_rows();
+    assert_eq!(rows[0].name, "Phones");
+    assert!(!rows[0].missing);
+}
+
+#[test]
+fn a_clock_device_back_in_the_scan_is_not_missing() {
+    let mut app = blank_app();
+    app.inventory.outputs.push(output("hw:Speaker", "Studio"));
+    app.output_idx = 0;
+    app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
+    let present = app.inventory.clone();
+    let mut gone = present.clone();
+    gone.outputs.clear();
+    app.apply_inventory(gone);
+    assert!(app.output_device_rows()[0].missing);
+    app.apply_inventory(present);
+    assert!(!app.output_device_rows()[0].missing);
+}
+
+#[test]
+fn a_clock_device_chosen_after_a_miss_is_not_missing() {
+    let mut app = blank_app();
+    app.inventory.outputs.push(output("hw:Speaker", "Studio"));
+    app.inventory.outputs.push(output("hw:Phones", "Phones"));
+    app.output_idx = 0;
+    app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
+    let mut gone = app.inventory.clone();
+    gone.outputs.remove(0);
+    app.apply_inventory(gone);
+    assert!(app.output_device_rows()[0].missing);
+
+    app.output_idx = app
+        .inventory
+        .outputs
+        .iter()
+        .position(|device| device.id == "hw:Phones")
+        .unwrap();
+    app.accept_output_device();
+    let rows = app.output_device_rows();
+    assert_eq!(rows[0].name, "Phones");
+    assert!(!rows[0].missing);
+}
+
+#[test]
+fn a_preview_clock_device_is_never_missing() {
+    let app = blank_app();
+    assert!(app.selected_output().demo);
+    assert!(!app.output_device_rows()[0].missing);
 }

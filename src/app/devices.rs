@@ -447,9 +447,11 @@ impl RigWerkApp {
         self.input_held = None;
     }
 
-    /// The person chose this output, or a patch found it.
+    /// The person chose this output, or a patch found it.  No scan has
+    /// missed it yet, so its clock row does not read missing.
     pub(crate) fn accept_output_device(&mut self) {
         self.output_held = None;
+        self.output_misses = 0;
     }
 
     pub(crate) fn is_preview(&self) -> bool {
@@ -786,6 +788,8 @@ impl RigWerkApp {
         }
         if !output_present && !output_demo && self.output_misses >= UNPLUG_SCANS {
             missing.push(output_name.clone());
+            // The selection fell back to another output, which no scan missed.
+            self.output_misses = 0;
         }
 
         if missing.is_empty() {

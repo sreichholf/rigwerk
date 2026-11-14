@@ -7,8 +7,6 @@ plans and the code review has landed; that history is in git.
 
 - The Live chain strip's OUTPUT chip shows only the master level (and the
   alignment delay), not each output device's level.
-- A missing clock device has no state of its own in its Mixer row; it
-  shows the bridge state.
 - Native PipeWire playback on two streams (not the duplex node) does not
   play to followers.  `audio/linux/native.rs` has no `FollowerOutputs`.
 - Recordings include the metronome click: a take is what the output

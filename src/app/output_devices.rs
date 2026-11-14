@@ -22,7 +22,8 @@ pub(crate) struct OutputDeviceRow {
     pub(crate) virtual_out: bool,
     /// Index into `followers` when this is not the clock device.
     pub(crate) follower_index: Option<usize>,
-    /// Device id missing from the current inventory.
+    /// Device id missing from the current inventory.  For the clock
+    /// device: the last scan did not list it, and it is held for one more.
     pub(crate) missing: bool,
     pub(crate) publish: bool,
     pub(crate) settings: OutputDeviceSettings,
@@ -73,6 +74,10 @@ impl RigWerkApp {
         };
         let running = self.engine.state == EngineState::Running;
         let channels = device_channel_count(reported, output.channels);
+        // A missed scan keeps the clock device selected (see
+        // `hold_unconfirmed_devices`), so it is still in the inventory.  The
+        // miss counter is what says the scan did not see it.
+        let clock_missing = !output.demo && self.output_misses > 0;
         let mut rows = vec![OutputDeviceRow {
             name: output.name.clone(),
             backend: output.backend.clone(),
@@ -81,7 +86,7 @@ impl RigWerkApp {
             clock: true,
             virtual_out: false,
             follower_index: None,
-            missing: false,
+            missing: clock_missing,
             publish: false,
             settings: self.clock_device,
             reduction_db: if running {
