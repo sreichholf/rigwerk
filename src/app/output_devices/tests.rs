@@ -1,4 +1,4 @@
-use super::{click_channels, device_channel_count};
+use super::{click_channels, device_channel_count, loudest};
 use crate::app::blank_app;
 use crate::app::devices::inventory_fingerprint;
 use crate::app::settings::FollowerPref;
@@ -137,4 +137,34 @@ fn a_preview_clock_device_is_never_missing() {
     let app = blank_app();
     assert!(app.selected_output().demo);
     assert!(!app.output_device_rows()[0].missing);
+}
+
+#[test]
+fn the_loudest_channel_stops_at_the_device_count() {
+    assert_eq!(loudest(&[0.1, 0.4, 0.9], 2), 0.4);
+    assert_eq!(loudest(&[0.1, 0.4], 8), 0.4);
+    assert_eq!(loudest(&[], 2), 0.0);
+}
+
+#[test]
+fn device_levels_follow_the_rows_and_their_meters() {
+    let mut app = blank_app();
+    let mut out = FollowerPref::virtual_out();
+    out.settings.mute = true;
+    app.followers.push(out);
+    app.meter_out_channels[1] = 0.5;
+    app.peak_out_channels[1] = 0.6;
+    app.peak_out_channels[4] = 1.0;
+    app.meter_follower_channels[0][0] = 0.25;
+    app.peak_follower_channels[0][0] = 0.3;
+    let levels = app.output_device_levels();
+    assert_eq!(levels.len(), 2);
+    let clock = &levels[0];
+    assert_eq!((clock.meter, clock.peak, clock.mute), (0.5, 0.6, false));
+    let virtual_out = &levels[1];
+    assert_eq!(virtual_out.name, FollowerPref::virtual_out().name);
+    assert_eq!(
+        (virtual_out.meter, virtual_out.peak, virtual_out.mute),
+        (0.25, 0.3, true)
+    );
 }

@@ -5,8 +5,6 @@ plans and the code review has landed; that history is in git.
 
 ## Features
 
-- The Live chain strip's OUTPUT chip shows only the master level (and the
-  alignment delay), not each output device's level.
 - Native PipeWire playback on two streams (not the duplex node) does not
   play to followers.  `audio/linux/native.rs` has no `FollowerOutputs`.
 - Recordings include the metronome click: a take is what the output
