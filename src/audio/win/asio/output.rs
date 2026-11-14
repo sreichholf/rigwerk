@@ -53,7 +53,7 @@ pub(crate) fn run_asio_output_bridge(
 
         // Two drivers keep two clocks, so the input rate is only known after
         // its driver opens.  That is the one path where the output mixer may
-        // still design its filter on the first callback; see REVIEW-FIXES.md.
+        // still design its filter on the first callback (docs/open-items.md).
         let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
         shared.set_status("Opening ASIO input…");
         run_asio_input_only(

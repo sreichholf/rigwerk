@@ -19,6 +19,8 @@ WASAPI). It is alpha software: expect rough edges and changes.
   with each other.
 - **Low latency when you want it**, with the real buffer sizes shown, not
   just the ones you asked for.
+- **A safety limiter on every output**, so nothing goes past −1 dBFS.
+- **A tuner, a metronome and a recorder** built in.
 - **Sessions** to save and reload your whole setup.
 
 ## A quick tour
@@ -28,10 +30,20 @@ The sidebar has one page per task. In order:
 ### Live Bridge
 
 Pick the input and output, start the bridge, and watch it run: level
-meters, a scope, the latency you hear, drift and dropouts. The output can
-run in a low latency mode (on Windows: shared, low-latency shared or
-exclusive WASAPI), and a driver check shows the buffer the device actually
-uses.
+meters, a scope, the latency you hear, drift and dropouts. The bridge
+itself sits in a strip under the Input and Output cards, with the ring
+fill, drift and safety buffer. The output can run in a low latency mode (on
+Windows: shared, low-latency shared or exclusive WASAPI), and a driver
+check shows the buffer the device actually uses. When a side runs on an
+ASIO driver, its card has a **Panel** chip that opens the driver's own
+control panel.
+
+**Ctrl+Shift+M** mutes and unmutes the main output from any page.
+
+The record row under the bridge records what an output plays, after its
+level, limiter and mute, to a WAV file (by default in `Recordings` in your
+home folder). Writing happens on its own thread, so a slow disk does not
+cause dropouts.
 
 The health card also keeps the last **measured** loopback. **Measure…**
 plays a short click through a cable from the output back into the input
@@ -44,8 +56,8 @@ muted for the whole short capture, not only while the click plays.
 
 When something needs attention, an Issues strip appears at the top and says
 what is wrong and what to do: a path nobody hears, a chain too heavy for
-the buffer, an output that went quiet. Tick auto-start to start the bridge
-when RigWerk opens.
+the buffer, an output that went quiet, an output the safety limiter is
+holding down. Tick auto-start to start the bridge when RigWerk opens.
 
 ![Live Bridge](docs/screenshots/live.png)
 
@@ -53,22 +65,41 @@ when RigWerk opens.
 
 The signal chain from top to bottom: input gain, EQ, plugins, noise gate,
 EQ, path level and output. Click a stage to edit it on the right. Plugins
-can be bypassed, reordered and mixed with the dry signal, and open either
-in their own window or as a list of parameters.
+can be bypassed one by one or all at once (the **BYP** pill, also on Live),
+reordered and mixed with the dry signal, and open either in their own
+window or as a list of parameters.
 
 The Output stage lists every device that plays the mix. Add extra outputs
 here, each with its own level, mute and safety buffer (Safe, Low latency or
 Manual), or add RigWerk Out to publish the mix as a source other apps can
 record (on Windows this needs a virtual cable such as VB-Audio Cable). If
 an extra output drops out, the rest keep playing and RigWerk keeps trying
-to reopen it.
+to reopen it. Each output has a safety limiter that holds it at −1 dBFS and
+shows how much it is reducing.
+
+**Metronome.** The Input stage has a metronome: tempo (40–240 BPM),
+rhythm (4/4, 3/4, 6/8, 7/8 and other common bars, with an accented one)
+and click level. Each output picks the channels the click plays on, for
+example only your headphones, or **Click on 3/4** to keep it off the main
+pair. The click is not part of the path mix, the scope or the meters, it
+keeps ticking when the rig is muted, and it stops while the Tuner mutes the
+rig. It always starts stopped when RigWerk opens.
 
 ![Mixer](docs/screenshots/mixer.png)
 
+### Tuner
+
+A chromatic tuner with a needle or strobe display, and a per-string view
+for 20 tunings (6, 7 and 8-string guitar; 4, 5 and 6-string bass) that
+reads every string from one strum. Set A4, the input channel and how
+close counts as in tune (±3, ±5 or ±10 cents). Auto-mute silences the
+output, and the metronome, while the page is open.
+
 ### Plugins
 
-The library of VST3 and CLAP effects found in the standard folders. Search
-it, add an effect to a path with one click, or add one by file path.
+The library of VST3 and CLAP effects found in the standard folders (and in
+`CLAP_PATH` or `RIGWERK_CLAP_PATH` for CLAP). Search it, add an effect to a
+path with one click, or add one by file path.
 
 ![Plugins](docs/screenshots/plugins.png)
 
@@ -122,7 +153,8 @@ latency.
 ### Sessions, Setup Guide and Diagnostics
 
 - **Sessions** saves everything (devices, levels, routing, EQ, gate, plugins
-  and their settings, paths) under a name, to load again later.
+  and their settings, paths) under a name, to load again later. Loading a
+  session leaves the metronome alone: each output keeps its click channels.
 - **Setup Guide** walks through a first setup, with notes for Linux and
   Windows.
 - **Diagnostics** has the activity log, how much of each audio buffer every
@@ -160,11 +192,16 @@ lowest that builds egui/eframe 0.37). Coding guidelines are in
 [`AGENTS.md`](AGENTS.md).
 
 ```bash
-cargo test
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
 ```
 
+Tests that open real hardware are `#[ignore]` and only play silence.
+
 The README screenshots and how to retake them are described in
-[`docs/screenshots`](docs/screenshots/README.md).
+[`docs/screenshots`](docs/screenshots/README.md). Known gaps and limits are
+in [`docs/open-items.md`](docs/open-items.md).
 
 ## License
 

@@ -40,7 +40,7 @@ fn restore_prefers_id_over_a_renamed_display() {
     assert!(!input.restore.matched_by_name());
 
     // The id is gone: the name fallback is visible, and it must not be
-    // treated as a confirmed id (H15 uses that to avoid overwriting).
+    // treated as a confirmed id (a save keeps the stored one).
     let fallback = restore_device(&outputs, "wasapi:{gone}", "WASAPI", "Speakers");
     assert_eq!(
         fallback,

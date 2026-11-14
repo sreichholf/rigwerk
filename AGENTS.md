@@ -5,13 +5,9 @@ Defaults for coding agents (and humans) working on RigWerk.
 The MSRV is Rust 1.95.0 (`rust-toolchain.toml`). Leave that pin unless the
 dependency that forced it changes. The license is GPL-3.0-or-later.
 
-`REVIEW.md` and `REVIEW-FIXES.md` record a finished review.  The
-must-fix list in `REVIEW.md` is history.
-`docs/mockups/dual-out-plan.md` records the multi-output work that has
-landed. `docs/mockups/live-issues-plan.md` records the Live Issues strip; its
-open items are done.  The sink monitor behind the silence row reads a
-live PipeWire graph (see "A PipeWire graph without hardware"), but a
-sink starving under Low latency has not been reproduced.
+`docs/open-items.md` lists what is known to be missing or limited.  The
+finished plans, mockups and code review are in git history only; do not
+restore them as open work.
 
 ## Start from master
 
@@ -48,6 +44,10 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
+
+The hardware tests read the devices from the environment: `RIGWERK_IN`,
+`RIGWERK_OUT`, optionally `RIGWERK_OUT_BACKEND` and `RIGWERK_CUSHION`
+(see `src/audio/hardware_tests.rs`).
 
 CI (`.github/workflows/ci.yml`) also compiles the ignored hardware tests
 (`cargo test --locked --no-run -- --ignored`) and runs
@@ -161,6 +161,8 @@ them in a new type:
 - `app::plugins` scans and inserts; `audio::plugins` is one chain per
   path.
 - `app::devices` selects and watches; `audio::devices` discovers.
+- `app::record` picks the folder and the take name and arms;
+  `audio::record` is the writer thread, the only place that opens the WAV.
 - Preferences store the audio types (`EqSettings`, `GateSettings`,
   `OutputDeviceSettings`, `PluginPref`).  Do not add a parallel struct.
 
@@ -178,8 +180,6 @@ them in a new type:
   `sanitize_preferences` (or that type's `sanitized`), the `RigWerkApp`
   field, an engine setter, and the widget.  That is the path.  Clamp in
   `sanitize_preferences`, not in the widget.
-- `REVIEW.md` is a finished review.  Do not treat its must-fix list as
-  open work.
 - `audio.rs` is the in-crate map for `app` and `ui`.  There is no
   library API.  New items are `pub(crate)` unless that file already
   re-exports the same kind of type.
