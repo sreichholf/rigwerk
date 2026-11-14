@@ -77,7 +77,7 @@ an extra output drops out, the rest keep playing and RigWerk keeps trying
 to reopen it. Each output has a safety limiter that holds it at −1 dBFS and
 shows how much it is reducing.
 
-**Metronome.** The Input stage has a metronome: tempo (40–240 BPM),
+**Metronome.** The Output stage has a metronome: tempo (40–240 BPM),
 rhythm (4/4, 3/4, 6/8, 7/8 and other common bars, with an accented one)
 and click level. Each output picks the channels the click plays on, for
 example only your headphones, or **Click on 3/4** to keep it off the main
@@ -87,6 +87,8 @@ rig. It always starts stopped when RigWerk opens.
 
 ![Mixer](docs/screenshots/mixer.png)
 
+![Metronome on the Output stage](docs/screenshots/metronome.png)
+
 ### Tuner
 
 A chromatic tuner with a needle or strobe display, and a per-string view
@@ -94,6 +96,8 @@ for 20 tunings (6, 7 and 8-string guitar; 4, 5 and 6-string bass) that
 reads every string from one strum. Set A4, the input channel and how
 close counts as in tune (±3, ±5 or ±10 cents). Auto-mute silences the
 output, and the metronome, while the page is open.
+
+![Tuner](docs/screenshots/tuner.png)
 
 ### Plugins
 
