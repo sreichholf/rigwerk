@@ -11,6 +11,10 @@ plans and the code review has landed; that history is in git.
 - A take on a follower with more than four channels still includes the
   metronome click: only narrower followers carry the click-free lanes
   through their ring.
+- A VST3 editor cannot open in a Wayland session with no X server.
+  `vst3-host` 0.11 opens Linux editors as X11 windows only and does not
+  implement `IWaylandHost` / `IWaylandFrame`; XWayland with `DISPLAY` set
+  works.  The plugin still runs, and RigWerk's parameter panel still opens.
 
 ## Not reproduced
 
