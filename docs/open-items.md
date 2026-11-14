@@ -41,5 +41,3 @@ since.
   seconds, so a large offset at start, or a Low-latency cushion, can
   underrun once before it has learned the offset.  A large cushion cut
   pops the excess, which the resampler turns into a short crossfade.
-- Native PipeWire nodes are refreshed on each device scan; there is no
-  registry subscription, so a new node waits for the scan interval.

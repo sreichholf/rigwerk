@@ -779,5 +779,7 @@ pub(crate) fn ensure_init() {
     ONCE.call_once(pw::init);
 }
 
+pub(crate) mod registry;
+
 #[cfg(test)]
 mod tests;

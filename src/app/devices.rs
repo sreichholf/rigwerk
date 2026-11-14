@@ -14,24 +14,32 @@ use crate::audio::{self, DeviceItem, Inventory};
 /// How many scans must miss a selected device before it counts as unplugged.
 const UNPLUG_SCANS: u8 = 2;
 
-/// Whether a sound-card uevent arrived since the last look.
+/// Whether a sound-card uevent, or a PipeWire source or sink coming or
+/// going, arrived since the last look.
 ///
-/// The watch is process-wide and blocks in its own thread. A machine without
-/// a netlink socket simply never wakes this, and the timed poll still runs.
+/// Each watch is process-wide and blocks in its own thread. A machine without
+/// a netlink socket or a PipeWire server simply never wakes this, and the
+/// timed poll still runs.
 fn hotplug_pending() -> bool {
     #[cfg(target_os = "linux")]
     {
         use std::sync::{Mutex, OnceLock};
-        static WATCH: OnceLock<Mutex<mpsc::Receiver<()>>> = OnceLock::new();
-        let watch = WATCH.get_or_init(|| Mutex::new(audio::hotplug::spawn()));
-        let Ok(receiver) = watch.lock() else {
-            return false;
-        };
-        let mut pending = false;
-        while receiver.try_recv().is_ok() {
-            pending = true;
+        type Watch = OnceLock<Mutex<mpsc::Receiver<()>>>;
+        fn drain(watch: &'static Watch, spawn: fn() -> mpsc::Receiver<()>) -> bool {
+            let Ok(receiver) = watch.get_or_init(|| Mutex::new(spawn())).lock() else {
+                return false;
+            };
+            let mut pending = false;
+            while receiver.try_recv().is_ok() {
+                pending = true;
+            }
+            pending
         }
-        pending
+        static UEVENTS: Watch = OnceLock::new();
+        static REGISTRY: Watch = OnceLock::new();
+        let uevent = drain(&UEVENTS, audio::hotplug::spawn);
+        let registry = drain(&REGISTRY, audio::pipewire_registry::spawn);
+        uevent || registry
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -501,9 +509,10 @@ impl RigWerkApp {
                 self.manual_scan = false;
             }
         }
-        let hotplug = hotplug_pending();
+        // Drain only between scans, so a change that lands while a scan runs
+        // starts the next one.
         if self.device_scan.is_none()
-            && (hotplug || self.last_device_scan.elapsed() >= Duration::from_millis(2500))
+            && (hotplug_pending() || self.last_device_scan.elapsed() >= Duration::from_millis(2500))
         {
             self.start_device_scan();
         }

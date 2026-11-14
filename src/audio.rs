@@ -118,6 +118,8 @@ pub(crate) use linux::alsa::{planned_output_period, smallest_output_buffer};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::hotplug;
 #[cfg(target_os = "linux")]
+pub(crate) use linux::native::registry as pipewire_registry;
+#[cfg(target_os = "linux")]
 pub(crate) use linux::native::{is_native_id, node_latency_frames, node_name as linux_node_name};
 #[cfg(target_os = "linux")]
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
