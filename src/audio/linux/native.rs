@@ -9,6 +9,11 @@
 //! and as the fallback. `node.latency` is set on our streams only. The desktop-wide
 //! `clock.force-quantum` switch stays in the metadata path.
 //!
+//! The two-stream bridge plays to generic (cpal) followers when its clock is
+//! a cpal output, from a supervisor thread as in `bridge.rs`.  PipeWire node
+//! followers and RigWerk Out are linked by the duplex node only, so they
+//! stay silent here.
+//!
 //! `hw:` and `plughw:` are untouched: they are the exclusive ALSA path. When
 //! the server is not running, listing fails and the ALSA `pipewire` device
 //! stays in the menu so something can still be opened.
@@ -26,6 +31,7 @@ use pw::spa;
 use pw::spa::pod::Pod;
 
 use crate::audio::denormal::DenormalGuard;
+use crate::audio::follower::FollowerOutputs;
 use crate::audio::input::{make_input_stream, open_input_device};
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
@@ -305,11 +311,15 @@ pub(crate) fn run(
         cpal_output = Some(output);
     }
 
+    // The rate the clock runs at: a cpal output may open at its own.
+    let clock_rate = cpal_output
+        .as_ref()
+        .map_or(output_rate, |output| output.rate);
     shared.running.store(true, Ordering::Relaxed);
     shared.set_status(format!(
         "Bridging {} ch · {} → independent output ({} ch)",
         input_channels,
-        crate::audio::bridge::rate_path(input_rate, output_rate),
+        crate::audio::bridge::rate_path(input_rate, clock_rate),
         output_channels
     ));
 
@@ -320,7 +330,7 @@ pub(crate) fn run(
         input_native,
         output_native,
         input_rate,
-        output_rate,
+        clock_rate,
     );
     drop(cpal_input);
     drop(cpal_output);
@@ -560,7 +570,34 @@ fn run_graph(
             .map_err(|error| format!("Connecting PipeWire output: {error}"))?;
     }
 
-    let stop_flag = Arc::clone(&stop);
+    // Generic followers, for a cpal clock only (a PipeWire clock is offered
+    // PipeWire node followers): their own cpal streams, synced from a
+    // supervisor thread as in `bridge.rs`.  Opening a cpal device blocks, so
+    // it stays off this main loop.  The scope joins that thread, which drops
+    // the followers, before the streams below go.
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        if !output_native {
+            scope.spawn(|| {
+                let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
+                while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
+                    followers.sync(&shared);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
+        }
+        let result = run_until_stop(&mainloop, &stop);
+        done.store(true, Ordering::Relaxed);
+        result
+    })
+}
+
+/// Runs `mainloop` until `stop` is set.
+fn run_until_stop(
+    mainloop: &pw::main_loop::MainLoopRc,
+    stop: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    let stop_flag = Arc::clone(stop);
     let loop_timer = mainloop.clone();
     let timer = mainloop.loop_().add_timer(move |_| {
         if stop_flag.load(Ordering::Relaxed) {

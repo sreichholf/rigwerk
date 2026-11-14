@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::super::shared::Shared;
+use super::super::shared::{FollowerPlan, Shared};
 use super::stream::{open_follower, OpenedFollower};
 
 /// How long to wait after a failed open before trying again.
@@ -39,25 +39,7 @@ impl FollowerOutputs {
             return;
         }
 
-        let plan = shared.follower_plan();
-        let wanted: Vec<(usize, String)> = (0..plan.count)
-            .filter_map(|slot| {
-                let link = &plan.slots[slot];
-                if link.device_id.is_empty() || !super::is_generic_follower(&link.device_id) {
-                    return None;
-                }
-                // PipeWire RigWerk Out is in-graph.  Windows VB-Cable publish
-                // is a WASAPI follower that only plays while publish is on.
-                if link.virtual_out {
-                    #[cfg(target_os = "windows")]
-                    if link.publish {
-                        return Some((slot, link.device_id.clone()));
-                    }
-                    return None;
-                }
-                Some((slot, link.device_id.clone()))
-            })
-            .collect();
+        let wanted = generic_followers(&shared.follower_plan());
 
         // Close slots that left the plan or changed device.
         for slot in 0..self.slots.len() {
@@ -160,3 +142,31 @@ impl FollowerOutputs {
         }
     }
 }
+
+/// The plan's slots that play on their own cpal stream, with their device
+/// ids.  A PipeWire node follower is not one: only the duplex node links it.
+fn generic_followers(plan: &FollowerPlan) -> Vec<(usize, String)> {
+    plan.slots
+        .iter()
+        .take(plan.count)
+        .enumerate()
+        .filter_map(|(slot, link)| {
+            if link.device_id.is_empty() || !super::is_generic_follower(&link.device_id) {
+                return None;
+            }
+            // PipeWire RigWerk Out is in-graph.  Windows VB-Cable publish
+            // is a WASAPI follower that only plays while publish is on.
+            if link.virtual_out {
+                #[cfg(target_os = "windows")]
+                if link.publish {
+                    return Some((slot, link.device_id.clone()));
+                }
+                return None;
+            }
+            Some((slot, link.device_id.clone()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;

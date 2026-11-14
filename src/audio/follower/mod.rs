@@ -2,8 +2,8 @@
 //! device, each on its own stream and clock.
 //!
 //! PipeWire duplex keeps its in-graph fan-out (`render_direct_devices`).
-//! This path is for ALSA / cpal clock devices and WASAPI followers on
-//! Windows.
+//! This path is for ALSA / cpal clock devices (also on the PipeWire
+//! two-stream bridge with a cpal clock) and WASAPI followers on Windows.
 //!
 //! # Flow
 //!
