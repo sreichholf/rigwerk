@@ -36,10 +36,6 @@ since.
 - **ASIO.**  Callback timing, driver stop and dispose, and reset requests
   are compile-checked only.  `sampleRateDidChange` is ignored (some
   drivers send it during start); only `kAsioResetRequest` ends a session.
-- **ASIO with two drivers.**  The output worker starts before the input
-  driver reports its rate, so its first callback may design the resampler
-  filter once on the audio thread (silent, no allocation up to 192 kHz).
-  Removing it needs a prepare/start split for the ASIO input.
 - **Resampler.**  Content between the output Nyquist and the lower rate
   minus 20 kHz (24–28 kHz for 96→48) is only partly rejected; it folds
   above the audible band.

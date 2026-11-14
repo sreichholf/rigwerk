@@ -1,8 +1,15 @@
 //! ASIO input into a system output, and an ASIO input on its own (feeding
 //! a separate ASIO output).  This thread creates the input driver, so its
 //! control panel is opened here between callbacks, not from the UI thread.
+//! The input on its own is prepared before the output opens and started
+//! after it, so the output knows the source rate before its first callback.
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use azo::driver::Driver;
+use azo::dto::ChannelId;
+use azo::windows_core::GUID;
 
 use crate::audio::shared::Shared;
 use crate::audio::types::StartConfig;
@@ -27,10 +34,6 @@ pub(crate) fn run_asio_bridge(
     let requested_rate = config.sample_rate;
     let requested_buffer = config.buffer_size;
     let asio_wrapper = config.asio_wrapper;
-    use azo::driver::Driver;
-    use azo::dto::ChannelId;
-    use azo::windows_core::GUID;
-    use std::ffi::c_void;
 
     shared.set_status("Opening ASIO driver…");
     let host = azo::Host::new();
@@ -202,20 +205,45 @@ pub(crate) fn run_asio_bridge(
     Ok(())
 }
 
-pub(crate) fn run_asio_input_only(
+/// An ASIO input driver that is open at its real rate, with buffers and a
+/// callback in place, but not started.  The bridge opens it before a
+/// separate ASIO output, so the output designs its resampler for the real
+/// source rate before its own driver starts.  Dropping it stops and
+/// disposes the driver and clears the callback.  It stays on the thread
+/// that created it, as ASIO requires.  `D` is azo's driver proxy, which
+/// azo does not export by name.
+pub(crate) struct PreparedAsioInput<D: Driver> {
+    driver: D,
+    registration: Option<CallbackRegistration>,
+    rate: u32,
+    input_channels: usize,
+    buffer_frames: usize,
+    /// The driver stopped calling back, so the context is leaked, not freed.
+    hung: bool,
+}
+
+impl<D: Driver> Drop for PreparedAsioInput<D> {
+    fn drop(&mut self) {
+        let _ = self.driver.stop();
+        let _ = self.driver.dispose_buffers();
+        if let Some(registration) = self.registration.take() {
+            if self.hung {
+                registration.abandon();
+            } else {
+                registration.clear();
+            }
+        }
+    }
+}
+
+/// Opens an ASIO input that feeds a separate ASIO output and publishes its
+/// rate.  Nothing calls back until [`PreparedAsioInput::run`].
+pub(crate) fn prepare_asio_input(
     clsid: u128,
     requested_rate: u32,
     requested_buffer: usize,
-    output_rate: u32,
     shared: &Arc<Shared>,
-    stop: &Arc<AtomicBool>,
-    mut tick: impl FnMut(),
-) -> Result<(), String> {
-    use azo::driver::Driver;
-    use azo::dto::ChannelId;
-    use azo::windows_core::GUID;
-    use std::ffi::c_void;
-
+) -> Result<PreparedAsioInput<impl Driver>, String> {
     let host = azo::Host::new();
     let driver = host
         .create_driver(&GUID::from_u128(clsid))
@@ -253,9 +281,6 @@ pub(crate) fn run_asio_input_only(
         } else {
             buffer.preferred
         };
-    // The output side already set its target; this input's blocks feed into
-    // the cushion's floor on top of it.
-    shared.note_input_block(buffer_frames.max(1) as usize);
 
     let mut channel_types = Vec::new();
     let mut channel_ids = Vec::new();
@@ -298,57 +323,67 @@ pub(crate) fn run_asio_input_only(
             }
         };
 
-    if let Err(error) = driver.start() {
-        let _ = driver.stop();
-        let _ = driver.dispose_buffers();
-        registration.clear();
-        return Err(format!("Starting ASIO: {error}"));
-    }
-
-    shared.running.store(true, Ordering::Relaxed);
-    shared.set_status(format!(
-        "ASIO input linked · {} in · {} smp · {} → ASIO output",
+    Ok(PreparedAsioInput {
+        driver,
+        registration: Some(registration),
+        rate,
         input_channels,
-        buffer_frames,
-        rate_path(rate, output_rate)
-    ));
+        buffer_frames: buffer_frames.max(1) as usize,
+        hung: false,
+    })
+}
 
-    let wait = wait_for_callbacks(
-        registration.signal(),
-        || stop.load(Ordering::Relaxed),
-        || {
-            tick();
-            !stop.load(Ordering::Relaxed)
-                && service_asio_panel(&driver, shared, &[AsioPanelSide::Input])
-        },
-    );
-    match wait {
-        CallbackWait::Stopped => {}
-        CallbackWait::Reset | CallbackWait::Failed => {
-            let _ = driver.stop();
-            let _ = driver.dispose_buffers();
-            registration.clear();
-            return Err(if matches!(wait, CallbackWait::Reset) {
-                DRIVER_RESET_MESSAGE
-            } else {
-                CALLBACK_PANIC_MESSAGE
-            }
-            .to_owned());
-        }
-        CallbackWait::Hung => {
-            let _ = driver.stop();
-            let _ = driver.dispose_buffers();
-            registration.abandon();
-            shared.set_device_lost(
-                "The ASIO input stopped responding — the interface may have been unplugged"
-                    .to_owned(),
-            );
+impl<D: Driver> PreparedAsioInput<D> {
+    /// Starts the input driver and bridges until `stop`.  Call it once the
+    /// output has opened.
+    pub(crate) fn run(
+        mut self,
+        output_rate: u32,
+        shared: &Arc<Shared>,
+        stop: &Arc<AtomicBool>,
+        mut tick: impl FnMut(),
+    ) -> Result<(), String> {
+        let Some(registration) = self.registration.as_ref() else {
             return Ok(());
+        };
+        // The output side already set its target; this input's blocks feed
+        // into the cushion's floor on top of it.
+        shared.note_input_block(self.buffer_frames);
+
+        if let Err(error) = self.driver.start() {
+            return Err(format!("Starting ASIO: {error}"));
+        }
+
+        shared.running.store(true, Ordering::Relaxed);
+        shared.set_status(format!(
+            "ASIO input linked · {} in · {} smp · {} → ASIO output",
+            self.input_channels,
+            self.buffer_frames,
+            rate_path(self.rate, output_rate)
+        ));
+
+        let wait = wait_for_callbacks(
+            registration.signal(),
+            || stop.load(Ordering::Relaxed),
+            || {
+                tick();
+                !stop.load(Ordering::Relaxed)
+                    && service_asio_panel(&self.driver, shared, &[AsioPanelSide::Input])
+            },
+        );
+        match wait {
+            CallbackWait::Stopped => Ok(()),
+            CallbackWait::Reset => Err(DRIVER_RESET_MESSAGE.to_owned()),
+            CallbackWait::Failed => Err(CALLBACK_PANIC_MESSAGE.to_owned()),
+            CallbackWait::Hung => {
+                self.hung = true;
+                drop(self);
+                shared.set_device_lost(
+                    "The ASIO input stopped responding — the interface may have been unplugged"
+                        .to_owned(),
+                );
+                Ok(())
+            }
         }
     }
-
-    let _ = driver.stop();
-    let _ = driver.dispose_buffers();
-    registration.clear();
-    Ok(())
 }

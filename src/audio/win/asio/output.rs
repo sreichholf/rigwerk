@@ -17,7 +17,7 @@ use super::callback::{
     CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
 use super::duplex::run_asio_duplex_bridge;
-use super::input::run_asio_input_only;
+use super::input::prepare_asio_input;
 use super::panel::service_asio_panel;
 use super::samples::write_asio_sample;
 use super::ASIO_OUTPUT_CALLBACKS;
@@ -40,6 +40,13 @@ pub(crate) fn run_asio_output_bridge(
     }
 
     if let Some(input_clsid) = config.asio_clsid {
+        // Two drivers keep two clocks.  Prepare the input first and publish
+        // its real rate, so the output worker designs the resampler before
+        // its driver starts.  The input driver starts once the output runs.
+        shared.set_status("Opening ASIO input…");
+        let input =
+            prepare_asio_input(input_clsid, config.sample_rate, config.buffer_size, &shared)?;
+
         shared.set_status("Opening ASIO output…");
         let (worker, output_rate, _output_channels) = open_asio_output_worker(
             output_clsid,
@@ -51,20 +58,8 @@ pub(crate) fn run_asio_output_bridge(
         // The worker publishes `output_rate` before the driver starts.  The
         // UI thread reloads plugins; this thread must not.
 
-        // Two drivers keep two clocks, so the input rate is only known after
-        // its driver opens.  That is the one path where the output mixer may
-        // still design its filter on the first callback (docs/open-items.md).
         let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
-        shared.set_status("Opening ASIO input…");
-        run_asio_input_only(
-            input_clsid,
-            config.sample_rate,
-            config.buffer_size,
-            output_rate,
-            &shared,
-            &stop,
-            || followers.sync(&shared),
-        )?;
+        input.run(output_rate, &shared, &stop, || followers.sync(&shared))?;
         drop(followers);
         drop(worker);
     } else {
