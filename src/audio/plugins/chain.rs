@@ -14,7 +14,7 @@ use super::load::{
 #[cfg(test)]
 use super::pref::PluginFormat;
 use super::pref::{PluginParamPref, PluginParamView, PluginPref, PluginView};
-use super::slot::{defer_plugin_slots, Slot, SlotControls};
+use super::slot::{defer_plugin_slots, ProcessFailure, Slot, SlotControls};
 #[cfg(test)]
 use super::MAX_ALIGN;
 
@@ -829,7 +829,9 @@ fn run_plugin(
                 }
                 Err(error) => {
                     drop(plugin);
-                    slot.error = Some(format!("Processing failed: {error}"));
+                    // Kept as it is, not formatted: the UI thread writes
+                    // the text when it rebuilds the views.
+                    slot.process_failure = Some(ProcessFailure::Vst3(error));
                     Outcome::Failed
                 }
             }
@@ -848,7 +850,7 @@ fn run_plugin(
                 Ok(false) => Outcome::Skipped,
                 Err(error) => {
                     drop(plugin);
-                    slot.error = Some(format!("Processing failed: {error}"));
+                    slot.process_failure = Some(ProcessFailure::Clap(error));
                     Outcome::Failed
                 }
             }

@@ -106,13 +106,31 @@ impl SlotControls {
     }
 }
 
+/// Why a loaded insert stopped processing, as the audio thread recorded
+/// it.  Recording it never allocates, and it is never dropped on the audio
+/// thread: a slot fails once (it then leaves the chain), and slots are
+/// dropped on the UI thread.  vst3-host's usual failures (`NotProcessing`,
+/// `ProcessFailed(tresult)`) and CLAP's static messages hold no heap data;
+/// a few rare vst3-host errors (`Other("Plugin not initialized")`) are
+/// built inside the crate.  [`Slot::resolved_error`] formats it on the UI
+/// thread.
+pub(crate) enum ProcessFailure {
+    Vst3(vst3_host::Error),
+    Clap(&'static str),
+}
+
 pub(crate) struct Slot {
     pub(crate) pref: PluginPref,
     /// Mix and bypass as the UI sets them (see [`SlotControls`]).  Kept
     /// when the slot is reopened or rebuilt for a new rate.
     pub(crate) controls: Arc<SlotControls>,
     pub(crate) plugin: Option<PluginHandle>,
+    /// A load failure.
     pub(crate) error: Option<String>,
+    /// Set by the audio thread when the plugin's process call fails (see
+    /// [`ProcessFailure`]).  The insert then stays out of the chain like
+    /// one with an `error`.
+    pub(crate) process_failure: Option<ProcessFailure>,
     pub(crate) parameters: Vec<PluginParamView>,
     /// Read once at load, so drawing the insert list never locks a plugin.
     has_editor: bool,
@@ -186,6 +204,7 @@ impl Slot {
             pref,
             plugin: None,
             error: None,
+            process_failure: None,
             parameters: Vec::new(),
             has_editor: false,
             clap_host: None,
@@ -272,6 +291,7 @@ impl Slot {
                     pref,
                     plugin: Some(plugin),
                     error: None,
+                    process_failure: None,
                     parameters,
                     has_editor,
                     clap_host,
@@ -295,10 +315,7 @@ impl Slot {
         if self.test_delay.is_some() {
             return !self.controls.bypass();
         }
-        !self.controls.bypass()
-            && self.error.is_none()
-            && self.plugin.is_some()
-            && !self.ports_changed()
+        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.ports_changed()
     }
 
     /// A saved slot that has never been opened and has not failed.
@@ -340,7 +357,7 @@ impl Slot {
         if let Some(test) = &self.test_delay {
             return test.latency.min(MAX_ALIGN);
         }
-        if self.plugin.is_none() || self.error.is_some() || self.ports_changed() {
+        if self.plugin.is_none() || self.failed() || self.ports_changed() {
             return 0;
         }
         if let Some(host) = &self.clap_host {
@@ -360,11 +377,27 @@ impl Slot {
         }
     }
 
+    /// Whether the slot failed to load or to process.  Lock and allocation
+    /// free, so the audio thread may call it.
+    pub(crate) fn failed(&self) -> bool {
+        self.error.is_some() || self.process_failure.is_some()
+    }
+
     /// The first error the slot should show: a load/processing failure, or a
-    /// port change that has not yet reached `process`.
+    /// port change that has not yet reached `process`.  Allocates: UI thread
+    /// only, which is where a processing failure gets its text.
     pub(crate) fn resolved_error(&self) -> Option<String> {
         self.error
             .clone()
+            .or_else(|| {
+                self.process_failure.as_ref().map(|failure| {
+                    let error: &dyn std::fmt::Display = match failure {
+                        ProcessFailure::Vst3(error) => error,
+                        ProcessFailure::Clap(error) => error,
+                    };
+                    format!("Processing failed: {error}")
+                })
+            })
             .or_else(|| self.ports_changed().then(|| AUDIO_PORTS_CHANGED.to_owned()))
     }
 
