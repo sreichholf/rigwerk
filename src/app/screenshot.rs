@@ -49,6 +49,11 @@ impl RigWerkApp {
         self.frames += 1;
         if self.frames == 1 && self.screenshot.is_some() {
             self.apply_screenshot_routing();
+            // A setup that loads inserts selects the last one; the stage a
+            // run asked for wins.
+            if let Some(stage) = super::initial_mixer_stage() {
+                self.select_chain(stage);
+            }
             if screenshot_start() {
                 self.start_bridge();
             }
@@ -174,6 +179,8 @@ impl RigWerkApp {
     /// `<path number>=<bundle>[#<effect name>]` (path 1 is Clean).  Room
     /// stays selected.  A chain without plugin latency gets none faked.
     /// The plugin library is scanned too, so the Plugins page has a list.
+    /// The metronome runs at 96 BPM in 4/4, clicking on the follower only,
+    /// so the Mixer and Live show it in use.
     fn apply_screenshot_showcase(&mut self) {
         self.begin_plugin_scan();
         let follower = self
@@ -184,7 +191,13 @@ impl RigWerkApp {
             .find(|id| *id != self.selected_output().id && !id.starts_with("vbcable:"));
         if let Some(id) = follower {
             self.add_follower_device(&id);
+            // Device 1 is that follower: the click goes to the headphones.
+            self.set_click_channel(1, 0, true);
+            self.set_click_channel(1, 1, true);
         }
+        self.set_metronome_bpm(96.0);
+        self.set_metronome_rhythm(crate::audio::ClickRhythm::FourFour);
+        self.set_metronome_running(true);
         self.add_follower_device(crate::audio::VIRTUAL_OUT_ID);
         if !self.apply_card(crate::app::cards::Card::Blend) {
             return;
