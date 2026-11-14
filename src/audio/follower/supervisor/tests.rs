@@ -1,7 +1,10 @@
-//! Which plan slots the supervisor opens on their own cpal stream.
+//! Which plan slots the supervisor opens on their own cpal stream, and how a
+//! slot table opens, retries and closes them.
 
-use super::super::super::shared::{FollowerLink, FollowerPlan};
-use super::generic_followers;
+use std::sync::atomic::Ordering;
+
+use super::super::super::shared::{FollowerLink, FollowerPlan, Shared};
+use super::{generic_followers, FollowerSlots};
 
 /// A cpal id of this platform's follower host.
 #[cfg(target_os = "linux")]
@@ -80,4 +83,113 @@ fn a_vb_cable_virtual_out_plays_only_while_published_on_windows() {
     };
     let wanted = generic_followers(&plan(&[cable(true), cable(false)]));
     assert_eq!(wanted, vec![(0, GENERIC.to_owned())]);
+}
+
+fn missing(shared: &Shared, slot: usize) -> bool {
+    shared.follower_bus(slot).missing.load(Ordering::Relaxed)
+}
+
+fn feeding(shared: &Shared, slot: usize) -> bool {
+    shared.follower_ring_active(slot).load(Ordering::Acquire)
+}
+
+fn wanted(slot: usize, key: &str) -> Vec<(usize, String)> {
+    vec![(slot, key.to_owned())]
+}
+
+#[test]
+fn an_opened_slot_feeds_its_ring_and_is_not_reopened() {
+    let shared = Shared::new(48_000);
+    let mut table = FollowerSlots::<()>::new();
+    let mut opens = 0;
+    for _ in 0..3 {
+        table.sync(&shared, &wanted(1, "sink"), |_, _| {
+            opens += 1;
+            Ok(())
+        });
+    }
+    assert_eq!(opens, 1);
+    assert!(feeding(&shared, 1));
+    assert!(!missing(&shared, 1));
+    assert!(!feeding(&shared, 0));
+}
+
+#[test]
+fn a_failed_open_is_missing_and_waits_before_it_retries() {
+    let shared = Shared::new(48_000);
+    let mut table = FollowerSlots::<()>::new();
+    let mut opens = 0;
+    for _ in 0..2 {
+        table.sync(&shared, &wanted(0, "sink"), |_, _| {
+            opens += 1;
+            Err("gone".to_owned())
+        });
+    }
+    assert_eq!(opens, 1, "the second tick is inside the backoff");
+    assert!(missing(&shared, 0));
+    assert!(!feeding(&shared, 0));
+}
+
+#[test]
+fn a_stream_that_reports_itself_lost_is_reopened() {
+    let shared = Shared::new(48_000);
+    let mut table = FollowerSlots::<()>::new();
+    let opens = std::cell::Cell::new(0);
+    let open = |_: usize, _: &str| {
+        opens.set(opens.get() + 1);
+        Ok(())
+    };
+    table.sync(&shared, &wanted(0, "sink"), open);
+    shared
+        .follower_bus(0)
+        .missing
+        .store(true, Ordering::Relaxed);
+    for _ in 0..2 {
+        table.sync(&shared, &wanted(0, "sink"), open);
+    }
+    assert_eq!(opens.get(), 1, "a lost stream waits out the backoff");
+    assert!(missing(&shared, 0), "and stays missing until it reopens");
+    assert!(!feeding(&shared, 0));
+
+    // The backoff runs out.
+    table.retry_at[0] = Some(std::time::Instant::now());
+    table.sync(&shared, &wanted(0, "sink"), open);
+    assert_eq!(opens.get(), 2);
+    assert!(feeding(&shared, 0));
+    assert!(!missing(&shared, 0));
+}
+
+#[test]
+fn a_new_key_reopens_and_a_slot_that_leaves_stops_its_ring() {
+    let shared = Shared::new(48_000);
+    let mut table = FollowerSlots::<String>::new();
+    let open = |_: usize, key: &str| Ok(key.to_owned());
+    table.sync(&shared, &wanted(0, "a"), open);
+    let mut reopened = None;
+    table.sync(&shared, &wanted(0, "b"), |_, key| {
+        reopened = Some(key.to_owned());
+        Ok(key.to_owned())
+    });
+    assert_eq!(reopened.as_deref(), Some("b"));
+    assert!(feeding(&shared, 0));
+
+    table.sync(&shared, &[], open);
+    assert!(!feeding(&shared, 0));
+    assert!(!missing(&shared, 0));
+}
+
+#[test]
+fn a_table_leaves_the_slots_of_another_table_alone() {
+    // A table clears only the flags of the slots it opened or retries.
+    let shared = Shared::new(48_000);
+    let mut cpal = FollowerSlots::<()>::new();
+    let mut nodes = FollowerSlots::<()>::new();
+    let plan = [(0, "sink".to_owned()), (1, "gone".to_owned())];
+    nodes.sync(&shared, &plan, |slot, _| match slot {
+        0 => Ok(()),
+        _ => Err("gone".to_owned()),
+    });
+    cpal.sync(&shared, &[], |_, _| Ok(()));
+    assert!(feeding(&shared, 0));
+    assert!(missing(&shared, 1));
 }

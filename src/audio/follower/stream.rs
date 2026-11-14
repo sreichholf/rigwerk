@@ -18,7 +18,23 @@ use super::mixer::FollowerMixer;
 /// A live follower stream.  Dropping it stops playback on that device only.
 pub(crate) struct OpenedFollower {
     _stream: cpal::Stream,
-    pub(crate) device_id: String,
+}
+
+/// Lays `slot`'s ring out for a `channels`-channel stream at `rate`.  The
+/// ring-active flag must be off, so the clock side is not feeding the ring
+/// while it changes.
+pub(crate) fn lay_out_ring(
+    shared: &Shared,
+    slot: usize,
+    channels: usize,
+    rate: u32,
+    buffer_frames: usize,
+) {
+    let bus = shared.follower_bus(slot);
+    bus.set_device_channels(channels);
+    bus.reset_playback();
+    bus.set_source_rate(shared.output_rate.load(Ordering::Relaxed).max(rate));
+    bus.set_target_frames(super::super::shared::initial_target(buffer_frames));
 }
 
 /// Opens one follower on its own cpal stream.  On failure the slot is marked
@@ -44,11 +60,7 @@ pub(crate) fn open_follower(
 
     // The ring-active flag is off until this returns, so the clock side is
     // not feeding the ring while it is laid out for this device.
-    let bus = shared.follower_bus(slot);
-    bus.set_device_channels(channels);
-    bus.reset_playback();
-    bus.set_source_rate(shared.output_rate.load(Ordering::Relaxed).max(rate));
-    bus.set_target_frames(super::super::shared::initial_target(buffer_frames));
+    lay_out_ring(shared, slot, channels, rate, buffer_frames);
 
     let stream = match make_follower_stream(
         slot,
@@ -72,10 +84,7 @@ pub(crate) fn open_follower(
     // The opened device rate.  The ring's source rate stays the clock rate,
     // which is not what this stream plays when the two differ.
     shared.follower_bus(slot).set_playback_rate(rate);
-    Ok(OpenedFollower {
-        _stream: stream,
-        device_id: device_id.to_owned(),
-    })
+    Ok(OpenedFollower { _stream: stream })
 }
 
 fn make_follower_stream(

@@ -5,11 +5,9 @@ plans and the code review has landed; that history is in git.
 
 ## Features
 
-- The native PipeWire two-stream bridge (not the duplex node) plays only
-  to generic (cpal) followers, and only when its clock is a cpal output.
-  PipeWire node followers and RigWerk Out are linked by the duplex node
-  alone, so a PipeWire output on two streams (a mixed bridge, or the
-  duplex fallback) plays to none.
+- RigWerk Out is published by the PipeWire duplex node alone.  The
+  two-stream bridge (a mixed bridge, or the duplex fallback) does not
+  play it; its other followers play.
 - A take on a follower with more than four channels still includes the
   metronome click: only narrower followers carry the click-free lanes
   through their ring.
