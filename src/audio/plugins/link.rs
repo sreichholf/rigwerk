@@ -8,10 +8,6 @@
 //! from its own or the audio thread) only `try_lock`s them and drops the
 //! value when they are busy.
 
-// The vst3-host arm uses the failure only; `push_edit` and the reload
-// requests arrive with the VST3 controller split (#28).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::ThreadId;
@@ -35,8 +31,7 @@ const RELOAD_WANTED: u8 = 2;
 /// (the comments say which thread is expected to).
 pub(crate) struct PluginShared {
     pub(crate) pause: PauseHandshake,
-    /// Clamped latency in samples, read after every activation (UI).  The
-    /// vst3-host arm keeps its own and never writes this.
+    /// Clamped latency in samples, read after every activation (UI).
     latency: AtomicU32,
     /// A re-read moved `latency`; taken by the path service to republish.
     latency_unseen: AtomicBool,
@@ -132,6 +127,10 @@ impl PluginShared {
         );
     }
 
+    /// Nothing rebuilds an insert on request yet: the failure that comes
+    /// with the request keeps it out of the chain until it is removed and
+    /// added again.
+    #[cfg(test)]
     pub(crate) fn reload_wanted(&self) -> bool {
         self.reload.load(Ordering::Acquire) == RELOAD_WANTED
     }
@@ -158,10 +157,17 @@ impl PluginShared {
 pub(crate) enum ProcessFailure {
     /// VST3 `process` returned this `tresult`.
     Vst3(i32),
-    /// A VST3 plugin was asked to process while it was not processing.
-    Vst3Stopped,
-    /// The VST3 host failed for another reason (vst3-host's own errors).
-    Vst3Host,
+    /// VST3 `setProcessing(true)` returned this `tresult`.
+    Vst3StartFailed(i32),
+    /// A VST3 plugin did not activate again after a restart.
+    Vst3Inactive,
+    /// A VST3 plugin changed its audio buses (`kIoChanged`): its buffers
+    /// no longer fit.
+    Vst3BusesChanged,
+    /// A VST3 plugin asked to be reloaded (`kReloadComponent`).
+    Vst3Reload,
+    /// A VST3 plugin changed its parameter ids.
+    Vst3ControlsChanged,
     Clap(ClapFailure),
 }
 
@@ -212,17 +218,31 @@ impl ClapFailure {
 
 /// Kinds in the high word of a packed failure; 0 is none.
 const FAILURE_VST3: u64 = 1;
-const FAILURE_VST3_STOPPED: u64 = 2;
+const FAILURE_VST3_START: u64 = 2;
 const FAILURE_CLAP: u64 = 3;
-const FAILURE_VST3_HOST: u64 = 4;
+const FAILURE_VST3_INACTIVE: u64 = 4;
+const FAILURE_VST3_RELOAD: u64 = 5;
+const FAILURE_VST3_CONTROLS: u64 = 6;
+const FAILURE_VST3_BUSES: u64 = 7;
 
 impl ProcessFailure {
     /// The text the insert's error shows (UI thread).
     pub(crate) fn message(self) -> String {
         match self {
             ProcessFailure::Vst3(code) => format!("Plugin process() failed: {code:#x}"),
-            ProcessFailure::Vst3Stopped => "Plugin is not processing".to_owned(),
-            ProcessFailure::Vst3Host => "The VST3 host reported an error".to_owned(),
+            ProcessFailure::Vst3StartFailed(code) => {
+                format!("Plugin setProcessing() failed: {code:#x}")
+            }
+            ProcessFailure::Vst3Inactive => "The VST3 plugin is not active.".to_owned(),
+            ProcessFailure::Vst3BusesChanged => {
+                "The plugin changed its audio buses.  Remove it and add it again.".to_owned()
+            }
+            ProcessFailure::Vst3Reload => {
+                "The plugin asked to be reloaded.  Remove it and add it again.".to_owned()
+            }
+            ProcessFailure::Vst3ControlsChanged => {
+                ClapFailure::ControlsChanged.message().to_owned()
+            }
             ProcessFailure::Clap(failure) => failure.message().to_owned(),
         }
     }
@@ -230,8 +250,13 @@ impl ProcessFailure {
     fn pack(self) -> u64 {
         match self {
             ProcessFailure::Vst3(code) => FAILURE_VST3 << 32 | u64::from(code as u32),
-            ProcessFailure::Vst3Stopped => FAILURE_VST3_STOPPED << 32,
-            ProcessFailure::Vst3Host => FAILURE_VST3_HOST << 32,
+            ProcessFailure::Vst3StartFailed(code) => {
+                FAILURE_VST3_START << 32 | u64::from(code as u32)
+            }
+            ProcessFailure::Vst3Inactive => FAILURE_VST3_INACTIVE << 32,
+            ProcessFailure::Vst3BusesChanged => FAILURE_VST3_BUSES << 32,
+            ProcessFailure::Vst3Reload => FAILURE_VST3_RELOAD << 32,
+            ProcessFailure::Vst3ControlsChanged => FAILURE_VST3_CONTROLS << 32,
             ProcessFailure::Clap(failure) => FAILURE_CLAP << 32 | u64::from(failure.code()),
         }
     }
@@ -240,8 +265,11 @@ impl ProcessFailure {
         let code = packed as u32;
         match packed >> 32 {
             FAILURE_VST3 => Some(ProcessFailure::Vst3(code as i32)),
-            FAILURE_VST3_STOPPED => Some(ProcessFailure::Vst3Stopped),
-            FAILURE_VST3_HOST => Some(ProcessFailure::Vst3Host),
+            FAILURE_VST3_START => Some(ProcessFailure::Vst3StartFailed(code as i32)),
+            FAILURE_VST3_INACTIVE => Some(ProcessFailure::Vst3Inactive),
+            FAILURE_VST3_BUSES => Some(ProcessFailure::Vst3BusesChanged),
+            FAILURE_VST3_RELOAD => Some(ProcessFailure::Vst3Reload),
+            FAILURE_VST3_CONTROLS => Some(ProcessFailure::Vst3ControlsChanged),
             FAILURE_CLAP => ClapFailure::from_code(code).map(ProcessFailure::Clap),
             _ => None,
         }
@@ -300,7 +328,9 @@ pub(crate) struct ParamOut {
     /// per id.  Capacity is one per parameter, reserved here, so replacing
     /// by id never allocates.
     edits: Mutex<Vec<(u32, f64)>>,
-    /// Whether an edit from another thread was dropped (logged once).
+    /// An edit from another thread was dropped since the last
+    /// [`Self::take_edits`], which logs it (once) on the UI thread.
+    dropped: AtomicBool,
     dropped_logged: AtomicBool,
 }
 
@@ -312,6 +342,7 @@ impl ParamOut {
             ids,
             sender: Mutex::new(sender),
             edits: Mutex::new(edits),
+            dropped: AtomicBool::new(false),
             dropped_logged: AtomicBool::new(false),
         }
     }
@@ -338,8 +369,9 @@ impl ParamOut {
             None => false,
         };
         if !pushed {
-            if !main && !self.dropped_logged.swap(true, Ordering::Relaxed) {
-                eprintln!("[plugins] dropped a parameter edit made off the UI thread");
+            if !main {
+                // No logging here: this may be the audio thread.
+                self.dropped.store(true, Ordering::Relaxed);
             }
             return false;
         }
@@ -357,6 +389,11 @@ impl ParamOut {
 
     /// Moves the edits since the last call into `out` (cleared first).
     pub(crate) fn take_edits(&self, out: &mut Vec<(u32, f64)>) {
+        if self.dropped.swap(false, Ordering::Relaxed)
+            && !self.dropped_logged.swap(true, Ordering::Relaxed)
+        {
+            eprintln!("[plugins] dropped a parameter edit made off the UI thread");
+        }
         out.clear();
         let mut edits = self.edits.lock().unwrap_or_else(PoisonError::into_inner);
         out.append(&mut edits);

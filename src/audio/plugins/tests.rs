@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use super::super::clap::AUDIO_PORTS_CHANGED;
 use super::load::{
-    apply_parameter_changes, latest_parameter_values, merge_synced_params, params_to_restore,
-    Capture, ParamChange, Restore,
+    apply_parameter_changes, merge_synced_params, params_to_restore, Capture, ParamChange, Restore,
 };
 use super::pref::{
     base64_decode, base64_encode, PluginFormat, PluginParamPref, PluginParamView, PluginPref,
@@ -188,12 +185,7 @@ fn a_read_only_control_is_never_saved() {
 
 #[test]
 fn the_same_control_reported_twice_keeps_the_last_value() {
-    // A drag's backlog and the processor's output feedback can report one
-    // id many times before the next poll.
-    assert_eq!(
-        latest_parameter_values(vec![(1, 0.2), (2, 0.4), (1, 0.9), (2, 0.1)]),
-        vec![(1, 0.9), (2, 0.1)]
-    );
+    // A drag can report one id many times before the next service frame.
     let mut parameters = vec![view(1, 0.2, 0.0)];
     let mut saved = Vec::new();
     let changes = [
@@ -603,28 +595,6 @@ fn a_skipped_insert_still_delays_by_its_latency() {
     }
 }
 
-#[test]
-fn processing_a_slot_sets_the_processed_flag_once() {
-    use super::PluginChain;
-    let mut chain = PluginChain::new(48_000);
-    chain.insert_delay_for_test(0);
-    let controls = Arc::clone(&chain.slot_mut_for_test(0).controls);
-    assert!(!controls.take_processed());
-    let mut left = vec![0.0f32; 32];
-    let mut right = vec![0.0f32; 32];
-    chain.process(&mut left, &mut right, 32);
-    assert!(controls.take_processed());
-    assert!(!controls.take_processed());
-    // A skipped block (bypass) does not set it: an editor edit would not be
-    // visible in one.
-    chain.set_bypass(0, true);
-    chain.process(&mut left, &mut right, 32);
-    assert!(!controls.take_processed());
-    // Destroy the slot here rather than through the chain's deferred
-    // teardown, which another test's main-thread claim could trigger.
-    drop(chain.restore(Vec::new()));
-}
-
 /// A CLAP insert has no instance lock the audio thread could find busy:
 /// its editor working on the UI side never makes a block skip it.  A
 /// restart pauses it instead, and the paused block still comes out by the
@@ -660,6 +630,7 @@ fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
         crate::audio::LockStats {
             attempts: 2,
             skips: 0,
+            paused: 0,
         }
     );
 
@@ -676,12 +647,14 @@ fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
     assert_eq!(left[0], 1.0);
     assert!(left.windows(2).take(95).all(|pair| pair[1] < pair[0]));
     assert_eq!(left[96..], impulse(128, 100)[96..]);
-    // The restart's pass-through is an attempt, not a missed lock.
+    // The restart's pass-through is an attempt, not a missed lock: it is
+    // counted as a paused block.
     assert_eq!(
         chain.slot_mut_for_test(0).controls.lock_stats(),
         crate::audio::LockStats {
             attempts: 3,
             skips: 0,
+            paused: 1,
         }
     );
     // Restarted and resumed: it processes again.
@@ -745,8 +718,6 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
         "the active insert's bypass is not written"
     );
     assert!(chain.slot_mut_for_test(1).controls.bypass());
-    assert!(!chain.slot_mut_for_test(0).controls.take_processed());
-    assert!(!chain.slot_mut_for_test(1).controls.take_processed());
     for index in 0..2 {
         assert_eq!(
             chain.slot_mut_for_test(index).controls.lock_stats(),
@@ -761,13 +732,9 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
     let mut left = vec![0.0f32; 64];
     let mut right = vec![0.0f32; 64];
     assert!(!chain.process(&mut left, &mut right, 64));
-    assert!(
-        chain.slot_mut_for_test(0).controls.take_processed(),
-        "turning chain bypass off processes the insert again"
-    );
-    assert!(!chain.slot_mut_for_test(1).controls.take_processed());
     assert!(!chain.slot_mut_for_test(0).controls.bypass());
     assert!(chain.slot_mut_for_test(1).controls.bypass());
+    // Turning chain bypass off runs the active insert again.
     assert_eq!(chain.slot_mut_for_test(0).controls.lock_stats().attempts, 1);
     assert_eq!(chain.slot_mut_for_test(1).controls.lock_stats().attempts, 0);
     assert_eq!(chain.latency_samples(), 24);
@@ -1123,8 +1090,15 @@ fn vst3_fixture_adelay_delays_an_impulse_by_its_delay() {
 
 /// The host checker logs the host's call sequence for its own editor; none
 /// of that is readable as a control, and its "Scoring" counts supported
-/// features, not errors.  So this is a call-sequence smoke test: a load,
-/// many blocks, a state capture and a restore, and nothing may fail.
+/// features, not errors.  So this is mostly a call-sequence test: a load,
+/// many blocks, a latency change, a state capture and a restore, and
+/// nothing may fail.
+///
+/// Its "Latency" control (0..10 s) reaches the processor, which reports it
+/// on an output parameter; the controller gets that and asks for a
+/// `kLatencyChanged` restart, and the plugin applies the new latency on
+/// activation.  So the latency only reads 256 if output parameters reach
+/// the controller and the restart reads it after reactivating.
 #[test]
 fn vst3_fixture_host_checker_survives_processing_and_a_state_round_trip() {
     let _main = crate::audio::claim_main_thread();
@@ -1142,24 +1116,23 @@ fn vst3_fixture_host_checker_survives_processing_and_a_state_round_trip() {
     {
         eprintln!("[vst3_fixture] host-checker Scoring: {}", score.display);
     }
-    // Its "Latency" control (0..10 s) should reach the view after the
-    // plugin's restart, but does not with vst3-host 0.11 (see
-    // docs/open-items.md): the processor's notice is an output parameter
-    // that never reaches the controller, and a restart reads the latency
-    // before reactivating, while this plugin applies it on activation.
-    // Printed, not asserted, so the CI log shows when that changes.
     let latency = param_id(&view, "Latency");
     path.set_plugin_parameter(0, latency, 256.5 / (10.0 * 48_000.0))
         .expect("set Latency");
-    for _ in 0..4 {
+    for _ in 0..10 {
         run_tone(&path, 4);
         path.service_plugins();
-        std::thread::sleep(std::time::Duration::from_millis(260));
+        if only_view(&path).latency == 256 {
+            break;
+        }
     }
-    eprintln!(
-        "[vst3_fixture] host-checker latency after asking for 256: {}",
-        only_view(&path).latency
-    );
+    let reported = only_view(&path).latency;
+    eprintln!("[vst3_fixture] host-checker latency after asking for 256: {reported}");
+    assert_eq!(reported, 256);
+    // It processes again after the restart.
+    run_tone(&path, 8);
+    path.service_plugins();
+    assert_eq!(only_view(&path).latency, 256);
     let saved = path.plugin_prefs();
     assert!(saved[0].state.is_some(), "the host checker saves a state");
 
@@ -1172,10 +1145,174 @@ fn vst3_fixture_host_checker_survives_processing_and_a_state_round_trip() {
     only_view(&restored);
 }
 
-/// A baseline for the insert lock, not a limit: the audio side processes
-/// AGain as fast as it can while the UI side moves its gain through the
-/// normal control path.  The output must stay finite; the skip counts are
-/// printed so a CI log records them.
+/// A latency restart while an audio thread processes the host checker
+/// waits for that thread: the UI asks for a pause, the audio side stops
+/// the plugin with its next block and skips it until the UI has
+/// reactivated it, and then it runs again.  No block fails.
+#[test]
+fn vst3_fixture_restart_waits_for_the_audio_thread() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("host-checker", HOST_CHECKER_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let latency = param_id(&only_view(&path), "Latency");
+    let handle = path.plugin_handle(0).expect("loaded");
+    let stop = AtomicBool::new(false);
+    let reported = std::thread::scope(|scope| {
+        let audio = scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                let mut left = tone(0);
+                let mut right = left.clone();
+                assert!(path.process_plugins(&mut left, &mut right, FIXTURE_BLOCK));
+                assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        // Started and processing before the request.
+        let since = Instant::now();
+        while !handle.shared().pause.processing() {
+            assert!(since.elapsed() < Duration::from_secs(5), "never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let paused_before = handle.shared().pause.paused_blocks();
+        path.set_plugin_parameter(0, latency, 256.5 / (10.0 * 48_000.0))
+            .expect("set Latency");
+        let since = Instant::now();
+        while only_view(&path).latency != 256 && since.elapsed() < Duration::from_secs(5) {
+            path.service_plugins();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let paused = handle.shared().pause.paused_blocks() - paused_before;
+        // It runs again: blocks are served and none pauses any more.
+        let served = handle.shared().pause.served();
+        let since = Instant::now();
+        while handle.shared().pause.served() < served + 8 {
+            assert!(since.elapsed() < Duration::from_secs(5), "no blocks after");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let after = handle.shared().pause.paused_blocks();
+        std::thread::sleep(Duration::from_millis(20));
+        let resumed = handle.shared().pause.paused_blocks() == after;
+        stop.store(true, Ordering::Relaxed);
+        audio.join().expect("the audio side panicked");
+        (paused, resumed)
+    });
+    path.service_plugins();
+    assert_eq!(handle.failure(), None);
+    assert_eq!(only_view(&path).latency, 256);
+    let (paused, resumed) = reported;
+    assert!(paused > 0, "the audio side never paused the plugin");
+    assert!(resumed, "the plugin stayed paused");
+    assert!(handle.shared().pause.processing(), "not processing again");
+}
+
+/// A value set while the insert is bypassed reaches the processor through
+/// an empty flush block, so the state saved afterwards holds it, with no
+/// saved parameter to help.  That state also survives a rate reload.
+#[test]
+fn vst3_fixture_again_a_value_set_while_bypassed_reaches_the_state() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let gain = param_id(&only_view(&path), "Gain");
+    run_tone(&path, 2);
+    path.set_plugin_bypass(0, true);
+    // The bypassed chain no longer runs on its own (no latency to keep).
+    run_tone(&path, 2);
+    path.set_plugin_parameter(0, gain, 0.25).expect("set Gain");
+    let bypassed = run_tone(&path, 2);
+    assert!(
+        (bypassed - TONE_PEAK).abs() < 0.01,
+        "bypassed peak {bypassed}"
+    );
+    let saved = path.plugin_prefs().into_iter().next().expect("one insert");
+    let blob = saved
+        .state
+        .as_ref()
+        .and_then(PluginState::bytes)
+        .expect("a captured state");
+
+    // The blob alone, with no saved parameters and an empty snapshot.
+    let blob_only = PluginPref {
+        params: Vec::new(),
+        state: Some(PluginState::capture(&blob, &[])),
+        bypass: false,
+        ..saved
+    };
+    let restored = fixture_path(blob_only);
+    assert!((param_value(&only_view(&restored).parameters, "Gain") - 0.25).abs() < 1e-6);
+    restored.reload_plugins_for_rate(96_000);
+    assert_eq!(restored.chain_rate(), 96_000);
+    assert!((param_value(&only_view(&restored).parameters, "Gain") - 0.25).abs() < 1e-6);
+    let peak = run_tone(&restored, 8);
+    assert!(
+        (peak - TONE_PEAK * 0.25).abs() < 0.01,
+        "restored peak {peak}"
+    );
+}
+
+/// An edit AGain's editor reports (`performEdit`) is the user's setting:
+/// the next service frame saves it and marks the state for capture.
+#[test]
+fn vst3_fixture_again_an_editor_edit_is_saved_by_the_service() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let gain = param_id(&only_view(&path), "Gain");
+    run_tone(&path, 2);
+    path.capture_plugin_states();
+    let handle = path.plugin_handle(0).expect("loaded");
+    assert!(!handle.wants_capture());
+    assert!(handle.edit_for_test(gain, 0.3));
+    path.service_plugins();
+    let (saved, _) = handle.saved();
+    assert!(saved
+        .iter()
+        .any(|param| param.id == gain && (param.value - 0.3).abs() < 1e-6));
+    assert!(handle.wants_capture());
+    assert!((param_value(&only_view(&path).parameters, "Gain") - 0.3).abs() < 1e-6);
+    let peak = run_tone(&path, 4);
+    assert!((peak - TONE_PEAK * 0.3).abs() < 0.01, "edited peak {peak}");
+}
+
+/// With no audio running a value set on AGain never reaches its
+/// processor, but a save still captures its state; the restore applies
+/// the value on top.
+#[test]
+fn vst3_fixture_again_a_save_with_audio_stopped_keeps_a_value_set() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let gain = param_id(&only_view(&path), "Gain");
+    path.set_plugin_parameter(0, gain, 0.3).expect("set Gain");
+    let saved = path.plugin_prefs();
+    assert!(saved[0].state.is_some(), "captured without audio");
+    let restored = crate::audio::path::PathControls::new(48_000);
+    restored.restore_plugins(saved);
+    restored.ensure_plugin_loaded(0);
+    assert!((param_value(&only_view(&restored).parameters, "Gain") - 0.3).abs() < 1e-6);
+    let peak = run_tone(&restored, 8);
+    assert!(
+        (peak - TONE_PEAK * 0.3).abs() < 0.01,
+        "restored peak {peak}"
+    );
+}
+
+/// The audio side processes AGain as fast as it can while the UI side moves
+/// its gain through the normal control path.  Neither the chain nor the
+/// insert is ever skipped: a control set takes no lock the audio thread
+/// takes.  The output must stay finite; the counts are printed so a CI log
+/// records them.
 #[test]
 fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1234,15 +1371,38 @@ fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
     let insert = report.inserts[0];
     eprintln!(
         "[vst3_fixture] lock baseline: {sets} sets, {blocks} blocks ({missed} without the chain); \
-         chain lock {}/{} skipped, insert lock {}/{} skipped ({:.1}%)",
+         chain lock {}/{} skipped, insert lock {}/{} skipped ({:.1}%), {} paused",
         report.chain.skipped(),
         report.chain.attempts,
         insert.skipped(),
         insert.attempts,
-        insert.share() * 100.0
+        insert.share() * 100.0,
+        insert.paused
     );
     assert_eq!(failures, Vec::<String>::new(), "a control set failed");
     assert!(blocks > 0 && sets > 0);
+    assert_eq!(missed, 0, "a block missed the chain");
+    assert_eq!(report.chain.skipped(), 0, "the chain lock was skipped");
+    assert_eq!(insert.skipped(), 0, "the insert was skipped");
+    assert_eq!(insert.paused, 0, "a control set paused the insert");
     path.service_plugins();
     only_view(&path);
+}
+
+#[test]
+fn a_latency_total_the_ui_stored_meanwhile_is_not_overwritten() {
+    use super::chain::publish_total;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let cell = AtomicU32::new(16);
+    // The audio thread read 16 and summed 32; the UI stored 48 meanwhile.
+    cell.store(48, Ordering::Release);
+    assert!(!publish_total(&cell, 16, 32));
+    assert_eq!(cell.load(Ordering::Acquire), 48, "the newer value wins");
+    // Nothing in between: the sum goes in and counts as a change.
+    assert!(publish_total(&cell, 48, 32));
+    assert_eq!(cell.load(Ordering::Acquire), 32);
+    // The same total again is no change.
+    assert!(!publish_total(&cell, 32, 32));
+    assert_eq!(cell.load(Ordering::Acquire), 32);
 }

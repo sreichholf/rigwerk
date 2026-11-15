@@ -23,8 +23,8 @@
 //! - `path`: one signal path's controls (routing, EQs, gate, inserts).
 //! - `plugins`: the VST3 and CLAP chain on each path.  The UI holds views.
 //! - `vst3`: RigWerk's own VST3 host on the `vst3` bindings (module,
-//!   factory, host context, run loop, streams).  Not used yet: the chain
-//!   still hosts VST3 through `vst3-host`.
+//!   factory, host context, run loop, streams, the controller and
+//!   processor halves, the editor view).
 //! - `scope`: decimated peak-hold lanes.  Drawing them is `ui/scope`.
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
@@ -78,7 +78,7 @@ mod shared;
 mod thread_priority;
 mod tuner;
 mod types;
-mod vst3;
+pub(crate) mod vst3;
 
 #[cfg(target_os = "windows")]
 mod win;

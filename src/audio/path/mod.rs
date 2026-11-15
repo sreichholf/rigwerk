@@ -255,10 +255,15 @@ impl DspTime {
 /// How often one lock on the sample path was tried and how often it was
 /// busy, so its work was skipped for that chunk.  Measurement only: the
 /// audio thread writes these relaxedly and never reads them back.
+///
+/// For an insert, `paused` counts the chunks it should have run but was
+/// paused for (a restart, a stopped or failed start): no lock was busy, so
+/// these are attempts, not skips.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LockStats {
     pub attempts: u64,
     pub skips: u64,
+    pub paused: u64,
 }
 
 impl LockStats {
@@ -381,6 +386,11 @@ pub(crate) struct PathControls {
     /// without the chain lock.  It does not write each slot's bypass.
     chain_bypass: Arc<AtomicBool>,
     plugin_active: AtomicUsize,
+    /// The UI wants the next block to enter the chain even with nothing
+    /// active (a bypass cleared, a value queued for a bypassed insert).
+    /// Its own flag, taken by the audio thread, so the audio thread's
+    /// recount of `plugin_active` cannot overwrite a wake.
+    plugin_wake: AtomicBool,
     /// How often the audio thread tried this path's chain lock and how often
     /// it was busy, so the chunk played the chain's input delayed instead.
     /// Measurement only: written relaxedly by the audio thread.
@@ -437,6 +447,7 @@ impl PathControls {
             chain_bypass: chain.chain_bypass_handle(),
             plugins: Mutex::new(chain),
             plugin_active: AtomicUsize::new(0),
+            plugin_wake: AtomicBool::new(false),
             chain_attempts: AtomicU64::new(0),
             chain_skips: AtomicU64::new(0),
             chain_poisoned: AtomicBool::new(false),

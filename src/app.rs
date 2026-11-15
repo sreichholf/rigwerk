@@ -142,6 +142,16 @@ pub(crate) struct LogEntry {
     pub(crate) tone: LogTone,
 }
 
+/// Closes a plugin's editor window before the fields drop: `engine` is
+/// declared first and would take the plugins down while their editor is
+/// still attached.  This way the view is detached, then the plugin
+/// deactivated and destroyed, on exit as everywhere else.
+impl Drop for RigWerkApp {
+    fn drop(&mut self) {
+        self.plugin_gui = None;
+    }
+}
+
 pub struct RigWerkApp {
     pub(crate) page: Page,
     /// The page the previous logic pass ran with.  The tuner logs its mute

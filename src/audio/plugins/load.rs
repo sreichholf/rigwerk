@@ -1,17 +1,12 @@
-//! Plugin loading, state capture, and the parameter helpers the vst3-host
-//! instance is driven by.  The helpers lock that instance: call them on the
-//! UI thread, through [`super::PluginHandle`].
+//! Plugin loading, the restore order, state capture, and the helpers that
+//! keep the saved control values in step with the plugin.  UI thread.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, TryLockError};
-use std::time::Instant;
-
-use vst3_host::{Plugin, Vst3Host};
+use std::sync::Arc;
 
 use super::super::clap::ClapInstance;
-use super::clamp_latency;
-use super::handle::{LoadedPlugin, PluginInstance, Saved};
+use super::super::vst3::Vst3Controller;
+use super::handle::{LoadedPlugin, Saved};
 use super::link::PluginShared;
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginPref, PluginState};
 
@@ -23,71 +18,13 @@ pub(crate) struct ParamChange {
     pub(crate) display: Option<String>,
 }
 
-/// Drains the control changes a VST3 plugin reported since the last call (its
-/// editor's edits and the processor's own output parameters), formatting each
-/// while the instance is still locked.  A drag and the processor's feedback
-/// can report the same id many times, so the last value per id is kept and
-/// only that one is formatted.  `Some(vec![])` means nothing changed; `None`
-/// means the format has no equivalent.  VST3 only becomes visible after a
-/// processed block, so an insert that has not processed one uses the full
-/// [`super::PluginHandle::sync_full`] read instead.
-pub(crate) fn take_parameter_changes(handle: &PluginInstance) -> Option<Vec<ParamChange>> {
-    let PluginInstance::Vst3Legacy(plugin) = handle else {
-        return None;
-    };
-    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-    let changes = plugin.get_parameter_changes();
-    if changes.is_empty() {
-        return Some(Vec::new());
-    }
-    Some(
-        latest_parameter_values(changes)
-            .into_iter()
-            .map(|(id, value)| ParamChange {
-                id,
-                value,
-                display: plugin.format_parameter(id, value).ok(),
-            })
-            .collect(),
-    )
-}
-
-/// Collapses reported `(id, value)` pairs to the last value per id, in id
-/// order.  A drag reports many values for one control before the next poll,
-/// and a processor's output parameter can echo them; formatting each would
-/// hold the instance lock far longer than needed.
-pub(crate) fn latest_parameter_values(changes: Vec<(u32, f64)>) -> Vec<(u32, f64)> {
-    let mut latest = std::collections::BTreeMap::new();
-    for (id, value) in changes {
-        latest.insert(id, value);
-    }
-    latest.into_iter().collect()
-}
-
-/// Drains the control changes a VST3 plugin reported since the last call,
-/// without formatting any of them.  A sync that reads every control anyway
-/// only needs the queue emptied: a value queued before the fresher full read
-/// would otherwise be applied by the next change poll, putting an older value
-/// back.  Formatting is the expensive part of [`take_parameter_changes`] and
-/// would be thrown away here.  `None` means the format has no change feed.
-pub(crate) fn take_parameter_values(handle: &PluginInstance) -> Option<Vec<(u32, f64)>> {
-    let PluginInstance::Vst3Legacy(plugin) = handle else {
-        return None;
-    };
-    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-    Some(latest_parameter_values(plugin.get_parameter_changes()))
-}
-
-/// Applies editor-reported changes to the cached views and the saved values,
-/// touching only the ids they name.  Every known change is applied; the
+/// Applies editor edits to the cached views and the saved values, touching
+/// only the ids they name.  Every known change is applied; the
 /// return value is `false` when any id was not in the cached views (a control
 /// the plugin added or renamed), which asks the caller for a full read.  The
 /// saved list keeps [`merge_synced_params`]'s semantics: every live value
 /// away from its default, plus saved entries the plugin does not list.
 /// Changes that are already at their default therefore leave it.
-///
-/// Kept for the parameter tests.  The running editor poll does not call it.
-#[cfg(test)]
 pub(crate) fn apply_parameter_changes(
     parameters: &mut [PluginParamView],
     saved: &mut Vec<PluginParamPref>,
@@ -113,139 +50,6 @@ pub(crate) fn apply_parameter_changes(
     }
     *saved = merge_synced_params(saved, parameters);
     all_known
-}
-
-/// How often [`Vst3Service::service`] looks for `restartComponent` requests
-/// while it has a reason to.  VST3 offers no lock-free way to peek at them,
-/// and every look try-locks the instance the audio callback also try-locks
-/// (a collision makes the callback skip the insert for a block).
-const VST3_POLL_MS: u64 = 250;
-
-/// How long after a parameter edit, editor sync or load the service keeps
-/// looking.  A plugin raises `kLatencyChanged` in response to such an edit
-/// (a mode switch, an oversampling toggle, a preset); with no edit there is
-/// nothing to look for.  The 250 ms editor sync nudges this on every poll,
-/// even one that reports no changes, so an open editor keeps the window open
-/// for as long as it is shown.
-const VST3_POLL_WINDOW_MS: u64 = 2_000;
-
-/// Milliseconds since the first call, for the poll window atomics.
-fn now_ms() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
-/// A VST3 insert's main-thread work: `restartComponent` requests, and the
-/// latency read after each activation.  Kept on the plugin's handle so the
-/// poll window survives a republish.
-pub(crate) struct Vst3Service {
-    pub(crate) plugin: Arc<Mutex<Plugin>>,
-    /// `IAudioProcessor::getLatencySamples`, as last read.  Lock-free, so
-    /// the audio thread may read it.
-    latency: AtomicU32,
-    /// Until when (see [`now_ms`]) the service looks for requests.
-    poll_until: AtomicU64,
-    /// When it may look next.
-    next_poll: AtomicU64,
-    /// Set when the plugin reported changed parameter values or titles, so
-    /// the next editor sync reads every control instead of only the reported
-    /// changes.  This covers an added, renamed or re-defaulted control
-    /// without waiting for the editor to close.
-    parameters_changed: AtomicBool,
-    /// Whether a failed `service_host_requests` was logged already.
-    error_logged: AtomicBool,
-}
-
-impl Vst3Service {
-    /// Reads the latency of a freshly loaded (set up and activated) plugin.
-    pub(crate) fn new(plugin: Arc<Mutex<Plugin>>) -> Self {
-        let latency = plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .latency_samples();
-        let service = Self {
-            plugin,
-            latency: AtomicU32::new(clamp_latency(latency)),
-            poll_until: AtomicU64::new(0),
-            next_poll: AtomicU64::new(0),
-            parameters_changed: AtomicBool::new(false),
-            error_logged: AtomicBool::new(false),
-        };
-        // Some plugins settle their latency right after loading.
-        service.nudge();
-        service
-    }
-
-    pub(crate) fn latency(&self) -> u32 {
-        self.latency.load(Ordering::Acquire)
-    }
-
-    /// Takes the "read every control" request set by
-    /// [`Self::service`].  The editor sync uses the full read once and then
-    /// goes back to polling reported changes.  No unit test exercises this:
-    /// building a [`Plugin`] needs a real VST3 module, and a stand-in would
-    /// only test the `AtomicBool`.
-    pub(crate) fn take_parameters_changed(&self) -> bool {
-        self.parameters_changed.swap(false, Ordering::AcqRel)
-    }
-
-    /// Opens the poll window: something just touched the plugin (a control,
-    /// a reset, a load), so it may raise a restart request.  The 250 ms
-    /// editor sync calls this on every poll, changes or not, so an open
-    /// editor keeps the window open for as long as it is shown.
-    pub(crate) fn nudge(&self) {
-        self.poll_until
-            .store(now_ms() + VST3_POLL_WINDOW_MS, Ordering::Relaxed);
-    }
-
-    /// Applies the plugin's `restartComponent` requests and re-reads its
-    /// latency, but only inside the poll window (see [`Self::nudge`]) and at
-    /// most every [`VST3_POLL_MS`]; otherwise it does nothing.  Call it on
-    /// the UI thread, which loaded the plugin and is its VST3 control
-    /// thread.  For `kLatencyChanged` (and `kIoChanged`)
-    /// `service_host_requests` stops processing, deactivates, re-reads
-    /// `getLatencySamples` and reactivates, as VST3 requires.  The instance
-    /// is only try-locked, so a busy audio callback or editor just moves the
-    /// work to a later poll.
-    ///
-    /// Returns whether the latency changed, so the caller can republish the
-    /// insert views.
-    pub(crate) fn service(&self) -> bool {
-        let now = now_ms();
-        if now > self.poll_until.load(Ordering::Relaxed)
-            || now < self.next_poll.load(Ordering::Relaxed)
-        {
-            return false;
-        }
-        self.next_poll.store(now + VST3_POLL_MS, Ordering::Relaxed);
-        let mut plugin = match self.plugin.try_lock() {
-            Ok(plugin) => plugin,
-            Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
-            Err(TryLockError::WouldBlock) => return false,
-        };
-        match plugin.service_host_requests() {
-            Ok(flags) => {
-                if flags.param_values_changed() || flags.param_titles_changed() {
-                    self.parameters_changed.store(true, Ordering::Release);
-                }
-                if flags.reload_component() {
-                    eprintln!(
-                        "[plugins] a VST3 plugin asked to be reloaded; remove and add it again"
-                    );
-                }
-            }
-            // The latency may still have changed (the request can fail
-            // halfway through the restart), so it is read either way.
-            Err(error) => {
-                if !self.error_logged.swap(true, Ordering::Relaxed) {
-                    eprintln!("[plugins] a VST3 restart request failed: {error}");
-                }
-            }
-        }
-        let latency = clamp_latency(plugin.latency_samples());
-        drop(plugin);
-        self.latency.swap(latency, Ordering::AcqRel) != latency
-    }
 }
 
 /// The capture of `bytes` a plugin saved, with `params` as the blob's
@@ -327,6 +131,11 @@ impl<'a> Restore<'a> {
     }
 }
 
+/// A snapshot value no control can have: the blob was captured before this
+/// control's saved value reached the plugin, so [`params_to_restore`]
+/// always applies the saved value (or the default) on top.
+pub(crate) const UNDELIVERED: f64 = -1.0;
+
 /// The values two parameter lists may differ by and still count as equal.
 const PARAM_EPSILON: f64 = 0.0005;
 
@@ -385,65 +194,6 @@ pub(crate) fn merge_synced_params(
         .collect()
 }
 
-pub(crate) fn host_parameters(plugin: &Mutex<Plugin>) -> Vec<PluginParamView> {
-    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-    parameter_views(&plugin)
-}
-
-pub(crate) fn host_set_parameter(
-    plugin: &Mutex<Plugin>,
-    id: u32,
-    value: f64,
-) -> Result<(), String> {
-    plugin
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .set_parameter(id, value.clamp(0.0, 1.0))
-        .map_err(|error| format!("Could not set parameter: {error}"))
-}
-
-/// The plugin's own text for one control value, `None` when it has none.
-pub(crate) fn host_format_parameter(plugin: &Mutex<Plugin>, id: u32, value: f64) -> Option<String> {
-    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-    plugin.format_parameter(id, value).ok()
-}
-
-pub(crate) fn host_reset_parameters(
-    plugin: &Mutex<Plugin>,
-) -> Result<Vec<PluginParamView>, String> {
-    let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-    let parameters = parameter_views(&plugin);
-    for parameter in parameters.iter().filter(|parameter| !parameter.read_only) {
-        let _ = plugin.set_parameter(parameter.id, parameter.default);
-    }
-    Ok(parameter_views(&plugin))
-}
-
-/// Reads the plugin's controls once, using the plugin's own value formatting.
-pub(crate) fn parameter_views(plugin: &Plugin) -> Vec<PluginParamView> {
-    let Ok(parameters) = plugin.get_parameters() else {
-        return Vec::new();
-    };
-    parameters
-        .into_iter()
-        .map(|parameter| {
-            let display = plugin
-                .format_parameter(parameter.id, parameter.value)
-                .unwrap_or_else(|_| parameter.format_value(parameter.value));
-            PluginParamView {
-                id: parameter.id,
-                name: parameter.name,
-                value: parameter.value,
-                default: parameter.default,
-                step_count: parameter.step_count,
-                unit: parameter.unit,
-                display,
-                read_only: parameter.is_read_only,
-            }
-        })
-        .collect()
-}
-
 /// Opens the plugin with its saved state and controls applied.  The flag says
 /// whether the saved state blob still describes the new instance exactly (it
 /// restored and no newer control value had to be applied on top); the
@@ -459,12 +209,23 @@ pub(crate) fn load_plugin(
         stale: !current,
     };
     match pref.format {
-        PluginFormat::Vst3 => load_vst3(pref, &restore, sample_rate).map(|(plugin, current)| {
-            (
-                LoadedPlugin::vst3_legacy(plugin, saved(current), sample_rate),
-                current,
-            )
-        }),
+        PluginFormat::Vst3 => {
+            let path = PathBuf::from(&pref.path);
+            if !path.exists() {
+                return Err(format!("Plugin not found: {}", path.display()));
+            }
+            let class_id = pref
+                .class_id
+                .as_deref()
+                .filter(|class_id| !class_id.trim().is_empty());
+            let shared = Arc::new(PluginShared::new(0));
+            Vst3Controller::load(&path, class_id, sample_rate, &restore, &shared)
+                .map_err(|error| format!("Load failed: {error}"))
+                .map(|loaded| {
+                    let current = loaded.state_current;
+                    (LoadedPlugin::vst3(loaded, shared, saved(current)), current)
+                })
+        }
         PluginFormat::Clap => {
             let plugin_id = pref
                 .class_id
@@ -484,74 +245,4 @@ pub(crate) fn load_plugin(
             )
         }
     }
-}
-
-fn load_vst3(
-    pref: &PluginPref,
-    restore: &Restore<'_>,
-    sample_rate: u32,
-) -> Result<(Plugin, bool), String> {
-    let path = PathBuf::from(&pref.path);
-    if !path.exists() {
-        return Err(format!("Plugin not found: {}", path.display()));
-    }
-    let rate = if sample_rate == 0 {
-        48_000.0
-    } else {
-        sample_rate as f64
-    };
-    let mut host = Vst3Host::builder()
-        .sample_rate(rate)
-        .block_size(MAX_BLOCK)
-        .build()
-        .map_err(|error| format!("VST3 host: {error}"))?;
-    let mut plugin = match &pref.class_id {
-        Some(class_id) if !class_id.trim().is_empty() => host
-            .load_plugin_class(&path, class_id)
-            .map_err(|error| format!("Load failed: {error}"))?,
-        _ => host
-            .load_plugin(&path)
-            .map_err(|error| format!("Load failed: {error}"))?,
-    };
-    // Restore the saved state first, then the controls it does not already
-    // cover, all before processing starts.  A stale parameter id from an older
-    // plugin version is skipped rather than failing the whole insert.
-    let state_loaded = restore
-        .state
-        .as_deref()
-        .is_some_and(|bytes| plugin.load_state(bytes).is_ok());
-    let values = restore.params(state_loaded);
-    // A value that was skipped as read-only leaves the blob as the only
-    // record of that control, so the slot is not stale for it.
-    let mut applied = false;
-    if !values.is_empty() {
-        let defaults = plugin.get_parameters().unwrap_or_default();
-        // Read-only controls are the plugin's own output, not settings this
-        // app owns: an old blob plus a failed capture must not push a saved
-        // value, or a default reset, into one.  CLAP's restore skips these
-        // too.
-        let read_only: Vec<u32> = defaults
-            .iter()
-            .filter(|parameter| parameter.is_read_only)
-            .map(|parameter| parameter.id)
-            .collect();
-        for (id, value) in &values {
-            if read_only.contains(id) {
-                continue;
-            }
-            let value = value.or_else(|| {
-                defaults
-                    .iter()
-                    .find(|parameter| parameter.id == *id)
-                    .map(|parameter| parameter.default)
-            });
-            if let Some(value) = value {
-                applied |= plugin.set_parameter(*id, value.clamp(0.0, 1.0)).is_ok();
-            }
-        }
-    }
-    plugin
-        .start_processing()
-        .map_err(|error| format!("Start failed: {error}"))?;
-    Ok((plugin, state_loaded && !applied))
 }

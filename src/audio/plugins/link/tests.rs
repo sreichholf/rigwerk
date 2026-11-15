@@ -13,8 +13,12 @@ fn only_the_first_failure_is_kept_and_reads_back() {
     assert_eq!(shared.failure(), Some(ProcessFailure::Vst3(-1)));
     for failure in [
         ProcessFailure::Vst3(0x7fff_ffff),
-        ProcessFailure::Vst3Stopped,
-        ProcessFailure::Vst3Host,
+        ProcessFailure::Vst3StartFailed(1),
+        ProcessFailure::Vst3StartFailed(-1),
+        ProcessFailure::Vst3Inactive,
+        ProcessFailure::Vst3BusesChanged,
+        ProcessFailure::Vst3Reload,
+        ProcessFailure::Vst3ControlsChanged,
         ProcessFailure::Clap(ClapFailure::NotActive),
         ProcessFailure::Clap(ClapFailure::ProcessError),
         ProcessFailure::Clap(ClapFailure::StartFailed),
@@ -34,12 +38,12 @@ fn failure_messages_keep_the_host_texts() {
         "Plugin process() failed: 0x1"
     );
     assert_eq!(
-        ProcessFailure::Vst3Stopped.message(),
-        "Plugin is not processing"
+        ProcessFailure::Vst3StartFailed(1).message(),
+        "Plugin setProcessing() failed: 0x1"
     );
     assert_eq!(
-        ProcessFailure::Vst3Host.message(),
-        "The VST3 host reported an error"
+        ProcessFailure::Vst3Inactive.message(),
+        "The VST3 plugin is not active."
     );
     // The CLAP processor reports the failure, not a text: each kind keeps
     // the text the CLAP host used to report.

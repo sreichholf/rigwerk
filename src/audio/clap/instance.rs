@@ -4,9 +4,9 @@
 //! (`gui.rs`).  The audio-thread half is `processor.rs`.
 //!
 //! Both halves point into one [`ClapCore`], which destroys the plugin when
-//! the last of them goes.  Deactivation is the owner's job, with processing
-//! stopped: `LoadedPlugin`'s teardown, or this instance's own drop after a
-//! failed load.
+//! the last of them goes.  The instance deactivates itself on drop, which
+//! is the last handle's: processing was stopped by `LoadedPlugin`'s
+//! teardown, and the editor is closed first.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
@@ -734,9 +734,10 @@ impl ClapInstance {
 
 impl Drop for ClapInstance {
     fn drop(&mut self) {
+        // The editor first, then the activation: this is the last handle
+        // (an editor window drops its own view before it), and
+        // `LoadedPlugin` already stopped processing.
         self.close_editor();
-        // Only a load that failed after activation gets here active;
-        // `LoadedPlugin` deactivates (with processing stopped) first.
         self.deactivate();
         // `core` goes with the fields: the plugin is destroyed once the
         // processor is gone too.

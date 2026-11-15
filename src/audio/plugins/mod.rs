@@ -1,7 +1,7 @@
 //! VST3 and CLAP insert chains, one per signal path.
 //!
-//! Plugins are discovered and loaded through `vst3-host` or the CLAP host in
-//! [`super::clap`]; each path's chain lives on that path in
+//! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`] or
+//! the CLAP host in [`super::clap`]; each path's chain lives on that path in
 //! [`super::shared::Shared`] so the playback callback can process it.  The UI
 //! only ever holds descriptors, never the plugin objects themselves.
 //!

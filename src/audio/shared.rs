@@ -532,13 +532,15 @@ impl Shared {
         }
     }
 
-    /// Runs the CLAP main-thread callbacks and timers of every live path
-    /// once per UI frame, then follows the device rate and drains plugins
-    /// a bridge thread deferred.
+    /// Runs the plugins' main-thread work of every live path and the VST3
+    /// run loop once per UI frame, then follows the device rate and drains
+    /// plugins a bridge thread deferred.
     pub(crate) fn service_plugins(&self) {
         for path in self.live_paths() {
             path.service_plugins();
         }
+        // VST3 editors' timers and fds (Linux), whether or not one is open.
+        super::vst3::service_run_loop();
         // The device may have opened at a different rate than `prepare_plugins`
         // used.  Both the reload and any plugins a bridge thread deferred are
         // handled on this thread, which is the UI thread.

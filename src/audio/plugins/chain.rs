@@ -24,10 +24,11 @@ pub(crate) struct ReloadPlan {
     pub(crate) jobs: Vec<(usize, PluginPref)>,
 }
 
-/// One path's insert chain.  The audio callback only try-locks the chain and
-/// each loaded plugin, so an edit or an open editor skips that processing for
-/// a block instead of stalling the callback; UI paths may still block on the
-/// chain lock.  A skip never changes the timing: a skipped insert plays its
+/// One path's insert chain.  The audio callback only try-locks the chain, so
+/// a structural edit skips that processing for a block instead of stalling
+/// the callback; UI paths may still block on the chain lock.  A plugin is
+/// never locked: a restart pauses it instead.  A skip never changes the
+/// timing: a skipped insert plays its
 /// input delayed by its latency, and a missed chain lock is covered the same
 /// way by the mixer (see the `path::plugins` module docs, "Chain handover").
 ///
@@ -72,8 +73,7 @@ impl PluginChain {
     /// call it under the chain lock.
     ///
     /// It is also the delay the chain really has, block by block: an insert
-    /// skipped for a block (bypass, mix at 0, a missed try-lock, a CLAP
-    /// restart's passthrough) plays its input delayed by its latency, and a
+    /// skipped for a block (bypass, mix at 0, a restart's pause) plays its input delayed by its latency, and a
     /// partial mix delays its dry side by it (see [`Self::process`]).
     pub(crate) fn latency_samples(&self) -> u32 {
         self.slots
@@ -116,8 +116,8 @@ impl PluginChain {
     /// Stores [`Self::latency_samples`] in the shared atomic and returns
     /// whether that changed it.  Allocation and lock free.
     fn publish_latency(&self) -> bool {
-        let total = self.latency_samples();
-        self.latency.swap(total, Ordering::AcqRel) != total
+        let previous = self.latency.load(Ordering::Acquire);
+        publish_total(&self.latency, previous, self.latency_samples())
     }
 
     /// Replaces the slots and hands the old ones back, so the caller can
@@ -329,7 +329,6 @@ impl PluginChain {
         let rate = self.sample_rate;
         if let Some(slot) = self.slots.get_mut(index) {
             slot.ensure_loaded(rate);
-            slot.nudge_vst3();
         }
         self.publish_latency();
     }
@@ -374,8 +373,8 @@ impl PluginChain {
     }
 
     /// Runs the enabled effects over one stereo block, in chunks of at most
-    /// [`MAX_BLOCK`] frames.  A plugin whose lock is held (its editor is
-    /// doing UI work) is skipped for that chunk, and a plugin that fails is
+    /// [`MAX_BLOCK`] frames.  A paused plugin (a restart) is skipped for
+    /// that chunk, and a plugin that fails is
     /// left in the chain with its error so the person can see why it is
     /// silent.  Every skipped insert still delays by its latency, and an
     /// insert's dry/wet mix blends with its input delayed by that latency,
@@ -446,12 +445,11 @@ struct SlotTiming {
 /// The input always goes into the insert's dry line first.  A processed
 /// chunk with a partial mix is blended with that dry side delayed by the
 /// insert's latency; a skipped chunk (the path's chain bypass, the slot's
-/// own bypass, mix at 0, the plugin's lock held by its editor, a CLAP
-/// restart's passthrough) plays the input delayed by that latency.  So the
+/// own bypass, mix at 0, a restart's pause) plays the input delayed by that
+/// latency.  So the
 /// insert delays by its reported latency
 /// whatever happens to it.  A switch between the plugin running and being
-/// skipped (bypass toggled, mix through 0, a plugin-lock skip, a CLAP
-/// restart) cannot crossfade, since only one of the two exists for the
+/// skipped (bypass toggled, mix through 0, a restart) cannot crossfade, since only one of the two exists for the
 /// chunk; its step is smoothed over `DECLICK_SECONDS` instead.  Returns
 /// whether the insert failed.
 fn process_slot(
@@ -483,11 +481,6 @@ fn process_slot(
     let outcome = run_plugin(slot, left, right, wet);
     let failed = matches!(outcome, Outcome::Failed);
     let processed = matches!(outcome, Outcome::Processed);
-    if processed {
-        // The editor sync needs to know a block ran: only then can a VST3
-        // plugin's reported changes have become visible.
-        slot.controls.note_processed();
-    }
     match outcome {
         Outcome::Processed if mix < 1.0 => {
             let dry = 1.0 - mix;
@@ -534,9 +527,8 @@ fn process_slot(
 /// Runs the insert's plugin over one chunk, fully wet when `wet`.  A loaded
 /// plugin is brought here every chunk, so its pause handshake is served even
 /// while it is skipped (see [`LoadedPlugin::run`](super::handle::LoadedPlugin::run)).
-/// A plugin whose lock is held (its editor is doing UI work) is skipped for
-/// this chunk rather than blocking the callback; a plugin that fails keeps
-/// its failure so the person can see why it is silent.
+/// A paused plugin is skipped for this chunk; a plugin that fails keeps its
+/// failure so the person can see why it is silent.
 fn run_plugin(slot: &mut Slot, left: &mut [f32], right: &mut [f32], wet: bool) -> Outcome {
     #[cfg(test)]
     if let Some(test) = slot.test_delay.as_mut() {
@@ -556,6 +548,18 @@ fn run_plugin(slot: &mut Slot, left: &mut [f32], right: &mut [f32], wet: bool) -
         Some(plugin) => plugin.run(&slot.controls, left, right, wet),
         None => Outcome::Skipped,
     }
+}
+
+/// Stores `total` in `cell` if it still holds `previous`, the value the
+/// total was summed after.  The UI also writes the total (from its links,
+/// without the chain lock); a value it stored in between is newer than
+/// this sum and wins.  Returns whether this call changed the value.
+/// Lock and allocation free.
+pub(super) fn publish_total(cell: &AtomicU32, previous: u32, total: u32) -> bool {
+    total != previous
+        && cell
+            .compare_exchange(previous, total, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
 }
 
 impl Drop for PluginChain {

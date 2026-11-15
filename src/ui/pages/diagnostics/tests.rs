@@ -36,7 +36,11 @@ fn a_chunk_count_is_pluralised() {
 
 #[test]
 fn a_skip_that_rounds_to_zero_reads_below_one_percent() {
-    let stats = |attempts, skips| crate::audio::LockStats { attempts, skips };
+    let stats = |attempts, skips| crate::audio::LockStats {
+        attempts,
+        skips,
+        paused: 0,
+    };
     assert_eq!(super::percent_text(&stats(1_000, 0)), "0%");
     assert_eq!(super::percent_text(&stats(1_000, 1)), "<1%");
     assert_eq!(super::percent_text(&stats(2, 1)), "50%");
@@ -53,6 +57,7 @@ fn a_chain_that_skipped_every_chunk_says_no_insert_ran() {
         chain: LockStats {
             attempts: 4,
             skips: 4,
+            paused: 0,
         },
         inserts: vec![LockStats::default()],
         chain_poisoned: false,
@@ -62,6 +67,7 @@ fn a_chain_that_skipped_every_chunk_says_no_insert_ran() {
         inserts: vec![LockStats {
             attempts: 2,
             skips: 0,
+            paused: 0,
         }],
         ..skipped.clone()
     };

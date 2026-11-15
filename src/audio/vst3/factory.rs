@@ -27,6 +27,8 @@ const COM_ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14
 #[derive(Clone, Debug)]
 pub(crate) struct ClassInfo {
     pub(crate) cid: TUID,
+    /// Shown by the tests; loads pick a class by id or category.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) name: String,
     pub(crate) category: String,
 }

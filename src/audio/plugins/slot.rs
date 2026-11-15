@@ -20,20 +20,18 @@ use crate::audio::LockStats;
 /// The slot's `pref.mix` / `pref.bypass` are only the values it was made
 /// with; [`Slot::saved_pref`] and the views read these.
 ///
-/// It also counts how often the audio thread tried the insert's plugin lock
-/// and how often UI-side work held it (parameter drags, state capture and the
-/// editor all count).  Measurement only: the audio thread writes these
-/// relaxedly and Diagnostics reads them.
-///
-/// `processed` is the same thread's notice that the plugin actually ran a
-/// chunk: a VST3 change it reported is only visible after one, so the editor
-/// sync needs it to decide between the change poll and a full read.
+/// It also counts how often the audio thread tried to run the insert's
+/// plugin, and how many of those chunks found it paused (a restart, a
+/// failed start).  Measurement only: the audio thread writes these
+/// relaxedly and Diagnostics reads them.  No UI-side work makes an insert
+/// skip any more (neither format has a lock the UI could hold), so the
+/// skip count stays 0.
 pub(crate) struct SlotControls {
     mix: AtomicU32,
     bypass: AtomicBool,
     attempts: AtomicU64,
     skips: AtomicU64,
-    processed: AtomicBool,
+    paused: AtomicU64,
 }
 
 impl SlotControls {
@@ -43,7 +41,7 @@ impl SlotControls {
             bypass: AtomicBool::new(pref.bypass),
             attempts: AtomicU64::new(0),
             skips: AtomicU64::new(0),
-            processed: AtomicBool::new(false),
+            paused: AtomicU64::new(0),
         }
     }
 
@@ -68,41 +66,29 @@ impl SlotControls {
         self.bypass.store(bypass, Ordering::Relaxed);
     }
 
-    /// Counts one attempt on the insert's plugin lock (audio thread, once
+    /// Counts one attempt to run the insert's plugin (audio thread, once
     /// per chunk the insert runs).
     pub(crate) fn note_attempt(&self) {
         self.attempts.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Counts an attempt whose plugin lock was busy, so that chunk skipped
-    /// the insert (audio thread).
-    pub(crate) fn note_lock_skip(&self) {
-        self.skips.fetch_add(1, Ordering::Relaxed);
+    /// Counts an attempt that found the plugin paused (audio thread).
+    pub(crate) fn note_paused(&self) {
+        self.paused.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn lock_stats(&self) -> LockStats {
         LockStats {
             attempts: self.attempts.load(Ordering::Relaxed),
             skips: self.skips.load(Ordering::Relaxed),
+            paused: self.paused.load(Ordering::Relaxed),
         }
     }
 
     pub(crate) fn reset_lock_stats(&self) {
         self.attempts.store(0, Ordering::Relaxed);
         self.skips.store(0, Ordering::Relaxed);
-    }
-
-    /// Notes that the plugin processed a chunk (audio thread).  A VST3 change
-    /// the plugin reports is only visible after a processed block, so the
-    /// editor sync reads this before it trusts the change poll.
-    pub(crate) fn note_processed(&self) {
-        self.processed.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether the plugin processed a chunk since the last call, clearing the
-    /// flag (UI thread).
-    pub(crate) fn take_processed(&self) -> bool {
-        self.processed.swap(false, Ordering::Relaxed)
+        self.paused.store(0, Ordering::Relaxed);
     }
 }
 
@@ -345,8 +331,8 @@ impl Slot {
     /// loaded, failed, or lost its ports to a rescan counts 0: it stays out
     /// of the chain until it is loaded again.
     ///
-    /// Whenever the chain skips the insert (bypass, mix at 0, a missed
-    /// try-lock, a CLAP restart's passthrough) it plays the insert's input
+    /// Whenever the chain skips the insert (bypass, mix at 0, a restart's
+    /// pause) it plays the insert's input
     /// delayed by this many frames instead, and a partial mix delays its
     /// dry side by it, so the chain always delays by its reported total.
     /// Values are clamped to [`MAX_ALIGN`] where they are read.
@@ -358,14 +344,6 @@ impl Slot {
         match &self.plugin {
             Some(plugin) if !self.failed() && !plugin.ports_changed() => plugin.latency(),
             _ => 0,
-        }
-    }
-
-    /// Tells a VST3 insert's service that the plugin was just edited, so it
-    /// looks for restart requests for a while (see `Vst3Service::nudge`).
-    pub(crate) fn nudge_vst3(&self) {
-        if let Some(plugin) = &self.plugin {
-            plugin.handle().nudge();
         }
     }
 

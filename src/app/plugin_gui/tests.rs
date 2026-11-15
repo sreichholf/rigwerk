@@ -36,17 +36,13 @@ fn opens_and_closes_a_clap_window() {
     drop(window);
 }
 
-/// Whether opening a VSTGUI editor from SDK 3.8 crashes the process here.
-/// `vst3-host` 0.11 offers `Linux::IRunLoop` on the plug frame only, but
-/// that VSTGUI takes the run loop from the factory's host context and
-/// dereferences it in `attached` without checking.  Remove this once the
-/// host context offers the run loop (issue #28).
-const VSTGUI_EDITOR_CRASHES: bool = cfg!(target_os = "linux");
-
-/// Opens AGain's VSTGUI editor the way the Plugins page does, services it
-/// for a few frames and closes it.  Needs `RIGWERK_VST3_FIXTURES` (see
-/// `scripts/vst3-fixtures.sh`) and, on Linux, an X server: CI runs it under
-/// `xvfb-run`.
+/// Opens AGain's VSTGUI editor the way the Plugins page does, runs a few
+/// frames (the engine's service, which drives the run loop, and the
+/// window's poll) and closes it.  SDK 3.8 VSTGUI takes its run loop from
+/// the factory's host context, which offers one.  On Linux the editor's
+/// run-loop entries are gone once the plugin is.  Needs
+/// `RIGWERK_VST3_FIXTURES` (see `scripts/vst3-fixtures.sh`) and, on Linux,
+/// an X server: CI runs it under `xvfb-run`.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[test]
 fn vst3_fixture_opens_and_closes_a_vst3_window() {
@@ -69,20 +65,28 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].error, None);
     assert!(views[0].has_editor, "AGain has a VSTGUI editor");
-    if VSTGUI_EDITOR_CRASHES {
-        eprintln!(
-            "[vst3_fixture] not opening the VSTGUI editor: it crashes without a host run loop"
-        );
-        return;
-    }
     assert!(app.open_plugin_gui(key), "the editor did not open");
     for _ in 0..10 {
+        app.engine.service_plugins();
         app.poll_plugin_gui();
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(app.plugin_gui.is_some(), "the editor closed on its own");
+    #[cfg(target_os = "linux")]
+    let (fds, timers) = crate::audio::vst3::run_loop_counts();
+    #[cfg(target_os = "linux")]
+    assert!(
+        fds + timers > 0,
+        "VSTGUI registered nothing with the run loop"
+    );
     app.close_plugin_gui();
     assert!(app.plugin_gui.is_none());
+    // Removing the insert unloads AGain: none of its handlers is left for
+    // the run loop to call.
+    app.engine.remove_plugin(key.path, key.insert);
+    app.engine.service_plugins();
+    #[cfg(target_os = "linux")]
+    assert_eq!(crate::audio::vst3::run_loop_counts(), (0, 0));
 }
 
 #[test]
@@ -91,68 +95,3 @@ fn poll_with_no_editor_leaves_the_window_unset() {
     app.poll_plugin_gui();
     assert!(app.plugin_gui.is_none());
 }
-
-#[test]
-fn only_a_running_callback_counts_as_audio_active() {
-    assert!(!audio_active(EngineState::Idle));
-    assert!(audio_active(EngineState::Starting));
-    assert!(audio_active(EngineState::Running));
-    assert!(audio_active(EngineState::Stopping));
-    assert!(!audio_active(EngineState::Preview));
-    assert!(!audio_active(EngineState::Error));
-}
-
-#[test]
-fn the_run_loop_is_due_at_once_when_an_editor_opens() {
-    let now = Instant::now();
-    // This pins the seed helper the open path uses: one interval in the
-    // past, or now where the clock cannot go that far back.
-    assert!(run_loop_due(true, run_loop_start(now), now));
-}
-
-#[test]
-fn an_open_editor_services_its_run_loop_less_often_while_audio_runs() {
-    let now = Instant::now();
-    // With no bridge running there is nothing to starve: every frame.
-    assert!(run_loop_due(false, now, now));
-    assert!(run_loop_due(
-        false,
-        now,
-        now.checked_sub(Duration::from_millis(1)).unwrap_or(now)
-    ));
-    // While it runs, the interval has to pass first.
-    assert!(!run_loop_due(true, now, now));
-    assert!(!run_loop_due(
-        true,
-        now,
-        now + VST3_RUN_LOOP_INTERVAL - Duration::from_millis(1)
-    ));
-    assert!(run_loop_due(true, now, now + VST3_RUN_LOOP_INTERVAL));
-    assert!(run_loop_due(true, now, now + Duration::from_millis(100)));
-}
-
-#[test]
-fn editor_service_skips_a_busy_instance_lock() {
-    let plugin = Mutex::new(Probe(0));
-    let _held = plugin.lock().expect("lock");
-    let ran = try_with_instance(&plugin, |_| {
-        panic!("must not run while the audio callback holds the lock");
-    });
-    assert!(!ran);
-}
-
-#[test]
-fn editor_service_recovers_a_poisoned_instance_lock() {
-    let plugin = Mutex::new(Probe(0));
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _held = plugin.lock().expect("lock");
-        panic!("instance panicked while locked");
-    }));
-    assert!(plugin.is_poisoned());
-    assert!(try_with_instance(&plugin, |probe| probe.0 += 1));
-    let probe = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-    assert_eq!(probe.0, 1);
-}
-
-/// Stand-in for the plugin instance in the lock tests.
-struct Probe(u8);

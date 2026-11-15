@@ -399,7 +399,7 @@ fn capture_and_prefs_never_wait_for_the_chain_lock() {
             for _ in 0..100 {
                 path.mark_plugin_state_stale(1);
                 path.capture_plugin_states();
-                let _ = path.sync_plugin_parameters(1, true);
+                path.sync_plugin_parameters(1);
                 saved = path.plugin_prefs();
             }
             let handle = path.plugin_handle(1).expect("the fake is loaded");
