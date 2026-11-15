@@ -7,8 +7,10 @@
 
 mod chain;
 mod load;
+mod pause;
 mod pref;
 mod slot;
+mod transfer;
 
 #[cfg(test)]
 mod tests;
