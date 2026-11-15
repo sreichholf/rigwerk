@@ -4,7 +4,7 @@
 //! Win32, X11 and Wayland all use physical pixels.  CLAP has no embedding
 //! for Wayland, so there the plugin opens a floating toplevel on its own
 //! connection and the host only creates, shows and destroys it.  Every call
-//! here is a main-thread call, made under the instance lock.
+//! here is a main-thread call, made under the plugin's UI-only lock.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
@@ -14,7 +14,7 @@ use clap_sys::ext::gui::{
 };
 use clap_sys::plugin::clap_plugin;
 
-use super::plugin::ClapPlugin;
+use super::instance::ClapInstance;
 
 /// The size an editor falls back to when the plugin does not report one.
 const FALLBACK_SIZE: (u32, u32) = (640, 480);
@@ -145,7 +145,7 @@ pub(super) fn choose_editor_api(
     })
 }
 
-impl ClapPlugin {
+impl ClapInstance {
     fn gui(&self) -> Result<&clap_plugin_gui, String> {
         unsafe { self.gui_ext.as_ref() }
             .ok_or_else(|| "This plugin has no GUI extension.".to_owned())

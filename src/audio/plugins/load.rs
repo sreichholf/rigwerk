@@ -1,7 +1,6 @@
-//! Plugin loading, state capture, and the host parameter helpers the
-//! legacy instances (vst3-host, the CLAP instance mutex) are driven by.
-//! The helpers lock the instance: call them on the UI thread, through
-//! [`super::PluginHandle`].
+//! Plugin loading, state capture, and the parameter helpers the vst3-host
+//! instance is driven by.  The helpers lock that instance: call them on the
+//! UI thread, through [`super::PluginHandle`].
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -10,31 +9,11 @@ use std::time::Instant;
 
 use vst3_host::{Plugin, Vst3Host};
 
-use super::super::clap::{ClapPlugin, HostState};
+use super::super::clap::ClapInstance;
 use super::clamp_latency;
 use super::handle::{LoadedPlugin, PluginInstance, Saved};
+use super::link::PluginShared;
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginPref, PluginState};
-
-/// Reads a plugin's current controls in full, for
-/// [`super::PluginHandle::sync_full`].  This reads and formats every
-/// control, so callers use it when a change poll cannot see the edits: a CLAP
-/// editor (no change feed), a stopped bridge, or an insert that has not
-/// processed a block, where VST3 reports parameter changes only after it has
-/// processed one.  An open, processing VST3 editor polls
-/// [`take_parameter_changes`] instead.
-/// Returns `None` while a CLAP value (one moved in RigWerk's panel, or a
-/// saved one restored into a plugin without `params.flush`) is still waiting
-/// for the next audio block, because reading the plugin then would show the
-/// old value and the sync would save it.
-pub(crate) fn read_plugin_parameters(handle: &PluginInstance) -> Option<Vec<PluginParamView>> {
-    if let PluginInstance::ClapLegacy(clap) = handle {
-        let clap = clap.lock().unwrap_or_else(|poison| poison.into_inner());
-        if clap.has_pending_parameters() {
-            return None;
-        }
-    }
-    Some(host_parameters(handle))
-}
 
 /// One control value a plugin reported as changed, with the text its own
 /// formatter gives it.
@@ -51,7 +30,7 @@ pub(crate) struct ParamChange {
 /// only that one is formatted.  `Some(vec![])` means nothing changed; `None`
 /// means the format has no equivalent.  VST3 only becomes visible after a
 /// processed block, so an insert that has not processed one uses the full
-/// [`read_plugin_parameters`] read instead.
+/// [`super::PluginHandle::sync_full`] read instead.
 pub(crate) fn take_parameter_changes(handle: &PluginInstance) -> Option<Vec<ParamChange>> {
     let PluginInstance::Vst3Legacy(plugin) = handle else {
         return None;
@@ -136,25 +115,6 @@ pub(crate) fn apply_parameter_changes(
     all_known
 }
 
-/// Runs one CLAP plugin's main-thread work.  Callbacks and timers run without
-/// any lock; only a pending flush, rescan, restart or latency re-read takes
-/// the instance lock, and only when the audio callback is not holding it.
-///
-/// Returns whether the plugin's latency changed, so the caller can
-/// republish the insert views (see [`super::PluginView::latency`]).
-pub(crate) fn service_clap(host: &HostState, plugin: &Mutex<ClapPlugin>) -> bool {
-    let before = host.latency();
-    if !host.service_main_thread() {
-        return false;
-    }
-    match plugin.try_lock() {
-        Ok(mut plugin) => plugin.service_pending(),
-        Err(TryLockError::Poisoned(poison)) => poison.into_inner().service_pending(),
-        Err(TryLockError::WouldBlock) => {}
-    }
-    host.latency() != before
-}
-
 /// How often [`Vst3Service::service`] looks for `restartComponent` requests
 /// while it has a reason to.  VST3 offers no lock-free way to peek at them,
 /// and every look try-locks the instance the audio callback also try-locks
@@ -176,8 +136,8 @@ fn now_ms() -> u64 {
 }
 
 /// A VST3 insert's main-thread work: `restartComponent` requests, and the
-/// latency read after each activation.  Kept on the slot (like a CLAP
-/// plugin's [`HostState`]) so the poll window survives a republish.
+/// latency read after each activation.  Kept on the plugin's handle so the
+/// poll window survives a republish.
 pub(crate) struct Vst3Service {
     pub(crate) plugin: Arc<Mutex<Plugin>>,
     /// `IAudioProcessor::getLatencySamples`, as last read.  Lock-free, so
@@ -425,73 +385,38 @@ pub(crate) fn merge_synced_params(
         .collect()
 }
 
-pub(crate) fn host_parameters(handle: &PluginInstance) -> Vec<PluginParamView> {
-    match handle {
-        PluginInstance::Vst3Legacy(plugin) => {
-            let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            parameter_views(&plugin)
-        }
-        PluginInstance::ClapLegacy(plugin) => {
-            let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            plugin.parameters()
-        }
-    }
+pub(crate) fn host_parameters(plugin: &Mutex<Plugin>) -> Vec<PluginParamView> {
+    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+    parameter_views(&plugin)
 }
 
 pub(crate) fn host_set_parameter(
-    handle: &PluginInstance,
+    plugin: &Mutex<Plugin>,
     id: u32,
     value: f64,
 ) -> Result<(), String> {
-    match handle {
-        PluginInstance::Vst3Legacy(plugin) => plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .set_parameter(id, value.clamp(0.0, 1.0))
-            .map_err(|error| format!("Could not set parameter: {error}")),
-        PluginInstance::ClapLegacy(plugin) => plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .set_parameter(id, value),
-    }
+    plugin
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .set_parameter(id, value.clamp(0.0, 1.0))
+        .map_err(|error| format!("Could not set parameter: {error}"))
 }
 
 /// The plugin's own text for one control value, `None` when it has none.
-pub(crate) fn host_format_parameter(
-    handle: &PluginInstance,
-    id: u32,
-    value: f64,
-) -> Option<String> {
-    match handle {
-        PluginInstance::Vst3Legacy(vst3) => {
-            let vst3 = vst3.lock().unwrap_or_else(|poison| poison.into_inner());
-            vst3.format_parameter(id, value).ok()
-        }
-        PluginInstance::ClapLegacy(clap) => Some(
-            clap.lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .display_for(id, value),
-        ),
-    }
+pub(crate) fn host_format_parameter(plugin: &Mutex<Plugin>, id: u32, value: f64) -> Option<String> {
+    let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+    plugin.format_parameter(id, value).ok()
 }
 
 pub(crate) fn host_reset_parameters(
-    handle: &PluginInstance,
+    plugin: &Mutex<Plugin>,
 ) -> Result<Vec<PluginParamView>, String> {
-    match handle {
-        PluginInstance::Vst3Legacy(plugin) => {
-            let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
-            let parameters = parameter_views(&plugin);
-            for parameter in parameters.iter().filter(|parameter| !parameter.read_only) {
-                let _ = plugin.set_parameter(parameter.id, parameter.default);
-            }
-            Ok(parameter_views(&plugin))
-        }
-        PluginInstance::ClapLegacy(plugin) => plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .reset_parameters(),
+    let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
+    let parameters = parameter_views(&plugin);
+    for parameter in parameters.iter().filter(|parameter| !parameter.read_only) {
+        let _ = plugin.set_parameter(parameter.id, parameter.default);
     }
+    Ok(parameter_views(&plugin))
 }
 
 /// Reads the plugin's controls once, using the plugin's own value formatting.
@@ -550,10 +475,13 @@ pub(crate) fn load_plugin(
             if !path.exists() {
                 return Err(format!("Plugin not found: {}", path.display()));
             }
-            super::super::clap::ClapPlugin::load(&path, plugin_id, sample_rate, MAX_BLOCK, &restore)
-                .map(|(plugin, current)| {
-                    (LoadedPlugin::clap_legacy(plugin, saved(current)), current)
-                })
+            let shared = Arc::new(PluginShared::new(0));
+            ClapInstance::load(&path, plugin_id, sample_rate, MAX_BLOCK, &restore, &shared).map(
+                |loaded| {
+                    let current = loaded.state_current;
+                    (LoadedPlugin::clap(loaded, shared, saved(current)), current)
+                },
+            )
         }
     }
 }

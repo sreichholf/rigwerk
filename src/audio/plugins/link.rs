@@ -8,8 +8,8 @@
 //! from its own or the audio thread) only `try_lock`s them and drops the
 //! value when they are busy.
 
-// The legacy arms (vst3-host, the CLAP instance mutex) use the failure only;
-// the rest arrives with the processor/controller split (#28).
+// The vst3-host arm uses the failure only; `push_edit` and the reload
+// requests arrive with the VST3 controller split (#28).
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -36,9 +36,7 @@ const RELOAD_WANTED: u8 = 2;
 pub(crate) struct PluginShared {
     pub(crate) pause: PauseHandshake,
     /// Clamped latency in samples, read after every activation (UI).  The
-    /// legacy arms (vst3-host, the CLAP instance mutex) keep their own and
-    /// never write this, so they seed it with 0: nothing reads it until
-    /// the processor/controller split.
+    /// vst3-host arm keeps its own and never writes this.
     latency: AtomicU32,
     /// A re-read moved `latency`; taken by the path service to republish.
     latency_unseen: AtomicBool,
@@ -173,6 +171,8 @@ pub(crate) enum ClapFailure {
     ProcessError,
     StartFailed,
     PortsChanged,
+    /// A parameter rescan changed the ids or ranges the processor uses.
+    ControlsChanged,
 }
 
 impl ClapFailure {
@@ -182,21 +182,10 @@ impl ClapFailure {
             ClapFailure::ProcessError => "The CLAP plugin reported a processing error.",
             ClapFailure::StartFailed => "The CLAP plugin could not start processing.",
             ClapFailure::PortsChanged => AUDIO_PORTS_CHANGED,
+            ClapFailure::ControlsChanged => {
+                "The plugin changed its controls.  Remove it and add it again."
+            }
         }
-    }
-
-    /// The failure a CLAP host message names (the legacy instance reports
-    /// its static strings).  An unknown text counts as a processing error.
-    /// Compares, never allocates.
-    pub(crate) fn from_message(message: &str) -> Self {
-        [
-            ClapFailure::NotActive,
-            ClapFailure::StartFailed,
-            ClapFailure::PortsChanged,
-        ]
-        .into_iter()
-        .find(|failure| failure.message() == message)
-        .unwrap_or(ClapFailure::ProcessError)
     }
 
     fn code(self) -> u32 {
@@ -205,6 +194,7 @@ impl ClapFailure {
             ClapFailure::ProcessError => 1,
             ClapFailure::StartFailed => 2,
             ClapFailure::PortsChanged => 3,
+            ClapFailure::ControlsChanged => 4,
         }
     }
 
@@ -214,6 +204,7 @@ impl ClapFailure {
             1 => ClapFailure::ProcessError,
             2 => ClapFailure::StartFailed,
             3 => ClapFailure::PortsChanged,
+            4 => ClapFailure::ControlsChanged,
             _ => return None,
         })
     }

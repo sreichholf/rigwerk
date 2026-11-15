@@ -13,9 +13,6 @@
 //! one (no bridge, a lingering one, a path that went inactive).
 //! [`drive_pause`] is the UI side, one call per frame.
 
-// No callers yet: they arrive with the VST3/CLAP processor/controller split (#28).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
@@ -58,7 +55,8 @@ pub(crate) enum BlockAction {
     /// call [`PauseHandshake::started`] if it succeeded, then process this
     /// block.  If it failed, call [`PauseHandshake::start_failed`] and play
     /// the block dry: the plugin is then paused and later blocks skip until
-    /// the UI resumes it.
+    /// the UI resumes it.  An insert that already failed skips the start
+    /// call and goes straight to `start_failed`.
     Start,
 }
 
@@ -252,6 +250,17 @@ impl PauseHandshake {
         self.processing.swap(false, Ordering::AcqRel)
     }
 
+    /// UI side: true when no block can be between its start call and
+    /// [`Self::started`]: paused, or waiting to start with no block inside.
+    /// A plugin that is idle may be paused at once with no stop call.
+    pub(crate) fn is_idle(&self) -> bool {
+        match self.state.load(Ordering::SeqCst) {
+            PAUSED => true,
+            RESUMING => !self.in_block.load(Ordering::SeqCst),
+            _ => false,
+        }
+    }
+
     /// True while the plugin is processing (started and not stopped).
     pub(crate) fn processing(&self) -> bool {
         self.processing.load(Ordering::Acquire)
@@ -315,6 +324,9 @@ impl PauseHandshake {
     }
 
     /// Blocks the audio side played dry because of a pause, ever.
+    // Read by the tests; Diagnostics reports it once the insert counters
+    // count pauses (#28).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn paused_blocks(&self) -> u64 {
         self.paused_blocks.load(Ordering::Relaxed)
     }

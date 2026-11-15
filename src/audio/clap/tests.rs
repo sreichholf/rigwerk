@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use clap_sys::ext::audio_ports::{
     CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT, CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR,
@@ -15,25 +16,49 @@ use super::gui::{
     choose_editor_api, linux_candidates, EditorApi, ParentWindow, ResizeHints, WindowApi,
 };
 use super::host::{
-    host_audio_ports_flag_supported, host_audio_ports_rescan, GuiVisibility, HostState, StateSave,
+    host_audio_ports_flag_supported, host_audio_ports_rescan, GuiVisibility, HostState,
 };
+use super::instance::ClapInstance;
 use super::module::{module_key, EntryInit, ModuleRegistry};
-use super::plugin::ClapPlugin;
 use super::ports::{
     port_layout, PortBuffers, PortInfo, PortLayout, MAX_AUDIO_PORTS, MAX_PORT_CHANNELS,
 };
 use super::scan::{scan_bundle, scan_module};
 use super::state::{StateReader, StateWriter};
+use crate::audio::plugins::{
+    ClapFailure, LoadedPlugin, Outcome, PluginHandle, PluginPref, PluginShared, Restore, Saved,
+};
 
 #[test]
 fn state_save_waits_while_values_are_queued() {
-    let mut host = HostState::new();
-    // On the main thread with no plugin, a save would report
-    // `Unavailable`; only the queued values make it wait.
-    host.main_thread = std::thread::current().id();
-    assert_eq!(host.save_state(), StateSave::Unavailable);
-    host.params_pending.store(true, Ordering::Release);
-    assert_eq!(host.save_state(), StateSave::Deferred);
+    let _main = super::claim_main_thread_for_test();
+    fake::reset(fake::Fail::Nothing);
+    fake::set_state(b"state");
+    fake::offer_params(true);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    // Processing, so a value goes through the transfer to the next block.
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    handle.set_parameter(7, 0.25).expect("set the gain");
+    // The plugin's state would still hold the old value: the save waits.
+    handle.capture_state();
+    assert!(handle.wants_capture());
+    assert_eq!(handle.saved().1, None);
+    assert_eq!(fake::count("state.save"), 0);
+    // Once a block delivered it, the save goes through.
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    handle.capture_state();
+    assert!(!handle.wants_capture());
+    let state = handle.saved().1.expect("captured");
+    assert_eq!(state.bytes().as_deref(), Some(&b"state"[..]));
 }
 
 #[test]
@@ -117,8 +142,8 @@ fn state_round_trips_through_both_streams() {
 
 /// A loaded fake CLAP effect with one stereo main port, for tests outside
 /// this module.  With `fail_process`, every block it is given fails.  The
-/// fake's state is per thread: process it on the thread that loaded it.
-pub(crate) fn fake_plugin_for_test(fail_process: bool) -> ClapPlugin {
+/// fake's settings are per thread: load it on the thread that sets them.
+pub(crate) fn fake_plugin_for_test(fail_process: bool) -> LoadedPlugin {
     const MAIN: u32 = clap_sys::ext::audio_ports::CLAP_AUDIO_PORT_IS_MAIN;
     fake::reset(if fail_process {
         fake::Fail::Process
@@ -131,7 +156,7 @@ pub(crate) fn fake_plugin_for_test(fail_process: bool) -> ClapPlugin {
 
 /// A loaded fake CLAP effect (as [`fake_plugin_for_test`]) that reports
 /// `latency` samples through `clap_plugin_latency`.
-pub(crate) fn fake_plugin_with_latency_for_test(latency: u32) -> ClapPlugin {
+pub(crate) fn fake_plugin_with_latency_for_test(latency: u32) -> LoadedPlugin {
     const MAIN: u32 = clap_sys::ext::audio_ports::CLAP_AUDIO_PORT_IS_MAIN;
     fake::reset(fake::Fail::Nothing);
     fake::set_latency(latency);
@@ -150,7 +175,7 @@ pub(crate) fn restart_fake_with_latency_for_test(latency: u32) {
 /// A loaded fake CLAP effect (as [`fake_plugin_for_test`]) with the state
 /// extension: `state.save` writes `state`, until
 /// [`set_fake_state_for_test`] changes it.
-pub(crate) fn fake_plugin_with_state_for_test(state: &[u8]) -> ClapPlugin {
+pub(crate) fn fake_plugin_with_state_for_test(state: &[u8]) -> LoadedPlugin {
     const MAIN: u32 = clap_sys::ext::audio_ports::CLAP_AUDIO_PORT_IS_MAIN;
     fake::reset(fake::Fail::Nothing);
     fake::set_state(state);
@@ -158,15 +183,57 @@ pub(crate) fn fake_plugin_with_state_for_test(state: &[u8]) -> ClapPlugin {
     fake::load("fake").expect("load the fake plugin")
 }
 
+/// A fake (as [`fake_plugin_for_test`]) with two controls (see
+/// `fake::offer_params`, with `params.flush`), restored from `pref` the way
+/// a real load restores it.
+pub(crate) fn fake_restoring_for_test(pref: &PluginPref) -> LoadedPlugin {
+    fake::reset(fake::Fail::Nothing);
+    fake::offer_params(true);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    fake::load_restoring("fake", pref).expect("load the fake plugin")
+}
+
+/// A fake (as [`fake_plugin_for_test`]) with two controls (id 7 "Gain",
+/// 0 to 2; id 9 "Mode", stepped 0 to 3) and `params.flush`.  It records
+/// every value it receives (see [`fake_received_for_test`]).
+pub(crate) fn fake_plugin_with_params_for_test() -> LoadedPlugin {
+    fake_restoring_for_test(&PluginPref::default())
+}
+
+/// The `(id, native value, "process" | "flush")` the fake loaded last on
+/// this thread received, in order, from whichever thread.
+pub(crate) fn fake_received_for_test() -> Vec<(u32, f64, &'static str)> {
+    fake::received()
+}
+
+/// The gate of the fake loaded last on this thread: while `hold` is set,
+/// its `process` waits inside the call (as a plugin busy with a long
+/// block), with `inside` set.  Any thread may use them.
+pub(crate) fn fake_process_gate_for_test() -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+    fake::gate()
+}
+
 /// What the stateful fakes on this thread save from now on.
 pub(crate) fn set_fake_state_for_test(state: &[u8]) {
     fake::set_state(state);
 }
 
+/// The `clap_host` a loaded CLAP plugin was handed.
+fn host_of(handle: &PluginHandle) -> *const clap_host {
+    handle
+        .with_clap(|plugin| &*plugin.core._host as *const clap_host)
+        .expect("a CLAP plugin")
+}
+
+/// Runs `body` on a loaded fake's main-thread instance.
+fn clap<R>(plugin: &LoadedPlugin, body: impl FnOnce(&mut ClapInstance) -> R) -> R {
+    plugin.handle().with_clap(body).expect("a CLAP plugin")
+}
+
 /// Makes `plugin` report a channel-count change, as a real plugin does
 /// through `clap_host_audio_ports.rescan`.
-pub(crate) fn rescan_ports_for_test(plugin: &ClapPlugin) {
-    let host: *const clap_sys::host::clap_host = &*plugin._host;
+pub(crate) fn rescan_ports_for_test(handle: &PluginHandle) {
+    let host = host_of(handle);
     unsafe {
         host_audio_ports_rescan(
             host,
@@ -180,15 +247,22 @@ pub(crate) fn rescan_ports_for_test(plugin: &ClapPlugin) {
 /// all run on the test thread, so the log and the setting are
 /// thread-local and the tests can run in parallel.
 mod fake {
+    use super::super::instance::ClapInstance;
     use super::super::module::{ModuleHandle, ModuleRegistry, OpenedModule};
-    use super::super::plugin::ClapPlugin;
     use super::super::ports::{DeclaredPorts, PortInfo};
-    use crate::audio::plugins::Restore;
+    use crate::audio::plugins::{LoadedPlugin, PluginPref, PluginShared, Restore, Saved};
     use clap_sys::entry::clap_plugin_entry;
+    use clap_sys::events::{
+        clap_event_header, clap_event_param_value, clap_input_events, clap_output_events,
+        CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE,
+    };
     use clap_sys::ext::audio_ports::{
         clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS,
     };
     use clap_sys::ext::latency::{clap_host_latency, clap_plugin_latency, CLAP_EXT_LATENCY};
+    use clap_sys::ext::params::{
+        clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_STEPPED,
+    };
     use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK};
     use clap_sys::factory::plugin_factory::clap_plugin_factory;
     use clap_sys::host::clap_host;
@@ -202,6 +276,8 @@ mod fake {
     use std::ffi::{c_char, c_void, CStr};
     use std::path::PathBuf;
     use std::ptr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Copy, PartialEq, Debug)]
     pub(super) enum Fail {
@@ -216,6 +292,8 @@ mod fake {
         Activate,
         /// Loads normally; every `process` call reports an error.
         Process,
+        /// Loads normally; `start_processing` refuses.
+        StartProcessing,
     }
 
     thread_local! {
@@ -235,6 +313,15 @@ mod fake {
         static HOST: Cell<*const clap_host> = const { Cell::new(ptr::null()) };
         /// What `state.save` writes; `None` leaves out the extension.
         static STATE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+        /// The params extension: `None` leaves it out, `Some(flush)` offers
+        /// it with or without `params.flush`.
+        static PARAMS: Cell<Option<bool>> = const { Cell::new(None) };
+        /// An output value every `process` call reports.
+        static EMIT: Cell<Option<(u32, f64)>> = const { Cell::new(None) };
+        /// The instance created last, for the helpers that look at it.
+        static LAST: Cell<*const Instance> = const { Cell::new(ptr::null()) };
+        /// The control list after a rescan: "Mode" becomes id 11.
+        static RENUMBERED: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(super) fn set_state(state: &[u8]) {
@@ -260,26 +347,218 @@ mod fake {
         };
 
     /// One fake instance's lifecycle, kept in `plugin_data` so several
-    /// fakes on one thread are checked separately.
+    /// fakes on one thread are checked separately.  Atomics and mutexes:
+    /// a test may process it on another thread than the one that loaded it.
     struct Instance {
         host: *const clap_host,
-        active: Cell<bool>,
-        processing: Cell<bool>,
+        active: AtomicBool,
+        processing: AtomicBool,
+        fail_start: bool,
+        emit: Option<(u32, f64)>,
+        /// The controls' current native values.
+        values: Mutex<Vec<(u32, f64)>>,
+        /// Every value received: `(id, value, "process" | "flush")`.
+        received: Mutex<Vec<(u32, f64, &'static str)>>,
+        hold: Arc<AtomicBool>,
+        inside: Arc<AtomicBool>,
     }
+
+    /// The fake's controls: `(id, name, min, max, default, flags)`.
+    const PARAM_INFO: [(u32, &str, f64, f64, f64, u32); 2] = [
+        (7, "Gain", 0.0, 2.0, 1.0, 0),
+        (9, "Mode", 0.0, 3.0, 0.0, CLAP_PARAM_IS_STEPPED),
+    ];
+
+    /// Offers the params extension, with `params.flush` or without.
+    pub(super) fn offer_params(flush: bool) {
+        PARAMS.with(|params| params.set(Some(flush)));
+    }
+
+    /// Makes every `process` call report `value` for `id`.
+    pub(super) fn emit_output(id: u32, value: f64) {
+        EMIT.with(|emit| emit.set(Some((id, value))));
+    }
+
+    fn last<'a>() -> &'a Instance {
+        let last = LAST.with(Cell::get);
+        assert!(!last.is_null(), "a fake was created on this thread");
+        unsafe { &*last }
+    }
+
+    pub(super) fn received() -> Vec<(u32, f64, &'static str)> {
+        last().received.lock().unwrap().clone()
+    }
+
+    pub(super) fn gate() -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+        let last = last();
+        (Arc::clone(&last.hold), Arc::clone(&last.inside))
+    }
+
+    /// Records the values in `events` (CLAP param-value events only).
+    fn receive(state: &Instance, events: *const clap_input_events, how: &'static str) {
+        let events = unsafe { &*events };
+        let size = events.size.expect("events size");
+        let get = events.get.expect("events get");
+        for index in 0..unsafe { size(events) } {
+            let header = unsafe { &*get(events, index) };
+            assert_eq!(header.space_id, CLAP_CORE_EVENT_SPACE_ID);
+            if header.type_ != CLAP_EVENT_PARAM_VALUE {
+                continue;
+            }
+            let event =
+                unsafe { &*(header as *const clap_event_header).cast::<clap_event_param_value>() };
+            state
+                .received
+                .lock()
+                .unwrap()
+                .push((event.param_id, event.value, how));
+            let mut values = state.values.lock().unwrap();
+            if let Some(value) = values.iter_mut().find(|(id, _)| *id == event.param_id) {
+                value.1 = event.value;
+            }
+        }
+    }
+
+    /// Reports `emit` through `out`, as a plugin reports its own change.
+    fn report(state: &Instance, out: *const clap_output_events) {
+        let Some((id, value)) = state.emit else {
+            return;
+        };
+        let out = unsafe { &*out };
+        let event = clap_event_param_value {
+            header: clap_event_header {
+                size: std::mem::size_of::<clap_event_param_value>() as u32,
+                time: 0,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_PARAM_VALUE,
+                flags: 0,
+            },
+            param_id: id,
+            cookie: ptr::null_mut(),
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value,
+        };
+        let push = out.try_push.expect("try_push");
+        assert!(unsafe { push(out, &event.header) });
+    }
+
+    unsafe extern "C" fn params_count(_plugin: *const clap_plugin) -> u32 {
+        PARAM_INFO.len() as u32
+    }
+
+    unsafe extern "C" fn params_get_info(
+        _plugin: *const clap_plugin,
+        index: u32,
+        info: *mut clap_param_info,
+    ) -> bool {
+        let Some(&(mut id, name, min, max, default, flags)) = PARAM_INFO.get(index as usize) else {
+            return false;
+        };
+        if id == 9 && RENUMBERED.with(Cell::get) {
+            id = 11;
+        }
+        let info = unsafe { &mut *info };
+        info.id = id;
+        info.flags = flags;
+        info.cookie = ptr::null_mut();
+        for (slot, byte) in info.name.iter_mut().zip(name.bytes().chain([0])) {
+            *slot = byte as c_char;
+        }
+        info.module[0] = 0;
+        info.min_value = min;
+        info.max_value = max;
+        info.default_value = default;
+        true
+    }
+
+    unsafe extern "C" fn params_get_value(
+        plugin: *const clap_plugin,
+        id: u32,
+        value: *mut f64,
+    ) -> bool {
+        let values = instance(plugin).values.lock().unwrap();
+        match values.iter().find(|(known, _)| *known == id) {
+            Some((_, current)) => {
+                unsafe { *value = *current };
+                true
+            }
+            None => false,
+        }
+    }
+
+    unsafe extern "C" fn params_value_to_text(
+        _plugin: *const clap_plugin,
+        _id: u32,
+        value: f64,
+        buffer: *mut c_char,
+        capacity: u32,
+    ) -> bool {
+        let text = format!("{value:.3}");
+        if text.len() >= capacity as usize {
+            return false;
+        }
+        for (index, byte) in text.bytes().chain([0]).enumerate() {
+            unsafe { *buffer.add(index) = byte as c_char };
+        }
+        true
+    }
+
+    unsafe extern "C" fn params_flush(
+        plugin: *const clap_plugin,
+        events: *const clap_input_events,
+        out: *const clap_output_events,
+    ) {
+        log("params.flush");
+        let state = instance(plugin);
+        // CLAP: [active ? audio-thread : main-thread], never during process.
+        assert!(!state.inside.load(Ordering::SeqCst), "flush during process");
+        if state.active.load(Ordering::SeqCst) {
+            assert!(
+                on_audio_thread(state.host),
+                "an active flush off the audio thread"
+            );
+        } else {
+            assert!(
+                !on_audio_thread(state.host),
+                "an inactive flush as the audio thread"
+            );
+        }
+        receive(state, events, "flush");
+        report(state, out);
+    }
+
+    static PARAMS_EXT: clap_plugin_params = clap_plugin_params {
+        count: Some(params_count),
+        get_info: Some(params_get_info),
+        get_value: Some(params_get_value),
+        value_to_text: Some(params_value_to_text),
+        text_to_value: None,
+        flush: Some(params_flush),
+    };
+
+    static PARAMS_EXT_WITHOUT_FLUSH: clap_plugin_params = clap_plugin_params {
+        flush: None,
+        ..PARAMS_EXT
+    };
 
     fn instance<'a>(plugin: *const clap_plugin) -> &'a Instance {
         unsafe { &*((*plugin).plugin_data as *const Instance) }
     }
 
-    /// Asks the host's `thread_check` whether this is the audio thread.
-    fn on_audio_thread(host: *const clap_host) -> bool {
+    fn thread_check<'a>(host: *const clap_host) -> &'a clap_host_thread_check {
         let host_ref = unsafe { host.as_ref() }.expect("a host");
         let get = host_ref.get_extension.expect("host get_extension");
         let ext =
             unsafe { get(host, CLAP_EXT_THREAD_CHECK.as_ptr()) } as *const clap_host_thread_check;
-        let check = unsafe { ext.as_ref() }
-            .and_then(|ext| ext.is_audio_thread)
-            .expect("the host offers thread_check");
+        unsafe { ext.as_ref() }.expect("the host offers thread_check")
+    }
+
+    /// Asks the host's `thread_check` whether this is the audio thread.
+    fn on_audio_thread(host: *const clap_host) -> bool {
+        let check = thread_check(host).is_audio_thread.expect("is_audio_thread");
         unsafe { check(host) }
     }
 
@@ -298,11 +577,49 @@ mod fake {
         LATENCY.with(|latency| latency.set(None));
         NEXT_LATENCY.with(|latency| latency.set(None));
         STATE.with(|state| state.borrow_mut().take());
+        PARAMS.with(|params| params.set(None));
+        EMIT.with(|emit| emit.set(None));
+        RENUMBERED.with(|renumbered| renumbered.set(false));
         gui::reset();
         // `NoAudioPorts` declares the extension with no ports at all.
         PORTS_DECLARED.with(|ports| {
             *ports.borrow_mut() = (step == Fail::NoAudioPorts).then(|| (Vec::new(), Vec::new()));
         });
+    }
+
+    /// Makes the step `step` go wrong from now on, without resetting the
+    /// fake (a later activation fails, say).
+    pub(super) fn fail_from_now(step: Fail) {
+        FAIL.with(|fail| fail.set(step));
+    }
+
+    /// The `clap_host` of the instance created last.
+    fn last_host<'a>() -> &'a clap_host {
+        let host = HOST.with(Cell::get);
+        unsafe { host.as_ref() }.expect("the fake was created")
+    }
+
+    fn host_params<'a>() -> &'a clap_sys::ext::params::clap_host_params {
+        let host = last_host();
+        let get = host.get_extension.expect("host get_extension");
+        let ext = unsafe { get(host, CLAP_EXT_PARAMS.as_ptr()) }
+            as *const clap_sys::ext::params::clap_host_params;
+        unsafe { ext.as_ref() }.expect("the host offers params")
+    }
+
+    /// Calls `clap_host_params.request_flush`, as a plugin whose own
+    /// editor changed a value does.
+    pub(super) fn request_flush() {
+        let request = host_params().request_flush.expect("request_flush");
+        unsafe { request(last_host()) };
+    }
+
+    /// Calls `clap_host_params.rescan`; with `renumber`, "Mode" comes back
+    /// as id 11.
+    pub(super) fn rescan_params(renumber: bool) {
+        RENUMBERED.with(|renumbered| renumbered.set(renumber));
+        let rescan = host_params().rescan.expect("rescan");
+        unsafe { rescan(last_host(), clap_sys::ext::params::CLAP_PARAM_RESCAN_ALL) };
     }
 
     pub(super) fn events() -> Vec<&'static str> {
@@ -348,9 +665,21 @@ mod fake {
         };
         let state = Box::into_raw(Box::new(Instance {
             host,
-            active: Cell::new(false),
-            processing: Cell::new(false),
+            active: AtomicBool::new(false),
+            processing: AtomicBool::new(false),
+            fail_start: failing(Fail::StartProcessing),
+            emit: EMIT.with(Cell::get),
+            values: Mutex::new(
+                PARAM_INFO
+                    .iter()
+                    .map(|&(id, _, _, _, default, _)| (id, default))
+                    .collect(),
+            ),
+            received: Mutex::new(Vec::new()),
+            hold: Arc::new(AtomicBool::new(false)),
+            inside: Arc::new(AtomicBool::new(false)),
         }));
+        LAST.with(|last| last.set(state));
         Box::into_raw(Box::new(clap_plugin {
             desc: ptr::null(),
             plugin_data: state.cast(),
@@ -375,6 +704,11 @@ mod fake {
     unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
         log("destroy");
         let plugin = unsafe { Box::from_raw(plugin as *mut clap_plugin) };
+        LAST.with(|last| {
+            if last.get() == plugin.plugin_data as *const Instance {
+                last.set(ptr::null());
+            }
+        });
         drop(unsafe { Box::from_raw(plugin.plugin_data as *mut Instance) });
     }
 
@@ -386,7 +720,14 @@ mod fake {
     ) -> bool {
         log("activate");
         let state = instance(plugin);
-        assert!(!state.active.get(), "activate while active");
+        assert!(
+            !state.active.load(Ordering::SeqCst),
+            "activate while active"
+        );
+        assert!(
+            !on_audio_thread(state.host),
+            "a main-thread call as the audio thread"
+        );
         if failing(Fail::Activate) {
             return false;
         }
@@ -394,7 +735,7 @@ mod fake {
             LATENCY.with(|latency| latency.set(Some(next)));
             tell_host_latency_changed();
         }
-        state.active.set(true);
+        state.active.store(true, Ordering::SeqCst);
         true
     }
 
@@ -402,22 +743,41 @@ mod fake {
         log("deactivate");
         let state = instance(plugin);
         // CLAP: [main-thread & active & !processing].
-        assert!(state.active.get(), "deactivate while inactive");
-        assert!(!state.processing.get(), "deactivate while processing");
-        state.active.set(false);
+        assert!(
+            state.active.load(Ordering::SeqCst),
+            "deactivate while inactive"
+        );
+        assert!(
+            !state.processing.load(Ordering::SeqCst),
+            "deactivate while processing"
+        );
+        assert!(
+            !on_audio_thread(state.host),
+            "a main-thread call as the audio thread"
+        );
+        state.active.store(false, Ordering::SeqCst);
     }
 
     unsafe extern "C" fn plugin_start_processing(plugin: *const clap_plugin) -> bool {
         log("start_processing");
         let state = instance(plugin);
         // CLAP: [audio-thread & active & !processing].
-        assert!(state.active.get(), "start_processing while inactive");
-        assert!(!state.processing.get(), "start_processing twice");
+        assert!(
+            state.active.load(Ordering::SeqCst),
+            "start_processing while inactive"
+        );
+        assert!(
+            !state.processing.load(Ordering::SeqCst),
+            "start_processing twice"
+        );
         assert!(
             on_audio_thread(state.host),
             "start_processing off the audio thread"
         );
-        state.processing.set(true);
+        if state.fail_start {
+            return false;
+        }
+        state.processing.store(true, Ordering::SeqCst);
         true
     }
 
@@ -425,13 +785,19 @@ mod fake {
         log("stop_processing");
         let state = instance(plugin);
         // CLAP: [audio-thread & active & processing].
-        assert!(state.active.get(), "stop_processing while inactive");
-        assert!(state.processing.get(), "stop_processing while stopped");
+        assert!(
+            state.active.load(Ordering::SeqCst),
+            "stop_processing while inactive"
+        );
+        assert!(
+            state.processing.load(Ordering::SeqCst),
+            "stop_processing while stopped"
+        );
         assert!(
             on_audio_thread(state.host),
             "stop_processing off the audio thread"
         );
-        state.processing.set(false);
+        state.processing.store(false, Ordering::SeqCst);
     }
 
     /// Makes the fake report `latency` (with the extension) from now on.
@@ -468,7 +834,10 @@ mod fake {
     unsafe extern "C" fn latency_get(plugin: *const clap_plugin) -> u32 {
         log("latency.get");
         // CLAP: [main-thread & active].
-        assert!(instance(plugin).active.get(), "latency.get while inactive");
+        assert!(
+            instance(plugin).active.load(Ordering::SeqCst),
+            "latency.get while inactive"
+        );
         LATENCY.with(Cell::get).unwrap_or(0)
     }
 
@@ -486,6 +855,15 @@ mod fake {
         }
         if id == CLAP_EXT_LATENCY && LATENCY.with(Cell::get).is_some() {
             return (&LATENCY_EXT as *const clap_plugin_latency).cast();
+        }
+        if id == CLAP_EXT_PARAMS {
+            match PARAMS.with(Cell::get) {
+                Some(true) => return (&PARAMS_EXT as *const clap_plugin_params).cast(),
+                Some(false) => {
+                    return (&PARAMS_EXT_WITHOUT_FLUSH as *const clap_plugin_params).cast()
+                }
+                None => {}
+            }
         }
         if id == clap_sys::ext::state::CLAP_EXT_STATE
             && STATE.with(|state| state.borrow().is_some())
@@ -539,10 +917,23 @@ mod fake {
     ) -> clap_process_status {
         let state = instance(plugin);
         // CLAP: [audio-thread & active & processing].
-        assert!(state.active.get(), "process while inactive");
-        assert!(state.processing.get(), "process before start_processing");
+        assert!(
+            state.active.load(Ordering::SeqCst),
+            "process while inactive"
+        );
+        assert!(
+            state.processing.load(Ordering::SeqCst),
+            "process before start_processing"
+        );
         assert!(on_audio_thread(state.host), "process off the audio thread");
         let process = unsafe { &*process };
+        state.inside.store(true, Ordering::SeqCst);
+        while state.hold.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        receive(state, process.in_events, "process");
+        report(state, process.out_events);
+        state.inside.store(false, Ordering::SeqCst);
         let frames = process.frames_count as usize;
         let inputs = unsafe {
             std::slice::from_raw_parts(process.audio_inputs, process.audio_inputs_count as usize)
@@ -679,11 +1070,29 @@ mod fake {
     }
 
     /// Runs the real load sequence against the fake module.
-    pub(super) fn load(plugin_id: &str) -> Result<ClapPlugin, String> {
-        let pref = crate::audio::PluginPref::default();
-        let restore = Restore::from_pref(&pref);
+    pub(super) fn load(plugin_id: &str) -> Result<LoadedPlugin, String> {
+        load_restoring(plugin_id, &PluginPref::default())
+    }
+
+    /// As [`load`], restoring `pref` the way a real load does.
+    pub(super) fn load_restoring(
+        plugin_id: &str,
+        pref: &PluginPref,
+    ) -> Result<LoadedPlugin, String> {
+        let restore = Restore::from_pref(pref);
         let module = acquire()?;
-        ClapPlugin::instantiate(module, plugin_id, 48_000, 256, &restore).map(|(plugin, _)| plugin)
+        let shared = Arc::new(PluginShared::new(0));
+        let loaded = ClapInstance::instantiate(module, plugin_id, 48_000, 256, &restore, &shared)?;
+        let current = loaded.state_current;
+        Ok(LoadedPlugin::clap(
+            loaded,
+            shared,
+            Saved {
+                params: pref.params.clone(),
+                state: pref.state.clone(),
+                stale: !current,
+            },
+        ))
     }
 
     /// The fake's GUI and `posix-fd-support` extensions, each left out
@@ -1287,9 +1696,10 @@ fn process_fake(ports: Option<FakePorts<'_>>) -> (fake::Seen, Vec<f32>, Vec<f32>
     let mut plugin = fake::load("fake").expect("load the fake plugin");
     let mut left = vec![0.5f32; 64];
     let mut right = vec![-0.25f32; 64];
-    plugin
-        .process(&mut left, &mut right, 64, 1.0)
-        .expect("process a block");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     let seen = fake::seen().expect("the plugin processed");
     (seen, left, right)
 }
@@ -1373,37 +1783,46 @@ fn process_restores_pointers_a_plugin_changed() {
     let mut plugin = fake::load("fake").expect("load the fake plugin");
     let mut left = vec![0.5f32; 32];
     let mut right = vec![-0.25f32; 32];
-    plugin
-        .process(&mut left, &mut right, 32, 1.0)
-        .expect("process the first block");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     // A misbehaving plugin can overwrite the buffer descriptions it was
     // handed.  `refresh` must restore everything before the next call.
-    for port in &mut plugin.inputs.ports {
+    let processor = plugin.clap_processor_for_test();
+    for port in &mut processor.inputs.ports {
         port.data32 = std::ptr::null_mut();
         port.data64 = std::ptr::null_mut();
         port.constant_mask = u64::MAX;
     }
-    for port in &mut plugin.outputs.ports {
+    for port in &mut processor.outputs.ports {
         port.data32 = std::ptr::null_mut();
         port.channel_count = 0;
         port.constant_mask = u64::MAX;
     }
     left.fill(0.5);
     right.fill(-0.25);
-    plugin
-        .process(&mut left, &mut right, 32, 1.0)
-        .expect("process the second block");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     let seen = fake::seen().expect("the plugin processed");
     assert_eq!(seen.inputs_count, 1);
     assert_eq!(seen.input_sums, [vec![16.0, -8.0]]);
     assert_eq!(seen.output_channels, [2]);
     assert!(left.iter().all(|sample| *sample == 1.0));
     assert!(right.iter().all(|sample| *sample == 2.0));
-    for port in plugin.inputs.ports.iter().chain(&plugin.outputs.ports) {
+    let processor = plugin.clap_processor_for_test();
+    for port in processor
+        .inputs
+        .ports
+        .iter()
+        .chain(&processor.outputs.ports)
+    {
         assert!(port.data64.is_null());
         assert_eq!(port.constant_mask, 0);
     }
-    assert_eq!(plugin.outputs.ports[0].channel_count, 2);
+    assert_eq!(processor.outputs.ports[0].channel_count, 2);
 }
 
 #[test]
@@ -1414,9 +1833,10 @@ fn process_refreshes_every_sub_block_of_a_long_buffer() {
     // 600 frames are three calls (256, 256, 88) at the fake's block size.
     let mut left = vec![0.5f32; 600];
     let mut right = vec![-0.25f32; 600];
-    plugin
-        .process(&mut left, &mut right, 600, 1.0)
-        .expect("process a long buffer");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     let seen = fake::seen().expect("the plugin processed");
     assert_eq!(seen.inputs_count, 2);
     assert_eq!(seen.input_sums, [vec![44.0, -22.0], vec![0.0, 0.0]]);
@@ -1430,7 +1850,7 @@ fn a_port_rescan_stops_processing_until_reloaded() {
     fake::reset(fake::Fail::Nothing);
     fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
     let mut plugin = fake::load("fake").expect("load the fake plugin");
-    let host: *const clap_host = &*plugin._host;
+    let host = host_of(plugin.handle());
     let mut left = vec![0.5f32; 16];
     let mut right = vec![0.5f32; 16];
     unsafe {
@@ -1441,19 +1861,31 @@ fn a_port_rescan_stops_processing_until_reloaded() {
         assert!(!host_audio_ports_flag_supported(host, 1 << 31));
         // Names and the two metadata flags do not touch the buffers.
         host_audio_ports_rescan(host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
-        assert!(!plugin.host_state.ports_changed());
-        assert!(plugin.process(&mut left, &mut right, 16, 1.0).is_ok());
+        assert!(!plugin.ports_changed());
+        assert_eq!(
+            plugin.run_for_test(&mut left, &mut right),
+            Outcome::Processed
+        );
         host_audio_ports_rescan(
             host,
             CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE | CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR,
         );
-        assert!(!plugin.host_state.ports_changed());
-        assert!(plugin.process(&mut left, &mut right, 16, 1.0).is_ok());
+        assert!(!plugin.ports_changed());
+        assert_eq!(
+            plugin.run_for_test(&mut left, &mut right),
+            Outcome::Processed
+        );
     }
     assert!(fake::seen().is_some());
     unsafe { host_audio_ports_rescan(host, CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT) };
-    assert!(plugin.host_state.ports_changed());
-    assert!(plugin.process(&mut left, &mut right, 16, 1.0).is_err());
+    assert!(plugin.ports_changed());
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Failed);
+    assert_eq!(
+        plugin.shared().failure(),
+        Some(crate::audio::plugins::ProcessFailure::Clap(
+            ClapFailure::PortsChanged
+        ))
+    );
     assert!(fake::seen().is_none(), "the plugin was not called");
 }
 
@@ -1468,38 +1900,59 @@ fn loads_a_real_clap_effect() {
     let candidates = scan_bundle(&path).expect("scan the fixture");
     assert!(!candidates.is_empty(), "fixture exposed no effects");
     let candidate = &candidates[0];
-    let mut plugin =
-        ClapPlugin::load_fresh(&path, &candidate.plugin_id, 48_000, 512).expect("load the fixture");
-    assert!(!plugin.parameters().is_empty());
-    if plugin.has_editor() {
-        let (width, height) = plugin
-            .prepare_editor()
-            .expect("create the fixture interface");
+    let pref = PluginPref::default();
+    let shared = Arc::new(PluginShared::new(0));
+    let loaded = ClapInstance::load(
+        &path,
+        &candidate.plugin_id,
+        48_000,
+        512,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load the fixture");
+    let mut plugin = LoadedPlugin::clap(
+        loaded,
+        shared,
+        Saved {
+            params: Vec::new(),
+            state: None,
+            stale: true,
+        },
+    );
+    let handle = plugin.handle().clone();
+    assert!(!handle.parameters().is_empty());
+    if handle.has_editor() {
+        let (width, height) =
+            clap(&plugin, |plugin| plugin.prepare_editor()).expect("create the fixture interface");
         assert!(width > 0 && height > 0);
-        plugin.close_editor();
+        clap(&plugin, ClapInstance::close_editor);
     }
-    plugin.set_parameter(1, 0.5).expect("set the fixture gain");
+    handle.set_parameter(1, 0.5).expect("set the fixture gain");
     let mut left = vec![0.25f32; 128];
     let mut right = vec![-0.25f32; 128];
-    plugin
-        .process(&mut left, &mut right, 128, 1.0)
-        .expect("process a block");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     assert!(left.iter().any(|sample| (*sample - 0.125).abs() < 0.001));
 }
 
 #[test]
 fn the_latency_is_read_once_the_plugin_is_active() {
     let plugin = fake_plugin_with_latency_for_test(64);
-    assert_eq!(plugin.latency_samples(), 64);
-    assert_eq!(plugin.host().latency(), 64);
+    assert_eq!(plugin.latency(), 64);
+    assert_eq!(plugin.handle().latency(), 64);
     // `latency.get` came after `activate` (the fake asserts it is active).
     let events = fake::events();
     let activate = events.iter().position(|event| *event == "activate");
     let get = events.iter().position(|event| *event == "latency.get");
     assert!(activate < get, "{events:?}");
+    // The load's own read is not a change to republish.
+    assert!(!plugin.shared().take_latency_change());
 
     let plain = fake_plugin_for_test(false);
-    assert_eq!(plain.latency_samples(), 0);
+    assert_eq!(plain.latency(), 0);
     assert_eq!(fake::count("latency.get"), 0);
 }
 
@@ -1509,35 +1962,33 @@ fn the_latency_is_read_once_the_plugin_is_active() {
 #[test]
 fn a_latency_change_while_active_is_read_again() {
     let plugin = fake_plugin_with_latency_for_test(64);
-    let host = plugin.host();
-    let plugin = std::sync::Mutex::new(plugin);
-    // Nothing pending: servicing does not touch the instance.
-    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+    let handle = plugin.handle().clone();
+    // Nothing pending: servicing changes nothing.
+    assert!(!handle.service());
 
     fake::set_latency(32);
     fake::tell_host_latency_changed();
     // Only a flag so far; the value is read on the main thread.
-    assert_eq!(host.latency(), 64);
-    assert!(crate::audio::plugins::service_clap(&host, &plugin));
-    assert_eq!(host.latency(), 32);
-    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+    assert_eq!(handle.latency(), 64);
+    assert!(handle.service());
+    assert_eq!(handle.latency(), 32);
+    assert!(!handle.service());
     assert_eq!(fake::count("deactivate"), 0, "no restart was asked for");
 }
 
+/// The restart is a pause: the UI asks, the audio thread stops processing
+/// on its next block, the UI deactivates, reactivates, reads the latency
+/// and resumes, and the next block starts processing again.
 #[test]
 fn a_restart_stops_on_the_audio_thread_then_reactivates_on_the_main_thread() {
-    let plugin = fake_plugin_with_latency_for_test(64);
-    let host = plugin.host();
-    let plugin = std::sync::Mutex::new(plugin);
+    let mut plugin = fake_plugin_with_latency_for_test(64);
+    let handle = plugin.handle().clone();
     let mut left = vec![0.5f32; 16];
     let mut right = vec![0.5f32; 16];
-    let process = |left: &mut [f32], right: &mut [f32]| {
-        plugin
-            .lock()
-            .expect("plugin lock")
-            .process(left, right, 16, 1.0)
-    };
-    assert!(process(&mut left, &mut right).is_ok());
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     assert!(fake::seen().is_some());
     assert_eq!(fake::count("start_processing"), 1);
 
@@ -1545,27 +1996,37 @@ fn a_restart_stops_on_the_audio_thread_then_reactivates_on_the_main_thread() {
     fake::set_next_latency(128);
     fake::request_restart();
 
-    // Still processing, so the main thread waits for the audio thread.
-    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+    // Still processing, so the main thread asks and waits for the audio
+    // thread.
+    assert!(!handle.service());
     assert_eq!(fake::count("deactivate"), 0);
-    assert_eq!(host.latency(), 64);
+    assert_eq!(handle.latency(), 64);
 
     // The audio thread stops processing and passes the block through.
     left.fill(0.5);
-    assert!(process(&mut left, &mut right).is_ok());
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Skipped);
     assert!(fake::seen().is_none(), "the plugin was not processed");
     assert!(left.iter().all(|sample| *sample == 0.5));
     assert_eq!(fake::count("stop_processing"), 1);
 
-    // The main thread restarts it and reads the new latency.
-    assert!(crate::audio::plugins::service_clap(&host, &plugin));
-    assert_eq!(host.latency(), 128);
+    // The main thread restarts it, reads the new latency and republishes.
+    assert!(handle.service());
+    assert_eq!(handle.latency(), 128);
     assert_eq!(fake::count("deactivate"), 1);
     assert_eq!(fake::count("activate"), 2);
-    assert!(!host.lifecycle_pending());
+    assert!(!plugin.shared().restart_pending());
+    let events = fake::events();
+    let stop = events.iter().position(|event| *event == "stop_processing");
+    let deactivate = events.iter().position(|event| *event == "deactivate");
+    let get = events.iter().rposition(|event| *event == "latency.get");
+    let activate = events.iter().rposition(|event| *event == "activate");
+    assert!(stop < deactivate && activate < get, "{events:?}");
 
     // Processing starts again.
-    assert!(process(&mut left, &mut right).is_ok());
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     assert!(fake::seen().is_some());
     assert_eq!(fake::count("start_processing"), 2);
 }
@@ -1573,58 +2034,360 @@ fn a_restart_stops_on_the_audio_thread_then_reactivates_on_the_main_thread() {
 #[test]
 fn a_restart_before_the_first_block_happens_right_away() {
     let plugin = fake_plugin_with_latency_for_test(16);
-    let host = plugin.host();
-    let plugin = std::sync::Mutex::new(plugin);
+    let handle = plugin.handle().clone();
     fake::set_next_latency(48);
     fake::request_restart();
-    assert!(crate::audio::plugins::service_clap(&host, &plugin));
-    assert_eq!(host.latency(), 48);
+    assert!(handle.service());
+    assert_eq!(handle.latency(), 48);
     assert_eq!(fake::count("stop_processing"), 0);
     assert_eq!(fake::count("deactivate"), 1);
+    // Resumed: the next block starts processing.
+    assert_eq!(fake::count("start_processing"), 0);
+    drop(handle);
+    drop(plugin);
 }
 
 #[test]
 fn a_restart_runs_on_the_main_thread_once_the_stream_has_stopped() {
-    let plugin = fake_plugin_with_latency_for_test(64);
-    let host = plugin.host();
-    let plugin = std::sync::Mutex::new(plugin);
+    let mut plugin = fake_plugin_with_latency_for_test(64);
+    let handle = plugin.handle().clone();
     let mut left = vec![0.5f32; 16];
     let mut right = vec![0.5f32; 16];
     // Started, then the stream stops: no audio callback will stop it.
-    assert!(plugin
-        .lock()
-        .expect("plugin lock")
-        .process(&mut left, &mut right, 16, 1.0)
-        .is_ok());
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
     fake::set_next_latency(256);
     fake::request_restart();
-    assert!(!crate::audio::plugins::service_clap(&host, &plugin));
+    assert!(!handle.service());
     assert_eq!(fake::count("deactivate"), 0);
-    std::thread::sleep(super::plugin::RESTART_STALL + std::time::Duration::from_millis(50));
-    assert!(crate::audio::plugins::service_clap(&host, &plugin));
-    assert_eq!(host.latency(), 256);
+    std::thread::sleep(crate::audio::plugins::PAUSE_STALL + std::time::Duration::from_millis(50));
+    assert!(handle.service());
+    assert_eq!(handle.latency(), 256);
     // Stopped (as the audio thread, which the fake checks) before the
     // deactivation.
     assert_eq!(fake::count("stop_processing"), 1);
     assert_eq!(fake::count("deactivate"), 1);
-    assert!(!host.lifecycle_pending());
+    assert!(!plugin.shared().restart_pending());
+    // The next block starts it again.
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert_eq!(fake::count("start_processing"), 2);
 }
 
 #[test]
 fn a_huge_latency_is_clamped() {
     let plugin = fake_plugin_with_latency_for_test(u32::MAX);
-    assert_eq!(plugin.latency_samples(), crate::audio::plugins::MAX_ALIGN);
+    assert_eq!(plugin.latency(), crate::audio::plugins::MAX_ALIGN);
+}
+
+#[test]
+fn a_parameter_set_reaches_process_as_an_input_event() {
+    let mut plugin = fake_plugin_with_params_for_test();
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    // Processing: the value waits in the transfer for the next block.
+    let display = handle.set_parameter(7, 0.25).expect("set the gain");
+    assert_eq!(display.as_deref(), Some("0.500"));
+    handle.set_parameter(9, 1.0).expect("set the mode");
+    assert!(fake_received_for_test().is_empty());
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    // Native values (gain 0 to 2, mode stepped 0 to 3), in the order set.
+    assert_eq!(
+        fake_received_for_test(),
+        vec![(7, 0.5, "process"), (9, 3.0, "process")]
+    );
+    assert_eq!(fake::count("params.flush"), 0);
+    // Delivered once.
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert_eq!(fake_received_for_test().len(), 2);
+}
+
+#[test]
+fn a_set_while_not_processing_is_flushed_on_the_main_thread() {
+    let mut plugin = fake_plugin_with_params_for_test();
+    let handle = plugin.handle().clone();
+    // No block has run: the plugin is active but not processing.  The fake
+    // checks that this active flush is made as its audio thread.
+    handle.set_parameter(7, 0.75).expect("set the gain");
+    assert_eq!(fake_received_for_test(), vec![(7, 1.5, "flush")]);
+    // The plugin has it: a full read sees it, nothing is queued.
+    assert_eq!(handle.sync_full().expect("nothing queued")[0].value, 0.75);
+    // The pause it took is over: the first block starts and processes,
+    // with nothing left to deliver.
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert_eq!(fake::count("start_processing"), 1);
+    assert_eq!(fake_received_for_test().len(), 1);
+    assert_eq!(plugin.shared().pause.paused_blocks(), 0);
+
+    // Without `params.flush` the value waits for the first block.
+    fake::reset(fake::Fail::Nothing);
+    fake::offer_params(false);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    handle.set_parameter(7, 0.75).expect("set the gain");
+    assert!(fake_received_for_test().is_empty());
+    assert!(handle.sync_full().is_none(), "a value is still queued");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert_eq!(fake_received_for_test(), vec![(7, 1.5, "process")]);
+}
+
+#[test]
+fn a_skipped_insert_flushes_queued_values() {
+    let mut plugin = fake_plugin_with_params_for_test();
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    handle.set_parameter(7, 1.0).expect("set the gain");
+    // Bypassed: the block skips the plugin, but hands it the value.
+    let controls = crate::audio::plugins::SlotControls::new(&PluginPref::default());
+    assert_eq!(
+        plugin.run(&controls, &mut left, &mut right, false),
+        Outcome::Skipped
+    );
+    assert_eq!(fake_received_for_test(), vec![(7, 2.0, "flush")]);
+    // Nothing queued: a state capture need not wait.
+    assert!(handle.sync_full().is_some());
+    // An empty skip does not flush again.
+    plugin.run(&controls, &mut left, &mut right, false);
+    assert_eq!(fake::count("params.flush"), 1);
+}
+
+#[test]
+fn output_param_events_reach_the_view() {
+    fake::reset(fake::Fail::Nothing);
+    fake::offer_params(true);
+    fake::emit_output(9, 2.0);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    assert_eq!(handle.parameters()[1].value, 0.0);
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    // The UI drains it on its next service and asks for a republish.
+    assert!(handle.service());
+    let mode = &handle.parameters()[1];
+    assert_eq!(mode.id, 9);
+    assert!((mode.value - 2.0 / 3.0).abs() < 1e-9, "{}", mode.value);
+    assert_eq!(mode.display, "2.000");
+    // View only: the plugin's own report is not a saved setting.
+    assert!(handle.saved().0.is_empty());
+    assert!(!handle.service());
+}
+
+#[test]
+fn a_failed_start_pauses_instead_of_processing() {
+    fake::reset(fake::Fail::StartProcessing);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let (mut left, mut right) = (vec![0.5f32; 16], vec![0.5f32; 16]);
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Failed);
+    assert!(fake::seen().is_none(), "process was not called");
+    assert_eq!(
+        plugin.shared().failure(),
+        Some(crate::audio::plugins::ProcessFailure::Clap(
+            ClapFailure::StartFailed
+        ))
+    );
+    assert!(plugin.shared().pause.is_paused());
+    assert!(!plugin.shared().pause.processing());
+    // Later blocks skip: no second start, no process.
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Skipped);
+    assert_eq!(fake::count("start_processing"), 1);
+    assert!(fake::seen().is_none());
+    assert!(left.iter().all(|sample| *sample == 0.5));
+    // Teardown does not stop a plugin that never started.
+    drop(plugin);
+    assert_eq!(fake::count("stop_processing"), 0);
+    assert_eq!(fake::count("deactivate"), 1);
+}
+
+/// A restart whose reactivation fails leaves the plugin inactive, failed
+/// and paused for good: neither a knob move nor a flush the plugin asks
+/// for resumes it, and the audio side never starts it again.
+#[test]
+fn a_failed_reactivation_stays_paused_through_later_controls() {
+    let mut plugin = fake_plugin_with_params_for_test();
+    let handle = plugin.handle().clone();
+    // Not processing yet: the restart happens at once, and fails.
+    fake::request_restart();
+    fake::fail_from_now(fake::Fail::Activate);
+    assert!(handle.service());
+    assert_eq!(
+        plugin.shared().failure(),
+        Some(crate::audio::plugins::ProcessFailure::Clap(
+            ClapFailure::NotActive
+        ))
+    );
+    assert!(plugin.shared().pause.is_paused());
+    // A knob move reaches the inactive plugin through a main-thread flush
+    // (the fake checks it is not made as the audio thread) and resumes
+    // nothing.
+    handle.set_parameter(7, 0.5).expect("set the gain");
+    assert!(plugin.shared().pause.is_paused());
+    assert_eq!(fake_received_for_test(), vec![(7, 1.0, "flush")]);
+    fake::request_flush();
+    handle.service();
+    assert!(plugin.shared().pause.is_paused());
+    assert_eq!(fake::count("params.flush"), 2);
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Skipped);
+    assert_eq!(fake::count("start_processing"), 0);
+}
+
+/// A value still queued for the audio side keeps a later one from taking
+/// the direct flush: delivered in order, the newer one wins.
+#[test]
+fn a_direct_flush_waits_behind_values_already_queued() {
+    let mut plugin = fake_plugin_with_params_for_test();
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    // Queued, then a restart stops the plugin before a block takes it.
+    handle.set_parameter(7, 0.25).expect("set the gain");
+    fake::request_restart();
+    handle.service();
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Skipped);
+    handle.service();
+    assert!(!plugin.shared().pause.processing());
+    // Not processing, but 0.25 is still queued: 0.75 queues behind it.
+    handle.set_parameter(7, 0.75).expect("set the gain");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    let received = fake_received_for_test();
+    assert_eq!(
+        received.last().map(|value| value.1),
+        Some(1.5),
+        "{received:?}"
+    );
+    assert_eq!(fake::count("params.flush"), 0);
+}
+
+/// A flush the plugin asks for while it is not processing is made by the
+/// main-thread service under a pause, as its audio thread; its output
+/// reaches the views, and the plugin resumes.
+#[test]
+fn a_requested_flush_while_not_processing_is_made_by_the_service() {
+    fake::reset(fake::Fail::Nothing);
+    fake::offer_params(true);
+    fake::emit_output(9, 3.0);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    fake::request_flush();
+    assert!(handle.service());
+    assert_eq!(fake::count("params.flush"), 1);
+    assert_eq!(handle.parameters()[1].value, 1.0);
+    // Taken: the next frame does not flush again, and the plugin starts.
+    assert!(!handle.service());
+    assert_eq!(fake::count("params.flush"), 1);
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert_eq!(fake::count("start_processing"), 1);
+}
+
+/// While processing, a requested flush is delivered by the next block: a
+/// processed one clears it, a skipped one flushes on the audio thread.
+#[test]
+fn a_requested_flush_while_processing_goes_with_the_next_block() {
+    let mut plugin = fake_plugin_with_params_for_test();
+    let controls = crate::audio::plugins::SlotControls::new(&PluginPref::default());
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    // A processed block delivers it: no flush afterwards.
+    fake::request_flush();
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    plugin.run(&controls, &mut left, &mut right, false);
+    assert_eq!(fake::count("params.flush"), 0);
+    // A skipped block flushes it, once.
+    fake::request_flush();
+    plugin.run(&controls, &mut left, &mut right, false);
+    assert_eq!(fake::count("params.flush"), 1);
+    plugin.run(&controls, &mut left, &mut right, false);
+    assert_eq!(fake::count("params.flush"), 1);
+}
+
+/// A rescan that keeps the controls refreshes the views; one that changes
+/// an id cannot be followed by the processor's table, so the insert fails
+/// and keeps the views and values of that table.
+#[test]
+fn a_rescan_that_changes_the_controls_fails_the_insert() {
+    let plugin = fake_plugin_with_params_for_test();
+    let handle = plugin.handle().clone();
+    fake::rescan_params(false);
+    assert!(handle.service());
+    assert_eq!(plugin.shared().failure(), None);
+
+    fake::rescan_params(true);
+    assert!(handle.service());
+    assert_eq!(
+        plugin.shared().failure(),
+        Some(crate::audio::plugins::ProcessFailure::Clap(
+            ClapFailure::ControlsChanged
+        ))
+    );
+    assert!(plugin.shared().reload_wanted());
+    let ids: Vec<u32> = handle.parameters().iter().map(|view| view.id).collect();
+    assert_eq!(ids, [7, 9], "the views keep the table the values use");
+    assert!(handle.set_parameter(11, 0.5).is_err());
+    assert!(handle.set_parameter(9, 1.0).is_ok());
 }
 
 /// Loads the fake with this GUI and its editor API chosen from
 /// `candidates`, as a load in that session would.
-fn fake_with_gui(gui: fake::gui::Gui, candidates: &[EditorApi]) -> ClapPlugin {
-    const MAIN: u32 = CLAP_AUDIO_PORT_IS_MAIN;
+fn fake_with_gui(gui: fake::gui::Gui, candidates: &[EditorApi]) -> LoadedPlugin {
     fake::reset(fake::Fail::Nothing);
     fake::gui::offer(gui);
     fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
-    let mut plugin = fake::load("fake").expect("load the fake plugin");
-    plugin.editor_api = choose_editor_api(plugin.plugin, plugin.gui_ext, candidates);
+    let plugin = fake::load("fake").expect("load the fake plugin");
+    clap(&plugin, |plugin| {
+        plugin.editor_api = choose_editor_api(plugin.plugin, plugin.gui_ext, candidates);
+    });
     plugin
 }
 
@@ -1675,7 +2438,7 @@ fn the_editor_api_is_the_first_one_the_plugin_supports() {
         &x11_and_wayland,
     );
     assert_eq!(
-        plugin.editor_api(),
+        clap(&plugin, |plugin| plugin.editor_api()),
         Some(EditorApi {
             api: WindowApi::X11,
             floating: false
@@ -1686,7 +2449,7 @@ fn the_editor_api_is_the_first_one_the_plugin_supports() {
     // A plugin that only floats still has an editor.
     let plugin = fake_with_gui(gui(vec![(CLAP_WINDOW_API_WAYLAND, true)]), &x11_and_wayland);
     assert_eq!(
-        plugin.editor_api(),
+        clap(&plugin, |plugin| plugin.editor_api()),
         Some(EditorApi {
             api: WindowApi::Wayland,
             floating: true
@@ -1698,7 +2461,7 @@ fn the_editor_api_is_the_first_one_the_plugin_supports() {
         gui(vec![(CLAP_WINDOW_API_X11, false)]),
         &linux_candidates(false, true),
     );
-    assert!(!plugin.has_editor());
+    assert!(!clap(&plugin, |plugin| plugin.has_editor()));
 }
 
 #[test]
@@ -1706,27 +2469,33 @@ fn a_plugin_without_the_gui_extension_has_no_editor() {
     let plugin = fake_plugin_for_test(false);
     let candidates = linux_candidates(true, true);
     assert_eq!(
-        choose_editor_api(plugin.plugin, plugin.gui_ext, &candidates),
+        clap(&plugin, |plugin| choose_editor_api(
+            plugin.plugin,
+            plugin.gui_ext,
+            &candidates
+        )),
         None
     );
 }
 
 #[test]
 fn a_floating_editor_is_created_titled_shown_and_destroyed() {
-    let mut plugin = fake_with_gui(
+    let plugin = fake_with_gui(
         fake::gui::Gui {
             supported: vec![(CLAP_WINDOW_API_WAYLAND, true)],
             ..Default::default()
         },
         &linux_candidates(false, true),
     );
-    assert_eq!(plugin.prepare_editor(), Ok((400, 300)));
-    plugin
-        .show_floating_editor("Fake - CLAP", 2.0)
-        .expect("show the floating editor");
-    // A floating editor cannot take a parent.
-    assert!(plugin.attach_editor(ParentWindow::X11(1), 1.0).is_err());
-    plugin.close_editor();
+    clap(&plugin, |plugin| {
+        assert_eq!(plugin.prepare_editor(), Ok((400, 300)));
+        plugin
+            .show_floating_editor("Fake - CLAP", 2.0)
+            .expect("show the floating editor");
+        // A floating editor cannot take a parent.
+        assert!(plugin.attach_editor(ParentWindow::X11(1), 1.0).is_err());
+        plugin.close_editor();
+    });
     assert_eq!(
         gui_events(),
         vec![
@@ -1742,22 +2511,24 @@ fn a_floating_editor_is_created_titled_shown_and_destroyed() {
 
 #[test]
 fn a_fixed_editor_keeps_its_size_when_the_window_is_dragged() {
-    let mut plugin = fake_with_gui(
+    let plugin = fake_with_gui(
         fake::gui::Gui {
             supported: vec![(CLAP_WINDOW_API_X11, false)],
             ..Default::default()
         },
         &linux_candidates(true, false),
     );
-    plugin.prepare_editor().expect("create the editor");
-    assert_eq!(plugin.editor_resize_hints(), ResizeHints::FIXED);
-    assert_eq!(plugin.resize_editor(900, 700), (400, 300));
+    clap(&plugin, |plugin| {
+        plugin.prepare_editor().expect("create the editor");
+        assert_eq!(plugin.editor_resize_hints(), ResizeHints::FIXED);
+        assert_eq!(plugin.resize_editor(900, 700), (400, 300));
+    });
     assert!(!gui_events().contains(&"gui.set_size"));
 }
 
 #[test]
 fn a_user_resize_goes_through_adjust_size_first() {
-    let mut plugin = fake_with_gui(
+    let plugin = fake_with_gui(
         fake::gui::Gui {
             supported: vec![(CLAP_WINDOW_API_X11, false)],
             resizable: true,
@@ -1766,9 +2537,11 @@ fn a_user_resize_goes_through_adjust_size_first() {
         },
         &linux_candidates(true, false),
     );
-    plugin.prepare_editor().expect("create the editor");
-    assert!(plugin.editor_resize_hints().resizable());
-    assert_eq!(plugin.resize_editor(523, 377), (500, 350));
+    clap(&plugin, |plugin| {
+        plugin.prepare_editor().expect("create the editor");
+        assert!(plugin.editor_resize_hints().resizable());
+        assert_eq!(plugin.resize_editor(523, 377), (500, 350));
+    });
     assert_eq!(fake::gui::size(), (500, 350));
     let events = gui_events();
     let adjust = events.iter().position(|event| *event == "gui.adjust_size");
@@ -1778,7 +2551,7 @@ fn a_user_resize_goes_through_adjust_size_first() {
 
 #[test]
 fn a_refused_resize_snaps_the_window_back() {
-    let mut plugin = fake_with_gui(
+    let plugin = fake_with_gui(
         fake::gui::Gui {
             supported: vec![(CLAP_WINDOW_API_X11, false)],
             resizable: true,
@@ -1787,10 +2560,12 @@ fn a_refused_resize_snaps_the_window_back() {
         },
         &linux_candidates(true, false),
     );
-    plugin.prepare_editor().expect("create the editor");
-    // `adjust_size` refuses (step 0), so the size is passed unchanged and
-    // `set_size` refuses that too.
-    assert_eq!(plugin.resize_editor(523, 377), (400, 300));
+    clap(&plugin, |plugin| {
+        plugin.prepare_editor().expect("create the editor");
+        // `adjust_size` refuses (step 0), so the size is passed unchanged
+        // and `set_size` refuses that too.
+        assert_eq!(plugin.resize_editor(523, 377), (400, 300));
+    });
 }
 
 #[test]
@@ -1811,7 +2586,7 @@ fn resize_hints_come_from_the_plugin() {
         &linux_candidates(true, false),
     );
     assert_eq!(
-        plugin.editor_resize_hints(),
+        clap(&plugin, |plugin| plugin.editor_resize_hints()),
         ResizeHints {
             horizontal: true,
             vertical: false,
@@ -1822,8 +2597,8 @@ fn resize_hints_come_from_the_plugin() {
 
 #[test]
 fn show_hide_and_hint_requests_wait_for_the_window() {
-    let shared = std::sync::Arc::new(HostState::new());
-    let host = super::plugin::make_host(&shared);
+    let shared = Arc::new(HostState::new(Arc::new(PluginShared::new(0))));
+    let host = super::instance::make_host(&shared);
     let host: *const clap_host = &host;
     let gui = &super::host::HOST_GUI;
     assert_eq!(shared.take_gui_visibility(), None);
@@ -1846,12 +2621,11 @@ fn posix_fds_are_registered_once_and_polled_for_the_plugin() {
     use clap_sys::ext::posix_fd_support::{CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE};
 
     let _main = super::claim_main_thread_for_test();
-    const MAIN: u32 = CLAP_AUDIO_PORT_IS_MAIN;
     fake::reset(fake::Fail::Nothing);
     fake::gui::offer_fd_support();
     fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
     let plugin = fake::load("fake").expect("load the fake plugin");
-    let host: *const clap_host = &*plugin._host;
+    let host = host_of(plugin.handle());
     let fd_ext = &super::host::HOST_POSIX_FD;
     let register = fd_ext.register_fd.expect("register_fd");
     let modify = fd_ext.modify_fd.expect("modify_fd");
@@ -1872,7 +2646,7 @@ fn posix_fds_are_registered_once_and_polled_for_the_plugin() {
         );
     }
     // Nothing to read and only writes watched: no call.
-    plugin.host_state.service_main_thread();
+    clap(&plugin, ClapInstance::service_callbacks);
     assert!(fake::gui::fd_calls().is_empty());
 
     unsafe { assert!(modify(host, read_end, CLAP_POSIX_FD_READ)) };
@@ -1880,14 +2654,14 @@ fn posix_fds_are_registered_once_and_polled_for_the_plugin() {
         unsafe { libc::write(write_end, b"x".as_ptr().cast(), 1) },
         1
     );
-    plugin.host_state.service_main_thread();
+    clap(&plugin, ClapInstance::service_callbacks);
     assert_eq!(fake::gui::fd_calls(), vec![(read_end, CLAP_POSIX_FD_READ)]);
 
     unsafe {
         assert!(unregister(host, read_end));
         assert!(!unregister(host, read_end));
     }
-    plugin.host_state.service_main_thread();
+    clap(&plugin, ClapInstance::service_callbacks);
     assert_eq!(fake::gui::fd_calls().len(), 1);
     drop(plugin);
     unsafe {

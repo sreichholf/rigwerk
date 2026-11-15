@@ -8,9 +8,10 @@
 
 mod gui;
 mod host;
+mod instance;
 mod module;
-mod plugin;
 mod ports;
+mod processor;
 mod scan;
 mod state;
 
@@ -23,8 +24,9 @@ pub(crate) use host::{claim_main_thread_for_test, MainThreadClaim};
 pub(crate) use host::{
     is_main_thread, mark_main_thread, may_destroy_plugins_here, GuiVisibility, HostState, StateSave,
 };
-pub(crate) use plugin::ClapPlugin;
+pub(crate) use instance::{ClapInstance, ClapLoaded};
 pub(crate) use ports::AUDIO_PORTS_CHANGED;
+pub(crate) use processor::ClapProcessor;
 pub(crate) use scan::{scan_bundle, scan_library, ClapCandidate};
 
 use std::ffi::{c_char, CStr};

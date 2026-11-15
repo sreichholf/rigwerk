@@ -153,7 +153,6 @@ pub use path::{
     sanitize_path_level, DspTime, LockStats, PathMix, PluginLockReport, MAX_PATHS,
     PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
 };
-pub(crate) use plugins::service_clap;
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;
 pub(crate) use plugins::PluginHandle;

@@ -7,9 +7,11 @@
 //!
 //! A CLAP editor embeds in a native window created here (Win32, or X11 when
 //! an X server is reachable), or floats in a toplevel of its own (pure
-//! Wayland, or a plugin that only floats).  The plugin's GUI callbacks only
-//! set flags on its host; [`ClapGuiWindow::service`] follows them once per
-//! frame.
+//! Wayland, or a plugin that only floats).  It reaches the plugin through
+//! its [`PluginHandle`] (the UI-only lock the audio thread never takes), so
+//! an editor at work never makes the audio callback skip the insert.  The
+//! plugin's GUI callbacks only set flags on its host;
+//! [`ClapGuiWindow::service`] follows them once per frame.
 
 use crate::app::LogTone;
 use std::sync::{Arc, Mutex};
@@ -19,7 +21,7 @@ use vst3_host::PluginWindow;
 
 use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
-use crate::audio::clap::{ClapPlugin, GuiVisibility, HostState, ParentWindow, ResizeHints};
+use crate::audio::clap::{ClapInstance, GuiVisibility, HostState, ParentWindow, ResizeHints};
 use crate::audio::{EngineState, PluginHandle, PluginView};
 /// How often a Linux VST3 editor's run loop is serviced while a bridge runs.
 /// Every frame would hold the instance lock often enough for the audio
@@ -142,8 +144,8 @@ impl RigWerkApp {
                     false
                 }
             }
-        } else if let Some(plugin) = handle.legacy_clap() {
-            match ClapGuiWindow::open(plugin, &name, f64::from(self.ui_scale)) {
+        } else if handle.is_clap() {
+            match ClapGuiWindow::open(handle.clone(), &name, f64::from(self.ui_scale)) {
                 Ok(window) => {
                     self.plugin_gui = Some(PluginGuiWindow {
                         key,
@@ -363,7 +365,6 @@ mod x11;
 /// A CLAP editor and the window it is in.  `frame` is `None` for a floating
 /// editor, whose toplevel the plugin owns.
 struct ClapGuiWindow {
-    plugin: Arc<Mutex<ClapPlugin>>,
     host: Arc<HostState>,
     frame: Option<Box<dyn EditorFrame>>,
     hints: ResizeHints,
@@ -371,33 +372,40 @@ struct ClapGuiWindow {
     /// window's echo of a resize is not passed back to the plugin.
     last_client: Option<(u32, u32)>,
     scale: f64,
-}
-
-fn lock(plugin: &Mutex<ClapPlugin>) -> std::sync::MutexGuard<'_, ClapPlugin> {
-    plugin.lock().unwrap_or_else(|poison| poison.into_inner())
+    /// Last: the editor is closed (in `drop`) before this reference goes.
+    handle: PluginHandle,
 }
 
 impl ClapGuiWindow {
-    fn open(plugin: Arc<Mutex<ClapPlugin>>, title: &str, app_scale: f64) -> Result<Self, String> {
-        let (api, size, host) = {
-            let mut locked = lock(&plugin);
-            let api = locked
-                .editor_api()
-                .ok_or_else(|| "This plugin has no interface RigWerk can open here.".to_owned())?;
-            let size = locked.prepare_editor()?;
-            (api, size, locked.host())
-        };
+    /// Runs `body` on the plugin's main-thread instance.
+    fn plugin<R>(&self, body: impl FnOnce(&mut ClapInstance) -> R) -> Result<R, String> {
+        self.handle
+            .with_clap(body)
+            .ok_or_else(|| "This is not a CLAP plugin.".to_owned())
+    }
+
+    fn open(handle: PluginHandle, title: &str, app_scale: f64) -> Result<Self, String> {
+        let (api, size, host) = handle
+            .with_clap(|plugin| {
+                let api = plugin.editor_api().ok_or_else(|| {
+                    "This plugin has no interface RigWerk can open here.".to_owned()
+                })?;
+                let size = plugin.prepare_editor()?;
+                Ok::<_, String>((api, size, plugin.host()))
+            })
+            .ok_or_else(|| "This is not a CLAP plugin.".to_owned())??;
         let mut window = Self {
-            plugin,
             host,
             frame: None,
             hints: ResizeHints::FIXED,
             last_client: Some(size),
             scale: app_scale,
+            handle,
         };
         if api.floating {
             // Dropping `window` on failure destroys the created editor.
-            lock(&window.plugin).show_floating_editor(&format!("{title} - CLAP"), app_scale)?;
+            let title = format!("{title} - CLAP");
+            window.plugin(|plugin| plugin.show_floating_editor(&title, app_scale))??;
             return Ok(window);
         }
         let frame = create_frame(api.api, title, size)?;
@@ -406,11 +414,11 @@ impl ClapGuiWindow {
         // Owned by `window` from here, so a failed attach still detaches the
         // editor before the native window is destroyed.
         window.frame = Some(frame);
-        let hints = {
-            let mut locked = lock(&window.plugin);
-            locked.attach_editor(parent, window.scale)?;
-            locked.editor_resize_hints()
-        };
+        let scale = window.scale;
+        let hints = window.plugin(|plugin| {
+            plugin.attach_editor(parent, scale)?;
+            Ok::<_, String>(plugin.editor_resize_hints())
+        })??;
         window.apply_hints(hints, size);
         if let Some(frame) = window.frame.as_mut() {
             frame.show();
@@ -436,12 +444,10 @@ impl ClapGuiWindow {
         if events.closed {
             return true;
         }
-        // Timers, fds and `on_main_thread` (where most editors repaint) run
-        // without the instance lock, so the audio callback keeps processing
-        // this insert while the editor is busy.  A latency change it picks
-        // up stays flagged on the host, so the path's `service_plugins`
-        // still republishes the insert views; the result is not needed here.
-        let _ = crate::audio::service_clap(&self.host, &self.plugin);
+        // Timers, fds and `on_main_thread` (where most editors repaint).  The
+        // audio callback never waits for them.  Restarts and latency are
+        // left to the path's `service_plugins`, which republishes the views.
+        let _ = self.plugin(ClapInstance::service_callbacks);
         if self.host.take_gui_closed() {
             return true;
         }
@@ -453,34 +459,38 @@ impl ClapGuiWindow {
             // A floating editor sizes and shows its own toplevel.
             if let Some(scale) = scale {
                 self.scale = scale;
-                lock(&self.plugin).set_editor_scale(scale);
+                let _ = self.plugin(|plugin| plugin.set_editor_scale(scale));
             }
             return false;
         };
         match self.host.take_gui_visibility() {
             Some(GuiVisibility::Show) => {
                 frame.show();
-                lock(&self.plugin).show_editor();
+                let _ = self.handle.with_clap(ClapInstance::show_editor);
             }
             Some(GuiVisibility::Hide) => {
-                lock(&self.plugin).hide_editor();
+                let _ = self.handle.with_clap(ClapInstance::hide_editor);
                 frame.hide();
             }
             None => {}
         }
         if let Some(scale) = scale {
             self.scale = scale;
-            let size = {
-                let mut locked = lock(&self.plugin);
-                locked.set_editor_scale(scale);
-                locked.editor_size()
-            };
+            let size = self
+                .plugin(|plugin| {
+                    plugin.set_editor_scale(scale);
+                    plugin.editor_size()
+                })
+                .ok()
+                .flatten();
             if let Some(size) = size {
                 self.resize_frame(size);
             }
         }
         if self.host.take_gui_hints_changed() {
-            let hints = lock(&self.plugin).editor_resize_hints();
+            let hints = self
+                .plugin(|plugin| plugin.editor_resize_hints())
+                .unwrap_or(ResizeHints::FIXED);
             let size = self.last_client.unwrap_or((640, 480));
             self.apply_hints(hints, size);
         }
@@ -492,7 +502,9 @@ impl ClapGuiWindow {
             if self.last_client != Some(size) {
                 // The user resized the window: the plugin rounds the size
                 // and the window follows whatever it settled on.
-                let fitted = lock(&self.plugin).resize_editor(size.0, size.1);
+                let fitted = self
+                    .plugin(|plugin| plugin.resize_editor(size.0, size.1))
+                    .unwrap_or(size);
                 self.last_client = Some(fitted);
                 if fitted != size {
                     self.resize_frame(fitted);
@@ -516,7 +528,7 @@ impl ClapGuiWindow {
 impl Drop for ClapGuiWindow {
     fn drop(&mut self) {
         // Detach the editor before the window it is embedded in goes.
-        lock(&self.plugin).close_editor();
+        let _ = self.handle.with_clap(ClapInstance::close_editor);
         drop(self.frame.take());
     }
 }

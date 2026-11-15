@@ -497,6 +497,98 @@ fn a_latency_change_republishes_without_the_chain_lock() {
     });
 }
 
+/// The audio thread is held inside a CLAP insert's `process` (it holds the
+/// chain lock and the plugin's processor) while the UI sets a control
+/// 10 000 times and services, reads and captures the plugin.  None of it
+/// may wait for the audio side: it all finishes while the block is still
+/// held.  Released, the audio side delivers the newest value, and the
+/// insert was never paused or skipped.
+#[test]
+fn clap_controls_never_wait_for_the_audio_side() {
+    use crate::audio::clap::tests::{
+        fake_plugin_with_params_for_test, fake_process_gate_for_test, fake_received_for_test,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let _main = claim_main_thread();
+    let shared = super::Shared::new(48_000);
+    let path = &shared.paths[0];
+    path.edit_chain(|chain| chain.insert_clap_for_test(fake_plugin_with_params_for_test()));
+    let handle = path.plugin_handle(0).expect("the fake is loaded");
+    let (hold, inside) = fake_process_gate_for_test();
+    // The first block starts processing.
+    let (mut left, mut right) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+    path.process_plugins(&mut left, &mut right, 64);
+    assert!(handle.shared().pause.processing());
+
+    const HELD: Duration = Duration::from_secs(5);
+    const SETS: usize = 10_000;
+    hold.store(true, Ordering::SeqCst);
+    let stop = AtomicBool::new(false);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let audio = scope.spawn(|| {
+            let (mut left, mut right) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+            while !stop.load(Ordering::SeqCst) {
+                path.process_plugins(&mut left, &mut right, 64);
+            }
+        });
+        let since = Instant::now();
+        while !inside.load(Ordering::SeqCst) {
+            assert!(since.elapsed() < HELD, "the audio thread never got inside");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Lets the block go if the UI hangs, so a failure does not hang.
+        let watchdog = {
+            let hold = std::sync::Arc::clone(&hold);
+            scope.spawn(move || {
+                let timed_out = done_rx.recv_timeout(HELD).is_err();
+                hold.store(false, Ordering::SeqCst);
+                timed_out
+            })
+        };
+        for step in 0..SETS {
+            let value = step as f64 / (SETS - 1) as f64;
+            path.set_plugin_parameter(0, 7, value)
+                .expect("set the gain");
+            if step % 500 == 0 {
+                path.service_plugins();
+                path.capture_plugin_states();
+                let _ = handle.sync_full();
+                let _ = path.plugin_prefs();
+            }
+        }
+        let still_held = inside.load(Ordering::SeqCst);
+        done_tx.send(()).unwrap();
+        assert!(
+            !watchdog.join().unwrap(),
+            "a UI call waited for the audio side"
+        );
+        assert!(still_held, "the block was released before the UI finished");
+        // The block is released; the newest value reaches `process`.
+        let since = Instant::now();
+        while fake_received_for_test().last() != Some(&(7, 2.0, "process")) {
+            assert!(since.elapsed() < HELD, "the last value never arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        stop.store(true, Ordering::SeqCst);
+        audio.join().unwrap();
+    });
+    assert_eq!(handle.shared().pause.paused_blocks(), 0);
+    assert_eq!(handle.failure(), None);
+    assert_eq!(
+        path.slot_links.lock().unwrap()[0]
+            .controls
+            .lock_stats()
+            .skips,
+        0
+    );
+    assert_eq!(path.plugin_views()[0].parameters[0].value, 1.0);
+    drop(handle);
+    drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+}
+
 #[test]
 fn a_plugin_latency_change_republishes_the_views() {
     use crate::audio::clap::tests::{
@@ -623,14 +715,11 @@ fn a_clap_port_change_is_published_on_the_next_service_frame() {
         chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
     });
     assert!(shared.plugin_views()[0].error.is_none());
-    let Some(plugin) = shared
-        .plugin_handle(0)
-        .and_then(|handle| handle.legacy_clap())
-    else {
+    let Some(handle) = shared.plugin_handle(0) else {
         panic!("the fake is a loaded CLAP slot");
     };
-    crate::audio::clap::tests::rescan_ports_for_test(&plugin.lock().unwrap());
-    drop(plugin);
+    crate::audio::clap::tests::rescan_ports_for_test(&handle);
+    drop(handle);
     assert!(shared.plugin_views()[0].error.is_none());
 
     shared.service_plugins();

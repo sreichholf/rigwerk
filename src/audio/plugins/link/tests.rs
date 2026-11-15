@@ -19,6 +19,7 @@ fn only_the_first_failure_is_kept_and_reads_back() {
         ProcessFailure::Clap(ClapFailure::ProcessError),
         ProcessFailure::Clap(ClapFailure::StartFailed),
         ProcessFailure::Clap(ClapFailure::PortsChanged),
+        ProcessFailure::Clap(ClapFailure::ControlsChanged),
     ] {
         let shared = PluginShared::new(0);
         shared.fail(failure);
@@ -40,18 +41,29 @@ fn failure_messages_keep_the_host_texts() {
         ProcessFailure::Vst3Host.message(),
         "The VST3 host reported an error"
     );
-    for failure in [
-        ClapFailure::NotActive,
-        ClapFailure::ProcessError,
-        ClapFailure::StartFailed,
-        ClapFailure::PortsChanged,
+    // The CLAP processor reports the failure, not a text: each kind keeps
+    // the text the CLAP host used to report.
+    for (failure, text) in [
+        (ClapFailure::NotActive, "The CLAP plugin is not active."),
+        (
+            ClapFailure::ProcessError,
+            "The CLAP plugin reported a processing error.",
+        ),
+        (
+            ClapFailure::StartFailed,
+            "The CLAP plugin could not start processing.",
+        ),
+        (
+            ClapFailure::PortsChanged,
+            crate::audio::clap::AUDIO_PORTS_CHANGED,
+        ),
+        (
+            ClapFailure::ControlsChanged,
+            "The plugin changed its controls.  Remove it and add it again.",
+        ),
     ] {
-        assert_eq!(ClapFailure::from_message(failure.message()), failure);
+        assert_eq!(ProcessFailure::Clap(failure).message(), text);
     }
-    assert_eq!(
-        ClapFailure::from_message("something else"),
-        ClapFailure::ProcessError
-    );
 }
 
 #[test]

@@ -3,38 +3,44 @@
 //! [`PluginHandle`] the UI reaches without the chain lock (the published
 //! insert links, the editor window).  Format-neutral.
 //!
-//! The UI half keeps what used to live on the slot under the chain lock:
-//! the control views, the saved values, the state blob and whether it is
-//! stale.  That sits behind [`PluginUi`]'s own mutex, a UI-only lock: the
-//! audio thread never takes it, so a control set, an editor sync, a state
-//! capture or a preference save no longer touches the chain lock.  Lock
-//! order on the UI side: chain → `UiSide` → the instance mutex.  Never the
-//! reverse.
+//! The UI half keeps the control views, the saved values, the state blob
+//! and whether it is stale, next to the main-thread plugin object.  That
+//! sits behind [`PluginUi`]'s own mutex, a UI-only lock: the audio thread
+//! never takes it, so a control set, an editor sync, a state capture or a
+//! preference save never touches a lock the audio thread takes.  Lock
+//! order on the UI side: chain → `UiSide` → `ParamOut`.  Never the reverse.
 //!
-//! This step still runs vst3-host and the CLAP instance as one object each
-//! behind a mutex (the `*Legacy` arms): both halves hold a clone of that
-//! `Arc<Mutex<_>>`, the audio half only `try_lock`s it, and the UI half
-//! calls the existing helpers in `load`.
+//! CLAP is split along its thread rules: the processor holds
+//! `ClapProcessor`, the UI half `ClapInstance`, and they talk through the
+//! parameter transfers, [`PluginShared`] and the pause handshake (a
+//! restart, or a flush while not processing, pauses the plugin from the UI
+//! and resumes it).  VST3 still runs vst3-host as one object behind a
+//! mutex (the `Vst3Legacy` arms): both halves hold a clone of that
+//! `Arc<Mutex<_>>`, the audio half only `try_lock`s it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use vst3_host::{AudioBuffers, Plugin};
 
-use super::super::clap::{ClapPlugin, HostState, StateSave};
-use super::link::{ClapFailure, PluginShared, ProcessFailure};
-use super::load::{
-    captured_state, host_parameters, host_reset_parameters, host_set_parameter,
-    merge_synced_params, read_plugin_parameters, service_clap, take_parameter_changes,
-    take_parameter_values, Capture, ParamChange, Vst3Service, MAX_BLOCK,
+use super::super::clap::{ClapInstance, ClapLoaded, ClapProcessor, StateSave};
+use super::link::{
+    ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
 };
-use super::pause::BlockAction;
-use super::pref::{PluginParamPref, PluginParamView, PluginState};
+use super::load::{
+    captured_state, host_format_parameter, host_parameters, host_reset_parameters,
+    host_set_parameter, merge_synced_params, take_parameter_changes, take_parameter_values,
+    Capture, ParamChange, Vst3Service, MAX_BLOCK,
+};
+use super::pause::{drive_pause, BlockAction, PauseStep};
+use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginState};
 use super::slot::SlotControls;
+use super::transfer::{param_transfer, ParamReceiver};
 
 /// The UI half's plugin object.
 pub(crate) enum PluginInstance {
     Vst3Legacy(Arc<Mutex<Plugin>>),
-    ClapLegacy(Arc<Mutex<ClapPlugin>>),
+    Clap(ClapInstance),
 }
 
 /// The audio half's plugin object (`Send`; it lives in the chain's slot).
@@ -48,7 +54,8 @@ pub(crate) enum PluginProcessor {
         /// thread never frees it; dropped with the slot on the UI thread.
         parked: Option<vst3_host::Error>,
     },
-    ClapLegacy(Arc<Mutex<ClapPlugin>>),
+    /// Boxed: it carries its port buffers' descriptions inline.
+    Clap(Box<ClapProcessor>),
 }
 
 impl Drop for PluginProcessor {
@@ -65,24 +72,26 @@ impl Drop for PluginProcessor {
     }
 }
 
-/// The legacy hosts' main-thread services, outside the UI lock: their
-/// latency and port flags are atomics, so the audio half reads them too.
-enum LegacyService {
-    Vst3(Arc<Vst3Service>),
-    Clap(Arc<HostState>),
-}
-
 pub(crate) struct PluginUi {
     shared: Arc<PluginShared>,
+    /// The UI→audio parameter producer (empty for vst3-host, which keeps
+    /// its own queue).
+    out: Arc<ParamOut>,
     ui: Mutex<UiSide>,
+    format: PluginFormat,
     /// Read once at load, so drawing never locks a plugin.
     has_editor: bool,
-    legacy: LegacyService,
+    /// vst3-host's main-thread service; its latency is an atomic, so the
+    /// audio half reads it too.
+    vst3: Option<Arc<Vst3Service>>,
 }
 
 /// What the UI half owns; behind [`PluginUi::ui`].
 struct UiSide {
     instance: PluginInstance,
+    /// The audio→UI parameter queue: CLAP output values, for the views.
+    from_audio: ParamReceiver,
+    ids: Arc<ParamIds>,
     views: Vec<PluginParamView>,
     /// The saved control values (was the slot's `pref.params`).
     saved: Vec<PluginParamPref>,
@@ -92,6 +101,8 @@ struct UiSide {
     /// missing or did not restore, or a control changed since.  The next
     /// preference save captures a fresh blob.
     state_stale: bool,
+    /// A pause the UI is driving (see `drive_pause`), kept between frames.
+    pause_wait: Option<(std::time::Instant, u64)>,
 }
 
 /// The UI's reference to one loaded plugin.  Cheap to clone; the slot, the
@@ -106,6 +117,7 @@ pub(crate) struct LoadedPlugin {
 }
 
 /// What one insert did with one chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// The plugin's output (fully wet) is in the buffers.
     Processed,
@@ -134,102 +146,62 @@ impl LoadedPlugin {
         } else {
             sample_rate
         };
-        Self::assemble(
-            PluginProcessor::Vst3Legacy {
+        // vst3-host queues its own parameter changes: empty transfers.
+        let ids = Arc::new(ParamIds::new(Vec::new()));
+        let (sender, _) = param_transfer(0);
+        let (_, from_audio) = param_transfer(0);
+        Self {
+            processor: PluginProcessor::Vst3Legacy {
                 plugin: Arc::clone(&plugin),
                 buffers: AudioBuffers::new(2, 2, MAX_BLOCK, rate as f64),
                 parked: None,
             },
-            PluginInstance::Vst3Legacy(plugin),
-            LegacyService::Vst3(service),
-            views,
-            has_editor,
-            saved,
-        )
-    }
-
-    /// A loaded, activated CLAP plugin.
-    pub(crate) fn clap_legacy(plugin: ClapPlugin, saved: Saved) -> Self {
-        let views = plugin.parameters();
-        let has_editor = plugin.has_editor();
-        Self::clap_with(plugin, views, has_editor, saved)
-    }
-
-    /// A CLAP plugin the way the chain tests insert one: no controls read,
-    /// no editor, nothing saved.
-    #[cfg(test)]
-    pub(crate) fn clap_for_test(plugin: ClapPlugin) -> Self {
-        Self::clap_with(
-            plugin,
-            Vec::new(),
-            false,
-            Saved {
-                params: Vec::new(),
-                state: None,
-                stale: false,
-            },
-        )
-    }
-
-    /// As [`Self::clap_for_test`], restoring the saved values and state of
-    /// `pref` the way [`super::load::load_plugin`] hands them over.
-    #[cfg(test)]
-    pub(crate) fn clap_restoring_for_test(
-        plugin: ClapPlugin,
-        pref: &super::pref::PluginPref,
-    ) -> Self {
-        Self::clap_with(
-            plugin,
-            Vec::new(),
-            false,
-            Saved {
-                params: pref.params.clone(),
-                state: pref.state.clone(),
-                stale: false,
-            },
-        )
-    }
-
-    fn clap_with(
-        plugin: ClapPlugin,
-        views: Vec<PluginParamView>,
-        has_editor: bool,
-        saved: Saved,
-    ) -> Self {
-        let host = plugin.host();
-        let plugin = Arc::new(Mutex::new(plugin));
-        Self::assemble(
-            PluginProcessor::ClapLegacy(Arc::clone(&plugin)),
-            PluginInstance::ClapLegacy(plugin),
-            LegacyService::Clap(host),
-            views,
-            has_editor,
-            saved,
-        )
-    }
-
-    fn assemble(
-        processor: PluginProcessor,
-        instance: PluginInstance,
-        legacy: LegacyService,
-        views: Vec<PluginParamView>,
-        has_editor: bool,
-        saved: Saved,
-    ) -> Self {
-        Self {
-            processor,
             handle: PluginHandle(Arc::new(PluginUi {
-                // The legacy arms read their latency from `legacy`.
+                // vst3-host reads its latency from `vst3`.
                 shared: Arc::new(PluginShared::new(0)),
-                ui: Mutex::new(UiSide {
-                    instance,
+                out: Arc::new(ParamOut::new(Arc::clone(&ids), sender)),
+                ui: Mutex::new(UiSide::new(
+                    PluginInstance::Vst3Legacy(plugin),
+                    from_audio,
+                    ids,
                     views,
-                    saved: saved.params,
-                    state: saved.state,
-                    state_stale: saved.stale,
-                }),
+                    saved,
+                )),
+                format: PluginFormat::Vst3,
                 has_editor,
-                legacy,
+                vst3: Some(service),
+            })),
+        }
+    }
+
+    /// A loaded, activated CLAP plugin; `shared` is the one it was loaded
+    /// with.  Processing starts with the first block.
+    pub(crate) fn clap(loaded: ClapLoaded, shared: Arc<PluginShared>, saved: Saved) -> Self {
+        let ClapLoaded {
+            instance,
+            processor,
+            out,
+            from_audio,
+            ids,
+            views,
+            has_editor,
+            state_current: _,
+        } = loaded;
+        Self {
+            processor: PluginProcessor::Clap(Box::new(processor)),
+            handle: PluginHandle(Arc::new(PluginUi {
+                shared,
+                out,
+                ui: Mutex::new(UiSide::new(
+                    PluginInstance::Clap(instance),
+                    from_audio,
+                    ids,
+                    views,
+                    saved,
+                )),
+                format: PluginFormat::Clap,
+                has_editor,
+                vst3: None,
             })),
         }
     }
@@ -250,15 +222,33 @@ impl LoadedPlugin {
 
     /// Whether the plugin's ports no longer match its buffers (atomics).
     pub(crate) fn ports_changed(&self) -> bool {
-        self.handle.0.ports_changed()
+        self.handle.0.shared.ports_changed()
+    }
+
+    /// The CLAP processor, for tests that look at its buffers.
+    #[cfg(test)]
+    pub(crate) fn clap_processor_for_test(&mut self) -> &mut ClapProcessor {
+        match &mut self.processor {
+            PluginProcessor::Clap(processor) => processor,
+            PluginProcessor::Vst3Legacy { .. } => panic!("not a CLAP plugin"),
+        }
+    }
+
+    /// One fully wet [`Self::run`], with counters nobody reads.
+    #[cfg(test)]
+    pub(crate) fn run_for_test(&mut self, left: &mut [f32], right: &mut [f32]) -> Outcome {
+        let controls = SlotControls::new(&super::pref::PluginPref::default());
+        self.run(&controls, left, right, true)
     }
 
     /// Audio thread, one chunk of at most [`MAX_BLOCK`] frames, in place.
     /// Every loaded insert is brought here every chunk, so its pause
-    /// handshake is served even while it is skipped; only `wet` runs the
-    /// plugin.  A plugin whose instance lock is busy (its editor or a UI
-    /// call holds it) is skipped for the chunk and counted on `controls`;
-    /// a failure is recorded in [`PluginShared`] and never allocates.
+    /// handshake (start, stop, skip) is served even while it is skipped;
+    /// only `wet` runs the plugin, and a skipped CLAP insert flushes the
+    /// values queued for it.  A failure is recorded in [`PluginShared`] and
+    /// never allocates.  A vst3-host plugin whose instance lock is busy is
+    /// skipped for the chunk and counted on `controls`.  A CLAP plugin has
+    /// no such lock.
     pub(crate) fn run(
         &mut self,
         controls: &SlotControls,
@@ -268,30 +258,70 @@ impl LoadedPlugin {
     ) -> Outcome {
         let Self { processor, handle } = self;
         let shared = &*handle.0.shared;
+        if wet {
+            controls.note_attempt();
+        }
         let block = shared.pause.begin_block();
-        // The legacy arms are never asked to pause (their restarts stay in
-        // vst3-host and the CLAP instance) and start processing at load or
-        // lazily inside `process`, so the start and stop calls are no-ops.
-        match block.action() {
-            BlockAction::Process => {}
-            BlockAction::Start => shared.pause.started(),
-            BlockAction::Stop => {
-                shared.pause.stopped();
-                return Outcome::Skipped;
-            }
-            BlockAction::Skip => return Outcome::Skipped,
-        }
-        if !wet {
-            return Outcome::Skipped;
-        }
-        controls.note_attempt();
         let count = left.len().min(right.len());
         match processor {
+            PluginProcessor::Clap(processor) => {
+                match block.action() {
+                    BlockAction::Process => {}
+                    BlockAction::Start if shared.failure().is_some() => {
+                        // A failed insert is not started again.
+                        shared.pause.start_failed();
+                        return Outcome::Skipped;
+                    }
+                    BlockAction::Start => {
+                        if let Err(failure) = processor.start() {
+                            // Paused and not processing: later blocks skip
+                            // instead of processing a plugin that never
+                            // started, and the insert shows why.
+                            shared.pause.start_failed();
+                            shared.fail(ProcessFailure::Clap(failure));
+                            return Outcome::Failed;
+                        }
+                        shared.pause.started();
+                    }
+                    BlockAction::Stop => {
+                        processor.stop();
+                        shared.pause.stopped();
+                        return Outcome::Skipped;
+                    }
+                    BlockAction::Skip => return Outcome::Skipped,
+                }
+                if !wet {
+                    processor.flush_if_queued();
+                    return Outcome::Skipped;
+                }
+                match processor.process(&mut left[..count], &mut right[..count]) {
+                    Ok(()) => Outcome::Processed,
+                    Err(failure) => {
+                        shared.fail(ProcessFailure::Clap(failure));
+                        Outcome::Failed
+                    }
+                }
+            }
             PluginProcessor::Vst3Legacy {
                 plugin,
                 buffers,
                 parked,
             } => {
+                // vst3-host is never asked to pause (its restarts stay in
+                // vst3-host) and starts processing at load, so the start and
+                // stop calls are no-ops.
+                match block.action() {
+                    BlockAction::Process => {}
+                    BlockAction::Start => shared.pause.started(),
+                    BlockAction::Stop => {
+                        shared.pause.stopped();
+                        return Outcome::Skipped;
+                    }
+                    BlockAction::Skip => return Outcome::Skipped,
+                }
+                if !wet {
+                    return Outcome::Skipped;
+                }
                 let mut plugin = match plugin.try_lock() {
                     Ok(plugin) => plugin,
                     Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
@@ -341,40 +371,96 @@ impl LoadedPlugin {
                     }
                 }
             }
-            PluginProcessor::ClapLegacy(plugin) => {
-                let mut plugin = match plugin.try_lock() {
-                    Ok(plugin) => plugin,
-                    Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
-                    Err(TryLockError::WouldBlock) => {
-                        controls.note_lock_skip();
-                        return Outcome::Skipped;
-                    }
-                };
-                match plugin.process(left, right, count, 1.0) {
-                    Ok(true) => Outcome::Processed,
-                    Ok(false) => Outcome::Skipped,
-                    Err(message) => {
-                        drop(plugin);
-                        shared.fail(ProcessFailure::Clap(ClapFailure::from_message(message)));
-                        Outcome::Failed
-                    }
-                }
+        }
+    }
+}
+
+impl Drop for LoadedPlugin {
+    /// UI thread, with the slot out of every chain, so no block can be
+    /// inside the plugin: stop it if it is processing (as its audio
+    /// thread), deactivate it (main thread), then drop the processor and
+    /// the handle.  The plugin is destroyed with the last handle (an open
+    /// editor may hold one a little longer).
+    fn drop(&mut self) {
+        if let PluginProcessor::Clap(processor) = &mut self.processor {
+            if self.handle.0.shared.pause.take_processing() {
+                processor.stop();
             }
+            self.handle.deactivate();
+        }
+    }
+}
+
+impl UiSide {
+    fn new(
+        instance: PluginInstance,
+        from_audio: ParamReceiver,
+        ids: Arc<ParamIds>,
+        views: Vec<PluginParamView>,
+        saved: Saved,
+    ) -> Self {
+        Self {
+            instance,
+            from_audio,
+            ids,
+            views,
+            saved: saved.params,
+            state: saved.state,
+            state_stale: saved.stale,
+            pause_wait: None,
         }
     }
 }
 
 impl PluginUi {
     fn latency(&self) -> u32 {
-        match &self.legacy {
-            LegacyService::Vst3(service) => service.latency(),
-            LegacyService::Clap(host) => host.latency(),
+        match &self.vst3 {
+            Some(service) => service.latency(),
+            None => self.shared.latency(),
         }
     }
+}
 
-    fn ports_changed(&self) -> bool {
-        self.shared.ports_changed()
-            || matches!(&self.legacy, LegacyService::Clap(host) if host.ports_changed())
+/// Writes plugin-reported `(index, normalized)` values into the views.
+/// Returns whether any view moved.
+fn apply_reported(
+    clap: &ClapInstance,
+    ids: &ParamIds,
+    views: &mut [PluginParamView],
+    reported: &[(usize, f64)],
+) -> bool {
+    let mut changed = false;
+    for &(index, value) in reported {
+        let Some(id) = ids.id(index) else {
+            continue;
+        };
+        if let Some(view) = views.iter_mut().find(|view| view.id == id) {
+            view.value = value;
+            view.display = clap.display_for(id, value);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Drains what the audio side reported into the views.
+fn drain_reported(
+    clap: &ClapInstance,
+    from_audio: &mut ParamReceiver,
+    ids: &ParamIds,
+    views: &mut [PluginParamView],
+) -> bool {
+    let mut reported = Vec::new();
+    from_audio.drain(|index, value, _| reported.push((index, value)));
+    apply_reported(clap, ids, views, &reported)
+}
+
+/// Resumes after [`PauseStep::Ready`], which never refuses; a refusal is
+/// logged once instead of leaving the plugin silently paused unnoticed.
+fn resume_or_log(pause: &super::pause::PauseHandshake) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !pause.resume() && !LOGGED.swap(true, Ordering::Relaxed) {
+        eprintln!("[plugins] a CLAP plugin's pause would not resume; it stays paused");
     }
 }
 
@@ -401,12 +487,18 @@ impl PluginHandle {
 
     /// Atomics only.
     pub(crate) fn ports_changed(&self) -> bool {
-        self.0.ports_changed()
+        self.0.shared.ports_changed()
     }
 
     /// The first processing failure the audio thread recorded (atomics).
     pub(crate) fn failure(&self) -> Option<ProcessFailure> {
         self.0.shared.failure()
+    }
+
+    /// What both halves share, for tests that look at the handshake.
+    #[cfg(test)]
+    pub(crate) fn shared(&self) -> &PluginShared {
+        &self.0.shared
     }
 
     /// The control views as last read or set.
@@ -415,10 +507,77 @@ impl PluginHandle {
     }
 
     /// Reads every control again, so the panel shows the plugin's values
-    /// right now.
+    /// right now.  A CLAP plugin with values still queued for it keeps the
+    /// views, which already show them.
     pub(crate) fn refresh_parameters(&self) {
         let mut ui = self.ui();
-        ui.views = host_parameters(&ui.instance);
+        let views = match &ui.instance {
+            PluginInstance::Vst3Legacy(plugin) => host_parameters(plugin),
+            PluginInstance::Clap(_) if self.0.out.has_queued() => return,
+            PluginInstance::Clap(clap) => clap.parameters(),
+        };
+        ui.views = views;
+    }
+
+    /// Sends normalized `(index, value)` CLAP values to the plugin.  While
+    /// it is processing they go through the transfer into the next block's
+    /// input events.  While it is not (no block yet, or paused) and nothing
+    /// older is queued, the UI pauses it and hands them to `params.flush`
+    /// itself, so a value set with no audio running reaches the plugin and
+    /// its state at once.  Never waits for the audio thread: a pause that
+    /// is not ready at once leaves the values queued and is finished by
+    /// [`Self::service`].
+    fn send_clap(&self, ui: &mut UiSide, values: &[(usize, f64)]) {
+        let shared = &*self.0.shared;
+        let UiSide {
+            instance,
+            from_audio,
+            ids,
+            views,
+            pause_wait,
+            ..
+        } = ui;
+        let PluginInstance::Clap(clap) = instance else {
+            return;
+        };
+        let native = |clap: &ClapInstance| -> Vec<(u32, f64)> {
+            values
+                .iter()
+                .filter_map(|&(index, value)| clap.native(index, value))
+                .collect()
+        };
+        if !clap.is_active() {
+            // A failed reactivation: the plugin stays paused and never
+            // starts again, so `flush` is a plain main-thread call.
+            if clap.can_flush() {
+                let reported = clap.flush_values(&native(clap));
+                apply_reported(clap, ids, views, &reported);
+            }
+            return;
+        }
+        // Only from a pause, or before a start no block has begun: a plugin
+        // between the audio side's start and `started` is left to it.
+        let direct = shared.pause.is_idle()
+            && pause_wait.is_none()
+            && !shared.restart_pending()
+            && clap.can_flush()
+            && !self.0.out.has_queued();
+        if direct
+            && drive_pause(&shared.pause, pause_wait, || clap.stop_processing()) == PauseStep::Ready
+        {
+            // What the last blocks reported is older than this flush.
+            drain_reported(clap, from_audio, ids, views);
+            let reported = clap.flush_values(&native(clap));
+            apply_reported(clap, ids, views, &reported);
+            // A failed insert stays paused: no new start per knob move.
+            if shared.failure().is_none() {
+                resume_or_log(&shared.pause);
+            }
+            return;
+        }
+        for &(index, value) in values {
+            self.0.out.push(index, value);
+        }
     }
 
     /// Sets one normalized control and keeps the views and the saved value
@@ -426,10 +585,25 @@ impl PluginHandle {
     pub(crate) fn set_parameter(&self, id: u32, value: f64) -> Result<Option<String>, String> {
         let value = value.clamp(0.0, 1.0);
         let mut ui = self.ui();
-        host_set_parameter(&ui.instance, id, value)?;
-        // Only the moved control is refreshed: re-reading every parameter
-        // on each drag event holds the plugin far longer.
-        let display = super::load::host_format_parameter(&ui.instance, id, value);
+        let display = match &ui.instance {
+            PluginInstance::Vst3Legacy(plugin) => {
+                host_set_parameter(plugin, id, value)?;
+                // Only the moved control is refreshed: re-reading every
+                // parameter on each drag event holds the plugin far longer.
+                host_format_parameter(plugin, id, value)
+            }
+            PluginInstance::Clap(clap) => {
+                let index = ui
+                    .ids
+                    .index_of(id)
+                    .ok_or_else(|| "That control is no longer available.".to_owned())?;
+                let display = Some(clap.display_for(id, value));
+                if !clap.is_read_only(id) {
+                    self.send_clap(&mut ui, &[(index, value)]);
+                }
+                display
+            }
+        };
         if let Some(parameter) = ui.views.iter_mut().find(|parameter| parameter.id == id) {
             parameter.value = value;
             if let Some(display) = &display {
@@ -451,7 +625,16 @@ impl PluginHandle {
     /// saved overrides.
     pub(crate) fn reset_parameters(&self) -> Result<Vec<PluginParamView>, String> {
         let mut ui = self.ui();
-        ui.views = host_reset_parameters(&ui.instance)?;
+        let views = match &ui.instance {
+            PluginInstance::Vst3Legacy(plugin) => host_reset_parameters(plugin)?,
+            PluginInstance::Clap(clap) => {
+                let defaults = clap.default_values();
+                let views = clap.default_views();
+                self.send_clap(&mut ui, &defaults);
+                views
+            }
+        };
+        ui.views = views;
         ui.saved.clear();
         ui.state_stale = true;
         let views = ui.views.clone();
@@ -461,15 +644,22 @@ impl PluginHandle {
     }
 
     /// Reads every control and stores the result as the views and the
-    /// saved values (see [`read_plugin_parameters`]).  The VST3 change
-    /// reporter is drained first, without formatting: a value queued before
-    /// this fresher read would otherwise be applied by the next change poll,
-    /// putting an older value back.  `None` while a CLAP value still waits
-    /// for the next block; nothing is stored then.
+    /// saved values.  The VST3 change reporter is drained first, without
+    /// formatting: a value queued before this fresher read would otherwise
+    /// be applied by the next change poll, putting an older value back.
+    /// `None` while a CLAP value still waits for the audio side (reading
+    /// the plugin then would show and save the old value); nothing is
+    /// stored then.
     pub(crate) fn sync_full(&self) -> Option<Vec<PluginParamView>> {
         let mut ui = self.ui();
-        drop(take_parameter_values(&ui.instance));
-        let parameters = read_plugin_parameters(&ui.instance)?;
+        let parameters = match &ui.instance {
+            PluginInstance::Vst3Legacy(plugin) => {
+                drop(take_parameter_values(&ui.instance));
+                host_parameters(plugin)
+            }
+            PluginInstance::Clap(_) if self.0.out.has_queued() => return None,
+            PluginInstance::Clap(clap) => clap.parameters(),
+        };
         ui.saved = merge_synced_params(&ui.saved, &parameters);
         ui.views = parameters;
         // The editor is open and can change more than parameters.
@@ -488,13 +678,17 @@ impl PluginHandle {
     }
 
     pub(crate) fn is_vst3(&self) -> bool {
-        matches!(self.0.legacy, LegacyService::Vst3(_))
+        self.0.format == PluginFormat::Vst3
+    }
+
+    pub(crate) fn is_clap(&self) -> bool {
+        self.0.format == PluginFormat::Clap
     }
 
     /// Tells a VST3 plugin's service that it was just touched, so it looks
     /// for restart requests for a while (see [`Vst3Service::nudge`]).
     pub(crate) fn nudge(&self) {
-        if let LegacyService::Vst3(service) = &self.0.legacy {
+        if let Some(service) = &self.0.vst3 {
             service.nudge();
         }
     }
@@ -502,60 +696,111 @@ impl PluginHandle {
     /// Takes a VST3 plugin's "read every control" request (see
     /// [`Vst3Service::take_parameters_changed`]).
     pub(crate) fn take_parameters_changed(&self) -> bool {
-        match &self.0.legacy {
-            LegacyService::Vst3(service) => service.take_parameters_changed(),
-            LegacyService::Clap(_) => false,
-        }
+        self.0
+            .vst3
+            .as_ref()
+            .is_some_and(|service| service.take_parameters_changed())
     }
 
-    /// The plugin's main-thread work, once per UI frame: CLAP callbacks,
-    /// timers and pending lifecycle work, VST3 restart requests.  Returns
-    /// whether the latency changed since the last call, so the caller can
-    /// republish the insert views.  Never takes the chain lock.
+    /// The plugin's main-thread work, once per UI frame, under the UI lock
+    /// only (never the chain lock, never a lock the audio thread takes).
+    ///
+    /// CLAP: callbacks, timers and fds; the output values the audio side
+    /// reported, into the views; a parameter rescan; and a restart (or a
+    /// flush the plugin asked for while not processing) through the pause
+    /// handshake: the first frame asks the audio side to stop, a later one
+    /// (or this one, when it is not processing or the stream stalled)
+    /// deactivates and reactivates it, reads its latency and resumes it.
+    /// VST3: vst3-host's restart requests.
+    ///
+    /// Returns whether the views need republishing: the latency or a
+    /// control the plugin reported changed, or a restart failed.
     pub(crate) fn service(&self) -> bool {
-        match &self.0.legacy {
-            LegacyService::Clap(host) => {
-                let plugin = match &self.ui().instance {
-                    PluginInstance::ClapLegacy(plugin) => Arc::clone(plugin),
-                    PluginInstance::Vst3Legacy(_) => return false,
-                };
-                let changed = service_clap(host, &plugin);
-                // Taken from the host as well, so a change an open editor's
-                // own service picked up counts here too.
-                host.take_latency_change() | changed
-            }
-            LegacyService::Vst3(service) => service.service(),
+        if let Some(service) = &self.0.vst3 {
+            return service.service();
         }
+        let shared = &*self.0.shared;
+        let mut ui = self.ui();
+        let UiSide {
+            instance,
+            from_audio,
+            ids,
+            views,
+            pause_wait,
+            ..
+        } = &mut *ui;
+        let PluginInstance::Clap(clap) = instance else {
+            return false;
+        };
+        clap.service_callbacks();
+        let mut changed = drain_reported(clap, from_audio, ids, views);
+        if let Some(fresh) = clap.rescan_if_requested() {
+            *views = fresh;
+            changed = true;
+        }
+        if !clap.is_active() && clap.take_flush_request() {
+            // Inactive (a failed reactivation): a main-thread flush.
+            let reported = clap.flush_values(&[]);
+            changed |= apply_reported(clap, ids, views, &reported);
+        }
+        let flush_wanted = clap.flush_requested() && !shared.pause.processing();
+        if (shared.restart_pending() || pause_wait.is_some() || flush_wanted)
+            && drive_pause(&shared.pause, pause_wait, || clap.stop_processing()) == PauseStep::Ready
+        {
+            if shared.take_restart() & RESTART_ACTIVATION != 0 && !clap.restart() {
+                // Left paused: an inactive plugin must not start again.
+                shared.fail(ProcessFailure::Clap(ClapFailure::NotActive));
+                changed = true;
+            }
+            if clap.is_active() && clap.take_flush_request() {
+                // Quiet: what the last blocks reported is older.
+                changed |= drain_reported(clap, from_audio, ids, views);
+                let reported = clap.flush_values(&[]);
+                changed |= apply_reported(clap, ids, views, &reported);
+            }
+            // Never resume an inactive plugin, or restart a failed one.
+            if clap.is_active() && shared.failure().is_none() {
+                resume_or_log(&shared.pause);
+            }
+        }
+        clap.reread_latency_if_changed();
+        changed | shared.take_latency_change()
     }
 
     /// Whether the saved state blob needs a capture: stale, or the plugin
     /// marked its state dirty.
     pub(crate) fn wants_capture(&self) -> bool {
-        self.ui().state_stale
-            || self.0.shared.state_dirty()
-            || matches!(&self.0.legacy, LegacyService::Clap(host) if host.state_dirty())
+        self.ui().state_stale || self.0.shared.state_dirty()
     }
 
     /// Captures the plugin's opaque state into the saved blob, with the
     /// saved values as its snapshot.  A failed capture keeps the previous
     /// blob, whose snapshot still lets newer values win on restore, and is
-    /// not retried until a control changes again; a deferred one stays
-    /// stale so the next save retries.  CLAP saves without the instance
-    /// lock, so the audio callback keeps the insert; VST3 locks it.
+    /// not retried until a control changes again; a deferred one (CLAP
+    /// values still queued for the audio side, or off the main thread)
+    /// stays stale so the next save retries.  CLAP saves under the UI lock
+    /// only, so the audio callback keeps the insert; VST3 locks it.
+    ///
+    /// CLAP values queued while the plugin processes wait for a block: if
+    /// the stream stops first, the capture stays deferred until the next
+    /// block (or a skipped one's flush) delivers them.  It cannot capture
+    /// anyway: the blob would hold the old values, and its snapshot must
+    /// say what the blob holds, or a restore would skip the newer saved
+    /// values.  The saved values still restore them.
     pub(crate) fn capture_state(&self) {
         let mut ui = self.ui();
-        let bytes = match (&ui.instance, &self.0.legacy) {
-            (PluginInstance::ClapLegacy(_), LegacyService::Clap(host)) => match host.save_state() {
+        let bytes = match &mut ui.instance {
+            PluginInstance::Clap(_) if self.0.out.has_queued() => Err(Capture::Deferred),
+            PluginInstance::Clap(clap) => match clap.save_state() {
                 StateSave::Saved(bytes) => Ok(bytes),
                 StateSave::Unavailable => Err(Capture::Failed),
                 StateSave::Deferred => Err(Capture::Deferred),
             },
-            (PluginInstance::Vst3Legacy(plugin), _) => plugin
+            PluginInstance::Vst3Legacy(plugin) => plugin
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .save_state()
                 .map_err(|_| Capture::Failed),
-            (PluginInstance::ClapLegacy(_), _) => Err(Capture::Failed),
         };
         let capture = match bytes {
             Ok(bytes) => captured_state(&bytes, &ui.saved),
@@ -587,19 +832,26 @@ impl PluginHandle {
         self.nudge();
     }
 
+    /// Runs `body` on the CLAP instance (its editor, its main-thread
+    /// callbacks), under the UI lock; `None` for another format.  UI
+    /// thread only.  The audio thread never waits for this.
+    pub(crate) fn with_clap<R>(&self, body: impl FnOnce(&mut ClapInstance) -> R) -> Option<R> {
+        match &mut self.ui().instance {
+            PluginInstance::Clap(clap) => Some(body(clap)),
+            PluginInstance::Vst3Legacy(_) => None,
+        }
+    }
+
+    /// Teardown (see [`LoadedPlugin`]'s drop): deactivates a CLAP plugin.
+    fn deactivate(&self) {
+        self.with_clap(ClapInstance::deactivate);
+    }
+
     /// The vst3-host instance, for its editor window (`app::plugin_gui`).
     pub(crate) fn legacy_vst3(&self) -> Option<Arc<Mutex<Plugin>>> {
         match &self.ui().instance {
             PluginInstance::Vst3Legacy(plugin) => Some(Arc::clone(plugin)),
-            PluginInstance::ClapLegacy(_) => None,
-        }
-    }
-
-    /// The CLAP instance, for its editor window (`app::plugin_gui`).
-    pub(crate) fn legacy_clap(&self) -> Option<Arc<Mutex<ClapPlugin>>> {
-        match &self.ui().instance {
-            PluginInstance::ClapLegacy(plugin) => Some(Arc::clone(plugin)),
-            PluginInstance::Vst3Legacy(_) => None,
+            PluginInstance::Clap(_) => None,
         }
     }
 }

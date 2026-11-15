@@ -3,8 +3,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-#[cfg(test)]
-use super::super::clap::ClapPlugin;
 use super::super::delay::{DECLICK_SECONDS, TAP_FADE_SECONDS};
 #[cfg(test)]
 use super::handle::LoadedPlugin;
@@ -234,14 +232,14 @@ impl PluginChain {
     /// Adds an already loaded CLAP plugin as a slot, the way a real load
     /// fills one in.
     #[cfg(test)]
-    pub(crate) fn insert_clap_for_test(&mut self, plugin: ClapPlugin) {
+    pub(crate) fn insert_clap_for_test(&mut self, plugin: LoadedPlugin) {
         let slot = Slot::with_plugin_for_test(
             PluginPref {
                 name: "Fake".to_owned(),
                 format: PluginFormat::Clap,
                 ..PluginPref::default()
             },
-            LoadedPlugin::clap_for_test(plugin),
+            plugin,
             self.sample_rate,
         );
         self.slots.push(slot);

@@ -13,18 +13,25 @@ fn opens_and_closes_a_clap_window() {
     let Some(candidate) = candidates.first() else {
         return;
     };
-    let plugin = Arc::new(Mutex::new(
-        ClapPlugin::load_fresh(&path, &candidate.plugin_id, 48_000, 512).expect("load the fixture"),
-    ));
-    if !plugin
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .has_editor()
-    {
+    let app = crate::app::blank_app();
+    let pref = crate::audio::PluginPref {
+        path: path.display().to_string(),
+        format: crate::audio::PluginFormat::Clap,
+        class_id: Some(candidate.plugin_id.clone()),
+        name: candidate.name.clone(),
+        ..crate::audio::PluginPref::default()
+    };
+    app.engine
+        .add_plugin(app.selected_path, pref)
+        .expect("load the fixture");
+    let Some(handle) = app.engine.plugin_handle(app.selected_path, 0) else {
+        panic!("the fixture did not load");
+    };
+    if !handle.has_editor() {
         return;
     }
     let mut window =
-        ClapGuiWindow::open(plugin.clone(), &candidate.name, 1.0).expect("open the fixture window");
+        ClapGuiWindow::open(handle, &candidate.name, 1.0).expect("open the fixture window");
     assert!(!window.service(1.0));
     drop(window);
 }

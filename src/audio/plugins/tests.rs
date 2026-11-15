@@ -309,10 +309,9 @@ fn no_reported_changes_leave_everything_unchanged() {
 /// A slot holding a fake CLAP plugin, the way a real load fills one in.
 fn fake_clap_slot(fail_process: bool) -> Slot {
     use super::super::clap::tests::fake_plugin_for_test;
-    use super::handle::LoadedPlugin;
     Slot::with_plugin_for_test(
         PluginPref::default(),
-        LoadedPlugin::clap_for_test(fake_plugin_for_test(fail_process)),
+        fake_plugin_for_test(fail_process),
         48_000,
     )
 }
@@ -323,14 +322,7 @@ fn a_port_change_is_visible_without_processing_a_block() {
     assert!(!slot.ports_changed());
     assert!(slot.resolved_error().is_none());
 
-    let plugin = slot
-        .plugin
-        .as_ref()
-        .unwrap()
-        .handle()
-        .legacy_clap()
-        .unwrap();
-    super::super::clap::tests::rescan_ports_for_test(&plugin.lock().unwrap());
+    super::super::clap::tests::rescan_ports_for_test(slot.plugin.as_ref().unwrap().handle());
     assert!(slot.ports_changed());
     assert_eq!(slot.resolved_error().as_deref(), Some(AUDIO_PORTS_CHANGED));
 }
@@ -453,7 +445,9 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     // The last fake switches modes the CLAP way: it asks for a restart and
     // reports the new latency when reactivated.
     restart_fake_with_latency_for_test(8);
-    // The audio thread stops it first; the latency has not moved yet.
+    // The main thread asks for a pause; the audio thread stops it first.
+    // The latency has not moved yet.
+    assert!(!service_all());
     assert!(!chain.process(&mut left, &mut right, 32));
     // The main thread restarts it and reads the new value.
     assert!(service_all());
@@ -478,9 +472,8 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
 #[test]
 fn a_rate_rebuild_restores_what_the_handle_saved_since_load() {
     use super::super::clap::tests::{
-        fake_plugin_for_test, fake_plugin_with_state_for_test, set_fake_state_for_test,
+        fake_plugin_with_state_for_test, fake_restoring_for_test, set_fake_state_for_test,
     };
-    use super::handle::LoadedPlugin;
     use super::PluginChain;
 
     let _main = crate::audio::claim_main_thread();
@@ -503,8 +496,7 @@ fn a_rate_rebuild_restores_what_the_handle_saved_since_load() {
     let rebuild = |jobs: Vec<(usize, PluginPref)>| -> Vec<(usize, PluginPref, Slot)> {
         jobs.into_iter()
             .map(|(index, pref)| {
-                let plugin =
-                    LoadedPlugin::clap_restoring_for_test(fake_plugin_for_test(false), &pref);
+                let plugin = fake_restoring_for_test(&pref);
                 let slot = Slot::with_plugin_for_test(pref.clone(), plugin, 96_000);
                 (index, pref, slot)
             })
@@ -633,8 +625,12 @@ fn processing_a_slot_sets_the_processed_flag_once() {
     drop(chain.restore(Vec::new()));
 }
 
+/// A CLAP insert has no instance lock the audio thread could find busy:
+/// its editor working on the UI side never makes a block skip it.  A
+/// restart pauses it instead, and the paused block still comes out by the
+/// insert's latency.
 #[test]
-fn a_clap_insert_skipped_by_its_editor_or_a_restart_keeps_its_latency() {
+fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_in_a_restart() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
@@ -647,49 +643,53 @@ fn a_clap_insert_skipped_by_its_editor_or_a_restart_keeps_its_latency() {
     chain.process(&mut left, &mut right, 128);
     assert_eq!(left[0], 1.0);
 
-    // Its editor holds the plugin: the block is the input, 64 frames late.
-    let Some(plugin) = chain.slot_links()[0]
-        .plugin
-        .as_ref()
-        .and_then(super::PluginHandle::legacy_clap)
-    else {
+    let Some(handle) = chain.slot_links()[0].plugin.clone() else {
         panic!("a CLAP insert");
     };
-    {
-        let _editor = plugin.lock().unwrap();
+    // Its editor holds the plugin's UI side: the block still runs it.
+    let ran = handle.with_clap(|_editor| {
         let mut left = impulse(128, 36);
         let mut right = impulse(128, 36);
         chain.process(&mut left, &mut right, 128);
-        // The switch from the plugin's output smooths its step over 2 ms
-        // (96 frames) from the constant down; the impulse after it comes
-        // 64 frames late.
-        assert_eq!(left[0], 1.0);
-        assert!(left.windows(2).take(95).all(|pair| pair[1] < pair[0]));
-        assert_eq!(left[96..], impulse(128, 100)[96..]);
-    }
-    // The normal block before and the locked one now: one lock skip.
+        left
+    });
+    assert_eq!(ran, Some(vec![1.0; 128]));
+    // The normal block and the one under the editor: no skip.
     assert_eq!(
         chain.slot_mut_for_test(0).controls.lock_stats(),
         crate::audio::LockStats {
             attempts: 2,
-            skips: 1,
+            skips: 0,
         }
     );
-    // A restart passes the block through: still 64 frames late.
+
+    // A restart: the UI asks for a pause, the block passes through, 64
+    // frames late.
     restart_fake_with_latency_for_test(64);
-    let mut left = impulse(128, 0);
-    let mut right = impulse(128, 0);
+    assert!(!handle.service());
+    let mut left = impulse(128, 36);
+    let mut right = impulse(128, 36);
     chain.process(&mut left, &mut right, 128);
-    assert_eq!(left, impulse(128, 64));
+    // The switch from the plugin's output smooths its step over 2 ms
+    // (96 frames) from the constant down; the impulse after it comes 64
+    // frames late.
+    assert_eq!(left[0], 1.0);
+    assert!(left.windows(2).take(95).all(|pair| pair[1] < pair[0]));
+    assert_eq!(left[96..], impulse(128, 100)[96..]);
     // The restart's pass-through is an attempt, not a missed lock.
     assert_eq!(
         chain.slot_mut_for_test(0).controls.lock_stats(),
         crate::audio::LockStats {
             attempts: 3,
-            skips: 1,
+            skips: 0,
         }
     );
-    drop(plugin);
+    // Restarted and resumed: it processes again.
+    handle.service();
+    assert!(!handle.shared().restart_pending());
+    chain.process(&mut left, &mut right, 128);
+    assert_eq!(left[127], 1.0);
+    drop(handle);
     drop(chain.restore(Vec::new()));
 }
 

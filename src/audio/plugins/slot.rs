@@ -37,7 +37,7 @@ pub(crate) struct SlotControls {
 }
 
 impl SlotControls {
-    fn new(pref: &PluginPref) -> Self {
+    pub(crate) fn new(pref: &PluginPref) -> Self {
         Self {
             mix: AtomicU32::new(pref.mix.clamp(0.0, 1.0).to_bits()),
             bypass: AtomicBool::new(pref.bypass),

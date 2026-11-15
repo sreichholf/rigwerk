@@ -9,9 +9,6 @@
 //! both take `&mut self`.  Everything is allocated there; `push` and `drain`
 //! never allocate or lock, so either side may be the audio thread.
 
-// No callers yet: they arrive with the VST3/CLAP processor/controller split (#28).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -266,6 +263,8 @@ impl ParamReceiver {
     /// slot the producer fills after the snapshot is kept, with the ring
     /// entries ahead of it, so each parameter loses only its oldest changes
     /// and keeps its newest whenever it keeps any.
+    // For a VST3 state load (#28); only the tests call it yet.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn discard(&mut self) {
         self.drain(|_, _, _| {});
     }

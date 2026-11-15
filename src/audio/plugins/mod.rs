@@ -50,8 +50,18 @@ pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
 pub(crate) use chain::PluginChain;
 pub(crate) use handle::PluginHandle;
-pub(crate) use load::{service_clap, Restore, MAX_BLOCK};
+#[cfg(test)]
+pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
+pub(crate) use link::{
+    ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
+};
+pub(crate) use load::{Restore, MAX_BLOCK};
+#[cfg(test)]
+pub(crate) use pause::PAUSE_STALL;
+#[cfg(test)]
+pub(crate) use slot::SlotControls;
 pub(crate) use slot::{drain_deferred_plugins, SlotLink};
+pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender};
 
 #[cfg(test)]
 pub(crate) use fixtures::vst3_fixture;
