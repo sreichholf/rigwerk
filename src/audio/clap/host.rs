@@ -295,17 +295,6 @@ impl HostState {
             || self.latency_changed.load(Ordering::Acquire)
     }
 
-    /// A state for tests that only exercise slot bookkeeping.
-    #[cfg(test)]
-    pub(crate) fn for_test(ports_changed: bool) -> Self {
-        let mut state = Self::new();
-        // Bookkeeping stand-ins stay on the caller even if another test has
-        // claimed the process-wide UI thread.
-        state.main_thread = std::thread::current().id();
-        state.ports_changed.store(ports_changed, Ordering::Relaxed);
-        state
-    }
-
     /// Saves the plugin's state through `clap_plugin_state.save`.  That is a
     /// main-thread call which CLAP allows while the audio thread processes,
     /// so it runs under the target's read lock instead of the instance mutex

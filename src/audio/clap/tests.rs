@@ -147,6 +147,22 @@ pub(crate) fn restart_fake_with_latency_for_test(latency: u32) {
     fake::request_restart();
 }
 
+/// A loaded fake CLAP effect (as [`fake_plugin_for_test`]) with the state
+/// extension: `state.save` writes `state`, until
+/// [`set_fake_state_for_test`] changes it.
+pub(crate) fn fake_plugin_with_state_for_test(state: &[u8]) -> ClapPlugin {
+    const MAIN: u32 = clap_sys::ext::audio_ports::CLAP_AUDIO_PORT_IS_MAIN;
+    fake::reset(fake::Fail::Nothing);
+    fake::set_state(state);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    fake::load("fake").expect("load the fake plugin")
+}
+
+/// What the stateful fakes on this thread save from now on.
+pub(crate) fn set_fake_state_for_test(state: &[u8]) {
+    fake::set_state(state);
+}
+
 /// Makes `plugin` report a channel-count change, as a real plugin does
 /// through `clap_host_audio_ports.rescan`.
 pub(crate) fn rescan_ports_for_test(plugin: &ClapPlugin) {
@@ -217,7 +233,31 @@ mod fake {
         /// The host of the instance created last, for the helpers that
         /// act as that plugin.
         static HOST: Cell<*const clap_host> = const { Cell::new(ptr::null()) };
+        /// What `state.save` writes; `None` leaves out the extension.
+        static STATE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
     }
+
+    pub(super) fn set_state(state: &[u8]) {
+        STATE.with(|saved| *saved.borrow_mut() = Some(state.to_vec()));
+    }
+
+    unsafe extern "C" fn state_save(
+        _plugin: *const clap_plugin,
+        stream: *const clap_sys::stream::clap_ostream,
+    ) -> bool {
+        log("state.save");
+        let bytes = STATE.with(|state| state.borrow().clone().unwrap_or_default());
+        let stream = unsafe { &*stream };
+        let write = stream.write.expect("ostream write");
+        let written = unsafe { write(stream, bytes.as_ptr() as *const c_void, bytes.len() as u64) };
+        written == bytes.len() as i64
+    }
+
+    static STATE_EXT: clap_sys::ext::state::clap_plugin_state =
+        clap_sys::ext::state::clap_plugin_state {
+            save: Some(state_save),
+            load: None,
+        };
 
     /// One fake instance's lifecycle, kept in `plugin_data` so several
     /// fakes on one thread are checked separately.
@@ -257,6 +297,7 @@ mod fake {
         SEEN.with(|seen| seen.borrow_mut().take());
         LATENCY.with(|latency| latency.set(None));
         NEXT_LATENCY.with(|latency| latency.set(None));
+        STATE.with(|state| state.borrow_mut().take());
         gui::reset();
         // `NoAudioPorts` declares the extension with no ports at all.
         PORTS_DECLARED.with(|ports| {
@@ -445,6 +486,11 @@ mod fake {
         }
         if id == CLAP_EXT_LATENCY && LATENCY.with(Cell::get).is_some() {
             return (&LATENCY_EXT as *const clap_plugin_latency).cast();
+        }
+        if id == clap_sys::ext::state::CLAP_EXT_STATE
+            && STATE.with(|state| state.borrow().is_some())
+        {
+            return (&STATE_EXT as *const clap_sys::ext::state::clap_plugin_state).cast();
         }
         gui::extension(id)
     }

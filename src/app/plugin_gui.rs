@@ -20,7 +20,7 @@ use vst3_host::PluginWindow;
 use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{ClapPlugin, GuiVisibility, HostState, ParentWindow, ResizeHints};
-use crate::audio::{plugin_instance_id, EngineState, PluginHandle, PluginView};
+use crate::audio::{EngineState, PluginHandle, PluginView};
 /// How often a Linux VST3 editor's run loop is serviced while a bridge runs.
 /// Every frame would hold the instance lock often enough for the audio
 /// callback to miss many blocks; at about 30 Hz the editor still paints.
@@ -55,6 +55,9 @@ pub(crate) struct PluginGuiWindow {
     pub(crate) key: InsertKey,
     kind: GuiKind,
     last_sync: Instant,
+    /// The plugin this editor shows.  Declared after `kind`, so the editor
+    /// is detached before this reference goes.
+    handle: PluginHandle,
 }
 
 enum GuiKind {
@@ -67,7 +70,6 @@ enum GuiKind {
         last_run_loop: Instant,
     },
     Clap {
-        plugin: Arc<Mutex<ClapPlugin>>,
         window: ClapGuiWindow,
     },
 }
@@ -76,10 +78,7 @@ impl PluginGuiWindow {
     /// The identity of the instance this editor belongs to, as the published
     /// insert views report it.
     fn instance_id(&self) -> usize {
-        match &self.kind {
-            GuiKind::Vst3 { plugin, .. } => plugin_instance_id(plugin),
-            GuiKind::Clap { plugin, .. } => plugin_instance_id(plugin),
-        }
+        self.handle.instance_id()
     }
 
     /// Whether the insert at this editor's key still holds its instance.
@@ -119,50 +118,48 @@ impl RigWerkApp {
             Some(owner) if self.path_count() > 1 => format!("{name} · {}", owner.name),
             _ => name,
         };
-        let opened = match &handle {
-            PluginHandle::Vst3(plugin) => {
-                let mut window = PluginWindow::new(plugin.clone());
-                match window.open() {
-                    Ok(()) => {
-                        self.plugin_gui = Some(PluginGuiWindow {
-                            key,
-                            kind: GuiKind::Vst3 {
-                                plugin: plugin.clone(),
-                                window,
-                                // Due at once, so opening the editor paints
-                                // on the first frame rather than after one
-                                // interval of a blank window.
-                                last_run_loop: run_loop_start(Instant::now()),
-                            },
-                            last_sync: Instant::now(),
-                        });
-                        true
-                    }
-                    Err(error) => {
-                        self.gui_error(error.to_string());
-                        false
-                    }
+        let opened = if let Some(plugin) = handle.legacy_vst3() {
+            let mut window = PluginWindow::new(plugin.clone());
+            match window.open() {
+                Ok(()) => {
+                    self.plugin_gui = Some(PluginGuiWindow {
+                        key,
+                        kind: GuiKind::Vst3 {
+                            plugin: plugin.clone(),
+                            window,
+                            // Due at once, so opening the editor paints
+                            // on the first frame rather than after one
+                            // interval of a blank window.
+                            last_run_loop: run_loop_start(Instant::now()),
+                        },
+                        last_sync: Instant::now(),
+                        handle: handle.clone(),
+                    });
+                    true
+                }
+                Err(error) => {
+                    self.gui_error(error.to_string());
+                    false
                 }
             }
-            PluginHandle::Clap(plugin) => {
-                match ClapGuiWindow::open(plugin.clone(), &name, f64::from(self.ui_scale)) {
-                    Ok(window) => {
-                        self.plugin_gui = Some(PluginGuiWindow {
-                            key,
-                            kind: GuiKind::Clap {
-                                plugin: plugin.clone(),
-                                window,
-                            },
-                            last_sync: Instant::now(),
-                        });
-                        true
-                    }
-                    Err(error) => {
-                        self.gui_error(error);
-                        false
-                    }
+        } else if let Some(plugin) = handle.legacy_clap() {
+            match ClapGuiWindow::open(plugin, &name, f64::from(self.ui_scale)) {
+                Ok(window) => {
+                    self.plugin_gui = Some(PluginGuiWindow {
+                        key,
+                        kind: GuiKind::Clap { window },
+                        last_sync: Instant::now(),
+                        handle,
+                    });
+                    true
+                }
+                Err(error) => {
+                    self.gui_error(error);
+                    false
                 }
             }
+        } else {
+            false
         };
         if opened {
             self.push_log("Opened the plugin's own interface.", LogTone::Green);

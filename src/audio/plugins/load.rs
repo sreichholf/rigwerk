@@ -1,4 +1,7 @@
-//! Plugin handles, loading, state capture, and host parameter helpers.
+//! Plugin loading, state capture, and the host parameter helpers the
+//! legacy instances (vst3-host, the CLAP instance mutex) are driven by.
+//! The helpers lock the instance: call them on the UI thread, through
+//! [`super::PluginHandle`].
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -7,50 +10,13 @@ use std::time::Instant;
 
 use vst3_host::{Plugin, Vst3Host};
 
-use super::super::clap::{ClapPlugin, HostState, StateSave};
+use super::super::clap::{ClapPlugin, HostState};
 use super::clamp_latency;
+use super::handle::{LoadedPlugin, PluginInstance, Saved};
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginPref, PluginState};
 
-/// A loaded plugin is shared between the audio callback (which processes it)
-/// and the window (which may show the plugin's own editor), so both sides use
-/// the same instance.
-#[derive(Clone)]
-pub(crate) enum PluginHandle {
-    Vst3(Arc<Mutex<Plugin>>),
-    Clap(Arc<Mutex<ClapPlugin>>),
-}
-
-impl PluginHandle {
-    /// Whether both handles point at the same plugin instance.
-    /// Identifies this plugin instance in [`super::PluginView::instance`].  It is
-    /// the address of the shared instance, so it stays unique for as long as
-    /// anyone (an open editor, for one) holds a clone of this handle.
-    pub(crate) fn instance_id(&self) -> usize {
-        match self {
-            PluginHandle::Vst3(plugin) => instance_id(plugin),
-            PluginHandle::Clap(plugin) => instance_id(plugin),
-        }
-    }
-
-    pub(crate) fn same(&self, other: &PluginHandle) -> bool {
-        match (self, other) {
-            (PluginHandle::Vst3(a), PluginHandle::Vst3(b)) => Arc::ptr_eq(a, b),
-            (PluginHandle::Clap(a), PluginHandle::Clap(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-
-/// The identity [`super::PluginView::instance`] reports for a shared plugin
-/// instance.  An editor that holds the `Arc` compares its own against the
-/// published view instead of fetching the handle under the chain lock; the
-/// address cannot be reused while that `Arc` keeps the instance alive.
-pub(crate) fn instance_id<T>(plugin: &Arc<T>) -> usize {
-    Arc::as_ptr(plugin) as *const () as usize
-}
-
 /// Reads a plugin's current controls in full, for
-/// [`PluginChain::apply_synced_parameters`].  This reads and formats every
+/// [`super::PluginHandle::sync_full`].  This reads and formats every
 /// control, so callers use it when a change poll cannot see the edits: a CLAP
 /// editor (no change feed), a stopped bridge, or an insert that has not
 /// processed a block, where VST3 reports parameter changes only after it has
@@ -60,8 +26,8 @@ pub(crate) fn instance_id<T>(plugin: &Arc<T>) -> usize {
 /// saved one restored into a plugin without `params.flush`) is still waiting
 /// for the next audio block, because reading the plugin then would show the
 /// old value and the sync would save it.
-pub(crate) fn read_plugin_parameters(handle: &PluginHandle) -> Option<Vec<PluginParamView>> {
-    if let PluginHandle::Clap(clap) = handle {
+pub(crate) fn read_plugin_parameters(handle: &PluginInstance) -> Option<Vec<PluginParamView>> {
+    if let PluginInstance::ClapLegacy(clap) = handle {
         let clap = clap.lock().unwrap_or_else(|poison| poison.into_inner());
         if clap.has_pending_parameters() {
             return None;
@@ -86,8 +52,8 @@ pub(crate) struct ParamChange {
 /// means the format has no equivalent.  VST3 only becomes visible after a
 /// processed block, so an insert that has not processed one uses the full
 /// [`read_plugin_parameters`] read instead.
-pub(crate) fn take_parameter_changes(handle: &PluginHandle) -> Option<Vec<ParamChange>> {
-    let PluginHandle::Vst3(plugin) = handle else {
+pub(crate) fn take_parameter_changes(handle: &PluginInstance) -> Option<Vec<ParamChange>> {
+    let PluginInstance::Vst3Legacy(plugin) = handle else {
         return None;
     };
     let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -125,8 +91,8 @@ pub(crate) fn latest_parameter_values(changes: Vec<(u32, f64)>) -> Vec<(u32, f64
 /// would otherwise be applied by the next change poll, putting an older value
 /// back.  Formatting is the expensive part of [`take_parameter_changes`] and
 /// would be thrown away here.  `None` means the format has no change feed.
-pub(crate) fn take_parameter_values(handle: &PluginHandle) -> Option<Vec<(u32, f64)>> {
-    let PluginHandle::Vst3(plugin) = handle else {
+pub(crate) fn take_parameter_values(handle: &PluginInstance) -> Option<Vec<(u32, f64)>> {
+    let PluginInstance::Vst3Legacy(plugin) = handle else {
         return None;
     };
     let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -322,39 +288,10 @@ impl Vst3Service {
     }
 }
 
-/// One plugin whose state [`PluginChain::state_requests`] wants captured.
-pub(crate) struct StateRequest {
-    pub(crate) index: usize,
-    pub(crate) handle: PluginHandle,
-    pub(crate) host: Option<Arc<HostState>>,
-    /// The saved parameters at request time, kept with the blob as its
-    /// snapshot.
-    pub(crate) params: Vec<PluginParamPref>,
-}
-
-/// Captures one plugin's opaque state.  Call it on the UI thread without the
-/// chain lock.  CLAP saves through the main-thread target and never takes the
-/// instance lock, so the audio callback keeps processing the insert; VST3 has
-/// to lock the instance, which is why only stale slots are requested.
-pub(crate) fn capture_state(request: &StateRequest) -> Capture {
-    let bytes = match (&request.handle, &request.host) {
-        (PluginHandle::Clap(_), Some(host)) => match host.save_state() {
-            StateSave::Saved(bytes) => bytes,
-            StateSave::Unavailable => return Capture::Failed,
-            StateSave::Deferred => return Capture::Deferred,
-        },
-        (PluginHandle::Clap(_), None) => return Capture::Failed,
-        (PluginHandle::Vst3(plugin), _) => {
-            match plugin
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .save_state()
-            {
-                Ok(bytes) => bytes,
-                Err(_) => return Capture::Failed,
-            }
-        }
-    };
+/// The capture of `bytes` a plugin saved, with `params` as the blob's
+/// snapshot of the saved values.  An empty or oversized blob is a failed
+/// capture.
+pub(crate) fn captured_state(bytes: &[u8], params: &[PluginParamPref]) -> Capture {
     if bytes.is_empty() {
         Capture::Failed
     } else if bytes.len() > MAX_STATE_BLOB {
@@ -364,14 +301,14 @@ pub(crate) fn capture_state(request: &StateRequest) -> Capture {
         );
         Capture::Failed
     } else {
-        Capture::Saved(PluginState::capture(&bytes, &request.params))
+        Capture::Saved(PluginState::capture(bytes, params))
     }
 }
 
 /// The largest state blob kept in the preferences file.
 const MAX_STATE_BLOB: usize = 8 * 1024 * 1024;
 
-/// The outcome of [`capture_state`].
+/// The outcome of [`super::PluginHandle::capture_state`].
 #[derive(Debug)]
 pub(crate) enum Capture {
     Saved(PluginState),
@@ -488,40 +425,31 @@ pub(crate) fn merge_synced_params(
         .collect()
 }
 
-pub(crate) fn host_parameters(handle: &PluginHandle) -> Vec<PluginParamView> {
+pub(crate) fn host_parameters(handle: &PluginInstance) -> Vec<PluginParamView> {
     match handle {
-        PluginHandle::Vst3(plugin) => {
+        PluginInstance::Vst3Legacy(plugin) => {
             let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
             parameter_views(&plugin)
         }
-        PluginHandle::Clap(plugin) => {
+        PluginInstance::ClapLegacy(plugin) => {
             let plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
             plugin.parameters()
         }
     }
 }
 
-pub(crate) fn host_has_editor(handle: &PluginHandle) -> bool {
+pub(crate) fn host_set_parameter(
+    handle: &PluginInstance,
+    id: u32,
+    value: f64,
+) -> Result<(), String> {
     match handle {
-        PluginHandle::Vst3(plugin) => plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .has_editor(),
-        PluginHandle::Clap(plugin) => plugin
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .has_editor(),
-    }
-}
-
-pub(crate) fn host_set_parameter(handle: &PluginHandle, id: u32, value: f64) -> Result<(), String> {
-    match handle {
-        PluginHandle::Vst3(plugin) => plugin
+        PluginInstance::Vst3Legacy(plugin) => plugin
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .set_parameter(id, value.clamp(0.0, 1.0))
             .map_err(|error| format!("Could not set parameter: {error}")),
-        PluginHandle::Clap(plugin) => plugin
+        PluginInstance::ClapLegacy(plugin) => plugin
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .set_parameter(id, value),
@@ -529,13 +457,17 @@ pub(crate) fn host_set_parameter(handle: &PluginHandle, id: u32, value: f64) -> 
 }
 
 /// The plugin's own text for one control value, `None` when it has none.
-pub(crate) fn host_format_parameter(handle: &PluginHandle, id: u32, value: f64) -> Option<String> {
+pub(crate) fn host_format_parameter(
+    handle: &PluginInstance,
+    id: u32,
+    value: f64,
+) -> Option<String> {
     match handle {
-        PluginHandle::Vst3(vst3) => {
+        PluginInstance::Vst3Legacy(vst3) => {
             let vst3 = vst3.lock().unwrap_or_else(|poison| poison.into_inner());
             vst3.format_parameter(id, value).ok()
         }
-        PluginHandle::Clap(clap) => Some(
+        PluginInstance::ClapLegacy(clap) => Some(
             clap.lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .display_for(id, value),
@@ -543,9 +475,11 @@ pub(crate) fn host_format_parameter(handle: &PluginHandle, id: u32, value: f64) 
     }
 }
 
-pub(crate) fn host_reset_parameters(handle: &PluginHandle) -> Result<Vec<PluginParamView>, String> {
+pub(crate) fn host_reset_parameters(
+    handle: &PluginInstance,
+) -> Result<Vec<PluginParamView>, String> {
     match handle {
-        PluginHandle::Vst3(plugin) => {
+        PluginInstance::Vst3Legacy(plugin) => {
             let mut plugin = plugin.lock().unwrap_or_else(|poison| poison.into_inner());
             let parameters = parameter_views(&plugin);
             for parameter in parameters.iter().filter(|parameter| !parameter.read_only) {
@@ -553,7 +487,7 @@ pub(crate) fn host_reset_parameters(handle: &PluginHandle) -> Result<Vec<PluginP
             }
             Ok(parameter_views(&plugin))
         }
-        PluginHandle::Clap(plugin) => plugin
+        PluginInstance::ClapLegacy(plugin) => plugin
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .reset_parameters(),
@@ -561,7 +495,7 @@ pub(crate) fn host_reset_parameters(handle: &PluginHandle) -> Result<Vec<PluginP
 }
 
 /// Reads the plugin's controls once, using the plugin's own value formatting.
-fn parameter_views(plugin: &Plugin) -> Vec<PluginParamView> {
+pub(crate) fn parameter_views(plugin: &Plugin) -> Vec<PluginParamView> {
     let Ok(parameters) = plugin.get_parameters() else {
         return Vec::new();
     };
@@ -587,15 +521,25 @@ fn parameter_views(plugin: &Plugin) -> Vec<PluginParamView> {
 
 /// Opens the plugin with its saved state and controls applied.  The flag says
 /// whether the saved state blob still describes the new instance exactly (it
-/// restored and no newer control value had to be applied on top).
+/// restored and no newer control value had to be applied on top); the
+/// instance starts stale otherwise.
 pub(crate) fn load_plugin(
     pref: &PluginPref,
     sample_rate: u32,
-) -> Result<(PluginHandle, bool), String> {
+) -> Result<(LoadedPlugin, bool), String> {
     let restore = Restore::from_pref(pref);
+    let saved = |current: bool| Saved {
+        params: pref.params.clone(),
+        state: pref.state.clone(),
+        stale: !current,
+    };
     match pref.format {
-        PluginFormat::Vst3 => load_vst3(pref, &restore, sample_rate)
-            .map(|(plugin, current)| (PluginHandle::Vst3(Arc::new(Mutex::new(plugin))), current)),
+        PluginFormat::Vst3 => load_vst3(pref, &restore, sample_rate).map(|(plugin, current)| {
+            (
+                LoadedPlugin::vst3_legacy(plugin, saved(current), sample_rate),
+                current,
+            )
+        }),
         PluginFormat::Clap => {
             let plugin_id = pref
                 .class_id
@@ -608,7 +552,7 @@ pub(crate) fn load_plugin(
             }
             super::super::clap::ClapPlugin::load(&path, plugin_id, sample_rate, MAX_BLOCK, &restore)
                 .map(|(plugin, current)| {
-                    (PluginHandle::Clap(Arc::new(Mutex::new(plugin))), current)
+                    (LoadedPlugin::clap_legacy(plugin, saved(current)), current)
                 })
         }
     }

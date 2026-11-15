@@ -52,15 +52,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use std::time::Instant;
 
-use super::clap::{ClapPlugin, HostState};
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::output_map::level_gain;
-use super::plugins::{PluginChain, PluginView, SlotLink, Vst3Service};
+use super::plugins::{PluginChain, PluginView, SlotLink};
 
 mod plugins;
-
-use plugins::ParamWrite;
 
 #[cfg(test)]
 mod tests;
@@ -223,9 +220,6 @@ impl LiveSlots {
     }
 }
 
-/// A CLAP plugin and its host state, as `service_plugins` services them.
-type ClapService = (Arc<HostState>, Arc<Mutex<ClapPlugin>>);
-
 /// A DSP time per block, as the mixer publishes it: one path's, or every
 /// live path's together (`Shared::total_dsp`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -352,36 +346,27 @@ pub(crate) struct PathControls {
     /// its DSP budget.  Written by the mixer at the end of each block (see
     /// `mixer::PathProcessor::publish_dsp`), read by Diagnostics and Live.
     dsp: DspCell,
-    /// The CLAP plugins the UI services every frame, published with the
-    /// views so `service_plugins` does not take the chain lock to find them.
+    /// Each insert's mix, bypass and plugin handle, published with the
+    /// views, so the UI sets mix, bypass and plugin controls, services the
+    /// plugins, captures their state and saves them without the chain lock
+    /// (see `plugins`, "Chain handover").
     ///
     /// Declared before `plugins` on purpose: fields drop in order, so these
     /// extra references are gone before the chain hands its slots to the
     /// deferred queue, and the main thread's drain is always the last owner.
-    pub(super) plugin_services: Mutex<Arc<[ClapService]>>,
-    /// The VST3 plugins `service_plugins` services (restart requests and
-    /// latency), published the same way and declared here for the same
-    /// reason.
-    vst3_services: Mutex<Arc<[Arc<Vst3Service>]>>,
-    /// Each insert's mix, bypass and plugin, published with the views, so
-    /// the UI sets mix, bypass and plugin controls without the chain lock
-    /// (see `plugins`, "Chain handover").  Declared before `plugins`
-    /// for the same reason as the service lists.
-    slot_links: Mutex<Arc<[SlotLink]>>,
-    /// Control values set through `slot_links`, stored into the chain the
-    /// next time the UI holds its lock (an edit, a state capture, a save).
-    param_backlog: Mutex<Vec<ParamWrite>>,
+    pub(super) slot_links: Mutex<Arc<[SlotLink]>>,
     /// The insert views the UI draws.  Republished by every chain edit while
     /// that edit still holds the chain lock, and read without it.  This lock
     /// is separate from the chain's and the audio thread never takes it, so
     /// only UI-side readers and writers contend on it, for an `Arc` clone.
     plugin_views: Mutex<Arc<[PluginView]>>,
     plugin_views_version: AtomicU64,
-    /// Set by the audio thread when an insert fails; the UI thread rebuilds
-    /// the views in `service_plugins`, so the audio thread never builds them.
+    /// Set by the audio thread when an insert fails or the chain latency
+    /// moved; the UI thread rebuilds the views from the links in
+    /// `service_plugins`, so the audio thread never builds them.
     plugin_views_dirty: AtomicBool,
     /// What the published views were built from, so the per-frame checks in
-    /// `service_plugins` can skip the chain lock when nothing changed.
+    /// `service_plugins` can skip the rebuild when nothing changed.
     published_ports_changed: AtomicUsize,
     chain_rate: AtomicU32,
     chain_unopened: AtomicBool,
@@ -441,10 +426,7 @@ impl PathControls {
             meter_l: AtomicU32::new(0.0f32.to_bits()),
             meter_r: AtomicU32::new(0.0f32.to_bits()),
             dsp: DspCell::default(),
-            plugin_services: Mutex::new(Arc::from(Vec::new())),
-            vst3_services: Mutex::new(Arc::from(Vec::new())),
             slot_links: Mutex::new(Arc::from(Vec::new())),
-            param_backlog: Mutex::new(Vec::new()),
             plugin_views: Mutex::new(Arc::from(Vec::new())),
             plugin_views_version: AtomicU64::new(0),
             plugin_views_dirty: AtomicBool::new(false),

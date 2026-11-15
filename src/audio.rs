@@ -156,8 +156,8 @@ pub use path::{
 pub(crate) use plugins::service_clap;
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;
+pub(crate) use plugins::PluginHandle;
 pub(crate) use plugins::MAX_ALIGN;
-pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
 pub(crate) use shared::{FollowerLink, FollowerPlan, SCOPE_LEN};

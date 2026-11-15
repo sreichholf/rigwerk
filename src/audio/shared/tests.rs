@@ -297,14 +297,10 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_chain_lock() {
     shared.paths[0].edit_chain(|chain| {
         chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
     });
-    let Some(handle) = shared.plugin_handle(1) else {
+    // What an open editor holds.
+    let Some(editor) = shared.plugin_handle(1) else {
         panic!("the fake is loaded");
     };
-    let editor = match &handle {
-        crate::audio::PluginHandle::Clap(plugin) => std::sync::Arc::clone(plugin),
-        crate::audio::PluginHandle::Vst3(_) => unreachable!(),
-    };
-    drop(handle);
 
     const HELD: std::time::Duration = std::time::Duration::from_secs(5);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -316,10 +312,7 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_chain_lock() {
                 let views = shared.plugin_views();
                 assert_eq!(views.len(), 2);
                 // The open-editor poll: identity from the published view.
-                assert_eq!(
-                    views[1].instance,
-                    Some(crate::audio::plugin_instance_id(&editor))
-                );
+                assert_eq!(views[1].instance, Some(editor.instance_id()));
                 shared.service_plugins();
                 shared.align_plugins_to_output_rate();
             }
@@ -375,6 +368,135 @@ fn mix_bypass_and_controls_never_wait_for_the_chain_lock() {
     drop(path.edit_chain(|chain| chain.restore(Vec::new())));
 }
 
+/// A state capture, a preference save, marking a state stale and a full
+/// editor sync all go through the published links: the worker finishes
+/// while this thread holds the chain lock, and its capture succeeds.  A
+/// capture off the plugin's main thread is deferred and leaves the insert
+/// stale with its previous blob.
+#[test]
+fn capture_and_prefs_never_wait_for_the_chain_lock() {
+    use crate::audio::clap::tests::{fake_plugin_with_state_for_test, set_fake_state_for_test};
+    let _main = claim_main_thread();
+    let shared = super::Shared::new(48_000);
+    let path = &shared.paths[0];
+    const HELD: std::time::Duration = std::time::Duration::from_secs(5);
+    let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            // The fake's state is per thread, and CLAP saves only on the
+            // thread that loaded it: it is loaded, saved and destroyed here.
+            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            path.restore_plugins(vec![missing("a.vst3")]);
+            path.edit_chain(|chain| {
+                chain.insert_clap_for_test(fake_plugin_with_state_for_test(b"saved state"))
+            });
+            path.set_plugin_mix(1, 0.5);
+            loaded_tx.send(()).unwrap();
+            held_rx.recv().unwrap();
+            let mut saved = Vec::new();
+            for _ in 0..100 {
+                path.mark_plugin_state_stale(1);
+                path.capture_plugin_states();
+                let _ = path.sync_plugin_parameters(1, true);
+                saved = path.plugin_prefs();
+            }
+            let handle = path.plugin_handle(1).expect("the fake is loaded");
+            let captured = !handle.wants_capture();
+            done_tx.send(()).unwrap();
+
+            // A capture off the plugin's main thread is deferred.
+            set_fake_state_for_test(b"newer state");
+            path.mark_plugin_state_stale(1);
+            std::thread::scope(|scope| {
+                scope.spawn(|| path.capture_plugin_states()).join().unwrap();
+            });
+            let deferred = (handle.wants_capture(), handle.saved().1);
+            drop(handle);
+            drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+            (saved, captured, deferred)
+        });
+        loaded_rx.recv().unwrap();
+        let chain = path.plugins.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let finished = done_rx.recv_timeout(HELD);
+        drop(chain);
+        assert!(
+            finished.is_ok(),
+            "a capture or a save waited for the chain lock"
+        );
+        let (saved, captured, (still_stale, kept)) = worker.join().unwrap();
+
+        // The save is the whole chain, the unopened slot included.
+        let names: Vec<&str> = saved.iter().map(|pref| pref.path.as_str()).collect();
+        assert_eq!(names, ["a.vst3", ""]);
+        assert_eq!(saved[1].mix, 0.5);
+        let state = saved[1].state.as_ref().expect("the capture succeeded");
+        assert_eq!(state.bytes().as_deref(), Some(&b"saved state"[..]));
+        assert_eq!(
+            state.params, saved[1].params,
+            "the snapshot is the saved values"
+        );
+        assert!(captured, "a successful capture leaves nothing to capture");
+
+        assert!(still_stale, "a deferred capture stays stale");
+        assert_eq!(
+            kept.as_ref().and_then(|state| state.bytes()).as_deref(),
+            Some(&b"saved state"[..]),
+            "a deferred capture keeps the previous blob"
+        );
+    });
+}
+
+/// A plugin that restarts with a new latency is republished by the next
+/// service frame (views and the path's latency total) while this thread
+/// holds the chain lock.
+#[test]
+fn a_latency_change_republishes_without_the_chain_lock() {
+    use crate::audio::clap::tests::{
+        fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
+    };
+    let _main = claim_main_thread();
+    let shared = super::Shared::new(48_000);
+    let path = &shared.paths[0];
+    const HELD: std::time::Duration = std::time::Duration::from_secs(5);
+    let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            // The fake's state is per thread: it is loaded, restarted and
+            // serviced here.
+            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            path.edit_chain(|chain| {
+                chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64))
+            });
+            assert_eq!(path.latency_samples(), 64);
+            loaded_tx.send(()).unwrap();
+            held_rx.recv().unwrap();
+            // It has not processed, so the main thread restarts it at once.
+            restart_fake_with_latency_for_test(8);
+            path.service_plugins();
+            let latency = (path.plugin_views()[0].latency, path.latency_samples());
+            done_tx.send(()).unwrap();
+            // Destroyed on the thread that loaded it.
+            drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+            latency
+        });
+        loaded_rx.recv().unwrap();
+        let chain = path.plugins.lock().unwrap();
+        held_tx.send(()).unwrap();
+        let finished = done_rx.recv_timeout(HELD);
+        drop(chain);
+        assert!(
+            finished.is_ok(),
+            "the latency republish waited for the chain lock"
+        );
+        assert_eq!(worker.join().unwrap(), (8, 8));
+    });
+}
+
 #[test]
 fn a_plugin_latency_change_republishes_the_views() {
     use crate::audio::clap::tests::{
@@ -407,7 +529,7 @@ fn a_panicking_edit_clears_what_it_published() {
         chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
     });
     assert_eq!(shared.plugin_views().len(), 1);
-    assert_eq!(shared.paths[0].plugin_services.lock().unwrap().len(), 1);
+    assert_eq!(shared.paths[0].slot_links.lock().unwrap().len(), 1);
     assert!(shared.paths[0].has_plugins());
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -419,7 +541,7 @@ fn a_panicking_edit_clears_what_it_published() {
     assert!(panicked.is_err());
     assert!(shared.paths[0].plugins.is_poisoned());
     assert!(shared.plugin_views().is_empty());
-    assert!(shared.paths[0].plugin_services.lock().unwrap().is_empty());
+    assert!(shared.paths[0].slot_links.lock().unwrap().is_empty());
     assert!(!shared.paths[0].has_plugins());
     // A poisoned chain refuses further edits and publishes nothing new.
     shared.set_plugin_bypass(0, false);
@@ -501,7 +623,10 @@ fn a_clap_port_change_is_published_on_the_next_service_frame() {
         chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
     });
     assert!(shared.plugin_views()[0].error.is_none());
-    let Some(crate::audio::PluginHandle::Clap(plugin)) = shared.plugin_handle(0) else {
+    let Some(plugin) = shared
+        .plugin_handle(0)
+        .and_then(|handle| handle.legacy_clap())
+    else {
         panic!("the fake is a loaded CLAP slot");
     };
     crate::audio::clap::tests::rescan_ports_for_test(&plugin.lock().unwrap());

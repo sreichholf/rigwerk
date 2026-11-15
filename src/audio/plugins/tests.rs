@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::super::clap::{HostState, AUDIO_PORTS_CHANGED};
+use super::super::clap::AUDIO_PORTS_CHANGED;
 use super::load::{
     apply_parameter_changes, latest_parameter_values, merge_synced_params, params_to_restore,
     Capture, ParamChange, Restore,
@@ -306,22 +306,39 @@ fn no_reported_changes_leave_everything_unchanged() {
     assert_eq!(saved, vec![param(1, 0.6)]);
 }
 
+/// A slot holding a fake CLAP plugin, the way a real load fills one in.
+fn fake_clap_slot(fail_process: bool) -> Slot {
+    use super::super::clap::tests::fake_plugin_for_test;
+    use super::handle::LoadedPlugin;
+    Slot::with_plugin_for_test(
+        PluginPref::default(),
+        LoadedPlugin::clap_for_test(fake_plugin_for_test(fail_process)),
+        48_000,
+    )
+}
+
 #[test]
 fn a_port_change_is_visible_without_processing_a_block() {
-    let mut slot = Slot::empty(PluginPref::default());
-    slot.clap_host = Some(Arc::new(HostState::for_test(true)));
-    assert!(slot.ports_changed());
-    assert_eq!(slot.resolved_error().as_deref(), Some(AUDIO_PORTS_CHANGED));
-
-    slot.clap_host = Some(Arc::new(HostState::for_test(false)));
+    let slot = fake_clap_slot(false);
     assert!(!slot.ports_changed());
     assert!(slot.resolved_error().is_none());
+
+    let plugin = slot
+        .plugin
+        .as_ref()
+        .unwrap()
+        .handle()
+        .legacy_clap()
+        .unwrap();
+    super::super::clap::tests::rescan_ports_for_test(&plugin.lock().unwrap());
+    assert!(slot.ports_changed());
+    assert_eq!(slot.resolved_error().as_deref(), Some(AUDIO_PORTS_CHANGED));
 }
 
 #[test]
 fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
     use super::super::clap::tests::fake_plugin_for_test;
-    use super::slot::ProcessFailure;
+    use super::link::{ClapFailure, ProcessFailure};
     use super::PluginChain;
 
     let mut chain = PluginChain::new(48_000);
@@ -333,12 +350,10 @@ fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
 
     // The audio thread kept the plugin's own error and wrote no text.
     let slot = chain.slot_mut_for_test(0);
-    assert!(matches!(
-        slot.process_failure,
-        Some(ProcessFailure::Clap(
-            "The CLAP plugin reported a processing error."
-        ))
-    ));
+    assert_eq!(
+        slot.plugin.as_ref().unwrap().shared().failure(),
+        Some(ProcessFailure::Clap(ClapFailure::ProcessError))
+    );
     assert!(slot.error.is_none());
     assert!(slot.failed());
     assert_eq!(chain.active(), 0, "the failed insert left the chain");
@@ -356,10 +371,14 @@ fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
 
 #[test]
 fn a_vst3_processing_failure_is_formatted_from_its_error() {
-    use super::slot::ProcessFailure;
+    use super::link::ProcessFailure;
 
-    let mut slot = Slot::empty(PluginPref::default());
-    slot.process_failure = Some(ProcessFailure::Vst3(vst3_host::Error::ProcessFailed(1)));
+    let mut slot = fake_clap_slot(false);
+    slot.plugin
+        .as_ref()
+        .unwrap()
+        .shared()
+        .fail(ProcessFailure::Vst3(1));
     assert!(slot.failed());
     assert_eq!(
         slot.view().error.as_deref(),
@@ -375,7 +394,7 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
-    use super::{service_clap, PluginChain};
+    use super::PluginChain;
     use std::sync::atomic::Ordering;
 
     let mut chain = PluginChain::new(48_000);
@@ -395,9 +414,15 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     chain.set_bypass(1, true);
     assert_eq!(chain.latency_samples(), 112);
     // A failed insert is out of the chain.
-    chain.slot_mut_for_test(0).process_failure = Some(super::slot::ProcessFailure::Clap(
-        "The CLAP plugin reported a processing error.",
-    ));
+    chain
+        .slot_mut_for_test(0)
+        .plugin
+        .as_ref()
+        .unwrap()
+        .shared()
+        .fail(super::link::ProcessFailure::Clap(
+            super::link::ClapFailure::ProcessError,
+        ));
     assert_eq!(chain.latency_samples(), 96);
 
     let views = chain.views();
@@ -408,11 +433,15 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
 
     let mut left = vec![0.0f32; 32];
     let mut right = vec![0.0f32; 32];
-    let services = chain.clap_services();
+    let services: Vec<_> = chain
+        .slot_links()
+        .into_iter()
+        .filter_map(|link| link.plugin)
+        .collect();
     let service_all = || {
         services
             .iter()
-            .map(|(host, plugin)| service_clap(host, plugin))
+            .map(super::PluginHandle::service)
             .fold(false, |any, changed| any | changed)
     };
     // The failure set above (outside an edit) reaches the atomic with the
@@ -441,6 +470,67 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     drop(services);
     drop(chain.restore(Vec::new()));
     assert_eq!(total.load(Ordering::Acquire), 0);
+}
+
+/// A rate rebuild restores what the handle saved since the load (the
+/// slot's own pref no longer holds it), and refuses a plan the handle moved
+/// past before the install.
+#[test]
+fn a_rate_rebuild_restores_what_the_handle_saved_since_load() {
+    use super::super::clap::tests::{
+        fake_plugin_for_test, fake_plugin_with_state_for_test, set_fake_state_for_test,
+    };
+    use super::handle::LoadedPlugin;
+    use super::PluginChain;
+
+    let _main = crate::audio::claim_main_thread();
+    let state_bytes = |pref: &PluginPref| pref.state.as_ref().and_then(PluginState::bytes);
+    let mut chain = PluginChain::new(48_000);
+    chain.insert_clap_for_test(fake_plugin_with_state_for_test(b"one"));
+    let handle = chain.slot_links()[0].plugin.clone().expect("loaded");
+    handle.mark_state_stale();
+    handle.capture_state();
+    assert!(!handle.wants_capture());
+
+    let plan = chain.reload_plan(96_000).expect("a new rate reloads");
+    assert_eq!(plan.jobs.len(), 1);
+    assert_eq!(state_bytes(&plan.jobs[0].1).as_deref(), Some(&b"one"[..]));
+
+    // The plugin's state moves on before the rebuilt slot is installed.
+    set_fake_state_for_test(b"two");
+    handle.mark_state_stale();
+    handle.capture_state();
+    let rebuild = |jobs: Vec<(usize, PluginPref)>| -> Vec<(usize, PluginPref, Slot)> {
+        jobs.into_iter()
+            .map(|(index, pref)| {
+                let plugin =
+                    LoadedPlugin::clap_restoring_for_test(fake_plugin_for_test(false), &pref);
+                let slot = Slot::with_plugin_for_test(pref.clone(), plugin, 96_000);
+                (index, pref, slot)
+            })
+            .collect()
+    };
+    let refused = chain.install_reload(plan.previous_rate, 96_000, rebuild(plan.jobs));
+    let Err(stale) = refused else {
+        panic!("a plan older than the saved state was installed");
+    };
+    drop(stale);
+
+    let plan = chain.reload_plan(96_000).expect("still a new rate");
+    assert_eq!(state_bytes(&plan.jobs[0].1).as_deref(), Some(&b"two"[..]));
+    let Ok(old) = chain.install_reload(plan.previous_rate, 96_000, rebuild(plan.jobs)) else {
+        panic!("the fresh plan matches the chain");
+    };
+    drop(old);
+    drop(handle);
+    let rebuilt = chain.slot_links()[0].plugin.clone().expect("loaded");
+    let (_, state) = rebuilt.saved();
+    assert_eq!(
+        state.as_ref().and_then(PluginState::bytes).as_deref(),
+        Some(&b"two"[..])
+    );
+    drop(rebuilt);
+    drop(chain.restore(Vec::new()));
 }
 
 /// An impulse at frame `at` in a block of `frames`.
@@ -548,7 +638,7 @@ fn a_clap_insert_skipped_by_its_editor_or_a_restart_keeps_its_latency() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
-    use super::{PluginChain, PluginHandle};
+    use super::PluginChain;
     let mut chain = PluginChain::new(48_000);
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64));
     let mut left = vec![0.0f32; 128];
@@ -558,7 +648,11 @@ fn a_clap_insert_skipped_by_its_editor_or_a_restart_keeps_its_latency() {
     assert_eq!(left[0], 1.0);
 
     // Its editor holds the plugin: the block is the input, 64 frames late.
-    let Some(PluginHandle::Clap(plugin)) = chain.handle(0) else {
+    let Some(plugin) = chain.slot_links()[0]
+        .plugin
+        .as_ref()
+        .and_then(super::PluginHandle::legacy_clap)
+    else {
         panic!("a CLAP insert");
     };
     {
@@ -796,7 +890,7 @@ fn vst3_fixture_each_sample_loads_lists_controls_and_processes() {
         let (handle, _) = super::load::load_plugin(&pref, 48_000)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(
-            !super::load::host_parameters(&handle).is_empty(),
+            !handle.handle().parameters().is_empty(),
             "{name} lists no controls"
         );
         drop(handle);
@@ -905,7 +999,7 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     };
     let (handle, current) = super::load::load_plugin(&blob_only, 48_000).expect("load");
     assert!(current, "the envelope restored");
-    let parameters = super::load::host_parameters(&handle);
+    let parameters = handle.handle().parameters();
     assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
     drop(handle);
 
@@ -926,7 +1020,7 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     };
     let (handle, current) = super::load::load_plugin(&hand_built, 48_000).expect("load");
     assert!(current, "the hand-built envelope restored");
-    let parameters = super::load::host_parameters(&handle);
+    let parameters = handle.handle().parameters();
     assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
     drop(handle);
 
@@ -938,8 +1032,55 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     };
     let (handle, current) = super::load::load_plugin(&legacy, 48_000).expect("load");
     assert!(current, "the raw component state restored");
-    let parameters = super::load::host_parameters(&handle);
+    let parameters = handle.handle().parameters();
     assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
+}
+
+/// A value set after the load survives a rate change (the rebuilt AGain
+/// opens with it), and a value set between a reload's plan and its install
+/// makes the install refuse the stale plan.
+#[test]
+fn vst3_fixture_again_a_rate_reload_keeps_values_set_since_load() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let gain = param_id(&only_view(&path), "Gain");
+    path.set_plugin_parameter(0, gain, 0.25).expect("set Gain");
+    path.reload_plugins_for_rate(96_000);
+    assert_eq!(path.chain_rate(), 96_000);
+    let view = only_view(&path);
+    assert!((param_value(&view.parameters, "Gain") - 0.25).abs() < 1e-6);
+    let (saved, _) = path.plugin_handle(0).expect("loaded").saved();
+    assert!(saved
+        .iter()
+        .any(|param| param.id == gain && (param.value - 0.25).abs() < 1e-6));
+    let peak = run_tone(&path, 8);
+    assert!(
+        (peak - TONE_PEAK * 0.25).abs() < 0.01,
+        "rebuilt peak {peak}"
+    );
+
+    let plan = path
+        .edit_chain(|chain| chain.reload_plan(48_000))
+        .flatten()
+        .expect("a new rate reloads");
+    path.set_plugin_parameter(0, gain, 0.75).expect("set Gain");
+    let built: Vec<_> = plan
+        .jobs
+        .into_iter()
+        .map(|(index, pref)| {
+            let (slot, _) = super::PluginChain::load_slot(pref.clone(), 48_000);
+            (index, pref, slot)
+        })
+        .collect();
+    let installed = path
+        .edit_chain(|chain| chain.install_reload(plan.previous_rate, 48_000, built))
+        .expect("the chain is not poisoned");
+    assert!(installed.is_err(), "a stale plan was installed");
+    drop(installed);
+    assert_eq!(path.chain_rate(), 96_000);
 }
 
 /// ADelay's delay is the normalized value times the rate, in samples
