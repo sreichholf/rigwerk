@@ -150,6 +150,8 @@ pub use path::{
     PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
 };
 pub(crate) use plugins::service_clap;
+#[cfg(test)]
+pub(crate) use plugins::vst3_fixture;
 pub(crate) use plugins::MAX_ALIGN;
 pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};

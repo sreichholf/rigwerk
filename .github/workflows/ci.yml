@@ -33,7 +33,19 @@ jobs:
             libxcursor-dev \
             libxi-dev \
             libgl1-mesa-dev \
-            pkg-config
+            pkg-config \
+            ninja-build \
+            xvfb \
+            libx11-xcb-dev \
+            libxcb-util-dev \
+            libxcb-cursor-dev \
+            libxcb-xkb-dev \
+            libxcb-keysyms1-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libfreetype-dev \
+            libfontconfig1-dev \
+            libgtkmm-3.0-dev
 
       # rust-toolchain.toml pins 1.95.0 (MSRV) with rustfmt + clippy.
       - uses: dtolnay/rust-toolchain@master
@@ -57,6 +69,30 @@ jobs:
 
       - name: Release build
         run: cargo build --locked --release
+
+      # The Steinberg SDK samples the vst3_fixture tests load, built by the
+      # script and cached per runner OS and script revision (which pins the
+      # SDK tag).
+      - uses: actions/cache@v5
+        with:
+          path: .vst3-fixtures/plugins
+          key: vst3-fixtures-${{ runner.os }}-${{ hashFiles('scripts/vst3-fixtures.sh') }}
+
+      - name: Build VST3 fixtures
+        timeout-minutes: 20
+        run: bash scripts/vst3-fixtures.sh .vst3-fixtures
+
+      - name: VST3 fixture tests
+        timeout-minutes: 10
+        env:
+          RIGWERK_VST3_FIXTURES: ${{ github.workspace }}/.vst3-fixtures/plugins
+        run: xvfb-run -a cargo test --locked vst3_fixture -- --nocapture --skip vst3_fixture_opens_and_closes
+
+      - name: VST3 editor test
+        timeout-minutes: 10
+        env:
+          RIGWERK_VST3_FIXTURES: ${{ github.workspace }}/.vst3-fixtures/plugins
+        run: xvfb-run -a cargo test --locked vst3_fixture_opens_and_closes -- --nocapture
 
   windows:
     name: Windows
@@ -86,3 +122,29 @@ jobs:
 
       - name: Release build
         run: cargo build --locked --release
+
+      # The Steinberg SDK samples the vst3_fixture tests load, built by the
+      # script and cached per runner OS and script revision (which pins the
+      # SDK tag).
+      - uses: actions/cache@v5
+        with:
+          path: .vst3-fixtures/plugins
+          key: vst3-fixtures-${{ runner.os }}-${{ hashFiles('scripts/vst3-fixtures.sh') }}
+
+      - name: Build VST3 fixtures
+        timeout-minutes: 20
+        shell: bash
+        run: bash scripts/vst3-fixtures.sh .vst3-fixtures
+
+      - name: VST3 fixture tests
+        timeout-minutes: 10
+        env:
+          RIGWERK_VST3_FIXTURES: ${{ github.workspace }}/.vst3-fixtures/plugins
+        run: cargo test --locked vst3_fixture -- --nocapture --skip vst3_fixture_opens_and_closes
+
+      - name: VST3 editor test
+        timeout-minutes: 10
+        env:
+          RIGWERK_VST3_FIXTURES: ${{ github.workspace }}/.vst3-fixtures/plugins
+        run: cargo test --locked vst3_fixture_opens_and_closes -- --nocapture
+

@@ -6,6 +6,8 @@
 //! only ever holds descriptors, never the plugin objects themselves.
 
 mod chain;
+#[cfg(test)]
+mod fixtures;
 mod load;
 mod pause;
 mod pref;
@@ -46,5 +48,7 @@ pub(crate) use load::{
 };
 pub(crate) use slot::drain_deferred_plugins;
 
+#[cfg(test)]
+pub(crate) use fixtures::vst3_fixture;
 #[cfg(test)]
 pub(crate) use slot::{deferred_slot_count, tracked_slots_alive};

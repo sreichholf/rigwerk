@@ -1,3 +1,4 @@
 /target/
 /shots/
 *.log
+/.vst3-fixtures/
