@@ -61,6 +61,13 @@ struct Inner {
     behind: Box<[AtomicU64]>,
 }
 
+impl Inner {
+    /// True while the ring holds an entry not yet drained.
+    fn ring_queued(&self) -> bool {
+        self.head.0.load(Ordering::Acquire) != self.tail.0.load(Ordering::Acquire)
+    }
+}
+
 /// The pushing side of a [`param_transfer`].
 pub(crate) struct ParamSender {
     inner: Arc<Inner>,
@@ -159,6 +166,23 @@ impl ParamSender {
         inner.head.0.store(head + 1, Ordering::Release);
         true
     }
+
+    /// True until the consumer has drained every change pushed so far.
+    /// False means drained, handed to a block; not that the plugin has
+    /// applied it.  No allocation, no lock.
+    ///
+    /// This scans every overflow slot (O(params)), not the pending bits: a
+    /// drain clears a word's bits before it puts back the ones it defers,
+    /// so from this thread the bits can read zero while a value still
+    /// waits.
+    pub(crate) fn has_queued(&self) -> bool {
+        let inner = &*self.inner;
+        inner.ring_queued()
+            || inner
+                .values
+                .iter()
+                .any(|slot| slot.load(Ordering::Acquire) != EMPTY)
+    }
 }
 
 impl ParamReceiver {
@@ -244,6 +268,30 @@ impl ParamReceiver {
     /// and keeps its newest whenever it keeps any.
     pub(crate) fn discard(&mut self) {
         self.drain(|_, _, _| {});
+    }
+
+    /// True when a drain would emit nothing, as far as this thread can see:
+    /// a change the producer is pushing right now may not show yet.  An
+    /// overflow value deferred behind ring entries counts as queued.
+    ///
+    /// Only the pending bits' slots are visited: the bits never read short
+    /// here, since this thread is the one that drains.
+    pub(crate) fn is_empty(&self) -> bool {
+        let inner = &*self.inner;
+        if inner.ring_queued() {
+            return false;
+        }
+        !inner.pending.iter().enumerate().any(|(word_index, word)| {
+            let mut bits = word.load(Ordering::Acquire);
+            while bits != 0 {
+                let index = word_index * 64 + bits.trailing_zeros() as usize;
+                if inner.values[index].load(Ordering::Acquire) != EMPTY {
+                    return true;
+                }
+                bits &= bits - 1;
+            }
+            false
+        })
     }
 }
 
