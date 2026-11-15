@@ -45,6 +45,14 @@ since.
 - **VST3 level lock.**  vst3-host's `Plugin::process_audio` takes a
   blocking `Mutex` (`audio_levels.lock()`) after every block, on the audio
   thread.  This is upstream, not RigWerk's code.
+- **VST3 latency changes.**  A plugin that changes its latency through
+  its processor (the SDK's host checker) never reaches the new value.
+  vst3-host 0.11 hands the processor's output parameters to the host
+  only, never to the controller, so the controller's restart request is
+  never raised.  When a restart does come, it reads `getLatencySamples`
+  before reactivating, and a plugin that applies the new latency in
+  `setActive (true)` reports the old one.  The host checker test prints
+  the value it gets.
 - **CLAP log.**  `host_log` (`clap/host.rs`) builds a `String` and replaces
   `last_log` (under `try_lock`) on whatever thread logs, so a plugin that
   logs from `process` allocates and frees on the audio thread.  Nothing
