@@ -15,6 +15,12 @@ plans and the code review has landed; that history is in git.
   `vst3-host` 0.11 opens Linux editors as X11 windows only and does not
   implement `IWaylandHost` / `IWaylandFrame`; XWayland with `DISPLAY` set
   works.  The plugin still runs, and RigWerk's parameter panel still opens.
+- A VSTGUI editor built with VST3 SDK 3.8 (the SDK's `again` sample, for
+  one) crashes RigWerk on Linux when it opens.  That VSTGUI takes the
+  `Linux::IRunLoop` from the factory's host context, and `vst3-host` 0.11
+  offers it only on the plug frame.  The editor test in
+  `app/plugin_gui/tests.rs` skips the open on Linux until the host
+  context offers it.
 
 ## Not reproduced
 
