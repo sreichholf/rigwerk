@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # System packages, a Rust toolchain new enough for eframe 0.37 (MSRV 1.95),
 # and a warm crates.io cache. Must exit. PipeWire itself is started by start.sh.
+# CMake, Ninja, xvfb and the VSTGUI libraries are for the VST3 fixtures
+# (scripts/vst3-fixtures.sh).
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -24,7 +26,22 @@ sudo apt-get install -y --no-install-recommends \
   pipewire-bin \
   pipewire-pulse \
   libpipewire-0.3-dev \
-  wireplumber
+  wireplumber \
+  cmake \
+  git \
+  ninja-build \
+  xvfb \
+  libx11-xcb-dev \
+  libxcb-util-dev \
+  libxcb-cursor-dev \
+  libxcb-xkb-dev \
+  libxkbcommon-x11-dev \
+  libxcb-keysyms1-dev \
+  libcairo2-dev \
+  libpango1.0-dev \
+  libfreetype-dev \
+  libfontconfig1-dev \
+  libgtkmm-3.0-dev
 
 # Login shells (install, start, and the agent) source /etc/profile.d.
 # Keep the default unset so a platform-provided runtime dir still wins.

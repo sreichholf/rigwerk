@@ -90,6 +90,26 @@ The test prints `Some(~0.5)` while the tone plays.  An idle sink is
 suspended and reads `None`, not `0.0`.  `pw-link -l` shows whether
 WirePlumber linked a stream.
 
+### Real VST3 plugins
+
+The `vst3_fixture` tests load Steinberg's VST3 SDK samples (`again`,
+`adelay`, `host-checker`).  `scripts/vst3-fixtures.sh <dir>` clones the
+SDK at a pinned tag and builds them into `<dir>/plugins`; they are never
+committed.  Without `RIGWERK_VST3_FIXTURES` the tests pass without doing
+anything.  With it set, a missing bundle fails.  CI runs them on Linux
+and Windows.  The editor test needs an X server on Linux, so run it
+under `xvfb-run`:
+
+```bash
+scripts/vst3-fixtures.sh .vst3-fixtures
+RIGWERK_VST3_FIXTURES=.vst3-fixtures/plugins \
+  xvfb-run -a cargo test --locked vst3_fixture -- --nocapture
+```
+
+The Linux build needs the VSTGUI packages in `.cursor/install.sh`.  The
+VSTGUI editor is not opened on Linux yet: it crashes without a run loop
+on the host context (see `docs/open-items.md`).
+
 ## When a test fails
 
 - Fix the source. Change the assertion only when the behavior change is

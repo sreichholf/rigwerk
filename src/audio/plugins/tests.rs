@@ -680,3 +680,428 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
     assert_eq!(total.load(Ordering::Acquire), 24);
     drop(chain.restore(Vec::new()));
 }
+
+// Real VST3 plugins: Steinberg's SDK samples, built by
+// `scripts/vst3-fixtures.sh` (see `super::fixtures`).  Each test goes through
+// RigWerk's own entry points (`load_plugin`, `PathControls`, the saved
+// `PluginPref`), not the VST3 host underneath, so they keep passing when
+// that host is replaced.  With `RIGWERK_VST3_FIXTURES` unset they return at
+// once.
+
+/// The class ids a scan stores in [`PluginPref::class_id`] for the three
+/// fixtures (32 hex digits, as `moduleinfo.json` writes them).  Saved
+/// preferences hold these, so a new host has to open them.
+const AGAIN_CLASS: &str = "84E8DE5F92554F5396FAE4133C935A18";
+const ADELAY_CLASS: &str = "0CDBB66985D548A9BFD8371909D24BB3";
+const HOST_CHECKER_CLASS: &str = "23FC190E02DD4499A8D2230E50617DA3";
+
+const FIXTURES: [(&str, &str); 3] = [
+    ("again", AGAIN_CLASS),
+    ("adelay", ADELAY_CLASS),
+    ("host-checker", HOST_CHECKER_CLASS),
+];
+
+/// The block the fixture tests process: well under [`super::MAX_BLOCK`].
+const FIXTURE_BLOCK: usize = 256;
+
+/// The peak of the quiet test tone.
+const TONE_PEAK: f32 = 0.1;
+
+/// The saved insert a scan would add for fixture `name`, or `None` when
+/// the fixtures are not configured.
+fn fixture_pref(name: &str, class_id: &str) -> Option<PluginPref> {
+    let path = super::vst3_fixture(name)?;
+    Some(PluginPref {
+        path: path.to_string_lossy().into_owned(),
+        format: PluginFormat::Vst3,
+        class_id: Some(class_id.to_owned()),
+        name: name.to_owned(),
+        ..PluginPref::default()
+    })
+}
+
+/// A 440 Hz tone at [`TONE_PEAK`], continuing from frame `start`.
+fn tone(start: usize) -> Vec<f32> {
+    (start..start + FIXTURE_BLOCK)
+        .map(|frame| TONE_PEAK * (frame as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin())
+        .collect()
+}
+
+/// Runs `blocks` blocks of the tone through the path's chain, the way the
+/// output callback does.  Fails on a missed chain lock (nothing else holds
+/// it here) and on a sample that is not finite.  Returns the last block's
+/// peak.
+fn run_tone(path: &crate::audio::path::PathControls, blocks: usize) -> f32 {
+    let mut peak = 0.0f32;
+    for block in 0..blocks {
+        let mut left = tone(block * FIXTURE_BLOCK);
+        let mut right = left.clone();
+        assert!(
+            path.process_plugins(&mut left, &mut right, FIXTURE_BLOCK),
+            "the chain lock was busy"
+        );
+        assert!(
+            left.iter().chain(&right).all(|sample| sample.is_finite()),
+            "block {block} is not finite"
+        );
+        peak = left
+            .iter()
+            .chain(&right)
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    }
+    peak
+}
+
+/// A path at 48 kHz with `pref` added the way the Plugins page adds it.
+fn fixture_path(pref: PluginPref) -> crate::audio::path::PathControls {
+    let path = crate::audio::path::PathControls::new(48_000);
+    path.add_plugin(pref).expect("add the fixture");
+    path
+}
+
+/// The only insert's published view, with its error checked.
+fn only_view(path: &crate::audio::path::PathControls) -> super::PluginView {
+    let views = path.plugin_views();
+    assert_eq!(views.len(), 1);
+    let view = views[0].clone();
+    assert_eq!(view.error, None, "{}", view.name);
+    view
+}
+
+/// The id of the control called `name`.
+fn param_id(view: &super::PluginView, name: &str) -> u32 {
+    view.parameters
+        .iter()
+        .find(|parameter| parameter.name == name)
+        .unwrap_or_else(|| panic!("{} has no {name} control", view.name))
+        .id
+}
+
+/// The normalized value of the control called `name`.
+fn param_value(parameters: &[PluginParamView], name: &str) -> f64 {
+    parameters
+        .iter()
+        .find(|parameter| parameter.name == name)
+        .unwrap_or_else(|| panic!("no {name} control"))
+        .value
+}
+
+#[test]
+fn vst3_fixture_each_sample_loads_lists_controls_and_processes() {
+    let _main = crate::audio::claim_main_thread();
+    for (name, class_id) in FIXTURES {
+        let Some(pref) = fixture_pref(name, class_id) else {
+            return;
+        };
+        let (handle, _) = super::load::load_plugin(&pref, 48_000)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(
+            !super::load::host_parameters(&handle).is_empty(),
+            "{name} lists no controls"
+        );
+        drop(handle);
+
+        let path = fixture_path(pref);
+        assert!(!only_view(&path).parameters.is_empty(), "{name}");
+        run_tone(&path, 16);
+        // A process failure is recorded on the audio thread and published
+        // by the UI's service pass.
+        path.service_plugins();
+        only_view(&path);
+    }
+}
+
+#[test]
+fn vst3_fixture_again_gain_sets_the_output_level() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let view = only_view(&path);
+    let gain = param_id(&view, "Gain");
+    // AGain's processor multiplies by the normalized value and opens at
+    // 1.0, although the control's default is 0.5.
+    assert!((param_value(&view.parameters, "Gain") - 1.0).abs() < 1e-6);
+    let unity = run_tone(&path, 8);
+    assert!((unity - TONE_PEAK).abs() < 0.01, "unity gain peak {unity}");
+
+    path.set_plugin_parameter(0, gain, 0.5).expect("set Gain");
+    let half = run_tone(&path, 8);
+    assert!(
+        (half - TONE_PEAK * 0.5).abs() < 0.01,
+        "half gain peak {half}"
+    );
+    assert!((param_value(&only_view(&path).parameters, "Gain") - 0.5).abs() < 1e-6);
+
+    path.set_plugin_parameter(0, gain, 0.0).expect("set Gain");
+    let silent = run_tone(&path, 8);
+    assert!(silent < 1e-6, "zero gain peak {silent}");
+}
+
+/// The saved-state envelope a VST3 insert's [`PluginState`] holds: 16 bytes
+/// of magic, then little-endian u32 version (1), component length and
+/// controller length (`u32::MAX` for none), then the two payloads.  Saved
+/// preferences carry it, so a new host has to keep reading it.
+const STATE_MAGIC: &[u8; 16] = b"VST3HOST_STATE\0\0";
+const STATE_HEADER: usize = 28;
+
+fn le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+#[test]
+fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let gain = param_id(&only_view(&path), "Gain");
+    path.set_plugin_parameter(0, gain, 0.25).expect("set Gain");
+    run_tone(&path, 2);
+    // What a preference save stores: the parameter and a fresh blob.
+    let saved = path.plugin_prefs();
+    assert_eq!(saved.len(), 1);
+    let saved = saved.into_iter().next().expect("one insert");
+    assert_eq!(saved.class_id.as_deref(), Some(AGAIN_CLASS));
+    assert!(saved
+        .params
+        .iter()
+        .any(|param| param.id == gain && (param.value - 0.25).abs() < 1e-6));
+    let state = saved.state.clone().expect("a captured state");
+    assert_eq!(state.version, PLUGIN_STATE_VERSION);
+    let blob = state.bytes().expect("the blob decodes");
+
+    assert_eq!(&blob[..16], STATE_MAGIC);
+    assert_eq!(le_u32(&blob, 16), 1, "envelope version");
+    let component = le_u32(&blob, 20) as usize;
+    let controller = le_u32(&blob, 24);
+    let controller_len = if controller == u32::MAX {
+        0
+    } else {
+        controller as usize
+    };
+    assert!(component > 0, "AGain writes a component state");
+    assert_eq!(blob.len(), STATE_HEADER + component + controller_len);
+
+    // A session restore: the saved insert reopens with the same value.
+    let restored = crate::audio::path::PathControls::new(48_000);
+    restored.restore_plugins(vec![saved.clone()]);
+    restored.ensure_plugin_loaded(0);
+    let view = only_view(&restored);
+    assert!((param_value(&view.parameters, "Gain") - 0.25).abs() < 1e-6);
+    let peak = run_tone(&restored, 8);
+    assert!(
+        (peak - TONE_PEAK * 0.25).abs() < 0.01,
+        "restored peak {peak}"
+    );
+
+    // The blob alone restores the value, with no saved parameters.
+    let blob_only = PluginPref {
+        params: Vec::new(),
+        state: Some(PluginState::capture(&blob, &[])),
+        ..saved.clone()
+    };
+    let (handle, current) = super::load::load_plugin(&blob_only, 48_000).expect("load");
+    assert!(current, "the envelope restored");
+    let parameters = super::load::host_parameters(&handle);
+    assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
+    drop(handle);
+
+    // An envelope built here, not by the writer: the reader is pinned on
+    // its own.  The writer is pinned above, and a new host has to keep
+    // writing this layout too, because an older RigWerk reads any other
+    // blob as raw component state.
+    let component_bytes = &blob[STATE_HEADER..STATE_HEADER + component];
+    let mut built = STATE_MAGIC.to_vec();
+    built.extend_from_slice(&1u32.to_le_bytes());
+    built.extend_from_slice(&(component_bytes.len() as u32).to_le_bytes());
+    built.extend_from_slice(&u32::MAX.to_le_bytes());
+    built.extend_from_slice(component_bytes);
+    let hand_built = PluginPref {
+        params: Vec::new(),
+        state: Some(PluginState::capture(&built, &[])),
+        ..saved.clone()
+    };
+    let (handle, current) = super::load::load_plugin(&hand_built, 48_000).expect("load");
+    assert!(current, "the hand-built envelope restored");
+    let parameters = super::load::host_parameters(&handle);
+    assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
+    drop(handle);
+
+    // A blob saved before the envelope was the raw component state.
+    let legacy = PluginPref {
+        params: Vec::new(),
+        state: Some(PluginState::capture(component_bytes, &[])),
+        ..saved
+    };
+    let (handle, current) = super::load::load_plugin(&legacy, 48_000).expect("load");
+    assert!(current, "the raw component state restored");
+    let parameters = super::load::host_parameters(&handle);
+    assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
+}
+
+/// ADelay's delay is the normalized value times the rate, in samples
+/// (`adelayprocessor.cpp`), so an impulse has to come out that many frames
+/// later through the chain.
+#[test]
+fn vst3_fixture_adelay_delays_an_impulse_by_its_delay() {
+    const DELAY: usize = 256;
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("adelay", ADELAY_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let delay = param_id(&only_view(&path), "Delay");
+    // Half a sample over, so the plugin's truncation lands on DELAY.
+    let value = (DELAY as f64 + 0.5) / 48_000.0;
+    path.set_plugin_parameter(0, delay, value)
+        .expect("set Delay");
+    let mut output = Vec::new();
+    for block in 0..3 {
+        let mut left = vec![0.0f32; FIXTURE_BLOCK];
+        // The first block only delivers the new delay.
+        if block == 1 {
+            left[0] = 0.25;
+        }
+        let mut right = left.clone();
+        assert!(path.process_plugins(&mut left, &mut right, FIXTURE_BLOCK));
+        assert_eq!(left, right);
+        output.extend(left);
+    }
+    let peak = output
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+        .map(|(frame, sample)| (frame, *sample));
+    assert_eq!(peak, Some((FIXTURE_BLOCK + DELAY, 0.25)));
+    path.service_plugins();
+    assert_eq!(only_view(&path).latency, 0, "ADelay reports no latency");
+}
+
+/// The host checker logs the host's call sequence for its own editor; none
+/// of that is readable as a control, and its "Scoring" counts supported
+/// features, not errors.  So this is a call-sequence smoke test: a load,
+/// many blocks, a state capture and a restore, and nothing may fail.
+#[test]
+fn vst3_fixture_host_checker_survives_processing_and_a_state_round_trip() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("host-checker", HOST_CHECKER_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    run_tone(&path, 100);
+    path.service_plugins();
+    let view = only_view(&path);
+    if let Some(score) = view
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "Scoring")
+    {
+        eprintln!("[vst3_fixture] host-checker Scoring: {}", score.display);
+    }
+    // Its "Latency" control (0..10 s) should reach the view after the
+    // plugin's restart, but does not with vst3-host 0.11 (see
+    // docs/open-items.md): the processor's notice is an output parameter
+    // that never reaches the controller, and a restart reads the latency
+    // before reactivating, while this plugin applies it on activation.
+    // Printed, not asserted, so the CI log shows when that changes.
+    let latency = param_id(&view, "Latency");
+    path.set_plugin_parameter(0, latency, 256.5 / (10.0 * 48_000.0))
+        .expect("set Latency");
+    for _ in 0..4 {
+        run_tone(&path, 4);
+        path.service_plugins();
+        std::thread::sleep(std::time::Duration::from_millis(260));
+    }
+    eprintln!(
+        "[vst3_fixture] host-checker latency after asking for 256: {}",
+        only_view(&path).latency
+    );
+    let saved = path.plugin_prefs();
+    assert!(saved[0].state.is_some(), "the host checker saves a state");
+
+    let restored = crate::audio::path::PathControls::new(48_000);
+    restored.restore_plugins(saved);
+    restored.ensure_plugin_loaded(0);
+    only_view(&restored);
+    run_tone(&restored, 100);
+    restored.service_plugins();
+    only_view(&restored);
+}
+
+/// A baseline for the insert lock, not a limit: the audio side processes
+/// AGain as fast as it can while the UI side moves its gain through the
+/// normal control path.  The output must stay finite; the skip counts are
+/// printed so a CI log records them.
+#[test]
+fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let gain = param_id(&only_view(&path), "Gain");
+    path.reset_plugin_lock_counters();
+    /// Stops the audio side however the UI loop ends, so a panic there
+    /// cannot leave the scope waiting on it forever.
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let stop = AtomicBool::new(false);
+    let mut sets = 0u64;
+    let mut failures = Vec::new();
+    let (blocks, missed) = std::thread::scope(|scope| {
+        let audio = scope.spawn(|| {
+            let (mut blocks, mut missed) = (0u64, 0u64);
+            while !stop.load(Ordering::Relaxed) {
+                let mut left = tone(0);
+                let mut right = left.clone();
+                if !path.process_plugins(&mut left, &mut right, FIXTURE_BLOCK) {
+                    missed += 1;
+                }
+                assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
+                blocks += 1;
+            }
+            (blocks, missed)
+        });
+        let stopper = StopOnDrop(&stop);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(300) {
+            let value = if sets.is_multiple_of(2) { 0.2 } else { 0.8 };
+            if let Err(error) = path.set_plugin_parameter(0, gain, value) {
+                failures.push(error);
+                break;
+            }
+            sets += 1;
+            if sets.is_multiple_of(64) {
+                path.service_plugins();
+            }
+        }
+        drop(stopper);
+        audio.join().expect("the audio side panicked")
+    });
+    let report = path.plugin_lock_report();
+    let insert = report.inserts[0];
+    eprintln!(
+        "[vst3_fixture] lock baseline: {sets} sets, {blocks} blocks ({missed} without the chain); \
+         chain lock {}/{} skipped, insert lock {}/{} skipped ({:.1}%)",
+        report.chain.skipped(),
+        report.chain.attempts,
+        insert.skipped(),
+        insert.attempts,
+        insert.share() * 100.0
+    );
+    assert_eq!(failures, Vec::<String>::new(), "a control set failed");
+    assert!(blocks > 0 && sets > 0);
+    path.service_plugins();
+    only_view(&path);
+}
