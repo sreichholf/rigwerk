@@ -30,8 +30,7 @@ use clap_sys::string_sizes::CLAP_NAME_SIZE;
 use clap_sys::version::CLAP_VERSION;
 
 use crate::audio::plugins::{
-    param_transfer, ClapFailure, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared,
-    ProcessFailure, Restore,
+    param_transfer, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared, Restore,
 };
 
 use super::gui::{choose_editor_api, session_candidates, EditorApi};
@@ -507,9 +506,8 @@ impl ClapInstance {
     /// views, or `None` without a request.  A rescan that changes the ids
     /// or ranges the processor was built with cannot be followed: the
     /// processor, the views and every value sent use that one table.  The
-    /// old list is kept, the insert fails with
-    /// [`ClapFailure::ControlsChanged`] (it leaves the chain) and a reload
-    /// is asked for.
+    /// old list is kept and a reload is asked for: the insert stops
+    /// processing and the path rebuilds it with the new controls.
     pub(crate) fn rescan_if_requested(&mut self) -> Option<Vec<PluginParamView>> {
         if !self.core.host.params_rescan.swap(false, Ordering::Relaxed) {
             return None;
@@ -523,10 +521,8 @@ impl ClapInstance {
                 .zip(self.ranges.iter())
                 .all(|(param, range)| param.range() == *range);
         if !same {
-            eprintln!("[plugins] a CLAP plugin changed its parameter list; it needs reloading");
+            eprintln!("[plugins] a CLAP plugin changed its parameter list; reloading it");
             self.cached_params = previous;
-            self.shared
-                .fail(ProcessFailure::Clap(ClapFailure::ControlsChanged));
             self.shared.want_reload();
         }
         Some(self.parameters())

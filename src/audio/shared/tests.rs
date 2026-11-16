@@ -707,27 +707,84 @@ fn a_processing_failure_is_published_on_the_next_service_frame() {
     assert_eq!(shared.plugin_views_version(), version);
 }
 
+/// A CLAP port change is a reload request: the next service frame
+/// rebuilds the insert, with no error, and its latency stays counted until
+/// then.
 #[test]
-fn a_clap_port_change_is_published_on_the_next_service_frame() {
+fn a_clap_port_change_reloads_the_insert_on_the_next_service_frame() {
     let _main = claim_main_thread();
-    let shared = super::Shared::new(48_000);
-    shared.paths[0].edit_chain(|chain| {
-        chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
+    let loads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = std::rc::Rc::clone(&loads);
+    let _loader = crate::audio::plugins::set_test_loader(move |_pref, _rate| {
+        counted.set(counted.get() + 1);
+        Ok((
+            crate::audio::clap::tests::fake_plugin_with_latency_for_test(32),
+            false,
+        ))
     });
-    assert!(shared.plugin_views()[0].error.is_none());
-    let Some(handle) = shared.plugin_handle(0) else {
-        panic!("the fake is a loaded CLAP slot");
-    };
-    crate::audio::clap::tests::rescan_ports_for_test(&handle);
-    drop(handle);
-    assert!(shared.plugin_views()[0].error.is_none());
+    let shared = super::Shared::new(48_000);
+    shared.paths[0]
+        .add_plugin(crate::audio::PluginPref {
+            path: format!("{}clap", crate::audio::plugins::TEST_PATH),
+            format: crate::audio::PluginFormat::Clap,
+            ..crate::audio::PluginPref::default()
+        })
+        .expect("load the fake");
+    let old = shared
+        .plugin_handle(0)
+        .expect("the fake is a loaded CLAP slot");
+    crate::audio::clap::tests::rescan_ports_for_test(&old);
+    assert_eq!(shared.paths[0].latency_samples(), 32);
 
     shared.service_plugins();
+    assert_eq!(loads.get(), 2, "reloaded once");
+    let new = shared.plugin_handle(0).expect("reloaded");
+    assert_ne!(new.instance_id(), old.instance_id());
+    let view = shared.plugin_views()[0].clone();
+    assert_eq!(view.error, None);
+    assert_eq!(view.latency, 32);
+    assert!(shared.paths[0].has_plugins());
+}
+
+/// A reload request in a frame that also has to follow a new device rate
+/// loads the plugin once, at the new rate, not once per reason.
+#[test]
+fn a_reload_request_with_a_new_device_rate_pending_loads_once_at_that_rate() {
+    let _main = claim_main_thread();
+    let rates = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::clone(&rates);
+    let _loader = crate::audio::plugins::set_test_loader(move |_pref, rate| {
+        seen.borrow_mut().push(rate);
+        Ok((
+            crate::audio::clap::tests::fake_plugin_for_test(false),
+            false,
+        ))
+    });
+    let shared = super::Shared::new(48_000);
+    shared.paths[0]
+        .add_plugin(crate::audio::PluginPref {
+            path: format!("{}clap", crate::audio::plugins::TEST_PATH),
+            format: crate::audio::PluginFormat::Clap,
+            ..crate::audio::PluginPref::default()
+        })
+        .expect("load the fake");
+    assert_eq!(*rates.borrow(), vec![48_000]);
+    shared.set_output(44_100, 128, "test output");
+    // The plugin asks to be rebuilt (a layout change).
+    shared
+        .plugin_handle(0)
+        .expect("loaded")
+        .shared()
+        .want_reload();
+    shared.service_plugins();
     assert_eq!(
-        shared.plugin_views()[0].error.as_deref(),
-        Some(crate::audio::clap::AUDIO_PORTS_CHANGED)
+        *rates.borrow(),
+        vec![48_000, 44_100],
+        "one load, at the new rate"
     );
-    assert!(!shared.paths[0].has_plugins());
+    assert_eq!(chain_rate(&shared), 44_100);
+    shared.service_plugins();
+    assert_eq!(rates.borrow().len(), 2);
 }
 
 #[test]

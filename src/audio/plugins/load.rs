@@ -202,6 +202,10 @@ pub(crate) fn load_plugin(
     pref: &PluginPref,
     sample_rate: u32,
 ) -> Result<(LoadedPlugin, bool), String> {
+    #[cfg(test)]
+    if pref.path.starts_with(TEST_PATH) {
+        return load_for_test(pref, sample_rate);
+    }
     let restore = Restore::from_pref(pref);
     let saved = |current: bool| Saved {
         params: pref.params.clone(),
@@ -245,4 +249,54 @@ pub(crate) fn load_plugin(
             )
         }
     }
+}
+
+/// Prefs whose path starts with this load through the loader a test set
+/// with [`set_test_loader`] (stand-ins that are no binary).
+#[cfg(test)]
+pub(crate) const TEST_PATH: &str = "test:";
+
+#[cfg(test)]
+type TestLoader = Box<dyn FnMut(&PluginPref, u32) -> Result<(LoadedPlugin, bool), String>>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LOADER: std::cell::RefCell<Option<TestLoader>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Makes [`load_plugin`] on this thread load [`TEST_PATH`] prefs through
+/// `loader`, until the guard drops.
+#[cfg(test)]
+pub(crate) fn set_test_loader(
+    loader: impl FnMut(&PluginPref, u32) -> Result<(LoadedPlugin, bool), String> + 'static,
+) -> TestLoaderGuard {
+    TEST_LOADER.with(|slot| *slot.borrow_mut() = Some(Box::new(loader)));
+    TestLoaderGuard(())
+}
+
+#[cfg(test)]
+pub(crate) struct TestLoaderGuard(());
+
+#[cfg(test)]
+impl Drop for TestLoaderGuard {
+    fn drop(&mut self) {
+        TEST_LOADER.with(|slot| slot.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+fn load_for_test(pref: &PluginPref, rate: u32) -> Result<(LoadedPlugin, bool), String> {
+    // Taken out while it runs, so a loader may load (or drop) plugins.
+    let mut loader = TEST_LOADER
+        .with(|slot| slot.borrow_mut().take())
+        .ok_or_else(|| "No test loader is set.".to_owned())?;
+    let loaded = loader(pref, rate);
+    TEST_LOADER.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(loader);
+        }
+    });
+    loaded
 }

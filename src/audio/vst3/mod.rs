@@ -42,6 +42,8 @@ mod stream;
 
 pub(crate) use controller::{Vst3Controller, Vst3Loaded};
 pub(crate) use editor::Vst3Editor;
+#[cfg(test)]
+pub(crate) use processor::BusLayout;
 pub(crate) use processor::Vst3Processor;
 
 use ::vst3::Steinberg::Vst::IProcessContextRequirements_::Flags_ as Needs;

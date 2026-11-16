@@ -1,4 +1,3 @@
-use super::super::clap::AUDIO_PORTS_CHANGED;
 use super::load::{
     apply_parameter_changes, merge_synced_params, params_to_restore, Capture, ParamChange, Restore,
 };
@@ -308,15 +307,21 @@ fn fake_clap_slot(fail_process: bool) -> Slot {
     )
 }
 
+/// A CLAP port change takes the insert out of the chain at once, without
+/// an error, and keeps its latency counted while it waits for the reload.
 #[test]
-fn a_port_change_is_visible_without_processing_a_block() {
-    let slot = fake_clap_slot(false);
-    assert!(!slot.ports_changed());
-    assert!(slot.resolved_error().is_none());
-
+fn a_port_change_takes_the_insert_out_and_keeps_its_latency() {
+    let slot = Slot::with_plugin_for_test(
+        PluginPref::default(),
+        super::super::clap::tests::fake_plugin_with_latency_for_test(32),
+        48_000,
+    );
+    assert!(slot.active() && !slot.reload_wanted());
     super::super::clap::tests::rescan_ports_for_test(slot.plugin.as_ref().unwrap().handle());
-    assert!(slot.ports_changed());
-    assert_eq!(slot.resolved_error().as_deref(), Some(AUDIO_PORTS_CHANGED));
+    assert!(slot.reload_wanted());
+    assert!(!slot.active());
+    assert_eq!(slot.latency_samples(), 32);
+    assert!(slot.resolved_error().is_none());
 }
 
 #[test]
@@ -1305,6 +1310,35 @@ fn vst3_fixture_again_a_save_with_audio_stopped_keeps_a_value_set() {
     assert!(
         (peak - TONE_PEAK * 0.3).abs() < 0.01,
         "restored peak {peak}"
+    );
+}
+
+/// AGain asked to be reloaded (`kReloadComponent`, raised here on its
+/// behalf): the path rebuilds it from its state and saved values, and the
+/// new instance processes with the gain set before.
+#[test]
+fn vst3_fixture_again_a_reload_request_rebuilds_it_with_its_values() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(pref) = fixture_pref("again", AGAIN_CLASS) else {
+        return;
+    };
+    let path = fixture_path(pref);
+    let gain = param_id(&only_view(&path), "Gain");
+    path.set_plugin_parameter(0, gain, 0.25).expect("set Gain");
+    run_tone(&path, 2);
+    let old = path.plugin_handle(0).expect("loaded");
+    old.shared()
+        .request_restart(crate::audio::vst3::RELOAD_COMPONENT);
+    path.service_plugins();
+    let new = path.plugin_handle(0).expect("reloaded");
+    assert_ne!(new.instance_id(), old.instance_id());
+    drop(old);
+    let view = only_view(&path);
+    assert!((param_value(&view.parameters, "Gain") - 0.25).abs() < 1e-6);
+    let peak = run_tone(&path, 8);
+    assert!(
+        (peak - TONE_PEAK * 0.25).abs() < 0.01,
+        "reloaded peak {peak}"
     );
 }
 

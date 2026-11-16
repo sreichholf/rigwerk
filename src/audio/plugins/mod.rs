@@ -48,19 +48,23 @@ pub(crate) fn clamp_latency(latency: u32) -> u32 {
 
 pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
-pub(crate) use chain::PluginChain;
+pub(crate) use chain::{PluginChain, ReloadPlan};
 pub(crate) use handle::PluginHandle;
 #[cfg(test)]
 pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
 pub(crate) use link::{
     ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
 };
+#[cfg(test)]
+pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
 pub(crate) use load::{Restore, MAX_BLOCK};
 #[cfg(test)]
 pub(crate) use pause::PAUSE_STALL;
 #[cfg(test)]
 pub(crate) use slot::SlotControls;
 pub(crate) use slot::{drain_deferred_plugins, SlotLink};
+#[cfg(test)]
+pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
 pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender};
 
 #[cfg(test)]

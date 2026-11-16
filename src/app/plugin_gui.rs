@@ -31,6 +31,9 @@ use crate::audio::{PluginHandle, PluginView};
 pub(crate) struct PluginGuiWindow {
     /// The insert this editor belongs to: its path and its position there.
     pub(crate) key: InsertKey,
+    /// The plugin's path and class, so a rebuilt instance of the same
+    /// plugin at this key (a layout reload) gets its editor back.
+    plugin: (String, Option<String>),
     kind: GuiKind,
     /// The plugin this editor shows.  Declared after `kind`, so the editor
     /// is detached before this reference goes.
@@ -55,6 +58,17 @@ impl PluginGuiWindow {
     fn matches(&self, view: Option<&PluginView>) -> bool {
         view.and_then(|view| view.instance) == Some(self.instance_id())
     }
+
+    /// Whether `view` is a new instance of this editor's plugin, with an
+    /// editor of its own.
+    fn rebuilt(&self, view: Option<&PluginView>) -> bool {
+        view.is_some_and(|view| {
+            view.instance.is_some()
+                && view.has_editor
+                && (view.path.as_str(), view.class_id.as_deref())
+                    == (self.plugin.0.as_str(), self.plugin.1.as_deref())
+        })
+    }
 }
 
 impl RigWerkApp {
@@ -75,12 +89,14 @@ impl RigWerkApp {
             ));
             return false;
         };
-        let name = self
-            .engine
-            .plugin_views(path)
-            .get(index)
+        let views = self.engine.plugin_views(path);
+        let view = views.get(index);
+        let name = view
             .map(|view| view.name.clone())
             .unwrap_or_else(|| "Plugin".to_owned());
+        let plugin = view
+            .map(|view| (view.path.clone(), view.class_id.clone()))
+            .unwrap_or_default();
         // With several paths the window title says whose insert it is.
         let name = match self.paths.get(path).and_then(Option::as_ref) {
             Some(owner) if self.path_count() > 1 => format!("{name} · {}", owner.name),
@@ -91,6 +107,7 @@ impl RigWerkApp {
                 Ok(window) => {
                     self.plugin_gui = Some(PluginGuiWindow {
                         key,
+                        plugin,
                         kind: GuiKind::Vst3 { window },
                         handle,
                     });
@@ -106,6 +123,7 @@ impl RigWerkApp {
                 Ok(window) => {
                     self.plugin_gui = Some(PluginGuiWindow {
                         key,
+                        plugin,
                         kind: GuiKind::Clap { window },
                         handle,
                     });
@@ -163,14 +181,16 @@ impl RigWerkApp {
     /// resize, a scale change, and the editor's own size requests.  The
     /// plugin's main-thread work (edits, restarts, a VST3 editor's run
     /// loop, CLAP callbacks) is the engine's `service_plugins`, which the
-    /// frame runs too.  An editor whose insert went away is dropped.
+    /// frame runs too.  An editor whose insert went away is dropped; one
+    /// whose plugin was rebuilt in place (a layout reload) opens again on
+    /// the new instance.
     pub(crate) fn poll_plugin_gui(&mut self) {
         let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) else {
             return;
         };
         let views = self.engine.plugin_views(key.path);
         let app_scale = f64::from(self.ui_scale);
-        let (dismissed, same_plugin) = {
+        let (dismissed, same_plugin, rebuilt) = {
             let Some(gui) = self.plugin_gui.as_mut() else {
                 return;
             };
@@ -178,14 +198,27 @@ impl RigWerkApp {
                 GuiKind::Vst3 { window } => window.service(app_scale),
                 GuiKind::Clap { window } => window.service(app_scale),
             };
-            (dismissed, gui.matches(views.get(key.insert)))
+            let view = views.get(key.insert);
+            (dismissed, gui.matches(view), gui.rebuilt(view))
         };
         if dismissed && same_plugin {
             self.finish_plugin_gui();
             return;
         }
         if !same_plugin {
-            self.plugin_gui = None;
+            // A rebuilt plugin's editor opens before the old one closes.
+            // VSTGUI on X11 keeps one X connection per module and closes it
+            // with its last editor, without finishing the cairo device it
+            // drew with; cairo keys that device by the connection's address,
+            // so a new connection allocated at the same address would draw
+            // through the stale device and abort.  Overlapping the two keeps
+            // the connection open.  The old view is still detached before
+            // the old instance deactivates (`kind` drops before `handle`).
+            let old = self.plugin_gui.take();
+            if rebuilt && !dismissed {
+                self.open_plugin_gui(key);
+            }
+            drop(old);
         }
     }
 }

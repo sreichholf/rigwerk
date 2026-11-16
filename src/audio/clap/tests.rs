@@ -1861,7 +1861,7 @@ fn a_port_rescan_stops_processing_until_reloaded() {
         assert!(!host_audio_ports_flag_supported(host, 1 << 31));
         // Names and the two metadata flags do not touch the buffers.
         host_audio_ports_rescan(host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
-        assert!(!plugin.ports_changed());
+        assert!(!plugin.shared().reload_wanted());
         assert_eq!(
             plugin.run_for_test(&mut left, &mut right),
             Outcome::Processed
@@ -1870,7 +1870,7 @@ fn a_port_rescan_stops_processing_until_reloaded() {
             host,
             CLAP_AUDIO_PORTS_RESCAN_PORT_TYPE | CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR,
         );
-        assert!(!plugin.ports_changed());
+        assert!(!plugin.shared().reload_wanted());
         assert_eq!(
             plugin.run_for_test(&mut left, &mut right),
             Outcome::Processed
@@ -1878,14 +1878,10 @@ fn a_port_rescan_stops_processing_until_reloaded() {
     }
     assert!(fake::seen().is_some());
     unsafe { host_audio_ports_rescan(host, CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT) };
-    assert!(plugin.ports_changed());
-    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Failed);
-    assert_eq!(
-        plugin.shared().failure(),
-        Some(crate::audio::plugins::ProcessFailure::Clap(
-            ClapFailure::PortsChanged
-        ))
-    );
+    // A real change asks for a reload: the old buffers are not used again.
+    assert!(plugin.shared().reload_wanted());
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Skipped);
+    assert_eq!(plugin.shared().failure(), None);
     assert!(fake::seen().is_none(), "the plugin was not called");
 }
 
@@ -2353,29 +2349,70 @@ fn a_requested_flush_while_processing_goes_with_the_next_block() {
 }
 
 /// A rescan that keeps the controls refreshes the views; one that changes
-/// an id cannot be followed by the processor's table, so the insert fails
-/// and keeps the views and values of that table.
+/// an id cannot be followed by the processor's table, so the insert asks
+/// for a reload and keeps the views and values of that table meanwhile.
 #[test]
-fn a_rescan_that_changes_the_controls_fails_the_insert() {
+fn a_rescan_that_changes_the_controls_asks_for_a_reload() {
     let plugin = fake_plugin_with_params_for_test();
     let handle = plugin.handle().clone();
     fake::rescan_params(false);
     assert!(handle.service());
-    assert_eq!(plugin.shared().failure(), None);
+    assert!(!plugin.shared().reload_wanted());
 
     fake::rescan_params(true);
     assert!(handle.service());
-    assert_eq!(
-        plugin.shared().failure(),
-        Some(crate::audio::plugins::ProcessFailure::Clap(
-            ClapFailure::ControlsChanged
-        ))
-    );
+    assert_eq!(plugin.shared().failure(), None);
     assert!(plugin.shared().reload_wanted());
     let ids: Vec<u32> = handle.parameters().iter().map(|view| view.id).collect();
     assert_eq!(ids, [7, 9], "the views keep the table the values use");
     assert!(handle.set_parameter(11, 0.5).is_err());
     assert!(handle.set_parameter(9, 1.0).is_ok());
+}
+
+/// The path rebuilds a fake whose controls changed: the new instance has
+/// the new ids, keeps the values set before, and the new control is
+/// settable.
+#[test]
+fn changed_controls_reload_the_plugin_with_its_new_controls() {
+    let _main = crate::audio::claim_main_thread();
+    fake::reset(fake::Fail::Nothing);
+    fake::offer_params(true);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let loads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = std::rc::Rc::clone(&loads);
+    let _loader = crate::audio::plugins::set_test_loader(move |pref, _rate| {
+        counted.set(counted.get() + 1);
+        let plugin = fake::load_restoring("fake", pref)?;
+        Ok((plugin, false))
+    });
+    let path = crate::audio::path::PathControls::new(48_000);
+    path.add_plugin(PluginPref {
+        path: format!("{}clap", crate::audio::plugins::TEST_PATH),
+        format: crate::audio::PluginFormat::Clap,
+        name: "Fake".to_owned(),
+        ..PluginPref::default()
+    })
+    .expect("load the fake");
+    path.set_plugin_parameter(0, 7, 0.25).expect("set the gain");
+    let old = path.plugin_handle(0).expect("loaded");
+    fake::rescan_params(true);
+    path.service_plugins();
+    assert_eq!(loads.get(), 2, "reloaded once");
+    let new = path.plugin_handle(0).expect("reloaded");
+    assert_ne!(new.instance_id(), old.instance_id());
+    let view = path.plugin_views()[0].clone();
+    assert_eq!(view.error, None);
+    let ids: Vec<u32> = view.parameters.iter().map(|view| view.id).collect();
+    assert_eq!(ids, [7, 11]);
+    assert!(
+        (view.parameters[0].value - 0.25).abs() < 1e-9,
+        "the value came over"
+    );
+    path.set_plugin_parameter(0, 11, 1.0)
+        .expect("the new control");
+    path.service_plugins();
+    assert_eq!(loads.get(), 2, "no second reload");
+    drop(old);
 }
 
 /// Loads the fake with this GUI and its editor API chosen from

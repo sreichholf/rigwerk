@@ -370,9 +370,6 @@ pub(crate) struct PathControls {
     /// moved; the UI thread rebuilds the views from the links in
     /// `service_plugins`, so the audio thread never builds them.
     plugin_views_dirty: AtomicBool,
-    /// What the published views were built from, so the per-frame checks in
-    /// `service_plugins` can skip the rebuild when nothing changed.
-    published_ports_changed: AtomicUsize,
     chain_rate: AtomicU32,
     chain_unopened: AtomicBool,
     /// The plugin insert chain and a cheap "is anything enabled?" flag so
@@ -440,7 +437,6 @@ impl PathControls {
             plugin_views: Mutex::new(Arc::from(Vec::new())),
             plugin_views_version: AtomicU64::new(0),
             plugin_views_dirty: AtomicBool::new(false),
-            published_ports_changed: AtomicUsize::new(0),
             chain_rate: AtomicU32::new(chain.rate()),
             chain_unopened: AtomicBool::new(false),
             latency: chain.latency_handle(),

@@ -200,6 +200,11 @@ impl Vst3Controller {
                 return Err("The VST3 plugin cannot process 32-bit samples.".to_owned());
             }
             this.open_controller(module.as_deref())?;
+            // The state first, with no handler yet: a parameter list or
+            // buses that depend on the state are read after it, so a
+            // restart the plugin raises from `setState` has nothing left to
+            // change.
+            let state_loaded = this.restore_state(restore.state.as_deref());
             this.infos = this.read_infos();
             let ids = Arc::new(ParamIds::new(
                 this.infos.iter().map(|info| info.id).collect(),
@@ -217,12 +222,10 @@ impl Vst3Controller {
             }
             this.handler = Some(handler);
 
-            let state_loaded = this.restore_state(restore.state.as_deref());
             let values = restore.params(state_loaded);
             let undelivered = this.restore_values(&values, &out);
 
             this.negotiate_buses()?;
-            this.layout = this.read_layout()?;
             let context = this.process_context(rate);
             this.setup.sampleRate = rate;
             if this.processor.setupProcessing(&mut this.setup) != kResultOk {
@@ -232,6 +235,9 @@ impl Vst3Controller {
                 return Err("The VST3 plugin refused to activate.".to_owned());
             }
             this.active = true;
+            // Read once active: some plugins settle their buses on
+            // activation.
+            this.layout = this.read_layout()?;
             this.shared.set_latency(this.processor.getLatencySamples());
             // The first value goes out with the views of the new insert.
             this.shared.take_latency_change();
@@ -264,19 +270,30 @@ impl Vst3Controller {
 
     /// Clears the restart flags the host's own setup and activation made
     /// the plugin raise: `kLatencyChanged` (the latency was just read after
-    /// activating) and `kIoChanged` when the buses still match the
-    /// processor's.  Some plugins raise these on every activation; acting on
-    /// them would restart the plugin forever.  Other flags are kept.
-    fn settle_restart_flags(&self) {
+    /// activating), `kIoChanged` when the buses still match the
+    /// processor's, `kParamTitlesChanged` when the ids still match, and
+    /// `kReloadComponent` (this is the fresh load).  Some plugins raise
+    /// these on every activation; acting on them would restart or reload
+    /// the plugin forever.  Other flags are kept.
+    fn settle_restart_flags(&mut self) {
         let flags = self.shared.take_restart();
-        let mut done = super::LATENCY_CHANGED;
+        let mut done = super::LATENCY_CHANGED | super::RELOAD_COMPONENT;
         if flags & super::IO_CHANGED != 0 && !self.buses_changed() {
             done |= super::IO_CHANGED;
+        }
+        if flags & super::PARAM_TITLES_CHANGED != 0 && self.rescan() {
+            done |= super::PARAM_TITLES_CHANGED;
         }
         let kept = flags & !done;
         if kept != 0 {
             self.shared.request_restart(kept);
         }
+    }
+
+    /// The buses the processor was built for.
+    #[cfg(test)]
+    pub(crate) fn layout(&self) -> &BusLayout {
+        &self.layout
     }
 
     /// Whether the plugin's audio buses no longer match the layout the

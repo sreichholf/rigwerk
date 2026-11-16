@@ -16,14 +16,10 @@ fn only_the_first_failure_is_kept_and_reads_back() {
         ProcessFailure::Vst3StartFailed(1),
         ProcessFailure::Vst3StartFailed(-1),
         ProcessFailure::Vst3Inactive,
-        ProcessFailure::Vst3BusesChanged,
-        ProcessFailure::Vst3Reload,
-        ProcessFailure::Vst3ControlsChanged,
+        ProcessFailure::ReloadLoop,
         ProcessFailure::Clap(ClapFailure::NotActive),
         ProcessFailure::Clap(ClapFailure::ProcessError),
         ProcessFailure::Clap(ClapFailure::StartFailed),
-        ProcessFailure::Clap(ClapFailure::PortsChanged),
-        ProcessFailure::Clap(ClapFailure::ControlsChanged),
     ] {
         let shared = PluginShared::new(0);
         shared.fail(failure);
@@ -57,14 +53,6 @@ fn failure_messages_keep_the_host_texts() {
             ClapFailure::StartFailed,
             "The CLAP plugin could not start processing.",
         ),
-        (
-            ClapFailure::PortsChanged,
-            crate::audio::clap::AUDIO_PORTS_CHANGED,
-        ),
-        (
-            ClapFailure::ControlsChanged,
-            "The plugin changed its controls.  Remove it and add it again.",
-        ),
     ] {
         assert_eq!(ProcessFailure::Clap(failure).message(), text);
     }
@@ -83,7 +71,7 @@ fn a_latency_change_is_clamped_and_seen_once() {
 }
 
 #[test]
-fn restart_bits_collect_until_taken_and_a_ports_change_wins_over_a_reload() {
+fn restart_bits_collect_until_taken_and_a_reload_request_stays() {
     let shared = PluginShared::new(0);
     shared.request_restart(1);
     shared.request_restart(RESTART_ACTIVATION);
@@ -91,12 +79,10 @@ fn restart_bits_collect_until_taken_and_a_ports_change_wins_over_a_reload() {
     assert_eq!(shared.take_restart(), 1 | RESTART_ACTIVATION);
     assert!(!shared.restart_pending());
 
+    assert!(!shared.reload_wanted());
     shared.want_reload();
-    assert!(shared.reload_wanted() && !shared.ports_changed());
-    shared.mark_ports_changed();
-    assert!(shared.ports_changed() && !shared.reload_wanted());
     shared.want_reload();
-    assert!(shared.ports_changed(), "a ports change stays");
+    assert!(shared.reload_wanted());
 
     assert!(!shared.state_dirty());
     shared.mark_state_dirty();

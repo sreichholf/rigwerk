@@ -55,6 +55,12 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
         "RIGWERK_VST3_FIXTURES is set but there is no X server; run under xvfb-run"
     );
     let _main = crate::audio::claim_main_thread();
+    // Xvfb resets itself when its last client disconnects, and refuses
+    // connections while it does: between the old editor window closing and
+    // the reopened one connecting there would be none.  A desktop X server
+    // never resets, so the test keeps a client of its own.
+    #[cfg(target_os = "linux")]
+    let _x_client = xcb::Connection::connect(None).expect("reach the X server");
     let mut app = crate::app::blank_app();
     assert!(app.add_plugin_from_bundle(&bundle, Some("AGain VST3")));
     let key = InsertKey {
@@ -79,6 +85,33 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
         fds + timers > 0,
         "VSTGUI registered nothing with the run loop"
     );
+    // AGain asks to be reloaded (as `kReloadComponent` does): the insert
+    // is rebuilt, and its editor opens again on the new instance.
+    let old = app
+        .engine
+        .plugin_handle(key.path, key.insert)
+        .expect("loaded");
+    old.request_restart_for_test(crate::audio::vst3::RELOAD_COMPONENT);
+    let old_id = old.instance_id();
+    drop(old);
+    for _ in 0..5 {
+        app.engine.service_plugins();
+        app.poll_plugin_gui();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let new = app
+        .engine
+        .plugin_handle(key.path, key.insert)
+        .expect("reloaded");
+    assert_ne!(new.instance_id(), old_id, "the insert was rebuilt");
+    assert_eq!(app.engine.plugin_views(key.path)[0].error, None);
+    let log: Vec<String> = app.log.iter().map(|entry| entry.text.clone()).collect();
+    let gui = app
+        .plugin_gui
+        .as_ref()
+        .unwrap_or_else(|| panic!("the editor opened again: {log:?}"));
+    assert_eq!(gui.instance_id(), new.instance_id());
+    drop(new);
     app.close_plugin_gui();
     assert!(app.plugin_gui.is_none());
     // Removing the insert unloads AGain: none of its handlers is left for

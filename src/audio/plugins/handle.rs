@@ -231,11 +231,6 @@ impl LoadedPlugin {
         self.handle.0.shared.latency()
     }
 
-    /// Whether the plugin's ports no longer match its buffers (atomics).
-    pub(crate) fn ports_changed(&self) -> bool {
-        self.handle.0.shared.ports_changed()
-    }
-
     /// The CLAP processor, for tests that look at its buffers.
     #[cfg(test)]
     pub(crate) fn clap_processor_for_test(&mut self) -> &mut ClapProcessor {
@@ -306,9 +301,13 @@ impl LoadedPlugin {
                 return Outcome::Skipped;
             }
         }
-        if !wet {
-            // A failed insert's buffers may no longer fit it.
-            if shared.failure().is_none() {
+        // An insert waiting for a reload has buffers or tables that may no
+        // longer fit it (its ports or buses changed): it is not run, even
+        // if the chain still counts it active for this block.
+        let waiting = shared.reload_wanted();
+        if !wet || waiting {
+            // A failed insert's buffers may no longer fit it either.
+            if shared.failure().is_none() && !waiting {
                 processor.flush_if_queued();
             }
             return Outcome::Skipped;
@@ -510,20 +509,30 @@ impl PluginHandle {
         self.0.shared.latency()
     }
 
-    /// Atomics only.
-    pub(crate) fn ports_changed(&self) -> bool {
-        self.0.shared.ports_changed()
-    }
-
     /// The first processing failure the audio thread recorded (atomics).
     pub(crate) fn failure(&self) -> Option<ProcessFailure> {
         self.0.shared.failure()
     }
 
-    /// What both halves share, for tests that look at the handshake.
-    #[cfg(test)]
-    pub(crate) fn shared(&self) -> &PluginShared {
+    /// What both halves share (atomics only).
+    pub(in crate::audio) fn shared(&self) -> &PluginShared {
         &self.0.shared
+    }
+
+    /// The buses a VST3 plugin's processor was built for, for the tests.
+    #[cfg(test)]
+    pub(crate) fn vst3_layout_for_test(&self) -> Option<super::super::vst3::BusLayout> {
+        match &self.ui().instance {
+            PluginInstance::Vst3(controller) => Some(controller.layout().clone()),
+            PluginInstance::Clap(_) => None,
+        }
+    }
+
+    /// A restart request as the plugin's own callback makes it, for the
+    /// app's tests.
+    #[cfg(test)]
+    pub(crate) fn request_restart_for_test(&self, bits: u32) {
+        self.0.shared.request_restart(bits);
     }
 
     /// An edit as a VST3 editor's `performEdit` makes it, for the tests.
@@ -801,10 +810,10 @@ impl PluginHandle {
     /// once); then the restart flags.  Values and titles are read again at
     /// once.  `kLatencyChanged` pauses the plugin through the handshake,
     /// then deactivates and reactivates it and reads its latency, which
-    /// VST3 only lets change while inactive.  `kIoChanged`,
-    /// `kReloadComponent` and a changed parameter id set leave the insert
-    /// failed, as the processor's buffers and tables no longer fit: it
-    /// has to be removed and added again.
+    /// VST3 only lets change while inactive.  `kIoChanged` with other
+    /// buses, `kReloadComponent` and a changed parameter id set ask for a
+    /// reload, as the processor's buffers and tables no longer fit: the
+    /// insert stops processing and the path rebuilds it.
     fn service_vst3(&self, ui: &mut UiSide) -> bool {
         let shared = &*self.0.shared;
         let UiSide {
@@ -839,8 +848,7 @@ impl PluginHandle {
             if controller.rescan() {
                 *views = controller.views();
             } else {
-                eprintln!("[plugins] a VST3 plugin changed its parameter ids; it needs reloading");
-                shared.fail(ProcessFailure::Vst3ControlsChanged);
+                eprintln!("[plugins] a VST3 plugin changed its parameter ids; reloading it");
                 shared.want_reload();
             }
             changed = true;
@@ -852,14 +860,12 @@ impl PluginHandle {
             changed = true;
         }
         if flags & IO_CHANGED != 0 && controller.buses_changed() {
-            eprintln!("[plugins] a VST3 plugin changed its audio buses; it needs reloading");
-            shared.fail(ProcessFailure::Vst3BusesChanged);
+            eprintln!("[plugins] a VST3 plugin changed its audio buses; reloading it");
             shared.want_reload();
             changed = true;
         }
         if flags & RELOAD_COMPONENT != 0 {
             eprintln!("[plugins] a VST3 plugin asked to be reloaded");
-            shared.fail(ProcessFailure::Vst3Reload);
             shared.want_reload();
             changed = true;
         }

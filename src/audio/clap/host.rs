@@ -532,8 +532,9 @@ pub(super) unsafe extern "C" fn host_audio_ports_flag_supported(
     flag != 0 && flag & !AUDIO_PORTS_RESCAN_ALL == 0
 }
 
-/// Marks the port buffers stale when the change would make them wrong.  Only
-/// a flag is set, so nothing is reallocated under the audio thread.  Before
+/// Asks for a reload when the change would make the port buffers wrong.
+/// Only a flag is set, so nothing is reallocated under the audio thread;
+/// the path rebuilds the insert with the new ports.  Before
 /// the buffers are built (during load) a rescan is harmless: the ports are
 /// read after it.
 pub(super) unsafe extern "C" fn host_audio_ports_rescan(host: *const clap_host, flags: u32) {
@@ -544,7 +545,7 @@ pub(super) unsafe extern "C" fn host_audio_ports_rescan(host: *const clap_host, 
     }
     if let Some(state) = unsafe { state(host) } {
         if state.ports_fixed.load(Ordering::Acquire) {
-            state.shared.mark_ports_changed();
+            state.shared.want_reload();
         }
     }
 }

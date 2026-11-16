@@ -8,11 +8,10 @@
 //! from its own or the audio thread) only `try_lock`s them and drops the
 //! value when they are busy.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::ThreadId;
 
-use super::super::clap::AUDIO_PORTS_CHANGED;
 use super::clamp_latency;
 use super::pause::PauseHandshake;
 use super::transfer::ParamSender;
@@ -20,11 +19,6 @@ use super::transfer::ParamSender;
 /// `restart` bit for a CLAP `clap_host.request_restart`.  VST3 restart
 /// flags use the low bits.
 pub(crate) const RESTART_ACTIVATION: u32 = 1 << 31;
-
-/// `reload` values.
-const RELOAD_NONE: u8 = 0;
-const RELOAD_PORTS: u8 = 1;
-const RELOAD_WANTED: u8 = 2;
 
 /// The state both halves of one loaded plugin and its host callbacks share.
 /// Atomics only: no lock, no allocation, so any thread may call any method
@@ -38,9 +32,8 @@ pub(crate) struct PluginShared {
     /// Restart work the UI owes the plugin: VST3 `RestartFlags` bits from
     /// `restartComponent`, or [`RESTART_ACTIVATION`] from CLAP.
     restart: AtomicU32,
-    /// The insert needs a structural rebuild: [`RELOAD_PORTS`] (CLAP ports
-    /// rescan, "remove and add it again") or [`RELOAD_WANTED`].
-    reload: AtomicU8,
+    /// The insert needs a structural rebuild (see [`Self::want_reload`]).
+    reload: AtomicBool,
     /// First processing failure, packed by [`ProcessFailure::pack`]; 0 is
     /// none.  Written once, by the audio thread.
     failure: AtomicU64,
@@ -55,7 +48,7 @@ impl PluginShared {
             latency: AtomicU32::new(clamp_latency(latency)),
             latency_unseen: AtomicBool::new(false),
             restart: AtomicU32::new(0),
-            reload: AtomicU8::new(RELOAD_NONE),
+            reload: AtomicBool::new(false),
             failure: AtomicU64::new(0),
             state_dirty: AtomicBool::new(false),
         }
@@ -107,32 +100,17 @@ impl PluginShared {
         ProcessFailure::unpack(self.failure.load(Ordering::Acquire))
     }
 
-    pub(crate) fn ports_changed(&self) -> bool {
-        self.reload.load(Ordering::Acquire) == RELOAD_PORTS
-    }
-
-    /// The plugin's ports no longer match its buffers: it stops until it
-    /// is removed and added again.
-    pub(crate) fn mark_ports_changed(&self) {
-        self.reload.store(RELOAD_PORTS, Ordering::Release);
-    }
-
-    /// The plugin asks to be rebuilt; a ports change already stops it.
+    /// The plugin asks to be rebuilt (VST3 `kIoChanged` with other buses,
+    /// `kReloadComponent`, changed parameter ids; CLAP changed controls or
+    /// audio ports): its buffers or tables no longer fit, so it stops
+    /// processing, and the path's next service frame builds a fresh
+    /// instance from its state and values.  Any thread.
     pub(crate) fn want_reload(&self) {
-        let _ = self.reload.compare_exchange(
-            RELOAD_NONE,
-            RELOAD_WANTED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        self.reload.store(true, Ordering::Release);
     }
 
-    /// Nothing rebuilds an insert on request yet: the failure that comes
-    /// with the request keeps it out of the chain until it is removed and
-    /// added again.
-    #[cfg(test)]
     pub(crate) fn reload_wanted(&self) -> bool {
-        self.reload.load(Ordering::Acquire) == RELOAD_WANTED
+        self.reload.load(Ordering::Acquire)
     }
 
     pub(crate) fn mark_state_dirty(&self) {
@@ -161,13 +139,8 @@ pub(crate) enum ProcessFailure {
     Vst3StartFailed(i32),
     /// A VST3 plugin did not activate again after a restart.
     Vst3Inactive,
-    /// A VST3 plugin changed its audio buses (`kIoChanged`): its buffers
-    /// no longer fit.
-    Vst3BusesChanged,
-    /// A VST3 plugin asked to be reloaded (`kReloadComponent`).
-    Vst3Reload,
-    /// A VST3 plugin changed its parameter ids.
-    Vst3ControlsChanged,
+    /// A plugin rebuilt on its own request asked again at once.
+    ReloadLoop,
     Clap(ClapFailure),
 }
 
@@ -176,9 +149,6 @@ pub(crate) enum ClapFailure {
     NotActive,
     ProcessError,
     StartFailed,
-    PortsChanged,
-    /// A parameter rescan changed the ids or ranges the processor uses.
-    ControlsChanged,
 }
 
 impl ClapFailure {
@@ -187,10 +157,6 @@ impl ClapFailure {
             ClapFailure::NotActive => "The CLAP plugin is not active.",
             ClapFailure::ProcessError => "The CLAP plugin reported a processing error.",
             ClapFailure::StartFailed => "The CLAP plugin could not start processing.",
-            ClapFailure::PortsChanged => AUDIO_PORTS_CHANGED,
-            ClapFailure::ControlsChanged => {
-                "The plugin changed its controls.  Remove it and add it again."
-            }
         }
     }
 
@@ -199,8 +165,6 @@ impl ClapFailure {
             ClapFailure::NotActive => 0,
             ClapFailure::ProcessError => 1,
             ClapFailure::StartFailed => 2,
-            ClapFailure::PortsChanged => 3,
-            ClapFailure::ControlsChanged => 4,
         }
     }
 
@@ -209,8 +173,6 @@ impl ClapFailure {
             0 => ClapFailure::NotActive,
             1 => ClapFailure::ProcessError,
             2 => ClapFailure::StartFailed,
-            3 => ClapFailure::PortsChanged,
-            4 => ClapFailure::ControlsChanged,
             _ => return None,
         })
     }
@@ -221,9 +183,7 @@ const FAILURE_VST3: u64 = 1;
 const FAILURE_VST3_START: u64 = 2;
 const FAILURE_CLAP: u64 = 3;
 const FAILURE_VST3_INACTIVE: u64 = 4;
-const FAILURE_VST3_RELOAD: u64 = 5;
-const FAILURE_VST3_CONTROLS: u64 = 6;
-const FAILURE_VST3_BUSES: u64 = 7;
+const FAILURE_RELOAD_LOOP: u64 = 5;
 
 impl ProcessFailure {
     /// The text the insert's error shows (UI thread).
@@ -234,15 +194,7 @@ impl ProcessFailure {
                 format!("Plugin setProcessing() failed: {code:#x}")
             }
             ProcessFailure::Vst3Inactive => "The VST3 plugin is not active.".to_owned(),
-            ProcessFailure::Vst3BusesChanged => {
-                "The plugin changed its audio buses.  Remove it and add it again.".to_owned()
-            }
-            ProcessFailure::Vst3Reload => {
-                "The plugin asked to be reloaded.  Remove it and add it again.".to_owned()
-            }
-            ProcessFailure::Vst3ControlsChanged => {
-                ClapFailure::ControlsChanged.message().to_owned()
-            }
+            ProcessFailure::ReloadLoop => "The plugin keeps asking to be reloaded.".to_owned(),
             ProcessFailure::Clap(failure) => failure.message().to_owned(),
         }
     }
@@ -254,9 +206,7 @@ impl ProcessFailure {
                 FAILURE_VST3_START << 32 | u64::from(code as u32)
             }
             ProcessFailure::Vst3Inactive => FAILURE_VST3_INACTIVE << 32,
-            ProcessFailure::Vst3BusesChanged => FAILURE_VST3_BUSES << 32,
-            ProcessFailure::Vst3Reload => FAILURE_VST3_RELOAD << 32,
-            ProcessFailure::Vst3ControlsChanged => FAILURE_VST3_CONTROLS << 32,
+            ProcessFailure::ReloadLoop => FAILURE_RELOAD_LOOP << 32,
             ProcessFailure::Clap(failure) => FAILURE_CLAP << 32 | u64::from(failure.code()),
         }
     }
@@ -267,9 +217,7 @@ impl ProcessFailure {
             FAILURE_VST3 => Some(ProcessFailure::Vst3(code as i32)),
             FAILURE_VST3_START => Some(ProcessFailure::Vst3StartFailed(code as i32)),
             FAILURE_VST3_INACTIVE => Some(ProcessFailure::Vst3Inactive),
-            FAILURE_VST3_BUSES => Some(ProcessFailure::Vst3BusesChanged),
-            FAILURE_VST3_RELOAD => Some(ProcessFailure::Vst3Reload),
-            FAILURE_VST3_CONTROLS => Some(ProcessFailure::Vst3ControlsChanged),
+            FAILURE_RELOAD_LOOP => Some(ProcessFailure::ReloadLoop),
             FAILURE_CLAP => ClapFailure::from_code(code).map(ProcessFailure::Clap),
             _ => None,
         }

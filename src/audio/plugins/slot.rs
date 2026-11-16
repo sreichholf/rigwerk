@@ -6,7 +6,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::super::clap::AUDIO_PORTS_CHANGED;
 use super::super::delay::{Declick, DelayLine, DelayTap};
 use super::handle::{LoadedPlugin, PluginHandle};
 use super::load::{load_plugin, MAX_BLOCK};
@@ -32,7 +31,34 @@ pub(crate) struct SlotControls {
     attempts: AtomicU64,
     skips: AtomicU64,
     paused: AtomicU64,
+    /// Rebuilds the plugin asked for in the current window, and when that
+    /// window began (milliseconds on [`now_ms`], 0 for none): bounds a
+    /// plugin that keeps asking.  UI thread.
+    reloads: AtomicU32,
+    reload_window_ms: AtomicU64,
 }
+
+/// Milliseconds since the first call, for [`SlotControls::reload_window_ms`].
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        // Never 0 (no window), and far enough from it that a test can move
+        // a window back by more than its length.
+        + 1_000_000
+}
+
+/// How many rebuilds a plugin may ask for within [`RELOAD_WINDOW_MS`]:
+/// the next request in that window fails the insert instead ("keeps
+/// asking"), so a plugin that asks on every load, or after a fixed delay,
+/// cannot reload forever.  Two in quick succession (a user changing the
+/// buses twice) are fine.
+pub(crate) const RELOAD_LIMIT: u32 = 2;
+/// The window [`RELOAD_LIMIT`] counts in, from the first rebuild of a run;
+/// a quiet window starts the count again.
+pub(crate) const RELOAD_WINDOW_MS: u64 = 10_000;
 
 impl SlotControls {
     pub(crate) fn new(pref: &PluginPref) -> Self {
@@ -42,6 +68,8 @@ impl SlotControls {
             attempts: AtomicU64::new(0),
             skips: AtomicU64::new(0),
             paused: AtomicU64::new(0),
+            reloads: AtomicU32::new(0),
+            reload_window_ms: AtomicU64::new(0),
         }
     }
 
@@ -70,6 +98,48 @@ impl SlotControls {
     /// per chunk the insert runs).
     pub(crate) fn note_attempt(&self) {
         self.attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether the window of rebuilds on request has run out.
+    fn reload_window_over(&self) -> bool {
+        match self.reload_window_ms.load(Ordering::Relaxed) {
+            0 => true,
+            start => now_ms().saturating_sub(start) >= RELOAD_WINDOW_MS,
+        }
+    }
+
+    /// Notes that the slot was just rebuilt on its plugin's request.
+    pub(crate) fn note_rebuilt(&self) {
+        if self.reload_window_over() {
+            self.reload_window_ms.store(now_ms(), Ordering::Relaxed);
+            self.reloads.store(1, Ordering::Relaxed);
+        } else {
+            self.reloads.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether another rebuild on request is allowed (see
+    /// [`RELOAD_LIMIT`]).
+    pub(crate) fn may_reload(&self) -> bool {
+        self.reload_window_over() || self.reloads.load(Ordering::Relaxed) < RELOAD_LIMIT
+    }
+
+    /// Starts the count again: the user changed the slot (a rate change
+    /// rebuilt it).
+    pub(crate) fn reset_reloads(&self) {
+        self.reloads.store(0, Ordering::Relaxed);
+        self.reload_window_ms.store(0, Ordering::Relaxed);
+    }
+
+    /// Moves the current window `ms` into the past, for tests that would
+    /// otherwise wait it out.
+    #[cfg(test)]
+    pub(crate) fn age_reload_window_for_test(&self, ms: u64) {
+        let start = self.reload_window_ms.load(Ordering::Relaxed);
+        if start != 0 {
+            self.reload_window_ms
+                .store(start - ms.min(start - 1), Ordering::Relaxed);
+        }
     }
 
     /// Counts an attempt that found the plugin paused (audio thread).
@@ -299,7 +369,7 @@ impl Slot {
         if self.test_delay.is_some() {
             return !self.controls.bypass();
         }
-        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.ports_changed()
+        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.reload_wanted()
     }
 
     /// A saved slot that has never been opened and has not failed.
@@ -311,13 +381,16 @@ impl Slot {
         self.plugin.is_none() && self.error.is_none()
     }
 
-    /// Whether this slot's CLAP plugin invalidated its port buffers.  The
-    /// insert is left out of the chain and the panel shows the error until it
-    /// is removed and added again.
-    pub(crate) fn ports_changed(&self) -> bool {
-        self.plugin
-            .as_ref()
-            .is_some_and(LoadedPlugin::ports_changed)
+    /// Whether this slot's plugin asked to be rebuilt (see
+    /// `PluginShared::want_reload`) and has not failed.  It stays out of
+    /// the chain, still counting its latency, until the path's service
+    /// replaces it.  Atomics only.
+    pub(crate) fn reload_wanted(&self) -> bool {
+        !self.failed()
+            && self
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| plugin.shared().reload_wanted())
     }
 
     /// The latency in samples this insert adds to the chain, as the plugin
@@ -327,9 +400,9 @@ impl Slot {
     /// A bypassed insert still counts: bypass only skips the processing,
     /// while the alignment around the chain is sized for the plugin's
     /// latency, so toggling bypass never moves the alignment (and never
-    /// makes the paths jump against each other).  An insert that is not
-    /// loaded, failed, or lost its ports to a rescan counts 0: it stays out
-    /// of the chain until it is loaded again.
+    /// makes the paths jump against each other).  So does one waiting for
+    /// a reload.  An insert that is not loaded or failed counts 0: it stays
+    /// out of the chain until it is loaded again.
     ///
     /// Whenever the chain skips the insert (bypass, mix at 0, a restart's
     /// pause) it plays the insert's input
@@ -342,7 +415,7 @@ impl Slot {
             return test.latency.min(MAX_ALIGN);
         }
         match &self.plugin {
-            Some(plugin) if !self.failed() && !plugin.ports_changed() => plugin.latency(),
+            Some(plugin) if !self.failed() => plugin.latency(),
             _ => 0,
         }
     }
@@ -430,18 +503,21 @@ pub(crate) struct SlotLink {
 }
 
 impl SlotLink {
+    /// As [`Slot::reload_wanted`].
+    pub(crate) fn reload_wanted(&self) -> bool {
+        !self.failed()
+            && self
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| plugin.shared().reload_wanted())
+    }
+
     fn failed(&self) -> bool {
         self.error.is_some()
             || self
                 .plugin
                 .as_ref()
                 .is_some_and(|plugin| plugin.failure().is_some())
-    }
-
-    pub(crate) fn ports_changed(&self) -> bool {
-        self.plugin
-            .as_ref()
-            .is_some_and(PluginHandle::ports_changed)
     }
 
     /// As [`Slot::latency_samples`].
@@ -451,7 +527,7 @@ impl SlotLink {
             return latency;
         }
         match &self.plugin {
-            Some(plugin) if !self.failed() && !plugin.ports_changed() => plugin.latency(),
+            Some(plugin) if !self.failed() => plugin.latency(),
             _ => 0,
         }
     }
@@ -462,22 +538,19 @@ impl SlotLink {
         if self.test_latency.is_some() {
             return !self.controls.bypass();
         }
-        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.ports_changed()
+        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.reload_wanted()
     }
 
-    /// The first error the insert should show: a load/processing failure,
-    /// or a port change that has not yet reached `process`.  Allocates: UI
-    /// thread only, which is where a processing failure gets its text.
+    /// The first error the insert should show: a load or processing
+    /// failure.  Allocates: UI thread only, which is where a processing
+    /// failure gets its text.
     pub(crate) fn resolved_error(&self) -> Option<String> {
-        self.error
-            .clone()
-            .or_else(|| {
-                self.plugin
-                    .as_ref()
-                    .and_then(PluginHandle::failure)
-                    .map(|failure| format!("Processing failed: {}", failure.message()))
-            })
-            .or_else(|| self.ports_changed().then(|| AUDIO_PORTS_CHANGED.to_owned()))
+        self.error.clone().or_else(|| {
+            self.plugin
+                .as_ref()
+                .and_then(PluginHandle::failure)
+                .map(|failure| format!("Processing failed: {}", failure.message()))
+        })
     }
 
     pub(crate) fn view(&self) -> PluginView {

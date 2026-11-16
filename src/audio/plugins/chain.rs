@@ -22,6 +22,8 @@ use super::MAX_ALIGN;
 pub(crate) struct ReloadPlan {
     pub(crate) previous_rate: u32,
     pub(crate) jobs: Vec<(usize, PluginPref)>,
+    /// The jobs' indices whose plugin asked to be rebuilt.
+    pub(crate) requested: Vec<usize>,
 }
 
 /// One path's insert chain.  The audio callback only try-locks the chain, so
@@ -159,8 +161,10 @@ impl PluginChain {
         Ok(())
     }
 
-    /// Lists slots to rebuild at `rate` without loading them.  When the rate
-    /// changed and nothing is installed, the rate is updated here.  The
+    /// Lists slots to rebuild at `rate` without loading them: every slot
+    /// when the rate changed, else the never-opened ones and those whose
+    /// plugin asked to be rebuilt.  When the rate changed and nothing is
+    /// installed, the rate is updated here.  The
     /// caller loads [`ReloadPlan::jobs`] outside the chain lock and commits
     /// them with [`Self::install_reload`].
     pub(crate) fn reload_plan(&mut self, rate: u32) -> Option<ReloadPlan> {
@@ -169,8 +173,13 @@ impl PluginChain {
             .slots
             .iter()
             .enumerate()
-            .filter(|(_, slot)| rate_changed || slot.needs_open())
+            .filter(|(_, slot)| rate_changed || slot.needs_open() || slot.reload_wanted())
             .map(|(index, slot)| (index, slot.restore_pref()))
+            .collect();
+        let requested = jobs
+            .iter()
+            .map(|(index, _)| *index)
+            .filter(|&index| self.slots[index].reload_wanted())
             .collect();
         if jobs.is_empty() {
             if rate_changed {
@@ -180,6 +189,24 @@ impl PluginChain {
         }
         Some(ReloadPlan {
             previous_rate: self.sample_rate,
+            jobs,
+            requested,
+        })
+    }
+
+    /// Lists only the slots whose plugin asked to be rebuilt, at the
+    /// chain's rate: a reload request opens nothing else.
+    pub(crate) fn request_plan(&mut self) -> Option<ReloadPlan> {
+        let jobs: Vec<(usize, PluginPref)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.reload_wanted())
+            .map(|(index, slot)| (index, slot.restore_pref()))
+            .collect();
+        (!jobs.is_empty()).then(|| ReloadPlan {
+            previous_rate: self.sample_rate,
+            requested: jobs.iter().map(|(index, _)| *index).collect(),
             jobs,
         })
     }

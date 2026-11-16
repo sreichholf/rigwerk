@@ -536,8 +536,12 @@ impl Shared {
     /// run loop once per UI frame, then follows the device rate and drains
     /// plugins a bridge thread deferred.
     pub(crate) fn service_plugins(&self) {
+        // A reload a plugin asks for in a frame that also follows a new
+        // device rate is built at that rate once.
+        let rate = self.output_rate.load(Ordering::Relaxed);
+        let device_rate = (super::clap::is_main_thread() && rate != 0).then_some(rate);
         for path in self.live_paths() {
-            path.service_plugins();
+            path.service_plugins_at(device_rate);
         }
         // VST3 editors' timers and fds (Linux), whether or not one is open.
         super::vst3::service_run_loop();

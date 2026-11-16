@@ -10,7 +10,7 @@ use ::vst3::Steinberg::Vst::{
     BusDirection, BusInfo, IAudioProcessor, IAudioProcessorTrait, IComponent, IComponentHandler,
     IComponentHandlerTrait, IComponentTrait, IEditController, IEditControllerTrait,
     IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, IoMode, MediaType, ParamID,
-    ParamValue, ParameterInfo, ProcessData, ProcessSetup, RoutingInfo, SpeakerArr,
+    ParamValue, ParameterInfo, ProcessData, ProcessSetup, RestartFlags_, RoutingInfo, SpeakerArr,
     SpeakerArrangement, String128, TChar,
 };
 use ::vst3::Steinberg::{char16, int16, kResultTrue, IPlugFrame, IPlugViewTrait, ViewRect};
@@ -21,9 +21,7 @@ use ::vst3::Steinberg::{
 use ::vst3::{Class, ComPtr, ComRef, ComWrapper};
 
 use super::Vst3Controller;
-use crate::audio::plugins::{
-    LoadedPlugin, PluginHandle, PluginPref, PluginShared, ProcessFailure, Restore, Saved,
-};
+use crate::audio::plugins::{LoadedPlugin, PluginHandle, PluginPref, PluginShared, Restore, Saved};
 use crate::audio::vst3::{IO_CHANGED, LATENCY_CHANGED, PARAM_VALUES_CHANGED, RELOAD_COMPONENT};
 
 /// The stand-in's one control, a gain with default 0.5.
@@ -53,6 +51,16 @@ struct Fake {
     /// last `setActive(false)`.
     strict: AtomicBool,
     fresh_setup: AtomicBool,
+    /// Extra parameter ids after [`GAIN`] (they share its value).
+    extra_ids: Mutex<Vec<u32>>,
+    /// Restart flags raised from `setProcessing(true)` (the audio thread).
+    raise_on_start: AtomicU32,
+    /// A restored state brings control 6 with it, and says so
+    /// (`kParamTitlesChanged`), as a plugin whose controls depend on its
+    /// state does.
+    ids_from_state: AtomicBool,
+    /// `process` calls with audio.
+    processed: AtomicUsize,
 }
 
 impl Fake {
@@ -171,6 +179,17 @@ impl IComponentTrait for Fake {
             return kResultFalse;
         }
         let gain = f64::from_le_bytes(bytes);
+        if self.ids_from_state.load(SeqCst) {
+            let mut extra = self.extra_ids.lock().unwrap();
+            if !extra.contains(&6) {
+                extra.push(6);
+            }
+            drop(extra);
+            if let Some(handler) = self.handler.lock().unwrap().clone() {
+                // SAFETY: the handler the host set.
+                unsafe { handler.restartComponent(RestartFlags_::kParamTitlesChanged) };
+            }
+        }
         self.gain.store(gain.to_bits(), SeqCst);
         self.value.store(gain.to_bits(), SeqCst);
         kResultOk
@@ -223,12 +242,20 @@ impl IAudioProcessorTrait for Fake {
     }
     unsafe fn setProcessing(&self, state: TBool) -> tresult {
         self.note(if state != 0 { "start" } else { "stop" });
+        let flags = self.raise_on_start.load(SeqCst);
+        if state != 0 && flags != 0 {
+            // SAFETY: the handler the host set.
+            unsafe { self.handler().restartComponent(flags as i32) };
+        }
         kResultOk
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         // SAFETY: the host's live block and change list.
         unsafe {
             let data = &*data;
+            if data.numSamples > 0 {
+                self.processed.fetch_add(1, SeqCst);
+            }
             let input: ComRef<'_, IParameterChanges> =
                 ComRef::from_raw(data.inputParameterChanges).expect("changes");
             for at in 0..input.getParameterCount() {
@@ -259,16 +286,21 @@ impl IEditControllerTrait for Fake {
         kResultFalse
     }
     unsafe fn getParameterCount(&self) -> i32 {
-        1
+        1 + self.extra_ids.lock().unwrap().len() as i32
     }
     unsafe fn getParameterInfo(&self, index: i32, info: *mut ParameterInfo) -> tresult {
-        if index != 0 {
-            return kInvalidArgument;
-        }
+        let id = match index {
+            0 => GAIN,
+            index => match self.extra_ids.lock().unwrap().get(index as usize - 1) {
+                Some(&id) => id,
+                None => return kInvalidArgument,
+            },
+        };
+        let title = if id == GAIN { "Gain" } else { "Mix" };
         // SAFETY: the host passes a writable `ParameterInfo`.
         unsafe {
-            (*info).id = GAIN;
-            for (unit, code) in (*info).title.iter_mut().zip("Gain".encode_utf16()) {
+            (*info).id = id;
+            for (unit, code) in (*info).title.iter_mut().zip(title.encode_utf16()) {
                 *unit = code;
             }
             (*info).defaultNormalizedValue = 0.5;
@@ -387,13 +419,19 @@ impl IPlugViewTrait for View {
 
 /// The stand-in, loaded from `pref` the way `load_plugin` loads a binary.
 fn load(fake: &ComWrapper<Fake>, pref: &PluginPref) -> LoadedPlugin {
+    load_current(fake, pref, 48_000).0
+}
+
+/// [`load`], with whether the saved state still describes the instance,
+/// as `load_plugin` returns it.
+fn load_current(fake: &ComWrapper<Fake>, pref: &PluginPref, rate: u32) -> (LoadedPlugin, bool) {
     let component = fake.to_com_ptr::<IComponent>().expect("a component");
     let shared = Arc::new(PluginShared::new(0));
     let restore = Restore::from_pref(pref);
-    let loaded = Vst3Controller::assemble(component, None, 48_000, &restore, &shared)
+    let loaded = Vst3Controller::assemble(component, None, rate, &restore, &shared)
         .unwrap_or_else(|error| panic!("{error}"));
     let current = loaded.state_current;
-    LoadedPlugin::vst3(
+    let plugin = LoadedPlugin::vst3(
         loaded,
         shared,
         Saved {
@@ -401,7 +439,8 @@ fn load(fake: &ComWrapper<Fake>, pref: &PluginPref) -> LoadedPlugin {
             state: pref.state.clone(),
             stale: !current,
         },
-    )
+    );
+    (plugin, current)
 }
 
 fn new_fake() -> ComWrapper<Fake> {
@@ -456,7 +495,7 @@ fn a_latency_change_raised_by_the_hosts_own_activation_does_not_restart_again() 
 }
 
 #[test]
-fn an_io_change_fails_the_insert_only_when_its_buses_changed() {
+fn an_io_change_asks_for_a_reload_only_when_its_buses_changed() {
     let _main = crate::audio::claim_main_thread();
     let fake = new_fake();
     // Raised while the host sets the plugin up: the buses still match.
@@ -466,30 +505,30 @@ fn an_io_change_fails_the_insert_only_when_its_buses_changed() {
     assert!(!handle.shared().restart_pending());
     handle.shared().request_restart(IO_CHANGED);
     handle.service();
-    assert_eq!(handle.failure(), None, "same buses");
+    assert!(!handle.shared().reload_wanted(), "same buses");
     run(&mut plugin, 1);
 
     fake.channels.store(1, SeqCst);
     handle.shared().request_restart(IO_CHANGED);
     assert!(handle.service());
-    assert_eq!(handle.failure(), Some(ProcessFailure::Vst3BusesChanged));
+    assert!(handle.shared().reload_wanted());
+    assert_eq!(handle.failure(), None, "waiting for the reload, not failed");
 }
 
 #[test]
-fn a_reload_request_fails_the_insert_with_its_own_text() {
+fn a_reload_request_raised_by_the_load_itself_is_not_followed() {
     let _main = crate::audio::claim_main_thread();
     let fake = new_fake();
+    fake.raise_on_activate.store(RELOAD_COMPONENT, SeqCst);
     let plugin = load(&fake, &PluginPref::default());
     let handle = plugin.handle();
+    assert!(!handle.shared().restart_pending());
+    handle.service();
+    assert!(!handle.shared().reload_wanted());
+    // Asked for later, it is.
     handle.shared().request_restart(RELOAD_COMPONENT);
-    assert!(handle.service());
-    let failure = handle.failure().expect("a failure");
-    assert_eq!(failure, ProcessFailure::Vst3Reload);
-    assert!(failure.message().contains("asked to be reloaded"));
-    assert_ne!(
-        failure.message(),
-        ProcessFailure::Vst3BusesChanged.message()
-    );
+    handle.service();
+    assert!(handle.shared().reload_wanted());
 }
 
 #[test]
@@ -621,4 +660,414 @@ fn a_latency_restart_sets_the_plugin_up_again_before_it_activates() {
     assert_eq!(handle.latency(), 32);
     assert_eq!(fake.activations.load(SeqCst), 2);
     assert!(handle.shared().pause.processing(), "processing again");
+}
+
+/// What the test loader builds stand-ins with, and what it built.
+#[derive(Default)]
+struct Reloads {
+    fakes: std::cell::RefCell<Vec<ComWrapper<Fake>>>,
+    channels: std::cell::Cell<u32>,
+    extra_ids: std::cell::RefCell<Vec<u32>>,
+    fail: std::cell::Cell<bool>,
+    loads: std::cell::Cell<usize>,
+    raise_on_start: std::cell::Cell<u32>,
+    ids_from_state: std::cell::Cell<bool>,
+}
+
+impl Reloads {
+    fn fake(&self, at: usize) -> ComWrapper<Fake> {
+        self.fakes.borrow()[at].clone()
+    }
+}
+
+/// A path with one stand-in insert, loaded (and reloaded) through
+/// `load_plugin` with the settings in the returned [`Reloads`].
+fn reloading_path() -> (
+    crate::audio::path::PathControls,
+    std::rc::Rc<Reloads>,
+    crate::audio::plugins::TestLoaderGuard,
+) {
+    let reloads = std::rc::Rc::new(Reloads::default());
+    let settings = std::rc::Rc::clone(&reloads);
+    let guard = crate::audio::plugins::set_test_loader(move |pref, rate| {
+        settings.loads.set(settings.loads.get() + 1);
+        if settings.fail.get() {
+            return Err("the stand-in is gone".to_owned());
+        }
+        let fake = new_fake();
+        fake.channels.store(settings.channels.get(), SeqCst);
+        *fake.extra_ids.lock().unwrap() = settings.extra_ids.borrow().clone();
+        fake.raise_on_start
+            .store(settings.raise_on_start.get(), SeqCst);
+        fake.ids_from_state
+            .store(settings.ids_from_state.get(), SeqCst);
+        let loaded = load_current(&fake, pref, rate);
+        settings.fakes.borrow_mut().push(fake);
+        Ok(loaded)
+    });
+    let path = crate::audio::path::PathControls::new(48_000);
+    path.add_plugin(PluginPref {
+        path: format!("{}vst3", crate::audio::plugins::TEST_PATH),
+        format: crate::audio::PluginFormat::Vst3,
+        name: "Stand-in".to_owned(),
+        ..PluginPref::default()
+    })
+    .expect("load the stand-in");
+    (path, reloads, guard)
+}
+
+fn run_path(path: &crate::audio::path::PathControls, blocks: usize) {
+    for _ in 0..blocks {
+        let (mut left, mut right) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        assert!(path.process_plugins(&mut left, &mut right, 64));
+    }
+}
+
+/// The insert's only view, with no error.
+fn view_of(path: &crate::audio::path::PathControls) -> crate::audio::PluginView {
+    let view = path.plugin_views()[0].clone();
+    assert_eq!(view.error, None);
+    view
+}
+
+#[test]
+fn a_bus_change_reloads_the_plugin_with_the_new_buses_and_its_values() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 2);
+    let old = path.plugin_handle(0).expect("loaded");
+    let stereo = old.vst3_layout_for_test().expect("a VST3 insert");
+    assert_eq!(stereo.outputs, vec![2]);
+
+    // The plugin goes mono and says so.
+    reloads.channels.set(1);
+    reloads.fake(0).channels.store(1, SeqCst);
+    old.shared().request_restart(IO_CHANGED);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2, "reloaded once");
+    let new = path.plugin_handle(0).expect("reloaded");
+    assert_ne!(new.instance_id(), old.instance_id());
+    assert_eq!(new.vst3_layout_for_test().expect("VST3").outputs, vec![1]);
+    assert_eq!(new.failure(), None);
+    let view = view_of(&path);
+    assert_eq!(view.instance, Some(new.instance_id()));
+    assert_eq!(view.parameters[0].value, 0.3);
+    assert_eq!(reloads.fake(1).value(), 0.3);
+    run_path(&path, 1);
+    assert_eq!(reloads.fake(1).gain(), 0.3);
+    // The old instance goes with its last handle.
+    drop(old);
+    assert!(reloads.fake(0).terminated.load(SeqCst));
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2, "no second reload");
+}
+
+#[test]
+fn a_reload_request_rebuilds_the_plugin_from_its_state() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 2);
+    assert_eq!(reloads.fake(0).gain(), 0.3);
+    let old = path.plugin_handle(0).expect("loaded");
+    old.shared().request_restart(RELOAD_COMPONENT);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2);
+    let new = path.plugin_handle(0).expect("reloaded");
+    assert_ne!(new.instance_id(), old.instance_id());
+    // The component state came over.
+    assert_eq!(reloads.fake(1).gain(), 0.3);
+    assert!(new.saved().1.is_some(), "restored from a captured state");
+    view_of(&path);
+    // A second request in quick succession (the user changing the
+    // layout twice) is honoured too.
+    new.shared().request_restart(RELOAD_COMPONENT);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 3);
+    view_of(&path);
+}
+
+#[test]
+fn a_plugin_that_asks_again_right_after_its_rebuild_is_stopped() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    // From now on every instance asks again as its first block starts.
+    reloads.raise_on_start.set(RELOAD_COMPONENT);
+    path.plugin_handle(0)
+        .expect("loaded")
+        .shared()
+        .request_restart(RELOAD_COMPONENT);
+    for _ in 0..10 {
+        path.service_plugins();
+        run_path(&path, 1);
+    }
+    path.service_plugins();
+    let limit = crate::audio::plugins::RELOAD_LIMIT as usize;
+    assert_eq!(
+        reloads.loads.get(),
+        1 + limit,
+        "rebuilt to the limit, then stopped"
+    );
+    let view = path.plugin_views()[0].clone();
+    let error = view.error.expect("the insert says why");
+    assert!(error.contains("keeps asking to be reloaded"), "{error}");
+}
+
+#[test]
+fn a_plugin_that_asks_again_every_second_is_stopped_at_the_limit() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    let limit = crate::audio::plugins::RELOAD_LIMIT as usize;
+    for round in 0..10 {
+        if path.plugin_views()[0].error.is_some() {
+            break;
+        }
+        let handle = path.plugin_handle(0).expect("loaded");
+        handle.shared().request_restart(RELOAD_COMPONENT);
+        path.service_plugins();
+        // About 1.1 s pass before the plugin asks again.
+        if let Some(link) = path.slot_link(0) {
+            link.controls.age_reload_window_for_test(1_100);
+        }
+        assert!(round <= limit, "still reloading after {round} requests");
+    }
+    assert_eq!(reloads.loads.get(), 1 + limit);
+    let error = path.plugin_views()[0].error.clone().expect("stopped");
+    assert!(error.contains("keeps asking to be reloaded"), "{error}");
+}
+
+#[test]
+fn a_quiet_window_lets_a_plugin_ask_again() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    let limit = crate::audio::plugins::RELOAD_LIMIT as usize;
+    for _ in 0..limit {
+        path.plugin_handle(0)
+            .expect("loaded")
+            .shared()
+            .request_restart(RELOAD_COMPONENT);
+        path.service_plugins();
+    }
+    // The window passes with no request.
+    path.slot_link(0)
+        .expect("a slot")
+        .controls
+        .age_reload_window_for_test(crate::audio::plugins::RELOAD_WINDOW_MS);
+    path.plugin_handle(0)
+        .expect("loaded")
+        .shared()
+        .request_restart(RELOAD_COMPONENT);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2 + limit);
+    view_of(&path);
+}
+
+#[test]
+fn titles_changed_raised_by_the_activation_with_the_same_ids_is_settled() {
+    let _main = crate::audio::claim_main_thread();
+    let fake = new_fake();
+    fake.raise_on_activate
+        .store(crate::audio::vst3::PARAM_TITLES_CHANGED, SeqCst);
+    let plugin = load(&fake, &PluginPref::default());
+    assert!(
+        !plugin.handle().shared().restart_pending(),
+        "nothing left to act on"
+    );
+}
+
+#[test]
+fn a_parameter_list_that_depends_on_the_state_is_not_a_layout_change() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 1);
+    // Every load from here on finds control 6 in the state it restores.
+    reloads.ids_from_state.set(true);
+    reloads.fake(0).ids_from_state.store(true, SeqCst);
+    path.plugin_handle(0)
+        .expect("loaded")
+        .shared()
+        .request_restart(RELOAD_COMPONENT);
+    for _ in 0..5 {
+        path.service_plugins();
+        run_path(&path, 1);
+    }
+    assert_eq!(reloads.loads.get(), 2, "no reload loop");
+    let view = view_of(&path);
+    assert_eq!(
+        view.parameters
+            .iter()
+            .map(|view| view.id)
+            .collect::<Vec<_>>(),
+        vec![GAIN, 6]
+    );
+    assert!(!path
+        .plugin_handle(0)
+        .expect("loaded")
+        .shared()
+        .reload_wanted());
+}
+
+#[test]
+fn an_insert_waiting_for_its_reload_is_not_processed() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    let fake = reloads.fake(0);
+    let processed = fake.processed.load(SeqCst);
+    // The buses changed; the service frame that rebuilds has not run.
+    fake.channels.store(1, SeqCst);
+    let handle = path.plugin_handle(0).expect("loaded");
+    handle.shared().request_restart(IO_CHANGED);
+    handle.service();
+    assert!(handle.shared().reload_wanted());
+    let (mut left, mut right) = (vec![0.5f32; 64], vec![0.5f32; 64]);
+    assert!(path.process_plugins(&mut left, &mut right, 64));
+    assert_eq!(fake.processed.load(SeqCst), processed, "skipped, not run");
+    // The stand-in writes no output when it runs; skipped, its input
+    // comes through (declicked in from the last processed block).
+    assert!(left[63] > 0.0 && right[63] > 0.0);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2);
+}
+
+/// Two stand-ins on one path, the second bypassed and the first at half
+/// mix.
+fn two_slot_path() -> (
+    crate::audio::path::PathControls,
+    std::rc::Rc<Reloads>,
+    crate::audio::plugins::TestLoaderGuard,
+) {
+    let (path, reloads, loader) = reloading_path();
+    path.add_plugin(PluginPref {
+        path: format!("{}vst3", crate::audio::plugins::TEST_PATH),
+        format: crate::audio::PluginFormat::Vst3,
+        name: "Second".to_owned(),
+        ..PluginPref::default()
+    })
+    .expect("load the second stand-in");
+    path.set_plugin_mix(0, 0.5);
+    path.set_plugin_bypass(1, true);
+    (path, reloads, loader)
+}
+
+fn instances(path: &crate::audio::path::PathControls) -> Vec<Option<usize>> {
+    path.plugin_views()
+        .iter()
+        .map(|view| view.instance)
+        .collect()
+}
+
+#[test]
+fn only_the_requesting_slot_is_rebuilt_and_keeps_its_bypass_and_mix() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = two_slot_path();
+    let before = instances(&path);
+    path.plugin_handle(1)
+        .expect("loaded")
+        .shared()
+        .request_restart(RELOAD_COMPONENT);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 3, "two loads, one rebuild");
+    let after = instances(&path);
+    assert_eq!(after[0], before[0], "the other slot stays");
+    assert_ne!(after[1], before[1]);
+    let views = path.plugin_views();
+    assert!((views[0].mix - 0.5).abs() < 1e-6 && !views[0].bypass);
+    assert!(views[1].bypass);
+}
+
+#[test]
+fn two_requests_in_one_frame_rebuild_both_slots() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = two_slot_path();
+    let before = instances(&path);
+    for index in 0..2 {
+        path.plugin_handle(index)
+            .expect("loaded")
+            .shared()
+            .request_restart(RELOAD_COMPONENT);
+    }
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 4);
+    let after = instances(&path);
+    assert!(after[0] != before[0] && after[1] != before[1]);
+    let views = path.plugin_views();
+    assert!(views.iter().all(|view| view.error.is_none()));
+    assert!((views[0].mix - 0.5).abs() < 1e-6 && !views[0].bypass);
+    assert!(views[1].bypass && (views[1].mix - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_reload_request_opens_no_other_slot() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    // A saved insert that was never opened (the bridge is stopped).
+    let mut prefs = path.plugin_prefs();
+    prefs.push(PluginPref {
+        path: format!("{}vst3", crate::audio::plugins::TEST_PATH),
+        format: crate::audio::PluginFormat::Vst3,
+        name: "Restored".to_owned(),
+        ..PluginPref::default()
+    });
+    path.restore_plugins(prefs);
+    path.ensure_plugin_loaded(0);
+    assert_eq!(reloads.loads.get(), 2);
+    assert!(path.plugin_handle(1).is_none(), "the second is not open");
+    path.plugin_handle(0)
+        .expect("loaded")
+        .shared()
+        .request_restart(RELOAD_COMPONENT);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 3, "only the requesting slot loaded");
+    assert!(path.plugin_handle(1).is_none());
+}
+
+#[test]
+fn changed_parameter_ids_reload_the_plugin_with_its_new_controls() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    let old = path.plugin_handle(0).expect("loaded");
+    assert!(
+        path.set_plugin_parameter(0, 6, 0.4).is_err(),
+        "no such control yet"
+    );
+    reloads.extra_ids.borrow_mut().push(6);
+    reloads.fake(0).extra_ids.lock().unwrap().push(6);
+    old.shared()
+        .request_restart(crate::audio::vst3::PARAM_TITLES_CHANGED);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2);
+    let view = view_of(&path);
+    assert_eq!(
+        view.parameters
+            .iter()
+            .map(|view| view.id)
+            .collect::<Vec<_>>(),
+        vec![GAIN, 6]
+    );
+    path.set_plugin_parameter(0, 6, 0.4)
+        .expect("the new control");
+}
+
+#[test]
+fn a_reload_that_fails_to_load_shows_why_and_is_not_retried() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    let old = path.plugin_handle(0).expect("loaded");
+    reloads.fail.set(true);
+    old.shared().request_restart(RELOAD_COMPONENT);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2);
+    let view = path.plugin_views()[0].clone();
+    let error = view.error.expect("the failure is shown");
+    assert!(error.contains("asked to be reloaded"), "{error}");
+    assert!(error.contains("the stand-in is gone"), "{error}");
+    assert!(path.plugin_handle(0).is_none());
+    for _ in 0..3 {
+        path.service_plugins();
+    }
+    assert_eq!(reloads.loads.get(), 2, "one attempt per request");
 }

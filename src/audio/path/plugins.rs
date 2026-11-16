@@ -21,8 +21,9 @@
 //!   links, all without the chain lock.
 //!
 //! What still takes the chain lock is structural and short: adding,
-//! removing, moving or restoring inserts, reopening them for a new rate
-//! (slow loads and teardowns run outside the lock), opening a never-opened
+//! removing, moving or restoring inserts, reopening them for a new rate or
+//! because a plugin changed its layout and asked to be rebuilt (slow loads
+//! and teardowns run outside the lock), opening a never-opened
 //! slot (for its editor, or a control set on it), and the publish of the
 //! views and links those edits do.
 //!
@@ -40,7 +41,9 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError, TryLockError};
 
-use super::super::plugins::{PluginChain, PluginHandle, PluginPref, PluginView, SlotLink};
+use super::super::plugins::{
+    PluginChain, PluginHandle, PluginPref, PluginView, ProcessFailure, ReloadPlan, SlotLink,
+};
 use super::{LockStats, PathControls, PluginLockReport};
 
 /// Armed by `edit_chain` around the edit itself.  If the edit panics, the
@@ -82,7 +85,7 @@ impl PathControls {
     }
 
     /// The insert at `index` as last published.
-    fn slot_link(&self, index: usize) -> Option<SlotLink> {
+    pub(in crate::audio) fn slot_link(&self, index: usize) -> Option<SlotLink> {
         self.slot_links
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -126,7 +129,6 @@ impl PathControls {
         self.chain_poisoned.store(true, Ordering::Relaxed);
         self.plugin_active.store(0, Ordering::Relaxed);
         self.chain_unopened.store(false, Ordering::Relaxed);
-        self.published_ports_changed.store(0, Ordering::Relaxed);
         *self
             .plugin_views
             .lock()
@@ -164,17 +166,13 @@ impl PathControls {
         stale
     }
 
-    /// Rebuilds the views, the active count and the port-change count from
-    /// `links`, without the chain lock.  The chain's own atomics (latency,
-    /// failures, ports) are what the audio thread reads too, so the result
-    /// matches what it publishes per block.
+    /// Rebuilds the views and the active count from `links`, without the
+    /// chain lock.  The chain's own atomics (latency, failures, reload
+    /// requests) are what the audio thread reads too, so the result matches
+    /// what it publishes per block.
     fn publish_from(&self, links: &[SlotLink]) {
         self.plugin_active.store(
             links.iter().filter(|link| link.active()).count(),
-            Ordering::Relaxed,
-        );
-        self.published_ports_changed.store(
-            links.iter().filter(|link| link.ports_changed()).count(),
             Ordering::Relaxed,
         );
         let views: Arc<[PluginView]> = links.iter().map(SlotLink::view).collect();
@@ -254,14 +252,14 @@ impl PathControls {
         }));
     }
 
-    /// Whether the chain needs a reload for `rate`: it was built at another
-    /// rate, or a restored slot was never opened.  Answered from the
-    /// published flags, without the chain lock.
     /// The rate the chain was last built for (lock-free).
     pub(crate) fn chain_rate(&self) -> u32 {
         self.chain_rate.load(Ordering::Relaxed)
     }
 
+    /// Whether the chain needs a reload for `rate`: it was built at another
+    /// rate, or a restored slot was never opened.  Answered from the
+    /// published flags, without the chain lock.
     pub(crate) fn needs_reload(&self, rate: u32) -> bool {
         rate != self.chain_rate.load(Ordering::Relaxed)
             || self.chain_unopened.load(Ordering::Relaxed)
@@ -275,24 +273,59 @@ impl PathControls {
         } else {
             sample_rate
         };
+        self.reload_with(rate, |chain| chain.reload_plan(rate));
+    }
+
+    /// Builds the slots `plan` lists outside the chain lock and installs
+    /// them, retrying a few times if the chain changed meanwhile.  A slot
+    /// rebuilt because its plugin asked is noted as such on its controls
+    /// (which the rebuilt slot keeps), for the loop bound.
+    fn reload_with(&self, rate: u32, plan: impl Fn(&mut PluginChain) -> Option<ReloadPlan>) {
         const MAX_ATTEMPTS: usize = 3;
         for _ in 0..MAX_ATTEMPTS {
-            let plan = match self.edit_chain(|chain| chain.reload_plan(rate)) {
+            let plan = match self.edit_chain(&plan) {
                 Some(Some(plan)) => plan,
                 Some(None) | None => return,
             };
+            let requested: Vec<bool> = plan
+                .jobs
+                .iter()
+                .map(|(index, _)| plan.requested.contains(index))
+                .collect();
             let built: Vec<_> = plan
                 .jobs
                 .into_iter()
-                .map(|(index, pref)| {
-                    let (slot, _) = PluginChain::load_slot(pref.clone(), rate);
+                .zip(&requested)
+                .map(|((index, pref), &requested)| {
+                    let (mut slot, _) = PluginChain::load_slot(pref.clone(), rate);
+                    if requested && slot.plugin.is_none() {
+                        // One attempt per request: a slot that failed to
+                        // load wants nothing more, and says why.
+                        slot.error = slot
+                            .error
+                            .take()
+                            .map(|error| format!("The plugin asked to be reloaded: {error}"));
+                    }
                     (index, pref, slot)
                 })
                 .collect();
             let installed = match self
                 .edit_chain(|chain| chain.install_reload(plan.previous_rate, rate, built))
             {
-                Some(Ok(old)) => Some(old),
+                Some(Ok(old)) => {
+                    // The replaced slots share their controls with the new
+                    // ones.  A rate change is the user's: the counts of
+                    // rebuilds on request start again.
+                    for (slot, requested) in old.iter().zip(&requested) {
+                        if plan.previous_rate != rate {
+                            slot.controls.reset_reloads();
+                        }
+                        if *requested {
+                            slot.controls.note_rebuilt();
+                        }
+                    }
+                    Some(old)
+                }
                 // Built for a chain that changed meanwhile; dropped here,
                 // after the chain lock was released.
                 Some(Err(stale)) => {
@@ -483,7 +516,15 @@ impl PathControls {
     /// published links.  A latency change, a processing failure or a port
     /// change republishes from the links too, so no frame takes the chain
     /// lock.
+    #[cfg(test)]
     pub(crate) fn service_plugins(&self) {
+        self.service_plugins_at(None);
+    }
+
+    /// [`Self::service_plugins`], knowing the rate the device opened at:
+    /// a reload request in a frame that also has to follow a new rate
+    /// rebuilds the chain at that rate once, instead of twice.
+    pub(crate) fn service_plugins_at(&self, device_rate: Option<u32>) {
         let links = Arc::clone(
             &self
                 .slot_links
@@ -494,17 +535,59 @@ impl PathControls {
         for handle in links.iter().filter_map(|link| link.plugin.as_ref()) {
             latency_changed |= handle.service();
         }
-        let ports_changed = links.iter().filter(|link| link.ports_changed()).count();
+        if links.iter().any(SlotLink::reload_wanted) && self.reload_requested(&links, device_rate) {
+            // The reload republished the links and views.
+            return;
+        }
         let dirty = self.plugin_views_dirty.swap(false, Ordering::AcqRel);
-        if dirty
-            || latency_changed
-            || ports_changed != self.published_ports_changed.load(Ordering::Relaxed)
-        {
+        if dirty || latency_changed {
             self.refresh_from_links();
         }
         // Dropped on this thread, in case a removal left it as the last
         // reference to a plugin.
         drop(links);
+    }
+
+    /// Rebuilds the inserts whose plugin asked for it (a layout change):
+    /// their state and values are captured from the old instance, a fresh
+    /// one is loaded from them outside the chain lock and swapped in, as a
+    /// rate change does for every slot (`reload_plugins_for_rate`).  The
+    /// old instance stopped processing when it asked, so its state is
+    /// final; a capture that cannot happen yet keeps the last blob, which
+    /// the saved values override on restore.  The old slot drops on this
+    /// thread afterwards, and a chain that changed meanwhile is retried on
+    /// the next frame.  Only the requesting slots are rebuilt, unless
+    /// `device_rate` is a new rate, which rebuilds them all at once.
+    ///
+    /// A slot that was rebuilt on request `RELOAD_LIMIT` times within
+    /// `RELOAD_WINDOW_MS` is failed instead when it asks again ("keeps
+    /// asking"): a plugin that asks on every load (from its own setup,
+    /// activation, first block or a timer) would otherwise reload
+    /// forever.  Returns whether anything was rebuilt.
+    fn reload_requested(&self, links: &[SlotLink], device_rate: Option<u32>) -> bool {
+        let mut rebuild = false;
+        for link in links.iter().filter(|link| link.reload_wanted()) {
+            let Some(handle) = &link.plugin else {
+                continue;
+            };
+            if !link.controls.may_reload() {
+                eprintln!("[plugins] a plugin keeps asking to be reloaded; it stays stopped");
+                handle.shared().fail(ProcessFailure::ReloadLoop);
+                self.plugin_views_dirty.store(true, Ordering::Release);
+            } else {
+                handle.capture_state();
+                rebuild = true;
+            }
+        }
+        if !rebuild {
+            return false;
+        }
+        let rate = self.chain_rate();
+        match device_rate.filter(|&device| device != 0 && device != rate) {
+            Some(device) => self.reload_plugins_for_rate(device),
+            None => self.reload_with(rate, PluginChain::request_plan),
+        }
+        true
     }
 
     /// Captures the opaque state of every loaded plugin whose saved blob is

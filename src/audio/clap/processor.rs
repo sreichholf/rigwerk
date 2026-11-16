@@ -242,11 +242,6 @@ impl ClapProcessor {
         right: &mut [f32],
     ) -> Result<(), ClapFailure> {
         let host = &*self.core.host;
-        if host.shared.ports_changed() {
-            // The buffers were built for the old ports; using them could
-            // hand the plugin fewer ports or channels than it now expects.
-            return Err(ClapFailure::PortsChanged);
-        }
         let _audio_thread = AudioThreadScope::enter();
         // A processed block delivers whatever the plugin asked to flush.
         host.flush_requested.store(false, Ordering::Relaxed);

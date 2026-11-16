@@ -25,7 +25,6 @@ pub(crate) use host::{
     is_main_thread, mark_main_thread, may_destroy_plugins_here, GuiVisibility, HostState, StateSave,
 };
 pub(crate) use instance::{ClapInstance, ClapLoaded};
-pub(crate) use ports::AUDIO_PORTS_CHANGED;
 pub(crate) use processor::ClapProcessor;
 pub(crate) use scan::{scan_bundle, scan_library, ClapCandidate};
 
