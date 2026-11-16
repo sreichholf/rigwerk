@@ -4,10 +4,14 @@
 //! into the input event list; the plugin's output `PARAM_VALUE` events go
 //! back to the UI through the other queue.
 //!
-//! Nothing here allocates, locks or frees: the buffers and the event list
-//! are sized at load, the queues never allocate, and a failure is a static
-//! [`ClapFailure`].  The processor never touches the main-thread instance
-//! or its UI lock.
+//! A value the event list could not take, or that went into a block the
+//! plugin failed, is kept and goes with the next block; values count as
+//! applied only once a block (or flush) carried them all.
+//!
+//! Nothing here allocates, locks or frees: the buffers, the event list and
+//! the kept values are sized at load, the queues never allocate, and a
+//! failure is a static [`ClapFailure`].  The processor never touches the
+//! main-thread instance or its UI lock.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -22,7 +26,7 @@ use clap_sys::ext::params::clap_plugin_params;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{clap_process, CLAP_PROCESS_ERROR};
 
-use crate::audio::plugins::{ClapFailure, ParamIds, ParamReceiver, ParamSender};
+use crate::audio::plugins::{ClapFailure, ParamIds, ParamReceiver, ParamSender, Retry};
 
 use super::host::AudioThreadScope;
 use super::instance::ClapCore;
@@ -204,6 +208,9 @@ pub(crate) struct ClapProcessor {
     pub(super) inputs: PortBuffers,
     pub(super) outputs: PortBuffers,
     pub(super) events: EventBuffer,
+    /// Values a block took from the transfer but the plugin did not get
+    /// (a full event list, a failed block); the next block carries them.
+    pub(super) retry: Retry,
     pub(super) steady_time: i64,
     pub(super) max_block: usize,
     /// Last: the instance outlives everything above that points into it.
@@ -255,11 +262,16 @@ impl ClapProcessor {
             inputs,
             outputs,
             events,
+            retry,
             steady_time,
             max_block,
             ..
         } = self;
         let plugin = *plugin;
+        // Every value this push count covers is in the first sub-block's
+        // events; they count as applied once every sub-block succeeded.
+        let pushed = from_ui.pushed();
+        let mut deferred = false;
         let mut offset = 0;
         while offset < frames {
             let count = (frames - offset).min(*max_block);
@@ -280,12 +292,7 @@ impl ClapProcessor {
             events.clear();
             if offset == 0 {
                 let last = count.saturating_sub(1) as i32;
-                from_ui.drain(|index, value, at| {
-                    if let Some(range) = ranges.get(index) {
-                        let time = at.clamp(0, last) as u32;
-                        events.push_value(range.id, range.denormalise(value), time);
-                    }
-                });
+                deferred = fill_events(retry, from_ui, ranges, events, last);
             }
             inputs.refresh();
             outputs.refresh();
@@ -318,6 +325,8 @@ impl ClapProcessor {
             };
             *steady_time = steady_time.saturating_add(count as i64);
             if status == CLAP_PROCESS_ERROR {
+                // The insert fails for good: nothing is applied, and
+                // nothing is kept for a block that will not come.
                 return Err(ClapFailure::ProcessError);
             }
 
@@ -331,6 +340,9 @@ impl ClapProcessor {
             }
             offset += count;
         }
+        if !deferred && retry.is_empty() {
+            from_ui.mark_applied(pushed);
+        }
         Ok(())
     }
 
@@ -342,7 +354,7 @@ impl ClapProcessor {
     pub(crate) fn flush_if_queued(&mut self) {
         let host = &*self.core.host;
         let requested = host.flush_requested.load(Ordering::Relaxed);
-        if !requested && self.from_ui.is_empty() {
+        if !requested && self.from_ui.is_empty() && self.retry.is_empty() {
             return;
         }
         let Some(flush) = (unsafe { self.params_ext.as_ref() }).and_then(|params| params.flush)
@@ -358,14 +370,12 @@ impl ClapProcessor {
             from_ui,
             to_ui,
             events,
+            retry,
             ..
         } = self;
         events.clear();
-        from_ui.drain(|index, value, _| {
-            if let Some(range) = ranges.get(index) {
-                events.push_value(range.id, range.denormalise(value), 0);
-            }
-        });
+        let pushed = from_ui.pushed();
+        let deferred = fill_events(retry, from_ui, ranges, events, 0);
         let input = events.as_clap();
         let mut emit = |index: usize, value: f64| {
             to_ui.push(index, value, 0);
@@ -377,5 +387,43 @@ impl ClapProcessor {
         };
         let output = sink.as_clap();
         unsafe { flush(*plugin, &input, &output) };
+        // `flush` reports nothing back: handed over is applied.
+        if !deferred && retry.is_empty() {
+            from_ui.mark_applied(pushed);
+        }
     }
+
+    /// Makes the event list hold only `capacity` events, for the tests of
+    /// a full list.
+    #[cfg(test)]
+    pub(super) fn limit_events_for_test(&mut self, capacity: usize) {
+        self.events = EventBuffer::with_capacity(capacity);
+    }
+}
+
+/// Fills `events` with the values `retry` kept, then the transfer's (a
+/// newer one for the same parameter follows the kept one, so it wins).  A
+/// value the full list cannot take is kept in `retry` for the next block,
+/// replacing an older kept one; once the list is full nothing newer gets
+/// in, so a kept value is never older than one that went.  Returns
+/// whether the drain deferred a value.
+fn fill_events(
+    retry: &mut Retry,
+    from_ui: &mut ParamReceiver,
+    ranges: &[ClapRange],
+    events: &mut EventBuffer,
+    last: i32,
+) -> bool {
+    retry.retain(|index, value| match ranges.get(index) {
+        Some(range) => !events.push_value(range.id, range.denormalise(value), 0),
+        None => false,
+    });
+    from_ui.drain(|index, value, at| {
+        let Some(range) = ranges.get(index) else {
+            return;
+        };
+        if !events.push_value(range.id, range.denormalise(value), at.clamp(0, last) as u32) {
+            retry.put(index, value);
+        }
+    })
 }

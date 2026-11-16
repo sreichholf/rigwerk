@@ -29,7 +29,7 @@ use super::link::{
     ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
 };
 use super::load::{
-    apply_parameter_changes, captured_state, merge_synced_params, Capture, ParamChange, UNDELIVERED,
+    apply_parameter_changes, captured_state, merge_synced_params, Capture, ParamChange,
 };
 use super::pause::{drive_pause, BlockAction, PauseStep};
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginState};
@@ -116,10 +116,11 @@ struct UiSide {
     reactivate: bool,
     /// Editor edits taken from [`ParamOut`], reused every frame.
     edits: Vec<(u32, f64)>,
-    /// VST3: ids pushed to the processor since the transfer was last seen
-    /// empty.  A capture with values still queued marks them in the blob's
-    /// snapshot, so a restore applies them again.
-    undelivered: Vec<u32>,
+    /// Ids pushed to the processor whose values it has not applied yet
+    /// (see [`Undelivered`]).  A capture while there are any builds the
+    /// blob's snapshot so a restore applies them again (see
+    /// `capture_snapshot`).
+    undelivered: Undelivered,
 }
 
 /// The UI's reference to one loaded plugin.  Cheap to clone; the slot, the
@@ -173,7 +174,7 @@ impl LoadedPlugin {
             views,
             saved,
         );
-        ui.undelivered = undelivered;
+        ui.undelivered.note(undelivered, out.pushed());
         Self {
             processor: PluginProcessor::Vst3(Box::new(processor)),
             handle: PluginHandle(Arc::new(PluginUi {
@@ -198,19 +199,22 @@ impl LoadedPlugin {
             views,
             has_editor,
             state_current: _,
+            undelivered,
         } = loaded;
+        let mut ui = UiSide::new(
+            PluginInstance::Clap(instance),
+            from_audio,
+            ids,
+            views,
+            saved,
+        );
+        ui.undelivered.note(undelivered, out.pushed());
         Self {
             processor: PluginProcessor::Clap(Box::new(processor)),
             handle: PluginHandle(Arc::new(PluginUi {
                 shared,
                 out,
-                ui: Mutex::new(UiSide::new(
-                    PluginInstance::Clap(instance),
-                    from_audio,
-                    ids,
-                    views,
-                    saved,
-                )),
+                ui: Mutex::new(ui),
                 format: PluginFormat::Clap,
                 has_editor,
             })),
@@ -355,7 +359,7 @@ impl UiSide {
             pause_wait: None,
             reactivate: false,
             edits: Vec::new(),
-            undelivered: Vec::new(),
+            undelivered: Undelivered::default(),
         }
     }
 }
@@ -445,7 +449,8 @@ fn apply_vst3_edits(
     edits: &[(u32, f64)],
     views: &mut [PluginParamView],
     saved: &mut Vec<PluginParamPref>,
-    undelivered: &mut Vec<u32>,
+    undelivered: &mut Undelivered,
+    pushed: u64,
 ) -> bool {
     if edits.is_empty() {
         return false;
@@ -459,32 +464,77 @@ fn apply_vst3_edits(
         })
         .collect();
     apply_parameter_changes(views, saved, &changes);
-    note_undelivered(undelivered, edits.iter().map(|&(id, _)| id));
+    undelivered.note(edits.iter().map(|&(id, _)| id), pushed);
     true
 }
 
-/// The snapshot a blob captured with `undelivered` values queued gets:
-/// the saved values, with each undelivered id marked [`UNDELIVERED`], so
-/// a restore applies its saved value (or, if none is saved, its default).
-fn undelivered_snapshot(saved: &[PluginParamPref], undelivered: &[u32]) -> Vec<PluginParamPref> {
+/// A state blob's snapshot of the saved values.  Ids in `undelivered` were
+/// still queued for the plugin when it saved, so the blob may not hold
+/// them.  No marker says so: the snapshot is built so the ordinary restore
+/// rule (`params_to_restore`, the same in older builds) applies them.  An
+/// undelivered id with a saved value is left out, so the saved value
+/// counts as changed and goes on top; one with no saved value (set back to
+/// its default) is listed, with its default from `views`, so it is reset.
+pub(super) fn capture_snapshot(
+    saved: &[PluginParamPref],
+    undelivered: &[u32],
+    views: &[PluginParamView],
+) -> Vec<PluginParamPref> {
     let mut snapshot: Vec<PluginParamPref> = saved
         .iter()
         .filter(|param| !undelivered.contains(&param.id))
         .cloned()
         .collect();
-    snapshot.extend(undelivered.iter().map(|&id| PluginParamPref {
-        id,
-        value: UNDELIVERED,
-    }));
+    snapshot.extend(
+        undelivered
+            .iter()
+            .filter(|id| !saved.iter().any(|param| param.id == **id))
+            .map(|&id| PluginParamPref {
+                id,
+                value: views
+                    .iter()
+                    .find(|view| view.id == id)
+                    .map_or(0.0, |view| view.default),
+            }),
+    );
     snapshot
 }
 
-/// Adds `ids` to the ids queued for the processor and not delivered yet.
-fn note_undelivered(undelivered: &mut Vec<u32>, ids: impl IntoIterator<Item = u32>) {
-    for id in ids {
-        if !undelivered.contains(&id) {
-            undelivered.push(id);
+/// The ids pushed to the processor whose values it may not have applied
+/// yet, each with the transfer's push count once it was queued.  The
+/// processor publishes the push count up to which a block (or an empty
+/// flush block) the plugin accepted delivered everything; an id is done
+/// only once that count reaches its own.  An empty queue is not enough: a
+/// drained value can still be inside `process`, or in a block the plugin
+/// refused.
+#[derive(Default)]
+struct Undelivered {
+    ids: Vec<(u32, u64)>,
+}
+
+impl Undelivered {
+    /// Notes `ids` as queued up to push count `pushed`.
+    fn note(&mut self, ids: impl IntoIterator<Item = u32>, pushed: u64) {
+        for id in ids {
+            match self.ids.iter_mut().find(|(queued, _)| *queued == id) {
+                Some(entry) => entry.1 = entry.1.max(pushed),
+                None => self.ids.push((id, pushed)),
+            }
         }
+    }
+
+    /// Forgets the ids the processor has applied up to push count
+    /// `applied`.
+    fn settle(&mut self, applied: u64) {
+        self.ids.retain(|&(_, pushed)| pushed > applied);
+    }
+
+    fn ids(&self) -> Vec<u32> {
+        self.ids.iter().map(|&(id, _)| id).collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty()
     }
 }
 
@@ -618,6 +668,11 @@ impl PluginHandle {
         for &(index, value) in values {
             self.0.out.push(index, value);
         }
+        let ids = &ui.ids;
+        ui.undelivered.note(
+            values.iter().filter_map(|&(index, _)| ids.id(index)),
+            self.0.out.pushed(),
+        );
     }
 
     /// Sets one normalized control and keeps the views and the saved value
@@ -637,7 +692,7 @@ impl PluginHandle {
                 if !controller.is_read_only(id) {
                     controller.set(id, value);
                     self.0.out.push(index, value);
-                    note_undelivered(&mut ui.undelivered, [id]);
+                    ui.undelivered.note([id], self.0.out.pushed());
                 }
                 controller.format(id, value)
             }
@@ -679,7 +734,7 @@ impl PluginHandle {
                     if let Some(id) = ui.ids.id(index) {
                         controller.set(id, value);
                         self.0.out.push(index, value);
-                        note_undelivered(&mut ui.undelivered, [id]);
+                        ui.undelivered.note([id], self.0.out.pushed());
                     }
                 }
                 controller.default_views()
@@ -718,7 +773,7 @@ impl PluginHandle {
             PluginInstance::Vst3(controller) => {
                 drain_vst3_reported(controller, from_audio, ids, views);
                 self.0.out.take_edits(edits);
-                note_undelivered(undelivered, edits.iter().map(|&(id, _)| id));
+                undelivered.note(edits.iter().map(|&(id, _)| id), self.0.out.pushed());
                 controller.views()
             }
             PluginInstance::Clap(_) if self.0.out.has_queued() => return None,
@@ -836,13 +891,18 @@ impl PluginHandle {
         let mut changed = !reported.is_empty();
         self.0.out.take_edits(edits);
         edits.retain(|edit| !reported.contains(edit));
-        changed |= apply_vst3_edits(controller, edits, views, saved, undelivered);
+        changed |= apply_vst3_edits(
+            controller,
+            edits,
+            views,
+            saved,
+            undelivered,
+            self.0.out.pushed(),
+        );
         if !edits.is_empty() {
             *state_stale = true;
         }
-        if !self.0.out.has_queued() {
-            undelivered.clear();
-        }
+        undelivered.settle(self.0.out.applied());
         let flags = shared.take_restart();
         if flags & PARAM_TITLES_CHANGED != 0 {
             if controller.rescan() {
@@ -911,20 +971,16 @@ impl PluginHandle {
     /// stays stale so the next save retries.  Both save under the UI lock
     /// only, so the audio callback keeps the insert.
     ///
-    /// VST3 captures anyway while values are queued: its processor is
-    /// owned by the audio side (in the chain's slot), so the UI cannot
-    /// flush them itself, and with the stream stopped they would wait
+    /// Both formats capture anyway while values are queued: the processor
+    /// is owned by the audio side (in the chain's slot), so the UI cannot
+    /// deliver them itself, and with the stream stopped they would wait
     /// forever, losing state that is not a parameter (a file the editor
     /// loaded, say).  The blob then has the old values of those controls,
-    /// so its snapshot marks them [`UNDELIVERED`]: a restore applies their
-    /// saved values (or defaults) on top, and the slot stays stale.
+    /// so its snapshot is built for a restore to apply their saved values
+    /// (or defaults) on top (see [`capture_snapshot`]), and the slot stays stale.
     ///
-    /// CLAP values queued while the plugin processes wait for a block: if
-    /// the stream stops first, the capture stays deferred until the next
-    /// block (or a skipped one's flush) delivers them.  It cannot capture
-    /// anyway: the blob would hold the old values, and its snapshot must
-    /// say what the blob holds, or a restore would skip the newer saved
-    /// values.  The saved values still restore them.
+    /// The snapshot must say what the blob holds, or a restore would skip
+    /// the newer saved values.
     pub(crate) fn capture_state(&self) {
         let mut ui = self.ui();
         let UiSide {
@@ -937,24 +993,18 @@ impl PluginHandle {
             undelivered,
             ..
         } = &mut *ui;
-        let mut snapshot = None;
+        if let PluginInstance::Vst3(controller) = instance {
+            // Edits since the last frame are saved values too.
+            self.0.out.take_edits(edits);
+            let pushed = self.0.out.pushed();
+            apply_vst3_edits(controller, edits, views, saved, undelivered, pushed);
+        }
+        undelivered.settle(self.0.out.applied());
         let bytes = match instance {
-            PluginInstance::Vst3(controller) => {
-                // Edits since the last frame are saved values too.
-                self.0.out.take_edits(edits);
-                apply_vst3_edits(controller, edits, views, saved, undelivered);
-                if !self.0.out.has_queued() {
-                    undelivered.clear();
-                }
-                if !undelivered.is_empty() {
-                    snapshot = Some(undelivered_snapshot(saved, undelivered));
-                }
-                controller.save_state().map_err(|error| {
-                    eprintln!("[plugins] {error}");
-                    Capture::Failed
-                })
-            }
-            PluginInstance::Clap(_) if self.0.out.has_queued() => Err(Capture::Deferred),
+            PluginInstance::Vst3(controller) => controller.save_state().map_err(|error| {
+                eprintln!("[plugins] {error}");
+                Capture::Failed
+            }),
             PluginInstance::Clap(clap) => match clap.save_state() {
                 StateSave::Saved(bytes) => Ok(bytes),
                 StateSave::Unavailable => Err(Capture::Failed),
@@ -962,12 +1012,14 @@ impl PluginHandle {
             },
         };
         let capture = match bytes {
-            Ok(bytes) => captured_state(&bytes, snapshot.as_deref().unwrap_or(saved)),
+            Ok(bytes) => {
+                captured_state(&bytes, &capture_snapshot(saved, &undelivered.ids(), views))
+            }
             Err(capture) => capture,
         };
         // A blob that misses queued values is captured again once they
         // reached the processor.
-        *state_stale = capture.leaves_stale() || snapshot.is_some();
+        *state_stale = capture.leaves_stale() || !undelivered.is_empty();
         if let Capture::Saved(captured) = capture {
             *state = Some(captured);
         }

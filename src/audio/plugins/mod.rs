@@ -65,7 +65,7 @@ pub(crate) use slot::SlotControls;
 pub(crate) use slot::{drain_deferred_plugins, SlotLink};
 #[cfg(test)]
 pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
-pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender};
+pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};
 
 #[cfg(test)]
 pub(crate) use fixtures::vst3_fixture;

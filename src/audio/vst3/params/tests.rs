@@ -79,3 +79,16 @@ fn parameter_changes_claim_one_queue_per_parameter_and_clear() {
     changes.push(1, 0, 1.0);
     assert_eq!(changes.points(1), vec![(0, 1.0)]);
 }
+
+#[test]
+fn a_full_queue_reports_the_point_it_dropped() {
+    let ids = Arc::new(ParamIds::new(vec![7]));
+    let changes = ParameterChanges::new(ids, 4);
+    for offset in 0..4 {
+        assert!(changes.push(0, offset, 0.1 * f64::from(offset)));
+    }
+    // The same offset replaces in place: nothing dropped.
+    assert!(changes.push(0, 3, 0.35));
+    assert!(!changes.push(0, 4, 0.4), "a point had to go");
+    assert_eq!(changes.points(0).last(), Some(&(4, 0.4)));
+}

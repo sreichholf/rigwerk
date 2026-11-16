@@ -31,6 +31,7 @@ use clap_sys::version::CLAP_VERSION;
 
 use crate::audio::plugins::{
     param_transfer, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared, Restore,
+    Retry,
 };
 
 use super::gui::{choose_editor_api, session_candidates, EditorApi};
@@ -153,6 +154,8 @@ pub(crate) struct ClapLoaded {
     pub(crate) has_editor: bool,
     /// The saved state restored and no newer value had to go on top.
     pub(crate) state_current: bool,
+    /// The ids of the restored values still queued for the processor.
+    pub(crate) undelivered: Vec<u32>,
 }
 
 impl ClapInstance {
@@ -291,6 +294,10 @@ impl ClapInstance {
         shared.take_latency_change();
 
         let mut views = instance.parameters();
+        let undelivered = queued
+            .iter()
+            .filter_map(|&(index, _)| ids.id(index))
+            .collect();
         // A value queued for the first block is what the plugin has from
         // then on, so the panel shows it rather than the old one.
         for (index, value) in queued {
@@ -299,7 +306,9 @@ impl ClapInstance {
                 view.display = instance.display_for(view.id, value);
             }
         }
-        let events = EventBuffer::with_capacity(from_ui.capacity() + from_ui.params());
+        // Room for a full ring, every overflow value and every value kept from
+        // a block that could not take it.
+        let events = EventBuffer::with_capacity(from_ui.capacity() + 2 * from_ui.params());
         let processor = ClapProcessor {
             plugin,
             params_ext: instance.params_ext,
@@ -310,6 +319,7 @@ impl ClapInstance {
             inputs,
             outputs,
             events,
+            retry: Retry::new(ids.len()),
             steady_time: 0,
             max_block: block,
             core: Arc::clone(&instance.core),
@@ -322,6 +332,7 @@ impl ClapInstance {
             ids,
             views,
             state_current: state_loaded && values.is_empty(),
+            undelivered,
             instance,
         })
     }

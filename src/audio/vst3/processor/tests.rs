@@ -243,3 +243,22 @@ fn a_mono_main_bus_gets_the_average_and_feeds_both_sides() {
     assert_eq!(left, vec![0.25, -0.25, 1.0]);
     assert_eq!(right, left);
 }
+
+/// More points for one parameter than its queue holds: the block keeps the
+/// newest, sends it again with the next block, and only that block counts
+/// the values as applied.
+#[test]
+fn a_block_whose_queue_dropped_a_point_is_not_counted_applied() {
+    let mut rig = rig(kResultOk);
+    for offset in 0..6 {
+        rig.to_audio
+            .push(0, 0.1 * f64::from(offset + 1), offset * 8);
+    }
+    let mut left = vec![1.0f32; 64];
+    let mut right = vec![1.0f32; 64];
+    assert_eq!(rig.processor.process(&mut left, &mut right), Ok(()));
+    assert_eq!(rig.to_audio.applied(), 0, "a point was dropped");
+    assert_eq!(rig.processor.process(&mut left, &mut right), Ok(()));
+    assert_eq!(rig.to_audio.applied(), 6);
+    assert!((rig.fake.gain() - 0.6).abs() < 1e-9);
+}

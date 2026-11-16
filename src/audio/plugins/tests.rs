@@ -96,6 +96,11 @@ fn old_pref_without_state_still_loads() {
     let damaged: PluginPref =
         ron::from_str(r#"(path:"C:/A.clap",state:Some((version:"x")))"#).expect("damaged blob");
     assert!(damaged.state.is_none());
+    let old: PluginPref = ron::from_str(
+        r#"(path:"C:/A.clap",state:Some((version:1,data:"AQ==",params:[(id:1,value:0.3)])))"#,
+    )
+    .expect("a saved snapshot");
+    assert_eq!(old.state.expect("a state").params, vec![param(1, 0.3)]);
 }
 
 #[test]
@@ -111,6 +116,40 @@ fn without_a_restored_state_every_saved_value_is_applied() {
 fn a_restored_state_takes_precedence_over_unchanged_values() {
     let saved = [param(1, 0.2), param(2, 0.9)];
     assert!(params_to_restore(&saved, Some(&saved)).is_empty());
+}
+
+/// The snapshot of a blob saved with values still queued restores them
+/// through the plain rule (`params_to_restore`, which an older build
+/// shares): no marker is needed.
+#[test]
+fn a_snapshot_with_undelivered_values_restores_them_through_the_plain_rule() {
+    use super::handle::capture_snapshot;
+    // 1 and 2 were queued when the blob was saved: 1 is saved at 0.2, and 2
+    // was set back to its default (so it is not saved any more); 3 was
+    // delivered.
+    let saved = [param(1, 0.2), param(3, 0.5)];
+    let views = [view(1, 0.2, 0.0), view(2, 0.4, 0.4), view(3, 0.5, 0.0)];
+    let snapshot = capture_snapshot(&saved, &[1, 2], &views);
+    assert_eq!(snapshot, vec![param(3, 0.5), param(2, 0.4)]);
+    assert_eq!(
+        params_to_restore(&saved, Some(&snapshot)),
+        vec![(1, Some(0.2)), (2, None)]
+    );
+    // Nothing queued: the snapshot is the saved values, and nothing is
+    // applied on top.
+    let snapshot = capture_snapshot(&saved, &[], &views);
+    assert!(params_to_restore(&saved, Some(&snapshot)).is_empty());
+}
+
+#[test]
+fn a_saved_value_of_minus_one_restores_like_any_other() {
+    // -1.0 is a plain CLAP value like any other.
+    let saved = [param(1, -1.0)];
+    assert!(params_to_restore(&saved, Some(&[param(1, -1.0)])).is_empty());
+    assert_eq!(
+        params_to_restore(&saved, Some(&[param(1, 0.5)])),
+        vec![(1, Some(-1.0))]
+    );
 }
 
 #[test]

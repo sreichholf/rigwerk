@@ -29,8 +29,12 @@ use crate::audio::plugins::{
     ClapFailure, LoadedPlugin, Outcome, PluginHandle, PluginPref, PluginShared, Restore, Saved,
 };
 
+/// A save while a value is still queued for the plugin captures anyway
+/// (the stream may never deliver it), marks that value undelivered in the
+/// snapshot and keeps the slot stale; once a block delivered it, the next
+/// save captures a blob that holds it.
 #[test]
-fn state_save_waits_while_values_are_queued() {
+fn state_save_with_values_queued_marks_them_undelivered() {
     let _main = super::claim_main_thread_for_test();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
@@ -45,12 +49,14 @@ fn state_save_waits_while_values_are_queued() {
         Outcome::Processed
     );
     handle.set_parameter(7, 0.25).expect("set the gain");
-    // The plugin's state would still hold the old value: the save waits.
     handle.capture_state();
-    assert!(handle.wants_capture());
-    assert_eq!(handle.saved().1, None);
-    assert_eq!(fake::count("state.save"), 0);
-    // Once a block delivered it, the save goes through.
+    assert_eq!(fake::count("state.save"), 1);
+    let state = handle.saved().1.expect("captured anyway");
+    // The queued value is left out of the snapshot, so a restore applies it.
+    assert!(state.params.iter().all(|param| param.id != 7));
+    assert!(handle.saved().0.iter().any(|param| param.id == 7));
+    assert!(handle.wants_capture(), "captured again once delivered");
+    // Once a block delivered it, the next save holds it.
     assert_eq!(
         plugin.run_for_test(&mut left, &mut right),
         Outcome::Processed
@@ -59,6 +65,182 @@ fn state_save_waits_while_values_are_queued() {
     assert!(!handle.wants_capture());
     let state = handle.saved().1.expect("captured");
     assert_eq!(state.bytes().as_deref(), Some(&b"state"[..]));
+    assert_eq!(
+        state.params,
+        handle.saved().0,
+        "the snapshot is the saved values"
+    );
+}
+
+/// A block that fails does not count the values it took as applied: the
+/// next save still leaves them out of the snapshot.
+/// A value the full event list could not take is kept and goes with the
+/// next block; only after that block are the values applied.
+#[test]
+fn a_value_a_full_event_list_dropped_arrives_with_the_next_block() {
+    let _main = super::claim_main_thread_for_test();
+    fake::reset(fake::Fail::Nothing);
+    fake::set_state(b"state");
+    fake::offer_params(true);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    plugin.clap_processor_for_test().limit_events_for_test(1);
+    handle.set_parameter(7, 0.25).expect("set the gain");
+    handle.set_parameter(9, 1.0).expect("set the mode");
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    let got = |id: u32| {
+        fake::received()
+            .iter()
+            .any(|&(seen, _, how)| seen == id && how == "process")
+    };
+    assert!(got(7) != got(9), "one value went, one was kept");
+    handle.capture_state();
+    let state = handle.saved().1.expect("captured");
+    assert!(state
+        .params
+        .iter()
+        .all(|param| param.id != 7 && param.id != 9));
+    assert!(handle.wants_capture());
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert!(got(7) && got(9), "the kept value arrived");
+    handle.capture_state();
+    let state = handle.saved().1.expect("captured");
+    assert!(state.params.iter().any(|param| param.id == 7));
+    assert!(state.params.iter().any(|param| param.id == 9));
+    assert!(!handle.wants_capture());
+}
+
+/// Two values a full list kept: with room for one, the first goes with the
+/// next block and the second survives it, to arrive with the one after.
+#[test]
+fn two_values_a_full_event_list_kept_arrive_one_block_at_a_time() {
+    let _main = super::claim_main_thread_for_test();
+    fake::reset(fake::Fail::Nothing);
+    fake::offer_params(true);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    plugin.run_for_test(&mut left, &mut right);
+    let received = || {
+        fake::received()
+            .iter()
+            .filter(|&&(_, _, how)| how == "process")
+            .count()
+    };
+    plugin.clap_processor_for_test().limit_events_for_test(0);
+    handle.set_parameter(7, 0.25).expect("set the gain");
+    handle.set_parameter(9, 1.0).expect("set the mode");
+    plugin.run_for_test(&mut left, &mut right);
+    assert_eq!(received(), 0, "both kept");
+    plugin.clap_processor_for_test().limit_events_for_test(1);
+    plugin.run_for_test(&mut left, &mut right);
+    assert_eq!(received(), 1);
+    plugin.run_for_test(&mut left, &mut right);
+    assert_eq!(received(), 2, "the second arrived a block later");
+    plugin.run_for_test(&mut left, &mut right);
+    assert_eq!(received(), 2, "and only once");
+}
+
+/// With the stream stopped the UI hands a value to `params.flush` itself:
+/// it is applied at once, so the next capture lists it.
+#[test]
+fn a_value_flushed_while_stopped_is_in_the_next_capture() {
+    let _main = super::claim_main_thread_for_test();
+    fake::reset(fake::Fail::Nothing);
+    fake::set_state(b"state");
+    fake::offer_params(true);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    handle.set_parameter(7, 0.25).expect("set the gain");
+    assert!(fake::received()
+        .iter()
+        .any(|&(id, _, how)| id == 7 && how == "flush"));
+    handle.capture_state();
+    let state = handle.saved().1.expect("captured");
+    assert!(state.params.iter().any(|param| param.id == 7));
+    assert!(!handle.wants_capture());
+}
+
+#[test]
+fn a_failed_block_does_not_count_its_values_applied() {
+    let _main = super::claim_main_thread_for_test();
+    fake::reset(fake::Fail::Nothing);
+    fake::set_state(b"state");
+    fake::offer_params(true);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    fake::fail_from_now(fake::Fail::Process);
+    handle.set_parameter(7, 0.25).expect("set the gain");
+    assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Failed);
+    handle.capture_state();
+    let state = handle.saved().1.expect("captured");
+    assert!(state.params.iter().all(|param| param.id != 7));
+    assert!(handle.wants_capture());
+}
+
+/// With the stream stopped a value set on a processing CLAP insert never
+/// reaches it, but a save still captures, and a restore applies the value
+/// on top of the older blob.
+#[test]
+fn a_capture_with_audio_stopped_after_a_set_keeps_the_value_through_a_restore() {
+    let _main = super::claim_main_thread_for_test();
+    let stateful = || {
+        fake::reset(fake::Fail::Nothing);
+        fake::set_state(b"older");
+        fake::offer_params(true);
+        fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    };
+    stateful();
+    let mut plugin = fake::load("fake").expect("load the fake plugin");
+    let handle = plugin.handle().clone();
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    plugin.run_for_test(&mut left, &mut right);
+    handle.set_parameter(7, 0.75).expect("set the gain");
+    // The stream stops here: nothing delivers the value.
+    handle.capture_state();
+    let (params, state) = handle.saved();
+    assert!(state.is_some(), "captured with audio stopped");
+    let pref = PluginPref {
+        params,
+        state,
+        ..PluginPref::default()
+    };
+    assert!(pref.state.as_ref().unwrap().params.is_empty());
+    drop(handle);
+    drop(plugin);
+    stateful();
+    let restored = fake::load_restoring("fake", &pref).expect("restore the fake");
+    assert!(fake::count("state.load") > 0, "the blob was restored");
+    let gain = restored
+        .handle()
+        .parameters()
+        .into_iter()
+        .find(|view| view.id == 7)
+        .expect("the gain");
+    assert!((gain.value - 0.75).abs() < 1e-9, "restored {}", gain.value);
+    assert!(fake_received_for_test()
+        .iter()
+        .any(|&(id, value, _)| id == 7 && (value - 1.5).abs() < 1e-9));
 }
 
 #[test]
@@ -340,10 +522,19 @@ mod fake {
         written == bytes.len() as i64
     }
 
+    /// Accepts any state (its bytes are not the controls' values).
+    unsafe extern "C" fn state_load(
+        _plugin: *const clap_plugin,
+        _stream: *const clap_sys::stream::clap_istream,
+    ) -> bool {
+        log("state.load");
+        true
+    }
+
     static STATE_EXT: clap_sys::ext::state::clap_plugin_state =
         clap_sys::ext::state::clap_plugin_state {
             save: Some(state_save),
-            load: None,
+            load: Some(state_load),
         };
 
     /// One fake instance's lifecycle, kept in `plugin_data` so several

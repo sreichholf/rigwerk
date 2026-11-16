@@ -50,7 +50,10 @@ pub struct PluginState {
     pub data: String,
     /// [`PluginPref::params`] as it was when the state was captured.  A
     /// parameter changed after the capture differs from this snapshot, and is
-    /// applied on top of the restored state so the newer value wins.
+    /// applied on top of the restored state so the newer value wins.  A
+    /// value still queued for the plugin when the state was saved is left
+    /// out of it, so it counts as changed; one that went back to its
+    /// default meanwhile is listed, so it is reset.
     #[serde(default)]
     pub params: Vec<PluginParamPref>,
 }

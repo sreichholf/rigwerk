@@ -131,11 +131,6 @@ impl<'a> Restore<'a> {
     }
 }
 
-/// A snapshot value no control can have: the blob was captured before this
-/// control's saved value reached the plugin, so [`params_to_restore`]
-/// always applies the saved value (or the default) on top.
-pub(crate) const UNDELIVERED: f64 = -1.0;
-
 /// The values two parameter lists may differ by and still count as equal.
 const PARAM_EPSILON: f64 = 0.0005;
 
@@ -143,8 +138,8 @@ const PARAM_EPSILON: f64 = 0.0005;
 /// blob that is every saved value.  After one, it is only what changed since
 /// the blob was captured: a value that differs from (or is missing in) the
 /// blob's snapshot, and a parameter that went back to its default (`None`),
-/// which the saved list no longer names.  An unchanged list applies nothing,
-/// so the blob takes precedence.
+/// which the saved list no longer names.  An unchanged list applies
+/// nothing, so the blob takes precedence.
 pub(crate) fn params_to_restore(
     saved: &[PluginParamPref],
     snapshot: Option<&[PluginParamPref]>,

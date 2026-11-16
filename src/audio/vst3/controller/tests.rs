@@ -61,6 +61,16 @@ struct Fake {
     ids_from_state: AtomicBool,
     /// `process` calls with audio.
     processed: AtomicUsize,
+    /// Refuses an empty flush block (`numSamples = 0`), applying nothing.
+    refuse_flush: AtomicBool,
+    /// Every block with audio fails.
+    fail_process: AtomicBool,
+    /// While set, `process` waits inside the call after it took the
+    /// values, with `inside` set.
+    hold: AtomicBool,
+    inside: AtomicBool,
+    /// Empty blocks (`numSamples = 0`) asked of it.
+    flushes: AtomicUsize,
 }
 
 impl Fake {
@@ -253,6 +263,12 @@ impl IAudioProcessorTrait for Fake {
         // SAFETY: the host's live block and change list.
         unsafe {
             let data = &*data;
+            if data.numSamples == 0 {
+                self.flushes.fetch_add(1, SeqCst);
+            }
+            if data.numSamples == 0 && self.refuse_flush.load(SeqCst) {
+                return kResultFalse;
+            }
             if data.numSamples > 0 {
                 self.processed.fetch_add(1, SeqCst);
             }
@@ -267,6 +283,14 @@ impl IAudioProcessorTrait for Fake {
                     self.gain.store(value.to_bits(), SeqCst);
                 }
             }
+        }
+        self.inside.store(true, SeqCst);
+        while self.hold.load(SeqCst) {
+            std::thread::yield_now();
+        }
+        self.inside.store(false, SeqCst);
+        if data_failed(self) {
+            return kResultFalse;
         }
         kResultOk
     }
@@ -356,6 +380,11 @@ impl IEditControllerTrait for Fake {
         .to_com_ptr::<IPlugView>()
         .map_or(std::ptr::null_mut(), ComPtr::into_raw)
     }
+}
+
+/// Whether the stand-in fails its blocks with audio.
+fn data_failed(fake: &Fake) -> bool {
+    fake.fail_process.load(SeqCst)
 }
 
 /// The stand-in's editor view: it attaches anywhere and logs its removal.
@@ -585,10 +614,9 @@ fn a_capture_with_audio_stopped_after_a_set_keeps_the_value() {
     let (params, state) = handle.saved();
     let state = state.expect("a captured state");
     assert_eq!(fake.gain(), 0.9);
-    assert!(state
-        .params
-        .iter()
-        .any(|param| param.id == GAIN && param.value < 0.0));
+    // The blob is older than the value: its snapshot leaves it out, so a
+    // restore applies the saved value.
+    assert!(state.params.iter().all(|param| param.id != GAIN));
     assert!(handle.wants_capture(), "captured again once delivered");
 
     // A restore applies the saved value on top of the older blob.
@@ -602,11 +630,16 @@ fn a_capture_with_audio_stopped_after_a_set_keeps_the_value() {
     assert_eq!(restored.value(), 0.3);
     run(&mut plugin, 1);
     assert_eq!(restored.gain(), 0.3);
-    // Set back to the default (no saved value) before that save: the
-    // default goes on top of the blob's 0.9.
+    // Set back to the default before the next save, still with no audio:
+    // the default is not saved any more, and goes on top of the blob's 0.9.
+    drop(state);
+    handle.reset_parameters().expect("reset");
+    handle.capture_state();
+    let (params, state) = handle.saved();
+    assert!(params.is_empty());
     let pref = PluginPref {
-        params: Vec::new(),
-        state: Some(state),
+        params,
+        state,
         ..PluginPref::default()
     };
     let reset = new_fake();
@@ -1070,4 +1103,177 @@ fn a_reload_that_fails_to_load_shows_why_and_is_not_retried() {
         path.service_plugins();
     }
     assert_eq!(reloads.loads.get(), 2, "one attempt per request");
+}
+
+/// Whether the snapshot of the insert's saved state lists `id`.
+fn snapshot_lists(handle: &PluginHandle, id: u32) -> bool {
+    let (_, state) = handle.saved();
+    state
+        .expect("a captured state")
+        .params
+        .iter()
+        .any(|param| param.id == id)
+}
+
+#[test]
+fn a_flush_the_plugin_refuses_leaves_the_value_undelivered() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    path.set_plugin_bypass(0, true);
+    reloads.fake(0).refuse_flush.store(true, SeqCst);
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 2);
+    assert_eq!(reloads.fake(0).gain(), 0.5, "the flush was refused");
+    let handle = path.plugin_handle(0).expect("loaded");
+    handle.capture_state();
+    assert!(!snapshot_lists(&handle, GAIN), "the blob does not hold it");
+    assert!(handle.wants_capture());
+    // A restore applies the saved value on top of the older blob.
+    let pref = path.plugin_prefs().into_iter().next().expect("one insert");
+    let restored = new_fake();
+    let mut plugin = load(
+        &restored,
+        &PluginPref {
+            bypass: false,
+            ..pref
+        },
+    );
+    run(&mut plugin, 1);
+    assert_eq!(restored.gain(), 0.3);
+}
+
+#[test]
+fn a_reload_after_a_refused_flush_hands_the_new_processor_the_saved_value() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    path.set_plugin_bypass(0, true);
+    reloads.fake(0).refuse_flush.store(true, SeqCst);
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 2);
+    path.plugin_handle(0)
+        .expect("loaded")
+        .shared()
+        .request_restart(RELOAD_COMPONENT);
+    path.service_plugins();
+    assert_eq!(reloads.loads.get(), 2);
+    path.set_plugin_bypass(0, false);
+    run_path(&path, 1);
+    // What the new processor got, not what its controller shows.
+    assert_eq!(reloads.fake(1).gain(), 0.3);
+}
+
+#[test]
+fn a_save_while_a_block_holds_the_values_inside_process_waits_for_it() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    let fake = reloads.fake(0);
+    let handle = path.plugin_handle(0).expect("loaded");
+    /// Lets the held block go however the test ends.
+    struct Release<'a>(&'a AtomicBool);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, SeqCst);
+        }
+    }
+    fake.hold.store(true, SeqCst);
+    std::thread::scope(|scope| {
+        let release = Release(&fake.hold);
+        let block = scope.spawn(|| run_path(&path, 1));
+        while !fake.inside.load(SeqCst) {
+            std::thread::yield_now();
+        }
+        // Drained, but the block has not returned: not applied yet.
+        handle.capture_state();
+        let listed = snapshot_lists(&handle, GAIN);
+        drop(release);
+        block.join().expect("the block");
+        assert!(!listed, "captured as applied while still inside process");
+    });
+    handle.capture_state();
+    assert!(
+        snapshot_lists(&handle, GAIN),
+        "applied once the block returned"
+    );
+    assert!(!handle.wants_capture());
+}
+
+#[test]
+fn a_failed_block_does_not_count_its_values_applied() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    reloads.fake(0).fail_process.store(true, SeqCst);
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 1);
+    let handle = path.plugin_handle(0).expect("loaded");
+    assert!(handle.failure().is_some());
+    handle.capture_state();
+    assert!(!snapshot_lists(&handle, GAIN));
+}
+
+#[test]
+fn a_value_a_refused_flush_took_reaches_the_processor_with_the_next_block() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    path.set_plugin_bypass(0, true);
+    let fake = reloads.fake(0);
+    fake.refuse_flush.store(true, SeqCst);
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 2);
+    let handle = path.plugin_handle(0).expect("loaded");
+    handle.capture_state();
+    assert!(!snapshot_lists(&handle, GAIN), "not applied yet");
+    path.set_plugin_bypass(0, false);
+    run_path(&path, 2);
+    path.service_plugins();
+    assert_eq!(fake.gain(), 0.3, "the next processed block carried it");
+    handle.capture_state();
+    assert!(snapshot_lists(&handle, GAIN));
+    assert!(!handle.wants_capture());
+}
+
+#[test]
+fn a_newer_value_wins_over_one_a_refused_flush_kept() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = reloading_path();
+    run_path(&path, 1);
+    path.set_plugin_bypass(0, true);
+    let fake = reloads.fake(0);
+    fake.refuse_flush.store(true, SeqCst);
+    path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
+    run_path(&path, 1);
+    // The plugin takes empty blocks again; a newer value is queued.
+    fake.refuse_flush.store(false, SeqCst);
+    path.set_plugin_parameter(0, GAIN, 0.6).expect("set Gain");
+    run_path(&path, 1);
+    assert_eq!(fake.gain(), 0.6);
+    path.set_plugin_bypass(0, false);
+    run_path(&path, 2);
+    assert_eq!(fake.gain(), 0.6, "the kept older value did not come back");
+}
+
+#[test]
+fn a_bypassed_plugin_that_refuses_empty_blocks_is_not_asked_every_chunk() {
+    let _main = crate::audio::claim_main_thread();
+    let (path, reloads, _loader) = two_slot_path();
+    run_path(&path, 1);
+    let bypassed = reloads.fake(1);
+    bypassed.refuse_flush.store(true, SeqCst);
+    path.set_plugin_parameter(1, GAIN, 0.3).expect("set Gain");
+    // The active first insert keeps the chain running.
+    run_path(&path, 50);
+    assert_eq!(
+        bypassed.flushes.load(SeqCst),
+        1,
+        "one try for the new value"
+    );
+    // Un-bypassed, the first block carries the kept value.
+    path.set_plugin_bypass(1, false);
+    run_path(&path, 1);
+    assert_eq!(bypassed.gain(), 0.3);
 }

@@ -347,6 +347,23 @@ impl ParamOut {
         out.append(&mut edits);
     }
 
+    /// Values pushed so far (see [`ParamSender::pushed`]).
+    pub(crate) fn pushed(&self) -> u64 {
+        self.sender
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pushed()
+    }
+
+    /// The push count up to which the plugin has applied every value
+    /// (see [`ParamSender::applied`]).
+    pub(crate) fn applied(&self) -> u64 {
+        self.sender
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .applied()
+    }
+
     /// Whether a pushed value has not reached the audio side yet.
     pub(crate) fn has_queued(&self) -> bool {
         self.sender

@@ -71,6 +71,11 @@ impl ParamValueQueue {
     /// offset, and when full drops the last point to make room.  Returns
     /// the new point's index.
     pub(crate) fn add(&self, offset: i32, value: f64) -> usize {
+        self.add_point(offset, value).0
+    }
+
+    /// [`Self::add`], and whether a point had to be dropped for it.
+    fn add_point(&self, offset: i32, value: f64) -> (usize, bool) {
         let capacity = self.offsets.len();
         let len = self.len.load(Relaxed).min(capacity);
         let mut at = len;
@@ -78,14 +83,15 @@ impl ParamValueQueue {
             let existing = self.offsets[index].load(Relaxed);
             if existing == offset {
                 self.values[index].store(value.to_bits(), Relaxed);
-                return index;
+                return (index, false);
             }
             if existing > offset {
                 at = index;
                 break;
             }
         }
-        let len = if len == capacity {
+        let full = len == capacity;
+        let len = if full {
             at = at.min(capacity - 1);
             capacity - 1
         } else {
@@ -97,7 +103,7 @@ impl ParamValueQueue {
         }
         self.set_point(at, offset, value);
         self.len.store(len + 1, Relaxed);
-        at
+        (at, full)
     }
 
     /// The value at the last offset, if any point was added.
@@ -203,9 +209,13 @@ impl ParameterChanges {
     }
 
     /// Adds a point for parameter `index` (audio thread).
-    pub(crate) fn push(&self, index: usize, offset: i32, value: f64) {
-        if let Some(slot) = self.claim(index) {
-            self.queues[slot].add(offset, value);
+    /// Adds a point for parameter `index` (audio thread).  False when the
+    /// parameter's queue was full and a point had to be dropped for it:
+    /// the block then does not carry every value it was given.
+    pub(crate) fn push(&self, index: usize, offset: i32, value: f64) -> bool {
+        match self.claim(index) {
+            Some(slot) => !self.queues[slot].add_point(offset, value).1,
+            None => true,
         }
     }
 

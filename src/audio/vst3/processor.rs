@@ -6,11 +6,14 @@
 //! `outputParameterChanges` goes back to the UI through the other queue,
 //! where the controller and the views get it.  A skipped insert with
 //! values queued flushes them with a `numSamples = 0` block, so a value set
-//! while bypassed still reaches the processor (and its state).
+//! while bypassed still reaches the processor (and its state).  Values a
+//! block the plugin refused took are kept and go with the next block; only
+//! values a block the plugin accepted carried count as applied (the push
+//! count the UI side's saves wait for).
 //!
 //! Nothing here allocates, locks or frees: the bus buffers, the change
-//! lists and the process context are built at load, and a failure is a
-//! `tresult`.  The processor never touches the controller or its UI lock.
+//! lists, the kept values and the process context are built at load, and a
+//! failure is a `tresult`.  The processor never touches the controller or its UI lock.
 
 use std::sync::Arc;
 
@@ -21,7 +24,9 @@ use ::vst3::Steinberg::Vst::{
 use ::vst3::Steinberg::{kNotImplemented, kResultOk};
 use ::vst3::{ComPtr, ComWrapper};
 
-use crate::audio::plugins::{ParamIds, ParamReceiver, ParamSender, ProcessFailure, MAX_BLOCK};
+use crate::audio::plugins::{
+    ParamIds, ParamReceiver, ParamSender, ProcessFailure, Retry, MAX_BLOCK,
+};
 
 use super::module::Vst3Module;
 use super::params::{EmptyEvents, ParameterChanges, IN_POINTS, OUT_POINTS};
@@ -160,6 +165,9 @@ pub(crate) struct Vst3Processor {
     events: ComWrapper<EmptyEvents>,
     buses: BusBuffers,
     context: Box<ProcessContext>,
+    /// Values a block the plugin refused or failed took from the transfer;
+    /// the next block carries them again.
+    retry: Retry,
     /// Last: the binary stays loaded until everything above is released.
     /// `None` only for the tests' Rust stand-ins, which live in no module.
     _module: Option<Arc<Vst3Module>>,
@@ -186,6 +194,7 @@ impl Vst3Processor {
             events: ComWrapper::new(EmptyEvents),
             buses: BusBuffers::new(layout),
             context: Box::new(context),
+            retry: Retry::new(ids.len()),
             _module: module,
         }
     }
@@ -219,8 +228,9 @@ impl Vst3Processor {
     ) -> Result<(), ProcessFailure> {
         let count = left.len().min(right.len()).min(MAX_BLOCK);
         self.buses.fill(left, right, count);
-        self.take_ui_values(count);
+        let taken = self.take_ui_values(count);
         let result = self.call(count, true);
+        self.applied(taken, result);
         self.context.continousTimeSamples += count as i64;
         if result != kResultOk {
             return Err(ProcessFailure::Vst3(result));
@@ -232,27 +242,57 @@ impl Vst3Processor {
     /// For a processing insert the chain skips (bypass, mix at 0): hands
     /// queued UI values to a `numSamples = 0` block with no buses (the
     /// SDK's flush, `FlushParamTest`), so they reach the processor without
-    /// audio.  Does nothing with nothing queued.
+    /// audio.  Does nothing without new values: values an earlier refused
+    /// flush kept go with the next flush that has new ones, or the next
+    /// processed block, so a plugin that refuses empty blocks does not get
+    /// one every chunk.
     pub(crate) fn flush_if_queued(&mut self) {
         if self.from_ui.is_empty() {
             return;
         }
-        self.take_ui_values(1);
-        // A plugin that refuses an empty block keeps its old values; the
-        // next processed block cannot bring them again, but the controller
-        // and the saved values have them.
-        let _ = self.call(0, false);
+        // A plugin that refuses an empty block keeps its old values: they
+        // go to `retry` for the next block.
+        let taken = self.take_ui_values(1);
+        let result = self.call(0, false);
+        self.applied(taken, result);
     }
 
-    /// Moves the transfer's values into the input changes, offsets clamped
-    /// to the block.
-    fn take_ui_values(&mut self, count: usize) {
-        let changes = &*self.input_changes;
+    /// Moves the values a refused block kept, then the transfer's, into
+    /// the input changes, offsets clamped to the block: a newer drained
+    /// value replaces a kept one at the same offset or follows it.
+    /// Returns the push count the drain covers and whether it deferred a
+    /// value, for [`Self::applied`].
+    fn take_ui_values(&mut self, count: usize) -> (u64, bool) {
+        let Self {
+            from_ui,
+            retry,
+            input_changes,
+            ..
+        } = self;
+        let pushed = from_ui.pushed();
+        let changes = &**input_changes;
         changes.clear();
+        retry.retain(|index, value| !changes.push(index, 0, value));
         let last = count.saturating_sub(1) as i32;
-        self.from_ui.drain(|index, value, offset| {
-            changes.push(index, offset.clamp(0, last), value);
+        let deferred = from_ui.drain(|index, value, offset| {
+            // A full queue dropped a point: the newest value for the
+            // parameter goes again next block.
+            if !changes.push(index, offset.clamp(0, last), value) {
+                retry.put(index, value);
+            }
         });
+        (pushed, deferred)
+    }
+
+    /// Reports the values up to the drained push count applied, once the
+    /// plugin accepted the block they went into, the drain deferred
+    /// nothing and no value waits for another try.
+    fn applied(&self, (pushed, deferred): (u64, bool), result: i32) {
+        // `retry` is not empty after an accepted block when a full change
+        // queue dropped a point.
+        if result == kResultOk && !deferred && self.retry.is_empty() {
+            self.from_ui.mark_applied(pushed);
+        }
     }
 
     /// One `process` call over `count` frames of the bus buffers (none
@@ -294,10 +334,16 @@ impl Vst3Processor {
         // plugin is processing (or this is an empty flush block).
         let result = unsafe { self.processor.process(&mut data) };
         let Self {
+            input_changes,
             output_changes,
             to_ui,
+            retry,
             ..
         } = self;
+        if result != kResultOk {
+            // Not taken: the newest value of each goes again next block.
+            input_changes.for_each_last(|index, value| retry.put(index, value));
+        }
         output_changes.for_each_last(|index, value| {
             to_ui.push(index, value, 0);
         });
