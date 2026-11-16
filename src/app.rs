@@ -386,9 +386,8 @@ impl RigWerkApp {
         if self.startup.is_some() {
             return;
         }
-        // A VST3 editor's changes may be younger than the last poll (and CLAP
-        // has no change feed), so `saved_paths` reads the open editor in full
-        // before it lists the inserts.
+        // An open editor may have changed a value without reporting it, so
+        // `saved_paths` reads it in full before it lists the inserts.
         // A side whose stored identity startup did not find keeps that
         // name, id, and backend. The on-screen row can still be the fallback.
         // An id match, a legacy name match, and a side with nothing stored

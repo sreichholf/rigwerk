@@ -18,7 +18,10 @@ fn the_report_names_the_chain_and_insert_counts() {
         text.contains("- Main: chain: 0 skipped of 1 chunk (0%)"),
         "{text}"
     );
-    assert!(text.contains("  - Delay: 0 of 1 chunk (0%)"), "{text}");
+    assert!(
+        text.contains("  - Delay: 0 paused of 1 chunk (0%)"),
+        "{text}"
+    );
     assert!(
         text.contains("Chain counts are chunks the path tried to process."),
         "{text}"
@@ -36,11 +39,7 @@ fn a_chunk_count_is_pluralised() {
 
 #[test]
 fn a_skip_that_rounds_to_zero_reads_below_one_percent() {
-    let stats = |attempts, skips| crate::audio::LockStats {
-        attempts,
-        skips,
-        paused: 0,
-    };
+    let stats = |attempts, skips| crate::audio::LockStats { attempts, skips };
     assert_eq!(super::percent_text(&stats(1_000, 0)), "0%");
     assert_eq!(super::percent_text(&stats(1_000, 1)), "<1%");
     assert_eq!(super::percent_text(&stats(2, 1)), "50%");
@@ -57,7 +56,6 @@ fn a_chain_that_skipped_every_chunk_says_no_insert_ran() {
         chain: LockStats {
             attempts: 4,
             skips: 4,
-            paused: 0,
         },
         inserts: vec![LockStats::default()],
         chain_poisoned: false,
@@ -67,7 +65,6 @@ fn a_chain_that_skipped_every_chunk_says_no_insert_ran() {
         inserts: vec![LockStats {
             attempts: 2,
             skips: 0,
-            paused: 0,
         }],
         ..skipped.clone()
     };
@@ -151,7 +148,7 @@ fn the_report_includes_status_notes_and_the_log() {
     assert!(text.contains("Bridge ready."), "{text}");
     assert!(text.contains("cap 400"), "{text}");
     assert!(text.contains("- Main: 0.0 ms · not running"), "{text}");
-    assert!(text.contains("Plugin locks"), "{text}");
+    assert!(text.contains("Plugin blocks"), "{text}");
     assert!(text.contains("No plugin blocks yet."), "{text}");
     assert_eq!(
         super::dsp_text(Some(crate::audio::DspTime {

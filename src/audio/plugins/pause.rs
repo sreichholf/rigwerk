@@ -324,8 +324,8 @@ impl PauseHandshake {
     }
 
     /// Blocks the audio side played dry because of a pause, ever.
-    // Read by the tests; Diagnostics reports it once the insert counters
-    // count pauses (#28).
+    // Read by the tests; Diagnostics counts pauses per insert instead
+    // (`SlotControls`), so a reset there does not clear this.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn paused_blocks(&self) -> u64 {
         self.paused_blocks.load(Ordering::Relaxed)

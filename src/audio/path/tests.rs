@@ -19,14 +19,12 @@ fn lock_stats_clamp_skips_to_attempts() {
     let reset_race = LockStats {
         attempts: 0,
         skips: 1,
-        paused: 0,
     };
     assert_eq!(reset_race.skipped(), 0);
     assert_eq!(reset_race.share(), 0.0);
     let clamped = LockStats {
         attempts: 2,
         skips: 5,
-        paused: 0,
     };
     assert_eq!(clamped.skipped(), 2);
     assert_eq!(clamped.share(), 1.0);
@@ -47,7 +45,6 @@ fn a_missed_chain_lock_is_counted_as_one_attempt_and_one_skip() {
         LockStats {
             attempts: 1,
             skips: 1,
-            paused: 0,
         }
     );
     assert_eq!(report.chain.share(), 1.0);
@@ -65,7 +62,6 @@ fn a_missed_chain_lock_is_counted_as_one_attempt_and_one_skip() {
         LockStats {
             attempts: 2,
             skips: 1,
-            paused: 0,
         }
     );
     path.reset_plugin_lock_counters();
@@ -96,7 +92,6 @@ fn a_poisoned_chain_is_reported_without_counting_a_skip() {
         LockStats {
             attempts: 1,
             skips: 0,
-            paused: 0,
         },
         "a poisoned lock is not contention"
     );
@@ -171,7 +166,6 @@ fn chain_bypass_skips_the_callback_and_leaves_stored_bypass_alone() {
         LockStats {
             attempts: 1,
             skips: 0,
-            paused: 0,
         },
         "the insert processes again"
     );

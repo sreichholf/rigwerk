@@ -21,10 +21,14 @@
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
 //! - `shared`: the ring buffer, cushion, meters and tuner tap both sides share.
 //! - `path`: one signal path's controls (routing, EQs, gate, inserts).
-//! - `plugins`: the VST3 and CLAP chain on each path.  The UI holds views.
+//! - `plugins`: the VST3 and CLAP chain on each path.  The slot owns each
+//!   plugin's processor; the UI reaches the rest through its handle and
+//!   holds views.
 //! - `vst3`: RigWerk's own VST3 host on the `vst3` bindings (module,
 //!   factory, host context, run loop, streams, the controller and
-//!   processor halves, the editor view).
+//!   processor halves, the editor view).  `vst3-host` only scans.
+//! - `clap`: the CLAP host (the main-thread instance, the audio-thread
+//!   processor, the editor).
 //! - `scope`: decimated peak-hold lanes.  Drawing them is `ui/scope`.
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.

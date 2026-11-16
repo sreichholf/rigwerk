@@ -305,7 +305,8 @@ impl ParamReceiver {
     /// slot the producer fills after the snapshot is kept, with the ring
     /// entries ahead of it, so each parameter loses only its oldest changes
     /// and keeps its newest whenever it keeps any.
-    // For a VST3 state load (#28); only the tests call it yet.
+    // Only the tests call it: a state is loaded only while its plugin
+    // loads, before any value is queued for it.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn discard(&mut self) {
         self.drain(|_, _, _| {});

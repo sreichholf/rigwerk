@@ -1,6 +1,7 @@
 //! Diagnostics: the activity log, scan notes, the bridge status line, the
-//! signal paths' DSP time (per path, against the block it must fit) and the
-//! plugin locks the audio thread skipped.
+//! signal paths' DSP time (per path, against the block it must fit), the
+//! chunks the audio thread found the chain lock busy, and the chunks it
+//! found an insert paused.
 //!
 //! The header pill still follows the engine state. This page shows the
 //! bridge's own status string beside that, and keeps scan notes and quantum
@@ -46,7 +47,7 @@ fn chunk_text(count: u64) -> String {
     }
 }
 
-/// The skip share as text.  A non-zero skip that rounds to nothing reads
+/// The skip (or pause) share as text.  A non-zero skip that rounds to nothing reads
 /// "<1%", so a rare skip is not reported as none.
 fn percent_text(stats: &crate::audio::LockStats) -> String {
     // Before any attempt `share` is 0, so the zero-skip case covers it.
@@ -63,19 +64,18 @@ fn percent_text(stats: &crate::audio::LockStats) -> String {
 
 /// Why the chain count and the insert counts differ; the card and the export
 /// say the same thing.
-const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Insert counts cover only chunks where the chain lock was free.";
+const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Insert counts cover only chunks where the chain lock was free. An insert pauses while it restarts, and stays paused after a failed start.";
 
 /// The line under a chain whose inserts were never reached.  A bypassed
-/// insert or one at mix 0 never tries its plugin lock, which is normal, and
-/// a chain lock that was always busy also keeps the inserts out.
-const NO_INSERT_TRIED: &str =
-    "(no insert tried its lock — bypassed, at mix 0, or the chain never ran)";
+/// insert or one at mix 0 never runs its plugin, which is normal, and a
+/// chain lock that was always busy also keeps the inserts out.
+const NO_INSERT_TRIED: &str = "(no insert ran — bypassed, at mix 0, or the chain never ran)";
 
 /// Whether the path got chunks through its chain but none through an insert,
 /// so nothing below the chain line explains what happened.  A poisoned chain
-/// never processed its chunks, so it does not read as "no insert tried its
-/// lock".  A bypassed insert or one at mix 0 never tries its plugin lock
-/// either, which is normal, so the line names those causes instead of
+/// never processed its chunks, so it does not read as "no insert ran".  A
+/// bypassed insert or one at mix 0 never runs its plugin either, which is
+/// normal, so the line names those causes instead of
 /// reading as a fault.
 fn no_insert_ran(report: &crate::audio::PluginLockReport) -> bool {
     !report.chain_poisoned
@@ -199,7 +199,7 @@ impl RigWerkApp {
                 (info, report, views)
             })
             .collect();
-        lines.push("Plugin locks (skipped / attempted):".to_owned());
+        lines.push("Plugin blocks (chain lock skipped, insert paused / attempted):".to_owned());
         let any_attempts = lock_reports.iter().any(|(_, report, _)| {
             // A poisoned chain has no attempts to show; it is still the only
             // thing the section has to say about that path.
@@ -235,7 +235,7 @@ impl RigWerkApp {
                         .map(|view| view.name.clone())
                         .unwrap_or_else(|| format!("Insert {}", index + 1));
                     lines.push(format!(
-                        "  - {name}: {} of {} ({})",
+                        "  - {name}: {} paused of {} ({})",
                         insert.skipped(),
                         chunk_text(insert.attempts),
                         percent_text(insert)
@@ -468,7 +468,10 @@ impl RigWerkApp {
         ui.add_space(10.0);
         card(ui, CARD, BORDER, |ui| {
             ui.set_width(width - 32.0);
-            ui.label(micro_label("PLUGIN LOCKS · SKIPPED / ATTEMPTED", DIM));
+            ui.label(micro_label(
+                "PLUGIN BLOCKS · SKIPPED OR PAUSED / ATTEMPTED",
+                DIM,
+            ));
             ui.add_space(6.0);
             let reports: Vec<_> = self
                 .path_infos()
@@ -536,7 +539,7 @@ impl RigWerkApp {
                             ui.add_space(16.0);
                             ui.label(mono(
                                 format!(
-                                    "{name}: {} of {} ({})",
+                                    "{name}: {} paused of {} ({})",
                                     insert.skipped(),
                                     chunk_text(insert.attempts),
                                     percent_text(insert)
@@ -553,7 +556,7 @@ impl RigWerkApp {
             ui.add_space(6.0);
             if ghost_button(ui, "Reset all", 120.0) {
                 self.engine.reset_plugin_lock_counters();
-                self.push_log("Plugin lock counters reset.", LogTone::Teal);
+                self.push_log("Plugin block counters reset.", LogTone::Teal);
             }
         });
 

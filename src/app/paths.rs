@@ -718,9 +718,9 @@ impl RigWerkApp {
     /// The live paths as they should be saved (fresh plugin state), and
     /// the slot order they are saved in (the display order).
     ///
-    /// The open editor is read in full first: an edit may be younger than the
-    /// last 250 ms poll, and the save lists the inserts from what that read
-    /// stored.  No editor open makes this a no-op.
+    /// The open editor is read in full first: a plugin may change a value
+    /// without reporting it, and the save lists the inserts from what that
+    /// read stored.  No editor open makes this a no-op.
     pub(crate) fn saved_paths(&self) -> (Vec<PathPref>, Vec<usize>) {
         self.sync_plugin_editor();
         let order = self.path_slots();

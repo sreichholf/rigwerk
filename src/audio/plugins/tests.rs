@@ -569,7 +569,7 @@ fn impulse(frames: usize, at: usize) -> Vec<f32> {
 }
 
 #[test]
-fn a_rate_reload_keeps_the_insert_lock_counters() {
+fn a_rate_reload_keeps_the_insert_counters() {
     use super::PluginChain;
     let mut chain = PluginChain::new(48_000);
     chain.insert_delay_for_test(16);
@@ -577,7 +577,7 @@ fn a_rate_reload_keeps_the_insert_lock_counters() {
     let mut right = vec![0.0f32; 32];
     chain.process(&mut left, &mut right, 32);
     let before = chain.slot_mut_for_test(0).controls.lock_stats();
-    assert_eq!(before.attempts, 1, "the insert lock was tried once");
+    assert_eq!(before.attempts, 1, "the insert was tried once");
 
     let plan = chain.reload_plan(96_000).expect("a new rate reloads");
     assert_eq!(plan.jobs.len(), 1);
@@ -628,8 +628,8 @@ fn a_skipped_insert_still_delays_by_its_latency() {
     chain.process(&mut left, &mut right, 64);
     assert_eq!(left, impulse(64, 24));
     assert_eq!(right, impulse(64, 25));
-    // A bypassed or mix-0 insert never tries its plugin lock at all: the
-    // delay comes from the dry fallback, not from a skipped attempt.
+    // A bypassed or mix-0 insert never counts an attempt: the delay comes
+    // from the dry fallback, not from a paused one.
     for index in 0..2 {
         assert_eq!(
             chain.slot_mut_for_test(index).controls.lock_stats(),
@@ -674,7 +674,6 @@ fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
         crate::audio::LockStats {
             attempts: 2,
             skips: 0,
-            paused: 0,
         }
     );
 
@@ -691,14 +690,12 @@ fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
     assert_eq!(left[0], 1.0);
     assert!(left.windows(2).take(95).all(|pair| pair[1] < pair[0]));
     assert_eq!(left[96..], impulse(128, 100)[96..]);
-    // The restart's pass-through is an attempt, not a missed lock: it is
-    // counted as a paused block.
+    // The restart's pass-through is counted as a paused block.
     assert_eq!(
         chain.slot_mut_for_test(0).controls.lock_stats(),
         crate::audio::LockStats {
             attempts: 3,
-            skips: 0,
-            paused: 1,
+            skips: 1,
         }
     );
     // Restarted and resumed: it processes again.
@@ -1444,20 +1441,18 @@ fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
     let insert = report.inserts[0];
     eprintln!(
         "[vst3_fixture] lock baseline: {sets} sets, {blocks} blocks ({missed} without the chain); \
-         chain lock {}/{} skipped, insert lock {}/{} skipped ({:.1}%), {} paused",
+         chain lock {}/{} skipped, insert {}/{} paused ({:.1}%)",
         report.chain.skipped(),
         report.chain.attempts,
         insert.skipped(),
         insert.attempts,
-        insert.share() * 100.0,
-        insert.paused
+        insert.share() * 100.0
     );
     assert_eq!(failures, Vec::<String>::new(), "a control set failed");
     assert!(blocks > 0 && sets > 0);
     assert_eq!(missed, 0, "a block missed the chain");
     assert_eq!(report.chain.skipped(), 0, "the chain lock was skipped");
-    assert_eq!(insert.skipped(), 0, "the insert was skipped");
-    assert_eq!(insert.paused, 0, "a control set paused the insert");
+    assert_eq!(insert.skipped(), 0, "a control set paused the insert");
     path.service_plugins();
     only_view(&path);
 }

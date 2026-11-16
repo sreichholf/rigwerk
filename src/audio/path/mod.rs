@@ -252,18 +252,15 @@ impl DspTime {
     }
 }
 
-/// How often one lock on the sample path was tried and how often it was
-/// busy, so its work was skipped for that chunk.  Measurement only: the
-/// audio thread writes these relaxedly and never reads them back.
-///
-/// For an insert, `paused` counts the chunks it should have run but was
-/// paused for (a restart, a stopped or failed start): no lock was busy, so
-/// these are attempts, not skips.
+/// How often the audio thread tried one piece of plugin work and how often
+/// it skipped it for that chunk.  For the chain a skip is a busy chain
+/// lock; for an insert it is a pause (a restart, a stopped or failed
+/// start), since no insert has a lock the UI could hold.  Measurement only:
+/// the audio thread writes these relaxedly and never reads them back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LockStats {
     pub attempts: u64,
     pub skips: u64,
-    pub paused: u64,
 }
 
 impl LockStats {
@@ -283,7 +280,8 @@ impl LockStats {
     }
 }
 
-/// One path's plugin lock counters: the chain's own lock and one per insert.
+/// One path's plugin counters: the chain lock's skips and each insert's
+/// pauses.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PluginLockReport {
     pub chain: LockStats,

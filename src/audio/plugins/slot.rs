@@ -22,14 +22,11 @@ use crate::audio::LockStats;
 /// It also counts how often the audio thread tried to run the insert's
 /// plugin, and how many of those chunks found it paused (a restart, a
 /// failed start).  Measurement only: the audio thread writes these
-/// relaxedly and Diagnostics reads them.  No UI-side work makes an insert
-/// skip any more (neither format has a lock the UI could hold), so the
-/// skip count stays 0.
+/// relaxedly and Diagnostics reads them.
 pub(crate) struct SlotControls {
     mix: AtomicU32,
     bypass: AtomicBool,
     attempts: AtomicU64,
-    skips: AtomicU64,
     paused: AtomicU64,
     /// Rebuilds the plugin asked for in the current window, and when that
     /// window began (milliseconds on [`now_ms`], 0 for none): bounds a
@@ -66,7 +63,6 @@ impl SlotControls {
             mix: AtomicU32::new(pref.mix.clamp(0.0, 1.0).to_bits()),
             bypass: AtomicBool::new(pref.bypass),
             attempts: AtomicU64::new(0),
-            skips: AtomicU64::new(0),
             paused: AtomicU64::new(0),
             reloads: AtomicU32::new(0),
             reload_window_ms: AtomicU64::new(0),
@@ -150,14 +146,12 @@ impl SlotControls {
     pub(crate) fn lock_stats(&self) -> LockStats {
         LockStats {
             attempts: self.attempts.load(Ordering::Relaxed),
-            skips: self.skips.load(Ordering::Relaxed),
-            paused: self.paused.load(Ordering::Relaxed),
+            skips: self.paused.load(Ordering::Relaxed),
         }
     }
 
     pub(crate) fn reset_lock_stats(&self) {
         self.attempts.store(0, Ordering::Relaxed);
-        self.skips.store(0, Ordering::Relaxed);
         self.paused.store(0, Ordering::Relaxed);
     }
 }

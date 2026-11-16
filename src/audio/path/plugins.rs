@@ -686,8 +686,8 @@ impl PathControls {
         true
     }
 
-    /// This path's plugin lock counters: the chain lock and each insert's
-    /// own plugin lock.  Measurement only; never takes the chain lock.
+    /// This path's plugin counters: the chain lock's skips and each
+    /// insert's pauses.  Measurement only; never takes the chain lock.
     pub(crate) fn plugin_lock_report(&self) -> PluginLockReport {
         let links = Arc::clone(
             &self
@@ -699,7 +699,6 @@ impl PathControls {
             chain: LockStats {
                 attempts: self.chain_attempts.load(Ordering::Relaxed),
                 skips: self.chain_skips.load(Ordering::Relaxed),
-                paused: 0,
             },
             inserts: links
                 .iter()
@@ -709,7 +708,7 @@ impl PathControls {
         }
     }
 
-    /// Clears this path's plugin lock counters (UI thread).  It does not
+    /// Clears this path's plugin counters (UI thread).  It does not
     /// clear [`PluginLockReport::chain_poisoned`]: resetting a counter cannot
     /// make a poisoned chain usable.
     pub(crate) fn reset_plugin_lock_counters(&self) {

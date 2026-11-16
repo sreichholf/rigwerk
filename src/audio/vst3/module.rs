@@ -20,8 +20,8 @@
 //!
 //! The SDK factory is one per binary, not per host: `setHostContext`
 //! replaces the context (and VSTGUI's run loop) for every user of the
-//! binary.  Never have vst3-host and this host load the same binary at
-//! the same time.
+//! binary.  Nothing else may load a VST3 binary: vst3-host only scans
+//! (it reads the bundle layout and `moduleinfo.json`).
 
 use std::cell::Cell;
 use std::collections::BTreeMap;

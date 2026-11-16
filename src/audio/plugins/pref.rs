@@ -36,7 +36,8 @@ pub struct PluginParamPref {
 
 /// The layout of [`PluginState::data`] this build writes and reads: the bytes
 /// the format's own state call produced (CLAP `clap_plugin_state.save`, or
-/// `vst3-host`'s `Plugin::save_state` envelope), base64-encoded.  A blob with
+/// the VST3 envelope in `vst3::stream`, the layout `vst3-host` wrote),
+/// base64-encoded.  A blob with
 /// any other version is ignored and the insert falls back to its parameters.
 pub(crate) const PLUGIN_STATE_VERSION: u32 = 1;
 

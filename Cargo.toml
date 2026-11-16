@@ -18,9 +18,9 @@ cpal = "0.18"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Preset-guided per-string spectra for the tuner.
 rustfft = "6"
-# VST3 discovery, hosting and processing.  The crate ships its own bindings,
-# so no Steinberg SDK or extra native toolchain is needed.  0.11.1 is the
-# first release whose Linux editor window reports a title-bar close.
+# VST3 discovery only (the bundle scan); `audio/vst3` hosts the plugins.
+# The crate ships its own bindings, so no Steinberg SDK or extra native
+# toolchain is needed.
 vst3-host = { version = "0.11.1", default-features = false }
 # The raw VST3 bindings (COM pointers, interfaces, `Class`) that RigWerk's own
 # VST3 host in `audio/vst3` is built on.  vst3-host already locks this version.
@@ -62,7 +62,7 @@ eframe = { version = "0.37", default-features = false, features = ["x11", "wayla
 # Netlink uevent socket for sound-card add/remove, and poll() for the fds a
 # CLAP plugin registers. No libudev.
 libc = "0.2"
-# The X11 window a CLAP editor embeds in.  vst3-host already links it.
+# The X11 window a plugin editor embeds in.
 xcb = "1.7"
 # Native PipeWire client. The ALSA `pipewire` plugin is not the Linux path.
 # v0_3_50 exposes pw_buffer.requested so playback fills one quantum, not maxsize.

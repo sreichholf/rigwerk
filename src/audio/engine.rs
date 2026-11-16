@@ -397,15 +397,15 @@ impl AudioEngine {
         (time.block_ns > 0).then_some(time)
     }
 
-    /// Path `path`'s plugin lock counters: how often the audio thread tried
-    /// the chain lock and each insert's plugin lock, and how often it found
-    /// one busy.  Measurement only; the report takes no lock on the sample
-    /// path.
+    /// Path `path`'s plugin counters: how often the audio thread tried the
+    /// chain lock and found it busy, and how often it tried each insert and
+    /// found it paused.  Measurement only; the report takes no lock on the
+    /// sample path.
     pub fn plugin_lock_report(&self, path: usize) -> PluginLockReport {
         self.shared.path(path).plugin_lock_report()
     }
 
-    /// Clears the plugin lock counters of every path.
+    /// Clears the plugin counters of every path.
     pub fn reset_plugin_lock_counters(&self) {
         for slot in 0..MAX_PATHS {
             self.shared.path(slot).reset_plugin_lock_counters();
