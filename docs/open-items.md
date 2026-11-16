@@ -12,47 +12,46 @@ plans and the code review has landed; that history is in git.
   metronome click: only narrower followers carry the click-free lanes
   through their ring.
 - A VST3 editor cannot open in a Wayland session with no X server.
-  `vst3-host` 0.11 opens Linux editors as X11 windows only and does not
-  implement `IWaylandHost` / `IWaylandFrame`; XWayland with `DISPLAY` set
-  works.  The plugin still runs, and RigWerk's parameter panel still opens.
-- A VSTGUI editor built with VST3 SDK 3.8 (the SDK's `again` sample, for
-  one) crashes RigWerk on Linux when it opens.  That VSTGUI takes the
-  `Linux::IRunLoop` from the factory's host context, and `vst3-host` 0.11
-  offers it only on the plug frame.  The editor test in
-  `app/plugin_gui/tests.rs` skips the open on Linux until the host
-  context offers it.
+  RigWerk's VST3 host (`audio/vst3`) opens Linux editors as X11 windows
+  only and does not implement `IWaylandHost` / `IWaylandFrame`; XWayland
+  with `DISPLAY` set works.  The plugin still runs, and RigWerk's
+  parameter panel still opens.
+- `vst3-host` is still a dependency, for the VST3 bundle scan only
+  (`app/plugins.rs`).  Step 4 of #28 replaces it.
 
 ## Not reproduced
 
 - A sink starving under Low latency.  The sink monitor behind the Live
   silence row reads a live PipeWire graph (see "A PipeWire graph without
   hardware" in `AGENTS.md`), but the starving case has not been seen.
+- Plugin editors on a real X11 desktop and on Windows.  The editor test
+  opens and closes AGain's editor under Xvfb and on the Windows CI
+  runner; nobody has used an editor by hand on our own VST3 host yet.
 
 ## Known limits
 
 Recorded when the review fixes landed (November 2026), not re-checked
 since.
 
-- **Plugin chain lock.**  When the audio thread finds the chain locked, the
-  plugin output for that chunk is lost: the path plays its input delayed
-  by the chain latency, so timing holds but the inserts' sound drops out.
-  The step into that dry fallback is declicked over 2 ms; once the chain
-  runs again it waits one latency, then crossfades back over 5 ms.  Short
-  holds that can collide: a plugin reload for a new output rate, opening an
-  editor for a slot that was never loaded, cloning the plugin views, a
-  parameter sync, and VST3 editor servicing (vst3-host has no lock-free
-  path).
-- **VST3 level lock.**  vst3-host's `Plugin::process_audio` takes a
-  blocking `Mutex` (`audio_levels.lock()`) after every block, on the audio
-  thread.  This is upstream, not RigWerk's code.
-- **VST3 latency changes.**  A plugin that changes its latency through
-  its processor (the SDK's host checker) never reaches the new value.
-  vst3-host 0.11 hands the processor's output parameters to the host
-  only, never to the controller, so the controller's restart request is
-  never raised.  When a restart does come, it reads `getLatencySamples`
-  before reactivating, and a plugin that applies the new latency in
-  `setActive (true)` reports the old one.  The host checker test prints
-  the value it gets.
+- **Plugin chain lock.**  Structural edits still take the chain lock:
+  adding, removing, moving or restoring inserts, reopening them for a
+  new rate or because a plugin changed its layout, and opening a slot
+  that was never loaded.  The audio thread
+  `try_lock`s it; when it is busy, the plugin output for that chunk is
+  lost: the path plays its input delayed by the chain latency, so timing
+  holds but the inserts' sound drops out.  The step into that dry
+  fallback is declicked over 2 ms; once the chain runs again it waits
+  one latency, then crossfades back over 5 ms.  Step 3 of #28 hands the
+  chain to the audio side.
+- **VSTGUI editor reopened on Linux.**  VSTGUI's X11 run loop closes
+  its xcb connection when its last editor closes, without finishing the
+  cairo device for it.  If a later editor from the same loaded module
+  gets a new connection at the same address, cairo reuses the stale
+  device and aborts (`cairo-xcb-screen.c` `_get_screen_index`).  A reload
+  opens the new editor before closing the old one, so it never hits
+  this; closing an editor by hand and reopening it later still can.
+  The fix belongs upstream (`cairo_device_finish` before
+  `xcb_disconnect`, as VSTGUI's Wayland path does).
 - **CLAP log.**  `host_log` (`clap/host.rs`) builds a `String` and replaces
   `last_log` (under `try_lock`) on whatever thread logs, so a plugin that
   logs from `process` allocates and frees on the audio thread.  Nothing

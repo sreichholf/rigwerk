@@ -142,6 +142,16 @@ pub(crate) struct LogEntry {
     pub(crate) tone: LogTone,
 }
 
+/// Closes a plugin's editor window before the fields drop: `engine` is
+/// declared first and would take the plugins down while their editor is
+/// still attached.  This way the view is detached, then the plugin
+/// deactivated and destroyed, on exit as everywhere else.
+impl Drop for RigWerkApp {
+    fn drop(&mut self) {
+        self.plugin_gui = None;
+    }
+}
+
 pub struct RigWerkApp {
     pub(crate) page: Page,
     /// The page the previous logic pass ran with.  The tuner logs its mute
@@ -376,9 +386,8 @@ impl RigWerkApp {
         if self.startup.is_some() {
             return;
         }
-        // A VST3 editor's changes may be younger than the last poll (and CLAP
-        // has no change feed), so `saved_paths` reads the open editor in full
-        // before it lists the inserts.
+        // An open editor may have changed a value without reporting it, so
+        // `saved_paths` reads it in full before it lists the inserts.
         // A side whose stored identity startup did not find keeps that
         // name, id, and backend. The on-screen row can still be the fallback.
         // An id match, a legacy name match, and a side with nothing stored

@@ -1,13 +1,33 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{BlockAction, PauseHandshake};
+use super::{drive_pause, BlockAction, PauseHandshake, PauseStep, PAUSE_STALL};
+
+/// One whole block: begin it, return its action, end it.
+fn block(pause: &PauseHandshake) -> BlockAction {
+    pause.begin_block().action()
+}
 
 /// A handshake past its first block: processing.
 fn running() -> PauseHandshake {
     let pause = PauseHandshake::new();
-    assert_eq!(pause.begin_block(), BlockAction::Start);
+    let first = pause.begin_block();
+    assert_eq!(first.action(), BlockAction::Start);
+    pause.started();
+    drop(first);
+    assert!(pause.processing());
+    pause
+}
+
+/// A handshake that went through a Stop block: stopped and paused.
+fn stopped() -> PauseHandshake {
+    let pause = running();
+    pause.request();
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    pause.stopped();
+    drop(stop);
     pause
 }
 
@@ -15,9 +35,16 @@ fn running() -> PauseHandshake {
 fn a_new_handshake_starts_processing_on_its_first_block() {
     let pause = PauseHandshake::new();
     assert!(!pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Start);
-    assert_eq!(pause.begin_block(), BlockAction::Process);
+    assert!(!pause.processing());
+    assert_eq!(pause.served(), 0);
+    let first = pause.begin_block();
+    assert_eq!(first.action(), BlockAction::Start);
+    pause.started();
+    drop(first);
+    assert!(pause.processing());
+    assert_eq!(block(&pause), BlockAction::Process);
     assert_eq!(pause.paused_blocks(), 0);
+    assert_eq!(pause.served(), 2);
 }
 
 #[test]
@@ -25,29 +52,41 @@ fn a_request_before_the_first_block_pauses_without_a_stop_call() {
     let pause = PauseHandshake::new();
     pause.request();
     assert!(!pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Skip);
-    assert!(pause.is_paused());
-    pause.resume();
-    assert_eq!(pause.begin_block(), BlockAction::Start);
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert!(pause.quiet());
+    assert!(!pause.take_processing());
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
 }
 
 #[test]
 fn the_full_sequence_stops_and_restarts_once() {
     let pause = running();
-    assert_eq!(pause.begin_block(), BlockAction::Process);
+    assert_eq!(block(&pause), BlockAction::Process);
     pause.request();
     assert!(!pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Stop);
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
     // Not paused until the stop call is done.
     assert!(!pause.is_paused());
     pause.stopped();
     assert!(pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Skip);
-    assert_eq!(pause.begin_block(), BlockAction::Skip);
-    pause.resume();
+    assert!(!pause.processing());
+    // Not quiet until the block is over.
+    assert!(!pause.quiet());
+    drop(stop);
+    assert!(pause.quiet());
+    assert!(!pause.take_processing());
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert!(pause.resume());
     assert!(!pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Start);
-    assert_eq!(pause.begin_block(), BlockAction::Process);
+    let start = pause.begin_block();
+    assert_eq!(start.action(), BlockAction::Start);
+    pause.started();
+    drop(start);
+    assert!(pause.processing());
+    assert_eq!(block(&pause), BlockAction::Process);
     assert_eq!(pause.paused_blocks(), 3);
 }
 
@@ -56,84 +95,304 @@ fn request_is_idempotent() {
     let pause = running();
     pause.request();
     pause.request();
-    assert_eq!(pause.begin_block(), BlockAction::Stop);
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
     pause.request();
     pause.stopped();
+    drop(stop);
     pause.request();
-    assert!(pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Skip);
+    assert!(pause.quiet());
+    assert_eq!(block(&pause), BlockAction::Skip);
 }
 
 #[test]
 fn resume_before_the_stop_cancels_the_request() {
     let pause = running();
     pause.request();
-    pause.resume();
-    assert_eq!(pause.begin_block(), BlockAction::Process);
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Process);
     assert_eq!(pause.paused_blocks(), 0);
+    assert!(pause.processing());
 }
 
 #[test]
 fn resume_during_the_stop_call_starts_on_the_next_block() {
     let pause = running();
     pause.request();
-    assert_eq!(pause.begin_block(), BlockAction::Stop);
-    pause.resume();
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    assert!(pause.resume());
     pause.stopped();
+    drop(stop);
     assert!(!pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Start);
-    assert_eq!(pause.begin_block(), BlockAction::Process);
+    assert!(!pause.processing());
+    assert_eq!(block(&pause), BlockAction::Start);
+    assert_eq!(block(&pause), BlockAction::Process);
 }
 
 #[test]
 fn request_again_during_the_stop_call_ends_paused() {
     let pause = running();
     pause.request();
-    assert_eq!(pause.begin_block(), BlockAction::Stop);
-    pause.resume();
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    assert!(pause.resume());
     pause.request();
     pause.stopped();
-    assert!(pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Skip);
-    pause.resume();
-    assert_eq!(pause.begin_block(), BlockAction::Start);
+    drop(stop);
+    assert!(pause.quiet());
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
 }
 
 #[test]
 fn request_before_the_restart_cancels_the_resume() {
-    let pause = running();
-    pause.request();
-    assert_eq!(pause.begin_block(), BlockAction::Stop);
-    pause.stopped();
-    pause.resume();
+    let pause = stopped();
+    assert!(pause.resume());
     pause.request();
     // Still stopped: the audio side confirms without a second stop call.
     assert!(!pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Skip);
-    assert!(pause.is_paused());
-    pause.resume();
-    assert_eq!(pause.begin_block(), BlockAction::Start);
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert!(pause.quiet());
+    assert!(!pause.take_processing());
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
 }
 
 #[test]
-fn without_a_bridge_the_ui_stops_only_a_processing_plugin() {
-    // Processing (also with a request pending): the UI must stop it.
+fn forcing_stops_only_a_processing_plugin_once_the_block_is_over() {
+    // Forced while a block is inside the plugin: paused at once, quiet
+    // only once the block is over; the UI makes the stop call.
     let pause = running();
-    assert!(pause.stop_without_audio());
+    let inside = pause.begin_block();
+    assert_eq!(inside.action(), BlockAction::Process);
+    pause.force();
     assert!(pause.is_paused());
+    assert!(!pause.quiet());
+    drop(inside);
+    assert!(pause.quiet());
+    assert!(pause.take_processing());
+    assert!(!pause.take_processing(), "the stop call is made once");
+    assert_eq!(block(&pause), BlockAction::Skip);
+
+    // Forced with a request pending and no block coming: the UI stops it.
     let pause = running();
     pause.request();
-    assert!(pause.stop_without_audio());
+    pause.force();
+    assert!(pause.quiet());
+    assert!(pause.take_processing());
+
+    // Forced during the audio side's stop call: that call is the one.
+    let pause = running();
+    pause.request();
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    pause.force();
+    assert!(!pause.quiet());
+    pause.stopped();
+    drop(stop);
+    assert!(pause.quiet());
+    assert!(!pause.take_processing());
+
+    // Forced during a start call: the UI stops what the block started.
+    let pause = PauseHandshake::new();
+    let start = pause.begin_block();
+    assert_eq!(start.action(), BlockAction::Start);
+    pause.force();
+    pause.started();
+    assert!(!pause.quiet());
+    drop(start);
+    assert!(pause.quiet());
+    assert!(pause.take_processing());
+
     // Already stopped: paused, not yet restarted, or never started.
-    assert!(!pause.stop_without_audio());
-    pause.resume();
-    assert!(!pause.stop_without_audio());
-    assert!(!PauseHandshake::new().stop_without_audio());
-    // The way out is `resume`: a later bridge's first block starts it.
-    pause.resume();
+    let pause = stopped();
+    pause.force();
+    assert!(pause.quiet());
+    assert!(!pause.take_processing());
+    assert!(pause.resume());
+    pause.force();
+    assert!(pause.quiet());
+    assert!(!pause.take_processing());
+    let new = PauseHandshake::new();
+    new.force();
+    assert!(new.quiet());
+    assert!(!new.take_processing());
+
+    // The way out is `resume`: the next block starts it.
+    assert!(pause.resume());
     assert!(!pause.is_paused());
-    assert_eq!(pause.begin_block(), BlockAction::Start);
-    assert_eq!(pause.paused_blocks(), 0);
+    assert_eq!(block(&pause), BlockAction::Start);
+}
+
+#[test]
+fn resume_after_a_force_waits_for_quiet_and_the_stop_call() {
+    // Forced while a block processes: no start before the block is over.
+    let pause = running();
+    let inside = pause.begin_block();
+    assert_eq!(inside.action(), BlockAction::Process);
+    pause.force();
+    assert!(!pause.resume(), "a block is still inside");
+    assert!(pause.is_paused());
+    drop(inside);
+    assert!(!pause.resume(), "quiet has not confirmed the force");
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert!(pause.quiet());
+    assert!(!pause.resume(), "still processing");
+    assert!(pause.take_processing());
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
+
+    // Forced during a start call: the start that block made is the one.
+    let pause = PauseHandshake::new();
+    let start = pause.begin_block();
+    assert_eq!(start.action(), BlockAction::Start);
+    pause.force();
+    assert!(!pause.resume());
+    pause.started();
+    drop(start);
+    assert!(pause.quiet());
+    assert!(!pause.resume());
+    assert!(pause.take_processing());
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
+
+    // A pause the audio side made needs no confirmation.
+    let pause = running();
+    pause.request();
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    pause.stopped();
+    assert!(pause.resume());
+    drop(stop);
+    assert_eq!(block(&pause), BlockAction::Start);
+}
+
+#[test]
+fn a_failed_start_pauses_until_resumed() {
+    let pause = PauseHandshake::new();
+    let start = pause.begin_block();
+    assert_eq!(start.action(), BlockAction::Start);
+    pause.start_failed();
+    drop(start);
+    assert!(pause.is_paused());
+    assert!(!pause.processing());
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert!(pause.quiet());
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
+
+    // A request during the failed start: paused, not a Stop on it.
+    let pause = PauseHandshake::new();
+    let start = pause.begin_block();
+    assert_eq!(start.action(), BlockAction::Start);
+    pause.request();
+    pause.start_failed();
+    drop(start);
+    assert!(pause.quiet());
+    assert!(!pause.take_processing());
+    assert_eq!(block(&pause), BlockAction::Skip);
+}
+
+#[test]
+fn drive_pause_resets_its_wait_for_the_next_pause() {
+    let pause = running();
+    let stops = AtomicU64::new(0);
+    let mut wait = None;
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    pause.stopped();
+    drop(stop);
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Ready);
+    assert_eq!(wait, None);
+    assert!(pause.resume());
+    let start = pause.begin_block();
+    assert_eq!(start.action(), BlockAction::Start);
+    pause.started();
+    drop(start);
+
+    // The same `wait` requests the next pause.
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    assert_eq!(block(&pause), BlockAction::Stop);
+}
+
+/// One [`drive_pause`] frame whose stop call counts into `stops`.
+fn drive(
+    pause: &PauseHandshake,
+    wait: &mut Option<(Instant, u64)>,
+    stops: &AtomicU64,
+) -> PauseStep {
+    drive_pause(pause, wait, || {
+        stops.fetch_add(1, Ordering::Relaxed);
+    })
+}
+
+#[test]
+fn a_pause_before_the_first_block_is_ready_at_once() {
+    let pause = PauseHandshake::new();
+    let stops = AtomicU64::new(0);
+    let mut wait = None;
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Ready);
+    assert_eq!(stops.load(Ordering::Relaxed), 0, "nothing to stop");
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
+}
+
+#[test]
+fn a_pause_while_blocks_run_waits_for_the_audio_threads_stop() {
+    let pause = running();
+    let stops = AtomicU64::new(0);
+    let mut wait = None;
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    pause.stopped();
+    // Paused, but the block is still inside the plugin.
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    drop(stop);
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Ready);
+    assert_eq!(
+        stops.load(Ordering::Relaxed),
+        0,
+        "the audio thread stopped it"
+    );
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
+}
+
+#[test]
+fn a_pause_after_the_stream_stopped_is_forced_after_the_stall() {
+    let pause = running();
+    let stops = AtomicU64::new(0);
+    let mut wait = None;
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    let (_, seen) = wait.expect("waiting");
+    let long_ago = Instant::now().checked_sub(PAUSE_STALL).expect("uptime");
+    // A block served since the last frame restarts the wait.
+    wait = Some((long_ago, seen.wrapping_sub(1)));
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    let (since, now_seen) = wait.expect("waiting");
+    assert!(since > long_ago);
+    assert_eq!(now_seen, seen);
+    // No block for the stall: the stream is taken to be stopped.
+    wait = Some((long_ago, seen));
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Ready);
+    assert_eq!(
+        stops.load(Ordering::Relaxed),
+        1,
+        "the UI made the stop call"
+    );
+    assert!(!pause.processing());
+    // A later bridge skips, then starts after the resume.
+    assert_eq!(block(&pause), BlockAction::Skip);
+    assert!(pause.resume());
+    assert_eq!(block(&pause), BlockAction::Start);
 }
 
 #[test]
@@ -151,22 +410,161 @@ fn the_audio_thread_restarts_after_the_ui_work() {
             let started = Instant::now();
             loop {
                 assert!(started.elapsed() < Duration::from_secs(10), "no restart");
-                match pause.begin_block() {
+                let block = pause.begin_block();
+                match block.action() {
                     BlockAction::Stop => pause.stopped(),
                     BlockAction::Start => return work.load(Ordering::Relaxed),
-                    BlockAction::Process | BlockAction::Skip => std::thread::yield_now(),
+                    BlockAction::Process | BlockAction::Skip => {
+                        drop(block);
+                        std::thread::yield_now();
+                    }
                 }
             }
         })
     };
     pause.request();
     let started = Instant::now();
-    while !pause.is_paused() {
+    while !pause.quiet() {
         assert!(started.elapsed() < Duration::from_secs(10), "never paused");
         std::thread::yield_now();
     }
     work.store(42, Ordering::Relaxed);
-    pause.resume();
+    assert!(pause.resume());
     assert_eq!(audio.join().unwrap(), 42);
     assert!(pause.paused_blocks() >= 1);
+}
+
+/// A plugin stand-in: whoever calls into it marks `inside` for the call,
+/// and it tracks whether it is processing, so an overlap or a stop/start
+/// out of turn fails the test.
+#[derive(Default)]
+struct FakePlugin {
+    inside: AtomicBool,
+    processing: AtomicBool,
+}
+
+impl FakePlugin {
+    fn call(&self, body: impl FnOnce(&Self)) {
+        assert!(
+            !self.inside.swap(true, Ordering::SeqCst),
+            "two threads inside"
+        );
+        for _ in 0..32 {
+            std::hint::spin_loop();
+        }
+        body(self);
+        self.inside.store(false, Ordering::SeqCst);
+    }
+
+    fn start(&self) {
+        self.call(|plugin| {
+            assert!(
+                !plugin.processing.swap(true, Ordering::SeqCst),
+                "started twice"
+            )
+        });
+    }
+
+    fn stop(&self) {
+        self.call(|plugin| {
+            assert!(
+                plugin.processing.swap(false, Ordering::SeqCst),
+                "stopped twice"
+            )
+        });
+    }
+
+    fn process(&self) {
+        self.call(|plugin| assert!(plugin.processing.load(Ordering::SeqCst), "not started"));
+    }
+
+    /// The UI's work: the plugin must be stopped.
+    fn work(&self) {
+        self.call(|plugin| {
+            assert!(
+                !plugin.processing.load(Ordering::SeqCst),
+                "still processing"
+            )
+        });
+    }
+}
+
+/// On x86_64 (TSO) this cannot catch a weakened ordering in the handshake
+/// (the hardware only lets a load pass an earlier store): that needs
+/// aarch64 or loom.
+#[test]
+fn a_forced_pause_never_overlaps_a_block() {
+    let pause = Arc::new(PauseHandshake::new());
+    let plugin = Arc::new(FakePlugin::default());
+    let done = Arc::new(AtomicBool::new(false));
+    let audio = {
+        let pause = Arc::clone(&pause);
+        let plugin = Arc::clone(&plugin);
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let mut blocks = 0u64;
+            while !done.load(Ordering::Relaxed) {
+                let block = pause.begin_block();
+                match block.action() {
+                    BlockAction::Stop => {
+                        plugin.stop();
+                        pause.stopped();
+                    }
+                    BlockAction::Start => {
+                        plugin.start();
+                        pause.started();
+                        plugin.process();
+                    }
+                    BlockAction::Process => plugin.process(),
+                    BlockAction::Skip => {}
+                }
+                drop(block);
+                blocks += 1;
+                if blocks.is_multiple_of(64) {
+                    std::thread::yield_now();
+                }
+            }
+            blocks
+        })
+    };
+
+    let started = Instant::now();
+    let mut pauses = 0u64;
+    let mut ui_stops = 0u64;
+    while started.elapsed() < Duration::from_millis(200) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        if pauses.is_multiple_of(2) {
+            let mut wait = None;
+            while drive_pause(&pause, &mut wait, || {
+                ui_stops += 1;
+                plugin.stop();
+            }) == PauseStep::Waiting
+            {
+                assert!(Instant::now() < deadline, "never ready");
+                std::thread::yield_now();
+            }
+        } else {
+            // Forced at once, whatever the audio thread is doing.
+            pause.request();
+            pause.force();
+            while !pause.quiet() {
+                assert!(Instant::now() < deadline, "never quiet");
+                std::hint::spin_loop();
+            }
+            if pause.take_processing() {
+                ui_stops += 1;
+                plugin.stop();
+            }
+        }
+        plugin.work();
+        assert!(pause.resume());
+        pauses += 1;
+        for _ in 0..(pauses % 7) * 50 {
+            std::hint::spin_loop();
+        }
+    }
+    done.store(true, Ordering::Relaxed);
+    let blocks = audio.join().expect("audio thread");
+    assert!(pauses > 0 && blocks > 0, "{pauses} pauses, {blocks} blocks");
+    eprintln!("{pauses} pauses, {ui_stops} stopped by the UI, {blocks} blocks");
 }

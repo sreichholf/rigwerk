@@ -1,13 +1,17 @@
 //! CLAP host state, main-thread helpers, and host extension callbacks.
 //!
-//! The GUI callbacks may arrive on any thread, so they only set flags that
-//! the open editor window follows on the UI thread.
+//! A plugin may call any host callback from any thread (its audio thread
+//! included), so every callback here only sets an atomic, or try-locks a
+//! list the UI services.  `request_restart`, `request_callback`,
+//! `latency.changed` and the rest leave the work to the main-thread
+//! service (`ClapInstance` behind the plugin's UI lock); none of them
+//! calls into the plugin or blocks.
 
 use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use clap_sys::ext::audio_ports::{clap_host_audio_ports, CLAP_EXT_AUDIO_PORTS};
@@ -15,44 +19,49 @@ use clap_sys::ext::gui::{clap_host_gui, CLAP_EXT_GUI};
 use clap_sys::ext::latency::{clap_host_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::log::{clap_host_log, clap_log_severity, CLAP_EXT_LOG};
 use clap_sys::ext::params::{clap_host_params, CLAP_EXT_PARAMS};
-use clap_sys::ext::posix_fd_support::clap_plugin_posix_fd_support;
 #[cfg(target_os = "linux")]
 use clap_sys::ext::posix_fd_support::{
     clap_host_posix_fd_support, clap_posix_fd_flags, CLAP_EXT_POSIX_FD_SUPPORT,
     CLAP_POSIX_FD_ERROR, CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE,
 };
-use clap_sys::ext::state::{clap_host_state, clap_plugin_state, CLAP_EXT_STATE};
+use clap_sys::ext::state::{clap_host_state, CLAP_EXT_STATE};
 use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK};
-use clap_sys::ext::timer_support::{
-    clap_host_timer_support, clap_plugin_timer_support, CLAP_EXT_TIMER_SUPPORT,
-};
+use clap_sys::ext::timer_support::{clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use clap_sys::host::clap_host;
-use clap_sys::plugin::clap_plugin;
 
 use super::cstring;
 use super::ports::{AUDIO_PORTS_RESCAN_ALL, AUDIO_PORTS_RESCAN_STOPS};
-use super::state::{StateWriter, MAX_STATE_BYTES};
+use crate::audio::plugins::{PluginShared, RESTART_ACTIVATION};
 
 thread_local! {
-    /// True while the current thread is inside a CLAP `process` call.  The
-    /// thread-check callback answers from here, so the audio callback never
-    /// takes a host-state lock just to report its identity.
+    /// True while the current thread makes CLAP audio-thread calls
+    /// (`start_processing`, `process`, `stop_processing`, an active
+    /// `params.flush`).  The thread-check callback answers from here, so
+    /// the audio callback never takes a host-state lock just to report its
+    /// identity.
     pub(super) static ON_AUDIO_THREAD: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Marks the current thread as the CLAP audio thread for as long as it lives.
-pub(super) struct AudioThreadScope;
+/// Marks the current thread as the CLAP audio thread for as long as it
+/// lives.  The UI thread enters one too when it makes an audio-thread call
+/// with no block inside the plugin (a forced pause, teardown); it is the
+/// plugin's audio thread for that call.  Scopes nest: dropping one restores
+/// what was there before.
+pub(super) struct AudioThreadScope {
+    previous: bool,
+}
 
 impl AudioThreadScope {
     pub(super) fn enter() -> Self {
-        ON_AUDIO_THREAD.with(|flag| flag.set(true));
-        Self
+        Self {
+            previous: ON_AUDIO_THREAD.with(|flag| flag.replace(true)),
+        }
     }
 }
 
 impl Drop for AudioThreadScope {
     fn drop(&mut self) {
-        ON_AUDIO_THREAD.with(|flag| flag.set(false));
+        ON_AUDIO_THREAD.with(|flag| flag.set(self.previous));
     }
 }
 
@@ -135,51 +144,27 @@ impl Drop for MainThreadClaim {
     }
 }
 
-/// What main-thread servicing needs to call into the plugin without taking the
-/// instance mutex.  The pointers are cleared (under the write lock) before the
-/// plugin is destroyed, so a reader holding the read lock always sees either a
-/// live plugin or null.
-pub(super) struct MainThreadTarget {
-    pub(super) plugin: *const clap_plugin,
-    pub(super) timer_ext: *const clap_plugin_timer_support,
-    pub(super) state_ext: *const clap_plugin_state,
-    pub(super) fd_ext: *const clap_plugin_posix_fd_support,
-}
-
-// Safety: the pointers are only dereferenced on the main thread while the
-// read lock is held, and cleared under the write lock before destruction.
-unsafe impl Send for MainThreadTarget {}
-unsafe impl Sync for MainThreadTarget {}
-
 /// Callback state shared with the plugin.  The plugin may call into this from
 /// its main, audio or helper threads, so everything here is atomics or a mutex
-/// that callbacks only try to take.
+/// that callbacks only try to take.  What both halves of the plugin share
+/// (restart requests, latency, ports, the dirty mark) lives in
+/// [`PluginShared`], which the callbacks write directly.
 pub(crate) struct HostState {
     pub(super) main_thread: std::thread::ThreadId,
-    pub(super) target: RwLock<MainThreadTarget>,
-    /// Set by `clap_host.request_restart`.  The audio thread stops
-    /// processing (see `ClapPlugin::process`), then the main thread
-    /// deactivates and reactivates the plugin in `ClapPlugin::service_pending`.
-    pub(super) restart_requested: AtomicBool,
+    pub(super) shared: Arc<PluginShared>,
     pub(super) process_requested: AtomicBool,
-    /// The plugin's latency in samples, read through `clap_plugin_latency.get`
-    /// after every activation.  Readable from any thread without a lock.
-    pub(super) latency: AtomicU32,
     /// Set by `clap_host_latency.changed`; the main thread re-reads the
-    /// latency in `ClapPlugin::service_pending`.
+    /// latency on its next service.
     pub(super) latency_changed: AtomicBool,
-    /// Set when a re-read moved [`Self::latency`], until the path's
-    /// `service_plugins` takes it to republish the insert views.
-    pub(super) latency_unseen: AtomicBool,
-    /// Counts `ClapPlugin::process` calls, so the main thread can tell
-    /// whether the audio callback still runs while a restart waits for it.
-    pub(super) blocks: AtomicU64,
     pub(super) callback_requested: AtomicBool,
     pub(super) params_rescan: AtomicBool,
+    /// Set by `clap_host_params.request_flush`.  A processed block delivers
+    /// it (and clears it); a skipped one flushes on the audio thread, and a
+    /// plugin that is not processing is flushed by the main-thread service.
     pub(super) flush_requested: AtomicBool,
-    /// Set by `clap_host_audio_ports.rescan` once the plugin is set up: its
-    /// ports no longer match the buffers, so it needs loading again.
-    pub(super) ports_changed: AtomicBool,
+    /// Set once the port buffers are built: from then on a rescan that
+    /// changes the ports stops the insert (see `host_audio_ports_rescan`).
+    pub(super) ports_fixed: AtomicBool,
     pub(super) gui_closed: AtomicBool,
     pub(super) gui_resize: AtomicU64,
     /// The last `request_show` or `request_hide` the open editor window
@@ -191,48 +176,31 @@ pub(crate) struct HostState {
     /// with the flags it watches.  Main-thread only, like the extension.
     #[cfg(target_os = "linux")]
     pub(super) fds: Mutex<Vec<(i32, clap_posix_fd_flags)>>,
-    /// Set by `clap_host_state.mark_dirty`.
-    pub(super) state_dirty: AtomicBool,
-    /// Mirrors whether the instance holds parameter values the plugin has
-    /// not received yet, so a state save can be deferred without taking the
-    /// instance lock.
-    pub(super) params_pending: AtomicBool,
     pub(super) timers: Mutex<Vec<TimerEntry>>,
     pub(super) next_timer: AtomicU32,
     pub(super) last_log: Mutex<Option<String>>,
 }
 
 impl HostState {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(shared: Arc<PluginShared>) -> Self {
         Self {
             // Prefer the thread `mark_main_thread` recorded.  Do not publish
             // the loader's thread: a plugin opened off the UI thread must
             // still answer `is_main_thread` for the UI thread.
             main_thread: recorded_main_thread().unwrap_or_else(|| std::thread::current().id()),
-            target: RwLock::new(MainThreadTarget {
-                plugin: ptr::null(),
-                timer_ext: ptr::null(),
-                state_ext: ptr::null(),
-                fd_ext: ptr::null(),
-            }),
-            restart_requested: AtomicBool::new(false),
+            shared,
             process_requested: AtomicBool::new(false),
-            latency: AtomicU32::new(0),
             latency_changed: AtomicBool::new(false),
-            latency_unseen: AtomicBool::new(false),
-            blocks: AtomicU64::new(0),
             callback_requested: AtomicBool::new(false),
             params_rescan: AtomicBool::new(false),
             flush_requested: AtomicBool::new(false),
-            ports_changed: AtomicBool::new(false),
+            ports_fixed: AtomicBool::new(false),
             gui_closed: AtomicBool::new(false),
             gui_resize: AtomicU64::new(0),
             gui_visibility: AtomicU8::new(0),
             gui_hints_changed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             fds: Mutex::new(Vec::new()),
-            state_dirty: AtomicBool::new(false),
-            params_pending: AtomicBool::new(false),
             timers: Mutex::new(Vec::new()),
             next_timer: AtomicU32::new(1),
             last_log: Mutex::new(None),
@@ -266,151 +234,36 @@ impl HostState {
         self.gui_hints_changed.swap(false, Ordering::Relaxed)
     }
 
-    /// Whether the plugin reported state changes since the last save.
-    pub(crate) fn state_dirty(&self) -> bool {
-        self.state_dirty.load(Ordering::Relaxed)
+    /// Whether this is the plugin's main thread.
+    pub(super) fn on_main_thread(&self) -> bool {
+        std::thread::current().id() == self.main_thread
     }
 
-    /// Whether the plugin asked for an audio-port rescan that the fixed
-    /// buffers cannot follow.  The insert is stopped until it is reloaded.
-    pub(crate) fn ports_changed(&self) -> bool {
-        self.ports_changed.load(Ordering::Relaxed)
-    }
-
-    /// The plugin's latency in samples as last read (0 without the latency
-    /// extension).  Lock-free, so the audio thread may read it.
-    pub(crate) fn latency(&self) -> u32 {
-        self.latency.load(Ordering::Acquire)
-    }
-
-    /// Whether the latency changed since the last call, whoever serviced
-    /// the plugin (the path, or an open editor window).
-    pub(crate) fn take_latency_change(&self) -> bool {
-        self.latency_unseen.swap(false, Ordering::AcqRel)
-    }
-
-    /// Whether a restart or latency change waits for the main thread.
-    pub(super) fn lifecycle_pending(&self) -> bool {
-        self.restart_requested.load(Ordering::Acquire)
-            || self.latency_changed.load(Ordering::Acquire)
-    }
-
-    /// A state for tests that only exercise slot bookkeeping.
-    #[cfg(test)]
-    pub(crate) fn for_test(ports_changed: bool) -> Self {
-        let mut state = Self::new();
-        // Bookkeeping stand-ins stay on the caller even if another test has
-        // claimed the process-wide UI thread.
-        state.main_thread = std::thread::current().id();
-        state.ports_changed.store(ports_changed, Ordering::Relaxed);
-        state
-    }
-
-    /// Saves the plugin's state through `clap_plugin_state.save`.  That is a
-    /// main-thread call which CLAP allows while the audio thread processes,
-    /// so it runs under the target's read lock instead of the instance mutex
-    /// (the audio callback keeps the insert).
-    ///
-    /// While parameter values are still queued for the next block the
-    /// plugin's state would hold the old values, so the save is deferred.
-    pub(crate) fn save_state(&self) -> StateSave {
-        if self.params_pending.load(Ordering::Acquire) {
-            return StateSave::Deferred;
-        }
-        if std::thread::current().id() != self.main_thread {
-            return StateSave::Deferred;
-        }
-        let target = self
-            .target
-            .read()
+    /// The timers due now, rescheduled.  The list is released before the
+    /// caller calls the plugin, which may (un)register timers from there.
+    pub(super) fn due_timers(&self) -> Vec<u32> {
+        let mut timers = self
+            .timers
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if target.plugin.is_null() {
-            return StateSave::Unavailable;
-        }
-        let Some(save) = (unsafe { target.state_ext.as_ref() }).and_then(|state| state.save) else {
-            return StateSave::Unavailable;
-        };
-        // Cleared first, so a change the plugin marks during the save is
-        // picked up by the next one; set again if the save fails.
-        self.state_dirty.store(false, Ordering::Relaxed);
-        let mut writer = StateWriter::default();
-        let stream = writer.stream();
-        let saved = unsafe { save(target.plugin, &stream) };
-        if writer.overflowed {
-            eprintln!(
-                "[plugins] not saving a CLAP plugin's state: it is larger than {} MB",
-                MAX_STATE_BYTES / (1024 * 1024)
-            );
-        }
-        if saved && !writer.overflowed {
-            StateSave::Saved(writer.bytes)
-        } else {
-            self.state_dirty.store(true, Ordering::Relaxed);
-            StateSave::Unavailable
-        }
-    }
-
-    /// Runs `on_main_thread` and due timers.  CLAP allows these main-thread
-    /// calls while the audio thread is inside `process`, so this does not take
-    /// the instance mutex: an editor repainting from its timer can no longer
-    /// make the audio callback skip the insert.  Returns true when a parameter
-    /// flush or rescan, a restart, or a latency re-read is waiting; those
-    /// touch the instance and must run through
-    /// [`super::ClapPlugin::service_pending`] under its lock.
-    pub(crate) fn service_main_thread(&self) -> bool {
-        if let Ok(target) = self.target.read() {
-            if !target.plugin.is_null() {
-                if self.callback_requested.swap(false, Ordering::Relaxed) {
-                    if let Some(on_main_thread) = unsafe { (*target.plugin).on_main_thread } {
-                        unsafe { on_main_thread(target.plugin) };
-                    }
-                }
-                self.service_timers(&target);
-                #[cfg(target_os = "linux")]
-                self.service_fds(&target);
+        let now = Instant::now();
+        let mut due = Vec::new();
+        for timer in timers.iter_mut() {
+            if timer.next <= now {
+                due.push(timer.id);
+                timer.next = now + timer.period;
             }
         }
-        self.flush_requested.load(Ordering::Relaxed)
-            || self.params_rescan.load(Ordering::Relaxed)
-            || self.lifecycle_pending()
-    }
-
-    pub(super) fn service_timers(&self, target: &MainThreadTarget) {
-        let Some(timers) = (unsafe { target.timer_ext.as_ref() }) else {
-            return;
-        };
-        let Some(on_timer) = timers.on_timer else {
-            return;
-        };
-        let due = {
-            let Ok(mut timers) = self.timers.lock() else {
-                return;
-            };
-            let now = Instant::now();
-            let mut due = Vec::new();
-            for timer in timers.iter_mut() {
-                if timer.next <= now {
-                    due.push(timer.id);
-                    timer.next = now + timer.period;
-                }
-            }
-            due
-        };
-        for id in due {
-            unsafe { on_timer(target.plugin, id) };
-        }
+        due
     }
 }
 
 impl HostState {
-    /// Polls the registered file descriptors without waiting and hands the
-    /// ready ones to `on_fd`.  Runs where the timers do, so a plugin that
-    /// waits on its own display connection is serviced at the same rate.
+    /// Polls the registered file descriptors without waiting and returns
+    /// the ready ones with their CLAP flags.  The list is released before
+    /// the caller hands them to `on_fd`.
     #[cfg(target_os = "linux")]
-    pub(super) fn service_fds(&self, target: &MainThreadTarget) {
-        let Some(on_fd) = (unsafe { target.fd_ext.as_ref() }).and_then(|ext| ext.on_fd) else {
-            return;
-        };
+    pub(super) fn ready_fds(&self) -> Vec<(i32, clap_posix_fd_flags)> {
         let mut polled: Vec<libc::pollfd> = {
             let fds = self
                 .fds
@@ -425,18 +278,17 @@ impl HostState {
                 .collect()
         };
         if polled.is_empty() {
-            return;
+            return Vec::new();
         }
         let ready = unsafe { libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, 0) };
         if ready <= 0 {
-            return;
+            return Vec::new();
         }
-        for entry in polled {
-            let flags = fd_flags(entry.revents);
-            if flags != 0 {
-                unsafe { on_fd(target.plugin, entry.fd, flags) };
-            }
-        }
+        polled
+            .into_iter()
+            .map(|entry| (entry.fd, fd_flags(entry.revents)))
+            .filter(|(_, flags)| *flags != 0)
+            .collect()
     }
 }
 
@@ -480,7 +332,7 @@ pub(crate) enum GuiVisibility {
     Hide,
 }
 
-/// The outcome of [`HostState::save_state`].
+/// The outcome of `ClapInstance::save_state`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StateSave {
     Saved(Vec<u8>),
@@ -528,9 +380,11 @@ pub(super) unsafe extern "C" fn host_get_extension(
     }
 }
 
+/// Any thread.  The main-thread service pauses the plugin, deactivates and
+/// reactivates it, and resumes it (see `PluginHandle::service`).
 pub(super) unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     if let Some(state) = unsafe { state(host) } {
-        state.restart_requested.store(true, Ordering::Release);
+        state.shared.request_restart(RESTART_ACTIVATION);
     }
 }
 
@@ -551,10 +405,11 @@ pub(super) static HOST_THREAD_CHECK: clap_host_thread_check = clap_host_thread_c
     is_audio_thread: Some(host_is_audio_thread),
 };
 
+/// The UI thread, except while it stands in as the audio thread (a forced
+/// stop, teardown, a flush with no block inside): one thread is never both.
 pub(super) unsafe extern "C" fn host_is_main_thread(host: *const clap_host) -> bool {
     unsafe { state(host) }
-        .map(|state| state.main_thread == std::thread::current().id())
-        .unwrap_or(false)
+        .is_some_and(|state| state.on_main_thread() && !ON_AUDIO_THREAD.with(Cell::get))
 }
 
 pub(super) unsafe extern "C" fn host_is_audio_thread(_host: *const clap_host) -> bool {
@@ -677,8 +532,11 @@ pub(super) unsafe extern "C" fn host_audio_ports_flag_supported(
     flag != 0 && flag & !AUDIO_PORTS_RESCAN_ALL == 0
 }
 
-/// Marks the port buffers stale when the change would make them wrong.  Only
-/// a flag is set, so nothing is reallocated under the audio thread.
+/// Asks for a reload when the change would make the port buffers wrong.
+/// Only a flag is set, so nothing is reallocated under the audio thread;
+/// the path rebuilds the insert with the new ports.  Before
+/// the buffers are built (during load) a rescan is harmless: the ports are
+/// read after it.
 pub(super) unsafe extern "C" fn host_audio_ports_rescan(host: *const clap_host, flags: u32) {
     // An unknown flag means the plugin is asking for something this host did
     // not agree to handle; stop rather than risk stale buffers.
@@ -686,7 +544,9 @@ pub(super) unsafe extern "C" fn host_audio_ports_rescan(host: *const clap_host, 
         return;
     }
     if let Some(state) = unsafe { state(host) } {
-        state.ports_changed.store(true, Ordering::Relaxed);
+        if state.ports_fixed.load(Ordering::Acquire) {
+            state.shared.want_reload();
+        }
     }
 }
 
@@ -747,7 +607,7 @@ pub(super) static HOST_STATE: clap_host_state = clap_host_state {
 
 pub(super) unsafe extern "C" fn host_state_mark_dirty(host: *const clap_host) {
     if let Some(state) = unsafe { state(host) } {
-        state.state_dirty.store(true, Ordering::Relaxed);
+        state.shared.mark_state_dirty();
     }
 }
 

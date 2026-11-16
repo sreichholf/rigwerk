@@ -11,23 +11,21 @@
 //! - the path's chain bypass is one atomic the audio thread loads in
 //!   `PluginChain::process`: it skips every insert without writing the
 //!   slots' own bypass, and the latency stays counted;
-//! - a plugin control goes straight to the plugin through the published
-//!   insert links (`slot_links`), holding only that plugin's own lock (the
-//!   audio thread then skips just that insert for a chunk, delayed by its
-//!   latency, never the chain); the view is patched at once and the saved
-//!   value waits in `param_backlog` until the UI takes the chain lock for
-//!   something else (an edit, a state capture, a save);
-//! - drawing reads the published views, and a quiet service frame takes no
-//!   lock.
+//! - a plugin control, a reset, an editor sync, a state capture and a
+//!   preference save go to the plugin's handle through the published insert
+//!   links (`slot_links`).  The handle keeps the views, the saved values and
+//!   the state blob behind its own UI-only lock, which the audio thread
+//!   never takes; the published view is patched at once;
+//! - drawing reads the published views, a service frame services the
+//!   handles, and a latency change or a failure rebuilds the views from the
+//!   links, all without the chain lock.
 //!
 //! What still takes the chain lock is structural and short: adding,
-//! removing, moving or restoring inserts, reopening them for a new rate
-//! (slow loads and teardowns run outside the lock), resetting a plugin's
-//! controls, capturing state for a save, a full editor sync, and the publish
-//! of the views those edits do.  The running poll of a VST3 insert does not
-//! take it: the changes it reported only patch the published view.  A CLAP
-//! editor (no change feed) and an insert that has not processed a block
-//! since the last sync are read in full instead.
+//! removing, moving or restoring inserts, reopening them for a new rate or
+//! because a plugin changed its layout and asked to be rebuilt (slow loads
+//! and teardowns run outside the lock), opening a never-opened
+//! slot (for its editor, or a control set on it), and the publish of the
+//! views and links those edits do.
 //!
 //! For those rare misses the mixer keeps the timing: rather than a second,
 //! lock-free copy of the chain (plugin instances are stateful and cannot be
@@ -44,30 +42,14 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError, TryLockError};
 
 use super::super::plugins::{
-    host_format_parameter, host_set_parameter, take_parameter_changes, take_parameter_values,
-    PluginChain, PluginHandle, PluginParamView, PluginPref, PluginView, SlotLink, Vst3Service,
+    PluginChain, PluginHandle, PluginPref, PluginView, ProcessFailure, ReloadPlan, SlotLink,
 };
-use super::{ClapService, LockStats, PathControls, PluginLockReport};
-
-/// The service lists a publish replaces; dropped after the chain lock is
-/// released, since they may hold the last reference to a removed plugin.
-type StaleServices = (Arc<[ClapService]>, Arc<[Arc<Vst3Service>]>, Arc<[SlotLink]>);
-
-/// A control value the UI set on a plugin without the chain lock, waiting
-/// to be stored in the chain's insert (its view and saved value) the next
-/// time the UI takes the lock anyway.
-pub(super) struct ParamWrite {
-    index: usize,
-    handle: PluginHandle,
-    id: u32,
-    value: f64,
-    display: Option<String>,
-}
+use super::{LockStats, PathControls, PluginLockReport};
 
 /// Armed by `edit_chain` around the edit itself.  If the edit panics, the
 /// chain mutex is poisoned and no later edit publishes again, so the
-/// published views and CLAP services are cleared here instead of being left
-/// to describe (and hold references to) slots the edit may have changed.
+/// published views and links are cleared here instead of being left to
+/// describe (and hold references to) slots the edit may have changed.
 struct PublishOnUnwind<'a> {
     path: &'a PathControls,
 }
@@ -78,109 +60,32 @@ impl Drop for PublishOnUnwind<'_> {
     }
 }
 
-/// Whether an editor sync has to read every control: it was asked to
-/// (`requested`), or the insert has not processed a block since the last sync
-/// (`!processed`, so a reported change may not be visible yet), or it is not a
-/// VST3 insert at all (CLAP has no change feed).  Only a VST3 insert that
-/// processed a block can be synced from its reported changes.
-pub(super) fn needs_full_sync(requested: bool, processed: bool, has_vst3: bool) -> bool {
-    requested || !processed || !has_vst3
-}
-
-/// What the running poll does with one id from [`take_parameter_changes`],
-/// decided from the published view after that drain has released the
-/// instance.
-///
-/// A known id only patches the published view.  The saved parameters and the
-/// slot's stale flag stay as they are, whether the control is read-only or a
-/// writable one the processor echoed.  An id the view does not list is
-/// ignored.  A control the plugin actually added is picked up by the full
-/// read on save, close, bypass, stop, or bridge start.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RunningSync {
-    /// Patch the published view's value and display.  Do not write the saved
-    /// parameters and do not mark the slot stale.
-    ViewOnly,
-    /// The published view does not list this id.
-    Ignore,
-}
-
-/// Classifies one reported id against the controls the published view
-/// already lists.  A known id is [`RunningSync::ViewOnly`] whether or not
-/// its cached `read_only` flag is set.  An id the view does not list is
-/// [`RunningSync::Ignore`], not a request for a full read.
-pub(super) fn classify_running_change(parameters: &[PluginParamView], id: u32) -> RunningSync {
-    if parameters.iter().any(|parameter| parameter.id == id) {
-        RunningSync::ViewOnly
-    } else {
-        RunningSync::Ignore
-    }
-}
-
 impl PathControls {
-    /// Runs one edit under the chain lock and republishes what the UI and
-    /// the audio flag read from it before releasing the lock.  `None` when
-    /// the chain is poisoned.  The replaced service lists are dropped
-    /// only after the lock is released: it may hold the last reference to a
-    /// plugin the edit removed.
+    /// Runs one structural edit under the chain lock and republishes what
+    /// the UI and the audio flag read from it before releasing the lock.
+    /// `None` when the chain is poisoned.  The replaced links are dropped
+    /// only after the lock is released: they may hold the last reference to
+    /// a plugin the edit removed.
     pub(in crate::audio) fn edit_chain<R>(
         &self,
         edit: impl FnOnce(&mut PluginChain) -> R,
     ) -> Option<R> {
-        let (result, stale, stored) = {
+        let (result, stale) = {
             let mut chain = self.plugins.lock().ok()?;
-            let stored = self.store_backlog(&mut chain);
             // Declared after the chain guard, so it runs first while
             // unwinding, still under the lock.
             let unwind = PublishOnUnwind { path: self };
             let result = edit(&mut chain);
             std::mem::forget(unwind);
             let stale = self.publish_plugins(&chain);
-            (result, stale, stored)
+            (result, stale)
         };
-        drop((stale, stored));
+        drop(stale);
         Some(result)
-    }
-
-    /// Takes the chain lock for UI-side work that does not change the
-    /// inserts, with the control values set meanwhile stored first.  The
-    /// stored writes (they hold plugin references) are dropped after the
-    /// lock is released.
-    fn with_chain<R>(&self, work: impl FnOnce(&mut PluginChain) -> R) -> Option<R> {
-        let (result, stored) = {
-            let mut chain = self.plugins.lock().ok()?;
-            let stored = self.store_backlog(&mut chain);
-            (work(&mut chain), stored)
-        };
-        drop(stored);
-        Some(result)
-    }
-
-    /// Stores the control values set without the chain lock (see
-    /// [`Self::set_plugin_parameter`]).  The caller holds the chain lock
-    /// and drops the returned writes after releasing it.
-    #[must_use]
-    fn store_backlog(&self, chain: &mut PluginChain) -> Vec<ParamWrite> {
-        let writes = std::mem::take(
-            &mut *self
-                .param_backlog
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-        for write in &writes {
-            chain.store_parameter(
-                write.index,
-                &write.handle,
-                write.id,
-                write.value,
-                write.display.clone(),
-            );
-        }
-        writes
     }
 
     /// The insert at `index` as last published.
-    fn slot_link(&self, index: usize) -> Option<SlotLink> {
+    pub(in crate::audio) fn slot_link(&self, index: usize) -> Option<SlotLink> {
         self.slot_links
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -224,7 +129,6 @@ impl PathControls {
         self.chain_poisoned.store(true, Ordering::Relaxed);
         self.plugin_active.store(0, Ordering::Relaxed);
         self.chain_unopened.store(false, Ordering::Relaxed);
-        self.published_ports_changed.store(0, Ordering::Relaxed);
         *self
             .plugin_views
             .lock()
@@ -232,20 +136,6 @@ impl PathControls {
         self.plugin_views_version.fetch_add(1, Ordering::Release);
         // The slots still own these plugins, so this is never the last
         // reference; what matters is that none outlives the chain.
-        let services = std::mem::replace(
-            &mut *self
-                .plugin_services
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            Arc::from(Vec::new()),
-        );
-        let vst3 = std::mem::replace(
-            &mut *self
-                .vst3_services
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            Arc::from(Vec::new()),
-        );
         let links = std::mem::replace(
             &mut *self
                 .slot_links
@@ -253,57 +143,72 @@ impl PathControls {
                 .unwrap_or_else(PoisonError::into_inner),
             Arc::from(Vec::new()),
         );
-        let backlog = std::mem::take(
-            &mut *self
-                .param_backlog
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-        drop((services, vst3, links, backlog));
+        drop(links);
     }
 
-    /// Publishes the views, the CLAP and VST3 service lists and the cheap
-    /// flags for `chain`.  The caller holds the chain lock.  Hands back the
-    /// previous service lists, which the caller drops after unlocking.
+    /// Publishes the links, the views and the cheap flags for `chain`.  The
+    /// caller holds the chain lock.  Hands back the previous links, which
+    /// the caller drops after unlocking.
     #[must_use]
-    fn publish_plugins(&self, chain: &PluginChain) -> StaleServices {
-        self.plugin_active.store(chain.active(), Ordering::Relaxed);
+    fn publish_plugins(&self, chain: &PluginChain) -> Arc<[SlotLink]> {
         self.chain_rate.store(chain.rate(), Ordering::Relaxed);
         self.chain_unopened
             .store(chain.has_unopened(), Ordering::Relaxed);
-        self.published_ports_changed
-            .store(chain.ports_changed_count(), Ordering::Relaxed);
-        let views: Arc<[PluginView]> = chain.views().into();
-        let services: Arc<[ClapService]> = chain.clap_services().into();
-        let vst3: Arc<[Arc<Vst3Service>]> = chain.vst3_services().into();
         let links: Arc<[SlotLink]> = chain.slot_links().into();
+        let stale = std::mem::replace(
+            &mut *self
+                .slot_links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            Arc::clone(&links),
+        );
+        self.publish_from(&links);
+        stale
+    }
+
+    /// Rebuilds the views and the active count from `links`, without the
+    /// chain lock.  The chain's own atomics (latency, failures, reload
+    /// requests) are what the audio thread reads too, so the result matches
+    /// what it publishes per block.
+    fn publish_from(&self, links: &[SlotLink]) {
+        self.plugin_active.store(
+            links.iter().filter(|link| link.active()).count(),
+            Ordering::Relaxed,
+        );
+        let views: Arc<[PluginView]> = links.iter().map(SlotLink::view).collect();
         *self
             .plugin_views
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = views;
         self.plugin_views_version.fetch_add(1, Ordering::Release);
-        let stale_clap = std::mem::replace(
-            &mut *self
-                .plugin_services
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            services,
-        );
-        let stale_vst3 = std::mem::replace(
-            &mut *self
-                .vst3_services
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-            vst3,
-        );
-        let stale_links = std::mem::replace(
-            &mut *self
+    }
+
+    /// Republishes after a change the plugins made outside the chain lock
+    /// (a latency re-read, a processing failure, a port change): the
+    /// latency total, the active count and the views, from the links.  The
+    /// audio thread also republishes the total with its next block.
+    ///
+    /// It snapshots the links and publishes from that snapshot without the
+    /// chain lock.  That is only correct because every chain edit (which
+    /// republishes the links) and `service_plugins` run on the UI thread,
+    /// so no edit can publish newer links between the snapshot and this
+    /// publish.
+    fn refresh_from_links(&self) {
+        let links = Arc::clone(
+            &self
                 .slot_links
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
-            links,
         );
-        (stale_clap, stale_vst3, stale_links)
+        if self.chain_poisoned.load(Ordering::Relaxed) {
+            return;
+        }
+        let total = links
+            .iter()
+            .map(SlotLink::latency)
+            .fold(0u32, u32::saturating_add);
+        self.latency.store(total, Ordering::Release);
+        self.publish_from(&links);
     }
 
     /// Replaces the saved insert list without loading anything.  Plugins are
@@ -347,14 +252,14 @@ impl PathControls {
         }));
     }
 
-    /// Whether the chain needs a reload for `rate`: it was built at another
-    /// rate, or a restored slot was never opened.  Answered from the
-    /// published flags, without the chain lock.
     /// The rate the chain was last built for (lock-free).
     pub(crate) fn chain_rate(&self) -> u32 {
         self.chain_rate.load(Ordering::Relaxed)
     }
 
+    /// Whether the chain needs a reload for `rate`: it was built at another
+    /// rate, or a restored slot was never opened.  Answered from the
+    /// published flags, without the chain lock.
     pub(crate) fn needs_reload(&self, rate: u32) -> bool {
         rate != self.chain_rate.load(Ordering::Relaxed)
             || self.chain_unopened.load(Ordering::Relaxed)
@@ -368,24 +273,59 @@ impl PathControls {
         } else {
             sample_rate
         };
+        self.reload_with(rate, |chain| chain.reload_plan(rate));
+    }
+
+    /// Builds the slots `plan` lists outside the chain lock and installs
+    /// them, retrying a few times if the chain changed meanwhile.  A slot
+    /// rebuilt because its plugin asked is noted as such on its controls
+    /// (which the rebuilt slot keeps), for the loop bound.
+    fn reload_with(&self, rate: u32, plan: impl Fn(&mut PluginChain) -> Option<ReloadPlan>) {
         const MAX_ATTEMPTS: usize = 3;
         for _ in 0..MAX_ATTEMPTS {
-            let plan = match self.edit_chain(|chain| chain.reload_plan(rate)) {
+            let plan = match self.edit_chain(&plan) {
                 Some(Some(plan)) => plan,
                 Some(None) | None => return,
             };
+            let requested: Vec<bool> = plan
+                .jobs
+                .iter()
+                .map(|(index, _)| plan.requested.contains(index))
+                .collect();
             let built: Vec<_> = plan
                 .jobs
                 .into_iter()
-                .map(|(index, pref)| {
-                    let (slot, _) = PluginChain::load_slot(pref.clone(), rate);
+                .zip(&requested)
+                .map(|((index, pref), &requested)| {
+                    let (mut slot, _) = PluginChain::load_slot(pref.clone(), rate);
+                    if requested && slot.plugin.is_none() {
+                        // One attempt per request: a slot that failed to
+                        // load wants nothing more, and says why.
+                        slot.error = slot
+                            .error
+                            .take()
+                            .map(|error| format!("The plugin asked to be reloaded: {error}"));
+                    }
                     (index, pref, slot)
                 })
                 .collect();
             let installed = match self
                 .edit_chain(|chain| chain.install_reload(plan.previous_rate, rate, built))
             {
-                Some(Ok(old)) => Some(old),
+                Some(Ok(old)) => {
+                    // The replaced slots share their controls with the new
+                    // ones.  A rate change is the user's: the counts of
+                    // rebuilds on request start again.
+                    for (slot, requested) in old.iter().zip(&requested) {
+                        if plan.previous_rate != rate {
+                            slot.controls.reset_reloads();
+                        }
+                        if *requested {
+                            slot.controls.note_rebuilt();
+                        }
+                    }
+                    Some(old)
+                }
                 // Built for a chain that changed meanwhile; dropped here,
                 // after the chain lock was released.
                 Some(Err(stale)) => {
@@ -456,9 +396,8 @@ impl PathControls {
         };
         link.controls.set_bypass(bypass);
         if !bypass {
-            // The cheap "anything to run?" flag the audio thread checks
-            // before locking; it recounts the active inserts itself.
-            self.plugin_active.fetch_max(1, Ordering::Relaxed);
+            // The audio thread recounts the active inserts itself.
+            self.wake_inserts();
         }
         self.patch_view(index, |view| view.bypass = bypass);
     }
@@ -478,136 +417,44 @@ impl PathControls {
     }
 
     /// The loaded plugin behind one insert, for its own editor window.
+    /// From the published links, without the chain lock.
     pub(crate) fn plugin_handle(&self, index: usize) -> Option<PluginHandle> {
-        self.plugins
-            .lock()
-            .ok()
-            .and_then(|chain| chain.handle(index))
+        self.slot_link(index).and_then(|link| link.plugin)
     }
 
-    /// Copies control values back after the plugin's own editor changed them.
-    ///
-    /// With `full`, the whole control list is read and formatted, and the
-    /// reporter is only drained (`take_parameter_values`).  Without it, a
-    /// running VST3 insert is drained once with [`take_parameter_changes`]
-    /// and each id is classified from the published view (see
-    /// [`classify_running_change`]).  A known id, read-only or writable,
-    /// patches that view's value and display and nothing else.  An id the
-    /// view does not list is ignored.  That poll does not take the chain
-    /// lock, does not write the saved parameters, and does not mark the slot
-    /// stale.  A CLAP plugin has no change feed, and an insert that has not
-    /// processed a block since the last sync has no visible changes yet, so
-    /// both cases read in full instead (see [`needs_full_sync`]).  A plugin
-    /// that reported a changed parameter list (`param_titles_changed` /
-    /// `param_values_changed`) is forced to the full read too.  A control the
-    /// plugin actually added, or a changed name or default on an existing id,
-    /// is picked up by that full read on save, close, bypass, stop, or bridge
-    /// start.
-    ///
-    /// A missing or unloaded insert is a silent no-op.
-    pub(crate) fn sync_plugin_parameters(&self, index: usize, full: bool) -> Result<(), String> {
-        // From the published links, so the periodic sync never takes the
-        // chain lock just to find the plugin.
-        let link = self.slot_link(index);
-        // Keep the VST3 restart/parameter poll window open for as long as the
-        // editor is being synced, even when it reports no parameter changes:
-        // a request raised by an editor action that does not call
-        // `performEdit` would otherwise go unseen once the window lapses.
-        // This is a plain atomic store, on the UI thread.
-        if let Some(service) = link.as_ref().and_then(|link| link.vst3.as_ref()) {
-            service.nudge();
+    /// Reads every control of a loaded insert again and stores them as its
+    /// views and saved values (see `PluginHandle::sync_full`), after its
+    /// editor changed them.  The service frames already follow edits and
+    /// reported values as they happen; this is the last full read on save,
+    /// close or bridge start.  Without the chain lock.  A missing or
+    /// unloaded insert is a silent no-op.
+    pub(crate) fn sync_plugin_parameters(&self, index: usize) {
+        let Some(handle) = self.plugin_handle(index) else {
+            return;
+        };
+        if let Some(parameters) = handle.sync_full() {
+            self.patch_view(index, |view| view.parameters = parameters);
         }
-        let parameters_changed = link
-            .as_ref()
-            .and_then(|link| link.vst3.as_ref())
-            .is_some_and(|vst3| vst3.take_parameters_changed());
-        let Some(link) = link else {
-            return Ok(());
-        };
-        let processed = link.controls.take_processed();
-        let has_vst3 = link.vst3.is_some();
-        let Some(handle) = link.plugin else {
-            return Ok(());
-        };
-        // Decided before draining, from the processed flag and the service's
-        // requests (atomics, no plugin call).
-        let full = needs_full_sync(full || parameters_changed, processed, has_vst3);
-        if !full {
-            let Some(changes) = take_parameter_changes(&handle) else {
-                return Ok(());
-            };
-            if changes.is_empty() {
-                return Ok(());
-            }
-            // The instance lock is released.  Classify from the published
-            // view, which already caches `read_only`.  No second plugin call
-            // and no chain lock.
-            let views = self.plugin_views();
-            let Some(cached) = views.get(index).map(|view| &view.parameters) else {
-                return Ok(());
-            };
-            if !changes
-                .iter()
-                .any(|change| classify_running_change(cached, change.id) == RunningSync::ViewOnly)
-            {
-                return Ok(());
-            }
-            self.patch_view(index, |view| {
-                for change in &changes {
-                    if classify_running_change(&view.parameters, change.id) != RunningSync::ViewOnly
-                    {
-                        continue;
-                    }
-                    if let Some(parameter) = view
-                        .parameters
-                        .iter_mut()
-                        .find(|parameter| parameter.id == change.id)
-                    {
-                        parameter.value = change.value;
-                        if let Some(display) = &change.display {
-                            parameter.display = display.clone();
-                        }
-                    }
-                }
-            });
-            return Ok(());
-        }
-        // Drain the reporter before the full read, without formatting:
-        // a value queued before the fresher read would otherwise be
-        // applied by the next change poll, putting an older value back.
-        drop(take_parameter_values(&handle));
-        let Some(parameters) = super::super::plugins::read_plugin_parameters(&handle) else {
-            return Ok(());
-        };
-        self.edit_chain(|chain| chain.apply_synced_parameters(index, &handle, parameters))
-            .ok_or_else(|| "Plugin chain unavailable".to_owned())
     }
 
     /// Sets one plugin control.  A loaded plugin is reached through the
-    /// published links, without the chain lock (only the plugin's own lock,
-    /// which the audio thread just skips the insert for): the view is
-    /// patched at once and the saved value is stored the next time the UI
-    /// takes the chain lock anyway.  An insert that is not open yet goes
-    /// through the chain, which opens it.
+    /// published links, without the chain lock: its handle stores the value
+    /// and the published view is patched at once.  An insert that
+    /// is not open yet goes through the chain, which opens it.
     pub(crate) fn set_plugin_parameter(
         &self,
         index: usize,
         id: u32,
         value: f64,
     ) -> Result<(), String> {
-        let Some(handle) = self.slot_link(index).and_then(|link| {
-            if let Some(vst3) = &link.vst3 {
-                vst3.nudge();
-            }
-            link.plugin
-        }) else {
+        let Some(handle) = self.plugin_handle(index) else {
             return self
                 .edit_chain(|chain| chain.set_parameter(index, id, value))
                 .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()));
         };
         let value = value.clamp(0.0, 1.0);
-        host_set_parameter(&handle, id, value)?;
-        let display = host_format_parameter(&handle, id, value);
+        let display = handle.set_parameter(id, value)?;
+        self.wake_inserts();
         self.patch_view(index, |view| {
             if let Some(parameter) = view
                 .parameters
@@ -620,25 +467,30 @@ impl PathControls {
                 }
             }
         });
-        let mut backlog = self
-            .param_backlog
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        // A drag sends many values for one control; only the last counts.
-        backlog.retain(|write| !(write.index == index && write.id == id));
-        backlog.push(ParamWrite {
-            index,
-            handle,
-            id,
-            value,
-            display,
-        });
         Ok(())
     }
 
+    /// Returns every control to the plugin's defaults.  A loaded plugin is
+    /// reset through its link, without the chain lock; one that is not open
+    /// yet goes through the chain, which opens it.
     pub(crate) fn reset_plugin_parameters(&self, index: usize) -> Result<(), String> {
-        self.edit_chain(|chain| chain.reset_parameters(index))
-            .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()))
+        let Some(handle) = self.plugin_handle(index) else {
+            return self
+                .edit_chain(|chain| chain.reset_parameters(index))
+                .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()));
+        };
+        let parameters = handle.reset_parameters()?;
+        self.wake_inserts();
+        self.patch_view(index, |view| view.parameters = parameters);
+        Ok(())
+    }
+
+    /// Makes the audio thread enter the chain with its next block, even if
+    /// every insert is bypassed at latency 0, so a skipped insert flushes
+    /// the values just queued for it.  It recounts the active inserts
+    /// itself.
+    fn wake_inserts(&self) {
+        self.plugin_wake.store(true, Ordering::Release);
     }
 
     /// The insert views as last published.  Never takes the chain lock, so
@@ -658,89 +510,126 @@ impl PathControls {
         self.plugin_views_version.load(Ordering::Acquire)
     }
 
-    /// Runs this path's CLAP main-thread callbacks and timers, and the VST3
-    /// restart requests, once per UI frame, outside the chain lock: a
+    /// Runs this path's plugins' main-thread work (CLAP callbacks and
+    /// timers, VST3 edits and restart requests) once per UI frame, outside the chain lock: a
     /// plugin's timer can do arbitrary work.  The plugins come from the
-    /// published lists, so a quiet frame takes no chain lock at all.
+    /// published links.  A latency change, a processing failure or a port
+    /// change republishes from the links too, so no frame takes the chain
+    /// lock.
+    #[cfg(test)]
     pub(crate) fn service_plugins(&self) {
-        let services = Arc::clone(
+        self.service_plugins_at(None);
+    }
+
+    /// [`Self::service_plugins`], knowing the rate the device opened at:
+    /// a reload request in a frame that also has to follow a new rate
+    /// rebuilds the chain at that rate once, instead of twice.
+    pub(crate) fn service_plugins_at(&self, device_rate: Option<u32>) {
+        let links = Arc::clone(
             &self
-                .plugin_services
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-        let vst3 = Arc::clone(
-            &self
-                .vst3_services
+                .slot_links
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         );
         let mut latency_changed = false;
-        for (host, plugin) in services.iter() {
-            super::super::plugins::service_clap(host, plugin);
-            // Taken from the host rather than the call's result, so a change
-            // an open editor's own service picked up counts here too.
-            latency_changed |= host.take_latency_change();
+        for handle in links.iter().filter_map(|link| link.plugin.as_ref()) {
+            latency_changed |= handle.service();
         }
-        for service in vst3.iter() {
-            latency_changed |= service.service();
+        if links.iter().any(SlotLink::reload_wanted) && self.reload_requested(&links, device_rate) {
+            // The reload republished the links and views.
+            return;
         }
-        // An insert failed on the audio thread, or a CLAP plugin changed its
-        // ports since the last publish: rebuild the views here, on the UI
-        // thread, under a normal chain lock.
-        let ports_changed = services
-            .iter()
-            .filter(|(host, _)| host.ports_changed())
-            .count();
         let dirty = self.plugin_views_dirty.swap(false, Ordering::AcqRel);
-        if dirty
-            || latency_changed
-            || ports_changed != self.published_ports_changed.load(Ordering::Relaxed)
-        {
-            // Also refreshes the chain's latency total.
-            self.edit_chain(PluginChain::refresh_latency);
+        if dirty || latency_changed {
+            self.refresh_from_links();
         }
-        // Dropped outside the chain lock, on this thread, in case a removal
-        // left it as the last reference to a plugin.
-        drop((services, vst3));
+        // Dropped on this thread, in case a removal left it as the last
+        // reference to a plugin.
+        drop(links);
+    }
+
+    /// Rebuilds the inserts whose plugin asked for it (a layout change):
+    /// their state and values are captured from the old instance, a fresh
+    /// one is loaded from them outside the chain lock and swapped in, as a
+    /// rate change does for every slot (`reload_plugins_for_rate`).  The
+    /// old instance stopped processing when it asked, so its state is
+    /// final; a capture that cannot happen yet keeps the last blob, which
+    /// the saved values override on restore.  The old slot drops on this
+    /// thread afterwards, and a chain that changed meanwhile is retried on
+    /// the next frame.  Only the requesting slots are rebuilt, unless
+    /// `device_rate` is a new rate, which rebuilds them all at once.
+    ///
+    /// A slot that was rebuilt on request `RELOAD_LIMIT` times within
+    /// `RELOAD_WINDOW_MS` is failed instead when it asks again ("keeps
+    /// asking"): a plugin that asks on every load (from its own setup,
+    /// activation, first block or a timer) would otherwise reload
+    /// forever.  Returns whether anything was rebuilt.
+    fn reload_requested(&self, links: &[SlotLink], device_rate: Option<u32>) -> bool {
+        let mut rebuild = false;
+        for link in links.iter().filter(|link| link.reload_wanted()) {
+            let Some(handle) = &link.plugin else {
+                continue;
+            };
+            if !link.controls.may_reload() {
+                eprintln!("[plugins] a plugin keeps asking to be reloaded; it stays stopped");
+                handle.shared().fail(ProcessFailure::ReloadLoop);
+                self.plugin_views_dirty.store(true, Ordering::Release);
+            } else {
+                handle.capture_state();
+                rebuild = true;
+            }
+        }
+        if !rebuild {
+            return false;
+        }
+        let rate = self.chain_rate();
+        match device_rate.filter(|&device| device != 0 && device != rate) {
+            Some(device) => self.reload_plugins_for_rate(device),
+            None => self.reload_with(rate, PluginChain::request_plan),
+        }
+        true
     }
 
     /// Captures the opaque state of every loaded plugin whose saved blob is
-    /// missing or stale.  Runs on the UI thread (the CLAP main thread); the
-    /// plugins are saved without the chain lock, which is only taken briefly
-    /// to list them and to store the results.
+    /// missing, stale or marked dirty.  Runs on the UI thread (the CLAP main
+    /// thread), through the published links: no chain lock.
     pub(crate) fn capture_plugin_states(&self) {
-        let Some(requests) = self.with_chain(|chain| chain.state_requests()) else {
-            return;
-        };
-        if requests.is_empty() {
-            return;
-        }
-        let captured: Vec<_> = requests
-            .iter()
-            .map(super::super::plugins::capture_state)
-            .collect();
-        self.with_chain(|chain| {
-            for (request, state) in requests.iter().zip(captured) {
-                chain.store_state(request.index, &request.handle, state);
+        let links = Arc::clone(
+            &self
+                .slot_links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for handle in links.iter().filter_map(|link| link.plugin.as_ref()) {
+            if handle.wants_capture() {
+                handle.capture_state();
             }
-        });
+        }
     }
 
     /// Marks one insert's saved state as out of date (its editor closed).
     pub(crate) fn mark_plugin_state_stale(&self, index: usize) {
-        self.with_chain(|chain| chain.mark_state_stale(index));
+        if let Some(handle) = self.plugin_handle(index) {
+            handle.mark_state_stale();
+        }
     }
 
     /// The insert chain as it should be saved, with fresh plugin state.
-    /// Call it from the UI thread.
+    /// Built from the published links, without the chain lock.  Call it
+    /// from the UI thread.
     pub(crate) fn plugin_prefs(&self) -> Vec<PluginPref> {
         self.capture_plugin_states();
-        self.with_chain(|chain| chain.prefs()).unwrap_or_default()
+        let links = Arc::clone(
+            &self
+                .slot_links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        links.iter().map(SlotLink::saved_pref).collect()
     }
 
     pub(crate) fn has_plugins(&self) -> bool {
-        self.plugin_active.load(Ordering::Relaxed) > 0
+        self.plugin_active.load(Ordering::Relaxed) > 0 || self.plugin_wake.load(Ordering::Acquire)
     }
 
     /// Called from the output callback.  Returns whether the chain ran;
@@ -768,7 +657,10 @@ impl PathControls {
         right: &mut [f32],
         frames: usize,
     ) -> bool {
-        if self.plugin_active.load(Ordering::Relaxed) == 0 && self.latency_samples() == 0 {
+        if self.plugin_active.load(Ordering::Relaxed) == 0
+            && self.latency_samples() == 0
+            && !self.plugin_wake.swap(false, Ordering::AcqRel)
+        {
             return true;
         }
         self.chain_attempts.fetch_add(1, Ordering::Relaxed);
@@ -794,8 +686,8 @@ impl PathControls {
         true
     }
 
-    /// This path's plugin lock counters: the chain lock and each insert's
-    /// own plugin lock.  Measurement only; never takes the chain lock.
+    /// This path's plugin counters: the chain lock's skips and each
+    /// insert's pauses.  Measurement only; never takes the chain lock.
     pub(crate) fn plugin_lock_report(&self) -> PluginLockReport {
         let links = Arc::clone(
             &self
@@ -816,7 +708,7 @@ impl PathControls {
         }
     }
 
-    /// Clears this path's plugin lock counters (UI thread).  It does not
+    /// Clears this path's plugin counters (UI thread).  It does not
     /// clear [`PluginLockReport::chain_poisoned`]: resetting a counter cannot
     /// make a poisoned chain usable.
     pub(crate) fn reset_plugin_lock_counters(&self) {

@@ -1,13 +1,21 @@
 //! VST3 and CLAP insert chains, one per signal path.
 //!
-//! Plugins are discovered and loaded through `vst3-host` or the CLAP host in
-//! [`super::clap`]; each path's chain lives on that path in
+//! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`] or
+//! the CLAP host in [`super::clap`]; each path's chain lives on that path in
 //! [`super::shared::Shared`] so the playback callback can process it.  The UI
 //! only ever holds descriptors, never the plugin objects themselves.
+//!
+//! Each loaded plugin is split in two (`handle`): the processor the chain's
+//! slot runs on the audio thread, and the [`PluginHandle`] the UI reaches
+//! through the published insert links.  The handle keeps the views, the
+//! saved values and the state blob behind its own UI-only lock, so the
+//! chain lock is only taken for structural edits.
 
 mod chain;
 #[cfg(test)]
 mod fixtures;
+mod handle;
+mod link;
 mod load;
 mod pause;
 mod pref;
@@ -40,13 +48,24 @@ pub(crate) fn clamp_latency(latency: u32) -> u32 {
 
 pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
-pub(crate) use chain::{PluginChain, SlotLink};
-pub(crate) use load::{
-    capture_state, host_format_parameter, host_set_parameter, instance_id, read_plugin_parameters,
-    service_clap, take_parameter_changes, take_parameter_values, PluginHandle, Restore,
-    Vst3Service, MAX_BLOCK,
+pub(crate) use chain::{PluginChain, ReloadPlan};
+pub(crate) use handle::PluginHandle;
+#[cfg(test)]
+pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
+pub(crate) use link::{
+    ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
 };
-pub(crate) use slot::drain_deferred_plugins;
+#[cfg(test)]
+pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
+pub(crate) use load::{Restore, MAX_BLOCK};
+#[cfg(test)]
+pub(crate) use pause::PAUSE_STALL;
+#[cfg(test)]
+pub(crate) use slot::SlotControls;
+pub(crate) use slot::{drain_deferred_plugins, SlotLink};
+#[cfg(test)]
+pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
+pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};
 
 #[cfg(test)]
 pub(crate) use fixtures::vst3_fixture;

@@ -1,85 +1,55 @@
 //! The plugin's own graphical editor, in a window of the plugin's making.
 //!
-//! VST3 editors are opened through `vst3-host`'s [`PluginWindow`].  On Linux
-//! that window is an X11 client, so it needs a display (`DISPLAY`, including
-//! XWayland).  The crate does not implement `IWaylandHost` / `IWaylandFrame`,
-//! and a session with no X server cannot open the editor.
+//! A VST3 editor embeds in a native window created here: Win32, or X11 on
+//! Linux, which needs an X server (`DISPLAY`, XWayland included).  The host
+//! does not implement `IWaylandHost` / `IWaylandFrame`, so a session with
+//! no X server cannot open it.  Its timers and fds run from the VST3 run
+//! loop, which the engine services every frame.
 //!
 //! A CLAP editor embeds in a native window created here (Win32, or X11 when
 //! an X server is reachable), or floats in a toplevel of its own (pure
 //! Wayland, or a plugin that only floats).  The plugin's GUI callbacks only
 //! set flags on its host; [`ClapGuiWindow::service`] follows them once per
 //! frame.
+//!
+//! Both reach the plugin through its [`PluginHandle`] (the UI-only lock the
+//! audio thread never takes), so an editor at work never makes the audio
+//! callback skip the insert.
 
 use crate::app::LogTone;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-
-use vst3_host::PluginWindow;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
-use crate::audio::clap::{ClapPlugin, GuiVisibility, HostState, ParentWindow, ResizeHints};
-use crate::audio::{plugin_instance_id, EngineState, PluginHandle, PluginView};
-/// How often a Linux VST3 editor's run loop is serviced while a bridge runs.
-/// Every frame would hold the instance lock often enough for the audio
-/// callback to miss many blocks; at about 30 Hz the editor still paints.
-const VST3_RUN_LOOP_INTERVAL: Duration = Duration::from_millis(30);
-
-/// Whether the editor's run loop is due.  With no audio running there is
-/// nothing to starve, so every frame services it; while a bridge runs it is
-/// limited to [`VST3_RUN_LOOP_INTERVAL`].
-fn run_loop_due(active: bool, last: Instant, now: Instant) -> bool {
-    !active || now.saturating_duration_since(last) >= VST3_RUN_LOOP_INTERVAL
-}
-
-/// The `last_run_loop` an editor starts with: one interval in the past, so
-/// the first frame services the loop and paints, or `now` on a clock that
-/// cannot go back that far.  Shared with the test, which pins the property.
-fn run_loop_start(now: Instant) -> Instant {
-    now.checked_sub(VST3_RUN_LOOP_INTERVAL).unwrap_or(now)
-}
-
-/// Whether the engine is running a callback that can process a plugin block.
-/// Preview does not: it starts no callback, so a VST3 insert there never
-/// sees a processed block and its reported changes stay queued.
-fn audio_active(state: EngineState) -> bool {
-    matches!(
-        state,
-        EngineState::Starting | EngineState::Running | EngineState::Stopping
-    )
-}
+use crate::audio::clap::{
+    ClapInstance, GuiVisibility, HostState, ParentWindow, ResizeHints, WindowApi,
+};
+use crate::audio::vst3::Vst3Editor;
+use crate::audio::{PluginHandle, PluginView};
 
 pub(crate) struct PluginGuiWindow {
     /// The insert this editor belongs to: its path and its position there.
     pub(crate) key: InsertKey,
+    /// The plugin's path and class, so a rebuilt instance of the same
+    /// plugin at this key (a layout reload) gets its editor back.
+    plugin: (String, Option<String>),
     kind: GuiKind,
-    last_sync: Instant,
+    /// The plugin this editor shows.  Declared after `kind`, so the editor
+    /// is detached before this reference goes.
+    handle: PluginHandle,
 }
 
 enum GuiKind {
-    Vst3 {
-        plugin: Arc<Mutex<vst3_host::Plugin>>,
-        window: PluginWindow,
-        /// When the run loop was last serviced, for
-        /// [`VST3_RUN_LOOP_INTERVAL`].  Kept here rather than on the shared
-        /// window so the VST3 arm can update it under its own borrow.
-        last_run_loop: Instant,
-    },
-    Clap {
-        plugin: Arc<Mutex<ClapPlugin>>,
-        window: ClapGuiWindow,
-    },
+    Vst3 { window: Vst3GuiWindow },
+    Clap { window: ClapGuiWindow },
 }
 
 impl PluginGuiWindow {
     /// The identity of the instance this editor belongs to, as the published
     /// insert views report it.
     fn instance_id(&self) -> usize {
-        match &self.kind {
-            GuiKind::Vst3 { plugin, .. } => plugin_instance_id(plugin),
-            GuiKind::Clap { plugin, .. } => plugin_instance_id(plugin),
-        }
+        self.handle.instance_id()
     }
 
     /// Whether the insert at this editor's key still holds its instance.
@@ -87,6 +57,17 @@ impl PluginGuiWindow {
     /// never takes the chain lock the audio callback needs.
     fn matches(&self, view: Option<&PluginView>) -> bool {
         view.and_then(|view| view.instance) == Some(self.instance_id())
+    }
+
+    /// Whether `view` is a new instance of this editor's plugin, with an
+    /// editor of its own.
+    fn rebuilt(&self, view: Option<&PluginView>) -> bool {
+        view.is_some_and(|view| {
+            view.instance.is_some()
+                && view.has_editor
+                && (view.path.as_str(), view.class_id.as_deref())
+                    == (self.plugin.0.as_str(), self.plugin.1.as_deref())
+        })
     }
 }
 
@@ -108,61 +89,53 @@ impl RigWerkApp {
             ));
             return false;
         };
-        let name = self
-            .engine
-            .plugin_views(path)
-            .get(index)
+        let views = self.engine.plugin_views(path);
+        let view = views.get(index);
+        let name = view
             .map(|view| view.name.clone())
             .unwrap_or_else(|| "Plugin".to_owned());
+        let plugin = view
+            .map(|view| (view.path.clone(), view.class_id.clone()))
+            .unwrap_or_default();
         // With several paths the window title says whose insert it is.
         let name = match self.paths.get(path).and_then(Option::as_ref) {
             Some(owner) if self.path_count() > 1 => format!("{name} · {}", owner.name),
             _ => name,
         };
-        let opened = match &handle {
-            PluginHandle::Vst3(plugin) => {
-                let mut window = PluginWindow::new(plugin.clone());
-                match window.open() {
-                    Ok(()) => {
-                        self.plugin_gui = Some(PluginGuiWindow {
-                            key,
-                            kind: GuiKind::Vst3 {
-                                plugin: plugin.clone(),
-                                window,
-                                // Due at once, so opening the editor paints
-                                // on the first frame rather than after one
-                                // interval of a blank window.
-                                last_run_loop: run_loop_start(Instant::now()),
-                            },
-                            last_sync: Instant::now(),
-                        });
-                        true
-                    }
-                    Err(error) => {
-                        self.gui_error(error.to_string());
-                        false
-                    }
+        let opened = if handle.is_vst3() {
+            match Vst3GuiWindow::open(&handle, &name, f64::from(self.ui_scale)) {
+                Ok(window) => {
+                    self.plugin_gui = Some(PluginGuiWindow {
+                        key,
+                        plugin,
+                        kind: GuiKind::Vst3 { window },
+                        handle,
+                    });
+                    true
+                }
+                Err(error) => {
+                    self.gui_error(error);
+                    false
                 }
             }
-            PluginHandle::Clap(plugin) => {
-                match ClapGuiWindow::open(plugin.clone(), &name, f64::from(self.ui_scale)) {
-                    Ok(window) => {
-                        self.plugin_gui = Some(PluginGuiWindow {
-                            key,
-                            kind: GuiKind::Clap {
-                                plugin: plugin.clone(),
-                                window,
-                            },
-                            last_sync: Instant::now(),
-                        });
-                        true
-                    }
-                    Err(error) => {
-                        self.gui_error(error);
-                        false
-                    }
+        } else if handle.is_clap() {
+            match ClapGuiWindow::open(handle.clone(), &name, f64::from(self.ui_scale)) {
+                Ok(window) => {
+                    self.plugin_gui = Some(PluginGuiWindow {
+                        key,
+                        plugin,
+                        kind: GuiKind::Clap { window },
+                        handle,
+                    });
+                    true
+                }
+                Err(error) => {
+                    self.gui_error(error);
+                    false
                 }
             }
+        } else {
+            false
         };
         if opened {
             self.push_log("Opened the plugin's own interface.", LogTone::Green);
@@ -182,15 +155,9 @@ impl RigWerkApp {
         self.finish_plugin_gui();
     }
 
-    /// Drops the editor after a last full sync, so whatever it changed since
-    /// the previous poll reaches the saved insert and its state blob.
-    ///
-    /// The poll itself only asks a VST3 insert that processed a block for the
-    /// changes it reported; a CLAP editor and an insert that has not
-    /// processed a block are read in full instead (see
-    /// [`Self::poll_plugin_gui`]).  So this close-time read is not the only
-    /// full one, but it is the last chance to see changes a plugin made
-    /// without reporting them.
+    /// Drops the editor after a last full sync, so whatever it changed
+    /// without reporting it reaches the saved insert and its state blob.
+    /// The service frames already follow its edits and reported values.
     pub(crate) fn finish_plugin_gui(&mut self) {
         if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
             self.engine.finish_plugin_editor(key.path, key.insert);
@@ -200,134 +167,59 @@ impl RigWerkApp {
 
     /// Copies the open editor's current controls into the engine with a full
     /// read, without closing the editor.  Used before a save and before a
-    /// bridge starts: an edit may be younger than the last 250 ms poll, and
-    /// the save or the new session is built from the insert's saved values
-    /// and state blob, not from the open editor.  The full sync marks the
-    /// insert's saved state stale, so a later save captures it again.
+    /// bridge starts: the save or the new session is built from the
+    /// insert's saved values and state blob, not from the open editor.  The
+    /// full sync marks the insert's saved state stale, so a later save
+    /// captures it again.
     pub(crate) fn sync_plugin_editor(&self) {
         if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
-            let _ = self
-                .engine
-                .sync_plugin_parameters(key.path, key.insert, true);
+            self.engine.sync_plugin_parameters(key.path, key.insert);
         }
     }
 
-    /// Servicing and keeping the open editor in step, once per UI frame.
-    ///
-    /// On Linux a VST3 editor's `IRunLoop` carries its input, timers and
-    /// repaints.  This drives that loop while the window is open, about 30 Hz
-    /// while a bridge runs and at the full frame rate when it is stopped:
-    /// each service try-locks the instance, and at 60 Hz the lock would be
-    /// busy often enough for the audio callback to miss many chunks.  The UI
-    /// never waits on the callback.  While the UI holds the lock to service
-    /// the loop, the callback skips the insert for that chunk, declicked and
-    /// with its latency kept.  So the 30 Hz gate delays the editor's input
-    /// and timer dispatch as well as its paint.  The cheap platform-event
-    /// service (window close, resize and DPI changes) still runs every frame
-    /// and try-locks once for them, so the interval limits only the run loop
-    /// itself.
+    /// Follows the open editor's window once per UI frame: a close, a
+    /// resize, a scale change, and the editor's own size requests.  The
+    /// plugin's main-thread work (edits, restarts, a VST3 editor's run
+    /// loop, CLAP callbacks) is the engine's `service_plugins`, which the
+    /// frame runs too.  An editor whose insert went away is dropped; one
+    /// whose plugin was rebuilt in place (a layout reload) opens again on
+    /// the new instance.
     pub(crate) fn poll_plugin_gui(&mut self) {
         let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) else {
             return;
         };
         let views = self.engine.plugin_views(key.path);
-        let audio_active = audio_active(self.engine.state);
-        let now = Instant::now();
-        let (dismissed, same_plugin, due) = {
+        let app_scale = f64::from(self.ui_scale);
+        let (dismissed, same_plugin, rebuilt) = {
             let Some(gui) = self.plugin_gui.as_mut() else {
                 return;
             };
             let dismissed = match &mut gui.kind {
-                GuiKind::Vst3 {
-                    plugin,
-                    window,
-                    last_run_loop,
-                } => {
-                    let _ = window.service_platform_events();
-                    let dismissed = window.closed_by_user() || !window.is_open();
-                    // A title-bar close is already recorded.  Painting now would
-                    // draw into a window the host is about to destroy.
-                    if !dismissed
-                        && run_loop_due(audio_active, *last_run_loop, now)
-                        && service_vst3_run_loop(plugin)
-                    {
-                        *last_run_loop = now;
-                    }
-                    dismissed
-                }
-                GuiKind::Clap { window, .. } => window.service(f64::from(self.ui_scale)),
+                GuiKind::Vst3 { window } => window.service(app_scale),
+                GuiKind::Clap { window } => window.service(app_scale),
             };
-            let same_plugin = gui.matches(views.get(key.insert));
-            let due = gui.last_sync.elapsed() >= Duration::from_millis(250);
-            if due {
-                gui.last_sync = Instant::now();
-            }
-            (dismissed, same_plugin, due)
+            let view = views.get(key.insert);
+            (dismissed, gui.matches(view), gui.rebuilt(view))
         };
         if dismissed && same_plugin {
             self.finish_plugin_gui();
             return;
         }
         if !same_plugin {
-            self.plugin_gui = None;
-            return;
+            // A rebuilt plugin's editor opens before the old one closes.
+            // VSTGUI on X11 keeps one X connection per module and closes it
+            // with its last editor, without finishing the cairo device it
+            // drew with; cairo keys that device by the connection's address,
+            // so a new connection allocated at the same address would draw
+            // through the stale device and abort.  Overlapping the two keeps
+            // the connection open.  The old view is still detached before
+            // the old instance deactivates (`kind` drops before `handle`).
+            let old = self.plugin_gui.take();
+            if rebuilt && !dismissed {
+                self.open_plugin_gui(key);
+            }
+            drop(old);
         }
-        if due {
-            // A running VST3 insert is drained from the changes it reported,
-            // once it has processed a block; that poll only patches the
-            // published view.  A bridge that is not running processes none,
-            // so no VST3 edit could become visible and every poll reads in
-            // full; the sync also goes full for a CLAP editor and an insert
-            // that has not processed a block (see `needs_full_sync`).
-            let full = self.engine.state != EngineState::Running;
-            let _ = self
-                .engine
-                .sync_plugin_parameters(key.path, key.insert, full);
-        }
-    }
-}
-
-/// Drives a Linux VST3 editor's `IRunLoop` without blocking the audio callback.
-///
-/// VSTGUI registers its X11 connection and timers there and only paints when
-/// the host calls [`vst3_host::Plugin::service_run_loop`].  That needs the
-/// instance lock.  The audio callback try-locks the same mutex and skips the
-/// insert when it loses, so this does the same: a busy callback leaves the
-/// editor for the next frame, and a poisoned lock is recovered rather than
-/// silencing the editor for the rest of the session.  Other platforms have no
-/// host run loop to service.  Taking the lock there would only make the
-/// callback skip blocks.
-///
-/// Returns whether the loop ran, so a collision retries on the next frame
-/// instead of waiting out [`VST3_RUN_LOOP_INTERVAL`].  Non-Linux platforms
-/// have nothing to run and report `true`.
-fn service_vst3_run_loop(plugin: &Mutex<vst3_host::Plugin>) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        try_with_instance(plugin, vst3_host::Plugin::service_run_loop)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = plugin;
-        true
-    }
-}
-
-/// Runs `body` when the instance lock is free, including after a panic
-/// poisoned it.  Returns whether `body` ran.  A lock the audio callback still
-/// holds is left alone.
-#[cfg(any(test, target_os = "linux"))]
-fn try_with_instance<T>(instance: &Mutex<T>, body: impl FnOnce(&mut T)) -> bool {
-    match instance.try_lock() {
-        Ok(mut guard) => {
-            body(&mut guard);
-            true
-        }
-        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-            body(&mut poisoned.into_inner());
-            true
-        }
-        Err(std::sync::TryLockError::WouldBlock) => false,
     }
 }
 
@@ -342,7 +234,7 @@ struct FrameEvents {
     scale: Option<f64>,
 }
 
-/// The native window an embedded CLAP editor lives in.  Sizes are physical
+/// The native window an embedded editor lives in.  Sizes are physical
 /// pixels of the client area.  Dropping it destroys the window, so the
 /// editor must be detached first.
 trait EditorFrame {
@@ -363,10 +255,100 @@ mod win32;
 #[cfg(target_os = "linux")]
 mod x11;
 
+/// A VST3 editor view and the window it is attached to.
+struct Vst3GuiWindow {
+    /// Declared first: the view is detached before its window goes.
+    editor: Vst3Editor,
+    frame: Box<dyn EditorFrame>,
+    hints: ResizeHints,
+    /// The client size the view was last given or asked for, so the
+    /// window's echo of a resize is not passed back to the plugin.
+    last_client: Option<(u32, u32)>,
+    scale: f64,
+}
+
+impl Vst3GuiWindow {
+    /// The window API VST3 views attach to here.
+    #[cfg(target_os = "windows")]
+    const API: WindowApi = WindowApi::Win32;
+    #[cfg(not(target_os = "windows"))]
+    const API: WindowApi = WindowApi::X11;
+
+    fn open(handle: &PluginHandle, title: &str, app_scale: f64) -> Result<Self, String> {
+        let mut editor = handle.open_vst3_editor()?;
+        let size = editor.size().unwrap_or((640, 480));
+        let frame = create_frame(Self::API, title, size)?;
+        let scale = frame.own_scale().unwrap_or(app_scale);
+        editor.set_scale(scale);
+        editor.attach(frame.parent())?;
+        let hints = if editor.can_resize() {
+            ResizeHints {
+                horizontal: true,
+                vertical: true,
+                aspect: None,
+            }
+        } else {
+            ResizeHints::FIXED
+        };
+        let mut window = Self {
+            editor,
+            frame,
+            hints,
+            last_client: Some(size),
+            scale,
+        };
+        // Attaching may have settled the view on another size.
+        let size = window.editor.size().unwrap_or(size);
+        window.resize_frame(size);
+        window.frame.show();
+        Ok(window)
+    }
+
+    /// Follows the window and the view's size requests.  Returns true once
+    /// the window should be closed.
+    fn service(&mut self, app_scale: f64) -> bool {
+        let events = self.frame.poll();
+        if events.closed {
+            return true;
+        }
+        let scale = match self.frame.own_scale() {
+            Some(_) => events.scale,
+            None => ((app_scale - self.scale).abs() > 1e-3).then_some(app_scale),
+        };
+        if let Some(scale) = scale {
+            self.scale = scale;
+            self.editor.set_scale(scale);
+        }
+        if let Some(size) = self.editor.take_resize_request() {
+            // The view already has this size (`resizeView` calls `onSize`).
+            self.resize_frame(size);
+            return false;
+        }
+        if let Some(size) = events.size {
+            if self.last_client != Some(size) {
+                // The user resized the window: the view rounds the size and
+                // the window follows whatever it settled on.
+                let fitted = self.editor.fit(size.0, size.1);
+                self.editor.resize(fitted.0, fitted.1);
+                self.last_client = Some(fitted);
+                if fitted != size {
+                    self.resize_frame(fitted);
+                }
+            }
+        }
+        false
+    }
+
+    fn resize_frame(&mut self, size: (u32, u32)) {
+        self.frame.resize(size.0, size.1);
+        self.frame.set_resize_hints(self.hints, size);
+        self.last_client = Some(size);
+    }
+}
+
 /// A CLAP editor and the window it is in.  `frame` is `None` for a floating
 /// editor, whose toplevel the plugin owns.
 struct ClapGuiWindow {
-    plugin: Arc<Mutex<ClapPlugin>>,
     host: Arc<HostState>,
     frame: Option<Box<dyn EditorFrame>>,
     hints: ResizeHints,
@@ -374,33 +356,40 @@ struct ClapGuiWindow {
     /// window's echo of a resize is not passed back to the plugin.
     last_client: Option<(u32, u32)>,
     scale: f64,
-}
-
-fn lock(plugin: &Mutex<ClapPlugin>) -> std::sync::MutexGuard<'_, ClapPlugin> {
-    plugin.lock().unwrap_or_else(|poison| poison.into_inner())
+    /// Last: the editor is closed (in `drop`) before this reference goes.
+    handle: PluginHandle,
 }
 
 impl ClapGuiWindow {
-    fn open(plugin: Arc<Mutex<ClapPlugin>>, title: &str, app_scale: f64) -> Result<Self, String> {
-        let (api, size, host) = {
-            let mut locked = lock(&plugin);
-            let api = locked
-                .editor_api()
-                .ok_or_else(|| "This plugin has no interface RigWerk can open here.".to_owned())?;
-            let size = locked.prepare_editor()?;
-            (api, size, locked.host())
-        };
+    /// Runs `body` on the plugin's main-thread instance.
+    fn plugin<R>(&self, body: impl FnOnce(&mut ClapInstance) -> R) -> Result<R, String> {
+        self.handle
+            .with_clap(body)
+            .ok_or_else(|| "This is not a CLAP plugin.".to_owned())
+    }
+
+    fn open(handle: PluginHandle, title: &str, app_scale: f64) -> Result<Self, String> {
+        let (api, size, host) = handle
+            .with_clap(|plugin| {
+                let api = plugin.editor_api().ok_or_else(|| {
+                    "This plugin has no interface RigWerk can open here.".to_owned()
+                })?;
+                let size = plugin.prepare_editor()?;
+                Ok::<_, String>((api, size, plugin.host()))
+            })
+            .ok_or_else(|| "This is not a CLAP plugin.".to_owned())??;
         let mut window = Self {
-            plugin,
             host,
             frame: None,
             hints: ResizeHints::FIXED,
             last_client: Some(size),
             scale: app_scale,
+            handle,
         };
         if api.floating {
             // Dropping `window` on failure destroys the created editor.
-            lock(&window.plugin).show_floating_editor(&format!("{title} - CLAP"), app_scale)?;
+            let title = format!("{title} - CLAP");
+            window.plugin(|plugin| plugin.show_floating_editor(&title, app_scale))??;
             return Ok(window);
         }
         let frame = create_frame(api.api, title, size)?;
@@ -409,11 +398,11 @@ impl ClapGuiWindow {
         // Owned by `window` from here, so a failed attach still detaches the
         // editor before the native window is destroyed.
         window.frame = Some(frame);
-        let hints = {
-            let mut locked = lock(&window.plugin);
-            locked.attach_editor(parent, window.scale)?;
-            locked.editor_resize_hints()
-        };
+        let scale = window.scale;
+        let hints = window.plugin(|plugin| {
+            plugin.attach_editor(parent, scale)?;
+            Ok::<_, String>(plugin.editor_resize_hints())
+        })??;
         window.apply_hints(hints, size);
         if let Some(frame) = window.frame.as_mut() {
             frame.show();
@@ -439,12 +428,10 @@ impl ClapGuiWindow {
         if events.closed {
             return true;
         }
-        // Timers, fds and `on_main_thread` (where most editors repaint) run
-        // without the instance lock, so the audio callback keeps processing
-        // this insert while the editor is busy.  A latency change it picks
-        // up stays flagged on the host, so the path's `service_plugins`
-        // still republishes the insert views; the result is not needed here.
-        let _ = crate::audio::service_clap(&self.host, &self.plugin);
+        // Timers, fds and `on_main_thread` (where most editors repaint).  The
+        // audio callback never waits for them.  Restarts and latency are
+        // left to the path's `service_plugins`, which republishes the views.
+        let _ = self.plugin(ClapInstance::service_callbacks);
         if self.host.take_gui_closed() {
             return true;
         }
@@ -456,34 +443,38 @@ impl ClapGuiWindow {
             // A floating editor sizes and shows its own toplevel.
             if let Some(scale) = scale {
                 self.scale = scale;
-                lock(&self.plugin).set_editor_scale(scale);
+                let _ = self.plugin(|plugin| plugin.set_editor_scale(scale));
             }
             return false;
         };
         match self.host.take_gui_visibility() {
             Some(GuiVisibility::Show) => {
                 frame.show();
-                lock(&self.plugin).show_editor();
+                let _ = self.handle.with_clap(ClapInstance::show_editor);
             }
             Some(GuiVisibility::Hide) => {
-                lock(&self.plugin).hide_editor();
+                let _ = self.handle.with_clap(ClapInstance::hide_editor);
                 frame.hide();
             }
             None => {}
         }
         if let Some(scale) = scale {
             self.scale = scale;
-            let size = {
-                let mut locked = lock(&self.plugin);
-                locked.set_editor_scale(scale);
-                locked.editor_size()
-            };
+            let size = self
+                .plugin(|plugin| {
+                    plugin.set_editor_scale(scale);
+                    plugin.editor_size()
+                })
+                .ok()
+                .flatten();
             if let Some(size) = size {
                 self.resize_frame(size);
             }
         }
         if self.host.take_gui_hints_changed() {
-            let hints = lock(&self.plugin).editor_resize_hints();
+            let hints = self
+                .plugin(|plugin| plugin.editor_resize_hints())
+                .unwrap_or(ResizeHints::FIXED);
             let size = self.last_client.unwrap_or((640, 480));
             self.apply_hints(hints, size);
         }
@@ -495,7 +486,9 @@ impl ClapGuiWindow {
             if self.last_client != Some(size) {
                 // The user resized the window: the plugin rounds the size
                 // and the window follows whatever it settled on.
-                let fitted = lock(&self.plugin).resize_editor(size.0, size.1);
+                let fitted = self
+                    .plugin(|plugin| plugin.resize_editor(size.0, size.1))
+                    .unwrap_or(size);
                 self.last_client = Some(fitted);
                 if fitted != size {
                     self.resize_frame(fitted);
@@ -519,7 +512,7 @@ impl ClapGuiWindow {
 impl Drop for ClapGuiWindow {
     fn drop(&mut self) {
         // Detach the editor before the window it is embedded in goes.
-        lock(&self.plugin).close_editor();
+        let _ = self.handle.with_clap(ClapInstance::close_editor);
         drop(self.frame.take());
     }
 }
@@ -529,11 +522,10 @@ impl Drop for ClapGuiWindow {
     allow(unused_variables)
 )]
 fn create_frame(
-    api: crate::audio::clap::WindowApi,
+    api: WindowApi,
     title: &str,
     size: (u32, u32),
 ) -> Result<Box<dyn EditorFrame>, String> {
-    use crate::audio::clap::WindowApi;
     match api {
         #[cfg(target_os = "windows")]
         WindowApi::Win32 => Ok(Box::new(win32::Win32Frame::create(title, size)?)),

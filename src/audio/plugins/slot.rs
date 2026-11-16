@@ -1,16 +1,15 @@
-//! Insert slots and deferred plugin teardown.
+//! Insert slots, the links the UI reaches them by, and deferred plugin
+//! teardown.
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::super::clap::{HostState, AUDIO_PORTS_CHANGED};
 use super::super::delay::{Declick, DelayLine, DelayTap};
-use super::load::{
-    host_has_editor, host_parameters, load_plugin, PluginHandle, Vst3Service, MAX_BLOCK,
-};
-use super::pref::{PluginParamView, PluginPref, PluginView};
+use super::handle::{LoadedPlugin, PluginHandle};
+use super::load::{load_plugin, MAX_BLOCK};
+use super::pref::{PluginPref, PluginView};
 use super::MAX_ALIGN;
 use crate::audio::LockStats;
 
@@ -20,30 +19,53 @@ use crate::audio::LockStats;
 /// The slot's `pref.mix` / `pref.bypass` are only the values it was made
 /// with; [`Slot::saved_pref`] and the views read these.
 ///
-/// It also counts how often the audio thread tried the insert's plugin lock
-/// and how often UI-side work held it (parameter drags, state capture and the
-/// editor all count).  Measurement only: the audio thread writes these
+/// It also counts how often the audio thread tried to run the insert's
+/// plugin, and how many of those chunks found it paused (a restart, a
+/// failed start).  Measurement only: the audio thread writes these
 /// relaxedly and Diagnostics reads them.
-///
-/// `processed` is the same thread's notice that the plugin actually ran a
-/// chunk: a VST3 change it reported is only visible after one, so the editor
-/// sync needs it to decide between the change poll and a full read.
 pub(crate) struct SlotControls {
     mix: AtomicU32,
     bypass: AtomicBool,
     attempts: AtomicU64,
-    skips: AtomicU64,
-    processed: AtomicBool,
+    paused: AtomicU64,
+    /// Rebuilds the plugin asked for in the current window, and when that
+    /// window began (milliseconds on [`now_ms`], 0 for none): bounds a
+    /// plugin that keeps asking.  UI thread.
+    reloads: AtomicU32,
+    reload_window_ms: AtomicU64,
 }
 
+/// Milliseconds since the first call, for [`SlotControls::reload_window_ms`].
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        // Never 0 (no window), and far enough from it that a test can move
+        // a window back by more than its length.
+        + 1_000_000
+}
+
+/// How many rebuilds a plugin may ask for within [`RELOAD_WINDOW_MS`]:
+/// the next request in that window fails the insert instead ("keeps
+/// asking"), so a plugin that asks on every load, or after a fixed delay,
+/// cannot reload forever.  Two in quick succession (a user changing the
+/// buses twice) are fine.
+pub(crate) const RELOAD_LIMIT: u32 = 2;
+/// The window [`RELOAD_LIMIT`] counts in, from the first rebuild of a run;
+/// a quiet window starts the count again.
+pub(crate) const RELOAD_WINDOW_MS: u64 = 10_000;
+
 impl SlotControls {
-    fn new(pref: &PluginPref) -> Self {
+    pub(crate) fn new(pref: &PluginPref) -> Self {
         Self {
             mix: AtomicU32::new(pref.mix.clamp(0.0, 1.0).to_bits()),
             bypass: AtomicBool::new(pref.bypass),
             attempts: AtomicU64::new(0),
-            skips: AtomicU64::new(0),
-            processed: AtomicBool::new(false),
+            paused: AtomicU64::new(0),
+            reloads: AtomicU32::new(0),
+            reload_window_ms: AtomicU64::new(0),
         }
     }
 
@@ -68,82 +90,88 @@ impl SlotControls {
         self.bypass.store(bypass, Ordering::Relaxed);
     }
 
-    /// Counts one attempt on the insert's plugin lock (audio thread, once
+    /// Counts one attempt to run the insert's plugin (audio thread, once
     /// per chunk the insert runs).
     pub(crate) fn note_attempt(&self) {
         self.attempts.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Counts an attempt whose plugin lock was busy, so that chunk skipped
-    /// the insert (audio thread).
-    pub(crate) fn note_lock_skip(&self) {
-        self.skips.fetch_add(1, Ordering::Relaxed);
+    /// Whether the window of rebuilds on request has run out.
+    fn reload_window_over(&self) -> bool {
+        match self.reload_window_ms.load(Ordering::Relaxed) {
+            0 => true,
+            start => now_ms().saturating_sub(start) >= RELOAD_WINDOW_MS,
+        }
+    }
+
+    /// Notes that the slot was just rebuilt on its plugin's request.
+    pub(crate) fn note_rebuilt(&self) {
+        if self.reload_window_over() {
+            self.reload_window_ms.store(now_ms(), Ordering::Relaxed);
+            self.reloads.store(1, Ordering::Relaxed);
+        } else {
+            self.reloads.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether another rebuild on request is allowed (see
+    /// [`RELOAD_LIMIT`]).
+    pub(crate) fn may_reload(&self) -> bool {
+        self.reload_window_over() || self.reloads.load(Ordering::Relaxed) < RELOAD_LIMIT
+    }
+
+    /// Starts the count again: the user changed the slot (a rate change
+    /// rebuilt it).
+    pub(crate) fn reset_reloads(&self) {
+        self.reloads.store(0, Ordering::Relaxed);
+        self.reload_window_ms.store(0, Ordering::Relaxed);
+    }
+
+    /// Moves the current window `ms` into the past, for tests that would
+    /// otherwise wait it out.
+    #[cfg(test)]
+    pub(crate) fn age_reload_window_for_test(&self, ms: u64) {
+        let start = self.reload_window_ms.load(Ordering::Relaxed);
+        if start != 0 {
+            self.reload_window_ms
+                .store(start - ms.min(start - 1), Ordering::Relaxed);
+        }
+    }
+
+    /// Counts an attempt that found the plugin paused (audio thread).
+    pub(crate) fn note_paused(&self) {
+        self.paused.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn lock_stats(&self) -> LockStats {
         LockStats {
             attempts: self.attempts.load(Ordering::Relaxed),
-            skips: self.skips.load(Ordering::Relaxed),
+            skips: self.paused.load(Ordering::Relaxed),
         }
     }
 
     pub(crate) fn reset_lock_stats(&self) {
         self.attempts.store(0, Ordering::Relaxed);
-        self.skips.store(0, Ordering::Relaxed);
+        self.paused.store(0, Ordering::Relaxed);
     }
-
-    /// Notes that the plugin processed a chunk (audio thread).  A VST3 change
-    /// the plugin reports is only visible after a processed block, so the
-    /// editor sync reads this before it trusts the change poll.
-    pub(crate) fn note_processed(&self) {
-        self.processed.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether the plugin processed a chunk since the last call, clearing the
-    /// flag (UI thread).
-    pub(crate) fn take_processed(&self) -> bool {
-        self.processed.swap(false, Ordering::Relaxed)
-    }
-}
-
-/// Why a loaded insert stopped processing, as the audio thread recorded
-/// it.  Recording it never allocates, and it is never dropped on the audio
-/// thread: a slot fails once (it then leaves the chain), and slots are
-/// dropped on the UI thread.  vst3-host's usual failures (`NotProcessing`,
-/// `ProcessFailed(tresult)`) and CLAP's static messages hold no heap data;
-/// a few rare vst3-host errors (`Other("Plugin not initialized")`) are
-/// built inside the crate.  [`Slot::resolved_error`] formats it on the UI
-/// thread.
-pub(crate) enum ProcessFailure {
-    Vst3(vst3_host::Error),
-    Clap(&'static str),
 }
 
 pub(crate) struct Slot {
-    pub(crate) pref: PluginPref,
+    /// The insert's identity, and what an unloaded slot restores with.
+    /// Once a plugin is loaded its saved values and state blob move to its
+    /// handle (see [`Self::saved_pref`]) and these are left empty.  Shared
+    /// with the published link, so a publish under the chain lock copies
+    /// nothing.
+    pub(crate) pref: Arc<PluginPref>,
     /// Mix and bypass as the UI sets them (see [`SlotControls`]).  Kept
     /// when the slot is reopened or rebuilt for a new rate.
     pub(crate) controls: Arc<SlotControls>,
-    pub(crate) plugin: Option<PluginHandle>,
+    /// The loaded plugin.  A processing failure is recorded in its
+    /// [`super::link::PluginShared`]; the insert then stays out of the
+    /// chain like one with an `error`.
+    pub(crate) plugin: Option<LoadedPlugin>,
     /// A load failure.
     pub(crate) error: Option<String>,
-    /// Set by the audio thread when the plugin's process call fails (see
-    /// [`ProcessFailure`]).  The insert then stays out of the chain like
-    /// one with an `error`.
-    pub(crate) process_failure: Option<ProcessFailure>,
-    pub(crate) parameters: Vec<PluginParamView>,
-    /// Read once at load, so drawing the insert list never locks a plugin.
-    has_editor: bool,
-    /// A CLAP plugin's callback state, so its main-thread work can run
-    /// without the chain lock or the instance lock.
-    pub(crate) clap_host: Option<Arc<HostState>>,
-    /// A VST3 plugin's main-thread servicing and its latency, the
-    /// counterpart of `clap_host`.
-    pub(crate) vst3: Option<Arc<Vst3Service>>,
-    /// Whether `pref.state` may no longer describe the live plugin: it was
-    /// missing or did not restore, or a control changed since.  The next
-    /// preference save captures a fresh blob.
-    pub(crate) state_stale: bool,
     /// Sample rate passed to the last load attempt.  `None` until then, so a
     /// restored slot stays distinguishable from one opened at a rate.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -201,15 +229,9 @@ impl Slot {
             controls: Arc::new(SlotControls::new(&pref)),
             was_processed: false,
             declick: Declick::default(),
-            pref,
+            pref: Arc::new(pref),
             plugin: None,
             error: None,
-            process_failure: None,
-            parameters: Vec::new(),
-            has_editor: false,
-            clap_host: None,
-            vst3: None,
-            state_stale: false,
             built_rate: None,
             dry: DelayLine::empty(),
             dry_tap: DelayTap::default(),
@@ -222,13 +244,56 @@ impl Slot {
     }
 
     /// The insert as it should be saved: its pref with the live mix and
-    /// bypass.
+    /// bypass, and a loaded plugin's saved values and state blob.
     pub(crate) fn saved_pref(&self) -> PluginPref {
         PluginPref {
             mix: self.controls.mix(),
             bypass: self.controls.bypass(),
-            ..self.pref.clone()
+            ..self.restore_pref()
         }
+    }
+
+    /// What a rebuilt instance restores with: the pref with a loaded
+    /// plugin's saved values and state blob, but the mix and bypass it was
+    /// made with (the rebuild keeps the live [`SlotControls`]).
+    pub(crate) fn restore_pref(&self) -> PluginPref {
+        let mut pref = (*self.pref).clone();
+        if let Some(plugin) = &self.plugin {
+            (pref.params, pref.state) = plugin.handle().saved();
+        }
+        pref
+    }
+
+    /// Whether [`Self::restore_pref`] would equal `plan`, compared in place
+    /// (nothing is cloned; the caller holds the chain lock).
+    pub(crate) fn restores_with(&self, plan: &PluginPref) -> bool {
+        // Exhaustive, so a new pref field has to be compared here too.
+        let PluginPref {
+            path,
+            format,
+            class_id,
+            name,
+            vendor,
+            category,
+            bypass,
+            mix,
+            params,
+            state,
+        } = plan;
+        let pref = &*self.pref;
+        let identity = pref.path == *path
+            && pref.format == *format
+            && pref.class_id == *class_id
+            && pref.name == *name
+            && pref.vendor == *vendor
+            && pref.category == *category
+            && pref.bypass == *bypass
+            && pref.mix == *mix;
+        identity
+            && match &self.plugin {
+                Some(plugin) => plugin.handle().saved_is(params, state.as_ref()),
+                None => pref.params == *params && pref.state == *state,
+            }
     }
 
     /// The dry delay line a loaded insert needs (allocates; UI thread).
@@ -263,45 +328,17 @@ impl Slot {
 
     pub(crate) fn loaded(pref: PluginPref, sample_rate: u32) -> Self {
         match load_plugin(&pref, sample_rate) {
-            Ok((plugin, state_current)) => {
-                let parameters = host_parameters(&plugin);
-                let has_editor = host_has_editor(&plugin);
-                let (clap_host, vst3) = match &plugin {
-                    PluginHandle::Clap(clap) => (
-                        Some(
-                            clap.lock()
-                                .unwrap_or_else(|poison| poison.into_inner())
-                                .host(),
-                        ),
-                        None,
-                    ),
-                    PluginHandle::Vst3(plugin) => {
-                        (None, Some(Arc::new(Vst3Service::new(Arc::clone(plugin)))))
-                    }
-                };
-                Self {
-                    controls: Arc::new(SlotControls::new(&pref)),
-                    was_processed: false,
-                    declick: Declick::default(),
-                    dry: Self::dry_line(),
-                    dry_tap: DelayTap::default(),
-                    dry_started: false,
-                    #[cfg(test)]
-                    test_delay: None,
-                    pref,
-                    plugin: Some(plugin),
-                    error: None,
-                    process_failure: None,
-                    parameters,
-                    has_editor,
-                    clap_host,
-                    vst3,
-                    state_stale: !state_current,
-                    built_rate: Some(sample_rate),
-                    #[cfg(test)]
-                    track: SlotTrack::default(),
-                }
-            }
+            Ok((plugin, _)) => Self {
+                plugin: Some(plugin),
+                dry: Self::dry_line(),
+                built_rate: Some(sample_rate),
+                // The handle owns the saved values and state from here on.
+                ..Self::empty(PluginPref {
+                    params: Vec::new(),
+                    state: None,
+                    ..pref
+                })
+            },
             Err(error) => Self {
                 error: Some(error),
                 built_rate: Some(sample_rate),
@@ -310,12 +347,23 @@ impl Slot {
         }
     }
 
+    /// A slot holding `plugin`, the way a real load fills one in.
+    #[cfg(test)]
+    pub(crate) fn with_plugin_for_test(pref: PluginPref, plugin: LoadedPlugin, rate: u32) -> Self {
+        Self {
+            plugin: Some(plugin),
+            dry: Self::dry_line(),
+            built_rate: Some(rate),
+            ..Self::empty(pref)
+        }
+    }
+
     pub(crate) fn active(&self) -> bool {
         #[cfg(test)]
         if self.test_delay.is_some() {
             return !self.controls.bypass();
         }
-        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.ports_changed()
+        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.reload_wanted()
     }
 
     /// A saved slot that has never been opened and has not failed.
@@ -327,13 +375,16 @@ impl Slot {
         self.plugin.is_none() && self.error.is_none()
     }
 
-    /// Whether this slot's CLAP plugin invalidated its port buffers.  The
-    /// insert is left out of the chain and the panel shows the error until it
-    /// is removed and added again.
-    pub(crate) fn ports_changed(&self) -> bool {
-        self.clap_host
-            .as_ref()
-            .is_some_and(|host| host.ports_changed())
+    /// Whether this slot's plugin asked to be rebuilt (see
+    /// `PluginShared::want_reload`) and has not failed.  It stays out of
+    /// the chain, still counting its latency, until the path's service
+    /// replaces it.  Atomics only.
+    pub(crate) fn reload_wanted(&self) -> bool {
+        !self.failed()
+            && self
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| plugin.shared().reload_wanted())
     }
 
     /// The latency in samples this insert adds to the chain, as the plugin
@@ -343,12 +394,12 @@ impl Slot {
     /// A bypassed insert still counts: bypass only skips the processing,
     /// while the alignment around the chain is sized for the plugin's
     /// latency, so toggling bypass never moves the alignment (and never
-    /// makes the paths jump against each other).  An insert that is not
-    /// loaded, failed, or lost its ports to a rescan counts 0: it stays out
-    /// of the chain until it is loaded again.
+    /// makes the paths jump against each other).  So does one waiting for
+    /// a reload.  An insert that is not loaded or failed counts 0: it stays
+    /// out of the chain until it is loaded again.
     ///
-    /// Whenever the chain skips the insert (bypass, mix at 0, a missed
-    /// try-lock, a CLAP restart's passthrough) it plays the insert's input
+    /// Whenever the chain skips the insert (bypass, mix at 0, a restart's
+    /// pause) it plays the insert's input
     /// delayed by this many frames instead, and a partial mix delays its
     /// dry side by it, so the chain always delays by its reported total.
     /// Values are clamped to [`MAX_ALIGN`] where they are read.
@@ -357,48 +408,27 @@ impl Slot {
         if let Some(test) = &self.test_delay {
             return test.latency.min(MAX_ALIGN);
         }
-        if self.plugin.is_none() || self.failed() || self.ports_changed() {
-            return 0;
-        }
-        if let Some(host) = &self.clap_host {
-            host.latency()
-        } else if let Some(vst3) = &self.vst3 {
-            vst3.latency()
-        } else {
-            0
-        }
-    }
-
-    /// Tells a VST3 insert's service that the plugin was just edited, so it
-    /// looks for restart requests for a while (see [`Vst3Service::nudge`]).
-    pub(crate) fn nudge_vst3(&self) {
-        if let Some(vst3) = &self.vst3 {
-            vst3.nudge();
+        match &self.plugin {
+            Some(plugin) if !self.failed() => plugin.latency(),
+            _ => 0,
         }
     }
 
     /// Whether the slot failed to load or to process.  Lock and allocation
     /// free, so the audio thread may call it.
     pub(crate) fn failed(&self) -> bool {
-        self.error.is_some() || self.process_failure.is_some()
+        self.error.is_some()
+            || self
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| plugin.shared().failure().is_some())
     }
 
-    /// The first error the slot should show: a load/processing failure, or a
-    /// port change that has not yet reached `process`.  Allocates: UI thread
-    /// only, which is where a processing failure gets its text.
+    /// The first error the slot should show (see [`SlotLink::resolved_error`]).
+    /// UI thread only.
+    #[cfg(test)]
     pub(crate) fn resolved_error(&self) -> Option<String> {
-        self.error
-            .clone()
-            .or_else(|| {
-                self.process_failure.as_ref().map(|failure| {
-                    let error: &dyn std::fmt::Display = match failure {
-                        ProcessFailure::Vst3(error) => error,
-                        ProcessFailure::Clap(error) => error,
-                    };
-                    format!("Processing failed: {error}")
-                })
-            })
-            .or_else(|| self.ports_changed().then(|| AUDIO_PORTS_CHANGED.to_owned()))
+        self.link().resolved_error()
     }
 
     /// Opens a saved slot on demand (the configure window may be opened before
@@ -407,8 +437,8 @@ impl Slot {
     /// failed.
     pub(crate) fn ensure_loaded(&mut self, sample_rate: u32) {
         if !self.load_if_needed(sample_rate) {
-            if let Some(parameters) = self.plugin.as_ref().map(host_parameters) {
-                self.parameters = parameters;
+            if let Some(plugin) = &self.plugin {
+                plugin.handle().refresh_parameters();
             }
         }
     }
@@ -426,22 +456,131 @@ impl Slot {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn view(&self) -> PluginView {
+        self.link().view()
+    }
+
+    /// What the UI needs to reach this insert without the chain lock (UI
+    /// thread; allocates).
+    pub(crate) fn link(&self) -> SlotLink {
+        SlotLink {
+            base: Arc::clone(&self.pref),
+            controls: Arc::clone(&self.controls),
+            plugin: self.plugin.as_ref().map(|plugin| plugin.handle().clone()),
+            error: self.error.clone(),
+            #[cfg(test)]
+            test_latency: self
+                .test_delay
+                .as_ref()
+                .map(|test| test.latency.min(MAX_ALIGN)),
+        }
+    }
+}
+
+/// One insert as the UI reaches it without the chain lock, published with
+/// the views (see `PathControls::slot_links`).  Everything it reads is the
+/// handle's UI-side state or atomics, so the views, the saved prefs and the
+/// latency total can be rebuilt from the links alone.
+#[derive(Clone)]
+pub(crate) struct SlotLink {
+    /// The slot's pref (see [`Slot::pref`]): identity, plus the saved
+    /// values and state of a slot that is not loaded.
+    pub(crate) base: Arc<PluginPref>,
+    pub(crate) controls: Arc<SlotControls>,
+    pub(crate) plugin: Option<PluginHandle>,
+    /// A load failure.
+    pub(crate) error: Option<String>,
+    /// A test delay's latency (see [`Slot::delay_for_test`]).
+    #[cfg(test)]
+    test_latency: Option<u32>,
+}
+
+impl SlotLink {
+    /// As [`Slot::reload_wanted`].
+    pub(crate) fn reload_wanted(&self) -> bool {
+        !self.failed()
+            && self
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| plugin.shared().reload_wanted())
+    }
+
+    fn failed(&self) -> bool {
+        self.error.is_some()
+            || self
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| plugin.failure().is_some())
+    }
+
+    /// As [`Slot::latency_samples`].
+    pub(crate) fn latency(&self) -> u32 {
+        #[cfg(test)]
+        if let Some(latency) = self.test_latency {
+            return latency;
+        }
+        match &self.plugin {
+            Some(plugin) if !self.failed() => plugin.latency(),
+            _ => 0,
+        }
+    }
+
+    /// As [`Slot::active`].
+    pub(crate) fn active(&self) -> bool {
+        #[cfg(test)]
+        if self.test_latency.is_some() {
+            return !self.controls.bypass();
+        }
+        !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.reload_wanted()
+    }
+
+    /// The first error the insert should show: a load or processing
+    /// failure.  Allocates: UI thread only, which is where a processing
+    /// failure gets its text.
+    pub(crate) fn resolved_error(&self) -> Option<String> {
+        self.error.clone().or_else(|| {
+            self.plugin
+                .as_ref()
+                .and_then(PluginHandle::failure)
+                .map(|failure| format!("Processing failed: {}", failure.message()))
+        })
+    }
+
+    pub(crate) fn view(&self) -> PluginView {
+        let pref = &*self.base;
         PluginView {
-            path: self.pref.path.clone(),
-            format: self.pref.format,
-            class_id: self.pref.class_id.clone(),
-            name: self.pref.name.clone(),
-            vendor: self.pref.vendor.clone(),
-            category: self.pref.category.clone(),
+            path: pref.path.clone(),
+            format: pref.format,
+            class_id: pref.class_id.clone(),
+            name: pref.name.clone(),
+            vendor: pref.vendor.clone(),
+            category: pref.category.clone(),
             bypass: self.controls.bypass(),
             mix: self.controls.mix(),
             error: self.resolved_error(),
-            parameters: self.parameters.clone(),
-            has_editor: self.plugin.is_some() && self.has_editor,
+            parameters: self
+                .plugin
+                .as_ref()
+                .map(PluginHandle::parameters)
+                .unwrap_or_default(),
+            has_editor: self.plugin.as_ref().is_some_and(PluginHandle::has_editor),
             instance: self.plugin.as_ref().map(PluginHandle::instance_id),
-            latency: self.latency_samples(),
+            latency: self.latency(),
         }
+    }
+
+    /// As [`Slot::saved_pref`].
+    pub(crate) fn saved_pref(&self) -> PluginPref {
+        let mut pref = PluginPref {
+            mix: self.controls.mix(),
+            bypass: self.controls.bypass(),
+            ..(*self.base).clone()
+        };
+        if let Some(plugin) = &self.plugin {
+            (pref.params, pref.state) = plugin.saved();
+        }
+        pref
     }
 }
 

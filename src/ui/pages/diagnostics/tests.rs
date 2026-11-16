@@ -18,7 +18,10 @@ fn the_report_names_the_chain_and_insert_counts() {
         text.contains("- Main: chain: 0 skipped of 1 chunk (0%)"),
         "{text}"
     );
-    assert!(text.contains("  - Delay: 0 of 1 chunk (0%)"), "{text}");
+    assert!(
+        text.contains("  - Delay: 0 paused of 1 chunk (0%)"),
+        "{text}"
+    );
     assert!(
         text.contains("Chain counts are chunks the path tried to process."),
         "{text}"
@@ -145,7 +148,7 @@ fn the_report_includes_status_notes_and_the_log() {
     assert!(text.contains("Bridge ready."), "{text}");
     assert!(text.contains("cap 400"), "{text}");
     assert!(text.contains("- Main: 0.0 ms · not running"), "{text}");
-    assert!(text.contains("Plugin locks"), "{text}");
+    assert!(text.contains("Plugin blocks"), "{text}");
     assert!(text.contains("No plugin blocks yet."), "{text}");
     assert_eq!(
         super::dsp_text(Some(crate::audio::DspTime {

@@ -9,9 +9,6 @@
 //! both take `&mut self`.  Everything is allocated there; `push` and `drain`
 //! never allocate or lock, so either side may be the audio thread.
 
-// No callers yet: they arrive with the VST3/CLAP processor/controller split (#28).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -59,6 +56,20 @@ struct Inner {
     /// when the consumer emptied the slot just after that look; the mark
     /// still holds, since no ring entry of the parameter was pushed since.
     behind: Box<[AtomicU64]>,
+    /// Changes pushed, ever (ring and overflow); stored after the change
+    /// itself.  Only the producer writes it.
+    pushed: Counter,
+    /// The `pushed` count up to which the consumer reports every change
+    /// applied (see [`ParamReceiver::mark_applied`]).  Only the consumer
+    /// writes it.
+    applied: Counter,
+}
+
+impl Inner {
+    /// True while the ring holds an entry not yet drained.
+    fn ring_queued(&self) -> bool {
+        self.head.0.load(Ordering::Acquire) != self.tail.0.load(Ordering::Acquire)
+    }
 }
 
 /// The pushing side of a [`param_transfer`].
@@ -96,6 +107,8 @@ pub(crate) fn param_transfer(params: usize) -> (ParamSender, ParamReceiver) {
             .map(|_| AtomicU64::new(0))
             .collect(),
         behind: (0..params).map(|_| AtomicU64::new(0)).collect(),
+        pushed: Counter(AtomicU64::new(0)),
+        applied: Counter(AtomicU64::new(0)),
     });
     (
         ParamSender {
@@ -150,6 +163,7 @@ impl ParamSender {
             }
             slot.store(value.to_bits(), Ordering::Release);
             inner.pending[index / 64].fetch_or(1 << (index % 64), Ordering::Release);
+            inner.pushed.0.fetch_add(1, Ordering::Release);
             return true;
         }
         let entry = &inner.entries[(head & inner.mask) as usize];
@@ -157,7 +171,36 @@ impl ParamSender {
         entry.value.store(value.to_bits(), Ordering::Relaxed);
         entry.offset.store(offset.max(0), Ordering::Relaxed);
         inner.head.0.store(head + 1, Ordering::Release);
+        inner.pushed.0.fetch_add(1, Ordering::Release);
         true
+    }
+
+    /// Changes pushed so far.
+    pub(crate) fn pushed(&self) -> u64 {
+        self.inner.pushed.0.load(Ordering::Relaxed)
+    }
+
+    /// The push count up to which the consumer has reported every change
+    /// applied: drained and accepted by the plugin.
+    pub(crate) fn applied(&self) -> u64 {
+        self.inner.applied.0.load(Ordering::Acquire)
+    }
+
+    /// True until the consumer has drained every change pushed so far.
+    /// False means drained, handed to a block; not that the plugin has
+    /// applied it.  No allocation, no lock.
+    ///
+    /// This scans every overflow slot (O(params)), not the pending bits: a
+    /// drain clears a word's bits before it puts back the ones it defers,
+    /// so from this thread the bits can read zero while a value still
+    /// waits.
+    pub(crate) fn has_queued(&self) -> bool {
+        let inner = &*self.inner;
+        inner.ring_queued()
+            || inner
+                .values
+                .iter()
+                .any(|slot| slot.load(Ordering::Acquire) != EMPTY)
     }
 }
 
@@ -165,6 +208,19 @@ impl ParamReceiver {
     /// Parameters this queue was made for.
     pub(crate) fn params(&self) -> usize {
         self.inner.values.len()
+    }
+
+    /// Changes pushed so far.  Read it before a [`Self::drain`]: every
+    /// change it counts is visible to that drain.
+    pub(crate) fn pushed(&self) -> u64 {
+        self.inner.pushed.0.load(Ordering::Acquire)
+    }
+
+    /// Reports every change up to push count `pushed` applied: a drain
+    /// taken after reading it left nothing deferred, and the plugin
+    /// accepted the block it went into.  Never moves back.
+    pub(crate) fn mark_applied(&self, pushed: u64) {
+        self.inner.applied.0.fetch_max(pushed, Ordering::Release);
     }
 
     /// Entries the ring holds before changes go to the overflow.
@@ -185,8 +241,13 @@ impl ParamReceiver {
     /// parameter only the newest arrives.  A value the producer stores while
     /// this runs arrives now or in a later drain, never twice: the slot is
     /// emptied with a swap.
-    pub(crate) fn drain(&mut self, mut emit: impl FnMut(usize, f64, i32)) {
+    ///
+    /// Returns whether it deferred an overflow value behind ring entries
+    /// pushed after its `head` snapshot (that value arrives with a later
+    /// drain).
+    pub(crate) fn drain(&mut self, mut emit: impl FnMut(usize, f64, i32)) -> bool {
         let inner = &*self.inner;
+        let mut deferred = false;
         let head = inner.head.0.load(Ordering::Acquire);
         let mut tail = inner.tail.0.load(Ordering::Relaxed);
         let mut last_offset = 0;
@@ -225,6 +286,7 @@ impl ParamReceiver {
                 // for the next drain.
                 if inner.behind[index].load(Ordering::Relaxed) > tail {
                     word.fetch_or(bit, Ordering::Relaxed);
+                    deferred = true;
                     continue;
                 }
                 // Only the consumer empties a slot, so this takes a value:
@@ -233,6 +295,7 @@ impl ParamReceiver {
                 emit(index, f64::from_bits(value), last_offset);
             }
         }
+        deferred
     }
 
     /// Drops what is queued, as after a state load (the restored state
@@ -242,8 +305,82 @@ impl ParamReceiver {
     /// slot the producer fills after the snapshot is kept, with the ring
     /// entries ahead of it, so each parameter loses only its oldest changes
     /// and keeps its newest whenever it keeps any.
+    // Only the tests call it: a state is loaded only while its plugin
+    // loads, before any value is queued for it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn discard(&mut self) {
         self.drain(|_, _, _| {});
+    }
+
+    /// True when a drain would emit nothing, as far as this thread can see:
+    /// a change the producer is pushing right now may not show yet.  An
+    /// overflow value deferred behind ring entries counts as queued.
+    ///
+    /// Only the pending bits' slots are visited: the bits never read short
+    /// here, since this thread is the one that drains.
+    pub(crate) fn is_empty(&self) -> bool {
+        let inner = &*self.inner;
+        if inner.ring_queued() {
+            return false;
+        }
+        !inner.pending.iter().enumerate().any(|(word_index, word)| {
+            let mut bits = word.load(Ordering::Acquire);
+            while bits != 0 {
+                let index = word_index * 64 + bits.trailing_zeros() as usize;
+                if inner.values[index].load(Ordering::Acquire) != EMPTY {
+                    return true;
+                }
+                bits &= bits - 1;
+            }
+            false
+        })
+    }
+}
+
+/// Values a consumer drained but the plugin did not take (a refused or
+/// failed block, an event list that was full): the newest per parameter,
+/// kept for the next block.  Allocated for the parameter count at load;
+/// putting and taking never allocate, so the audio thread owns it.
+pub(crate) struct Retry {
+    values: Box<[f64]>,
+    /// One bit per parameter with a value kept.
+    pending: Box<[u64]>,
+}
+
+impl Retry {
+    pub(crate) fn new(params: usize) -> Self {
+        Self {
+            values: vec![0.0; params].into(),
+            pending: vec![0; params.div_ceil(64)].into(),
+        }
+    }
+
+    /// Keeps `value` for parameter `index`, replacing an older one.
+    pub(crate) fn put(&mut self, index: usize, value: f64) {
+        if let Some(slot) = self.values.get_mut(index) {
+            *slot = value;
+            self.pending[index / 64] |= 1 << (index % 64);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending.iter().all(|&word| word == 0)
+    }
+
+    /// Hands every kept value to `offer` as `(index, value)`; it stays
+    /// kept only where `offer` returns true.
+    pub(crate) fn retain(&mut self, mut offer: impl FnMut(usize, f64) -> bool) {
+        for (word_index, word) in self.pending.iter_mut().enumerate() {
+            let mut bits = *word;
+            while bits != 0 {
+                let bit = bits & bits.wrapping_neg();
+                bits &= bits - 1;
+                let index = word_index * 64 + bit.trailing_zeros() as usize;
+                if !offer(index, self.values[index]) {
+                    *word &= !bit;
+                }
+            }
+        }
     }
 }
 

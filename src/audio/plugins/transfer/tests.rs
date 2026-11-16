@@ -318,3 +318,95 @@ fn discards_racing_a_producer_lose_only_old_changes() {
         }
     }
 }
+
+#[test]
+fn has_queued_until_drained() {
+    let (mut sender, mut receiver) = param_transfer(70);
+    let capacity = receiver.capacity();
+    assert!(!sender.has_queued());
+    assert!(receiver.is_empty());
+
+    // The ring.
+    assert!(sender.push(3, 0.5, 0));
+    assert!(sender.has_queued());
+    assert!(!receiver.is_empty());
+    assert_eq!(drain(&mut receiver).len(), 1);
+    assert!(!sender.has_queued());
+    assert!(receiver.is_empty());
+
+    // The overflow, in the second bitset word.
+    for _ in 0..capacity {
+        assert!(sender.push(0, 0.0, 0));
+    }
+    assert!(sender.push(69, 0.25, 0));
+    let out = drain(&mut receiver);
+    assert_eq!(out.len(), capacity + 1);
+    assert!(!sender.has_queued());
+    assert!(receiver.is_empty());
+
+    // A value deferred behind ring entries a drain had not reached.
+    let out = drain_racing(&mut sender, &mut receiver, |sender| {
+        race_into_overflow(sender, capacity, 2.0)
+    });
+    assert_eq!(out.len(), 1);
+    assert!(sender.has_queued());
+    assert!(!receiver.is_empty());
+    let out = drain(&mut receiver);
+    assert_eq!(out.last(), Some(&(1, 2.0, 5)));
+    assert!(!sender.has_queued());
+    assert!(receiver.is_empty());
+
+    // Discard empties it too.
+    assert!(sender.push(5, 0.5, 0));
+    receiver.discard();
+    assert!(!sender.has_queued());
+    assert!(receiver.is_empty());
+}
+
+#[test]
+fn a_value_counts_as_queued_while_a_drain_holds_its_bit() {
+    // A drain swaps a word's bits to zero before it takes or defers each
+    // value; the sender must not read that gap as drained.
+    let (mut sender, mut receiver) = param_transfer(70);
+    for _ in 0..receiver.capacity() {
+        assert!(sender.push(0, 0.0, 0));
+    }
+    assert!(sender.push(69, 0.25, 0));
+    let bits = receiver.inner.pending[1].swap(0, std::sync::atomic::Ordering::AcqRel);
+    assert_ne!(bits, 0);
+    assert!(sender.has_queued(), "the slot is still full");
+    receiver.inner.pending[1].fetch_or(bits, std::sync::atomic::Ordering::AcqRel);
+    assert_eq!(drain(&mut receiver).last(), Some(&(69, 0.25, 0)));
+    assert!(!sender.has_queued());
+}
+
+/// A value the producer puts in the overflow while a drain runs, behind
+/// ring entries that drain did not see, waits for the next drain, and the
+/// drain says it deferred one.
+#[test]
+fn a_drain_reports_an_overflow_value_it_deferred() {
+    let (mut sender, mut receiver) = param_transfer(2);
+    let capacity = receiver.capacity();
+    assert!(sender.push(0, 0.1, 0));
+    let mut pushed_inside = false;
+    let deferred = receiver.drain(|_, _, _| {
+        if !pushed_inside {
+            pushed_inside = true;
+            // The drain has not published its tail yet: these fill the
+            // ring, and the last one goes to the overflow behind them.
+            for at in 0..capacity {
+                sender.push(0, at as f64, 0);
+            }
+            sender.push(1, 0.9, 0);
+        }
+    });
+    assert!(
+        deferred,
+        "the overflow value waits behind the new ring entries"
+    );
+    let mut later = Vec::new();
+    let deferred = receiver.drain(|index, value, _| later.push((index, value)));
+    assert!(!deferred);
+    assert_eq!(later.last(), Some(&(1, 0.9)));
+    assert!(!receiver.drain(|_, _, _| {}), "nothing left to defer");
+}

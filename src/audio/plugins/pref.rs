@@ -36,7 +36,8 @@ pub struct PluginParamPref {
 
 /// The layout of [`PluginState::data`] this build writes and reads: the bytes
 /// the format's own state call produced (CLAP `clap_plugin_state.save`, or
-/// `vst3-host`'s `Plugin::save_state` envelope), base64-encoded.  A blob with
+/// the VST3 envelope in `vst3::stream`, the layout `vst3-host` wrote),
+/// base64-encoded.  A blob with
 /// any other version is ignored and the insert falls back to its parameters.
 pub(crate) const PLUGIN_STATE_VERSION: u32 = 1;
 
@@ -50,7 +51,10 @@ pub struct PluginState {
     pub data: String,
     /// [`PluginPref::params`] as it was when the state was captured.  A
     /// parameter changed after the capture differs from this snapshot, and is
-    /// applied on top of the restored state so the newer value wins.
+    /// applied on top of the restored state so the newer value wins.  A
+    /// value still queued for the plugin when the state was saved is left
+    /// out of it, so it counts as changed; one that went back to its
+    /// default meanwhile is listed, so it is reset.
     #[serde(default)]
     pub params: Vec<PluginParamPref>,
 }

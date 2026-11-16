@@ -2416,6 +2416,7 @@ dependencies = [
  "ron",
  "rustfft",
  "serde",
+ "vst3",
  "vst3-host",
  "winapi",
  "windows",

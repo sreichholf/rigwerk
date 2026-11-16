@@ -21,7 +21,14 @@
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
 //! - `shared`: the ring buffer, cushion, meters and tuner tap both sides share.
 //! - `path`: one signal path's controls (routing, EQs, gate, inserts).
-//! - `plugins`: the VST3 and CLAP chain on each path.  The UI holds views.
+//! - `plugins`: the VST3 and CLAP chain on each path.  The slot owns each
+//!   plugin's processor; the UI reaches the rest through its handle and
+//!   holds views.
+//! - `vst3`: RigWerk's own VST3 host on the `vst3` bindings (module,
+//!   factory, host context, run loop, streams, the controller and
+//!   processor halves, the editor view).  `vst3-host` only scans.
+//! - `clap`: the CLAP host (the main-thread instance, the audio-thread
+//!   processor, the editor).
 //! - `scope`: decimated peak-hold lanes.  Drawing them is `ui/scope`.
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
@@ -75,6 +82,7 @@ mod shared;
 mod thread_priority;
 mod tuner;
 mod types;
+pub(crate) mod vst3;
 
 #[cfg(target_os = "windows")]
 mod win;
@@ -149,11 +157,10 @@ pub use path::{
     sanitize_path_level, DspTime, LockStats, PathMix, PluginLockReport, MAX_PATHS,
     PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
 };
-pub(crate) use plugins::service_clap;
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;
+pub(crate) use plugins::PluginHandle;
 pub(crate) use plugins::MAX_ALIGN;
-pub(crate) use plugins::{instance_id as plugin_instance_id, PluginHandle};
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
 pub(crate) use shared::{FollowerLink, FollowerPlan, SCOPE_LEN};

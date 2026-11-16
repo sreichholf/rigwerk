@@ -11,11 +11,6 @@ use clap_sys::ext::audio_ports::{
 };
 use clap_sys::plugin::clap_plugin;
 
-/// What a slot shows once the plugin has declared audio ports that no longer
-/// match the buffers it was loaded with.
-pub(crate) const AUDIO_PORTS_CHANGED: &str =
-    "The CLAP plugin changed its audio ports; remove it and add it again.";
-
 /// Rescan flags that cannot invalidate the buffers: port names and metadata,
 /// and the in-place pairing, which this host never uses because every port has
 /// its own buffers.

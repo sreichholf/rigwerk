@@ -107,8 +107,9 @@ RIGWERK_VST3_FIXTURES=.vst3-fixtures/plugins \
 ```
 
 The Linux build needs the VSTGUI packages in `.cursor/install.sh`.  The
-VSTGUI editor is not opened on Linux yet: it crashes without a run loop
-on the host context (see `docs/open-items.md`).
+editor test opens AGain's VSTGUI editor in an X11 window, so on Linux it
+needs `xvfb-run` (or a real X server).  `vst3-host` only scans for
+bundles; `audio/vst3` loads, processes and opens them.
 
 ## When a test fails
 
@@ -155,9 +156,10 @@ import `app` or `ui`, and it does not import egui.
 
 - `audio` is DSP, the bridge thread, device backends, and plugin
   instances.  A page holds `PluginView`, never an instance.
-  `PluginGuiWindow` (`app/plugin_gui.rs`) is the editor, and the only
-  place outside `audio` that holds an instance lock.  Do not put another
-  `Arc<Mutex<Plugin>>` on a page, and do not move that window into
+  `PluginGuiWindow` (`app/plugin_gui.rs`) is the editor, and that file
+  is the only place outside `audio` that holds a `PluginHandle`; the
+  editor reaches the plugin through it on the UI thread.  Do not put a
+  handle or an instance on a page, and do not move that window into
   `audio` (the audio crate does not own a window).
 - `app` is state, startup, preferences, device selection, and bridge
   control.  It does not draw, and it does not import `ui`.  A method
@@ -217,6 +219,12 @@ This applies to an input callback, an output callback, an ASIO
 - The callback `try_lock`s the plugin chain, the EQs, and the gate. If
   the lock is busy, skip that work or keep the last settings and try
   again next block. Never call `lock()` from the callback.
+- Plugin instances have no lock the callback takes.  The chain's slot
+  owns each plugin's processor; the UI reaches the rest through its
+  `PluginHandle`.  Values cross in the transfer queues (`transfer.rs`).
+  A restart or reactivation asks for a pause (`pause.rs`) and does its
+  work only once the audio side has stopped the processor, or once no
+  block is inside it.
 - Load, scan, and destroy plugins on the UI thread, then publish under
   a short lock (`Shared::edit_chain`, `add_plugin`). The audio thread
   does not build plugin views.

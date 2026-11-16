@@ -69,9 +69,9 @@ impl RigWerkApp {
         }
         self.bridge_restart_pending = false;
         self.bridge_signature = self.current_bridge_signature();
-        // The open editor's newest edit may be younger than the last 250 ms
-        // poll, and the new session is rebuilt from the saved inserts (their
-        // preferences and state blobs), so read the editor in full here.
+        // The new session is rebuilt from the saved inserts (their
+        // preferences and state blobs), and a plugin may change a value
+        // without reporting it, so read the open editor in full here.
         self.sync_plugin_editor();
         self.driver_checked = false;
         self.issue_state.new_session();
