@@ -525,7 +525,7 @@ impl Shared {
         for path in self.live_paths() {
             // The common case on every UI frame: the chain already runs at
             // the device rate and every slot was opened.  Answered from the
-            // published flags instead of taking the chain lock.
+            // published flags instead of taking the model lock.
             if path.needs_reload(rate) {
                 path.reload_plugins_for_rate(rate);
             }
@@ -540,8 +540,14 @@ impl Shared {
         // device rate is built at that rate once.
         let rate = self.output_rate.load(Ordering::Relaxed);
         let device_rate = (super::clap::is_main_thread() && rate != 0).then_some(rate);
-        for path in self.live_paths() {
-            path.service_plugins_at(device_rate);
+        for path in &self.paths {
+            if path.state().is_live() {
+                path.service_plugins_at(device_rate);
+            } else {
+                // A removed path's release waits for its mixer to park the
+                // runtime; this applies it and destroys what came back.
+                path.flush_chain();
+            }
         }
         // VST3 editors' timers and fds (Linux), whether or not one is open.
         super::vst3::service_run_loop();

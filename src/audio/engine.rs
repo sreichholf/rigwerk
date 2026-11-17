@@ -398,7 +398,7 @@ impl AudioEngine {
     }
 
     /// Path `path`'s plugin counters: how often the audio thread tried the
-    /// chain lock and found it busy, and how often it tried each insert and
+    /// chain and could not run it, and how often it tried each insert and
     /// found it paused.  Measurement only; the report takes no lock on the
     /// sample path.
     pub fn plugin_lock_report(&self, path: usize) -> PluginLockReport {

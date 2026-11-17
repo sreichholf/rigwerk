@@ -54,7 +54,7 @@ impl PluginGuiWindow {
 
     /// Whether the insert at this editor's key still holds its instance.
     /// Read from the published views, so polling an open editor every frame
-    /// never takes the chain lock the audio callback needs.
+    /// never waits for a chain edit.
     fn matches(&self, view: Option<&PluginView>) -> bool {
         view.and_then(|view| view.instance) == Some(self.instance_id())
     }

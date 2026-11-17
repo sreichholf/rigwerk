@@ -281,15 +281,11 @@ fn a_latency_change_crossfades_the_other_path_without_a_click() {
     let mut clock = 0;
     let before = run(&mut mixer, &shared, &mut clock, 4);
     let start = clock;
-    shared.paths[0].edit_chain(|chain| {
-        chain
-            .slot_mut_for_test(0)
-            .test_delay
-            .as_mut()
-            .unwrap()
-            .latency = 640;
-        chain.refresh_latency();
-    });
+    // The insert reports a new latency while the mixer holds the chain.
+    shared.paths[0]
+        .slot_link(0)
+        .expect("one insert")
+        .set_test_latency(640);
     let out = run(&mut mixer, &shared, &mut clock, 12);
     // The sine moves by at most 0.01 per frame; the fade adds the gap
     // between the two read positions spread over 15 ms.
@@ -305,14 +301,16 @@ fn a_latency_change_crossfades_the_other_path_without_a_click() {
 }
 
 #[test]
-fn a_missed_chain_lock_keeps_the_sum_in_time_and_level() {
+fn a_missed_chain_keeps_the_sum_in_time_and_level() {
     const LATENCY: usize = 64;
     let (mut mixer, shared) = aligned_mixer(LATENCY as u32, 0);
     let mut clock = 0;
     let mut out = run(&mut mixer, &shared, &mut clock, 4).remove(0);
     {
-        // The UI holds the chain lock for a whole block (an edit).
-        let _held = shared.paths[0].plugins.lock().unwrap();
+        // The mixer let go of the runtime and the UI holds it for a whole
+        // block (applying an edit).
+        mixer.park_chains_for_test();
+        let _held = shared.paths[0].hold_chain_for_test();
         out.extend(run(&mut mixer, &shared, &mut clock, 1).remove(0));
     }
     out.extend(run(&mut mixer, &shared, &mut clock, 6).remove(0));
@@ -376,13 +374,13 @@ fn a_chain_past_the_alignment_limit_is_flagged() {
 }
 
 #[test]
-fn a_missed_chain_lock_fades_into_the_fallback_without_a_click() {
+fn a_missed_chain_fades_into_the_fallback_without_a_click() {
     let _main = super::super::shared::tests::claim_main_thread();
     let (mut mixer, shared) = aligned_mixer(0, 0);
     // Path 0 runs a plugin whose output is nothing like its input (the
     // fake writes a constant); path 1 plays nowhere.
     shared.paths[0].edit_chain(|chain| {
-        drop(chain.restore(Vec::new()));
+        chain.restore(Vec::new());
         chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false));
     });
     let mut only = OutputDeviceSettings::default();
@@ -399,7 +397,8 @@ fn a_missed_chain_lock_fades_into_the_fallback_without_a_click() {
         out.last().unwrap()[0]
     );
     {
-        let _held = shared.paths[0].plugins.lock().unwrap();
+        mixer.park_chains_for_test();
+        let _held = shared.paths[0].hold_chain_for_test();
         out.extend(run(&mut mixer, &shared, &mut clock, 1).remove(0));
     }
     out.extend(run(&mut mixer, &shared, &mut clock, 2).remove(0));
@@ -411,7 +410,10 @@ fn a_missed_chain_lock_fades_into_the_fallback_without_a_click() {
         "the plugin is back: {}",
         out.last().unwrap()[0]
     );
-    drop(shared.paths[0].edit_chain(|chain| chain.restore(Vec::new())));
+    // Parked, so the removal applies here and the fake is destroyed on
+    // this thread.
+    mixer.park_chains_for_test();
+    shared.paths[0].edit_chain(|chain| chain.restore(Vec::new()));
 }
 
 #[test]

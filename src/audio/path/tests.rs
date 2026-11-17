@@ -31,13 +31,13 @@ fn lock_stats_clamp_skips_to_attempts() {
 }
 
 #[test]
-fn a_missed_chain_lock_is_counted_as_one_attempt_and_one_skip() {
+fn a_missed_chain_is_counted_as_one_attempt_and_one_skip() {
     let path = PathControls::new(48_000);
     path.edit_chain(|chain| chain.insert_delay_for_test(16));
     let mut left = vec![0.5f32; 64];
     let mut right = vec![-0.25f32; 64];
-    // The UI holds the chain: the audio thread skips it for this block.
-    let guard = path.plugins.lock().unwrap();
+    // Someone else holds the runtime: this block skips the chain.
+    let guard = path.hold_chain_for_test();
     assert!(!path.process_plugins(&mut left, &mut right, 64));
     let report = path.plugin_lock_report();
     assert_eq!(
@@ -52,10 +52,10 @@ fn a_missed_chain_lock_is_counted_as_one_attempt_and_one_skip() {
     assert_eq!(
         report.inserts,
         vec![LockStats::default()],
-        "an insert counted a chunk the chain lock kept out"
+        "an insert counted a chunk it was kept out of"
     );
     drop(guard);
-    // The next chunk finds the lock free: one more attempt, no new skip.
+    // The next chunk finds the runtime parked: one more attempt, no new skip.
     assert!(path.process_plugins(&mut left, &mut right, 64));
     assert_eq!(
         path.plugin_lock_report().chain,
@@ -68,9 +68,9 @@ fn a_missed_chain_lock_is_counted_as_one_attempt_and_one_skip() {
     let report = path.plugin_lock_report();
     assert_eq!(report.chain, LockStats::default());
     assert_eq!(report.inserts, vec![LockStats::default()]);
-    // Drop the guard before releasing the slot: a slot left on the
-    // deferred-drop queue flaked the parallel suite.
-    drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+    // Release the slot here: a slot left on the deferred-drop queue flaked
+    // the parallel suite.
+    path.edit_chain(|chain| chain.restore(Vec::new()));
 }
 
 #[test]
@@ -84,7 +84,8 @@ fn a_poisoned_chain_is_reported_without_counting_a_skip() {
     path.poison_chain_for_test();
     let mut left = vec![0.0f32; 64];
     let mut right = vec![0.0f32; 64];
-    // The lock is free but unusable: the block takes the dry fallback.
+    // The runtime is parked but the chain is dead: the block takes the dry
+    // fallback.
     assert!(!path.process_plugins(&mut left, &mut right, 64));
     let report = path.plugin_lock_report();
     assert_eq!(
@@ -93,7 +94,7 @@ fn a_poisoned_chain_is_reported_without_counting_a_skip() {
             attempts: 1,
             skips: 0,
         },
-        "a poisoned lock is not contention"
+        "a dead chain is not contention"
     );
     assert!(report.chain_poisoned);
     // Resetting the counters cannot make the chain usable again.
@@ -109,13 +110,13 @@ fn a_zero_latency_edit_panic_is_reported_before_the_callback() {
     let _main = crate::audio::claim_main_thread();
     let path = PathControls::new(48_000);
     path.insert_delay_for_test(0);
-    path.poison_chain_in_edit_for_test();
+    path.poison_chain_for_test();
     // Published by the unwind guard.  The callback has not run yet.
     assert!(path.plugin_lock_report().chain_poisoned);
     let mut left = vec![0.0f32; 64];
     let mut right = vec![0.0f32; 64];
     // Active is cleared and latency is still 0, so this returns before the
-    // poisoned lock and counts no attempt.
+    // dead chain and counts no attempt.
     assert!(path.process_plugins(&mut left, &mut right, 64));
     assert_eq!(path.plugin_lock_report().chain.attempts, 0);
 }
@@ -174,5 +175,5 @@ fn chain_bypass_skips_the_callback_and_leaves_stored_bypass_alone() {
     assert!(!saved[0].bypass);
     assert!(saved[1].bypass);
     assert_eq!(path.latency_samples(), 24);
-    drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+    path.edit_chain(|chain| chain.restore(Vec::new()));
 }

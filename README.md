@@ -103,7 +103,8 @@ output, and the metronome, while the page is open.
 
 The library of VST3 and CLAP effects found in the standard folders (and in
 `CLAP_PATH` or `RIGWERK_CLAP_PATH` for CLAP). Search it, add an effect to a
-path with one click, or add one by file path.
+path with one click, or add one by file path. A path holds up to 32
+effects. Adding, removing or reordering them does not stall the audio.
 
 ![Plugins](docs/screenshots/plugins.png)
 

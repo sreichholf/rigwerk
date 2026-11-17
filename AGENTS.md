@@ -216,18 +216,23 @@ This applies to an input callback, an output callback, an ASIO
 - Rings are lock-free and single-producer single-consumer (`ring.rs`,
   and the same pattern on `Shared`). One side writes `head`, the other
   writes `tail`. Do not put a `Mutex` on the sample path.
-- The callback `try_lock`s the plugin chain, the EQs, and the gate. If
-  the lock is busy, skip that work or keep the last settings and try
-  again next block. Never call `lock()` from the callback.
+- The callback `try_lock`s the EQs and the gate. If the lock is busy,
+  keep the last settings and try again next block. Never call `lock()`
+  from the callback.
+- The plugin chain has no lock.  The mixer holds each path's runtime
+  (`plugins/chain.rs`) and applies the commands the UI's model queued
+  at the start of a block.  A slot it lets go of goes back through the
+  return queue: the audio side never destroys one.
 - Plugin instances have no lock the callback takes.  The chain's slot
   owns each plugin's processor; the UI reaches the rest through its
   `PluginHandle`.  Values cross in the transfer queues (`transfer.rs`).
   A restart or reactivation asks for a pause (`pause.rs`) and does its
   work only once the audio side has stopped the processor, or once no
   block is inside it.
-- Load, scan, and destroy plugins on the UI thread, then publish under
-  a short lock (`Shared::edit_chain`, `add_plugin`). The audio thread
-  does not build plugin views.
+- Load, scan, and destroy plugins on the UI thread.  A structural edit
+  goes through the chain model (`PathControls::edit_chain`,
+  `add_plugin`), which builds and loads the slot before it sends it.
+  The audio thread does not build plugin views.
 - Hold a `DenormalGuard` for the whole block so the EQ, the gate, and
   the inserts run in flush-to-zero. Drop restores the previous mode.
 - The resampler kernel is preallocated through `PREALLOCATED_SOURCE_RATE`

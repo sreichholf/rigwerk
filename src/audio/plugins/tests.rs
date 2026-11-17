@@ -367,9 +367,9 @@ fn a_port_change_takes_the_insert_out_and_keeps_its_latency() {
 fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
     use super::super::clap::tests::fake_plugin_for_test;
     use super::link::{ClapFailure, ProcessFailure};
-    use super::PluginChain;
+    use super::ChainRuntime;
 
-    let mut chain = PluginChain::new(48_000);
+    let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_clap_for_test(fake_plugin_for_test(true));
     assert_eq!(chain.active(), 1);
     let mut left = vec![0.5f32; 64];
@@ -422,21 +422,17 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
-    use super::PluginChain;
-    use std::sync::atomic::Ordering;
+    use super::ChainRuntime;
 
-    let mut chain = PluginChain::new(48_000);
-    let total = chain.latency_handle();
+    let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(16));
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(32));
     // The fake loaded last is the one `restart_fake_with_latency_for_test` moves.
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64));
     // A saved insert that was never opened.
-    assert!(chain
-        .push_slot(Slot::empty(PluginPref::default()), 48_000)
-        .is_ok());
+    chain.push_for_test(Slot::empty(PluginPref::default()));
     assert_eq!(chain.latency_samples(), 112);
-    assert_eq!(total.load(Ordering::Acquire), 112);
+    assert_eq!(chain.latency(), 112);
 
     // Bypass keeps the latency, so the alignment does not move.
     chain.set_bypass(1, true);
@@ -475,7 +471,7 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     // The failure set above (outside an edit) reaches the atomic with the
     // first block, which asks for a republish; the next block does not.
     assert!(chain.process(&mut left, &mut right, 32));
-    assert_eq!(total.load(Ordering::Acquire), 96);
+    assert_eq!(chain.latency(), 96);
     assert!(!chain.process(&mut left, &mut right, 32));
 
     // The last fake switches modes the CLAP way: it asks for a restart and
@@ -491,32 +487,32 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     // The next block publishes it and asks for the views to be rebuilt,
     // so the stale `· 64 smp` label goes.
     assert!(chain.process(&mut left, &mut right, 32));
-    assert_eq!(total.load(Ordering::Acquire), 40);
+    assert_eq!(chain.latency(), 40);
     assert_eq!(chain.views()[2].latency, 8);
     assert!(!chain.process(&mut left, &mut right, 32));
 
     // Destroy the plugins here rather than through the chain's deferred
     // teardown, which another test's main-thread claim could trigger.
     drop(services);
-    drop(chain.restore(Vec::new()));
-    assert_eq!(total.load(Ordering::Acquire), 0);
+    drop(chain.clear_for_test());
+    assert_eq!(chain.latency(), 0);
 }
 
 /// A rate rebuild restores what the handle saved since the load (the
-/// slot's own pref no longer holds it), and refuses a plan the handle moved
-/// past before the install.
+/// slot's own pref no longer holds it), as it stands when the plan is made.
 #[test]
 fn a_rate_rebuild_restores_what_the_handle_saved_since_load() {
     use super::super::clap::tests::{
         fake_plugin_with_state_for_test, fake_restoring_for_test, set_fake_state_for_test,
     };
-    use super::PluginChain;
+    use super::ChainModel;
 
     let _main = crate::audio::claim_main_thread();
     let state_bytes = |pref: &PluginPref| pref.state.as_ref().and_then(PluginState::bytes);
-    let mut chain = PluginChain::new(48_000);
+    let mut chain = ChainModel::new(48_000, Default::default());
     chain.insert_clap_for_test(fake_plugin_with_state_for_test(b"one"));
-    let handle = chain.slot_links()[0].plugin.clone().expect("loaded");
+    drop(chain.flush());
+    let handle = chain.links()[0].plugin.clone().expect("loaded");
     handle.mark_state_stale();
     handle.capture_state();
     assert!(!handle.wants_capture());
@@ -525,40 +521,33 @@ fn a_rate_rebuild_restores_what_the_handle_saved_since_load() {
     assert_eq!(plan.jobs.len(), 1);
     assert_eq!(state_bytes(&plan.jobs[0].1).as_deref(), Some(&b"one"[..]));
 
-    // The plugin's state moves on before the rebuilt slot is installed.
+    // The plugin's state moves on; the next plan carries it.
     set_fake_state_for_test(b"two");
     handle.mark_state_stale();
     handle.capture_state();
-    let rebuild = |jobs: Vec<(usize, PluginPref)>| -> Vec<(usize, PluginPref, Slot)> {
-        jobs.into_iter()
-            .map(|(index, pref)| {
-                let plugin = fake_restoring_for_test(&pref);
-                let slot = Slot::with_plugin_for_test(pref.clone(), plugin, 96_000);
-                (index, pref, slot)
-            })
-            .collect()
-    };
-    let refused = chain.install_reload(plan.previous_rate, 96_000, rebuild(plan.jobs));
-    let Err(stale) = refused else {
-        panic!("a plan older than the saved state was installed");
-    };
-    drop(stale);
-
     let plan = chain.reload_plan(96_000).expect("still a new rate");
     assert_eq!(state_bytes(&plan.jobs[0].1).as_deref(), Some(&b"two"[..]));
-    let Ok(old) = chain.install_reload(plan.previous_rate, 96_000, rebuild(plan.jobs)) else {
-        panic!("the fresh plan matches the chain");
-    };
-    drop(old);
+    let built = plan
+        .jobs
+        .into_iter()
+        .map(|(index, pref)| {
+            let plugin = fake_restoring_for_test(&pref);
+            (index, Slot::with_plugin_for_test(pref, plugin, 96_000))
+        })
+        .collect();
+    chain.install(96_000, built);
+    // The old slot comes back from the runtime and is destroyed here.
+    assert_eq!(chain.flush().len(), 1);
     drop(handle);
-    let rebuilt = chain.slot_links()[0].plugin.clone().expect("loaded");
+    let rebuilt = chain.links()[0].plugin.clone().expect("loaded");
     let (_, state) = rebuilt.saved();
     assert_eq!(
         state.as_ref().and_then(PluginState::bytes).as_deref(),
         Some(&b"two"[..])
     );
     drop(rebuilt);
-    drop(chain.restore(Vec::new()));
+    chain.restore(Vec::new());
+    drop(chain.flush());
 }
 
 /// An impulse at frame `at` in a block of `frames`.
@@ -570,39 +559,43 @@ fn impulse(frames: usize, at: usize) -> Vec<f32> {
 
 #[test]
 fn a_rate_reload_keeps_the_insert_counters() {
-    use super::PluginChain;
-    let mut chain = PluginChain::new(48_000);
+    use super::ChainModel;
+    let mut chain = ChainModel::new(48_000, Default::default());
+    let home = chain.home();
     chain.insert_delay_for_test(16);
-    let mut left = vec![0.0f32; 32];
-    let mut right = vec![0.0f32; 32];
-    chain.process(&mut left, &mut right, 32);
-    let before = chain.slot_mut_for_test(0).controls.lock_stats();
+    drop(chain.flush());
+    {
+        let mut runtime = home.take().expect("parked");
+        let mut left = vec![0.0f32; 32];
+        let mut right = vec![0.0f32; 32];
+        runtime.process(&mut left, &mut right, 32);
+    }
+    let before = chain.links()[0].controls.lock_stats();
     assert_eq!(before.attempts, 1, "the insert was tried once");
 
     let plan = chain.reload_plan(96_000).expect("a new rate reloads");
     assert_eq!(plan.jobs.len(), 1);
-    let built: Vec<_> = plan
+    let built = plan
         .jobs
         .into_iter()
-        .map(|(index, pref)| (index, pref, Slot::delay_for_test(16)))
+        .map(|(index, _)| (index, Slot::delay_for_test(16)))
         .collect();
-    let replaced = match chain.install_reload(plan.previous_rate, 96_000, built) {
-        Ok(replaced) => replaced,
-        Err(_) => panic!("the rebuilt slots match the chain"),
-    };
-    drop(replaced);
-    // `install_reload` reuses the old `SlotControls`, so the UI-side mix,
-    // bypass and lock counters survive the rebuild.
-    assert_eq!(chain.slot_mut_for_test(0).controls.lock_stats(), before);
-    // Destroy the rebuilt slot here rather than through the chain's deferred
-    // teardown, which another test's main-thread claim could trigger.
-    drop(chain.restore(Vec::new()));
+    chain.install(96_000, built);
+    drop(chain.flush());
+    // The rebuilt slot keeps the old `SlotControls`, so the UI-side mix,
+    // bypass and lock counters survive the rebuild, on both sides.
+    assert_eq!(chain.links()[0].controls.lock_stats(), before);
+    let mut runtime = home.take().expect("parked");
+    assert_eq!(runtime.slot_mut_for_test(0).controls.lock_stats(), before);
+    drop(runtime);
+    chain.restore(Vec::new());
+    drop(chain.flush());
 }
 
 #[test]
 fn a_partial_mix_lines_the_dry_side_up_with_the_wet_one() {
-    use super::PluginChain;
-    let mut chain = PluginChain::new(48_000);
+    use super::ChainRuntime;
+    let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_delay_for_test(32);
     chain.set_mix(0, 0.5);
     let mut left = impulse(128, 10);
@@ -615,8 +608,8 @@ fn a_partial_mix_lines_the_dry_side_up_with_the_wet_one() {
 
 #[test]
 fn a_skipped_insert_still_delays_by_its_latency() {
-    use super::PluginChain;
-    let mut chain = PluginChain::new(48_000);
+    use super::ChainRuntime;
+    let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_delay_for_test(16);
     chain.insert_delay_for_test(8);
     assert_eq!(chain.latency_samples(), 24);
@@ -648,8 +641,8 @@ fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
-    use super::PluginChain;
-    let mut chain = PluginChain::new(48_000);
+    use super::ChainRuntime;
+    let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64));
     let mut left = vec![0.0f32; 128];
     let mut right = vec![0.0f32; 128];
@@ -704,25 +697,20 @@ fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
     chain.process(&mut left, &mut right, 128);
     assert_eq!(left[127], 1.0);
     drop(handle);
-    drop(chain.restore(Vec::new()));
+    drop(chain.clear_for_test());
 }
 
 #[test]
 fn a_bypass_after_a_latency_change_delays_by_the_new_latency_at_once() {
-    use super::PluginChain;
-    let mut chain = PluginChain::new(48_000);
+    use super::ChainRuntime;
+    let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_delay_for_test(0);
     let mut left = vec![0.0f32; 128];
     let mut right = vec![0.0f32; 128];
     chain.process(&mut left, &mut right, 128);
     // The insert switches to 64 frames while it runs fully wet: its dry
     // side is not read, but has to follow.
-    chain
-        .slot_mut_for_test(0)
-        .test_delay
-        .as_mut()
-        .unwrap()
-        .latency = 64;
+    chain.slot_links()[0].set_test_latency(64);
     for _ in 0..4 {
         chain.process(&mut left, &mut right, 128);
     }
@@ -735,18 +723,16 @@ fn a_bypass_after_a_latency_change_delays_by_the_new_latency_at_once() {
 
 #[test]
 fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
-    use super::PluginChain;
-    use std::sync::atomic::Ordering;
+    use super::ChainRuntime;
 
-    let mut chain = PluginChain::new(48_000);
-    let total = chain.latency_handle();
+    let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_delay_for_test(16);
     chain.insert_delay_for_test(8);
     chain.set_bypass(1, true);
     assert!(!chain.slot_mut_for_test(0).controls.bypass());
     assert!(chain.slot_mut_for_test(1).controls.bypass());
     assert_eq!(chain.latency_samples(), 24);
-    assert_eq!(total.load(Ordering::Acquire), 24);
+    assert_eq!(chain.latency(), 24);
 
     chain.set_chain_bypass(true);
     let mut left = impulse(64, 0);
@@ -767,7 +753,7 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
         );
     }
     assert_eq!(chain.latency_samples(), 24);
-    assert_eq!(total.load(Ordering::Acquire), 24);
+    assert_eq!(chain.latency(), 24);
 
     chain.set_chain_bypass(false);
     let mut left = vec![0.0f32; 64];
@@ -779,8 +765,8 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
     assert_eq!(chain.slot_mut_for_test(0).controls.lock_stats().attempts, 1);
     assert_eq!(chain.slot_mut_for_test(1).controls.lock_stats().attempts, 0);
     assert_eq!(chain.latency_samples(), 24);
-    assert_eq!(total.load(Ordering::Acquire), 24);
-    drop(chain.restore(Vec::new()));
+    assert_eq!(chain.latency(), 24);
+    drop(chain.clear_for_test());
 }
 
 // Real VST3 plugins: Steinberg's SDK samples, built by
@@ -1045,8 +1031,7 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
 }
 
 /// A value set after the load survives a rate change (the rebuilt AGain
-/// opens with it), and a value set between a reload's plan and its install
-/// makes the install refuse the stale plan.
+/// opens with it), and so does one set after that rebuild.
 #[test]
 fn vst3_fixture_again_a_rate_reload_keeps_values_set_since_load() {
     let _main = crate::audio::claim_main_thread();
@@ -1070,25 +1055,17 @@ fn vst3_fixture_again_a_rate_reload_keeps_values_set_since_load() {
         "rebuilt peak {peak}"
     );
 
-    let plan = path
-        .edit_chain(|chain| chain.reload_plan(48_000))
-        .flatten()
-        .expect("a new rate reloads");
+    // A value set after the first rebuild survives the next one too.
     path.set_plugin_parameter(0, gain, 0.75).expect("set Gain");
-    let built: Vec<_> = plan
-        .jobs
-        .into_iter()
-        .map(|(index, pref)| {
-            let (slot, _) = super::PluginChain::load_slot(pref.clone(), 48_000);
-            (index, pref, slot)
-        })
-        .collect();
-    let installed = path
-        .edit_chain(|chain| chain.install_reload(plan.previous_rate, 48_000, built))
-        .expect("the chain is not poisoned");
-    assert!(installed.is_err(), "a stale plan was installed");
-    drop(installed);
-    assert_eq!(path.chain_rate(), 96_000);
+    path.reload_plugins_for_rate(48_000);
+    assert_eq!(path.chain_rate(), 48_000);
+    let view = only_view(&path);
+    assert!((param_value(&view.parameters, "Gain") - 0.75).abs() < 1e-6);
+    let peak = run_tone(&path, 8);
+    assert!(
+        (peak - TONE_PEAK * 0.75).abs() < 0.01,
+        "rebuilt again peak {peak}"
+    );
 }
 
 /// ADelay's delay is the normalized value times the rate, in samples
@@ -1455,22 +1432,4 @@ fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
     assert_eq!(insert.skipped(), 0, "a control set paused the insert");
     path.service_plugins();
     only_view(&path);
-}
-
-#[test]
-fn a_latency_total_the_ui_stored_meanwhile_is_not_overwritten() {
-    use super::chain::publish_total;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    let cell = AtomicU32::new(16);
-    // The audio thread read 16 and summed 32; the UI stored 48 meanwhile.
-    cell.store(48, Ordering::Release);
-    assert!(!publish_total(&cell, 16, 32));
-    assert_eq!(cell.load(Ordering::Acquire), 48, "the newer value wins");
-    // Nothing in between: the sum goes in and counts as a change.
-    assert!(publish_total(&cell, 48, 32));
-    assert_eq!(cell.load(Ordering::Acquire), 32);
-    // The same total again is no change.
-    assert!(!publish_total(&cell, 32, 32));
-    assert_eq!(cell.load(Ordering::Acquire), 32);
 }

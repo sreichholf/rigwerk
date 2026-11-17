@@ -1,6 +1,28 @@
-//! One signal path's insert chain.
+//! One signal path's insert chain on the audio side: the [`ChainRuntime`]
+//! the audio thread owns and runs, the [`ChainCommand`]s that change it,
+//! and the [`ChainHome`] it waits in while no audio thread holds it.  The
+//! UI side is `model` ([`super::ChainModel`]).
+//!
+//! The UI never touches the runtime while an audio thread holds it.  Every
+//! structural edit (insert, remove, move, replace, a new rate) reaches it
+//! as a command through a queue, with any new slot already built, loaded
+//! and activated on the UI thread.  The runtime applies the commands at the
+//! start of a block and hands every slot it lets go of back through the
+//! return queue, for the UI thread to destroy.  So the audio thread never
+//! waits, never allocates, and never loads or destroys a plugin for an edit.
+//!
+//! The mixer takes the runtime out of its path's home with its first block
+//! of the path, as a [`ChainLease`], and parks it again when the path stops
+//! being live or the mixer goes away (the lease's `Drop`).  While it is
+//! parked, the UI takes it and applies its commands itself.  A block that
+//! finds the home empty because the UI holds it for that moment, or another
+//! mixer still does, plays the chain's input delayed by its latency
+//! (`mixer::PathProcessor::run_inserts`).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Arc;
 
 use super::super::delay::{DECLICK_SECONDS, TAP_FADE_SECONDS};
@@ -10,274 +32,266 @@ use super::handle::Outcome;
 use super::load::MAX_BLOCK;
 #[cfg(test)]
 use super::pref::PluginFormat;
+#[cfg(test)]
 use super::pref::PluginPref;
 #[cfg(test)]
 use super::pref::PluginView;
-use super::slot::{defer_plugin_slots, Slot, SlotLink};
+use super::queue::{Consumer, Producer};
+#[cfg(test)]
+use super::slot::SlotLink;
+use super::slot::{defer_plugin_slots, Slot};
 #[cfg(test)]
 use super::MAX_ALIGN;
 
-/// Slots [`PluginChain::reload_plan`] wants opened at a new or first rate.
-/// The caller builds them without the chain lock.
-pub(crate) struct ReloadPlan {
-    pub(crate) previous_rate: u32,
-    pub(crate) jobs: Vec<(usize, PluginPref)>,
-    /// The jobs' indices whose plugin asked to be rebuilt.
-    pub(crate) requested: Vec<usize>,
+/// The most inserts one path holds.  The runtime's slot list is allocated
+/// for this many, so an insert never grows it on the audio thread.
+pub(crate) const MAX_INSERTS: usize = 32;
+
+/// Room in the command queue.  A full queue is not an error: the model
+/// keeps the rest in its backlog and sends it once the runtime caught up.
+pub(super) const COMMAND_QUEUE: usize = 4 * MAX_INSERTS;
+
+/// Room in the return queue.  The runtime applies a command that lets go of
+/// a slot only while the queue has room for it, so it never has to drop one.
+pub(super) const RETURN_QUEUE: usize = 2 * MAX_INSERTS;
+
+/// One structural edit, as the UI sends it to the runtime.  Indices are
+/// positions in the chain as it stands once every earlier command applied,
+/// which is the model's own list.  A slot travels boxed, so moving it in or
+/// out of the runtime never allocates.
+pub(crate) enum ChainCommand {
+    /// Puts `slot` at `index` (at the end if past it).
+    Insert { index: usize, slot: Box<Slot> },
+    /// Takes the slot at `index` out and returns it.
+    Remove { index: usize },
+    /// Swaps two slots.
+    Swap { a: usize, b: usize },
+    /// Puts `slot` at `index` and returns the slot it replaces.
+    Replace { index: usize, slot: Box<Slot> },
+    /// The rate the slots are now built for (fades and declicks).
+    SetRate(u32),
 }
 
-/// One path's insert chain.  The audio callback only try-locks the chain, so
-/// a structural edit skips that processing for a block instead of stalling
-/// the callback; UI paths may still block on the chain lock.  A plugin is
-/// never locked: a restart pauses it instead.  A skip never changes the
-/// timing: a skipped insert plays its
-/// input delayed by its latency, and a missed chain lock is covered the same
-/// way by the mixer (see the `path::plugins` module docs, "Chain handover").
+/// Destroys a slot here if this thread may destroy plugins, else hands it
+/// to the deferred queue the UI thread drains.  What a queue does with the
+/// values left in it when both its ends are gone.
+pub(super) fn release_slot(slot: Box<Slot>) {
+    if super::super::clap::may_destroy_plugins_here() {
+        drop(slot);
+    } else {
+        defer_plugin_slots(vec![*slot]);
+    }
+}
+
+/// As [`release_slot`], for a command that never reached the runtime.
+pub(super) fn release_command(command: ChainCommand) {
+    match command {
+        ChainCommand::Insert { slot, .. } | ChainCommand::Replace { slot, .. } => {
+            release_slot(slot);
+        }
+        ChainCommand::Remove { .. } | ChainCommand::Swap { .. } | ChainCommand::SetRate(_) => {}
+    }
+}
+
+/// One path's insert chain as the audio thread runs it.  It holds the
+/// slots, each with its plugin's processor, and is touched by one thread at
+/// a time: the audio thread through a [`ChainLease`], or the UI while it is
+/// parked.
 ///
 /// Latency: every insert reports the samples it delays the signal by (VST3
 /// `getLatencySamples`, CLAP `latency.get`, read after each activation and
 /// again when the plugin reports a change).  The chain total, bypassed
 /// inserts included (see [`Slot::latency_samples`]), is
-/// [`Self::latency_samples`], and is also kept in an atomic
-/// ([`Self::latency_handle`]) that readers outside the chain lock can load.
-/// A path-level chain bypass ([`Self::set_chain_bypass`]) skips every
-/// insert the same way and still counts in that total.
-pub(crate) struct PluginChain {
-    slots: Vec<Slot>,
+/// [`Self::latency_samples`].  A path-level chain bypass skips every insert
+/// the same way and still counts in that total.
+pub(crate) struct ChainRuntime {
+    /// Allocated for [`MAX_INSERTS`]; never grows.  Boxed: a slot arrives
+    /// and leaves through the queues as a `Box`, built and freed on the UI
+    /// thread, so moving one in or out here never allocates.
+    #[allow(clippy::vec_box)]
+    slots: Vec<Box<Slot>>,
     sample_rate: u32,
-    /// [`Self::latency_samples`] as last published.
-    latency: Arc<AtomicU32>,
-    /// Skips every insert's processing.  The audio thread loads it; the UI
-    /// stores it without the chain lock.  It does not write each slot's
-    /// own bypass.
+    /// The total [`Self::publish_latency`] last saw.
+    latency: u32,
+    /// Skips every insert's processing.  The UI stores it; [`Self::process`]
+    /// loads it.  It does not write each slot's own bypass.
     chain_bypass: Arc<AtomicBool>,
+    commands: Consumer<ChainCommand>,
+    returns: Producer<Box<Slot>>,
 }
 
-impl PluginChain {
-    pub(crate) fn new(sample_rate: u32) -> Self {
-        let rate = if sample_rate == 0 {
-            48_000
-        } else {
-            sample_rate
-        };
+impl ChainRuntime {
+    pub(super) fn new(
+        sample_rate: u32,
+        chain_bypass: Arc<AtomicBool>,
+        commands: Consumer<ChainCommand>,
+        returns: Producer<Box<Slot>>,
+    ) -> Self {
         Self {
-            slots: Vec::new(),
-            sample_rate: rate,
-            latency: Arc::new(AtomicU32::new(0)),
-            chain_bypass: Arc::new(AtomicBool::new(false)),
+            slots: Vec::with_capacity(MAX_INSERTS),
+            sample_rate,
+            latency: 0,
+            chain_bypass,
+            commands,
+            returns,
+        }
+    }
+
+    /// A runtime with no model, for tests that build and run a chain
+    /// directly.  Nothing ever sends it a command.
+    #[cfg(test)]
+    pub(crate) fn for_test(sample_rate: u32) -> Self {
+        let (_, commands) = super::queue::queue(1, release_command);
+        let (returns, _) = super::queue::queue(1, release_slot);
+        Self::new(
+            sample_rate,
+            Arc::new(AtomicBool::new(false)),
+            commands,
+            returns,
+        )
+    }
+
+    /// Applies the commands the UI queued, in order, without allocating.
+    /// It stops early, leaving the rest queued for the next call, when the
+    /// return queue has no room for a slot one would hand back.  Returns
+    /// whether it applied any.
+    pub(crate) fn apply_commands(&mut self) -> bool {
+        let mut applied = false;
+        while let Some(command) = self.commands.peek() {
+            if self.returns.room() == 0 && self.hands_back(command) {
+                break;
+            }
+            let Some(command) = self.commands.pop() else {
+                break;
+            };
+            self.apply(command);
+            applied = true;
+        }
+        applied
+    }
+
+    /// Whether applying `command` hands a slot back.
+    fn hands_back(&self, command: &ChainCommand) -> bool {
+        match command {
+            ChainCommand::Remove { .. } | ChainCommand::Replace { .. } => true,
+            ChainCommand::Insert { .. } => self.slots.len() >= self.slots.capacity(),
+            ChainCommand::Swap { .. } | ChainCommand::SetRate(_) => false,
+        }
+    }
+
+    fn apply(&mut self, command: ChainCommand) {
+        match command {
+            ChainCommand::Insert { index, slot } => {
+                if self.slots.len() < self.slots.capacity() {
+                    self.slots.insert(index.min(self.slots.len()), slot);
+                } else {
+                    // The model never sends more than MAX_INSERTS.
+                    self.hand_back(slot);
+                }
+            }
+            ChainCommand::Remove { index } => {
+                if index < self.slots.len() {
+                    let slot = self.slots.remove(index);
+                    self.hand_back(slot);
+                }
+            }
+            ChainCommand::Swap { a, b } => {
+                if a < self.slots.len() && b < self.slots.len() {
+                    self.slots.swap(a, b);
+                }
+            }
+            ChainCommand::Replace { index, slot } => match self.slots.get_mut(index) {
+                Some(current) => {
+                    let old = std::mem::replace(current, slot);
+                    self.hand_back(old);
+                }
+                None => self.hand_back(slot),
+            },
+            ChainCommand::SetRate(rate) => self.sample_rate = rate,
+        }
+    }
+
+    /// Queues a slot for the UI to destroy.  [`Self::apply_commands`] made
+    /// sure there is room; were there none, the slot is leaked rather than
+    /// destroyed here.
+    fn hand_back(&mut self, slot: Box<Slot>) {
+        if let Err(slot) = self.returns.push(slot) {
+            std::mem::forget(slot);
         }
     }
 
     /// The latency in samples the chain *should* have: the sum over its
     /// inserts (see [`Slot::latency_samples`]).  A bypassed insert still
     /// counts (so bypass does not move the alignment); one that is not
-    /// loaded or failed counts 0.  Atomics only, so the audio thread may
-    /// call it under the chain lock.
+    /// loaded or failed counts 0.  Atomics only.
     ///
     /// It is also the delay the chain really has, block by block: an insert
-    /// skipped for a block (bypass, mix at 0, a restart's pause) plays its input delayed by its latency, and a
-    /// partial mix delays its dry side by it (see [`Self::process`]).
+    /// skipped for a block (bypass, mix at 0, a restart's pause) plays its
+    /// input delayed by its latency, and a partial mix delays its dry side
+    /// by it (see [`Self::process`]).
     pub(crate) fn latency_samples(&self) -> u32 {
         self.slots
             .iter()
-            .map(Slot::latency_samples)
+            .map(|slot| slot.latency_samples())
             .fold(0u32, u32::saturating_add)
     }
 
-    /// The chain total as an atomic, for readers that do not hold the chain
-    /// lock (the audio thread's alignment, for one).  It is refreshed on
-    /// every edit and every processed block, so a plugin that changes its
-    /// latency on the main thread shows up by the next block.
-    pub(crate) fn latency_handle(&self) -> Arc<AtomicU32> {
-        Arc::clone(&self.latency)
+    /// Sums the latency again and returns whether it moved since the last
+    /// call.  A plugin that changes its latency on the main thread shows up
+    /// here by the next block.
+    pub(crate) fn publish_latency(&mut self) -> bool {
+        let latency = self.latency_samples();
+        let changed = latency != self.latency;
+        self.latency = latency;
+        changed
     }
 
-    /// The path-level bypass flag, shared so the UI can set it without the
-    /// chain lock.  [`Self::process`] loads it on the audio thread.
-    pub(crate) fn chain_bypass_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.chain_bypass)
+    /// The total as [`Self::publish_latency`] last summed it.
+    pub(crate) fn latency(&self) -> u32 {
+        self.latency
     }
 
-    /// Skips every insert's processing until cleared.  Each slot's own
-    /// bypass is left as it is, so clearing this restores those states.
-    /// Latency stays counted.  The running path writes the same atomic;
-    /// this setter is for the chain's own tests.
+    pub(crate) fn active(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.active()).count()
+    }
+
+    /// Whether a restored slot is still waiting for its first open.
+    pub(crate) fn has_unopened(&self) -> bool {
+        self.slots.iter().any(|slot| slot.needs_open())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rate(&self) -> u32 {
+        self.sample_rate
+    }
+
     #[cfg(test)]
     pub(crate) fn set_chain_bypass(&self, bypass: bool) {
         self.chain_bypass.store(bypass, Ordering::Relaxed);
-    }
-
-    /// Publishes the latency total after a test changed an insert's latency
-    /// in place.  The running path republishes from its links instead
-    /// (`PathControls::service_plugins`).
-    #[cfg(test)]
-    pub(crate) fn refresh_latency(&mut self) {
-        self.publish_latency();
-    }
-
-    /// Stores [`Self::latency_samples`] in the shared atomic and returns
-    /// whether that changed it.  Allocation and lock free.
-    fn publish_latency(&self) -> bool {
-        let previous = self.latency.load(Ordering::Acquire);
-        publish_total(&self.latency, previous, self.latency_samples())
-    }
-
-    /// Replaces the slots and hands the old ones back, so the caller can
-    /// drop (and destroy) them after releasing the chain lock.
-    pub(crate) fn restore(&mut self, prefs: Vec<PluginPref>) -> Vec<Slot> {
-        let old = std::mem::replace(
-            &mut self.slots,
-            prefs.into_iter().map(Slot::empty).collect(),
-        );
-        self.publish_latency();
-        old
-    }
-
-    /// Builds a fully opened slot without holding the chain lock.  Add it with
-    /// [`Self::push_slot`] once it is ready, so a slow library load or
-    /// `start_processing` never stalls the audio callback.  A failed load is
-    /// returned as an error but remains a valid slot to push, so the failure
-    /// stays visible in the insert list instead of disappearing.
-    pub(crate) fn load_slot(pref: PluginPref, sample_rate: u32) -> (Slot, Result<(), String>) {
-        let slot = Slot::loaded(pref, sample_rate);
-        let result = match &slot.error {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        };
-        (slot, result)
-    }
-
-    /// Splices an already loaded slot into the chain, but only when it was
-    /// built for the chain's current rate.  The caller holds the chain lock.
-    /// A mismatched slot is handed back so the caller can release the lock
-    /// before dropping it and rebuild at the new rate.
-    #[allow(clippy::result_large_err)] // Slot is returned so the caller can rebuild it.
-    pub(crate) fn push_slot(&mut self, slot: Slot, loaded_rate: u32) -> Result<(), Slot> {
-        if loaded_rate != self.sample_rate {
-            return Err(slot);
-        }
-        self.slots.push(slot);
-        self.publish_latency();
-        Ok(())
-    }
-
-    /// Lists slots to rebuild at `rate` without loading them: every slot
-    /// when the rate changed, else the never-opened ones and those whose
-    /// plugin asked to be rebuilt.  When the rate changed and nothing is
-    /// installed, the rate is updated here.  The
-    /// caller loads [`ReloadPlan::jobs`] outside the chain lock and commits
-    /// them with [`Self::install_reload`].
-    pub(crate) fn reload_plan(&mut self, rate: u32) -> Option<ReloadPlan> {
-        let rate_changed = rate != self.sample_rate;
-        let jobs: Vec<(usize, PluginPref)> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| rate_changed || slot.needs_open() || slot.reload_wanted())
-            .map(|(index, slot)| (index, slot.restore_pref()))
-            .collect();
-        let requested = jobs
-            .iter()
-            .map(|(index, _)| *index)
-            .filter(|&index| self.slots[index].reload_wanted())
-            .collect();
-        if jobs.is_empty() {
-            if rate_changed {
-                self.apply_rate(rate);
-            }
-            return None;
-        }
-        Some(ReloadPlan {
-            previous_rate: self.sample_rate,
-            jobs,
-            requested,
-        })
-    }
-
-    /// Lists only the slots whose plugin asked to be rebuilt, at the
-    /// chain's rate: a reload request opens nothing else.
-    pub(crate) fn request_plan(&mut self) -> Option<ReloadPlan> {
-        let jobs: Vec<(usize, PluginPref)> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| slot.reload_wanted())
-            .map(|(index, slot)| (index, slot.restore_pref()))
-            .collect();
-        (!jobs.is_empty()).then(|| ReloadPlan {
-            previous_rate: self.sample_rate,
-            requested: jobs.iter().map(|(index, _)| *index).collect(),
-            jobs,
-        })
-    }
-
-    /// Swaps in slots built outside the lock.  On success the replaced slots
-    /// are returned so the caller can drop them after releasing the lock.
-    /// On conflict the new slots are returned instead and the chain is left
-    /// as it was.
-    pub(crate) fn install_reload(
-        &mut self,
-        previous_rate: u32,
-        rate: u32,
-        built: Vec<(usize, PluginPref, Slot)>,
-    ) -> Result<Vec<Slot>, Vec<Slot>> {
-        let unchanged = self.sample_rate == previous_rate
-            && built.iter().all(|(index, pref, _)| {
-                self.slots
-                    .get(*index)
-                    .is_some_and(|slot| slot.restores_with(pref))
-            });
-        if !unchanged {
-            return Err(built.into_iter().map(|(_, _, slot)| slot).collect());
-        }
-        let mut old = Vec::with_capacity(built.len());
-        for (index, _, mut slot) in built {
-            // The UI may have moved mix or bypass meanwhile; it keeps
-            // writing to the same controls.
-            slot.controls = Arc::clone(&self.slots[index].controls);
-            old.push(std::mem::replace(&mut self.slots[index], slot));
-        }
-        self.apply_rate(rate);
-        self.publish_latency();
-        Ok(old)
-    }
-
-    fn apply_rate(&mut self, rate: u32) {
-        self.sample_rate = rate;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn built_rates(&self) -> Vec<Option<u32>> {
-        self.slots.iter().map(|slot| slot.built_rate).collect()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn insert_tracked_slot_for_test(&mut self) {
-        self.slots.push(Slot::tracked_for_test());
     }
 
     /// Adds an already loaded CLAP plugin as a slot, the way a real load
     /// fills one in.
     #[cfg(test)]
     pub(crate) fn insert_clap_for_test(&mut self, plugin: LoadedPlugin) {
-        let slot = Slot::with_plugin_for_test(
-            PluginPref {
-                name: "Fake".to_owned(),
-                format: PluginFormat::Clap,
-                ..PluginPref::default()
-            },
-            plugin,
-            self.sample_rate,
-        );
-        self.slots.push(slot);
-        self.publish_latency();
+        self.push_for_test(clap_slot_for_test(plugin, self.sample_rate));
     }
 
     /// Adds a test insert that is a pure delay of `latency` frames and
     /// reports that latency (see [`Slot::delay_for_test`]).
     #[cfg(test)]
     pub(crate) fn insert_delay_for_test(&mut self, latency: u32) {
-        self.slots.push(Slot::delay_for_test(latency));
+        self.push_for_test(Slot::delay_for_test(latency));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_for_test(&mut self, slot: Slot) {
+        self.slots.push(Box::new(slot));
         self.publish_latency();
     }
 
@@ -287,138 +301,50 @@ impl PluginChain {
         &mut self.slots[index]
     }
 
-    pub(crate) fn rate(&self) -> u32 {
-        self.sample_rate
+    #[cfg(test)]
+    pub(crate) fn set_bypass(&mut self, index: usize, bypass: bool) {
+        self.slots[index].controls.set_bypass(bypass);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mix(&mut self, index: usize, mix: f32) {
+        self.slots[index].controls.set_mix(mix);
     }
 
     #[cfg(test)]
     pub(crate) fn views(&self) -> Vec<PluginView> {
-        self.slots.iter().map(Slot::view).collect()
+        self.slots.iter().map(|slot| slot.view()).collect()
     }
 
-    pub(crate) fn prefs(&self) -> Vec<PluginPref> {
-        self.slots.iter().map(Slot::saved_pref).collect()
-    }
-
-    /// Whether a restored slot is still waiting for its first open.
-    pub(crate) fn has_unopened(&self) -> bool {
-        self.slots.iter().any(Slot::needs_open)
-    }
-
-    pub(crate) fn active(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.active()).count()
-    }
-
-    /// Takes a slot out of the chain.  The caller drops it after releasing
-    /// the chain lock: destroying a plugin can take a while, and the audio
-    /// callback replaces the chain by a plain delay whenever it cannot get the lock.
-    pub(crate) fn remove(&mut self, index: usize) -> Option<Slot> {
-        let removed = (index < self.slots.len()).then(|| self.slots.remove(index));
-        self.publish_latency();
-        removed
-    }
-
-    pub(crate) fn move_slot(&mut self, index: usize, delta: isize) {
-        if index >= self.slots.len() {
-            return;
-        }
-        let target = (index as isize + delta).clamp(0, self.slots.len() as isize - 1) as usize;
-        if target != index {
-            self.slots.swap(index, target);
-        }
-    }
-
-    /// Sets one insert's bypass.  The UI goes through
-    /// [`Self::slot_links`] instead, without the chain lock.
     #[cfg(test)]
-    pub(crate) fn set_bypass(&mut self, index: usize, bypass: bool) {
-        if let Some(slot) = self.slots.get(index) {
-            slot.controls.set_bypass(bypass);
-        }
-    }
-
-    /// Sets one insert's mix (see [`Self::set_bypass`]).
-    #[cfg(test)]
-    pub(crate) fn set_mix(&mut self, index: usize, mix: f32) {
-        if let Some(slot) = self.slots.get(index) {
-            slot.controls.set_mix(mix);
-        }
-    }
-
-    /// What the UI needs to reach each insert without the chain lock (see
-    /// [`SlotLink`]).  Published with the views.
     pub(crate) fn slot_links(&self) -> Vec<SlotLink> {
-        self.slots.iter().map(Slot::link).collect()
+        self.slots.iter().map(|slot| slot.link()).collect()
     }
 
-    /// Opens a saved slot so its controls can be shown before playback starts.
-    pub(crate) fn ensure_loaded(&mut self, index: usize) {
-        let rate = self.sample_rate;
-        if let Some(slot) = self.slots.get_mut(index) {
-            slot.ensure_loaded(rate);
-        }
+    /// Takes every slot out, so a test destroys them on its own thread
+    /// rather than through the deferred queue.
+    #[cfg(test)]
+    pub(crate) fn clear_for_test(&mut self) -> Vec<Slot> {
+        let slots = self.slots.drain(..).map(|slot| *slot).collect();
         self.publish_latency();
-    }
-
-    /// Sets one normalized plugin control, opening a never-opened slot
-    /// first.  A loaded slot is reached through its link instead (see
-    /// `PathControls::set_plugin_parameter`), without the chain lock.
-    pub(crate) fn set_parameter(
-        &mut self,
-        index: usize,
-        id: u32,
-        value: f64,
-    ) -> Result<(), String> {
-        self.open_handle(index)?
-            .set_parameter(id, value)
-            .map(|_| ())
-    }
-
-    /// Returns every control to the plugin's own defaults and forgets the
-    /// saved overrides, opening a never-opened slot first.
-    pub(crate) fn reset_parameters(&mut self, index: usize) -> Result<(), String> {
-        self.open_handle(index)?.reset_parameters().map(|_| ())
-    }
-
-    /// The handle of slot `index`, opened if it never was.
-    fn open_handle(&mut self, index: usize) -> Result<super::PluginHandle, String> {
-        let rate = self.sample_rate;
-        let Some(slot) = self.slots.get_mut(index) else {
-            return Err("That insert is no longer in the chain".to_owned());
-        };
-        if slot.load_if_needed(rate) {
-            self.publish_latency();
-        }
-        let slot = &self.slots[index];
-        match &slot.plugin {
-            Some(plugin) => Ok(plugin.handle().clone()),
-            None => Err(slot
-                .error
-                .clone()
-                .unwrap_or_else(|| "The plugin is not loaded".to_owned())),
-        }
+        slots
     }
 
     /// Runs the enabled effects over one stereo block, in chunks of at most
     /// [`MAX_BLOCK`] frames.  A paused plugin (a restart) is skipped for
-    /// that chunk, and a plugin that fails is
-    /// left in the chain with its error so the person can see why it is
-    /// silent.  Every skipped insert still delays by its latency, and an
-    /// insert's dry/wet mix blends with its input delayed by that latency,
-    /// so the block comes out [`Self::latency_samples`] late, with the dry
-    /// and wet sides of every insert lined up.  The path's chain bypass
-    /// skips every insert for the block the same way, without writing each
-    /// slot's bypass.
+    /// that chunk, and a plugin that fails is left in the chain with its
+    /// error so the person can see why it is silent.  Every skipped insert
+    /// still delays by its latency, and an insert's dry/wet mix blends with
+    /// its input delayed by that latency, so the block comes out
+    /// [`Self::latency_samples`] late, with the dry and wet sides of every
+    /// insert lined up.  The path's chain bypass skips every insert for the
+    /// block the same way, without writing each slot's bypass.
     ///
     /// Returns whether a slot gained an error in this block, or the chain
     /// latency changed, so the caller can ask the UI thread to republish
     /// the insert views (the audio thread does not build them itself).
-    ///
-    /// Also refreshes [`Self::latency_handle`], so a latency change made on
-    /// the main thread (outside the chain lock) reaches it by the next block.
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
-        // One relaxed load.  The flag is an atomic, so this does not lock
-        // or allocate; the callback already holds the chain only by try_lock.
+        // One relaxed load: an atomic, so this does not lock or allocate.
         let chain_bypass = self.chain_bypass.load(Ordering::Relaxed);
         let failed = self.process_inserts(left, right, frames, chain_bypass);
         let latency_changed = self.publish_latency();
@@ -458,6 +384,125 @@ impl PluginChain {
     }
 }
 
+impl Drop for ChainRuntime {
+    /// The last owner may be a bridge thread that outlived its session:
+    /// plugins are destroyed on the UI thread, so the slots go to the
+    /// deferred queue there (see [`release_slot`]).  Queued commands and
+    /// returned slots go the same way when their queue drops.
+    fn drop(&mut self) {
+        for slot in self.slots.drain(..) {
+            release_slot(slot);
+        }
+    }
+}
+
+/// A CLAP test slot built the way a real load fills one in.
+#[cfg(test)]
+pub(super) fn clap_slot_for_test(plugin: LoadedPlugin, rate: u32) -> Slot {
+    Slot::with_plugin_for_test(
+        PluginPref {
+            name: "Fake".to_owned(),
+            format: PluginFormat::Clap,
+            ..PluginPref::default()
+        },
+        plugin,
+        rate,
+    )
+}
+
+// `ChainHome` moves the runtime between threads through an `AtomicPtr`,
+// which is `Send` and `Sync` whatever it points to: this keeps the
+// runtime itself `Send`.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<ChainRuntime>();
+};
+
+/// Where one path's [`ChainRuntime`] waits while no audio thread holds it:
+/// one pointer, swapped in and out, so taking and parking it is lock and
+/// allocation free.  There is exactly one runtime per home, either parked
+/// here or in a [`ChainLease`].
+pub(crate) struct ChainHome {
+    parked: AtomicPtr<ChainRuntime>,
+}
+
+impl ChainHome {
+    pub(super) fn new(runtime: ChainRuntime) -> Arc<Self> {
+        Arc::new(Self {
+            parked: AtomicPtr::new(Box::into_raw(Box::new(runtime))),
+        })
+    }
+
+    /// Takes the runtime, or `None` while someone else holds it.  Lock and
+    /// allocation free, so the audio thread may call it.
+    pub(crate) fn take(self: &Arc<Self>) -> Option<ChainLease> {
+        let runtime = self.parked.swap(ptr::null_mut(), Ordering::AcqRel);
+        if runtime.is_null() {
+            return None;
+        }
+        Some(ChainLease {
+            // Parked by `new` or `park`, from a `Box`, and swapped out
+            // above: this is its only owner.
+            runtime: ManuallyDrop::new(unsafe { Box::from_raw(runtime) }),
+            home: Arc::clone(self),
+        })
+    }
+
+    fn park(&self, runtime: Box<ChainRuntime>) {
+        let previous = self.parked.swap(Box::into_raw(runtime), Ordering::AcqRel);
+        // One runtime per home, so the home was empty.  Were it not, the
+        // other one is leaked rather than destroyed here, which may be the
+        // audio thread.
+        debug_assert!(previous.is_null(), "two runtimes for one home");
+    }
+}
+
+impl Drop for ChainHome {
+    fn drop(&mut self) {
+        let runtime = std::mem::replace(self.parked.get_mut(), ptr::null_mut());
+        if !runtime.is_null() {
+            // As in `take`: parked from a `Box`, and this is the last owner.
+            drop(unsafe { Box::from_raw(runtime) });
+        }
+    }
+}
+
+/// The runtime while one thread holds it.  Dropping the lease parks the
+/// runtime in its home again (lock and allocation free).
+pub(crate) struct ChainLease {
+    runtime: ManuallyDrop<Box<ChainRuntime>>,
+    home: Arc<ChainHome>,
+}
+
+impl ChainLease {
+    /// Whether this lease was taken from `home`.
+    pub(crate) fn is_from(&self, home: &Arc<ChainHome>) -> bool {
+        Arc::ptr_eq(&self.home, home)
+    }
+}
+
+impl Deref for ChainLease {
+    type Target = ChainRuntime;
+
+    fn deref(&self) -> &ChainRuntime {
+        &self.runtime
+    }
+}
+
+impl DerefMut for ChainLease {
+    fn deref_mut(&mut self) -> &mut ChainRuntime {
+        &mut self.runtime
+    }
+}
+
+impl Drop for ChainLease {
+    fn drop(&mut self) {
+        // Taken once, here; the field is not touched again.
+        let runtime = unsafe { ManuallyDrop::take(&mut self.runtime) };
+        self.home.park(runtime);
+    }
+}
+
 /// Per-chunk constants for [`process_slot`], in frames.
 #[derive(Clone, Copy)]
 struct SlotTiming {
@@ -473,12 +518,11 @@ struct SlotTiming {
 /// chunk with a partial mix is blended with that dry side delayed by the
 /// insert's latency; a skipped chunk (the path's chain bypass, the slot's
 /// own bypass, mix at 0, a restart's pause) plays the input delayed by that
-/// latency.  So the
-/// insert delays by its reported latency
-/// whatever happens to it.  A switch between the plugin running and being
-/// skipped (bypass toggled, mix through 0, a restart) cannot crossfade, since only one of the two exists for the
-/// chunk; its step is smoothed over `DECLICK_SECONDS` instead.  Returns
-/// whether the insert failed.
+/// latency.  So the insert delays by its reported latency whatever happens
+/// to it.  A switch between the plugin running and being skipped (bypass
+/// toggled, mix through 0, a restart) cannot crossfade, since only one of
+/// the two exists for the chunk; its step is smoothed over
+/// `DECLICK_SECONDS` instead.  Returns whether the insert failed.
 fn process_slot(
     slot: &mut Slot,
     left: &mut [f32],
@@ -564,7 +608,7 @@ fn run_plugin(slot: &mut Slot, left: &mut [f32], right: &mut [f32], wet: bool) -
         }
         slot.controls.note_attempt();
         let count = left.len().min(right.len());
-        let latency = test.latency.min(MAX_ALIGN) as usize;
+        let latency = test.latency.load(Ordering::Relaxed).min(MAX_ALIGN) as usize;
         for index in 0..count {
             test.line.push([left[index], right[index]]);
             [left[index], right[index]] = test.line.read(latency);
@@ -577,27 +621,5 @@ fn run_plugin(slot: &mut Slot, left: &mut [f32], right: &mut [f32], wet: bool) -
     }
 }
 
-/// Stores `total` in `cell` if it still holds `previous`, the value the
-/// total was summed after.  The UI also writes the total (from its links,
-/// without the chain lock); a value it stored in between is newer than
-/// this sum and wins.  Returns whether this call changed the value.
-/// Lock and allocation free.
-pub(super) fn publish_total(cell: &AtomicU32, previous: u32, total: u32) -> bool {
-    total != previous
-        && cell
-            .compare_exchange(previous, total, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-}
-
-impl Drop for PluginChain {
-    fn drop(&mut self) {
-        // A bridge that outlived `replace_session` drops the old session on
-        // the bridge thread.  Plugins have to be destroyed on the UI thread,
-        // so the slots wait for [`super::drain_deferred_plugins`].
-        if self.slots.is_empty() || super::super::clap::may_destroy_plugins_here() {
-            return;
-        }
-        let slots = std::mem::take(&mut self.slots);
-        defer_plugin_slots(slots);
-    }
-}
+#[cfg(test)]
+mod tests;

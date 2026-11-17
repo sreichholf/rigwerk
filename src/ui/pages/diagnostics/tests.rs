@@ -116,7 +116,7 @@ fn a_zero_latency_edit_panic_is_named_in_diagnostics() {
     let app = blank_app();
     let path = app.engine.shared.path(0);
     path.insert_delay_for_test(0);
-    path.poison_chain_in_edit_for_test();
+    path.poison_chain_for_test();
 
     let text = app.diagnostics_text();
     assert!(
