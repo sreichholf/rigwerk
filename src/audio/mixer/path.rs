@@ -8,7 +8,7 @@ use super::super::delay::{Declick, DelayLine, DelayTap, DECLICK_SECONDS, TAP_FAD
 use super::super::eq::{EqSlot, Equalizer};
 use super::super::gate::{GateSlot, NoiseGate};
 use super::super::path::{DspTime, PathControls, PathState};
-use super::super::plugins::MAX_ALIGN;
+use super::super::plugins::{ChainLease, MAX_ALIGN};
 use super::ramp::{PathRamps, Ramp};
 
 /// The chain of one signal path, from the split to the sum: routing,
@@ -49,11 +49,15 @@ pub(crate) struct PathProcessor {
     /// lines play out; `None` until its fade reaches silence.
     pub(super) drain: Option<u32>,
     /// The chain latency (frames) read at the start of the block: what the
-    /// alignment counts for this path, and what a missed chain lock is
-    /// replaced by.
+    /// alignment counts for this path, and what a missed chain is replaced
+    /// by.
     latency: u32,
     /// The same, before clamping to [`MAX_ALIGN`] (for the report).
     pub(super) latency_raw: u32,
+    /// The path's chain runtime, taken with the first block of the path and
+    /// parked again when the path stops being live or this processor drops
+    /// (see `plugins::chain`).
+    chain: Option<ChainLease>,
     /// The input of the plugin chain, for the blocks the chain cannot run
     /// (see [`Self::run_inserts`]): read back delayed by the chain latency.
     chain_line: DelayLine,
@@ -148,6 +152,7 @@ impl PathProcessor {
             latency: 0,
             latency_raw: 0,
             drain: None,
+            chain: None,
             chain_line: DelayLine::new(MAX_ALIGN as usize + CHAIN_CHUNK),
             chain_tap: DelayTap::default(),
             chain_mix: 1.0,
@@ -196,6 +201,12 @@ impl PathProcessor {
         self.dsp = DspMeter::default();
     }
 
+    /// Parks the chain runtime for a path that is not live, so the UI can
+    /// apply its edits (and release a removed path's plugins) itself.
+    pub(super) fn release_chain(&mut self) {
+        self.chain = None;
+    }
+
     /// Grows the per-block scratch outside the callback.
     pub(super) fn prepare(&mut self, frames: usize) {
         self.reserve_block(frames);
@@ -240,6 +251,9 @@ impl PathProcessor {
         if restarted {
             self.restart(rate, generation);
         }
+        // Applies the UI's chain edits first, so the latency read below is
+        // the chain this block runs.
+        let unopened = controls.begin_chain(&mut self.chain);
         self.latency_raw = controls.latency_samples();
         self.latency = self.latency_raw.min(MAX_ALIGN);
         self.tap_fade = TAP_FADE_SECONDS * rate as f32;
@@ -252,10 +266,8 @@ impl PathProcessor {
         self.fading = controls.state() == PathState::FadingOut;
         // A chain whose plugins are still being opened (a path just added,
         // duplicated or restored) stays silent rather than playing dry.
-        let silent = self.fading
-            || controls.muted()
-            || (any_solo && !controls.soloed())
-            || controls.chain_pending();
+        let silent =
+            self.fading || controls.muted() || (any_solo && !controls.soloed()) || unopened;
         let gain = if silent { 0.0 } else { controls.level_gain() };
         if adopted {
             self.gain.set_target(gain, ramp_samples);
@@ -376,11 +388,12 @@ impl PathProcessor {
     /// Runs the plugin inserts over a block that `run_front` filled, in
     /// chunks of at most [`CHAIN_CHUNK`] frames.
     ///
-    /// The chain never just drops out.  Mix, bypass and plugin controls do
-    /// not take the chain lock at all (see the `audio::path::plugins` docs), so a
-    /// miss is rare: the UI holds the lock for a structural edit.  The
-    /// chain's input also goes into `chain_line`; a chunk the chain cannot
-    /// run plays that input delayed by the chain latency instead.  That
+    /// The chain never just drops out.  No edit holds a lock the chain
+    /// needs (see the `audio::path::plugins` docs), so a miss is rare: the
+    /// UI holding the parked runtime for a moment, or another mixer still
+    /// holding it.  The chain's input also goes into `chain_line`; a chunk
+    /// the chain cannot run plays that input delayed by the chain latency
+    /// instead.  That
     /// keeps the path's timing in the sum (no comb, no phase jump), but not
     /// its sound: for the missed chunk the path plays dry (its inserts'
     /// level and tone are gone).  The switch into the fallback cannot
@@ -425,7 +438,7 @@ impl PathProcessor {
             for (l, r) in chunk_l.iter().zip(chunk_r.iter()) {
                 self.chain_line.push([*l, *r]);
             }
-            let ran = controls.process_plugins(chunk_l, chunk_r, count);
+            let ran = controls.run_plugins(&mut self.chain, chunk_l, chunk_r, count);
             // Into the fallback from (some of) the chain's own output.
             let entering = !ran && self.chain_mix > 0.0 && !self.chain_fresh;
             if !ran {

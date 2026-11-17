@@ -1,14 +1,15 @@
 //! A loaded plugin in its two halves: the [`PluginProcessor`] the audio
 //! thread runs inside the chain's slot ([`LoadedPlugin`]), and the
-//! [`PluginHandle`] the UI reaches without the chain lock (the published
-//! insert links, the editor window).  Format-neutral.
+//! [`PluginHandle`] the UI reaches through the published insert links and
+//! the editor window.  Format-neutral.
 //!
 //! The UI half keeps the control views, the saved values, the state blob
 //! and whether it is stale, next to the main-thread plugin object.  That
 //! sits behind [`PluginUi`]'s own mutex, a UI-only lock: the audio thread
 //! never takes it, so a control set, an editor sync, a state capture or a
 //! preference save never touches a lock the audio thread takes.  Lock
-//! order on the UI side: chain → `UiSide` → `ParamOut`.  Never the reverse.
+//! order on the UI side: chain model → `UiSide` → `ParamOut`.  Never the
+//! reverse.
 //!
 //! Both formats are split along their thread rules: the processor holds
 //! `ClapProcessor` or `Vst3Processor`, the UI half `ClapInstance` or
@@ -795,7 +796,8 @@ impl PluginHandle {
     }
 
     /// The plugin's main-thread work, once per UI frame, under the UI lock
-    /// only (never the chain lock, never a lock the audio thread takes).
+    /// only (never the chain model's lock, never a lock the audio thread
+    /// takes).
     ///
     /// CLAP: callbacks, timers and fds; the output values the audio side
     /// reported, into the views; a parameter rescan; and a restart (or a
@@ -1029,13 +1031,6 @@ impl PluginHandle {
     pub(crate) fn saved(&self) -> (Vec<PluginParamPref>, Option<PluginState>) {
         let ui = self.ui();
         (ui.saved.clone(), ui.state.clone())
-    }
-
-    /// Whether the saved values and state blob are `params` and `state`,
-    /// compared in place.
-    pub(crate) fn saved_is(&self, params: &[PluginParamPref], state: Option<&PluginState>) -> bool {
-        let ui = self.ui();
-        ui.saved == params && ui.state.as_ref() == state
     }
 
     /// Marks the saved state as out of date (its editor closed), so the

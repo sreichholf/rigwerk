@@ -103,7 +103,8 @@ pub(crate) enum BlockAction {
 /// load (the UI sees the block, and waits for the guard's release).
 ///
 /// One block at a time per handshake: `in_block` is a bool, not a count.
-/// The processor's `&mut` and the chain's `try_lock` give that.  A guard
+/// The processor's `&mut`, held by whoever holds the chain's runtime, gives
+/// that.  A guard
 /// kept too long, or leaked, only keeps a pause from finishing (`quiet`
 /// stays false); it never makes one unsafe.
 pub(crate) struct PauseHandshake {

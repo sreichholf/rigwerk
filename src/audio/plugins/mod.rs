@@ -8,8 +8,13 @@
 //! Each loaded plugin is split in two (`handle`): the processor the chain's
 //! slot runs on the audio thread, and the [`PluginHandle`] the UI reaches
 //! through the published insert links.  The handle keeps the views, the
-//! saved values and the state blob behind its own UI-only lock, so the
-//! chain lock is only taken for structural edits.
+//! saved values and the state blob behind its own UI-only lock.
+//!
+//! Each chain is split the same way: the runtime the audio thread owns
+//! (`chain`) and the model the UI edits (`model`), which sends structural
+//! edits as commands through a queue (`queue`) and gets the slots the
+//! runtime let go of back the same way.  No lock is shared between the two
+//! sides.
 
 mod chain;
 #[cfg(test)]
@@ -17,8 +22,10 @@ mod fixtures;
 mod handle;
 mod link;
 mod load;
+mod model;
 mod pause;
 mod pref;
+mod queue;
 mod slot;
 mod transfer;
 
@@ -48,7 +55,9 @@ pub(crate) fn clamp_latency(latency: u32) -> u32 {
 
 pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
-pub(crate) use chain::{PluginChain, ReloadPlan};
+#[cfg(test)]
+pub(crate) use chain::ChainRuntime;
+pub(crate) use chain::{ChainHome, ChainLease, MAX_INSERTS};
 pub(crate) use handle::PluginHandle;
 #[cfg(test)]
 pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
@@ -58,11 +67,12 @@ pub(crate) use link::{
 #[cfg(test)]
 pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
 pub(crate) use load::{Restore, MAX_BLOCK};
+pub(crate) use model::{ChainModel, ReloadPlan};
 #[cfg(test)]
 pub(crate) use pause::PAUSE_STALL;
 #[cfg(test)]
 pub(crate) use slot::SlotControls;
-pub(crate) use slot::{drain_deferred_plugins, SlotLink};
+pub(crate) use slot::{drain_deferred_plugins, Slot, SlotLink};
 #[cfg(test)]
 pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
 pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};

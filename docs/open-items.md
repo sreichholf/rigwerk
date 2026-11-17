@@ -33,16 +33,11 @@ plans and the code review has landed; that history is in git.
 Recorded when the review fixes landed (November 2026), not re-checked
 since.
 
-- **Plugin chain lock.**  Structural edits still take the chain lock:
-  adding, removing, moving or restoring inserts, reopening them for a
-  new rate or because a plugin changed its layout, and opening a slot
-  that was never loaded.  The audio thread
-  `try_lock`s it; when it is busy, the plugin output for that chunk is
-  lost: the path plays its input delayed by the chain latency, so timing
-  holds but the inserts' sound drops out.  The step into that dry
-  fallback is declicked over 2 ms; once the chain runs again it waits
-  one latency, then crossfades back over 5 ms.  Step 3 of #28 hands the
-  chain to the audio side.
+- **Insert limit.**  A path holds at most 32 inserts
+  (`plugins::MAX_INSERTS`): the audio side's slot list is allocated once.
+  Adding one more is refused with a message; a saved chain longer than
+  that is cut to 32 when it is restored, with only a log line, and the
+  next save keeps the 32.
 - **VSTGUI editor reopened on Linux.**  VSTGUI's X11 run loop closes
   its xcb connection when its last editor closes, without finishing the
   cairo device for it.  If a later editor from the same loaded module

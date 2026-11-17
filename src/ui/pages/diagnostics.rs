@@ -1,7 +1,7 @@
 //! Diagnostics: the activity log, scan notes, the bridge status line, the
 //! signal paths' DSP time (per path, against the block it must fit), the
-//! chunks the audio thread found the chain lock busy, and the chunks it
-//! found an insert paused.
+//! chunks the audio thread could not run a path's chain (it did not hold
+//! the chain's runtime), and the chunks it found an insert paused.
 //!
 //! The header pill still follows the engine state. This page shows the
 //! bridge's own status string beside that, and keeps scan notes and quantum
@@ -64,11 +64,11 @@ fn percent_text(stats: &crate::audio::LockStats) -> String {
 
 /// Why the chain count and the insert counts differ; the card and the export
 /// say the same thing.
-const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Insert counts cover only chunks where the chain lock was free. An insert pauses while it restarts, and stays paused after a failed start.";
+const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Insert counts cover only chunks the chain ran. An insert pauses while it restarts, and stays paused after a failed start.";
 
 /// The line under a chain whose inserts were never reached.  A bypassed
 /// insert or one at mix 0 never runs its plugin, which is normal, and a
-/// chain lock that was always busy also keeps the inserts out.
+/// chain that never ran also keeps the inserts out.
 const NO_INSERT_TRIED: &str = "(no insert ran — bypassed, at mix 0, or the chain never ran)";
 
 /// Whether the path got chunks through its chain but none through an insert,
@@ -83,9 +83,9 @@ fn no_insert_ran(report: &crate::audio::PluginLockReport) -> bool {
         && report.inserts.iter().all(|insert| insert.attempts == 0)
 }
 
-/// One path's chain lock line: its skip share, or why there is none.  A
-/// poisoned chain is not contention, so its counters would read as a
-/// misleading skip rate.
+/// One path's chain line: its skip share, or why there is none.  A dead
+/// chain (a panicking edit) is not contention, so its counters would read
+/// as a misleading skip rate.
 fn chain_lock_text(report: &crate::audio::PluginLockReport) -> String {
     if report.chain_poisoned {
         "chain unavailable after an internal error".to_owned()
@@ -199,7 +199,7 @@ impl RigWerkApp {
                 (info, report, views)
             })
             .collect();
-        lines.push("Plugin blocks (chain lock skipped, insert paused / attempted):".to_owned());
+        lines.push("Plugin blocks (chain skipped, insert paused / attempted):".to_owned());
         let any_attempts = lock_reports.iter().any(|(_, report, _)| {
             // A poisoned chain has no attempts to show; it is still the only
             // thing the section has to say about that path.

@@ -118,16 +118,12 @@ pub(crate) struct MainClaim {
 }
 
 fn chain_rate(shared: &super::Shared) -> u32 {
-    shared.paths[0]
-        .plugins
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .rate()
+    shared.paths[0].chain_rate()
 }
 
 fn built_rates(shared: &super::Shared) -> Vec<Option<u32>> {
     shared.paths[0]
-        .plugins
+        .chain
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .built_rates()
@@ -182,11 +178,7 @@ fn off_thread_drop_defers_plugin_slots_until_the_main_thread() {
     // The UI thread drops the chain immediately.
     {
         let shared = super::Shared::new(48_000);
-        shared.paths[0]
-            .plugins
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert_tracked_slot_for_test();
+        shared.paths[0].edit_chain(|chain| chain.insert_tracked_slot_for_test());
         assert_eq!(plugins(), 1);
         drop(shared);
         assert_eq!(plugins(), 0);
@@ -194,11 +186,7 @@ fn off_thread_drop_defers_plugin_slots_until_the_main_thread() {
     }
 
     let shared = super::Shared::new(48_000);
-    shared.paths[0]
-        .plugins
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .insert_tracked_slot_for_test();
+    shared.paths[0].edit_chain(|chain| chain.insert_tracked_slot_for_test());
     assert_eq!(plugins(), 1);
     std::thread::scope(|scope| {
         scope.spawn(move || drop(shared));
@@ -282,11 +270,12 @@ fn published_views_follow_every_chain_edit() {
     assert!(shared.plugin_views().is_empty());
 }
 
-/// Holds the chain lock on this thread while the UI-side calls run on a
-/// worker that stands in for the main thread.  None of them may wait for
-/// the lock: the worker must finish while it is still held.
+/// Holds the chain runtime on this thread, as the audio thread does, while
+/// the UI-side calls run on a worker that stands in for the main thread.
+/// None of them may wait for it: the worker must finish while it is still
+/// held.
 #[test]
-fn drawing_and_quiet_service_frames_never_wait_for_the_chain_lock() {
+fn drawing_and_quiet_service_frames_never_wait_for_the_audio_side() {
     let _main = claim_main_thread();
     let shared = super::Shared::new(48_000);
     shared.restore_plugins(vec![missing("a.vst3")]);
@@ -304,7 +293,7 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_chain_lock() {
 
     const HELD: std::time::Duration = std::time::Duration::from_secs(5);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let chain = shared.paths[0].plugins.lock().unwrap();
+    let chain = shared.paths[0].hold_chain_for_test();
     std::thread::scope(|scope| {
         scope.spawn(|| {
             let _worker_main = crate::audio::clap::claim_main_thread_for_test();
@@ -320,15 +309,82 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_chain_lock() {
         });
         let finished = done_rx.recv_timeout(HELD);
         drop(chain);
-        assert!(finished.is_ok(), "a UI-side call waited for the chain lock");
+        assert!(finished.is_ok(), "a UI-side call waited for the audio side");
     });
 }
 
-/// Dragging an insert's mix, toggling its bypass and moving a plugin
-/// control never take the chain lock, so the audio thread never misses
-/// the chain for them: the worker finishes while this thread holds it.
+/// Structural edits (move, remove, add) do not wait for the audio side
+/// either: while it holds the runtime they are published at once and
+/// queued, and its next block applies them.  The slot it lets go of is
+/// destroyed by the next service frame on the UI thread, never by the
+/// audio side.
 #[test]
-fn mix_bypass_and_controls_never_wait_for_the_chain_lock() {
+fn structural_edits_never_wait_for_the_audio_side() {
+    let _main = claim_main_thread();
+    let alive = crate::audio::plugins::tracked_slots_alive;
+    let shared = super::Shared::new(48_000);
+    let path = &shared.paths[0];
+    path.insert_delay_for_test(16);
+    path.insert_delay_for_test(8);
+    path.edit_chain(|chain| chain.insert_tracked_slot_for_test());
+    assert_eq!(alive(), 1);
+    let audio = path.hold_chain_for_test();
+
+    const HELD: std::time::Duration = std::time::Duration::from_secs(5);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            path.move_plugin(0, 1);
+            path.remove_plugin(2);
+            assert!(path.add_plugin(missing("c.vst3")).is_err());
+            path.service_plugins();
+            done_tx.send(()).unwrap();
+        });
+        let finished = done_rx.recv_timeout(HELD);
+        assert!(
+            finished.is_ok(),
+            "a structural edit waited for the audio side"
+        );
+    });
+    let latencies: Vec<u32> = path
+        .plugin_views()
+        .iter()
+        .map(|view| view.latency)
+        .collect();
+    assert_eq!(
+        latencies,
+        [8, 16, 0],
+        "published before the runtime applied it"
+    );
+    assert!(path.chain_commands_pending());
+    assert_eq!(alive(), 1, "the removed slot is still in the runtime");
+
+    // The audio side's next block applies the edits, then runs the chain.
+    let mut seat = Some(audio);
+    let mut left = vec![0.0f32; 64];
+    let mut right = vec![0.0f32; 64];
+    left[0] = 1.0;
+    right[0] = 1.0;
+    path.begin_chain(&mut seat);
+    assert!(!path.chain_commands_pending());
+    assert_eq!(path.latency_samples(), 24);
+    assert!(path.run_plugins(&mut seat, &mut left, &mut right, 64));
+    assert_eq!(left[24], 1.0);
+    assert_eq!(alive(), 1, "the audio side destroys nothing");
+
+    // Back on the UI thread, the next frame destroys what it handed back.
+    drop(seat);
+    path.service_plugins();
+    assert_eq!(alive(), 0);
+    path.restore_plugins(Vec::new());
+}
+
+/// Dragging an insert's mix, toggling its bypass and moving a plugin
+/// control reach the plugin without the runtime, so they never wait for
+/// the audio side: the worker finishes while this thread holds it.
+#[test]
+fn mix_bypass_and_controls_never_wait_for_the_audio_side() {
     let _main = claim_main_thread();
     let shared = super::Shared::new(48_000);
     let path = &shared.paths[0];
@@ -337,7 +393,7 @@ fn mix_bypass_and_controls_never_wait_for_the_chain_lock() {
     });
     const HELD: std::time::Duration = std::time::Duration::from_secs(5);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let chain = path.plugins.lock().unwrap();
+    let chain = path.hold_chain_for_test();
     std::thread::scope(|scope| {
         scope.spawn(|| {
             let _worker_main = crate::audio::clap::claim_main_thread_for_test();
@@ -345,10 +401,10 @@ fn mix_bypass_and_controls_never_wait_for_the_chain_lock() {
                 path.set_plugin_mix(0, step as f32 / 100.0);
                 path.set_plugin_bypass(0, step % 2 == 0);
                 // The fake has no controls: this fails, but at the
-                // plugin, without the chain lock.
+                // plugin.
                 let _ = path.set_plugin_parameter(0, 7, 0.5);
-                // Neither reading nor resetting the counters may take the
-                // chain lock the main thread holds.
+                // Neither reading nor resetting the counters may wait for
+                // the audio side.
                 let _ = path.plugin_lock_report();
                 path.reset_plugin_lock_counters();
             }
@@ -365,16 +421,16 @@ fn mix_bypass_and_controls_never_wait_for_the_chain_lock() {
     assert_eq!((views[0].mix, views[0].bypass), (0.25, true));
     let saved = &path.plugin_prefs()[0];
     assert_eq!((saved.mix, saved.bypass), (0.25, true));
-    drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+    path.edit_chain(|chain| chain.restore(Vec::new()));
 }
 
 /// A state capture, a preference save, marking a state stale and a full
 /// editor sync all go through the published links: the worker finishes
-/// while this thread holds the chain lock, and its capture succeeds.  A
+/// while this thread holds the chain runtime, and its capture succeeds.  A
 /// capture off the plugin's main thread is deferred and leaves the insert
 /// stale with its previous blob.
 #[test]
-fn capture_and_prefs_never_wait_for_the_chain_lock() {
+fn capture_and_prefs_never_wait_for_the_audio_side() {
     use crate::audio::clap::tests::{fake_plugin_with_state_for_test, set_fake_state_for_test};
     let _main = claim_main_thread();
     let shared = super::Shared::new(48_000);
@@ -383,6 +439,7 @@ fn capture_and_prefs_never_wait_for_the_chain_lock() {
     let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (released_tx, released_rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
             // The fake's state is per thread, and CLAP saves only on the
@@ -414,17 +471,20 @@ fn capture_and_prefs_never_wait_for_the_chain_lock() {
             });
             let deferred = (handle.wants_capture(), handle.saved().1);
             drop(handle);
-            drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+            // Once the runtime is parked, so the removal applies here.
+            released_rx.recv().unwrap();
+            path.edit_chain(|chain| chain.restore(Vec::new()));
             (saved, captured, deferred)
         });
         loaded_rx.recv().unwrap();
-        let chain = path.plugins.lock().unwrap();
+        let chain = path.hold_chain_for_test();
         held_tx.send(()).unwrap();
         let finished = done_rx.recv_timeout(HELD);
         drop(chain);
+        released_tx.send(()).unwrap();
         assert!(
             finished.is_ok(),
-            "a capture or a save waited for the chain lock"
+            "a capture or a save waited for the audio side"
         );
         let (saved, captured, (still_stale, kept)) = worker.join().unwrap();
 
@@ -451,9 +511,9 @@ fn capture_and_prefs_never_wait_for_the_chain_lock() {
 
 /// A plugin that restarts with a new latency is republished by the next
 /// service frame (views and the path's latency total) while this thread
-/// holds the chain lock.
+/// holds the chain runtime.
 #[test]
-fn a_latency_change_republishes_without_the_chain_lock() {
+fn a_latency_change_republishes_without_the_audio_side() {
     use crate::audio::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
@@ -464,6 +524,7 @@ fn a_latency_change_republishes_without_the_chain_lock() {
     let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (released_tx, released_rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
             // The fake's state is per thread: it is loaded, restarted and
@@ -480,18 +541,21 @@ fn a_latency_change_republishes_without_the_chain_lock() {
             path.service_plugins();
             let latency = (path.plugin_views()[0].latency, path.latency_samples());
             done_tx.send(()).unwrap();
-            // Destroyed on the thread that loaded it.
-            drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+            // Destroyed on the thread that loaded it, once the runtime is
+            // parked.
+            released_rx.recv().unwrap();
+            path.edit_chain(|chain| chain.restore(Vec::new()));
             latency
         });
         loaded_rx.recv().unwrap();
-        let chain = path.plugins.lock().unwrap();
+        let chain = path.hold_chain_for_test();
         held_tx.send(()).unwrap();
         let finished = done_rx.recv_timeout(HELD);
         drop(chain);
+        released_tx.send(()).unwrap();
         assert!(
             finished.is_ok(),
-            "the latency republish waited for the chain lock"
+            "the latency republish waited for the audio side"
         );
         assert_eq!(worker.join().unwrap(), (8, 8));
     });
@@ -586,7 +650,7 @@ fn clap_controls_never_wait_for_the_audio_side() {
     );
     assert_eq!(path.plugin_views()[0].parameters[0].value, 1.0);
     drop(handle);
-    drop(path.edit_chain(|chain| chain.restore(Vec::new())));
+    path.edit_chain(|chain| chain.restore(Vec::new()));
 }
 
 #[test]
@@ -631,7 +695,7 @@ fn a_panicking_edit_clears_what_it_published() {
         })
     }));
     assert!(panicked.is_err());
-    assert!(shared.paths[0].plugins.is_poisoned());
+    assert!(shared.paths[0].chain.is_poisoned());
     assert!(shared.plugin_views().is_empty());
     assert!(shared.paths[0].slot_links.lock().unwrap().is_empty());
     assert!(!shared.paths[0].has_plugins());

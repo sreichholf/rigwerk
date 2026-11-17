@@ -37,10 +37,11 @@
 //!    On the ring path, each generic follower's mapped frame goes into
 //!    that follower's ring; its own stream plays it (see `follower`).
 //!
-//! The plugin chain of a path never drops out of the timing: a chunk whose
-//! chain lock the UI holds (rare: only structural edits take it) plays the
-//! chain's input delayed by its latency instead, so the sum keeps its
-//! phase; that chunk loses the inserts' sound (see
+//! The plugin chain of a path never drops out of the timing: a chunk that
+//! finds no chain runtime to run (rare: the UI applying an edit to the
+//! parked runtime at that moment) plays the chain's input delayed by its
+//! latency instead, so the sum keeps its phase; that chunk loses the
+//! inserts' sound (see
 //! [`PathProcessor::run_inserts`] and the `audio::path::plugins` module docs).
 //!
 //! Each path's chain (front, inserts, back) runs as one piece per block
@@ -247,6 +248,15 @@ impl OutputMixer {
         }
     }
 
+    /// Parks every path's chain runtime, as a mixer that goes away does,
+    /// so a test can take one before the next block.
+    #[cfg(test)]
+    pub(crate) fn park_chains_for_test(&mut self) {
+        for path in &mut self.paths {
+            path.release_chain();
+        }
+    }
+
     /// Publishes the output device's channel count.  Call when the stream
     /// opens, outside the callback, so the snapshot has it at once.
     pub(crate) fn publish_device_channels(&self, shared: &Shared) {
@@ -338,6 +348,11 @@ impl OutputMixer {
     fn begin_block(&mut self, shared: &Shared, frames: usize) {
         let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
         self.live = shared.live_slots();
+        for slot in 0..MAX_PATHS {
+            if !self.live.contains(slot) {
+                self.paths[slot].release_chain();
+            }
+        }
         let any_solo = shared.any_solo();
         // Only the mixer's first block adopts the path gains outright.
         let fade_in = self.gain_adopted;

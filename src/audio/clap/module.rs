@@ -111,7 +111,8 @@ impl ClapModule {
 ///
 /// The lock is only ever taken on the UI, bridge and scan threads: a module is
 /// released when the last [`ModuleHandle`] drops, and the audio callback never
-/// drops the last reference to a plugin (see `PluginChain::process`).
+/// drops the last reference to a plugin: the chain runtime hands every slot
+/// it lets go of back to the UI (see `plugins::chain`).
 pub(super) struct ModuleRegistry {
     pub(super) modules: Mutex<std::collections::BTreeMap<PathBuf, Arc<ClapModule>>>,
     /// Test hook: how long a [`ModuleHandle`] drop lingers after releasing

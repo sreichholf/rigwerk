@@ -1312,6 +1312,40 @@ fn a_removed_path_fades_out_and_then_goes_inactive() {
     assert_eq!(shared.paths[added].state(), PathState::Inactive);
 }
 
+/// A removed path whose mixer still holds the chain runtime when the UI
+/// releases it: the release waits, the mixer parks the runtime with its
+/// next block, and the next service frame applies the release and
+/// destroys the slot on the UI thread.
+#[test]
+fn a_removed_path_releases_its_plugins_once_the_mixer_lets_go() {
+    use super::super::path::PathState;
+    let _main = super::super::shared::tests::claim_main_thread();
+    let alive = crate::audio::plugins::tracked_slots_alive;
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    shared.running.store(true, Ordering::Relaxed);
+    let added = shared.add_path().expect("a free slot");
+    shared.paths[added].edit_chain(|chain| chain.insert_tracked_slot_for_test());
+    render(&mut mixer, &shared, 64);
+    assert_eq!(alive(), 1);
+
+    assert!(shared.remove_path(added));
+    for _ in 0..1_000 {
+        if shared.paths[added].state() == PathState::Inactive {
+            break;
+        }
+        render(&mut mixer, &shared, 64);
+    }
+    assert_eq!(shared.paths[added].state(), PathState::Inactive);
+    // The block that ended the fade still holds the runtime.
+    shared.service_paths();
+    shared.service_plugins();
+    assert_eq!(alive(), 1, "the release waits for the mixer");
+
+    render(&mut mixer, &shared, 64);
+    shared.service_plugins();
+    assert_eq!(alive(), 0, "released on this thread");
+}
+
 #[test]
 fn a_duplicate_starts_muted_and_copies_the_chain() {
     use super::super::gate::GateSettings;
@@ -1336,7 +1370,7 @@ fn a_duplicate_starts_muted_and_copies_the_chain() {
     assert_eq!(mix.routes, shared.paths[0].mix().routes);
     assert_eq!(mix.gate, gate);
     assert_eq!(mix.level_db, -3.0);
-    let plugins = duplicate.plugins.lock().unwrap().prefs();
+    let plugins = duplicate.plugin_prefs();
     assert_eq!(plugins.len(), 1);
     assert_eq!(plugins, shared.paths[0].plugin_prefs());
     // Added muted: the sum does not move.

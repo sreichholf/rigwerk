@@ -13,11 +13,10 @@ use super::pref::{PluginPref, PluginView};
 use super::MAX_ALIGN;
 use crate::audio::LockStats;
 
-/// An insert's mix and bypass as atomics: the UI sets them without the
-/// chain lock and the audio thread reads them every chunk, so dragging the
-/// mix or toggling bypass never makes the audio thread miss the chain.
-/// The slot's `pref.mix` / `pref.bypass` are only the values it was made
-/// with; [`Slot::saved_pref`] and the views read these.
+/// An insert's mix and bypass as atomics: the UI sets them through the
+/// insert's link and the audio thread reads them every chunk, without a
+/// chain edit.  The slot's `pref.mix` / `pref.bypass` are only the values it
+/// was made with; [`SlotLink::saved_pref`] and the views read these.
 ///
 /// It also counts how often the audio thread tried to run the insert's
 /// plugin, and how many of those chunks found it paused (a restart, a
@@ -159,9 +158,8 @@ impl SlotControls {
 pub(crate) struct Slot {
     /// The insert's identity, and what an unloaded slot restores with.
     /// Once a plugin is loaded its saved values and state blob move to its
-    /// handle (see [`Self::saved_pref`]) and these are left empty.  Shared
-    /// with the published link, so a publish under the chain lock copies
-    /// nothing.
+    /// handle (see [`SlotLink::saved_pref`]) and these are left empty.
+    /// Shared with the published link, so a publish copies nothing.
     pub(crate) pref: Arc<PluginPref>,
     /// Mix and bypass as the UI sets them (see [`SlotControls`]).  Kept
     /// when the slot is reopened or rebuilt for a new rate.
@@ -204,7 +202,9 @@ pub(crate) struct Slot {
 /// See [`Slot::delay_for_test`].
 #[cfg(test)]
 pub(crate) struct TestDelay {
-    pub(crate) latency: u32,
+    /// Shared with the slot's links, so a test can change it while an
+    /// audio side holds the slot, as a plugin changes its own latency.
+    pub(crate) latency: Arc<AtomicU32>,
     pub(crate) line: DelayLine,
 }
 
@@ -243,59 +243,6 @@ impl Slot {
         }
     }
 
-    /// The insert as it should be saved: its pref with the live mix and
-    /// bypass, and a loaded plugin's saved values and state blob.
-    pub(crate) fn saved_pref(&self) -> PluginPref {
-        PluginPref {
-            mix: self.controls.mix(),
-            bypass: self.controls.bypass(),
-            ..self.restore_pref()
-        }
-    }
-
-    /// What a rebuilt instance restores with: the pref with a loaded
-    /// plugin's saved values and state blob, but the mix and bypass it was
-    /// made with (the rebuild keeps the live [`SlotControls`]).
-    pub(crate) fn restore_pref(&self) -> PluginPref {
-        let mut pref = (*self.pref).clone();
-        if let Some(plugin) = &self.plugin {
-            (pref.params, pref.state) = plugin.handle().saved();
-        }
-        pref
-    }
-
-    /// Whether [`Self::restore_pref`] would equal `plan`, compared in place
-    /// (nothing is cloned; the caller holds the chain lock).
-    pub(crate) fn restores_with(&self, plan: &PluginPref) -> bool {
-        // Exhaustive, so a new pref field has to be compared here too.
-        let PluginPref {
-            path,
-            format,
-            class_id,
-            name,
-            vendor,
-            category,
-            bypass,
-            mix,
-            params,
-            state,
-        } = plan;
-        let pref = &*self.pref;
-        let identity = pref.path == *path
-            && pref.format == *format
-            && pref.class_id == *class_id
-            && pref.name == *name
-            && pref.vendor == *vendor
-            && pref.category == *category
-            && pref.bypass == *bypass
-            && pref.mix == *mix;
-        identity
-            && match &self.plugin {
-                Some(plugin) => plugin.handle().saved_is(params, state.as_ref()),
-                None => pref.params == *params && pref.state == *state,
-            }
-    }
-
     /// The dry delay line a loaded insert needs (allocates; UI thread).
     pub(crate) fn dry_line() -> DelayLine {
         DelayLine::new(MAX_ALIGN as usize + MAX_BLOCK)
@@ -312,7 +259,7 @@ impl Slot {
         });
         slot.dry = Self::dry_line();
         slot.test_delay = Some(TestDelay {
-            latency,
+            latency: Arc::new(AtomicU32::new(latency)),
             line: DelayLine::new(MAX_ALIGN as usize),
         });
         slot
@@ -406,7 +353,7 @@ impl Slot {
     pub(crate) fn latency_samples(&self) -> u32 {
         #[cfg(test)]
         if let Some(test) = &self.test_delay {
-            return test.latency.min(MAX_ALIGN);
+            return test.latency.load(Ordering::Relaxed).min(MAX_ALIGN);
         }
         match &self.plugin {
             Some(plugin) if !self.failed() => plugin.latency(),
@@ -431,37 +378,12 @@ impl Slot {
         self.link().resolved_error()
     }
 
-    /// Opens a saved slot on demand (the configure window may be opened before
-    /// the bridge has started) and refreshes its control list so the panel
-    /// shows the values the plugin has right now.  A slot that failed stays
-    /// failed.
-    pub(crate) fn ensure_loaded(&mut self, sample_rate: u32) {
-        if !self.load_if_needed(sample_rate) {
-            if let Some(plugin) = &self.plugin {
-                plugin.handle().refresh_parameters();
-            }
-        }
-    }
-
-    /// Opens a never-loaded slot.  Returns whether it loaded one, which also
-    /// read the fresh control list.
-    pub(crate) fn load_if_needed(&mut self, sample_rate: u32) -> bool {
-        if self.plugin.is_none() && self.error.is_none() {
-            let controls = Arc::clone(&self.controls);
-            *self = Slot::loaded(self.saved_pref(), sample_rate);
-            self.controls = controls;
-            true
-        } else {
-            false
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn view(&self) -> PluginView {
         self.link().view()
     }
 
-    /// What the UI needs to reach this insert without the chain lock (UI
+    /// What the UI needs to reach this insert while the runtime holds it (UI
     /// thread; allocates).
     pub(crate) fn link(&self) -> SlotLink {
         SlotLink {
@@ -473,12 +395,14 @@ impl Slot {
             test_latency: self
                 .test_delay
                 .as_ref()
-                .map(|test| test.latency.min(MAX_ALIGN)),
+                .map(|test| Arc::clone(&test.latency)),
+            #[cfg(test)]
+            built_rate: self.built_rate,
         }
     }
 }
 
-/// One insert as the UI reaches it without the chain lock, published with
+/// One insert as the UI reaches it while the runtime holds it, published with
 /// the views (see `PathControls::slot_links`).  Everything it reads is the
 /// handle's UI-side state or atomics, so the views, the saved prefs and the
 /// latency total can be rebuilt from the links alone.
@@ -493,10 +417,42 @@ pub(crate) struct SlotLink {
     pub(crate) error: Option<String>,
     /// A test delay's latency (see [`Slot::delay_for_test`]).
     #[cfg(test)]
-    test_latency: Option<u32>,
+    test_latency: Option<Arc<AtomicU32>>,
+    /// As [`Slot::built_rate`].
+    #[cfg(test)]
+    pub(crate) built_rate: Option<u32>,
 }
 
 impl SlotLink {
+    /// Moves a test delay's latency (see [`Slot::delay_for_test`]), as a
+    /// plugin moves its own.
+    #[cfg(test)]
+    pub(crate) fn set_test_latency(&self, latency: u32) {
+        if let Some(cell) = &self.test_latency {
+            cell.store(latency, Ordering::Relaxed);
+        }
+    }
+
+    /// As [`Slot::needs_open`].
+    pub(crate) fn needs_open(&self) -> bool {
+        #[cfg(test)]
+        if self.test_latency.is_some() {
+            return false;
+        }
+        self.plugin.is_none() && self.error.is_none()
+    }
+
+    /// What a rebuilt instance restores with: the pref with a loaded
+    /// plugin's saved values and state blob, but the mix and bypass it was
+    /// made with (the rebuild keeps the live [`SlotControls`]).
+    pub(crate) fn restore_pref(&self) -> PluginPref {
+        let mut pref = (*self.base).clone();
+        if let Some(plugin) = &self.plugin {
+            (pref.params, pref.state) = plugin.saved();
+        }
+        pref
+    }
+
     /// As [`Slot::reload_wanted`].
     pub(crate) fn reload_wanted(&self) -> bool {
         !self.failed()
@@ -517,8 +473,8 @@ impl SlotLink {
     /// As [`Slot::latency_samples`].
     pub(crate) fn latency(&self) -> u32 {
         #[cfg(test)]
-        if let Some(latency) = self.test_latency {
-            return latency;
+        if let Some(latency) = &self.test_latency {
+            return latency.load(Ordering::Relaxed).min(MAX_ALIGN);
         }
         match &self.plugin {
             Some(plugin) if !self.failed() => plugin.latency(),
@@ -590,15 +546,15 @@ static TRACKED_SLOTS: AtomicUsize = AtomicUsize::new(0);
 /// Slots whose plugins must be destroyed on the UI thread.  Filled from
 /// [`Drop`] when the dropping thread is not the recorded main thread, and
 /// emptied by [`drain_deferred_plugins`].
-static DEFERRED_PLUGIN_SLOTS: Mutex<Vec<Vec<Slot>>> = Mutex::new(Vec::new());
+static DEFERRED_PLUGIN_SLOTS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
 
 pub(crate) fn defer_plugin_slots(slots: Vec<Slot>) {
     if slots.is_empty() {
         return;
     }
     match DEFERRED_PLUGIN_SLOTS.lock() {
-        Ok(mut queue) => queue.push(slots),
-        Err(poison) => poison.into_inner().push(slots),
+        Ok(mut queue) => queue.extend(slots),
+        Err(poison) => poison.into_inner().extend(slots),
     }
 }
 
@@ -623,7 +579,7 @@ pub(crate) fn tracked_slots_alive() -> usize {
 #[cfg(test)]
 pub(crate) fn deferred_slot_count() -> usize {
     match DEFERRED_PLUGIN_SLOTS.lock() {
-        Ok(queue) => queue.iter().map(Vec::len).sum(),
-        Err(poison) => poison.into_inner().iter().map(Vec::len).sum(),
+        Ok(queue) => queue.len(),
+        Err(poison) => poison.into_inner().len(),
     }
 }

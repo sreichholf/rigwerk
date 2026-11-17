@@ -38,7 +38,7 @@
 //! [`PathControls::latency_samples`] is the chain's total plugin latency,
 //! and the chain really delays by exactly that much at all times: an
 //! insert skipped for a block plays its input delayed by its latency, and
-//! an insert's dry/wet mix delays its dry side (see `PluginChain::process`).
+//! an insert's dry/wet mix delays its dry side (see `ChainRuntime::process`).
 //! A path-level chain bypass skips every insert the same way, and the total
 //! still counts.  The mixer lines the paths up per device with it (`output_map`,
 //! "Alignment").
@@ -55,7 +55,7 @@ use std::time::Instant;
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::output_map::level_gain;
-use super::plugins::{PluginChain, PluginView, SlotLink};
+use super::plugins::{ChainHome, ChainModel, PluginView, SlotLink};
 
 mod plugins;
 
@@ -280,14 +280,14 @@ impl LockStats {
     }
 }
 
-/// One path's plugin counters: the chain lock's skips and each insert's
-/// pauses.
+/// One path's plugin counters: the chunks the chain missed and each
+/// insert's pauses.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PluginLockReport {
     pub chain: LockStats,
     pub inserts: Vec<LockStats>,
-    /// The chain lock was poisoned by a panic while it was held, so the
-    /// inserts are gone for the rest of the session.  The skip counters then
+    /// A chain edit panicked, so the chain is unused for the rest of the
+    /// session (see `PathControls::chain_poisoned`).  The skip counters then
     /// describe nothing, and Diagnostics says so instead of showing a rate.
     pub chain_poisoned: bool,
 }
@@ -351,17 +351,18 @@ pub(crate) struct PathControls {
     dsp: DspCell,
     /// Each insert's mix, bypass and plugin handle, published with the
     /// views, so the UI sets mix, bypass and plugin controls, services the
-    /// plugins, captures their state and saves them without the chain lock
+    /// plugins, captures their state and saves them without the model lock
     /// (see `plugins`, "Chain handover").
     ///
-    /// Declared before `plugins` on purpose: fields drop in order, so these
-    /// extra references are gone before the chain hands its slots to the
-    /// deferred queue, and the main thread's drain is always the last owner.
+    /// Declared before `chain_home` on purpose: fields drop in order, so
+    /// these extra references are gone before the runtime hands its slots
+    /// to the deferred queue, and the main thread's drain is always the
+    /// last owner.
     pub(super) slot_links: Mutex<Arc<[SlotLink]>>,
-    /// The insert views the UI draws.  Republished by every chain edit while
-    /// that edit still holds the chain lock, and read without it.  This lock
-    /// is separate from the chain's and the audio thread never takes it, so
-    /// only UI-side readers and writers contend on it, for an `Arc` clone.
+    /// The insert views the UI draws.  Republished by every chain edit, and
+    /// read without the model lock.  The audio thread never takes this lock,
+    /// so only UI-side readers and writers contend on it, for an `Arc`
+    /// clone.
     plugin_views: Mutex<Arc<[PluginView]>>,
     plugin_views_version: AtomicU64,
     /// Set by the audio thread when an insert fails or the chain latency
@@ -370,15 +371,18 @@ pub(crate) struct PathControls {
     plugin_views_dirty: AtomicBool,
     chain_rate: AtomicU32,
     chain_unopened: AtomicBool,
-    /// The plugin insert chain and a cheap "is anything enabled?" flag so
-    /// the audio callback skips the lock when no effects are loaded.
-    pub(super) plugins: Mutex<PluginChain>,
-    /// The chain's total latency ([`PluginChain::latency_handle`]), read
-    /// without the chain lock.
-    latency: Arc<AtomicU32>,
-    /// Path-level insert bypass ([`PluginChain::chain_bypass_handle`]).
-    /// The audio thread loads it inside the chain; the UI stores it
-    /// without the chain lock.  It does not write each slot's bypass.
+    /// The insert chain as the UI edits it, and the only sender of its
+    /// commands (see `plugins`, "Chain handover").  A UI-only lock: the
+    /// audio thread never takes it.
+    pub(super) chain: Mutex<ChainModel>,
+    /// Where the chain's runtime waits while no audio thread holds it.
+    chain_home: Arc<ChainHome>,
+    /// The chain's total latency, read by the mixer.  The runtime's holder
+    /// stores it at the start of every block; a chain edit stores the total
+    /// of its links.
+    latency: AtomicU32,
+    /// Path-level insert bypass.  The runtime loads it every block; the UI
+    /// stores it.  It does not write each slot's bypass.
     chain_bypass: Arc<AtomicBool>,
     plugin_active: AtomicUsize,
     /// The UI wants the next block to enter the chain even with nothing
@@ -386,14 +390,15 @@ pub(crate) struct PathControls {
     /// Its own flag, taken by the audio thread, so the audio thread's
     /// recount of `plugin_active` cannot overwrite a wake.
     plugin_wake: AtomicBool,
-    /// How often the audio thread tried this path's chain lock and how often
-    /// it was busy, so the chunk played the chain's input delayed instead.
+    /// How often the audio thread tried to run this path's chain and how
+    /// often it did not hold the runtime, so the chunk played the chain's
+    /// input delayed instead.
     /// Measurement only: written relaxedly by the audio thread.
     chain_attempts: AtomicU64,
     chain_skips: AtomicU64,
-    /// Set by the audio thread when the chain lock is poisoned: an earlier
-    /// panic while the lock was held left the chain unusable, which is not
-    /// contention and never clears.
+    /// Set when a chain edit panicked: the model may no longer match the
+    /// runtime, so the chain stays unused for the rest of the session.  It
+    /// is not contention and never clears.
     chain_poisoned: AtomicBool,
     /// The two built-in EQs (pre and post inserts).  Each version counter
     /// lets the audio callback notice a change without taking the lock.
@@ -406,7 +411,8 @@ pub(crate) struct PathControls {
 
 impl PathControls {
     pub(crate) fn new(sample_rate: u32) -> Self {
-        let chain = PluginChain::new(sample_rate);
+        let chain_bypass = Arc::new(AtomicBool::new(false));
+        let chain = ChainModel::new(sample_rate, Arc::clone(&chain_bypass));
         Self {
             routes: [
                 AtomicBool::new(true),
@@ -437,9 +443,10 @@ impl PathControls {
             plugin_views_dirty: AtomicBool::new(false),
             chain_rate: AtomicU32::new(chain.rate()),
             chain_unopened: AtomicBool::new(false),
-            latency: chain.latency_handle(),
-            chain_bypass: chain.chain_bypass_handle(),
-            plugins: Mutex::new(chain),
+            chain_home: chain.home(),
+            chain: Mutex::new(chain),
+            latency: AtomicU32::new(0),
+            chain_bypass,
             plugin_active: AtomicUsize::new(0),
             plugin_wake: AtomicBool::new(false),
             chain_attempts: AtomicU64::new(0),
@@ -494,13 +501,7 @@ impl PathControls {
         // (UI) thread first, so the rebuilt chain reopens with what the
         // person set since the last save.
         if previous.state() == PathState::Active {
-            previous.capture_plugin_states();
-            let plugins = previous
-                .plugins
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .prefs();
-            self.restore_plugins(plugins);
+            self.restore_plugins(previous.plugin_prefs());
         } else {
             self.restore_plugins(Vec::new());
         }

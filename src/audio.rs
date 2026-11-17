@@ -23,7 +23,8 @@
 //! - `path`: one signal path's controls (routing, EQs, gate, inserts).
 //! - `plugins`: the VST3 and CLAP chain on each path.  The slot owns each
 //!   plugin's processor; the UI reaches the rest through its handle and
-//!   holds views.
+//!   holds views.  The audio side owns each chain's runtime and the UI
+//!   edits its model; edits cross as commands, never under a shared lock.
 //! - `vst3`: RigWerk's own VST3 host on the `vst3` bindings (module,
 //!   factory, host context, run loop, streams, the controller and
 //!   processor halves, the editor view).  `vst3-host` only scans.
