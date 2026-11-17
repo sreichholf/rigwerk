@@ -3,9 +3,10 @@
 //!
 //! The scan runs on the `rigwerk-plugin-scan` thread, and the module
 //! registry (`module.rs`) loads and drops binaries on the UI thread only,
-//! so nothing here opens a binary.  A bundle is listed when it has a
+//! so nothing here loads a binary.  A bundle is listed when it has a
 //! binary this build can load (`module::binary_path`, the same lookup a
-//! load uses), and its classes come from `moduleinfo.json`.
+//! load uses: the architecture folder, then the binary's header), and its
+//! classes come from `moduleinfo.json`.
 //!
 //! A bundle without `moduleinfo.json` (SDKs before 3.7) is not asked for
 //! its classes here.  Listing them would mean loading every such binary on
@@ -165,6 +166,7 @@ fn is_bundle_name(path: &Path) -> bool {
 
 /// Whether the bundle holds a binary this build can load.  A bundle that
 /// only ships another architecture's binary is left out of the library.
+/// Reads the start of the binary, never loads it.
 pub(crate) fn has_loadable_binary(bundle: &Path) -> bool {
     super::module::binary_path(bundle).is_ok()
 }

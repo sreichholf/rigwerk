@@ -5,10 +5,11 @@ use super::{
     extra_roots, find_bundles, has_loadable_binary, parse_module_info, read_module_info,
     strip_json5,
 };
+use crate::audio::vst3::module::tests::this_build_binary;
 use crate::audio::vst3::module::{ARCH_FOLDERS, BINARY_EXTENSION};
 
-/// A temp folder of fake bundles, removed on drop.  Each bundle holds an
-/// empty binary where this build looks for one; nothing loads it.  Also
+/// A temp folder of fake bundles, removed on drop.  Each bundle holds a
+/// binary header for this build where it looks for one; nothing loads it.  Also
 /// used by the app's scan tests.
 pub(crate) struct TestBundles {
     pub(crate) root: PathBuf,
@@ -28,7 +29,7 @@ impl TestBundles {
     }
 
     /// A file at `relative`, with its folders.
-    pub(crate) fn file(&self, relative: &str, contents: &str) -> PathBuf {
+    pub(crate) fn file(&self, relative: &str, contents: impl AsRef<[u8]>) -> PathBuf {
         let path = self.root.join(relative);
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("folders");
         std::fs::write(&path, contents).expect("file");
@@ -45,7 +46,7 @@ impl TestBundles {
                 "{relative}/Contents/{}/{stem}.{BINARY_EXTENSION}",
                 ARCH_FOLDERS[0]
             ),
-            "",
+            this_build_binary(),
         );
         if let Some(text) = module_info {
             self.file(
@@ -212,7 +213,7 @@ fn a_bundle_is_listed_only_with_a_binary_for_this_arch() {
     // A bundle shipping only another architecture's binary.
     dir.file(
         &format!("Other.vst3/Contents/other-arch/Other.{BINARY_EXTENSION}"),
-        "",
+        this_build_binary(),
     );
     assert!(!has_loadable_binary(&dir.root.join("Other.vst3")));
     // A binary named unlike the bundle still counts.
@@ -221,12 +222,23 @@ fn a_bundle_is_listed_only_with_a_binary_for_this_arch() {
             "Renamed.vst3/Contents/{}/plugin.{BINARY_EXTENSION}",
             ARCH_FOLDERS[0]
         ),
-        "",
+        this_build_binary(),
     );
     assert!(has_loadable_binary(&dir.root.join("Renamed.vst3")));
-    // The Windows single-file layout loads as given.
-    let single = dir.file("Single.vst3", "");
-    assert!(has_loadable_binary(&single));
+    // In the right folder, but not a binary this build loads.
+    dir.file(
+        &format!(
+            "Stub.vst3/Contents/{}/Stub.{BINARY_EXTENSION}",
+            ARCH_FOLDERS[0]
+        ),
+        "",
+    );
+    assert!(!has_loadable_binary(&dir.root.join("Stub.vst3")));
+    // The single-file layout is Windows only, and checked like the rest.
+    let single = dir.file("Single.vst3", this_build_binary());
+    assert_eq!(has_loadable_binary(&single), cfg!(target_os = "windows"));
+    let empty = dir.file("Empty.vst3", "");
+    assert!(!has_loadable_binary(&empty));
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]

@@ -1,15 +1,74 @@
+use std::io::Cursor;
 use std::path::PathBuf;
 
-use super::{acquire, binary_path, ModuleCode, ARCH_FOLDERS, BINARY_EXTENSION};
+use super::{
+    acquire, binary_path, read_image, Image, ModuleCode, ARCH_FOLDERS, BINARY_EXTENSION, MACHINES,
+};
+
+/// The start of an ELF binary: the identification and `e_machine`.
+pub(crate) fn elf(is_64_bit: bool, machine: u16) -> Vec<u8> {
+    let mut bytes = vec![0; 64];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = if is_64_bit { 2 } else { 1 };
+    bytes[5] = 1;
+    bytes[6] = 1;
+    bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+    bytes
+}
+
+/// The start of a PE binary: a DOS header pointing at the PE signature
+/// and `Machine`.
+pub(crate) fn pe(machine: u16) -> Vec<u8> {
+    let mut bytes = vec![0; 0x80 + 24];
+    bytes[..2].copy_from_slice(b"MZ");
+    bytes[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+    bytes[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+    bytes
+}
+
+/// A header this build loads; the rest of a real binary is not needed.
+pub(crate) fn this_build_binary() -> Vec<u8> {
+    let machine = MACHINES.first().copied().unwrap_or_default();
+    if cfg!(target_os = "windows") {
+        pe(machine)
+    } else {
+        elf(cfg!(target_pointer_width = "64"), machine)
+    }
+}
+
+/// A header for a machine this build does not load.
+fn foreign_binary() -> Vec<u8> {
+    if cfg!(target_os = "windows") {
+        pe(if MACHINES.contains(&0x014C) {
+            0xAA64
+        } else {
+            0x014C
+        })
+    } else {
+        let machine = if MACHINES.contains(&3) { 183 } else { 3 };
+        elf(cfg!(target_pointer_width = "64"), machine)
+    }
+}
 
 /// What a plugin would do if its `ModuleExit` (or a release during an
 /// unload) loaded a module: the registry lock is already held further up.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 #[test]
 fn registry_reentry_during_module_code_panics_instead_of_deadlocking() {
-    let missing = std::env::temp_dir().join("rigwerk-vst3-missing.vst3");
+    // A bundle the layout and header checks pass, so `acquire` reaches the
+    // registry; its binary is only a header, so nothing ever loads.
+    let root = TempBundle::new("reentry");
+    root.file(
+        &format!(
+            "Fake.vst3/Contents/{}/Fake.{BINARY_EXTENSION}",
+            ARCH_FOLDERS[0]
+        ),
+        &this_build_binary(),
+    );
+    let fake = root.0.join("Fake.vst3");
     let code = ModuleCode::enter();
-    let reentry = std::panic::catch_unwind(|| acquire(&missing).is_ok());
+    let reentry = std::panic::catch_unwind(|| acquire(&fake).is_ok());
     let message = reentry.expect_err("re-entry panics");
     let message = message
         .downcast_ref::<String>()
@@ -21,8 +80,9 @@ fn registry_reentry_during_module_code_panics_instead_of_deadlocking() {
         "{message}"
     );
     drop(code);
-    // Outside module code the registry works as usual.
-    assert!(acquire(&missing).is_err());
+    // Outside module code the registry works as usual: the load is tried,
+    // and fails.
+    assert!(acquire(&fake).is_err());
 }
 
 /// A bundle directory in the temp dir, removed on drop.
@@ -36,10 +96,10 @@ impl TempBundle {
         Self(root)
     }
 
-    fn file(&self, relative: &str) -> PathBuf {
+    fn file(&self, relative: &str, contents: &[u8]) -> PathBuf {
         let path = self.0.join(relative);
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("folders");
-        std::fs::write(&path, b"").expect("file");
+        std::fs::write(&path, contents).expect("file");
         path
     }
 }
@@ -56,22 +116,127 @@ fn bundle_binary_is_the_named_one_for_this_arch() {
     let root = TempBundle::new("layout");
     let arch = ARCH_FOLDERS[0];
     let bundle = root.0.join("Gain.vst3");
-    // Another architecture's binary is never picked.
-    root.file(&format!(
-        "Gain.vst3/Contents/other-arch/Gain.{BINARY_EXTENSION}"
-    ));
+    let own = this_build_binary();
+    // Another architecture's folder is never searched.
+    root.file(
+        &format!("Gain.vst3/Contents/other-arch/Gain.{BINARY_EXTENSION}"),
+        &own,
+    );
     let error = binary_path(&bundle).expect_err("no binary for this arch");
     assert!(error.contains(arch), "{error}");
 
     // Any binary in this arch's folder, the bundle-named one first.
-    let other = root.file(&format!("Gain.vst3/Contents/{arch}/aaa.{BINARY_EXTENSION}"));
-    assert_eq!(binary_path(&bundle), Ok(other));
-    let named = root.file(&format!(
-        "Gain.vst3/Contents/{arch}/Gain.{BINARY_EXTENSION}"
-    ));
-    assert_eq!(binary_path(&bundle), Ok(named));
+    let other = root.file(
+        &format!("Gain.vst3/Contents/{arch}/aaa.{BINARY_EXTENSION}"),
+        &own,
+    );
+    assert_eq!(binary_path(&bundle), Ok(other.clone()));
+    let named = root.file(
+        &format!("Gain.vst3/Contents/{arch}/Gain.{BINARY_EXTENSION}"),
+        &own,
+    );
+    assert_eq!(binary_path(&bundle), Ok(named.clone()));
 
-    // A plain file is the legacy single-file layout.
-    let single = root.file("Single.vst3");
+    // A named binary for another machine is skipped for one that loads.
+    root.file(
+        &format!("Gain.vst3/Contents/{arch}/Gain.{BINARY_EXTENSION}"),
+        &foreign_binary(),
+    );
+    assert_eq!(binary_path(&bundle), Ok(other.clone()));
+
+    // With none left, the error says what the binary was.
+    root.file(
+        &format!("Gain.vst3/Contents/{arch}/aaa.{BINARY_EXTENSION}"),
+        b"not a binary",
+    );
+    let error = binary_path(&bundle).expect_err("nothing this build loads");
+    assert!(error.contains("not one this"), "{error}");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_single_file_plugin_loads_only_for_this_machine() {
+    let root = TempBundle::new("single");
+    let single = root.file("Single.vst3", &this_build_binary());
     assert_eq!(binary_path(&single), Ok(single.clone()));
+    let foreign = root.file("Foreign.vst3", &foreign_binary());
+    let error = binary_path(&foreign).expect_err("another machine");
+    assert!(error.contains("a Windows binary for"), "{error}");
+    let empty = root.file("Empty.vst3", b"");
+    assert!(binary_path(&empty).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_has_no_single_file_layout() {
+    let root = TempBundle::new("single");
+    let single = root.file("Single.vst3", &this_build_binary());
+    let error = binary_path(&single).expect_err("a file is not a bundle");
+    assert!(error.contains("not a bundle folder"), "{error}");
+}
+
+#[test]
+fn the_header_names_the_format_and_the_machine() {
+    let read = |bytes: Vec<u8>| read_image(&mut Cursor::new(bytes));
+    assert_eq!(
+        read(elf(true, 62)),
+        Some(Image::Elf {
+            is_64_bit: true,
+            little_endian: true,
+            machine: 62
+        })
+    );
+    let mut big = elf(false, 0);
+    big[5] = 2;
+    big[18..20].copy_from_slice(&40u16.to_be_bytes());
+    assert_eq!(
+        read(big),
+        Some(Image::Elf {
+            is_64_bit: false,
+            little_endian: false,
+            machine: 40
+        })
+    );
+    assert_eq!(read(pe(0xAA64)), Some(Image::Pe { machine: 0xAA64 }));
+
+    // Not a binary, cut short, a bad identification, or a PE offset past
+    // the end.
+    assert_eq!(read(b"#!/bin/sh\n".repeat(8)), None);
+    assert_eq!(read(elf(true, 62)[..10].to_vec()), None);
+    let mut odd_class = elf(true, 62);
+    odd_class[4] = 7;
+    assert_eq!(read(odd_class), None);
+    assert_eq!(read(pe(0x8664)[..0x82].to_vec()), None);
+    let mut far = pe(0x8664);
+    far[0x3C..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(read(far), None);
+    let mut unsigned = pe(0x8664);
+    unsigned[0x80] = b'X';
+    assert_eq!(read(unsigned), None);
+}
+
+#[test]
+fn only_this_builds_platform_and_machine_load() {
+    let own = read_image(&mut Cursor::new(this_build_binary())).expect("a header");
+    assert_eq!(own.is_loadable(), !MACHINES.is_empty());
+    let foreign = read_image(&mut Cursor::new(foreign_binary())).expect("a header");
+    assert!(!foreign.is_loadable());
+    // The other platform's format never loads, whatever its machine.
+    for machine in [3, 62, 183, 0x014C, 0x8664, 0xAA64] {
+        let other = if cfg!(target_os = "windows") {
+            elf(true, machine)
+        } else {
+            pe(machine)
+        };
+        let image = read_image(&mut Cursor::new(other)).expect("a header");
+        assert!(!image.is_loadable(), "{image:?}");
+    }
+    // The other word size does not load either.
+    let narrow = elf(
+        !cfg!(target_pointer_width = "64"),
+        MACHINES.first().copied().unwrap_or(62),
+    );
+    assert!(!read_image(&mut Cursor::new(narrow))
+        .expect("a header")
+        .is_loadable());
 }
