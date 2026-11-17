@@ -18,13 +18,13 @@ cpal = "0.18"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Preset-guided per-string spectra for the tuner.
 rustfft = "6"
-# VST3 discovery only (the bundle scan); `audio/vst3` hosts the plugins.
-# The crate ships its own bindings, so no Steinberg SDK or extra native
-# toolchain is needed.
-vst3-host = { version = "0.11.1", default-features = false }
 # The raw VST3 bindings (COM pointers, interfaces, `Class`) that RigWerk's own
-# VST3 host in `audio/vst3` is built on.  vst3-host already locks this version.
+# VST3 host in `audio/vst3` is built on.  The crate ships its own bindings, so
+# no Steinberg SDK or extra native toolchain is needed.
 vst3 = "0.3"
+# A VST3 bundle's `moduleinfo.json`, read by the library scan once its
+# comments and trailing commas are stripped (`audio/vst3/scan.rs`).
+serde_json = "1"
 # CLAP discovery and hosting.  The bindings are plain C, and libloading opens
 # the .clap bundles at runtime without a build-time SDK.
 clap-sys = "0.5"

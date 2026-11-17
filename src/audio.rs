@@ -27,7 +27,8 @@
 //!   edits its model; edits cross as commands, never under a shared lock.
 //! - `vst3`: RigWerk's own VST3 host on the `vst3` bindings (module,
 //!   factory, host context, run loop, streams, the controller and
-//!   processor halves, the editor view).  `vst3-host` only scans.
+//!   processor halves, the editor view) and the bundle scan, which reads
+//!   `moduleinfo.json` and never loads a binary.
 //! - `clap`: the CLAP host (the main-thread instance, the audio-thread
 //!   processor, the editor).
 //! - `scope`: decimated peak-hold lanes.  Drawing them is `ui/scope`.

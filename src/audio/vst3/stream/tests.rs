@@ -28,7 +28,7 @@ fn header(component: u32, controller: u32) -> Vec<u8> {
 
 #[test]
 fn state_envelope_round_trips_and_reads_raw_component_state() {
-    // Both states: the layout vst3-host writes, byte for byte.
+    // Both states: the layout vst3-host 0.11.1 wrote, byte for byte.
     let both = StateBlob {
         component: vec![1, 2, 3],
         controller: Some(vec![9, 8]),

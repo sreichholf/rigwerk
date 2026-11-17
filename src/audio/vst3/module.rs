@@ -20,8 +20,8 @@
 //!
 //! The SDK factory is one per binary, not per host: `setHostContext`
 //! replaces the context (and VSTGUI's run loop) for every user of the
-//! binary.  Nothing else may load a VST3 binary: vst3-host only scans
-//! (it reads the bundle layout and `moduleinfo.json`).
+//! binary.  Nothing else may load a VST3 binary: the library scan
+//! (`scan`) only reads the bundle layout and `moduleinfo.json`.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -169,14 +169,14 @@ pub(crate) fn acquire(bundle: &Path) -> Result<Arc<Vst3Module>, String> {
 /// architecture's first (SDK `module_linux.cpp`, `module_win32.cpp`).
 /// Empty on a platform without a VST3 host.
 #[cfg(target_os = "linux")]
-const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
+pub(super) const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
     b"x86_64" => &["x86_64-linux"],
     b"aarch64" => &["aarch64-linux"],
     b"x86" => &["i386-linux"],
     _ => &[],
 };
 #[cfg(target_os = "windows")]
-const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
+pub(super) const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
     b"x86_64" => &["x86_64-win"],
     b"aarch64" => &["arm64-win", "arm64x-win"],
     b"arm64ec" => &["arm64ec-win", "arm64x-win", "x86_64-win"],
@@ -184,10 +184,10 @@ const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
     _ => &[],
 };
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-const ARCH_FOLDERS: &[&str] = &[];
+pub(super) const ARCH_FOLDERS: &[&str] = &[];
 
 /// The binary's extension inside a bundle.
-const BINARY_EXTENSION: &str = if cfg!(target_os = "windows") {
+pub(super) const BINARY_EXTENSION: &str = if cfg!(target_os = "windows") {
     "vst3"
 } else {
     "so"

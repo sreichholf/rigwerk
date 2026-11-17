@@ -1,9 +1,9 @@
 //! The in-memory stream a plugin reads and writes its state through, and
 //! the envelope a saved VST3 state is stored in.
 //!
-//! The envelope is the one vst3-host 0.11.1 writes (`plugin.rs`), byte for
-//! byte, because saved preferences hold it and an older RigWerk reads any
-//! other blob as raw component state: 16 bytes `VST3HOST_STATE\0\0`, then
+//! The envelope is the one vst3-host 0.11.1 wrote (`plugin.rs`) when it
+//! hosted RigWerk's plugins, byte for byte, because saved preferences hold
+//! it and an older RigWerk reads any other blob as raw component state: 16 bytes `VST3HOST_STATE\0\0`, then
 //! little-endian u32 version (1), component length and controller length
 //! (`u32::MAX` for no controller state), then the two payloads.
 
@@ -184,7 +184,7 @@ impl IBStreamTrait for MemoryStream {
         } else {
             return kInvalidArgument;
         };
-        // Before the start lands on the start, as vst3-host does.
+        // Before the start lands on the start, as vst3-host 0.11.1 did.
         let Some(target) = base.checked_add(pos).map(|target| target.max(0)) else {
             return kInvalidArgument;
         };

@@ -108,8 +108,9 @@ RIGWERK_VST3_FIXTURES=.vst3-fixtures/plugins \
 
 The Linux build needs the VSTGUI packages in `.cursor/install.sh`.  The
 editor test opens AGain's VSTGUI editor in an X11 window, so on Linux it
-needs `xvfb-run` (or a real X server).  `vst3-host` only scans for
-bundles; `audio/vst3` loads, processes and opens them.
+needs `xvfb-run` (or a real X server).  `audio/vst3` scans for bundles
+(from `moduleinfo.json`, without loading them), and loads, processes and
+opens them.
 
 ## When a test fails
 
