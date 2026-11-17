@@ -16,8 +16,11 @@ plans and the code review has landed; that history is in git.
   only and does not implement `IWaylandHost` / `IWaylandFrame`; XWayland
   with `DISPLAY` set works.  The plugin still runs, and RigWerk's
   parameter panel still opens.
-- `vst3-host` is still a dependency, for the VST3 bundle scan only
-  (`app/plugins.rs`).  Step 4 of #28 replaces it.
+- A VST3 bundle without `moduleinfo.json` (built with an SDK before
+  3.7) is listed as one effect named after the bundle, because the scan
+  never loads a binary (`audio/vst3/scan.rs`).  Loading it takes the
+  factory's first audio class, so a second class in such a bundle cannot
+  be picked, and an instrument in one is listed too.
 
 ## Not reproduced
 

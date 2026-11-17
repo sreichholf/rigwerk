@@ -20,8 +20,8 @@
 //!
 //! The SDK factory is one per binary, not per host: `setHostContext`
 //! replaces the context (and VSTGUI's run loop) for every user of the
-//! binary.  Nothing else may load a VST3 binary: vst3-host only scans
-//! (it reads the bundle layout and `moduleinfo.json`).
+//! binary.  Nothing else may load a VST3 binary: the library scan
+//! (`scan`) only reads the bundle layout and `moduleinfo.json`.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -142,8 +142,8 @@ pub(crate) fn is_loaded(key: &Path) -> bool {
         .is_some_and(|weak| weak.strong_count() > 0)
 }
 
-/// The shared module for a `.vst3` bundle (or a legacy single-file
-/// plugin), loading it and handing its factory the host context when no
+/// The shared module for a `.vst3` bundle (or, on Windows, a legacy
+/// single-file plugin), loading it and handing its factory the host context when no
 /// one is using it yet.
 pub(crate) fn acquire(bundle: &Path) -> Result<Arc<Vst3Module>, String> {
     let binary = binary_path(bundle)?;
@@ -169,14 +169,14 @@ pub(crate) fn acquire(bundle: &Path) -> Result<Arc<Vst3Module>, String> {
 /// architecture's first (SDK `module_linux.cpp`, `module_win32.cpp`).
 /// Empty on a platform without a VST3 host.
 #[cfg(target_os = "linux")]
-const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
+pub(super) const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
     b"x86_64" => &["x86_64-linux"],
     b"aarch64" => &["aarch64-linux"],
     b"x86" => &["i386-linux"],
     _ => &[],
 };
 #[cfg(target_os = "windows")]
-const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
+pub(super) const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
     b"x86_64" => &["x86_64-win"],
     b"aarch64" => &["arm64-win", "arm64x-win"],
     b"arm64ec" => &["arm64ec-win", "arm64x-win", "x86_64-win"],
@@ -184,50 +184,225 @@ const ARCH_FOLDERS: &[&str] = match std::env::consts::ARCH.as_bytes() {
     _ => &[],
 };
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-const ARCH_FOLDERS: &[&str] = &[];
+pub(super) const ARCH_FOLDERS: &[&str] = &[];
 
 /// The binary's extension inside a bundle.
-const BINARY_EXTENSION: &str = if cfg!(target_os = "windows") {
+pub(super) const BINARY_EXTENSION: &str = if cfg!(target_os = "windows") {
     "vst3"
 } else {
     "so"
 };
 
+/// The machine ids a binary this build can load carries: ELF `e_machine`
+/// on Linux, the PE `Machine` field on Windows.  An ARM64EC build also
+/// loads x64 and ARM64X images, which are `0x8664` and `0xAA64`.  An
+/// ARM64EC image says `0x8664` too, so an x64 build cannot tell one from
+/// x64 by the header; the load refuses it.
+#[cfg(target_os = "linux")]
+pub(super) const MACHINES: &[u16] = match std::env::consts::ARCH.as_bytes() {
+    b"x86_64" => &[62],
+    b"aarch64" => &[183],
+    b"x86" => &[3],
+    _ => &[],
+};
+#[cfg(target_os = "windows")]
+pub(super) const MACHINES: &[u16] = match std::env::consts::ARCH.as_bytes() {
+    b"x86_64" => &[0x8664],
+    b"aarch64" => &[0xAA64],
+    b"arm64ec" => &[0x8664, 0xAA64],
+    b"x86" => &[0x014C],
+    _ => &[],
+};
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(super) const MACHINES: &[u16] = &[];
+
+/// What a binary's header says it is.  Nothing else of the file is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Image {
+    Elf {
+        is_64_bit: bool,
+        little_endian: bool,
+        machine: u16,
+    },
+    Pe {
+        machine: u16,
+    },
+}
+
+impl Image {
+    /// Whether this build can load it: the platform's format, this
+    /// build's machine and, for ELF, its word size and byte order.
+    fn is_loadable(self) -> bool {
+        match self {
+            Image::Elf {
+                is_64_bit,
+                little_endian,
+                machine,
+            } => {
+                cfg!(target_os = "linux")
+                    && is_64_bit == cfg!(target_pointer_width = "64")
+                    && little_endian == cfg!(target_endian = "little")
+                    && MACHINES.contains(&machine)
+            }
+            Image::Pe { machine } => cfg!(target_os = "windows") && MACHINES.contains(&machine),
+        }
+    }
+
+    fn describe(self) -> String {
+        match self {
+            Image::Elf {
+                is_64_bit, machine, ..
+            } => {
+                let name = match machine {
+                    3 => "x86".to_owned(),
+                    40 => "ARM".to_owned(),
+                    62 => "x86_64".to_owned(),
+                    183 => "aarch64".to_owned(),
+                    other => format!("machine {other}"),
+                };
+                format!(
+                    "a {}-bit Linux binary for {name}",
+                    if is_64_bit { 64 } else { 32 }
+                )
+            }
+            Image::Pe { machine } => {
+                let name = match machine {
+                    0x014C => "x86".to_owned(),
+                    0x01C4 => "ARM".to_owned(),
+                    0x8664 => "x64".to_owned(),
+                    0xAA64 => "ARM64".to_owned(),
+                    other => format!("machine {other:#06x}"),
+                };
+                format!("a Windows binary for {name}")
+            }
+        }
+    }
+}
+
+/// The header of an ELF or PE binary: the ELF identification and
+/// `e_machine`, or the DOS header's `e_lfanew` and the PE signature and
+/// `Machine` it points at.  `None` for anything else.
+pub(super) fn read_image(file: &mut (impl std::io::Read + std::io::Seek)) -> Option<Image> {
+    use std::io::SeekFrom;
+    let mut header = [0u8; 64];
+    file.read_exact(&mut header[..20]).ok()?;
+    if header[..4] == *b"\x7fELF" {
+        let little_endian = match header[5] {
+            1 => true,
+            2 => false,
+            _ => return None,
+        };
+        let is_64_bit = match header[4] {
+            1 => false,
+            2 => true,
+            _ => return None,
+        };
+        let bytes = [header[18], header[19]];
+        let machine = if little_endian {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        };
+        return Some(Image::Elf {
+            is_64_bit,
+            little_endian,
+            machine,
+        });
+    }
+    if header[..2] != *b"MZ" {
+        return None;
+    }
+    file.read_exact(&mut header[20..]).ok()?;
+    let offset = u32::from_le_bytes(header[0x3C..0x40].try_into().ok()?);
+    file.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+    let mut signature = [0u8; 6];
+    file.read_exact(&mut signature).ok()?;
+    if signature[..4] != *b"PE\0\0" {
+        return None;
+    }
+    Some(Image::Pe {
+        machine: u16::from_le_bytes([signature[4], signature[5]]),
+    })
+}
+
+/// `Ok` when the file at `path` is a binary this build can load, else why
+/// not.  Reads the header only; the plugin is not loaded.
+fn check_image(path: &Path) -> Result<(), String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("Cannot read {}: {error}.", path.display()))?;
+    match read_image(&mut file) {
+        Some(image) if image.is_loadable() => Ok(()),
+        Some(image) => Err(format!(
+            "{} is {}, not one this {} build can load.",
+            path.display(),
+            image.describe(),
+            std::env::consts::ARCH
+        )),
+        None => Err(format!("{} is not a plugin binary.", path.display())),
+    }
+}
+
 /// The binary inside a bundle directory: `Contents/<arch>/<name>.<ext>`,
-/// or the first `.<ext>` file there when the name differs.  A plain file is
-/// the legacy single-file layout and loads as given.
+/// or else the first `.<ext>` file there, whose header (`read_image`)
+/// says this build can load it.  A binary for another machine is skipped,
+/// so a broken install is refused here, not by the loader.  On Windows a
+/// plain file is the legacy single-file layout and is checked the same way;
+/// Linux has bundle folders only.
 pub(super) fn binary_path(bundle: &Path) -> Result<PathBuf, String> {
     if ARCH_FOLDERS.is_empty() {
         return Err(UNSUPPORTED.to_owned());
     }
     if !bundle.is_dir() {
+        if !cfg!(target_os = "windows") {
+            return Err(format!("{} is not a bundle folder.", bundle.display()));
+        }
+        check_image(bundle)?;
         return Ok(bundle.to_path_buf());
     }
     let mut name = bundle.file_stem().unwrap_or_default().to_os_string();
     name.push(".");
     name.push(BINARY_EXTENSION);
     let contents = bundle.join("Contents");
+    // The first refusal, to say why a bundle with binaries has none to load.
+    let mut refused = None;
+    let mut loadable = |path: &Path| match check_image(path) {
+        Ok(()) => true,
+        Err(error) => {
+            refused.get_or_insert(error);
+            false
+        }
+    };
     let found = ARCH_FOLDERS.iter().find_map(|folder| {
         let folder = contents.join(folder);
         let named = folder.join(&name);
-        if named.is_file() {
+        if named.is_file() && loadable(&named) {
             return Some(named);
         }
-        std::fs::read_dir(&folder)
+        let mut others: Vec<PathBuf> = std::fs::read_dir(&folder)
             .ok()?
             .flatten()
             .map(|entry| entry.path())
-            .find(|path| {
-                path.is_file() && path.extension() == Some(std::ffi::OsStr::new(BINARY_EXTENSION))
+            .filter(|path| {
+                *path != named
+                    && path.is_file()
+                    && path.extension() == Some(std::ffi::OsStr::new(BINARY_EXTENSION))
             })
+            .collect();
+        others.sort();
+        others.into_iter().find(|path| loadable(path))
     });
     found.ok_or_else(|| {
-        format!(
+        let mut message = format!(
             "{} has no binary this {} build can load (searched Contents/{}).",
             bundle.display(),
             std::env::consts::ARCH,
             ARCH_FOLDERS.join(", Contents/")
-        )
+        );
+        if let Some(reason) = refused {
+            message.push(' ');
+            message.push_str(&reason);
+        }
+        message
     })
 }
 
@@ -350,4 +525,4 @@ fn open(_binary: &Path, _key: PathBuf) -> Result<Vst3Module, String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

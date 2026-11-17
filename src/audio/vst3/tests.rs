@@ -11,6 +11,7 @@ use super::connection::Connection;
 use super::factory::{self, AUDIO_MODULE_CLASS};
 use super::host::host_context;
 use super::module::{self, Vst3Module};
+use super::scan;
 use super::stream::{decode_state, encode_state, MemoryStream, StateBlob};
 
 /// The class ids saved preferences hold for the fixtures, as in
@@ -61,6 +62,77 @@ fn vst3_fixture_each_bundle_loads_and_lists_its_audio_class() {
         );
         assert!(factory::audio_class(module.factory(), Some("not a class id")).is_err());
     }
+}
+
+/// The scan finds each bundle without loading it, and the audio classes
+/// `moduleinfo.json` declares are the ones the factory reports, so a
+/// scanned class id opens the class it names.
+#[test]
+fn vst3_fixture_the_scan_lists_what_the_factory_offers() {
+    let _main = crate::audio::claim_main_thread();
+    let Some(again) = crate::audio::vst3_fixture("again") else {
+        return;
+    };
+    let folder = again.parent().expect("the fixtures folder").to_path_buf();
+    let found = scan::find_bundles(std::slice::from_ref(&folder));
+    for (name, class_id) in FIXTURES {
+        let bundle = folder.join(format!("{name}.vst3"));
+        assert!(found.contains(&bundle), "{name} not in {found:?}");
+        assert!(scan::has_loadable_binary(&bundle), "{name}");
+        let info = scan::read_module_info(&bundle)
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .unwrap_or_else(|| panic!("{name} has no moduleinfo.json"));
+        assert_eq!(info.factory.vendor, "Steinberg Media Technologies");
+        let mut declared: Vec<_> = info
+            .classes
+            .iter()
+            .filter(|class| class.category == AUDIO_MODULE_CLASS)
+            .map(|class| (class.class_id.clone(), class.name.clone()))
+            .collect();
+        assert!(
+            declared.iter().any(|(id, _)| id == class_id),
+            "{name}: {declared:?}"
+        );
+
+        let module = fixture_module(name).expect("the same fixture");
+        let mut offered: Vec<_> = factory::classes(module.factory())
+            .into_iter()
+            .filter(|class| class.category == AUDIO_MODULE_CLASS)
+            .map(|class| {
+                let id = declared
+                    .iter()
+                    .find(|(id, _)| factory::parse_class_id(id) == Some(class.cid))
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_default();
+                (id, class.name)
+            })
+            .collect();
+        declared.sort();
+        offered.sort();
+        assert_eq!(declared, offered, "{name}");
+    }
+}
+
+/// The header check against real binaries: every fixture's binary passes,
+/// and copied out on its own it is a single-file plugin on Windows only.
+#[test]
+fn vst3_fixture_binaries_pass_the_header_check() {
+    let Some(again) = crate::audio::vst3_fixture("again") else {
+        return;
+    };
+    let folder = again.parent().expect("the fixtures folder");
+    for (name, _) in FIXTURES {
+        let bundle = folder.join(format!("{name}.vst3"));
+        module::binary_path(&bundle).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    let binary = module::binary_path(&again).expect("AGain's binary");
+    let dir = std::env::temp_dir().join(format!("rigwerk-vst3-single-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let single = dir.join("AGain Single.vst3");
+    std::fs::copy(&binary, &single).expect("copy");
+    let listed = scan::has_loadable_binary(&single);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(listed, cfg!(target_os = "windows"));
 }
 
 #[test]

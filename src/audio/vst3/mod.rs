@@ -17,14 +17,17 @@
 //! - `controller`: the main-thread half of a loaded plugin and its load
 //!   sequence.
 //! - `processor`: the audio-thread half.
+//! - `scan`: finding bundles and reading `moduleinfo.json`, without
+//!   loading a binary.
 //!
-//! Everything but `processor` and `params` is UI-thread work.  The
-//! bindings mark every interface `Send + Sync`, so the compiler does not
-//! keep a pointer off the audio thread: the audio side only ever holds a
-//! [`Vst3Processor`], and the callbacks a plugin may make from another
-//! thread (`IConnectionPoint::notify`, `performEdit`, `restartComponent`,
-//! run-loop registration) use `try_lock`, atomics, or refuse, and never
-//! wait for the UI.
+//! Everything but `processor`, `params` and `scan` (the library scan's
+//! own thread) is UI-thread work.  The bindings mark every interface
+//! `Send + Sync`, so the compiler does not keep a pointer off the audio
+//! thread: the audio side only ever holds a [`Vst3Processor`], and the
+//! callbacks a plugin may make from another thread
+//! (`IConnectionPoint::notify`, `performEdit`, `restartComponent`, run-loop
+//! registration) use `try_lock`, atomics, or refuse, and never wait for the
+//! UI.
 
 mod connection;
 mod controller;
@@ -38,6 +41,7 @@ mod params;
 mod processor;
 #[cfg(target_os = "linux")]
 mod run_loop;
+mod scan;
 mod stream;
 
 pub(crate) use controller::{Vst3Controller, Vst3Loaded};
@@ -45,6 +49,9 @@ pub(crate) use editor::Vst3Editor;
 #[cfg(test)]
 pub(crate) use processor::BusLayout;
 pub(crate) use processor::Vst3Processor;
+#[cfg(test)]
+pub(crate) use scan::tests::TestBundles;
+pub(crate) use scan::{find_bundles, has_loadable_binary, read_module_info, search_roots};
 
 use ::vst3::Steinberg::Vst::IProcessContextRequirements_::Flags_ as Needs;
 use ::vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_ as States;

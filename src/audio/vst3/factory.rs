@@ -4,7 +4,8 @@
 //! Saved preferences hold class ids as the 32 hex digits `moduleinfo.json`
 //! writes, in canonical order.  On Windows a `TUID` is COM-compatible: the
 //! first three GUID fields are little-endian, so the text is reordered on
-//! the way in (the mapping vst3-host 0.11.1 uses, `internal/utils.rs`).
+//! the way in (the mapping vst3-host 0.11.1 used, `internal/utils.rs`, so
+//! the ids older builds saved still match).
 
 use std::ffi::c_void;
 use std::ptr;

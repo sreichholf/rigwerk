@@ -9,6 +9,7 @@ use std::thread;
 use crate::app::paths::InsertKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{self, ClapCandidate};
+use crate::audio::vst3;
 use crate::audio::{PluginFormat, PluginPref};
 /// One plugin a scan found.  `class_id` is set when a bundle contains more
 /// than one audio class (VST3), or holds the plugin id (CLAP), so the right
@@ -50,18 +51,8 @@ impl PluginBrowser {
 }
 
 fn scan_library() -> Vec<PluginCandidate> {
-    let mut roots = vst3_host::discovery::scan_standard_paths();
-    if let Ok(extra) = std::env::var("RIGWERK_VST3_PATH") {
-        for part in extra.split(';') {
-            let part = part.trim();
-            if !part.is_empty() {
-                roots.push(PathBuf::from(part));
-            }
-        }
-    }
-    let paths = vst3_host::discovery::scan_directories(&roots).unwrap_or_default();
     let mut candidates = Vec::new();
-    for path in paths {
+    for path in vst3::find_bundles(&vst3::search_roots()) {
         candidates.extend(candidates_from_bundle(&path));
     }
     for candidate in clap::scan_library() {
@@ -111,7 +102,7 @@ fn candidates_from_clap_bundle(path: &Path) -> Vec<PluginCandidate> {
 fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
     // A bundle that only ships another architecture's binary cannot be
     // opened by this build, so leave it out instead of offering a dead row.
-    if vst3_host::discovery::get_vst3_binary_path(path).is_err() {
+    if !vst3::has_loadable_binary(path) {
         return Vec::new();
     }
     let fallback_name = path
@@ -120,11 +111,17 @@ fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
         .unwrap_or("VST3 plugin")
         .to_owned();
     let mut found = Vec::new();
-    if let Ok(Some(info)) = vst3_host::discovery::read_module_info(path) {
+    // Without `moduleinfo.json` the bundle is one row with no class id,
+    // and the load takes its first audio class (`audio/vst3/scan.rs`).
+    // A module that declares audio classes, all of them instruments, gets
+    // no row: that fallback would load an instrument.
+    let mut declares_audio = false;
+    if let Ok(Some(info)) = vst3::read_module_info(path) {
         for class in &info.classes {
             if !class.category.eq_ignore_ascii_case("Audio Module Class") {
                 continue;
             }
+            declares_audio = true;
             let is_instrument = class
                 .sub_categories
                 .iter()
@@ -155,7 +152,7 @@ fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
             });
         }
     }
-    if found.is_empty() {
+    if found.is_empty() && !declares_audio {
         found.push(PluginCandidate {
             path: path.to_path_buf(),
             format: PluginFormat::Vst3,
@@ -434,3 +431,6 @@ impl RigWerkApp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
