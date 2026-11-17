@@ -216,6 +216,16 @@ fn gate_missing_from_old_saves_uses_defaults() {
 }
 
 #[test]
+fn a_save_with_the_dropped_prefer_plugin_interface_still_loads() {
+    let raw = r#"(session_name:"Old",prefer_plugin_interface:true,sample_rate:44100)"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.backup.is_none(), "nothing to keep aside");
+    let preferences = loaded.preferences.expect("readable");
+    assert_eq!(preferences.session_name, "Old");
+    assert_eq!(preferences.sample_rate, 44100);
+}
+
+#[test]
 fn gate_knobs_are_sanitized_on_load() {
     let raw = r#"(
             gate:(

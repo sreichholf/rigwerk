@@ -306,8 +306,6 @@ pub struct RigWerkApp {
     pub(crate) ui_scale: f32,
     /// Filter typed into the configure panel.
     pub(crate) plugin_param_filter: String,
-    /// Open the plugin's own interface straight from the insert when it has one.
-    pub(crate) prefer_plugin_interface: bool,
     /// A copy of stored preferences that could not be fully read, written
     /// under its own key on the next save so that save cannot lose it.
     preferences_backup: Option<(String, String)>,
@@ -442,7 +440,6 @@ impl RigWerkApp {
             cushion_ms: self.cushion_ms,
             paths,
             selected_path,
-            prefer_plugin_interface: self.prefer_plugin_interface,
             clock_device,
             followers,
             measured_latency: self.measured_latency.clone(),
@@ -632,7 +629,6 @@ impl RigWerkApp {
             plugin_gui: None,
             ui_scale: 1.0,
             plugin_param_filter: String::new(),
-            prefer_plugin_interface: preferences.prefer_plugin_interface,
             preferences_backup: loaded.backup,
             measured_latency: preferences.measured_latency.clone(),
             calibration: calibration::CalibrationUi::default(),
@@ -864,7 +860,6 @@ pub(crate) fn blank_app() -> RigWerkApp {
         plugin_gui: None,
         ui_scale: 1.0,
         plugin_param_filter: String::new(),
-        prefer_plugin_interface: false,
         preferences_backup: None,
         measured_latency: None,
         calibration: calibration::CalibrationUi::default(),

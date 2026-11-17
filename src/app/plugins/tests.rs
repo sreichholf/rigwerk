@@ -121,3 +121,30 @@ fn a_bundle_whose_audio_classes_are_all_instruments_is_not_listed() {
         "the fallback row would load the instrument"
     );
 }
+
+#[test]
+fn an_insert_that_cannot_open_an_editor_opens_its_parameters() {
+    use crate::app::paths::InsertKey;
+    use crate::audio::PluginPref;
+    let missing = |path: &str| PluginPref {
+        path: path.to_owned(),
+        name: path.to_owned(),
+        ..PluginPref::default()
+    };
+    let mut app = crate::app::blank_app();
+    app.engine
+        .restore_plugins(0, vec![missing("A.vst3"), missing("B.vst3")]);
+
+    // Neither plugin loads, so neither has an editor to open.
+    app.open_plugin_editor(1);
+    assert_eq!(app.plugin_editor, Some(InsertKey { path: 0, insert: 1 }));
+    assert!(app.plugin_gui.is_none());
+
+    // The same insert keeps its filter; another insert starts clean.
+    app.plugin_param_filter = "gain".to_owned();
+    app.open_plugin_parameters(1);
+    assert_eq!(app.plugin_param_filter, "gain");
+    app.open_plugin_parameters(0);
+    assert_eq!(app.plugin_editor, Some(InsertKey { path: 0, insert: 0 }));
+    assert!(app.plugin_param_filter.is_empty());
+}

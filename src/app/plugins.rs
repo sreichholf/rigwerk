@@ -385,11 +385,28 @@ impl RigWerkApp {
         self.engine.set_plugin_mix(self.selected_path, index, mix);
     }
 
-    /// Opens the control panel for one insert of the selected path, loading
-    /// a saved plugin first if the bridge has not been started yet.  When
-    /// the person prefers plugin interfaces, a plugin that can embed its own
-    /// view opens that instead.
+    /// Opens the plugin's own editor for one insert of the selected path,
+    /// loading a saved plugin first if the bridge has not been started yet.
+    /// A plugin with no editor, or one whose editor cannot open here, gets
+    /// RigWerk's parameter panel instead.
     pub(crate) fn open_plugin_editor(&mut self, index: usize) {
+        let key = self.insert_key(index);
+        self.engine.ensure_plugin_loaded(key.path, index);
+        let usable = self
+            .engine
+            .plugin_views(key.path)
+            .get(index)
+            .is_some_and(|view| view.has_editor && view.error.is_none());
+        if usable && self.open_plugin_gui(key) {
+            self.plugin_editor = None;
+            return;
+        }
+        self.open_plugin_parameters(index);
+    }
+
+    /// Opens RigWerk's parameter panel for one insert of the selected path,
+    /// loading a saved plugin first if the bridge has not been started yet.
+    pub(crate) fn open_plugin_parameters(&mut self, index: usize) {
         let key = self.insert_key(index);
         self.engine.ensure_plugin_loaded(key.path, index);
         if self.plugin_editor != Some(key) {
@@ -397,16 +414,6 @@ impl RigWerkApp {
             // the one that was open before.
             self.finish_plugin_gui();
             self.plugin_param_filter.clear();
-        }
-        if self.prefer_plugin_interface {
-            let views = self.engine.plugin_views(key.path);
-            let usable = views
-                .get(index)
-                .is_some_and(|view| view.has_editor && view.error.is_none());
-            if usable && self.open_plugin_gui(key) {
-                self.plugin_editor = None;
-                return;
-            }
         }
         self.plugin_editor = Some(key);
     }
