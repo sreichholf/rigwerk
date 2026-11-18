@@ -42,7 +42,7 @@ use crate::audio::output::open_output;
 use crate::audio::output_map::DeviceFrame;
 use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::{FollowerPlan, Shared};
-use crate::audio::types::{DeviceItem, StartConfig};
+use crate::audio::types::{DeviceItem, OutputMode, StartConfig};
 
 use super::alsa::{alsa_pcm_is_default, alsa_pcm_name};
 use super::pipewire::{self, LOW_QUANTUM};
@@ -303,7 +303,12 @@ pub(crate) fn run(
         } else {
             format!("PipeWire node · {frames} frames{note}")
         };
-        shared.set_output(output_rate, frames, mode);
+        let opened = if config.pipewire_low_latency {
+            OutputMode::LowLatency
+        } else {
+            OutputMode::Standard
+        };
+        shared.set_output(output_rate, frames, opened, mode);
     } else {
         shared.set_status("Opening independent output…");
         let output = open_output(

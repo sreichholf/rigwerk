@@ -17,7 +17,7 @@ fn one_follower(channels: usize, cushion_ms: f32) -> Shared {
 /// [`one_follower`] with everything at `rate`.
 fn one_follower_at(rate: u32, channels: usize, cushion_ms: f32) -> Shared {
     let shared = Shared::new(rate);
-    shared.set_output(rate, 64, "test");
+    shared.set_output(rate, 64, crate::audio::OutputMode::Standard, "test");
     shared.drift_enabled.store(false, Ordering::Relaxed);
     let mut plan = FollowerPlan {
         count: 1,
@@ -199,7 +199,7 @@ fn closing_a_large_cushion_step_does_not_flag_the_drift_loop() {
 /// not clamped below its floor, and the excess purge still fires.
 fn a_wide_ring_holds_a_safe_cushion(rate: u32, channels: usize) {
     let shared = Shared::new(rate);
-    shared.set_output(rate, 64, "test");
+    shared.set_output(rate, 64, crate::audio::OutputMode::Standard, "test");
     shared.drift_enabled.store(false, Ordering::Relaxed);
     let bus = shared.follower_bus(0);
     bus.set_device_channels(channels);

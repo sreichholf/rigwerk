@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::audio::{ClickRhythm, CushionMode};
+use crate::audio::{ClickRhythm, CushionMode, OutputMode};
 
 const FOUR_FOUR: u8 = ClickRhythm::FourFour as u8;
 
@@ -65,7 +65,7 @@ fn set_output_lifts_the_safe_cushion_for_a_large_exclusive_step() {
     shared.set_target_frames(super::initial_target(128));
     shared.note_input_block(128);
     assert_eq!(shared.target_frames(), 256);
-    shared.set_output(48_000, 480, "Exclusive · test");
+    shared.set_output(48_000, 480, OutputMode::Exclusive, "Exclusive · test");
     assert_eq!(shared.target_frames(), 960);
     assert_eq!(shared.output_step_frames.load(Ordering::Relaxed), 480);
 }
@@ -141,7 +141,7 @@ fn publishing_output_rate_reloads_only_on_the_main_thread() {
     assert_eq!(built_rates(&shared), vec![None]);
 
     // Publishing the device rate does not itself rebuild the chain.
-    shared.set_output(44_100, 128, "test output");
+    shared.set_output(44_100, 128, OutputMode::Standard, "test output");
     assert_eq!(chain_rate(&shared), 48_000);
     assert_eq!(built_rates(&shared), vec![None]);
 
@@ -161,7 +161,7 @@ fn publishing_output_rate_reloads_only_on_the_main_thread() {
 
     // A later device rate still waits for that follow-up, including the
     // one `service_plugins` runs each frame.
-    shared.set_output(48_000, 128, "test output");
+    shared.set_output(48_000, 128, OutputMode::Standard, "test output");
     assert_eq!(chain_rate(&shared), 44_100);
     assert_eq!(built_rates(&shared), vec![Some(44_100)]);
     shared.service_plugins();
@@ -279,7 +279,7 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_audio_side() {
     let _main = claim_main_thread();
     let shared = super::Shared::new(48_000);
     shared.restore_plugins(vec![missing("a.vst3")]);
-    shared.set_output(48_000, 128, "test output");
+    shared.set_output(48_000, 128, OutputMode::Standard, "test output");
     // Opens the restored slot (it fails), so the chain is settled.
     shared.service_plugins();
     assert!(shared.plugin_views()[0].error.is_some());
@@ -833,7 +833,7 @@ fn a_reload_request_with_a_new_device_rate_pending_loads_once_at_that_rate() {
         })
         .expect("load the fake");
     assert_eq!(*rates.borrow(), vec![48_000]);
-    shared.set_output(44_100, 128, "test output");
+    shared.set_output(44_100, 128, OutputMode::Standard, "test output");
     // The plugin asks to be rebuilt (a layout change).
     shared
         .plugin_handle(0)
@@ -1080,4 +1080,46 @@ fn the_published_beat_and_rhythm_round_trip_in_one_value() {
     // Stopping clears the beat, not the bar it belonged to.
     shared.clear_metronome_beat();
     assert_eq!(shared.metronome_beat(), (0, ClickRhythm::SixEight as u8));
+}
+
+#[test]
+fn the_opened_output_mode_is_published_with_its_line_and_cleared_on_reset() {
+    let shared = super::Shared::new(48_000);
+    assert_eq!(shared.snapshot().opened_output_mode, None);
+    shared.set_output(
+        48_000,
+        144,
+        OutputMode::Shared,
+        "Standard output · REAL-style refused: no client",
+    );
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.opened_output_mode, Some(OutputMode::Shared));
+    assert!(snapshot.output_mode.contains("refused"));
+    shared.set_output(48_000, 128, OutputMode::RealStyle, "REAL-style · 128 smp");
+    assert_eq!(
+        shared.snapshot().opened_output_mode,
+        Some(OutputMode::RealStyle)
+    );
+    shared.reset();
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.opened_output_mode, None);
+    assert!(snapshot.output_mode.is_empty());
+}
+
+#[test]
+fn every_output_mode_survives_its_stored_byte() {
+    let modes = [
+        OutputMode::Standard,
+        OutputMode::LowLatency,
+        OutputMode::Shared,
+        OutputMode::RealStyle,
+        OutputMode::Exclusive,
+        OutputMode::Asio,
+    ];
+    for mode in modes {
+        assert_ne!(mode.to_u8(), 0, "{mode:?}");
+        assert_eq!(OutputMode::from_u8(mode.to_u8()), Some(mode));
+    }
+    assert_eq!(OutputMode::from_u8(0), None);
+    assert_eq!(OutputMode::from_u8(200), None);
 }

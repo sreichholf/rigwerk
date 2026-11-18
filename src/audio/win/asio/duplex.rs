@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::shared::{initial_target, Shared};
-use crate::audio::types::StartConfig;
+use crate::audio::types::{OutputMode, StartConfig};
 
 use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
@@ -76,6 +76,7 @@ pub(crate) fn run_asio_duplex_bridge(
     shared.set_output(
         rate,
         buffer_frames.max(1) as u32,
+        OutputMode::Asio,
         format!("ASIO in and out · one driver, {buffer_frames} smp"),
     );
     // The UI thread reloads plugins from the rate published above.

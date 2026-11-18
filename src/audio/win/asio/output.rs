@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::shared::{initial_target, Shared};
-use crate::audio::types::StartConfig;
+use crate::audio::types::{OutputMode, StartConfig};
 
 use cpal::traits::StreamTrait;
 
@@ -316,6 +316,7 @@ pub(crate) fn run_asio_output_loop(
     shared.set_output(
         rate,
         buffer_frames.max(1) as u32,
+        OutputMode::Asio,
         format!("ASIO output · driver buffer {buffer_frames} smp"),
     );
     if let Err(error) = driver.start() {

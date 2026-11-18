@@ -870,7 +870,7 @@ fn the_ring_path_pushes_finished_frames_into_active_follower_rings() {
     use super::super::types::CushionMode;
 
     let (mut mixer, shared) = steady_mixer((0.5, -0.25));
-    shared.set_output(48_000, 64, "test");
+    shared.set_output(48_000, 64, crate::audio::OutputMode::Standard, "test");
     let mut plan = FollowerPlan {
         count: 1,
         ..FollowerPlan::default()
@@ -1648,7 +1648,7 @@ fn recording_keeps_the_limited_device_frame() {
     let (mut mixer, shared) = steady_mixer((1.0, -1.0));
     let channels = 2usize;
     let rate = 48_000u32;
-    shared.set_output(rate, 64, "test");
+    shared.set_output(rate, 64, crate::audio::OutputMode::Standard, "test");
     mixer.publish_device_channels(&shared);
     assert_eq!(shared.clock_device.channels() as usize, channels);
     let path = recording_file("limited");

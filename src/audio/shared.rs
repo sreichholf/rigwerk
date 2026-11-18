@@ -36,7 +36,7 @@ use super::plugins::PluginPref;
 #[cfg(test)]
 use super::plugins::PluginView;
 use super::scope::ScopeLane;
-use super::types::{CushionMode, Snapshot};
+use super::types::{CushionMode, OutputMode, Snapshot};
 
 use super::asio_panel::AsioPanelRequests;
 use super::calibration::Calibration;
@@ -181,6 +181,9 @@ pub(crate) struct Shared {
     pub(crate) output_rate: AtomicU32,
     pub(crate) output_step_frames: AtomicU32,
     pub(crate) output_mode: Mutex<String>,
+    /// [`OutputMode::to_u8`] of the mode the output opened in, published
+    /// with [`Self::output_mode`]; 0 until it has opened.
+    opened_output_mode: AtomicU8,
     /// Nanoseconds from our playback stream to the graph edge (`pw_time.delay`).
     /// [`PATH_DELAY_UNKNOWN`] until a native PipeWire playback callback writes it.
     pub(crate) path_delay_ns: AtomicU64,
@@ -270,6 +273,7 @@ impl Shared {
             output_rate: AtomicU32::new(0),
             output_step_frames: AtomicU32::new(0),
             output_mode: Mutex::new(String::new()),
+            opened_output_mode: AtomicU8::new(0),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
             paths: std::array::from_fn(|_| PathControls::new(sample_rate)),
             total_dsp: DspCell::default(),
@@ -609,6 +613,7 @@ impl Shared {
         self.path_delay_ns
             .store(PATH_DELAY_UNKNOWN, Ordering::Relaxed);
         self.set_output_mode("");
+        self.opened_output_mode.store(0, Ordering::Relaxed);
         // A measurement belongs to the session it was armed in; a restarted
         // bridge must not inherit a duck or a half-filled capture.
         self.calibration.finish();
@@ -652,12 +657,22 @@ impl Shared {
         self.scope_out.set_rate(rate);
     }
 
-    pub(crate) fn set_output(&self, rate: u32, step_frames: u32, mode: impl Into<String>) {
+    /// Publishes what the output opened: its rate, the step it is fed in,
+    /// the mode it really runs in and the line that describes it.
+    pub(crate) fn set_output(
+        &self,
+        rate: u32,
+        step_frames: u32,
+        opened: OutputMode,
+        mode: impl Into<String>,
+    ) {
         self.output_rate.store(rate, Ordering::Relaxed);
         self.output_step_frames
             .store(step_frames, Ordering::Relaxed);
         self.scope_out.set_rate(rate);
         self.set_output_mode(mode);
+        self.opened_output_mode
+            .store(opened.to_u8(), Ordering::Relaxed);
         // Size the cushion from the device step as soon as it is known.  Exclusive
         // (and large REAL-style) wakes drain a full step each time; waiting for the
         // mixer's second block to call note_output_block leaves the target at the
@@ -1167,6 +1182,9 @@ impl Shared {
                 .lock()
                 .map(|mode| mode.clone())
                 .unwrap_or_default(),
+            opened_output_mode: OutputMode::from_u8(
+                self.opened_output_mode.load(Ordering::Relaxed),
+            ),
             path_delay_ms: self.path_delay_ms(),
             direct: self.direct.load(Ordering::Relaxed),
             metronome_beat,

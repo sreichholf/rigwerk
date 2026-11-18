@@ -212,7 +212,11 @@ pub struct Snapshot {
     pub output_rate: u32,
     pub output_step_frames: u32,
     /// One line on how the output runs, e.g. REAL-style or why it fell back.
+    /// Display only: compare [`Self::opened_output_mode`] instead.
     pub output_mode: String,
+    /// The mode the clock output opened in, published with
+    /// [`Self::output_mode`].  `None` until the output has opened.
+    pub opened_output_mode: Option<OutputMode>,
     /// Milliseconds from our playback node to the graph edge (device/filters),
     /// when PipeWire reports it. `None` on non-PipeWire outputs or before the
     /// first timing sample. Bluetooth A2DP often lands around 100–200 ms here.
@@ -290,6 +294,55 @@ impl WasapiOutputMode {
     /// Whether this mode asks for a low-latency attempt (not plain Shared).
     pub fn wants_low_latency(self) -> bool {
         !matches!(self, Self::Shared)
+    }
+}
+
+/// How the clock output really opened, published beside the mode line
+/// ([`Snapshot::output_mode`]).  An open that refused what was asked for
+/// (an exclusive or low-latency attempt, a fixed buffer) publishes the
+/// mode that runs instead, never the request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Linux: a stream at the chosen output buffer, or a PipeWire node at
+    /// the graph's own size.
+    Standard,
+    /// Linux Low latency: ALSA's smallest period, or a PipeWire node at the
+    /// low quantum.
+    LowLatency,
+    /// Windows (and any other non-Linux host): a shared stream at the
+    /// chosen output buffer.
+    Shared,
+    /// WASAPI shared at the driver's smallest engine step (REAL-style).
+    RealStyle,
+    /// WASAPI exclusive, this device only.
+    Exclusive,
+    /// An ASIO driver, alone or as the input's driver too.
+    Asio,
+}
+
+impl OutputMode {
+    /// The value [`super::shared::Shared`] stores; 0 is "nothing opened".
+    pub(crate) fn to_u8(self) -> u8 {
+        match self {
+            Self::Standard => 1,
+            Self::LowLatency => 2,
+            Self::Shared => 3,
+            Self::RealStyle => 4,
+            Self::Exclusive => 5,
+            Self::Asio => 6,
+        }
+    }
+
+    pub(crate) fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            1 => Self::Standard,
+            2 => Self::LowLatency,
+            3 => Self::Shared,
+            4 => Self::RealStyle,
+            5 => Self::Exclusive,
+            6 => Self::Asio,
+            _ => return None,
+        })
     }
 }
 

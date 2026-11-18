@@ -1,4 +1,7 @@
-use super::{civil_from_days, utc_stamp, LatencyConditions, LoopbackKind, MeasuredLatency};
+use super::{
+    civil_from_days, output_mode_key, utc_stamp, LatencyConditions, LoopbackKind, MeasuredLatency,
+};
+use crate::audio::{EngineState, OutputMode};
 
 fn measurement() -> MeasuredLatency {
     MeasuredLatency {
@@ -180,61 +183,45 @@ fn the_summary_says_measured_and_names_the_stale_reason() {
 }
 
 #[test]
-fn the_opened_mode_is_the_comparison_key() {
+fn every_output_mode_keeps_its_stored_key() {
+    // Saved measurements hold these strings: a renamed label must not
+    // change one, or every stored measurement would read stale.
     let cases = [
-        (
-            "Exclusive · 128 smp step (2.7 ms) · this device only",
-            false,
-            Some("exclusive"),
-        ),
-        ("Exclusive · 128 smp", true, Some("exclusive")),
-        (
-            "Standard output · Exclusive refused: busy",
-            true,
-            Some("shared"),
-        ),
-        (
-            "Standard output · REAL-style refused: no client",
-            true,
-            Some("shared"),
-        ),
-        (
-            "REAL-style · 128 smp step (2.7 ms)",
-            true,
-            Some("real-style"),
-        ),
-        (
-            "Low latency · ALSA smallest period",
-            false,
-            Some("low-latency"),
-        ),
-        (
-            "Low latency · ALSA smallest period · fixed buffer refused, driver default",
-            false,
-            Some("standard"),
-        ),
-        ("Standard output", false, Some("standard")),
-        ("Standard output", true, Some("shared")),
-        ("ASIO output · driver buffer 128 smp", true, Some("asio")),
-        (
-            "Low latency · PipeWire duplex node · 128 frames at 48000 Hz · no bridge buffer",
-            false,
-            Some("low-latency"),
-        ),
-        (
-            "PipeWire duplex node · 1024 frames at 48000 Hz · no bridge buffer",
-            false,
-            Some("standard"),
-        ),
-        ("", false, None),
+        (OutputMode::Standard, "standard"),
+        (OutputMode::LowLatency, "low-latency"),
+        (OutputMode::Shared, "shared"),
+        (OutputMode::RealStyle, "real-style"),
+        (OutputMode::Exclusive, "exclusive"),
+        (OutputMode::Asio, "asio"),
     ];
-    for (mode, windows, expected) in cases {
-        assert_eq!(
-            super::opened_output_mode_key_on(mode, windows),
-            expected,
-            "{mode:?} windows={windows}"
-        );
+    for (mode, key) in cases {
+        assert_eq!(output_mode_key(mode), key, "{mode:?}");
     }
+}
+
+#[test]
+fn the_opened_mode_is_the_comparison_key() {
+    let mut app = crate::app::blank_app();
+    app.low_latency_output = true;
+    app.wasapi_output_mode = crate::audio::WasapiOutputMode::Exclusive;
+    let requested = if cfg!(target_os = "windows") {
+        "exclusive"
+    } else {
+        "low-latency"
+    };
+    // Stopped: the settings' request, whatever an old snapshot says.
+    app.snapshot.opened_output_mode = Some(OutputMode::Shared);
+    assert_eq!(app.output_mode_key(), requested);
+    // Running: what the driver opened, so a refused attempt is the
+    // fallback that runs, not the request.
+    app.engine.state = EngineState::Running;
+    assert_eq!(app.output_mode(), OutputMode::Shared);
+    assert_eq!(app.output_mode_key(), "shared");
+    app.snapshot.opened_output_mode = Some(OutputMode::Standard);
+    assert_eq!(app.latency_conditions().output_mode, "standard");
+    // Running, before the output has published: still the request.
+    app.snapshot.opened_output_mode = None;
+    assert_eq!(app.output_mode_key(), requested);
 }
 
 #[test]

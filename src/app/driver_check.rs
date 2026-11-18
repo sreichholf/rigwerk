@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use crate::app::settings::rate_label;
 use crate::app::{LogTone, RigWerkApp};
-use crate::audio::EngineState;
+use crate::audio::{EngineState, OutputMode};
 
 /// Whether a driver result is good news or a limitation worth attention.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -392,6 +392,7 @@ impl RigWerkApp {
             return None;
         }
         let mode = &self.snapshot.output_mode;
+        let opened = self.snapshot.opened_output_mode;
         let asio = self.selected_output().asio_clsid.is_some();
         let mut notes = Vec::new();
 
@@ -416,7 +417,7 @@ impl RigWerkApp {
             ));
         }
 
-        if mode.starts_with("REAL-style") {
+        if opened == Some(OutputMode::RealStyle) {
             // REAL-style asks for the driver's smallest step, not the chosen
             // buffer; only a step above it, or a driver with no smaller step
             // at all, is worth a word.
@@ -432,11 +433,11 @@ impl RigWerkApp {
                     block_ms(frames, rate)
                 ));
             }
-        } else if mode.starts_with("Exclusive") {
+        } else if opened == Some(OutputMode::Exclusive) {
             // Exclusive uses the driver's exclusive period, not the chosen
             // shared output buffer.  A size mismatch is expected and not a
             // shared-mode mixing note.
-        } else if mode.starts_with("Low latency") {
+        } else if opened == Some(OutputMode::LowLatency) {
             // Low latency deliberately asks for a different size than the
             // manual output buffer, so a difference is not a surprise here.
         } else if frames as usize != self.output_buffer {

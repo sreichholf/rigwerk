@@ -118,7 +118,9 @@ fn arm_recording_refuses_a_clock_with_no_opened_endpoint() {
     let engine = AudioEngine::new(48_000);
     let path = recording_file("clock-closed");
     assert!(!engine.arm_recording(path.clone(), RecordSource::Clock));
-    engine.shared.set_output(48_000, 64, "test");
+    engine
+        .shared
+        .set_output(48_000, 64, crate::audio::OutputMode::Standard, "test");
     assert!(
         !engine.arm_recording(path.clone(), RecordSource::Clock),
         "a rate without a channel count is not an endpoint"
@@ -126,7 +128,9 @@ fn arm_recording_refuses_a_clock_with_no_opened_endpoint() {
     engine.shared.clock_device.set_channels(2);
     engine.shared.output_rate.store(0, Ordering::Relaxed);
     assert!(!engine.arm_recording(path.clone(), RecordSource::Clock));
-    engine.shared.set_output(48_000, 64, "test");
+    engine
+        .shared
+        .set_output(48_000, 64, crate::audio::OutputMode::Standard, "test");
     assert!(engine.arm_recording(path.clone(), RecordSource::Clock));
     wait_until_recording(&engine);
     assert_eq!(engine.recording_status().rate, 48_000);
@@ -140,7 +144,9 @@ fn arm_recording_refuses_a_clock_with_no_opened_endpoint() {
 fn arm_recording_uses_the_followers_opened_rate() {
     let engine = AudioEngine::new(48_000);
     let path = recording_file("follower-rate");
-    engine.shared.set_output(44_100, 64, "test");
+    engine
+        .shared
+        .set_output(44_100, 64, crate::audio::OutputMode::Standard, "test");
     engine.shared.followers[0].set_channels(2);
     assert!(
         !engine.arm_recording(path.clone(), RecordSource::Follower(0)),
@@ -174,7 +180,9 @@ fn arm_recording_uses_the_followers_opened_rate() {
 #[test]
 fn arm_recording_stop_lets_the_writer_finish() {
     let mut engine = AudioEngine::new(48_000);
-    engine.shared.set_output(48_000, 64, "test");
+    engine
+        .shared
+        .set_output(48_000, 64, crate::audio::OutputMode::Standard, "test");
     engine.shared.clock_device.set_channels(2);
     let path = recording_file("stop");
     assert!(engine.arm_recording(path.clone(), RecordSource::Clock));

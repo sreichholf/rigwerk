@@ -14,7 +14,7 @@
 use serde::Deserialize;
 
 use crate::app::RigWerkApp;
-use crate::audio::MAX_ROUND_TRIP_MS;
+use crate::audio::{OutputMode, MAX_ROUND_TRIP_MS};
 
 /// How the person closed the loop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
@@ -270,69 +270,55 @@ impl RigWerkApp {
     /// for: a refused exclusive or low-latency open is the fallback.  The
     /// long status line stays display-only.
     pub(crate) fn output_mode_key(&self) -> &'static str {
+        output_mode_key(self.output_mode())
+    }
+
+    /// The mode the clock output runs in: the one the driver published while
+    /// the bridge runs, otherwise the one the settings ask for.
+    pub(crate) fn output_mode(&self) -> OutputMode {
         if self.engine.state == crate::audio::EngineState::Running {
-            if let Some(opened) = opened_output_mode_key(&self.snapshot.output_mode) {
+            if let Some(opened) = self.snapshot.opened_output_mode {
                 return opened;
             }
         }
-        self.requested_output_mode_key()
+        self.requested_output_mode()
     }
 
     /// The mode the settings ask for, used before the driver has published
     /// what it opened and while the bridge is stopped.
-    fn requested_output_mode_key(&self) -> &'static str {
+    fn requested_output_mode(&self) -> OutputMode {
         if self.selected_output().asio_clsid.is_some() {
-            return "asio";
+            return OutputMode::Asio;
         }
         let (real_style, exclusive) = self.output_start_flags();
         if cfg!(target_os = "windows") {
             if exclusive {
-                "exclusive"
+                OutputMode::Exclusive
             } else if real_style {
-                "real-style"
+                OutputMode::RealStyle
             } else {
-                "shared"
+                OutputMode::Shared
             }
         } else if real_style {
-            "low-latency"
+            OutputMode::LowLatency
         } else {
-            "standard"
+            OutputMode::Standard
         }
     }
 }
 
-/// The comparison token for a mode string the driver published.  `None`
-/// when nothing has been published yet.  A line that says the attempt was
-/// refused names the fallback that is actually running, not the request.
-fn opened_output_mode_key(mode: &str) -> Option<&'static str> {
-    opened_output_mode_key_on(mode, cfg!(target_os = "windows"))
-}
-
-pub(crate) fn opened_output_mode_key_on(mode: &str, windows: bool) -> Option<&'static str> {
-    let mode = mode.trim();
-    if mode.is_empty() {
-        return None;
+/// The comparison token stored in [`MeasuredLatency::output_mode`].  Saved
+/// measurements hold these strings, so a token never changes, even when the
+/// mode's label does.
+pub(crate) fn output_mode_key(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Standard => "standard",
+        OutputMode::LowLatency => "low-latency",
+        OutputMode::Shared => "shared",
+        OutputMode::RealStyle => "real-style",
+        OutputMode::Exclusive => "exclusive",
+        OutputMode::Asio => "asio",
     }
-    let fallback = if windows { "shared" } else { "standard" };
-    if mode.contains("refused") {
-        return Some(fallback);
-    }
-    if mode.starts_with("ASIO") {
-        return Some("asio");
-    }
-    if mode.starts_with("Exclusive") {
-        return Some("exclusive");
-    }
-    if mode.starts_with("REAL") {
-        return Some("real-style");
-    }
-    if mode.starts_with("Low latency") {
-        return Some("low-latency");
-    }
-    if mode.starts_with("Shared") || mode.starts_with("Standard") || mode.starts_with("PipeWire") {
-        return Some(fallback);
-    }
-    None
 }
 
 #[cfg(test)]

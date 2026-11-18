@@ -47,7 +47,7 @@ use std::time::Duration;
 use pipewire as pw;
 
 use crate::audio::shared::Shared;
-use crate::audio::types::StartConfig;
+use crate::audio::types::{OutputMode, StartConfig};
 
 use super::native::{node_latency_frames, node_name};
 
@@ -151,7 +151,12 @@ pub(crate) fn run(
         let low = if low_latency { "Low latency · " } else { "" };
         format!("{low}PipeWire duplex node · {quantum} frames at {rate} Hz · no bridge buffer")
     };
-    shared.set_output(rate, frames, mode(rate, frames as u64));
+    let opened = if low_latency {
+        OutputMode::LowLatency
+    } else {
+        OutputMode::Standard
+    };
+    shared.set_output(rate, frames, opened, mode(rate, frames as u64));
     shared.running.store(true, Ordering::Relaxed);
     shared.set_status(format!(
         "Bridging 2 ch · {rate} Hz · one PipeWire node (no bridge buffer)"
@@ -196,7 +201,7 @@ pub(crate) fn run(
         if rate > 0 && (rate, quantum) != shown.get() {
             shown.set((rate, quantum));
             shared.note_direct_rate(rate);
-            shared.set_output(rate, quantum as u32, mode(rate, quantum));
+            shared.set_output(rate, quantum as u32, opened, mode(rate, quantum));
         }
         // Create or drop RigWerk Out when publish is toggled live.
         let want_publish = (0..shared.follower_count())
