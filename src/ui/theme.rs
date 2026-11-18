@@ -57,6 +57,7 @@ pub(crate) fn log_colour(tone: crate::app::LogTone) -> Color32 {
 }
 
 pub(crate) fn configure_style(ctx: &egui::Context) {
+    crate::ui::fonts::install(ctx);
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = Vec2::new(8.0, 8.0);

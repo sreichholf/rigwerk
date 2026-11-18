@@ -217,9 +217,16 @@ Third-party crates keep their own licenses (mostly MIT / Apache-2.0). System
 libraries such as PipeWire and ALSA are typically LGPL and are linked
 dynamically.
 
-### Bundled fonts (egui)
+### Bundled fonts
 
-The UI embeds egui’s default fonts from `epaint_default_fonts`:
+The UI is set in IBM Plex Sans and IBM Plex Mono, under the
+[SIL Open Font License 1.1](assets/fonts/OFL.txt).  `assets/fonts` holds
+subsets of them, renamed RigWerk Sans and RigWerk Mono because “Plex” is a
+Reserved Font Name; its [README](assets/fonts/README.md) gives the source
+and version.
+
+Behind them, as the fallback, the UI embeds egui’s default fonts from
+`epaint_default_fonts`:
 
 | Font | License |
 | --- | --- |
