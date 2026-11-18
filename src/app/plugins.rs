@@ -22,6 +22,26 @@ pub(crate) struct PluginCandidate {
     pub(crate) name: String,
     pub(crate) vendor: String,
     pub(crate) category: String,
+    /// The channel count the scan read without loading the binary: CLAP
+    /// features or VST3 sub-categories saying "mono" or "stereo".  `None`
+    /// when they say neither.
+    #[cfg_attr(not(test), allow(dead_code))] // For the effect browser's rows.
+    pub(crate) channels: Option<u32>,
+    /// What went wrong reading this candidate, when the scan could still
+    /// list it (a VST3 `moduleinfo.json` it could not read or parse).
+    #[cfg_attr(not(test), allow(dead_code))] // For the effect browser's rows.
+    pub(crate) scan_error: Option<String>,
+}
+
+/// The channel count a plugin's own tags declare: "mono" is 1, "stereo"
+/// is 2, case-insensitive.  `None` for neither, or both.
+fn declared_channels(tags: &[String]) -> Option<u32> {
+    let has = |word: &str| tags.iter().any(|tag| tag.eq_ignore_ascii_case(word));
+    match (has("mono"), has("stereo")) {
+        (true, false) => Some(1),
+        (false, true) => Some(2),
+        _ => None,
+    }
 }
 
 #[derive(Default)]
@@ -76,6 +96,8 @@ fn candidate_from_clap(candidate: ClapCandidate) -> PluginCandidate {
         name: candidate.name,
         vendor: candidate.vendor,
         category: candidate.category,
+        channels: declared_channels(&candidate.features),
+        scan_error: None,
     }
 }
 
@@ -116,7 +138,11 @@ fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
     // A module that declares audio classes, all of them instruments, gets
     // no row: that fallback would load an instrument.
     let mut declares_audio = false;
-    if let Ok(Some(info)) = vst3::read_module_info(path) {
+    let (info, scan_error) = match vst3::read_module_info(path) {
+        Ok(info) => (info, None),
+        Err(error) => (None, Some(error)),
+    };
+    if let Some(info) = info {
         for class in &info.classes {
             if !class.category.eq_ignore_ascii_case("Audio Module Class") {
                 continue;
@@ -149,6 +175,8 @@ fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
                     class.vendor.clone()
                 },
                 category,
+                channels: declared_channels(&class.sub_categories),
+                scan_error: None,
             });
         }
     }
@@ -160,6 +188,8 @@ fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
             name: fallback_name,
             vendor: String::new(),
             category: "VST3 effect".to_owned(),
+            channels: None,
+            scan_error,
         });
     }
     found

@@ -1,4 +1,4 @@
-use super::candidates_from_bundle;
+use super::{candidate_from_clap, candidates_from_bundle, declared_channels};
 use crate::audio::vst3::TestBundles;
 use crate::audio::PluginFormat;
 
@@ -147,4 +147,96 @@ fn an_insert_that_cannot_open_an_editor_opens_its_parameters() {
     app.open_plugin_parameters(0);
     assert_eq!(app.plugin_editor, Some(InsertKey { path: 0, insert: 0 }));
     assert!(app.plugin_param_filter.is_empty());
+}
+
+#[test]
+fn mono_and_stereo_tags_declare_the_channel_count() {
+    let tags = |list: &[&str]| list.iter().map(|tag| (*tag).to_owned()).collect::<Vec<_>>();
+    assert_eq!(declared_channels(&tags(&["Fx", "Mono"])), Some(1));
+    assert_eq!(
+        declared_channels(&tags(&["audio-effect", "stereo"])),
+        Some(2)
+    );
+    assert_eq!(declared_channels(&tags(&["Fx", "STEREO"])), Some(2));
+    assert_eq!(declared_channels(&tags(&["Fx", "Delay"])), None);
+    assert_eq!(declared_channels(&tags(&["surround"])), None);
+    assert_eq!(declared_channels(&tags(&["mono", "stereo"])), None, "both");
+    assert_eq!(declared_channels(&[]), None);
+}
+
+#[test]
+fn a_clap_candidate_reads_its_channels_from_its_features() {
+    let candidate = |features: &[&str]| crate::audio::clap::ClapCandidate {
+        path: "amp.clap".into(),
+        plugin_id: "rig.amp".to_owned(),
+        name: "Amp".to_owned(),
+        vendor: "Rig".to_owned(),
+        category: features.join(" · "),
+        features: features
+            .iter()
+            .map(|feature| (*feature).to_owned())
+            .collect(),
+    };
+    let mono = candidate_from_clap(candidate(&["audio-effect", "mono"]));
+    assert_eq!(mono.channels, Some(1));
+    assert_eq!(mono.scan_error, None);
+    assert_eq!(mono.category, "audio-effect · mono");
+    let open = candidate_from_clap(candidate(&["audio-effect", "distortion"]));
+    assert_eq!(open.channels, None);
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[test]
+fn a_vst3_class_reads_its_channels_from_its_sub_categories() {
+    let dir = TestBundles::new("channels");
+    let bundle = dir.bundle(
+        "Pair.vst3",
+        Some(
+            r#"{
+  "Classes": [
+    {
+      "CID": "0CDBB66985D548A9BFD8371909D24BB3",
+      "Category": "Audio Module Class",
+      "Name": "Mono Delay",
+      "Sub Categories": ["Fx", "Delay", "Mono",],
+    },
+    {
+      "CID": "84E8DE5F92554F5396FAE4133C935A18",
+      "Category": "Audio Module Class",
+      "Name": "Stereo Delay",
+      "Sub Categories": ["Fx", "Delay", "Stereo",],
+    },
+  ],
+}"#,
+        ),
+    );
+    let found = candidates_from_bundle(&bundle);
+    let rows: Vec<_> = found
+        .iter()
+        .map(|candidate| (candidate.name.as_str(), candidate.channels))
+        .collect();
+    assert_eq!(rows, [("Mono Delay", Some(1)), ("Stereo Delay", Some(2))]);
+    assert!(found.iter().all(|candidate| candidate.scan_error.is_none()));
+    // The module above says neither.
+    let other = dir.bundle("Other.vst3", Some(MODULE_INFO));
+    assert!(candidates_from_bundle(&other)
+        .iter()
+        .all(|candidate| candidate.channels.is_none()));
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[test]
+fn an_unreadable_module_info_keeps_the_row_with_its_scan_error() {
+    let dir = TestBundles::new("broken-info");
+    let bundle = dir.bundle("Broken.vst3", Some("{ this is not json"));
+    let found = candidates_from_bundle(&bundle);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].class_id, None);
+    assert_eq!(found[0].name, "Broken");
+    assert_eq!(found[0].channels, None);
+    let error = found[0].scan_error.as_deref().expect("a scan error");
+    assert!(error.contains("moduleinfo.json"), "{error}");
+    // A bundle with no module info at all is not an error.
+    let old = dir.bundle("Old.vst3", None);
+    assert_eq!(candidates_from_bundle(&old)[0].scan_error, None);
 }

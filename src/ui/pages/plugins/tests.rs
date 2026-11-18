@@ -13,6 +13,8 @@ fn a_plugin_row_exposes_its_name_and_whether_it_can_be_added() {
         name: "Room".to_owned(),
         vendor: "Rig".to_owned(),
         category: "Reverb".to_owned(),
+        channels: None,
+        scan_error: None,
     };
     let tree = accesskit_frame(|ui| {
         assert!(!library_row(ui, &candidate, false, &[]));
@@ -31,6 +33,8 @@ fn a_plugin_row_names_the_paths_that_hold_it() {
         name: "Amp".to_owned(),
         vendor: String::new(),
         category: "Amp".to_owned(),
+        channels: None,
+        scan_error: None,
     };
     let holders = [(eframe::egui::Color32::RED, "Wet".to_owned())];
     let tree = accesskit_frame(|ui| {

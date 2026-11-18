@@ -24,6 +24,8 @@ pub(crate) struct ClapCandidate {
     pub(crate) name: String,
     pub(crate) vendor: String,
     pub(crate) category: String,
+    /// The descriptor's features as declared (`category` joins them).
+    pub(crate) features: Vec<String>,
 }
 
 /// Standard CLAP locations, plus `RIGWERK_CLAP_PATH` for a custom folder.
@@ -149,6 +151,7 @@ pub(super) fn candidate_from_descriptor(
         name,
         vendor,
         category,
+        features,
     })
 }
 
