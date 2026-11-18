@@ -136,9 +136,10 @@ opens them.
   `ui/frame.rs`.
 - `src/ui`: egui. The title bar, status bar, banner and the sheet and
   drawer hosts live in `ui/shell.rs`. Menus are `ui/menus`, sheets
-  `ui/sheets`, drawers `ui/drawers`. Setup replaces Devices and Guide
-  (`ui/pages/setup.rs`). Classic pages stay under `ui/pages` until each
-  one is replaced. Shared controls live in `ui/widgets`. Colours and
+  `ui/sheets`, drawers `ui/drawers`. The console is the home screen
+  (`ui/pages/console.rs`, one file per strip under `console/`). Setup
+  replaces Devices and Guide (`ui/pages/setup.rs`). Classic pages stay
+  under `ui/pages`, reached from *Classic ▸*, until each one is replaced. Shared controls live in `ui/widgets`. Colours and
   type scale live in `ui/theme.rs`.
 - Platform code stays in `audio/linux` and `audio/win`, behind `cfg`.
   The `linux` module is also compiled for tests on other targets
@@ -277,10 +278,13 @@ Settings are RON in eframe storage (`app/settings`).
 - Take colours from `ui/theme.rs` and text sizes from `ts()`. Reuse
   `ui/widgets` before adding a one-off control.
 - Meters, scopes, and latency figures come from the live snapshot.
-- Screenshot runs use `--screenshot <file>` and `RIGWERK_PAGE` (`live`,
-  `mixer`, `routing`, `setup`, `sessions`, `plugins`, `tuner`,
-  `diagnostics`). `devices` and `guide` open Setup. `RIGWERK_MIXER_STAGE`
-  selects a Mixer stage.
+- Screenshot runs use `--screenshot <file>` and `RIGWERK_PAGE`
+  (`console`, `tuner`, `setup`, and the classic `live`, `mixer`,
+  `routing`, `plugins`). `devices` and `guide` open Setup; anything else
+  opens the console. `RIGWERK_SHEET` (`eq`, `gate`, `effect`, `path`,
+  `output`, `scope`, `diagnostics`) opens a sheet on the selected path,
+  `RIGWERK_DRAWER` (`browser`, `issues`) a drawer, and
+  `RIGWERK_MIXER_STAGE` selects a Mixer stage.
   Screenshot mode drops Wayland so the requested window size sticks.
   The README set and how to retake it: `docs/screenshots/README.md`.
 

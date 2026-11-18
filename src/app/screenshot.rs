@@ -172,6 +172,8 @@ impl RigWerkApp {
     /// off (the red warning); `live3` is `blend` plus an empty third path
     /// (unmuted, routed nowhere: a Live Issues warning), for the Live page.
     /// `showcase` is the README setup: see [`Self::apply_screenshot_showcase`].
+    /// `showcase4` adds two paths, every other sink as an extra output and
+    /// a long chain (board 6): see [`Self::apply_screenshot_four_paths`].
     fn apply_screenshot_routing(&mut self) {
         use crate::app::layouts::PathLayout;
         let setup = std::env::var("RIGWERK_ROUTING_SETUP").unwrap_or_default();
@@ -207,6 +209,10 @@ impl RigWerkApp {
                 }
             }
             "showcase" => self.apply_screenshot_showcase(),
+            "showcase4" => {
+                self.apply_screenshot_showcase();
+                self.apply_screenshot_four_paths();
+            }
             "dualamp-off" => {
                 if !self.apply_layout(PathLayout::DualAmp) {
                     return;
@@ -219,6 +225,40 @@ impl RigWerkApp {
             }
             _ => {}
         }
+    }
+
+    /// Board 6 on top of the showcase: Drive (a copy of Room, playing) and
+    /// an empty Stream path, every sink not yet in use as an extra output,
+    /// and ten stand-in effects on Drive so its list scrolls.
+    fn apply_screenshot_four_paths(&mut self) {
+        let slots = self.path_slots();
+        let Some(&room) = slots.get(1) else {
+            return;
+        };
+        if let Some(drive) = self.duplicate_path(room) {
+            self.rename_path(drive, "Drive");
+            self.set_path_mute(drive, false);
+            for _ in 0..10 {
+                self.add_screenshot_effect_always(drive);
+            }
+        }
+        if let Some(stream) = self.add_path() {
+            self.rename_path(stream, "Stream");
+        }
+        let used: Vec<String> = std::iter::once(self.selected_output().id.clone())
+            .chain(self.extra_outputs.iter().map(|extra| extra.id.clone()))
+            .collect();
+        let more: Vec<String> = self
+            .inventory
+            .outputs
+            .iter()
+            .map(|device| device.id.clone())
+            .filter(|id| !used.contains(id) && !id.starts_with("vbcable:"))
+            .collect();
+        for id in more {
+            self.add_extra_output_device(&id);
+        }
+        self.select_path(room);
     }
 
     /// The README setup, the same on every page: a second output sink as a

@@ -651,6 +651,14 @@ impl RigWerkApp {
         }
     }
 
+    /// Puts a stand-in effect on path `slot`, for a screenshot of a long
+    /// chain.  Screenshot runs only.
+    pub(crate) fn add_screenshot_effect_always(&mut self, slot: usize) {
+        if self.screenshot.is_some() {
+            let _ = self.engine.add_plugin(slot, screenshot_effect());
+        }
+    }
+
     /// Opens the browser drawer for a `RIGWERK_DRAWER=browser` screenshot.
     /// An empty library is filled with sample rows so the column is not
     /// blank when the machine has no scanned effects.
