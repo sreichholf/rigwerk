@@ -12,6 +12,10 @@ use super::{fit_text, nav_row, row_info, show_focus_ring, NavLead};
 /// A sidebar sub-entry for one signal path under Mixer: the path's colour
 /// dot where the icon sits, indented, otherwise the same row as
 /// [`nav_item`].
+#[allow(
+    dead_code,
+    reason = "the sidebar path row stays until the classic pages go"
+)]
 pub(crate) fn nav_path_item(
     ui: &mut egui::Ui,
     colour: Color32,

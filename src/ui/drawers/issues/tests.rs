@@ -37,7 +37,7 @@ fn an_output_row_names_its_action() {
     let tree = accesskit_frame(|ui| app.issues_strip(ui, 1200.0));
     let _ = node_named(
         &tree,
-        "Open diagnostics: PipeWire did not take the quantum change",
+        "Open diagnostics: PipeWire did not take the buffer change",
     );
 }
 
@@ -93,9 +93,9 @@ fn rows_offer_dismiss_for_warnings_and_show_on_their_card() {
     let tree = accesskit_frame(|ui| app.issues_strip(ui, 1200.0));
     let _ = node_named(
         &tree,
-        "Show on Output: PipeWire did not take the quantum change",
+        "Show on Output: PipeWire did not take the buffer change",
     );
-    let _ = node_named(&tree, "Dismiss: PipeWire did not take the quantum change");
+    let _ = node_named(&tree, "Dismiss: PipeWire did not take the buffer change");
     assert!(
         tree.nodes.iter().all(|(_, node)| node
             .label()
@@ -157,7 +157,7 @@ fn clicks_dismiss_a_row_filter_it_and_ring_its_card() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
 
-    let show = "Show on Output: PipeWire did not take the quantum change";
+    let show = "Show on Output: PipeWire did not take the buffer change";
     let at = strip_frame(&ctx, &mut app, None, show);
     strip_frame(&ctx, &mut app, at, show);
     assert!(
@@ -174,7 +174,7 @@ fn clicks_dismiss_a_row_filter_it_and_ring_its_card() {
     assert!(!app.live_issues_collapsed, "a filter click is not a toggle");
     app.set_issue_filter(IssueFilter::All);
 
-    let dismiss = "Dismiss: PipeWire did not take the quantum change";
+    let dismiss = "Dismiss: PipeWire did not take the buffer change";
     let at = strip_frame(&ctx, &mut app, None, dismiss);
     strip_frame(&ctx, &mut app, at, dismiss);
     let view = app.issue_view();

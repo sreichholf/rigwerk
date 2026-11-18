@@ -21,7 +21,7 @@ fn device(id: &str, name: &str, backend: &str) -> DeviceItem {
 
 fn test_app() -> RigWerkApp {
     let mut app = crate::app::blank_app();
-    app.page = Page::Sessions;
+    app.page = Page::Live;
     app.inventory
         .asio
         .push(device("asio:focusrite", "Focusrite", "ASIO"));
@@ -479,4 +479,19 @@ fn saving_a_session_writes_current_gate() {
     app.save_session();
     assert_eq!(app.sessions.len(), 1);
     assert_eq!(app.sessions[0].paths[0].gate, app.path().mix.gate);
+}
+
+#[test]
+fn a_saved_session_is_edited_when_the_gain_changes() {
+    let mut app = test_app();
+    app.session_name = "Clean".to_owned();
+    app.asio_idx = 0;
+    app.output_idx = 0;
+    app.save_session();
+    assert!(!app.session_edited(), "a fresh save matches");
+    app.input_gain += 1.0;
+    assert!(app.session_edited());
+    app.start_new_session();
+    assert_eq!(app.session_name, "Untitled session");
+    assert!(app.session_edited());
 }

@@ -14,7 +14,7 @@ use crate::app::screenshot;
 use crate::app::{Page, RigWerkApp};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    configure_style, with_alpha, BG, BORDER, CARD, DIM, GREEN, MUTED, SIDEBAR, TEAL, TEXT,
+    configure_style, with_alpha, BG, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
 };
 
 /// Command and shift, and nothing else.  Command is Ctrl on Windows and
@@ -59,32 +59,52 @@ impl eframe::App for RigWerkApp {
         // Screenshots need a painted frame, so they stay on the drawing side.
         self.handle_screenshot(&ctx);
 
-        egui::Panel::left("rigwerk_nav")
-            .exact_size(224.0)
+        let bar = crate::ui::theme::palette(root.ctx()).bar;
+        egui::Panel::top("rigwerk_title")
+            .exact_size(52.0)
             .resizable(false)
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
-                    .fill(SIDEBAR)
-                    .inner_margin(Margin::symmetric(16, 22)),
+                    .fill(bar)
+                    .inner_margin(Margin::symmetric(12, 10)),
             )
-            .show(root, |ui| {
-                self.sidebar(ui);
-            });
+            .show(root, |ui| self.title_bar(ui));
+
+        if self.banner_open() {
+            egui::Panel::top("rigwerk_banner")
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(bar)
+                        .inner_margin(Margin::symmetric(12, 6)),
+                )
+                .show(root, |ui| self.error_banner(ui));
+        }
+
+        egui::Panel::bottom("rigwerk_status")
+            .exact_size(30.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(bar)
+                    .inner_margin(Margin::symmetric(12, 6)),
+            )
+            .show(root, |ui| self.status_bar(ui));
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin {
                 left: 26,
                 right: 26,
-                top: 20,
-                bottom: 18,
+                top: 16,
+                bottom: 12,
             }))
             .show(root, |ui| {
                 // Mixer and Plugins scroll inside their own panes and fill the
                 // remaining height, so they stay outside the page ScrollArea.
                 if matches!(self.page, Page::Mixer | Page::Plugins) {
-                    self.header(ui);
-                    ui.add_space(14.0);
                     if self.page == Page::Mixer {
                         self.mixer_page(ui);
                     } else {
@@ -102,12 +122,8 @@ impl eframe::App for RigWerkApp {
                 }
                 page_scroll.show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    self.header(ui);
-                    // The tuner skips the usual 14 px header gap and the
-                    // 18 px page bottom gap (it keeps 2 px); the panel's own
-                    // 18 px bottom margin is unchanged.
                     if self.page != Page::Tuner {
-                        ui.add_space(14.0);
+                        ui.add_space(4.0);
                     }
                     match self.page {
                         Page::Live => self.live_page(ui, &ctx),
@@ -115,10 +131,8 @@ impl eframe::App for RigWerkApp {
                         Page::Tuner => self.tuner_page(ui),
                         Page::Routing => self.routing_page(ui),
                         Page::Devices => self.devices_page(ui),
-                        Page::Sessions => self.sessions_page(ui),
                         Page::Plugins => self.plugins_page(ui),
                         Page::Guide => self.guide_page(ui),
-                        Page::Diagnostics => self.diagnostics_page(ui),
                     }
                     ui.add_space(if self.page == Page::Tuner { 2.0 } else { 18.0 });
                 });
@@ -151,7 +165,7 @@ impl eframe::App for RigWerkApp {
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new(
-                            "Windows: ASIO and WASAPI (DirectSound and MME when the host lists them). Mixer can add WASAPI extra outputs; the virtual output uses an installed virtual cable such as VB-Audio Cable. Linux: PipeWire is the low-latency path (own nodes linked to the source and sink you pick), with direct ALSA hw: available and PulseAudio on the system side. PipeWire clocks can add extra outputs and RigWerk Out. The ALSA period is compared with the PipeWire quantum instead of hiding a mismatch.",
+                            "Windows: ASIO and WASAPI (DirectSound and MME when the host lists them). Mixer can add WASAPI extra outputs; the virtual output uses an installed virtual cable such as VB-Audio Cable. Linux: PipeWire is the low-latency path (own nodes linked to the source and sink you pick), with direct ALSA hw: available and PulseAudio on the system side. PipeWire clocks can add extra outputs and RigWerk Out. The ALSA buffer is compared with the PipeWire graph buffer instead of hiding a mismatch.",
                         )
                         .size(ts(10.5))
                         .color(GREEN),
@@ -166,7 +180,7 @@ impl eframe::App for RigWerkApp {
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(format!(
-                            "Version {} · preview build",
+                            "Version {}",
                             env!("CARGO_PKG_VERSION")
                         ))
                         .color(DIM),
@@ -219,33 +233,9 @@ impl eframe::App for RigWerkApp {
                 });
         }
 
-        if let Some(message) = self.device_alert.clone() {
-            egui::Window::new("Audio device disconnected")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(&ctx, |ui| {
-                    ui.set_width(380.0);
-                    ui.label(RichText::new(message).size(ts(12.5)).color(TEXT));
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(
-                            "Plug the device back in (or pick another one on the Devices page), then start the bridge again.",
-                        )
-                        .size(ts(10.5))
-                        .color(MUTED),
-                    );
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Rescan devices").clicked() {
-                            self.rescan();
-                        }
-                        if ui.button("Dismiss").clicked() {
-                            self.device_alert = None;
-                        }
-                    });
-                });
-        }
+        self.sheet_host(&ctx);
+        self.drawer_host(&ctx);
+        self.handle_shell_keys(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -314,4 +304,68 @@ impl RigWerkApp {
             }
         }
     }
+
+    /// Save, the tuner, Setup, and Esc for the innermost overlay.
+    /// A text field keeps the keys.  Command is Ctrl on Windows and Linux.
+    pub(crate) fn handle_shell_keys(&mut self, ctx: &egui::Context) {
+        if ctx.text_edit_focused() {
+            return;
+        }
+        let (escape, save_as, save, tuner, setup) = ctx.input_mut(|input| {
+            (
+                take_chord(input, egui::Modifiers::NONE, egui::Key::Escape),
+                take_chord(
+                    input,
+                    egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+                    egui::Key::S,
+                ),
+                take_chord(input, egui::Modifiers::COMMAND, egui::Key::S),
+                take_chord(input, egui::Modifiers::COMMAND, egui::Key::T),
+                take_chord(input, egui::Modifiers::COMMAND, egui::Key::Comma),
+            )
+        });
+        if save_as {
+            self.chrome.session_draft = Some(crate::app::screen::SessionDraft::SaveAs(
+                self.session_name.clone(),
+            ));
+            self.chrome.open_session_menu = true;
+        } else if save {
+            self.save_session();
+        }
+        if tuner {
+            self.page = if self.page == Page::Tuner {
+                Page::Live
+            } else {
+                Page::Tuner
+            };
+        }
+        if setup {
+            self.open_setup(crate::app::screen::SetupSection::Devices);
+        }
+        if escape {
+            self.close_innermost();
+        }
+    }
+}
+
+fn take_chord(input: &mut egui::InputState, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+    let mut pressed = false;
+    input.events.retain(|event| {
+        let egui::Event::Key {
+            key: pressed_key,
+            pressed: down,
+            repeat,
+            modifiers: got,
+            ..
+        } = event
+        else {
+            return true;
+        };
+        if *pressed_key != key || !*down || *repeat || !got.matches_exact(modifiers) {
+            return true;
+        }
+        pressed = true;
+        false
+    });
+    pressed
 }

@@ -367,7 +367,7 @@ pub(crate) enum IssueKey {
     /// Path slot.
     RoutedNowhere(usize),
     Dsp,
-    /// PipeWire did not take the quantum change.
+    /// PipeWire did not take the buffer change.
     QuantumNotTaken,
     /// The graph block cannot be read (PipeWire, so Linux only).
     #[cfg(target_os = "linux")]
@@ -763,14 +763,26 @@ impl RigWerkApp {
             .filter(|issue| issue.severity == IssueSeverity::Error)
             .map(|issue| issue.title.clone())
             .collect();
-        if errors
+        let fresh = errors
             .iter()
-            .any(|title| !self.issue_state.seen_errors.contains(title))
-        {
+            .any(|title| !self.issue_state.seen_errors.contains(title));
+        if fresh {
             self.live_issues_collapsed = false;
             if !self.issue_state.filter.admits(IssueSeverity::Error) {
                 self.issue_state.filter = IssueFilter::All;
             }
+            self.chrome.error_title = errors.first().cloned();
+            self.chrome.error_dismissed = false;
+        } else if errors.is_empty() {
+            self.chrome.error_title = None;
+            self.chrome.error_dismissed = false;
+        } else if self
+            .chrome
+            .error_title
+            .as_ref()
+            .is_some_and(|title| !errors.iter().any(|item| item == title))
+        {
+            self.chrome.error_title = None;
         }
         self.issue_state.seen_errors = errors;
     }
@@ -1043,14 +1055,14 @@ impl RigWerkApp {
                 heaviest = Some((info.name.clone(), most));
             }
         }
-        let quantum = if self.snapshot.direct {
-            "graph quantum"
+        let block_name = if self.snapshot.direct {
+            "graph buffer"
         } else {
             "output block"
         };
         let (name, most) = heaviest.unwrap_or_default();
         let shares = format!(
-            "{:.0}% of the {:.1} ms {quantum} on average, {:.0}% at peak",
+            "{:.0}% of the {:.1} ms {block_name} on average, {:.0}% at peak",
             avg_share * 100.0,
             block / 1e6,
             peak_share * 100.0
@@ -1067,9 +1079,9 @@ impl RigWerkApp {
             key: IssueKey::Dsp,
             severity,
             title: if infos.len() > 1 {
-                format!("Paths overload the {quantum}")
+                format!("Paths overload the {block_name}")
             } else {
-                format!("The chain overloads the {quantum}")
+                format!("The chain overloads the {block_name}")
             },
             detail,
             place: format!("DSP · {name}"),
@@ -1086,7 +1098,7 @@ impl RigWerkApp {
             issues.push(LiveIssue {
                 key: IssueKey::QuantumNotTaken,
                 severity: IssueSeverity::Warning,
-                title: "PipeWire did not take the quantum change".to_owned(),
+                title: "PipeWire did not take the buffer change".to_owned(),
                 detail: note.to_owned(),
                 place: "OUTPUT · Low latency".to_owned(),
                 card: Some(IssueCard::Output),
@@ -1110,8 +1122,8 @@ impl RigWerkApp {
     /// problem.
     #[cfg(target_os = "linux")]
     pub(crate) fn quantum_info_issue(&self, info: &QuantumInfo) -> Option<LiveIssue> {
-        let quantum = info.quantum;
-        if !info.available || quantum == 0 {
+        let graph_frames = info.quantum;
+        if !info.available || graph_frames == 0 {
             return self.low_latency_output.then(|| LiveIssue {
                 key: IssueKey::QuantumUnknown,
                 severity: IssueSeverity::Warning,
@@ -1124,10 +1136,9 @@ impl RigWerkApp {
         }
         let period = info.alsa_period;
         if period > 0 && !info.fits {
-            let fitting =
-                BUFFERS.iter().rev().copied().find(|&frames| {
-                    frames as u32 <= quantum && quantum.is_multiple_of(frames as u32)
-                });
+            let fitting = BUFFERS.iter().rev().copied().find(|&frames| {
+                frames as u32 <= graph_frames && graph_frames.is_multiple_of(frames as u32)
+            });
             let action = match fitting {
                 // The buffer is what the output asked for: changing it helps.
                 Some(frames) if period as usize == self.output_buffer => {
@@ -1136,13 +1147,13 @@ impl RigWerkApp {
                 _ if self.low_latency_output => IssueAction::LowLatencyOff,
                 _ => IssueAction::OpenDiagnostics,
             };
-            let detail = if period > quantum {
+            let detail = if period > graph_frames {
                 format!(
-                    "The output period ({period} frames) is larger than the PipeWire graph block ({quantum} frames), so the coarser period sets the latency."
+                    "The output buffer ({period} frames) is larger than the PipeWire graph buffer ({graph_frames} frames), so the coarser buffer sets the latency."
                 )
             } else {
                 format!(
-                    "The output period ({period} frames) does not divide the PipeWire graph block ({quantum} frames), so the two clocks drift against each other and can cause a dropout."
+                    "The output buffer ({period} frames) does not divide the PipeWire graph buffer ({graph_frames} frames), so the two clocks drift against each other and can cause a dropout."
                 )
             };
             return Some(LiveIssue {
@@ -1161,8 +1172,8 @@ impl RigWerkApp {
             severity: IssueSeverity::Warning,
             title: "Low latency is on, but the graph block is not".to_owned(),
             detail: format!(
-                "The desktop PipeWire graph runs {quantum} frames ({:.1} ms), not the {PIPEWIRE_LOW_QUANTUM} RigWerk asked for. Another app may hold the quantum.",
-                quantum as f32 / info.rate.max(1) as f32 * 1000.0
+                "The desktop PipeWire graph runs {graph_frames} frames ({:.1} ms), not the {PIPEWIRE_LOW_QUANTUM} RigWerk asked for. Another app may hold the graph buffer.",
+                graph_frames as f32 / info.rate.max(1) as f32 * 1000.0
             ),
             place: "OUTPUT · Low latency".to_owned(),
             card: Some(IssueCard::Output),
@@ -1459,8 +1470,10 @@ impl RigWerkApp {
                 self.page = Page::Routing;
             }
             IssueAction::OpenRouting => self.page = Page::Routing,
-            IssueAction::OpenDiagnostics => self.page = Page::Diagnostics,
-            IssueAction::OpenDevices => self.page = Page::Devices,
+            IssueAction::OpenDiagnostics => self.open_diagnostics(),
+            IssueAction::OpenDevices => {
+                self.open_setup(crate::app::screen::SetupSection::Devices);
+            }
             IssueAction::CheckDriver => self.start_output_driver_check(true),
             IssueAction::SetOutputBuffer(frames) => {
                 self.output_buffer = frames;

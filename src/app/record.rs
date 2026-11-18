@@ -91,11 +91,11 @@ pub(crate) fn format_elapsed(frames: u64, rate: u32) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// A short overrun count.  `1 overrun`, otherwise `N overruns`.
-pub(crate) fn overrun_label(count: u64) -> String {
+/// A short lost-sample count.  `1 lost sample`, otherwise `N lost samples`.
+pub(crate) fn lost_samples_label(count: u64) -> String {
     match count {
-        1 => "1 overrun".to_owned(),
-        n => format!("{n} overruns"),
+        1 => "1 lost sample".to_owned(),
+        n => format!("{n} lost samples"),
     }
 }
 

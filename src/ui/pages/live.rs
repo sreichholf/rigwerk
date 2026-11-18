@@ -14,9 +14,7 @@ mod chain_strip;
 mod driver_line;
 mod health;
 mod input_card;
-mod issues;
 mod output_card;
-mod record;
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
@@ -32,14 +30,9 @@ impl RigWerkApp {
     pub(crate) fn live_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let total = ui.available_width();
 
-        // Judgments first: one strip, only while there is something to say.
-        self.issues_strip(ui, total);
-
         self.live_io_pair(ui, total);
         ui.add_space(10.0);
         self.bridge_card(ui, ctx);
-        ui.add_space(10.0);
-        self.record_row(ui);
 
         ui.add_space(10.0);
         self.virtual_output_banner(ui, total);
@@ -293,7 +286,7 @@ impl RigWerkApp {
                             .corner_radius(CornerRadius::same(7)),
                         );
                         if guide.clicked() {
-                            self.page = Page::Diagnostics;
+                            self.open_diagnostics();
                         }
                         ui.add_space(8.0);
                         let row_h = guide.rect.height();

@@ -20,6 +20,7 @@ pub(crate) mod paths;
 pub(crate) mod plugin_gui;
 pub(crate) mod plugins;
 pub(crate) mod record;
+pub(crate) mod screen;
 pub(crate) mod screenshot;
 pub(crate) mod sessions;
 pub(crate) mod settings;
@@ -45,17 +46,15 @@ use crate::audio::{
     WasapiOutputMode, MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
     Live,
     Mixer,
     Tuner,
     Routing,
     Devices,
-    Sessions,
     Plugins,
     Guide,
-    Diagnostics,
 }
 
 /// Test hook for screenshots of a specific page: `RIGWERK_PAGE=devices`.
@@ -70,10 +69,10 @@ pub(crate) fn initial_page() -> Page {
         "tuner" => Page::Tuner,
         "routing" => Page::Routing,
         "devices" => Page::Devices,
-        "sessions" => Page::Sessions,
         "plugins" => Page::Plugins,
         "guide" => Page::Guide,
-        "diagnostics" => Page::Diagnostics,
+        // Sessions and Diagnostics are the menu and the sheet.  Until the
+        // console exists, those saved pages open Live.
         _ => Page::Live,
     }
 }
@@ -195,6 +194,8 @@ pub struct RigWerkApp {
     pub(crate) theme: appearance::ThemeChoice,
     /// The interface size, egui's zoom factor (0.8–1.5).
     pub(crate) ui_size: f32,
+    /// Sheet, drawer, session draft and the error banner.
+    pub(crate) chrome: screen::Chrome,
     /// The audible flag [`Self::apply_metronome`] last pushed, so a frame
     /// re-pushes the click only when the tuner's auto-mute changes it.
     pub(crate) metronome_pushed: Option<bool>,
@@ -473,6 +474,7 @@ impl RigWerkApp {
             metronome_level_db: self.metronome_level_db,
             theme: self.theme,
             ui_size: self.ui_size,
+            sheet_height: self.chrome.sheet_height,
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -551,6 +553,7 @@ impl RigWerkApp {
             // `ui_size` was clamped in `load_preferences`.
             theme: preferences.theme,
             ui_size: preferences.ui_size,
+            chrome: screen::Chrome::at_launch(preferences.sheet_height),
             metronome_pushed: None,
             drift: preferences.drift,
             monitor: preferences.monitor,
@@ -726,7 +729,7 @@ impl RigWerkApp {
         );
         if self.inventory.asio.iter().all(|driver| driver.demo) {
             self.push_log(
-                format!("Preview driver loaded — connect a {low_label} input to go live."),
+                format!("Demo driver loaded — connect a {low_label} input to start."),
                 LogTone::Amber,
             );
         } else {
@@ -782,6 +785,7 @@ impl RigWerkApp {
             text: text.into(),
             tone,
         });
+        self.note_log_arrived();
         let overflow = self.log.len().saturating_sub(ACTIVITY_LOG_CAP);
         if overflow > 0 {
             self.log.drain(0..overflow);
@@ -814,6 +818,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
         theme: appearance::ThemeChoice::System,
         ui_size: appearance::UI_SIZE_DEFAULT,
+        chrome: screen::Chrome::default(),
         metronome_pushed: None,
         drift: true,
         monitor: true,
