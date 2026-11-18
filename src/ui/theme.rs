@@ -8,6 +8,8 @@
 use eframe::egui;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Theme, Vec2};
 
+pub(crate) use crate::ui::fonts::Face;
+
 /// Every text size in the window is multiplied by this, so the whole interface
 /// can be made easier to read from one place.
 pub(crate) const FONT_SCALE: f32 = 1.2;
@@ -15,6 +17,63 @@ pub(crate) const FONT_SCALE: f32 = 1.2;
 /// A text size at the interface's reading scale.
 pub(crate) fn ts(size: f32) -> f32 {
     size * FONT_SCALE
+}
+
+/// A step of the type scale (`docs/ui-spec.md` §7.3).  The old pages keep
+/// `ts()`; the rewritten ones use this, which `FONT_SCALE` does not touch.
+#[allow(
+    dead_code,
+    reason = "the rewritten pages use it; the old ones use ts()"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TypeRole {
+    /// Grid headers, the meter scale.
+    GridHeader,
+    /// Secondary text, the status bar.
+    Secondary,
+    /// Body text, rows.
+    Body,
+    /// Strip names, buttons.
+    Control,
+    /// The title, a sheet's title.
+    Title,
+    /// Setup headings.
+    Heading,
+    /// The tuner's strings.
+    TunerString,
+    /// The tuner's cents.
+    TunerCents,
+    /// The tuner's note.
+    TunerNote,
+}
+
+/// The size of `role` in points at 100 %.  The interface size zooms it.
+#[allow(
+    dead_code,
+    reason = "the rewritten pages use it; the old ones use ts()"
+)]
+pub(crate) fn type_size(role: TypeRole) -> f32 {
+    match role {
+        TypeRole::GridHeader => 11.0,
+        TypeRole::Secondary => 12.0,
+        TypeRole::Body => 13.0,
+        TypeRole::Control => 14.0,
+        TypeRole::Title => 15.0,
+        TypeRole::Heading => 18.0,
+        TypeRole::TunerString => 22.0,
+        TypeRole::TunerCents => 44.0,
+        TypeRole::TunerNote => 200.0,
+    }
+}
+
+/// `role`'s size in one of the bundled faces, e.g.
+/// `font(Face::Mono, TypeRole::Secondary)` for the status bar.
+#[allow(
+    dead_code,
+    reason = "the rewritten pages use it; the old ones use ts()"
+)]
+pub(crate) fn font(face: Face, role: TypeRole) -> FontId {
+    FontId::new(type_size(role), face.family())
 }
 
 /// The colour tokens of one theme.  Both themes define every token; a

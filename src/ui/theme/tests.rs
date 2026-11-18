@@ -2,8 +2,8 @@ use eframe::egui;
 use egui::Color32;
 
 use super::{
-    palette, Palette, AMBER, CARD, CARD_RAISED, DARK, DIM, LIGHT, MUTED, PATH_COLOURS, RED, TEAL,
-    TEXT,
+    font, palette, ts, type_size, Face, Palette, TypeRole, AMBER, CARD, CARD_RAISED, DARK, DIM,
+    LIGHT, MUTED, PATH_COLOURS, RED, TEAL, TEXT,
 };
 
 fn channel(c: u8) -> f64 {
@@ -146,6 +146,36 @@ fn the_old_constants_are_the_dark_tokens() {
     assert_eq!(AMBER, DARK.warn);
     assert_eq!(RED, DARK.error);
     assert_eq!(PATH_COLOURS, DARK.path);
+}
+
+#[test]
+fn the_type_scale_is_the_spec_and_ts_is_unchanged() {
+    let scale = [
+        (TypeRole::GridHeader, 11.0),
+        (TypeRole::Secondary, 12.0),
+        (TypeRole::Body, 13.0),
+        (TypeRole::Control, 14.0),
+        (TypeRole::Title, 15.0),
+        (TypeRole::Heading, 18.0),
+        (TypeRole::TunerString, 22.0),
+        (TypeRole::TunerCents, 44.0),
+        (TypeRole::TunerNote, 200.0),
+    ];
+    for (role, size) in scale {
+        assert_eq!(type_size(role), size, "{role:?}");
+    }
+    assert_eq!(ts(10.0), 12.0, "the old pages keep their sizes");
+}
+
+#[test]
+fn font_names_the_bundled_family() {
+    let id = font(Face::MonoMedium, TypeRole::Secondary);
+    assert_eq!(id.size, 12.0);
+    assert_eq!(id.family, egui::FontFamily::Name("mono-medium".into()));
+    assert_eq!(
+        font(Face::SansSemibold, TypeRole::Heading).family,
+        egui::FontFamily::Name("sans-semibold".into())
+    );
 }
 
 #[test]
