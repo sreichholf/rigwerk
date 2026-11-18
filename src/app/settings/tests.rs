@@ -514,11 +514,23 @@ fn newer_layout_keeps_a_copy() {
 }
 
 #[test]
-fn old_session_and_diagnostics_pages_open_live() {
-    assert_eq!(page_from_key("diagnostics"), Page::Live);
-    assert_eq!(page_from_key(" Diagnostics "), Page::Live);
-    assert_eq!(page_from_key("sessions"), Page::Live);
+fn old_pages_open_the_console() {
+    for key in [
+        "live",
+        "mixer",
+        "routing",
+        "plugins",
+        "sessions",
+        "diagnostics",
+        " Diagnostics ",
+        "console",
+        "a page from a newer build",
+    ] {
+        assert_eq!(page_from_key(key), Page::Console, "{key}");
+    }
+    assert_eq!(page_key(Page::Console), "console");
     assert_eq!(page_key(Page::Live), "live");
+    assert_eq!(page_from_key(&Preferences::default().page), Page::Console);
 }
 
 #[test]

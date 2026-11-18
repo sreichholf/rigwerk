@@ -717,3 +717,32 @@ fn the_theme_is_saved_with_the_preferences() {
     assert_eq!(saved.theme, super::appearance::ThemeChoice::Light);
     assert!(raw.contains("theme:Light"), "{raw}");
 }
+
+#[test]
+fn a_run_opens_the_console_unless_it_names_another_page() {
+    use super::{page_for_run, Page};
+    assert_eq!(page_for_run("console"), Page::Console);
+    assert_eq!(page_for_run(""), Page::Console);
+    assert_eq!(page_for_run("sessions"), Page::Console);
+    assert_eq!(page_for_run("diagnostics"), Page::Console);
+    assert_eq!(page_for_run(" Tuner "), Page::Tuner);
+    assert_eq!(page_for_run("devices"), Page::Setup);
+    // Classic pages stay reachable until their sheets land.
+    assert_eq!(page_for_run("live"), Page::Live);
+    assert_eq!(page_for_run("mixer"), Page::Mixer);
+    assert_eq!(page_for_run("routing"), Page::Routing);
+    assert_eq!(page_for_run("plugins"), Page::Plugins);
+}
+
+#[test]
+fn setup_and_the_tuner_return_to_the_console() {
+    use super::Page;
+    use crate::app::screen::SetupSection;
+    let mut app = blank_app();
+    app.open_setup(SetupSection::Clock);
+    app.close_setup();
+    assert_eq!(app.page, Page::Console);
+    app.page = Page::Tuner;
+    assert!(app.close_innermost());
+    assert_eq!(app.page, Page::Console);
+}

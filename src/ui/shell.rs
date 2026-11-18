@@ -66,7 +66,7 @@ impl RigWerkApp {
     fn screen_button(&mut self, ui: &mut egui::Ui, label: &str, on: bool, page: Page) {
         let widget = bar_button(ui.ctx(), label, on);
         if ui.add(widget).clicked() {
-            self.page = if on { Page::Live } else { page };
+            self.page = if on { Page::Console } else { page };
         }
     }
 

@@ -345,7 +345,7 @@ impl RigWerkApp {
         }
         if tuner {
             self.page = if self.page == Page::Tuner {
-                Page::Live
+                Page::Console
             } else {
                 Page::Tuner
             };

@@ -1,7 +1,9 @@
 //! Which sheet and drawer are open, and the title-bar drafts.
 //!
-//! The page (`Page`) is a classic screen or Setup.  The sheet and the
-//! drawer sit over it.  *Setup* opens the Setup screen at a section.
+//! The page (`Page`) is the console, the tuner, Setup, or a classic screen
+//! still reached from *Classic ▸*.  The sheet and the drawer sit over it.
+//! *Setup* opens the Setup screen at a section; Done and Esc come back to
+//! the console.
 
 use std::time::{Duration, Instant};
 
@@ -219,8 +221,7 @@ impl RigWerkApp {
         self.chrome.sheet = None;
     }
 
-    /// Setup, scrolled to `section`.  Done returns to Live, which is home
-    /// until the console exists.
+    /// Setup, scrolled to `section`.  Done returns to the console.
     pub(crate) fn open_setup(&mut self, section: SetupSection) {
         self.chrome.setup_section = Some(section);
         self.page = crate::app::Page::Setup;
@@ -230,7 +231,7 @@ impl RigWerkApp {
     /// Leaves Setup for the home page.
     pub(crate) fn close_setup(&mut self) {
         if self.page == crate::app::Page::Setup {
-            self.page = crate::app::Page::Live;
+            self.page = crate::app::Page::Console;
         }
         self.chrome.setup_section = None;
     }
@@ -343,7 +344,7 @@ impl RigWerkApp {
             return true;
         }
         if self.page == crate::app::Page::Tuner {
-            self.page = crate::app::Page::Live;
+            self.page = crate::app::Page::Console;
             return true;
         }
         false

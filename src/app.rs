@@ -60,22 +60,25 @@ pub(crate) enum Page {
     Setup,
 }
 
-/// Test hook for screenshots of a specific page: `RIGWERK_PAGE=devices`.
+/// Test hook for screenshots of a specific page: `RIGWERK_PAGE=console`.
 /// Normal launches start on the page that was open when the app was closed.
 pub(crate) fn initial_page() -> Page {
-    match std::env::var("RIGWERK_PAGE")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
+    page_for_run(&std::env::var("RIGWERK_PAGE").unwrap_or_default())
+}
+
+/// The page a `RIGWERK_PAGE` value opens.  The classic pages stay
+/// reachable for screenshots until their sheets replace them; anything
+/// else, Sessions and Diagnostics (the menu and the sheet) included, is
+/// the console.
+pub(crate) fn page_for_run(key: &str) -> Page {
+    match key.trim().to_lowercase().as_str() {
+        "live" => Page::Live,
         "mixer" => Page::Mixer,
         "tuner" => Page::Tuner,
         "routing" => Page::Routing,
         "plugins" => Page::Plugins,
         "setup" | "devices" | "guide" => Page::Setup,
-        // Sessions and Diagnostics are the menu and the sheet.  Until the
-        // console exists, those saved pages open Live.
-        _ => Page::Live,
+        _ => Page::Console,
     }
 }
 

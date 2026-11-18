@@ -220,7 +220,7 @@ impl Default for Preferences {
             auto_start_bridge: false,
             sessions: Vec::new(),
             session_name: "My guitar rig".to_owned(),
-            page: "live".to_owned(),
+            page: "console".to_owned(),
             eq_edit: 0,
             output_tab_low_latency: cfg!(target_os = "linux"),
             selected_session: None,
@@ -790,15 +790,13 @@ pub(crate) fn page_key(page: Page) -> &'static str {
 
 pub(crate) fn page_from_key(key: &str) -> Page {
     match key.trim().to_lowercase().as_str() {
-        "mixer" => Page::Mixer,
         "tuner" => Page::Tuner,
-        "routing" => Page::Routing,
-        "plugins" => Page::Plugins,
         "setup" | "devices" | "guide" => Page::Setup,
-        // The old Sessions and Diagnostics pages, and the console key a
-        // newer build may have written.  Live is home until the console.
-        // An old build reading `setup` falls back to Live the same way.
-        _ => Page::Live,
+        // The console replaces Live, Mixer, Routing and Plugins, and the
+        // old Sessions and Diagnostics pages are its menu and its sheet.  A
+        // key from a newer build opens it too.  An old build reading
+        // `console` or `setup` falls back to Live.
+        _ => Page::Console,
     }
 }
 /// How many entries the stored lists held before unreadable ones were
