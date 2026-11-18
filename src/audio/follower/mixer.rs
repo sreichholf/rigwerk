@@ -209,6 +209,7 @@ impl FollowerMixer {
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
         let block_source_frames =
             (frames as u64 * self.source_rate as u64).div_ceil(self.output_rate as u64) as usize;
+        shared.follower_bus(self.slot).note_device_block(frames);
         if self.started {
             shared
                 .follower_bus(self.slot)

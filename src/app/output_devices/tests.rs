@@ -168,3 +168,22 @@ fn device_levels_follow_the_rows_and_their_meters() {
         (0.25, 0.3, true)
     );
 }
+
+#[test]
+fn a_follower_reading_needs_a_running_bridge_and_a_stream() {
+    let mut app = blank_app();
+    app.snapshot.output_rate = 48_000;
+    app.snapshot.follower_rates[1] = 44_100;
+    app.snapshot.follower_buffer_frames[1] = 256;
+    app.snapshot.follower_ring_fill[1] = 0.5;
+    app.snapshot.follower_target_frames[1] = 240;
+    assert_eq!(app.follower_reading(1), None, "stopped");
+    app.engine.state = EngineState::Running;
+    let reading = app.follower_reading(1).expect("a stream");
+    assert_eq!(reading.rate, 44_100);
+    assert_eq!(reading.buffer_frames, 256);
+    assert_eq!(reading.fill, 0.5);
+    assert!((reading.cushion_ms - 5.0).abs() < 1.0e-4, "{reading:?}");
+    assert_eq!(app.follower_reading(0), None, "no stream of its own");
+    assert_eq!(app.follower_reading(crate::audio::MAX_FOLLOWERS), None);
+}

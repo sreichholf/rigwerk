@@ -4,6 +4,8 @@
 //! flags, and settings.  The colour of a device's state stays in `ui`.
 //! [`DeviceLevel`] is one row's live meter, from the smoothed per-channel
 //! meters the bridge updates each frame (`app/bridge.rs`).
+//! [`FollowerReading`] is what a follower's own stream really runs at,
+//! from the live snapshot.
 
 use crate::app::RigWerkApp;
 use crate::audio::{EngineState, OutputDeviceSettings, MAX_OUTPUT_CHANNELS};
@@ -43,6 +45,20 @@ pub(crate) struct DeviceLevel {
     pub(crate) peak: f32,
     /// The device's own mute.  The master mute already zeroes the meters.
     pub(crate) mute: bool,
+}
+
+/// What one follower's own stream runs at, from the live snapshot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
+pub(crate) struct FollowerReading {
+    /// The rate the device opened at, Hz.
+    pub(crate) rate: u32,
+    /// The frames its driver asks for per callback.  0 until the first.
+    pub(crate) buffer_frames: u32,
+    /// The ring's fill against its cushion, 0 to 1.
+    pub(crate) fill: f32,
+    /// The cushion, in ms at the clock output's rate.
+    pub(crate) cushion_ms: f32,
 }
 
 /// The loudest of a device's first `channels` meters.
@@ -85,6 +101,31 @@ pub(crate) fn click_channels(device_id: &str, channels: usize) -> usize {
 }
 
 impl RigWerkApp {
+    /// Follower `index`'s live readings.  `None` while the bridge is not
+    /// running or the follower has no stream of its own: not open yet,
+    /// missing, or played in the PipeWire graph.
+    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
+    pub(crate) fn follower_reading(&self, index: usize) -> Option<FollowerReading> {
+        if self.engine.state != EngineState::Running {
+            return None;
+        }
+        let snapshot = &self.snapshot;
+        let rate = *snapshot.follower_rates.get(index)?;
+        if rate == 0 {
+            return None;
+        }
+        let clock_rate = match snapshot.output_rate {
+            0 => rate,
+            clock => clock,
+        };
+        Some(FollowerReading {
+            rate,
+            buffer_frames: snapshot.follower_buffer_frames[index],
+            fill: snapshot.follower_ring_fill[index],
+            cushion_ms: snapshot.follower_target_frames[index] as f32 * 1000.0 / clock_rate as f32,
+        })
+    }
+
     /// The output devices under the master, clock device first, then followers.
     pub(crate) fn output_device_rows(&self) -> Vec<OutputDeviceRow> {
         let output = self.selected_output();

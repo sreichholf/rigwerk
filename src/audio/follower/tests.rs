@@ -357,3 +357,48 @@ fn the_ring_doubles_its_lanes_up_to_four_channels() {
         assert!(ring_lanes(channels) <= FRAME_LANES);
     }
 }
+
+#[test]
+fn a_follower_stream_publishes_its_rate_buffer_and_cushion_fill() {
+    let shared = one_follower(2, 10.0);
+    let bus = shared.follower_bus(0);
+    for _ in 0..240 {
+        bus.push_lanes(&[0.5, -0.25]);
+    }
+    let mut mixer = FollowerMixer::new(0, 48_000, 2);
+    mixer.render(&shared, 128, |_, _| {});
+    // No stream has published its rate: nothing to read yet.
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.follower_rates, [0; 4]);
+    assert_eq!(snapshot.follower_buffer_frames, [0; 4]);
+    assert_eq!(snapshot.follower_ring_fill, [0.0; 4]);
+    assert_eq!(snapshot.follower_target_frames, [0; 4]);
+
+    // The stream opened at 48 kHz; its driver asks for 128 frames.
+    bus.set_playback_rate(48_000);
+    mixer.render(&shared, 128, |_, _| {});
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.follower_rates[0], 48_000);
+    assert_eq!(snapshot.follower_buffer_frames[0], 128);
+    // A manual 10 ms cushion at the clock's 48 kHz.
+    assert_eq!(snapshot.follower_target_frames[0], 480);
+    let expected = bus.ring_frames() as f32 / 480.0;
+    assert!(
+        (snapshot.follower_ring_fill[0] - expected).abs() < 1.0e-6,
+        "{} vs {expected}",
+        snapshot.follower_ring_fill[0]
+    );
+    assert!(snapshot.follower_ring_fill[0] > 0.0);
+    assert_eq!(snapshot.follower_rates[1..], [0; 3]);
+
+    // Closed: the readings go with the stream.
+    bus.set_playback_rate(0);
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.follower_rates[0], 0);
+    assert_eq!(snapshot.follower_buffer_frames[0], 0);
+    assert_eq!(snapshot.follower_ring_fill[0], 0.0);
+    // A fresh open starts without the old stream's buffer.
+    bus.reset_playback();
+    bus.set_playback_rate(44_100);
+    assert_eq!(shared.snapshot().follower_buffer_frames[0], 0);
+}

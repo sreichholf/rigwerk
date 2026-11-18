@@ -61,6 +61,10 @@ pub(crate) struct FollowerBus {
     /// differs from the clock plays the resampled frame, and a recording
     /// of that endpoint has to use this rate.
     playback_rate: AtomicU32,
+    /// Frames the follower device asked for in its last callback: the
+    /// buffer its driver really runs at, not the one requested.  0 until
+    /// the stream's first callback.
+    device_block: AtomicU32,
     pub(crate) underruns: AtomicU64,
     pub(crate) overruns: AtomicU64,
     /// Stream open failed or the device vanished; the bridge keeps running.
@@ -84,6 +88,7 @@ impl FollowerBus {
             manual_cushion_ms: AtomicU32::new(10.0f32.to_bits()),
             source_rate: AtomicU32::new(0),
             playback_rate: AtomicU32::new(0),
+            device_block: AtomicU32::new(0),
             underruns: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
             missing: AtomicBool::new(false),
@@ -100,6 +105,7 @@ impl FollowerBus {
         self.overruns.store(0, Ordering::Relaxed);
         self.input_block.store(0, Ordering::Relaxed);
         self.output_block.store(0, Ordering::Relaxed);
+        self.device_block.store(0, Ordering::Relaxed);
         self.missing.store(false, Ordering::Relaxed);
         self.drift_at_limit.store(false, Ordering::Relaxed);
         self.lift_to_floor();
@@ -159,6 +165,25 @@ impl FollowerBus {
 
     pub(crate) fn target_frames(&self) -> usize {
         self.target_frames.load(Ordering::Relaxed) as usize
+    }
+
+    /// The ring's fill against its cushion, 0 to 1, as the clock's
+    /// `Shared::ring_fill`.
+    pub(crate) fn fill(&self) -> f32 {
+        let target = self.target_frames().max(1) as f32;
+        (self.ring_frames() as f32 / target).clamp(0.0, 1.0)
+    }
+
+    /// Follower side, every callback: the frames the device asked for.
+    pub(crate) fn note_device_block(&self, frames: usize) {
+        self.device_block
+            .store(frames.min(u32::MAX as usize) as u32, Ordering::Relaxed);
+    }
+
+    /// The frames the device asked for in its last callback (see the
+    /// field).
+    pub(crate) fn device_block(&self) -> u32 {
+        self.device_block.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set_cushion(&self, mode: CushionMode, manual_ms: f32) {

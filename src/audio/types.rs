@@ -191,6 +191,23 @@ pub struct Snapshot {
     pub follower_underruns: [u64; MAX_FOLLOWERS],
     /// Generic followers whose drift loop is pinned at its limit.
     pub follower_drift_at_limit: [bool; MAX_FOLLOWERS],
+    /// The rate each follower's own stream opened at, Hz.  0 while it has
+    /// no stream: not open yet, missing, or played in the PipeWire graph.
+    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
+    pub follower_rates: [u32; MAX_FOLLOWERS],
+    /// The frames each follower's driver asks for per callback (its real
+    /// buffer size).  0 while it has no stream, and until its first
+    /// callback.
+    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
+    pub follower_buffer_frames: [u32; MAX_FOLLOWERS],
+    /// Each follower's ring fill against its cushion, 0 to 1 (as
+    /// [`Self::ring_fill`]).  0 while it has no stream.
+    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
+    pub follower_ring_fill: [f32; MAX_FOLLOWERS],
+    /// Each follower's cushion (its ring's fill target), in frames at the
+    /// clock output's rate.  0 while it has no stream.
+    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
+    pub follower_target_frames: [usize; MAX_FOLLOWERS],
     pub underruns: u64,
     /// Frames the input callback dropped because the ring was full.
     #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.

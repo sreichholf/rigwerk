@@ -1160,6 +1160,31 @@ impl Shared {
                     .drift_at_limit
                     .load(Ordering::Relaxed)
             }),
+            follower_rates: std::array::from_fn(|index| self.follower_buses[index].playback_rate()),
+            follower_buffer_frames: std::array::from_fn(|index| {
+                let bus = &self.follower_buses[index];
+                if bus.playback_rate() == 0 {
+                    0
+                } else {
+                    bus.device_block()
+                }
+            }),
+            follower_ring_fill: std::array::from_fn(|index| {
+                let bus = &self.follower_buses[index];
+                if bus.playback_rate() == 0 {
+                    0.0
+                } else {
+                    bus.fill()
+                }
+            }),
+            follower_target_frames: std::array::from_fn(|index| {
+                let bus = &self.follower_buses[index];
+                if bus.playback_rate() == 0 {
+                    0
+                } else {
+                    bus.target_frames()
+                }
+            }),
             underruns: self.underruns.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
             input_frames: self.input_frames.load(Ordering::Relaxed),
