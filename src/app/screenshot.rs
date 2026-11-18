@@ -77,7 +77,7 @@ fn screenshot_start() -> bool {
 }
 
 /// Frames to wait before the capture: longer once a bridge has started, so
-/// the meters, the scope and the follower links have settled.
+/// the meters, the scope and the extra output links have settled.
 const SETTLE_FRAMES: u64 = 120;
 const SETTLE_FRAMES_RUNNING: u64 = 480;
 
@@ -97,7 +97,7 @@ impl RigWerkApp {
         self.frames += 1;
         if self.frames == 1 && self.screenshot.is_some() {
             self.apply_screenshot_routing();
-            // A setup that loads inserts selects the last one; the stage a
+            // A setup that loads effects selects the last one; the stage a
             // run asked for wins.
             if let Some(stage) = super::initial_mixer_stage() {
                 self.select_chain(stage);
@@ -162,34 +162,34 @@ impl RigWerkApp {
     }
 
     /// Test hook for screenshots of Signal Routing:
-    /// `RIGWERK_ROUTING_SETUP=drywet` applies the Dry L / Wet R card;
+    /// `RIGWERK_ROUTING_SETUP=drywet` applies the Dry L / Wet R layout;
     /// `sum3` adds a third path (a copy of the first, playing) on top of it,
-    /// routed L/R on the clock device, so two paths add up there.
+    /// routed L/R on the clock output, so two paths add up there.
     /// `blend` applies Blend clean with 128 samples of (fake) plugin
     /// latency on the driven path, aligned; `dualamp-off` applies Dual-amp
-    /// with 64 samples on the second amp and the clock device's alignment
+    /// with 64 samples on the second amp and the clock output's alignment
     /// off (the red warning); `live3` is `blend` plus an empty third path
     /// (unmuted, routed nowhere: a Live Issues warning), for the Live page.
     /// `showcase` is the README setup: see [`Self::apply_screenshot_showcase`].
     fn apply_screenshot_routing(&mut self) {
-        use crate::app::cards::Card;
+        use crate::app::layouts::PathLayout;
         let setup = std::env::var("RIGWERK_ROUTING_SETUP").unwrap_or_default();
         match setup.as_str() {
             "drywet" | "sum3" => {
-                if !self.apply_card(Card::DryWet) {
+                if !self.apply_layout(PathLayout::DryWet) {
                     return;
                 }
                 if setup == "sum3" {
                     let first = self.path_slots()[0];
                     if let Some(copy) = self.duplicate_path(first) {
                         self.set_path_mute(copy, false);
-                        self.clock_device.path_map[copy].map = crate::audio::ChannelMap::default();
+                        self.clock_output.path_map[copy].map = crate::audio::ChannelMap::default();
                         self.select_path(first);
                     }
                 }
             }
             "blend" | "live3" => {
-                if !self.apply_card(Card::Blend) {
+                if !self.apply_layout(PathLayout::Blend) {
                     return;
                 }
                 let slots = self.path_slots();
@@ -207,7 +207,7 @@ impl RigWerkApp {
             }
             "showcase" => self.apply_screenshot_showcase(),
             "dualamp-off" => {
-                if !self.apply_card(Card::DualAmp) {
+                if !self.apply_layout(PathLayout::DualAmp) {
                     return;
                 }
                 let slots = self.path_slots();
@@ -221,32 +221,32 @@ impl RigWerkApp {
     }
 
     /// The README setup, the same on every page: a second output sink as a
-    /// follower plus RigWerk Out, Blend clean (Clean and Room), and the
-    /// inserts in `RIGWERK_SCREENSHOT_PLUGINS`, a `;` list of
+    /// extra output plus RigWerk Out, Blend clean (Clean and Room), and the
+    /// effects in `RIGWERK_SCREENSHOT_PLUGINS`, a `;` list of
     /// `<path number>=<bundle>[#<effect name>]` (path 1 is Clean).  Room
     /// stays selected.  A chain without plugin latency gets none faked.
     /// The plugin library is scanned too, so the Plugins page has a list.
-    /// The metronome runs at 96 BPM in 4/4, clicking on the follower only,
+    /// The metronome runs at 96 BPM in 4/4, clicking on the extra output only,
     /// so the Mixer and Live show it in use.
     fn apply_screenshot_showcase(&mut self) {
         self.begin_plugin_scan();
-        let follower = self
+        let extra_output = self
             .inventory
             .outputs
             .iter()
             .map(|device| device.id.clone())
             .find(|id| *id != self.selected_output().id && !id.starts_with("vbcable:"));
-        if let Some(id) = follower {
-            self.add_follower_device(&id);
-            // Device 1 is that follower: the click goes to the headphones.
+        if let Some(id) = extra_output {
+            self.add_extra_output_device(&id);
+            // Device 1 is that extra output: the click goes to the headphones.
             self.set_click_channel(1, 0, true);
             self.set_click_channel(1, 1, true);
         }
         self.set_metronome_bpm(96.0);
         self.set_metronome_rhythm(crate::audio::ClickRhythm::FourFour);
         self.set_metronome_running(true);
-        self.add_follower_device(crate::audio::VIRTUAL_OUT_ID);
-        if !self.apply_card(crate::app::cards::Card::Blend) {
+        self.add_extra_output_device(crate::audio::VIRTUAL_OUTPUT_ID);
+        if !self.apply_layout(crate::app::layouts::PathLayout::Blend) {
             return;
         }
         let slots = self.path_slots();

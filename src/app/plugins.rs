@@ -1,12 +1,12 @@
 //! Finding VST3 and CLAP bundles and adding them to the selected path's
-//! insert chain.
+//! effect chain.
 
 use crate::app::LogTone;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use crate::app::paths::InsertKey;
+use crate::app::paths::EffectKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{self, ClapCandidate};
 use crate::audio::vst3;
@@ -309,12 +309,12 @@ impl RigWerkApp {
 
     fn install_plugin(&mut self, pref: PluginPref) {
         let format = pref.format;
-        let insert_at = self.plugin_insert_at.take();
+        let effect_at = self.plugin_effect_at.take();
         let path = self.selected_path;
         match self.engine.add_plugin(path, pref) {
             Ok(()) => {
                 let mut index = self.engine.plugin_views(path).len().saturating_sub(1);
-                if let Some(target) = insert_at {
+                if let Some(target) = effect_at {
                     while index > target {
                         self.engine.move_plugin(path, index, -1);
                         index -= 1;
@@ -328,7 +328,7 @@ impl RigWerkApp {
                     "the master bus".to_owned()
                 };
                 self.push_log(
-                    format!("{} insert added to {target}.", format.label()),
+                    format!("{} effect added to {target}.", format.label()),
                     LogTone::Green,
                 );
                 self.plugin_browser.notice = Some((
@@ -346,27 +346,27 @@ impl RigWerkApp {
         }
     }
 
-    /// The selected path's insert `index`.
-    fn insert_key(&self, index: usize) -> InsertKey {
-        InsertKey {
+    /// The selected path's effect `index`.
+    fn effect_key(&self, index: usize) -> EffectKey {
+        EffectKey {
             path: self.selected_path,
-            insert: index,
+            effect: index,
         }
     }
 
-    /// Removes insert `index` of the selected path.
+    /// Removes effect `index` of the selected path.
     pub(crate) fn remove_plugin(&mut self, index: usize) {
         let path = self.selected_path;
         // Editors are tied to a position in the chain: close the removed
-        // insert's, and let a later insert's follow it as it slides up.
-        let shift = |key: InsertKey| -> Option<InsertKey> {
-            if key.path != path || key.insert < index {
+        // effect's, and let a later effect's follow it as it slides up.
+        let shift = |key: EffectKey| -> Option<EffectKey> {
+            if key.path != path || key.effect < index {
                 Some(key)
-            } else if key.insert == index {
+            } else if key.effect == index {
                 None
             } else {
-                Some(InsertKey {
-                    insert: key.insert - 1,
+                Some(EffectKey {
+                    effect: key.effect - 1,
                     ..key
                 })
             }
@@ -386,12 +386,12 @@ impl RigWerkApp {
         if self.plugin_editor.is_none() {
             self.plugin_param_filter.clear();
         }
-        self.push_log("Plugin insert removed.", LogTone::Amber);
+        self.push_log("Effect removed.", LogTone::Amber);
     }
 
     pub(crate) fn move_plugin(&mut self, index: usize, delta: isize) {
         let path = self.selected_path;
-        // Finished while its index still names the right insert.  Editors
+        // Finished while its index still names the right effect.  Editors
         // of other paths are not affected.
         if self
             .plugin_gui
@@ -415,12 +415,12 @@ impl RigWerkApp {
         self.engine.set_plugin_mix(self.selected_path, index, mix);
     }
 
-    /// Opens the plugin's own editor for one insert of the selected path,
+    /// Opens the plugin's own editor for one effect of the selected path,
     /// loading a saved plugin first if the bridge has not been started yet.
     /// A plugin with no editor, or one whose editor cannot open here, gets
     /// RigWerk's parameter panel instead.
     pub(crate) fn open_plugin_editor(&mut self, index: usize) {
-        let key = self.insert_key(index);
+        let key = self.effect_key(index);
         self.engine.ensure_plugin_loaded(key.path, index);
         let usable = self
             .engine
@@ -434,13 +434,13 @@ impl RigWerkApp {
         self.open_plugin_parameters(index);
     }
 
-    /// Opens RigWerk's parameter panel for one insert of the selected path,
+    /// Opens RigWerk's parameter panel for one effect of the selected path,
     /// loading a saved plugin first if the bridge has not been started yet.
     pub(crate) fn open_plugin_parameters(&mut self, index: usize) {
-        let key = self.insert_key(index);
+        let key = self.effect_key(index);
         self.engine.ensure_plugin_loaded(key.path, index);
         if self.plugin_editor != Some(key) {
-            // A different insert: the plugin editor and the filter belong to
+            // A different effect: the plugin editor and the filter belong to
             // the one that was open before.
             self.finish_plugin_gui();
             self.plugin_param_filter.clear();
@@ -448,17 +448,17 @@ impl RigWerkApp {
         self.plugin_editor = Some(key);
     }
 
-    pub(crate) fn set_plugin_parameter(&mut self, key: InsertKey, id: u32, value: f64) {
+    pub(crate) fn set_plugin_parameter(&mut self, key: EffectKey, id: u32, value: f64) {
         if let Err(error) = self
             .engine
-            .set_plugin_parameter(key.path, key.insert, id, value)
+            .set_plugin_parameter(key.path, key.effect, id, value)
         {
             self.plugin_browser.notice = Some((error, std::time::Instant::now()));
         }
     }
 
-    pub(crate) fn reset_plugin_parameters(&mut self, key: InsertKey) {
-        if let Err(error) = self.engine.reset_plugin_parameters(key.path, key.insert) {
+    pub(crate) fn reset_plugin_parameters(&mut self, key: EffectKey) {
+        if let Err(error) = self.engine.reset_plugin_parameters(key.path, key.effect) {
             self.plugin_browser.notice = Some((error, std::time::Instant::now()));
         } else {
             self.push_log(

@@ -6,7 +6,7 @@ use crate::app::latency::{LoopbackKind, MeasuredLatency};
 use crate::app::Page;
 use crate::audio::{
     ChannelMap, EqSettings, GateSettings, GateSlot, OutputDeviceSettings, PluginFormat, PluginPref,
-    UnusedChannels, WasapiOutputMode, MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    UnusedChannels, WasapiOutputMode, MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
 const BACKUP: &str = "rigwerk-preferences-backup-1";
@@ -29,8 +29,8 @@ impl eframe::Storage for MemoryStorage {
     fn flush(&mut self) {}
 }
 
-fn preset(name: &str) -> Preset {
-    Preset {
+fn session(name: &str) -> Session {
+    Session {
         name: name.to_owned(),
         note: "ASIO → WASAPI".to_owned(),
         input: "Focusrite USB ASIO".to_owned(),
@@ -45,7 +45,7 @@ fn preset(name: &str) -> Preset {
         output_buffer: 256,
         eq: Some(EqSettings::default()),
         eq_post: None,
-        ..Preset::default()
+        ..Session::default()
     }
 }
 
@@ -77,7 +77,7 @@ fn round_trip_keeps_everything() {
         ron::from_str(r#"Some((version: 1, data: "AAEC/w==", params: [(id: 7, value: 0.25)]))"#)
             .expect("state");
     let preferences = Preferences {
-        sessions: vec![preset("Clean"), preset("Lead")],
+        sessions: vec![session("Clean"), session("Lead")],
         plugins: vec![
             plugin("C:/Plugins/Amp.vst3", PluginFormat::Vst3),
             verb.clone(),
@@ -100,7 +100,7 @@ fn round_trip_keeps_everything() {
     assert_eq!(back.sessions[0].output_id, "wasapi:{speakers}");
     assert_eq!(back.sessions[0].output_backend, "WASAPI");
     assert_eq!(back.sessions[0].output_buffer, 256);
-    // A patch from before paths: path 1, with what it never stored (the
+    // A session from before paths: path 1, with what it never stored (the
     // post EQ) taken from the first path of the preferences.
     assert_eq!(back.sessions[0].paths.len(), 1);
     assert_eq!(back.sessions[0].paths[0].eq, EqSettings::default());
@@ -118,7 +118,7 @@ fn round_trip_keeps_everything() {
 }
 
 #[test]
-fn damaged_plugin_state_keeps_the_insert() {
+fn damaged_plugin_state_keeps_the_effect() {
     let raw = r#"(plugins:[(path:"C:/Plugins/Amp.clap",format:clap,name:"Amp",params:[(id:3,value:0.5)],state:Some((version:"one",data:12))),(path:"C:/Plugins/Old.vst3",name:"Old")])"#;
     let loaded = load_preferences(Some(raw), BACKUP);
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
@@ -131,7 +131,7 @@ fn damaged_plugin_state_keeps_the_insert() {
 }
 
 #[test]
-fn preset_missing_fields_still_loads() {
+fn session_missing_fields_still_loads() {
     // Written before `note`, `buffer` and the output side existed, and
     // before the schema version: used to fail the whole preferences.
     let raw = r#"(auto_start_bridge:true,sessions:[(name:"Old",input:"In",output:"Out",rate:44100)],session_name:"Mine",sample_rate:44100)"#;
@@ -157,7 +157,7 @@ fn preset_missing_fields_still_loads() {
     assert_eq!(old.input_gain, DEFAULT_INPUT_GAIN);
     assert_eq!(old.output_gain, DEFAULT_OUTPUT_GAIN);
     assert_eq!(old.input_channels, [true, true]);
-    assert_eq!(old.paths.len(), 1, "an old patch is one path");
+    assert_eq!(old.paths.len(), 1, "an old session is one path");
     assert_eq!(old.paths[0].output_channels, [true, true]);
     assert!(!old.paths[0].mono);
     assert!(!old.mute);
@@ -169,8 +169,8 @@ fn preset_missing_fields_still_loads() {
         old.paths[0].routes,
         [[true, false, false, false], [false, true, false, false]]
     );
-    assert_eq!(old.cushion_mode, 0);
-    assert_eq!(old.cushion_ms, DEFAULT_CUSHION_MS);
+    assert_eq!(old.bridge_buffer_mode, 0);
+    assert_eq!(old.bridge_buffer_ms, DEFAULT_BRIDGE_BUFFER_MS);
     assert!(old.paths[0].plugins.is_empty());
     assert!(old.eq.is_none());
     assert!(old.eq_post.is_none());
@@ -178,7 +178,7 @@ fn preset_missing_fields_still_loads() {
 }
 
 #[test]
-fn gate_round_trips_in_preferences_and_session_presets() {
+fn gate_round_trips_in_preferences_and_sessions() {
     let gate = GateSettings {
         enabled: true,
         slot: GateSlot::Pre,
@@ -189,7 +189,7 @@ fn gate_round_trips_in_preferences_and_session_presets() {
         release_ms: 180.0,
         hold_ms: 55.0,
     };
-    let mut session = preset("Gated");
+    let mut session = session("Gated");
     session.gate = Some(gate);
     session.eq_post = Some(EqSettings::default());
     let preferences = Preferences {
@@ -321,22 +321,22 @@ fn corrupt_gains_rates_and_buffers_are_not_applied_raw() {
     assert_eq!(preferences.output_buffer, DEFAULT_BUFFER);
     assert!(preferences.output_buffer >= MIN_OUTPUT_BUFFER);
     assert_ne!(preferences.output_buffer, 1);
-    assert_eq!(preferences.cushion_ms, DEFAULT_CUSHION_MS);
+    assert_eq!(preferences.bridge_buffer_ms, DEFAULT_BRIDGE_BUFFER_MS);
 
-    let preset = &preferences.sessions[0];
-    assert_eq!(preset.rate, DEFAULT_SAMPLE_RATE);
-    assert_ne!(preset.rate, 1);
-    assert_eq!(preset.buffer, DEFAULT_BUFFER);
-    assert_ne!(preset.buffer, 0);
-    assert_eq!(preset.output_rate, DEFAULT_SAMPLE_RATE);
-    assert_ne!(preset.output_buffer, 9);
-    assert_eq!(preset.output_buffer, DEFAULT_BUFFER);
-    assert!(preset.output_buffer >= MIN_OUTPUT_BUFFER);
-    assert!(preset.input_gain.is_finite());
-    assert_eq!(preset.input_gain, DEFAULT_INPUT_GAIN);
-    assert_eq!(preset.output_gain, OUTPUT_GAIN_MIN_DB);
-    assert!(preset.output_gain.is_finite());
-    assert_eq!(preset.cushion_ms, CUSHION_MS_MAX);
+    let session = &preferences.sessions[0];
+    assert_eq!(session.rate, DEFAULT_SAMPLE_RATE);
+    assert_ne!(session.rate, 1);
+    assert_eq!(session.buffer, DEFAULT_BUFFER);
+    assert_ne!(session.buffer, 0);
+    assert_eq!(session.output_rate, DEFAULT_SAMPLE_RATE);
+    assert_ne!(session.output_buffer, 9);
+    assert_eq!(session.output_buffer, DEFAULT_BUFFER);
+    assert!(session.output_buffer >= MIN_OUTPUT_BUFFER);
+    assert!(session.input_gain.is_finite());
+    assert_eq!(session.input_gain, DEFAULT_INPUT_GAIN);
+    assert_eq!(session.output_gain, OUTPUT_GAIN_MIN_DB);
+    assert!(session.output_gain.is_finite());
+    assert_eq!(session.bridge_buffer_ms, BRIDGE_BUFFER_MS_MAX);
 
     // A listed size is kept, and so is a step that is not on the combo
     // but still inside the output floor and the largest offered size.
@@ -348,7 +348,7 @@ fn corrupt_gains_rates_and_buffers_are_not_applied_raw() {
             output_buffer: 16,
             input_gain: 100.0,
             output_gain: -100.0,
-            cushion_ms: 7.5,
+            bridge_buffer_ms: 7.5,
         },
         OutputBufferZero::Invalid,
     );
@@ -358,7 +358,7 @@ fn corrupt_gains_rates_and_buffers_are_not_applied_raw() {
     assert_eq!(kept.output_buffer, MIN_OUTPUT_BUFFER);
     assert_eq!(kept.input_gain, INPUT_GAIN_MAX_DB);
     assert_eq!(kept.output_gain, OUTPUT_GAIN_MIN_DB);
-    assert_eq!(kept.cushion_ms, 7.5);
+    assert_eq!(kept.bridge_buffer_ms, 7.5);
 
     let huge = validate_bridge_settings(
         BridgeSettings {
@@ -368,7 +368,7 @@ fn corrupt_gains_rates_and_buffers_are_not_applied_raw() {
             output_buffer: 4_096,
             input_gain: 0.0,
             output_gain: 0.0,
-            cushion_ms: 10.0,
+            bridge_buffer_ms: 10.0,
         },
         OutputBufferZero::FollowInput,
     );
@@ -381,8 +381,8 @@ fn corrupt_gains_rates_and_buffers_are_not_applied_raw() {
 }
 
 #[test]
-fn a_full_preset_round_trips_routes_gains_and_plugins() {
-    let mut full = preset("Gig");
+fn a_full_session_round_trips_routes_gains_and_plugins() {
+    let mut full = session("Gig");
     full.input_gain = 6.0;
     full.output_gain = -12.0;
     full.input_channels = [true, false];
@@ -393,8 +393,8 @@ fn a_full_preset_round_trips_routes_gains_and_plugins() {
     full.drift = false;
     full.low_latency_output = false;
     full.routes = [[false, true, false, true], [true, false, true, false]];
-    full.cushion_mode = 2;
-    full.cushion_ms = 7.5;
+    full.bridge_buffer_mode = 2;
+    full.bridge_buffer_ms = 7.5;
     full.plugins = vec![plugin("C:/Plugins/Amp.vst3", PluginFormat::Vst3)];
     let preferences = Preferences {
         sessions: vec![full.clone()],
@@ -414,8 +414,8 @@ fn a_full_preset_round_trips_routes_gains_and_plugins() {
     assert!(!back.monitor);
     assert!(!back.drift);
     assert!(!back.low_latency_output);
-    assert_eq!(back.cushion_mode, 2);
-    assert_eq!(back.cushion_ms, 7.5);
+    assert_eq!(back.bridge_buffer_mode, 2);
+    assert_eq!(back.bridge_buffer_ms, 7.5);
     let path = &back.paths[0];
     assert_eq!(path.output_channels, [false, true]);
     assert!(path.mono);
@@ -428,7 +428,7 @@ fn a_full_preset_round_trips_routes_gains_and_plugins() {
 }
 
 #[test]
-fn corrupt_preset_is_skipped_and_the_rest_kept() {
+fn corrupt_session_is_skipped_and_the_rest_kept() {
     let raw = r#"(sessions:[(name:"Good one",rate:48000,buffer:64),(name:12,rate:"fast"),"junk",(name:"Good two")],session_name:"Mine",buffer_size:256,plugins:[(path:"C:/A.vst3",name:"A")])"#;
     let loaded = load_preferences(Some(raw), BACKUP);
     let preferences = loaded.preferences.expect("readable");
@@ -444,7 +444,7 @@ fn corrupt_preset_is_skipped_and_the_rest_kept() {
     assert_eq!(preferences.paths[0].plugins.len(), 1);
     assert_eq!(loaded.notices.len(), 1);
     assert!(
-        loaded.notices[0].contains("Skipped 2 saved patch"),
+        loaded.notices[0].contains("Skipped 2 saved session"),
         "{}",
         loaded.notices[0]
     );
@@ -466,7 +466,7 @@ fn corrupt_plugin_entry_is_skipped_and_missing_name_filled_in() {
     assert_eq!(plugins[1].name, "Verb");
     assert_eq!(plugins[1].mix, 1.0);
     assert!(
-        loaded.notices[0].contains("2 plugin insert"),
+        loaded.notices[0].contains("2 plugin effect"),
         "{}",
         loaded.notices[0]
     );
@@ -520,7 +520,7 @@ fn the_diagnostics_page_round_trips() {
     assert!(page_from_key(" Diagnostics ") == Page::Diagnostics);
 }
 
-fn output_devices() -> (OutputDeviceSettings, Vec<FollowerPref>) {
+fn output_devices() -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
     let clock = OutputDeviceSettings {
         level_db: -6.0,
         mute: true,
@@ -532,8 +532,8 @@ fn output_devices() -> (OutputDeviceSettings, Vec<FollowerPref>) {
         align: false,
         click_mask: 0,
     };
-    let followers = vec![
-        FollowerPref {
+    let extra_outputs = vec![
+        ExtraOutputPref {
             id: "hw:Phones".to_owned(),
             backend: "ALSA".to_owned(),
             name: "Phones".to_owned(),
@@ -541,20 +541,20 @@ fn output_devices() -> (OutputDeviceSettings, Vec<FollowerPref>) {
                 level_db: -3.0,
                 ..OutputDeviceSettings::default()
             },
-            cushion_mode: 2,
-            cushion_ms: 20.0,
-            ..FollowerPref::default()
+            bridge_buffer_mode: 2,
+            bridge_buffer_ms: 20.0,
+            ..ExtraOutputPref::default()
         },
-        FollowerPref {
+        ExtraOutputPref {
             settings: OutputDeviceSettings {
                 mute: true,
                 path_map: crate::audio::PathMapSettings::first(ChannelMap { left: 1, right: 1 }),
                 ..OutputDeviceSettings::default()
             },
-            ..FollowerPref::virtual_out()
+            ..ExtraOutputPref::virtual_output()
         },
     ];
-    (clock, followers)
+    (clock, extra_outputs)
 }
 
 #[test]
@@ -576,13 +576,13 @@ fn old_saves_without_output_devices_use_defaults() {
         click_mask: 0,
     };
     assert_eq!(OutputDeviceSettings::default(), today);
-    assert_eq!(preferences.clock_device, today);
-    assert!(preferences.followers.is_empty());
+    assert_eq!(preferences.clock_output, today);
+    assert!(preferences.extra_outputs.is_empty());
     // The master stays where it was.
     assert_eq!(preferences.output_gain, -6.0);
     assert!(preferences.mute);
-    assert_eq!(preferences.sessions[0].clock_device, today);
-    assert!(preferences.sessions[0].followers.is_empty());
+    assert_eq!(preferences.sessions[0].clock_output, today);
+    assert!(preferences.sessions[0].extra_outputs.is_empty());
 }
 
 #[test]
@@ -591,10 +591,10 @@ fn unknown_unused_channel_mode_reads_as_mono_copy() {
     let loaded = load_preferences(Some(raw), BACKUP);
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     let preferences = loaded.preferences.expect("readable");
-    assert_eq!(preferences.clock_device.unused, UnusedChannels::MonoCopy);
-    assert_eq!(preferences.clock_device.level_db, -2.0);
+    assert_eq!(preferences.clock_output.unused, UnusedChannels::MonoCopy);
+    assert_eq!(preferences.clock_output.level_db, -2.0);
     assert_eq!(
-        preferences.followers[0].settings.unused,
+        preferences.extra_outputs[0].settings.unused,
         UnusedChannels::Silent
     );
     assert_eq!(preferences.session_name, "Mine");
@@ -602,42 +602,42 @@ fn unknown_unused_channel_mode_reads_as_mono_copy() {
 }
 
 #[test]
-fn output_devices_round_trip_in_preferences_and_presets() {
-    let (clock, followers) = output_devices();
-    let mut session = preset("Two outs");
-    session.clock_device = clock;
-    session.followers = followers.clone();
+fn output_devices_round_trip_in_preferences_and_sessions() {
+    let (clock, extra_outputs) = output_devices();
+    let mut session = session("Two outs");
+    session.clock_output = clock;
+    session.extra_outputs = extra_outputs.clone();
     let preferences = Preferences {
-        clock_device: clock,
-        followers: followers.clone(),
+        clock_output: clock,
+        extra_outputs: extra_outputs.clone(),
         sessions: vec![session],
         ..Preferences::default()
     };
     let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     let back = loaded.preferences.expect("readable");
-    assert_eq!(back.clock_device, clock);
-    assert_eq!(back.sessions[0].clock_device, clock);
+    assert_eq!(back.clock_output, clock);
+    assert_eq!(back.sessions[0].clock_output, clock);
     #[cfg(target_os = "windows")]
     {
         // Virtual-out clears the PipeWire sentinel; rematch fills WASAPI later.
-        assert_eq!(back.followers.len(), followers.len());
-        assert_eq!(back.followers[0], followers[0]);
-        assert!(back.followers[1].virtual_out && back.followers[1].publish);
-        assert!(back.followers[1].id.is_empty());
-        assert_eq!(back.followers[1].name, VIRTUAL_OUT_NAME);
-        assert_eq!(back.sessions[0].followers.len(), followers.len());
-        assert!(back.sessions[0].followers[1].id.is_empty());
+        assert_eq!(back.extra_outputs.len(), extra_outputs.len());
+        assert_eq!(back.extra_outputs[0], extra_outputs[0]);
+        assert!(back.extra_outputs[1].virtual_output && back.extra_outputs[1].virtual_output_on);
+        assert!(back.extra_outputs[1].id.is_empty());
+        assert_eq!(back.extra_outputs[1].name, VIRTUAL_OUTPUT_NAME);
+        assert_eq!(back.sessions[0].extra_outputs.len(), extra_outputs.len());
+        assert!(back.sessions[0].extra_outputs[1].id.is_empty());
     }
     #[cfg(not(target_os = "windows"))]
     {
-        assert_eq!(back.followers, followers);
-        assert_eq!(back.sessions[0].followers, followers);
+        assert_eq!(back.extra_outputs, extra_outputs);
+        assert_eq!(back.sessions[0].extra_outputs, extra_outputs);
     }
 }
 
 #[test]
-fn unreadable_follower_is_skipped_and_the_rest_kept() {
+fn unreadable_extra_output_is_skipped_and_the_rest_kept() {
     let raw = r#"(
             clock_device:(level_db:NaN,map:(left:3)),
             sessions:[
@@ -654,21 +654,24 @@ fn unreadable_follower_is_skipped_and_the_rest_kept() {
     let loaded = load_preferences(Some(raw), BACKUP);
     let preferences = loaded.preferences.expect("readable");
     let ids: Vec<_> = preferences
-        .followers
+        .extra_outputs
         .iter()
         .map(|f| f.id.as_str())
         .collect();
     assert_eq!(ids, ["hw:A", "hw:C"]);
     assert_eq!(
-        preferences.followers[0].settings.unused,
+        preferences.extra_outputs[0].settings.unused,
         UnusedChannels::Silent
     );
-    assert_eq!(preferences.followers[1].cushion_ms, CUSHION_MS_MAX);
-    assert_eq!(preferences.clock_device.level_db, 0.0);
-    assert_eq!(preferences.clock_device.map(0).left, 3);
-    assert_eq!(preferences.clock_device.map(0).right, 0b10);
-    assert_eq!(preferences.sessions[0].clock_device.level_db, 6.0);
-    let session = &preferences.sessions[1].followers;
+    assert_eq!(
+        preferences.extra_outputs[1].bridge_buffer_ms,
+        BRIDGE_BUFFER_MS_MAX
+    );
+    assert_eq!(preferences.clock_output.level_db, 0.0);
+    assert_eq!(preferences.clock_output.map(0).left, 3);
+    assert_eq!(preferences.clock_output.map(0).right, 0b10);
+    assert_eq!(preferences.sessions[0].clock_output.level_db, 6.0);
+    let session = &preferences.sessions[1].extra_outputs;
     assert_eq!(session.len(), 1);
     assert_eq!(session[0].settings.level_db, -36.0);
     assert!(
@@ -704,52 +707,52 @@ fn nothing_stored_is_quiet() {
 }
 
 #[test]
-fn old_followers_without_publish_default_off() {
+fn old_extra_outputs_without_publish_default_off() {
     let raw = r#"(followers:[(id:"hw:A",name:"A")])"#;
     let loaded = load_preferences(Some(raw), BACKUP);
     let preferences = loaded.preferences.expect("readable");
-    assert_eq!(preferences.followers.len(), 1);
-    assert!(!preferences.followers[0].virtual_out);
-    assert!(!preferences.followers[0].publish);
+    assert_eq!(preferences.extra_outputs.len(), 1);
+    assert!(!preferences.extra_outputs[0].virtual_output);
+    assert!(!preferences.extra_outputs[0].virtual_output_on);
 }
 
 #[test]
 fn virtual_out_and_publish_round_trip() {
     let preferences = Preferences {
-        followers: vec![FollowerPref::virtual_out()],
+        extra_outputs: vec![ExtraOutputPref::virtual_output()],
         ..Preferences::default()
     };
     let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
     let back = loaded.preferences.expect("readable");
-    assert_eq!(back.followers.len(), 1);
-    assert!(back.followers[0].virtual_out);
-    assert!(back.followers[0].publish);
+    assert_eq!(back.extra_outputs.len(), 1);
+    assert!(back.extra_outputs[0].virtual_output);
+    assert!(back.extra_outputs[0].virtual_output_on);
     #[cfg(target_os = "windows")]
     {
         // PipeWire sentinel is cleared; inventory rematch fills the WASAPI id.
-        assert!(back.followers[0].id.is_empty());
+        assert!(back.extra_outputs[0].id.is_empty());
     }
     #[cfg(not(target_os = "windows"))]
     {
-        assert_eq!(back.followers[0].id, VIRTUAL_OUT_ID);
+        assert_eq!(back.extra_outputs[0].id, VIRTUAL_OUTPUT_ID);
     }
-    assert_eq!(back.followers[0].name, VIRTUAL_OUT_NAME);
+    assert_eq!(back.extra_outputs[0].name, VIRTUAL_OUTPUT_NAME);
 }
 
 #[test]
-fn followers_past_the_cap_are_dropped() {
-    let entries: String = (0..=MAX_FOLLOWERS)
+fn extra_outputs_past_the_cap_are_dropped() {
+    let entries: String = (0..=MAX_EXTRA_OUTPUTS)
         .map(|index| format!(r#"(id:"hw:{index}",name:"D{index}")"#))
         .collect::<Vec<_>>()
         .join(",");
     let raw = format!("(followers:[{entries}])");
     let loaded = load_preferences(Some(&raw), BACKUP);
     let preferences = loaded.preferences.expect("readable");
-    assert_eq!(preferences.followers.len(), MAX_FOLLOWERS);
-    assert_eq!(preferences.followers[0].id, "hw:0");
+    assert_eq!(preferences.extra_outputs.len(), MAX_EXTRA_OUTPUTS);
+    assert_eq!(preferences.extra_outputs[0].id, "hw:0");
     assert_eq!(
-        preferences.followers[MAX_FOLLOWERS - 1].id,
-        format!("hw:{}", MAX_FOLLOWERS - 1)
+        preferences.extra_outputs[MAX_EXTRA_OUTPUTS - 1].id,
+        format!("hw:{}", MAX_EXTRA_OUTPUTS - 1)
     );
 }
 
@@ -762,29 +765,29 @@ fn a_second_virtual_out_is_dropped() {
         ])"#;
     let loaded = load_preferences(Some(raw), BACKUP);
     let preferences = loaded.preferences.expect("readable");
-    assert_eq!(preferences.followers.len(), 2);
-    assert!(!preferences.followers[0].virtual_out);
-    assert!(preferences.followers[1].virtual_out);
-    assert!(preferences.followers[1].publish);
+    assert_eq!(preferences.extra_outputs.len(), 2);
+    assert!(!preferences.extra_outputs[0].virtual_output);
+    assert!(preferences.extra_outputs[1].virtual_output);
+    assert!(preferences.extra_outputs[1].virtual_output_on);
     #[cfg(target_os = "windows")]
     {
-        assert!(preferences.followers[1].id.is_empty());
+        assert!(preferences.extra_outputs[1].id.is_empty());
     }
     #[cfg(not(target_os = "windows"))]
     {
-        assert_eq!(preferences.followers[1].id, VIRTUAL_OUT_ID);
+        assert_eq!(preferences.extra_outputs[1].id, VIRTUAL_OUTPUT_ID);
     }
 }
 
 #[test]
 fn windows_virtual_out_keeps_wasapi_id_through_sanitize() {
-    let pref = FollowerPref {
+    let pref = ExtraOutputPref {
         id: "wasapi:{cable-input}".to_owned(),
         backend: "WASAPI".to_owned(),
         name: "CABLE Input (VB-Audio Virtual Cable)".to_owned(),
-        virtual_out: true,
-        publish: true,
-        ..FollowerPref::default()
+        virtual_output: true,
+        virtual_output_on: true,
+        ..ExtraOutputPref::default()
     }
     .sanitized();
     #[cfg(target_os = "windows")]
@@ -795,31 +798,31 @@ fn windows_virtual_out_keeps_wasapi_id_through_sanitize() {
     #[cfg(not(target_os = "windows"))]
     {
         // PipeWire RigWerk Out always uses the sentinel id.
-        assert_eq!(pref.id, VIRTUAL_OUT_ID);
+        assert_eq!(pref.id, VIRTUAL_OUTPUT_ID);
         assert_eq!(pref.backend, "PipeWire");
     }
-    assert!(pref.virtual_out && pref.publish);
+    assert!(pref.virtual_output && pref.virtual_output_on);
     assert_eq!(pref.name, "CABLE Input (VB-Audio Virtual Cable)");
 }
 
 #[test]
 fn windows_virtual_out_drops_pipewire_sentinel_on_sanitize() {
-    let pref = FollowerPref {
-        id: VIRTUAL_OUT_ID.to_owned(),
-        virtual_out: true,
-        publish: true,
-        ..FollowerPref::default()
+    let pref = ExtraOutputPref {
+        id: VIRTUAL_OUTPUT_ID.to_owned(),
+        virtual_output: true,
+        virtual_output_on: true,
+        ..ExtraOutputPref::default()
     }
     .sanitized();
     #[cfg(target_os = "windows")]
     {
         assert!(pref.id.is_empty());
         assert_eq!(pref.backend, "WASAPI");
-        assert_eq!(pref.name, VIRTUAL_OUT_NAME);
+        assert_eq!(pref.name, VIRTUAL_OUTPUT_NAME);
     }
     #[cfg(not(target_os = "windows"))]
     {
-        assert_eq!(pref.id, VIRTUAL_OUT_ID);
+        assert_eq!(pref.id, VIRTUAL_OUTPUT_ID);
         assert_eq!(pref.backend, "PipeWire");
     }
 }
@@ -837,23 +840,23 @@ fn windows_virtual_out_rematch_binds_vb_cable_from_inventory() {
         preferred: false,
         asio_clsid: None,
     };
-    let mut followers = vec![FollowerPref {
-        id: VIRTUAL_OUT_ID.to_owned(),
-        virtual_out: true,
-        publish: true,
-        ..FollowerPref::default()
+    let mut extra_outputs = vec![ExtraOutputPref {
+        id: VIRTUAL_OUTPUT_ID.to_owned(),
+        virtual_output: true,
+        virtual_output_on: true,
+        ..ExtraOutputPref::default()
     }
     .sanitized()];
-    rematch_windows_virtual_out(&mut followers, std::slice::from_ref(&cable));
+    rematch_windows_virtual_output(&mut extra_outputs, std::slice::from_ref(&cable));
     #[cfg(target_os = "windows")]
     {
-        assert_eq!(followers[0].id, cable.id);
-        assert_eq!(followers[0].backend, "WASAPI");
+        assert_eq!(extra_outputs[0].id, cable.id);
+        assert_eq!(extra_outputs[0].backend, "WASAPI");
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = cable;
-        assert_eq!(followers[0].id, VIRTUAL_OUT_ID);
+        assert_eq!(extra_outputs[0].id, VIRTUAL_OUTPUT_ID);
     }
 }
 
@@ -880,7 +883,7 @@ fn wasapi_exclusive_mode_round_trips() {
         low_latency_output: false,
         wasapi_output_mode: Some(WasapiOutputMode::Exclusive),
         sessions: {
-            let mut session = preset("Exclusive");
+            let mut session = session("Exclusive");
             session.low_latency_output = false;
             session.wasapi_output_mode = Some(WasapiOutputMode::Exclusive);
             vec![session]
@@ -951,12 +954,12 @@ fn an_old_file_loads_as_one_path() {
     // The master mute stays the master's.
     assert!(preferences.mute);
     assert_eq!(
-        preferences.clock_device.map(0),
+        preferences.clock_output.map(0),
         ChannelMap { left: 4, right: 8 }
     );
-    assert_eq!(preferences.clock_device.level_db, -3.0);
+    assert_eq!(preferences.clock_output.level_db, -3.0);
     assert_eq!(
-        preferences.followers[0].settings.map(0),
+        preferences.extra_outputs[0].settings.map(0),
         ChannelMap { left: 3, right: 0 }
     );
     // The legacy fields are cleared once migrated.
@@ -968,14 +971,14 @@ fn an_old_file_loads_as_one_path() {
     assert!(old.paths[0].mono);
     assert_eq!(old.paths[0].routes[0], [true, true, false, false]);
     assert_eq!(old.paths[0].plugins[0].name, "B");
-    // What the patch never stored comes from the first path.
+    // What the session never stored comes from the first path.
     assert_eq!(old.paths[0].gate, path.gate);
-    assert_eq!(old.clock_device.map(0), ChannelMap { left: 2, right: 1 });
+    assert_eq!(old.clock_output.map(0), ChannelMap { left: 2, right: 1 });
 }
 
 /// Three paths with their own chains, and each device with its own map,
 /// level, polarity and trim per path.
-fn three_paths() -> (Vec<PathPref>, OutputDeviceSettings, Vec<FollowerPref>) {
+fn three_paths() -> (Vec<PathPref>, OutputDeviceSettings, Vec<ExtraOutputPref>) {
     let mut eq = EqSettings::default();
     eq.bands[2].gain_db = 4.5;
     let paths = vec![
@@ -1022,17 +1025,17 @@ fn three_paths() -> (Vec<PathPref>, OutputDeviceSettings, Vec<FollowerPref>) {
         trim_ms: 1.5,
     };
     clock.path_map[2] = crate::audio::PathMapSettings::unrouted();
-    let mut stream = FollowerPref::virtual_out();
+    let mut stream = ExtraOutputPref::virtual_output();
     stream.settings.path_map[0] = crate::audio::PathMapSettings::unrouted();
     stream.settings.path_map[2].level_db = -2.0;
-    // A generic follower with its own cushion and a per-path map.
-    let mut phones = FollowerPref {
+    // A generic extra output with its own bridge buffer and a per-path map.
+    let mut phones = ExtraOutputPref {
         id: "hw:Phones".to_owned(),
         backend: "ALSA".to_owned(),
         name: "Phones".to_owned(),
-        cushion_mode: 1,
-        cushion_ms: 12.5,
-        ..FollowerPref::default()
+        bridge_buffer_mode: 1,
+        bridge_buffer_ms: 12.5,
+        ..ExtraOutputPref::default()
     };
     phones.settings.path_map[1] = crate::audio::PathMapSettings::unrouted();
     phones.settings.path_map[2].invert = true;
@@ -1043,12 +1046,12 @@ fn three_paths() -> (Vec<PathPref>, OutputDeviceSettings, Vec<FollowerPref>) {
 
 #[test]
 fn three_paths_round_trip_in_preferences() {
-    let (paths, clock_device, followers) = three_paths();
+    let (paths, clock_output, extra_outputs) = three_paths();
     let preferences = Preferences {
         paths: paths.clone(),
         selected_path: 2,
-        clock_device,
-        followers: followers.clone(),
+        clock_output,
+        extra_outputs: extra_outputs.clone(),
         wasapi_output_mode: Some(WasapiOutputMode::Exclusive),
         ..Preferences::default()
     };
@@ -1077,19 +1080,19 @@ fn three_paths_round_trip_in_preferences() {
     let back = loaded.preferences.expect("readable");
     assert_eq!(back.paths, paths);
     assert_eq!(back.selected_path, 2);
-    assert_eq!(back.clock_device, clock_device);
-    assert_eq!(back.followers, followers);
+    assert_eq!(back.clock_output, clock_output);
+    assert_eq!(back.extra_outputs, extra_outputs);
     assert_eq!(back.wasapi_output_mode, Some(WasapiOutputMode::Exclusive));
 }
 
 #[test]
-fn three_paths_round_trip_in_a_preset() {
-    let (paths, clock_device, followers) = three_paths();
-    let mut session = preset("Three");
+fn three_paths_round_trip_in_a_session() {
+    let (paths, clock_output, extra_outputs) = three_paths();
+    let mut session = session("Three");
     session.eq = None;
     session.paths = paths.clone();
-    session.clock_device = clock_device;
-    session.followers = followers.clone();
+    session.clock_output = clock_output;
+    session.extra_outputs = extra_outputs.clone();
     let preferences = Preferences {
         sessions: vec![session],
         ..Preferences::default()
@@ -1098,13 +1101,13 @@ fn three_paths_round_trip_in_a_preset() {
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     let back = &loaded.preferences.expect("readable").sessions[0];
     assert_eq!(back.paths, paths);
-    assert_eq!(back.clock_device, clock_device);
-    assert_eq!(back.followers, followers);
+    assert_eq!(back.clock_output, clock_output);
+    assert_eq!(back.extra_outputs, extra_outputs);
 }
 
 #[test]
-fn a_one_path_preset_round_trips() {
-    let mut session = preset("One");
+fn a_one_path_session_round_trips() {
+    let mut session = session("One");
     session.paths = vec![PathPref {
         routes: [[false, true, false, false], [true, false, false, false]],
         ..PathPref::default()
@@ -1116,7 +1119,7 @@ fn a_one_path_preset_round_trips() {
     let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
     let back = &loaded.preferences.expect("readable").sessions[0];
     assert_eq!(back.paths, session.paths);
-    assert_eq!(back.clock_device, OutputDeviceSettings::default());
+    assert_eq!(back.clock_output, OutputDeviceSettings::default());
 }
 
 #[test]
@@ -1201,7 +1204,7 @@ fn a_damaged_measurement_is_skipped_not_fatal() {
     let preferences = loaded.preferences.expect("the rest still loads");
     assert!(preferences.auto_start_bridge);
     assert_eq!(preferences.measured_latency, None);
-    // The drop is reported like a skipped patch, and the original is kept.
+    // The drop is reported like a skipped session, and the original is kept.
     assert!(
         loaded
             .notices
@@ -1231,20 +1234,24 @@ fn an_impossible_measurement_is_dropped_and_reported() {
 #[test]
 fn a_cap_dropped_output_is_not_reported_as_unreadable() {
     let mut preferences = Preferences::default();
-    for index in 0..(MAX_FOLLOWERS + 1) {
-        preferences.followers.push(FollowerPref {
+    for index in 0..(MAX_EXTRA_OUTPUTS + 1) {
+        preferences.extra_outputs.push(ExtraOutputPref {
             id: format!("out:{index}"),
             name: format!("Out {index}"),
-            ..FollowerPref::default()
+            ..ExtraOutputPref::default()
         });
     }
     // A duplicate virtual out goes through the same floor rule.
-    preferences.followers.push(FollowerPref::virtual_out());
-    preferences.followers.push(FollowerPref::virtual_out());
+    preferences
+        .extra_outputs
+        .push(ExtraOutputPref::virtual_output());
+    preferences
+        .extra_outputs
+        .push(ExtraOutputPref::virtual_output());
 
     let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
     let back = loaded.preferences.expect("readable");
-    assert_eq!(back.followers.len(), MAX_FOLLOWERS);
+    assert_eq!(back.extra_outputs.len(), MAX_EXTRA_OUTPUTS);
     assert!(
         loaded
             .notices
@@ -1345,7 +1352,7 @@ fn chain_bypass_round_trips_and_an_old_path_stays_off() {
     assert!(path.plugins[1].bypass);
 
     // A save from before the field: the path loads, chain bypass stays off,
-    // and the insert's own bypass is still there.
+    // and the effect's own bypass is still there.
     let raw = r#"(paths:[(name:"Main",plugins:[(path:"A.vst3",name:"Amp",bypass:true)])])"#;
     let loaded = load_preferences(Some(raw), BACKUP);
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
@@ -1397,16 +1404,16 @@ fn preferences_round_trip_the_metronome_and_stay_on_schema_2() {
         metronome_bpm: 100.0,
         metronome_rhythm: crate::audio::ClickRhythm::SixEight,
         metronome_level_db: -6.0,
-        clock_device: OutputDeviceSettings {
+        clock_output: OutputDeviceSettings {
             click_mask: 0b1100,
             ..OutputDeviceSettings::default()
         },
-        followers: vec![FollowerPref {
+        extra_outputs: vec![ExtraOutputPref {
             settings: OutputDeviceSettings {
                 click_mask: 0b0001,
                 ..OutputDeviceSettings::default()
             },
-            ..FollowerPref::default()
+            ..ExtraOutputPref::default()
         }],
         ..Preferences::default()
     };
@@ -1422,8 +1429,8 @@ fn preferences_round_trip_the_metronome_and_stay_on_schema_2() {
     assert_eq!(back.metronome_bpm, 100.0);
     assert_eq!(back.metronome_rhythm, crate::audio::ClickRhythm::SixEight);
     assert_eq!(back.metronome_level_db, -6.0);
-    assert_eq!(back.clock_device.click_mask, 0b1100);
-    assert_eq!(back.followers[0].settings.click_mask, 0b0001);
+    assert_eq!(back.clock_output.click_mask, 0b1100);
+    assert_eq!(back.extra_outputs[0].settings.click_mask, 0b0001);
 }
 
 #[test]
@@ -1439,8 +1446,8 @@ fn old_preferences_load_the_metronome_off() {
         crate::audio::ClickRhythm::FourFour
     );
     assert_eq!(preferences.metronome_level_db, -12.0);
-    assert_eq!(preferences.clock_device.click_mask, 0);
-    assert!(preferences.followers.is_empty());
+    assert_eq!(preferences.clock_output.click_mask, 0);
+    assert!(preferences.extra_outputs.is_empty());
 }
 
 #[test]
@@ -1479,24 +1486,24 @@ fn preferences_clamp_a_nan_tempo_and_an_unknown_rhythm() {
 }
 
 #[test]
-fn preferences_preset_keeps_the_click_mask_and_not_the_transport() {
-    let preset = Preset {
-        clock_device: OutputDeviceSettings {
+fn preferences_session_keeps_the_click_mask_and_not_the_transport() {
+    let session = Session {
+        clock_output: OutputDeviceSettings {
             click_mask: 0b1100,
             ..OutputDeviceSettings::default()
         },
-        followers: vec![FollowerPref::default()],
-        ..Preset::default()
+        extra_outputs: vec![ExtraOutputPref::default()],
+        ..Session::default()
     };
-    let text = ron::to_string(&preset).expect("preset");
+    let text = ron::to_string(&session).expect("session");
     assert!(text.contains("clock_device"), "{text}");
     assert!(text.contains("followers"), "{text}");
     assert!(!text.contains("metronome_bpm"), "{text}");
     assert!(!text.contains("metronome_running"), "{text}");
     assert!(!text.contains("metronome_rhythm"), "{text}");
     assert!(!text.contains("metronome_level_db"), "{text}");
-    let back: Preset = ron::from_str(&text).expect("preset");
-    assert_eq!(back.clock_device.click_mask, 0b1100);
+    let back: Session = ron::from_str(&text).expect("session");
+    assert_eq!(back.clock_output.click_mask, 0b1100);
 }
 
 #[test]

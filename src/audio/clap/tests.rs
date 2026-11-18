@@ -198,7 +198,7 @@ fn a_failed_block_does_not_count_its_values_applied() {
     assert!(handle.wants_capture());
 }
 
-/// With the stream stopped a value set on a processing CLAP insert never
+/// With the stream stopped a value set on a processing CLAP effect never
 /// reaches it, but a save still captures, and a restore applies the value
 /// on top of the older blob.
 #[test]
@@ -2341,7 +2341,7 @@ fn a_set_while_not_processing_is_flushed_on_the_main_thread() {
 }
 
 #[test]
-fn a_skipped_insert_flushes_queued_values() {
+fn a_skipped_effect_flushes_queued_values() {
     let mut plugin = fake_plugin_with_params_for_test();
     let handle = plugin.handle().clone();
     let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
@@ -2540,7 +2540,7 @@ fn a_requested_flush_while_processing_goes_with_the_next_block() {
 }
 
 /// A rescan that keeps the controls refreshes the views; one that changes
-/// an id cannot be followed by the processor's table, so the insert asks
+/// an id cannot be followed by the processor's table, so the effect asks
 /// for a reload and keeps the views and values of that table meanwhile.
 #[test]
 fn a_rescan_that_changes_the_controls_asks_for_a_reload() {

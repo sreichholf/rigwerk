@@ -1,5 +1,5 @@
-//! The tuner's non-UI half: note maths, the preset table, YIN pitch
-//! detection and the preset-guided harmonic analysis that turns one strum into
+//! The tuner's non-UI half: note maths, the tuning table, YIN pitch
+//! detection and the tuning-guided harmonic analysis that turns one strum into
 //! per-string readings.
 //!
 //! Nothing here knows about egui.  `app::tuner::TunerState` owns a
@@ -162,7 +162,7 @@ impl Tuning {
 
 /// The static table.  Grouped by how the page lists them: six-string guitar
 /// tunings, extended range, then bass.
-pub(crate) const PRESETS: &[Tuning] = &[
+pub(crate) const TUNINGS: &[Tuning] = &[
     Tuning {
         id: "e-standard",
         name: "E standard",
@@ -396,16 +396,16 @@ pub(crate) const PRESETS: &[Tuning] = &[
     },
 ];
 
-/// The chromatic mode is not a preset: it has no strings, so the page shows a
+/// The chromatic mode is not a tuning: it has no strings, so the page shows a
 /// single reading and disables the all-strings view.
 pub(crate) const DEFAULT_PRESET_ID: &str = "chromatic";
 
 pub(crate) fn tuning_index(id: &str) -> Option<usize> {
-    PRESETS.iter().position(|tuning| tuning.id == id)
+    TUNINGS.iter().position(|tuning| tuning.id == id)
 }
 
 pub(crate) fn tuning_by_id(id: &str) -> Option<&'static Tuning> {
-    PRESETS.iter().find(|tuning| tuning.id == id)
+    TUNINGS.iter().find(|tuning| tuning.id == id)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1711,7 +1711,7 @@ impl TunerAnalysis {
     ) {
         let tuning = preset
             .or_else(|| tuning_by_id("drop-c"))
-            .unwrap_or(&PRESETS[0]);
+            .unwrap_or(&TUNINGS[0]);
 
         self.reset_poly_history();
         self.frame.strings.clear();

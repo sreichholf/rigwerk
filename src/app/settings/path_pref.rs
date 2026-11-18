@@ -1,10 +1,10 @@
-//! One saved signal path, as `Preferences` and `Preset` store it.
+//! One saved signal path, as `Preferences` and `Session` store it.
 
 use super::serde_util::skip_unreadable;
 use crate::audio::{EqSettings, GateSettings, PathMix, PluginPref, MAX_PATHS};
 
 /// One signal path: its name and colour (UI data), its chain settings, its
-/// plugins, whether that insert chain is bypassed, and its level, mute and
+/// plugins, whether that effect chain is bypassed, and its level, mute and
 /// solo.  How it reaches each device lives with the device
 /// (`OutputDeviceSettings::path_map`, indexed by the path's position in the
 /// saved list).
@@ -19,15 +19,15 @@ pub(crate) struct PathPref {
     pub(crate) mono: bool,
     /// Channel enable for the path's L and R.
     pub(crate) output_channels: [bool; 2],
-    /// The EQ before the plugin inserts.
+    /// The EQ before the plugin effects.
     pub(crate) eq: EqSettings,
-    /// The EQ after the plugin inserts.
+    /// The EQ after the plugin effects.
     pub(crate) eq_post: EqSettings,
     pub(crate) gate: GateSettings,
-    /// The insert chain.  An entry that cannot be read is skipped.
+    /// The effect chain.  An entry that cannot be read is skipped.
     #[serde(deserialize_with = "skip_unreadable")]
     pub(crate) plugins: Vec<PluginPref>,
-    /// Skips every insert's processing without changing each insert's own
+    /// Skips every effect's processing without changing each effect's own
     /// bypass.  Older saves have no field and stay off.
     #[serde(default)]
     pub(crate) chain_bypass: bool,

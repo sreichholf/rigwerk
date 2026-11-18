@@ -189,7 +189,7 @@ fn wanted_links_wire_source_to_rigwerk_to_sink_and_skip_monitors() {
 }
 
 #[test]
-fn follower_sinks_link_from_preallocated_port_pairs() {
+fn extra_output_sinks_link_from_preallocated_port_pairs() {
     let mut graph = rigwerk_and_sink();
     add_port(&mut graph, 34, 3, true, "follow_0_FL", false);
     add_port(&mut graph, 35, 3, true, "follow_0_FR", false);
@@ -201,7 +201,7 @@ fn follower_sinks_link_from_preallocated_port_pairs() {
     assert!(links.contains(&(3, 33, 2, 21)));
     assert!(links.contains(&(3, 34, 6, 60)));
     assert!(links.contains(&(3, 35, 6, 61)));
-    // A missing follower stays in the session: no link, bridge keeps going.
+    // A missing extra output stays in the session: no link, bridge keeps going.
     let only_clock = graph.wanted_links(3, "missing", "speakers", &[(0, "gone")]);
     assert_eq!(only_clock, vec![(3, 32, 2, 20), (3, 33, 2, 21)]);
 }

@@ -419,7 +419,7 @@ fn measured_summary(
                     "Estimated path now {estimate_ms:.1} ms (derived; {gap}). It is a different leg, not this measurement's error."
                 ),
                 None => format!(
-                    "Estimated path now {estimate_ms:.1} ms (derived; input block, cushion, chain, output step and after-node). It is a different leg, not this measurement's error."
+                    "Estimated path now {estimate_ms:.1} ms (derived; input block, bridge buffer, chain, output step and after-node). It is a different leg, not this measurement's error."
                 ),
             })
             .size(ts(10.0))

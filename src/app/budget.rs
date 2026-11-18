@@ -3,7 +3,7 @@
 //!
 //! Everything here is read from the live snapshot and the app's own settings;
 //! nothing is invented.  A part is `Reported` (the driver, the graph or a
-//! plugin says so), `Setting` (RigWerk's own cushion), `Derived` (added and
+//! plugin says so), `Setting` (RigWerk's own bridge buffer), `Derived` (added and
 //! converted here with the buffer and rate the bridge really runs at) or
 //! `Measured` (the loopback calibration played a click and heard it come
 //! back).  The estimate is the sum of the reported and setting parts; it is
@@ -12,7 +12,7 @@
 //!
 //! The measured loopback and the estimate cover different legs of the path:
 //! the measurement starts at the output callback and ends at the input
-//! callback, while the estimate adds the input block, cushion, chain, output
+//! callback, while the estimate adds the input block, bridge buffer, chain, output
 //! step and after-node delay.  They are shown side by side with that
 //! difference stated, never subtracted from each other.
 //!
@@ -27,7 +27,7 @@ use crate::app::RigWerkApp;
 
 /// How the measured leg and the estimated path differ, in one sentence for
 /// the Diagnostics card, the panel and the copied text.
-pub(crate) const LEGS_NOTE: &str = "The measured loopback runs from the output callback through the converters, the cable or microphone and back to the input callback. The estimated path adds the input block, bridge cushion, selected chain, output step and any graph delay after RigWerk's node, and leaves out the converters and alignment trims. They cover different legs, so the measurement is not an error on the estimate.";
+pub(crate) const LEGS_NOTE: &str = "The measured loopback runs from the output callback through the converters, the cable or microphone and back to the input callback. The estimated path adds the input block, bridge buffer, selected chain, output step and any graph delay after RigWerk's node, and leaves out the converters and alignment trims. They cover different legs, so the measurement is not an error on the estimate.";
 
 /// Where one budget number comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,7 +136,7 @@ impl RigWerkApp {
         let parts_of_bridge = self.latency_parts();
         let mut parts = Vec::new();
         parts.push(input_block_part(&parts_of_bridge));
-        parts.push(cushion_part(&parts_of_bridge));
+        parts.push(bridge_buffer_part(&parts_of_bridge));
         let chain = self.path_infos().into_iter().find(|info| info.selected);
         parts.push(BudgetPart {
             label: "PLUGIN CHAIN",
@@ -147,7 +147,7 @@ impl RigWerkApp {
                     info.latency_samples,
                     rate_label(self.engine.plugin_rate().max(1))
                 ),
-                Some(info) => format!("{}: no insert reports latency", info.name),
+                Some(info) => format!("{}: no effect reports latency", info.name),
                 None => "no selected path".to_owned(),
             },
             ms: chain.as_ref().map(|info| info.latency_ms),
@@ -235,20 +235,20 @@ fn input_block_part(parts: &LatencyParts) -> BudgetPart {
     }
 }
 
-fn cushion_part(parts: &LatencyParts) -> BudgetPart {
+fn bridge_buffer_part(parts: &LatencyParts) -> BudgetPart {
     BudgetPart {
-        label: "BRIDGE CUSHION",
+        label: "BRIDGE BUFFER",
         detail: if parts.direct {
             "none: the duplex node runs both sides in one graph cycle".to_owned()
         } else {
             format!(
                 "{} frames at {} · RigWerk's own fill target, not a hardware reading{}",
-                parts.cushion,
+                parts.bridge_buffer,
                 rate_label(parts.input_rate),
                 planned_suffix(parts.running)
             )
         },
-        ms: Some(frames_ms(parts.cushion, parts.input_rate)),
+        ms: Some(frames_ms(parts.bridge_buffer, parts.input_rate)),
         source: LatencySource::Setting,
     }
 }

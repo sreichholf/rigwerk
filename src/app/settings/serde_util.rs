@@ -25,7 +25,7 @@ where
 }
 
 /// Reads a list entry by entry, dropping the entries that do not parse, so
-/// one damaged patch or insert does not cost the rest of the preferences.
+/// one damaged session or effect does not cost the rest of the preferences.
 pub(super) fn skip_unreadable<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,

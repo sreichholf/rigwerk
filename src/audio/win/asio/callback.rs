@@ -366,7 +366,7 @@ pub(crate) enum CallbackWait {
 
 /// Waits for the bridge stop flag while watching the driver callback.  The
 /// watchdog checks every 80 ms; a failed callback wakes it at once.
-/// `tick` runs each pass (follower supervisor sync, an ASIO control-panel
+/// `tick` runs each pass (extra output supervisor sync, an ASIO control-panel
 /// request).  When `tick` returns `true` it blocked this thread inside the
 /// driver's panel, and that wait is not counted as a missing callback.
 pub(crate) fn wait_for_callbacks(

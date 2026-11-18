@@ -1,4 +1,4 @@
-//! One signal path's insert chain on the audio side: the [`ChainRuntime`]
+//! One signal path's effect chain on the audio side: the [`ChainRuntime`]
 //! the audio thread owns and runs, the [`ChainCommand`]s that change it,
 //! and the [`ChainHome`] it waits in while no audio thread holds it.  The
 //! UI side is `model` ([`super::ChainModel`]).
@@ -17,7 +17,7 @@
 //! parked, the UI takes it and applies its commands itself.  A block that
 //! finds the home empty because the UI holds it for that moment, or another
 //! mixer still does, plays the chain's input delayed by its latency
-//! (`mixer::PathProcessor::run_inserts`).
+//! (`mixer::PathProcessor::run_effects`).
 
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
@@ -43,17 +43,17 @@ use super::slot::{defer_plugin_slots, Slot};
 #[cfg(test)]
 use super::MAX_ALIGN;
 
-/// The most inserts one path holds.  The runtime's slot list is allocated
-/// for this many, so an insert never grows it on the audio thread.
-pub(crate) const MAX_INSERTS: usize = 32;
+/// The most effects one path holds.  The runtime's slot list is allocated
+/// for this many, so an effect never grows it on the audio thread.
+pub(crate) const MAX_EFFECTS: usize = 32;
 
 /// Room in the command queue.  A full queue is not an error: the model
 /// keeps the rest in its backlog and sends it once the runtime caught up.
-pub(super) const COMMAND_QUEUE: usize = 4 * MAX_INSERTS;
+pub(super) const COMMAND_QUEUE: usize = 4 * MAX_EFFECTS;
 
 /// Room in the return queue.  The runtime applies a command that lets go of
 /// a slot only while the queue has room for it, so it never has to drop one.
-pub(super) const RETURN_QUEUE: usize = 2 * MAX_INSERTS;
+pub(super) const RETURN_QUEUE: usize = 2 * MAX_EFFECTS;
 
 /// One structural edit, as the UI sends it to the runtime.  Indices are
 /// positions in the chain as it stands once every earlier command applied,
@@ -93,19 +93,19 @@ pub(super) fn release_command(command: ChainCommand) {
     }
 }
 
-/// One path's insert chain as the audio thread runs it.  It holds the
+/// One path's effect chain as the audio thread runs it.  It holds the
 /// slots, each with its plugin's processor, and is touched by one thread at
 /// a time: the audio thread through a [`ChainLease`], or the UI while it is
 /// parked.
 ///
-/// Latency: every insert reports the samples it delays the signal by (VST3
+/// Latency: every effect reports the samples it delays the signal by (VST3
 /// `getLatencySamples`, CLAP `latency.get`, read after each activation and
 /// again when the plugin reports a change).  The chain total, bypassed
-/// inserts included (see [`Slot::latency_samples`]), is
-/// [`Self::latency_samples`].  A path-level chain bypass skips every insert
+/// effects included (see [`Slot::latency_samples`]), is
+/// [`Self::latency_samples`].  A path-level chain bypass skips every effect
 /// the same way and still counts in that total.
 pub(crate) struct ChainRuntime {
-    /// Allocated for [`MAX_INSERTS`]; never grows.  Boxed: a slot arrives
+    /// Allocated for [`MAX_EFFECTS`]; never grows.  Boxed: a slot arrives
     /// and leaves through the queues as a `Box`, built and freed on the UI
     /// thread, so moving one in or out here never allocates.
     #[allow(clippy::vec_box)]
@@ -113,7 +113,7 @@ pub(crate) struct ChainRuntime {
     sample_rate: u32,
     /// The total [`Self::publish_latency`] last saw.
     latency: u32,
-    /// Skips every insert's processing.  The UI stores it; [`Self::process`]
+    /// Skips every effect's processing.  The UI stores it; [`Self::process`]
     /// loads it.  It does not write each slot's own bypass.
     chain_bypass: Arc<AtomicBool>,
     commands: Consumer<ChainCommand>,
@@ -128,7 +128,7 @@ impl ChainRuntime {
         returns: Producer<Box<Slot>>,
     ) -> Self {
         Self {
-            slots: Vec::with_capacity(MAX_INSERTS),
+            slots: Vec::with_capacity(MAX_EFFECTS),
             sample_rate,
             latency: 0,
             chain_bypass,
@@ -185,7 +185,7 @@ impl ChainRuntime {
                 if self.slots.len() < self.slots.capacity() {
                     self.slots.insert(index.min(self.slots.len()), slot);
                 } else {
-                    // The model never sends more than MAX_INSERTS.
+                    // The model never sends more than MAX_EFFECTS.
                     self.hand_back(slot);
                 }
             }
@@ -221,11 +221,11 @@ impl ChainRuntime {
     }
 
     /// The latency in samples the chain *should* have: the sum over its
-    /// inserts (see [`Slot::latency_samples`]).  A bypassed insert still
+    /// effects (see [`Slot::latency_samples`]).  A bypassed effect still
     /// counts (so bypass does not move the alignment); one that is not
     /// loaded or failed counts 0.  Atomics only.
     ///
-    /// It is also the delay the chain really has, block by block: an insert
+    /// It is also the delay the chain really has, block by block: an effect
     /// skipped for a block (bypass, mix at 0, a restart's pause) plays its
     /// input delayed by its latency, and a partial mix delays its dry side
     /// by it (see [`Self::process`]).
@@ -282,7 +282,7 @@ impl ChainRuntime {
         self.push_for_test(clap_slot_for_test(plugin, self.sample_rate));
     }
 
-    /// Adds a test insert that is a pure delay of `latency` frames and
+    /// Adds a test effect that is a pure delay of `latency` frames and
     /// reports that latency (see [`Slot::delay_for_test`]).
     #[cfg(test)]
     pub(crate) fn insert_delay_for_test(&mut self, latency: u32) {
@@ -333,25 +333,25 @@ impl ChainRuntime {
     /// Runs the enabled effects over one stereo block, in chunks of at most
     /// [`MAX_BLOCK`] frames.  A paused plugin (a restart) is skipped for
     /// that chunk, and a plugin that fails is left in the chain with its
-    /// error so the person can see why it is silent.  Every skipped insert
-    /// still delays by its latency, and an insert's dry/wet mix blends with
+    /// error so the person can see why it is silent.  Every skipped effect
+    /// still delays by its latency, and an effect's dry/wet mix blends with
     /// its input delayed by that latency, so the block comes out
     /// [`Self::latency_samples`] late, with the dry and wet sides of every
-    /// insert lined up.  The path's chain bypass skips every insert for the
+    /// effect lined up.  The path's chain bypass skips every effect for the
     /// block the same way, without writing each slot's bypass.
     ///
     /// Returns whether a slot gained an error in this block, or the chain
     /// latency changed, so the caller can ask the UI thread to republish
-    /// the insert views (the audio thread does not build them itself).
+    /// the effect views (the audio thread does not build them itself).
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
         // One relaxed load: an atomic, so this does not lock or allocate.
         let chain_bypass = self.chain_bypass.load(Ordering::Relaxed);
-        let failed = self.process_inserts(left, right, frames, chain_bypass);
+        let failed = self.process_effects(left, right, frames, chain_bypass);
         let latency_changed = self.publish_latency();
         failed || latency_changed
     }
 
-    fn process_inserts(
+    fn process_effects(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
@@ -368,7 +368,7 @@ impl ChainRuntime {
         };
         let mut failed = false;
         let Self { slots, .. } = self;
-        // Chunks of at most MAX_BLOCK, so each insert's dry line only needs
+        // Chunks of at most MAX_BLOCK, so each effect's dry line only needs
         // its latency plus one chunk.
         let mut offset = 0;
         while offset < frames {
@@ -385,7 +385,7 @@ impl ChainRuntime {
 }
 
 impl Drop for ChainRuntime {
-    /// The last owner may be a bridge thread that outlived its session:
+    /// The last owner may be a bridge thread that outlived its run:
     /// plugins are destroyed on the UI thread, so the slots go to the
     /// deferred queue there (see [`release_slot`]).  Queued commands and
     /// returned slots go the same way when their queue drops.
@@ -513,16 +513,16 @@ struct SlotTiming {
     declick: u32,
 }
 
-/// Runs one insert over one chunk (at most [`MAX_BLOCK`] frames) in place.
-/// The input always goes into the insert's dry line first.  A processed
+/// Runs one effect over one chunk (at most [`MAX_BLOCK`] frames) in place.
+/// The input always goes into the effect's dry line first.  A processed
 /// chunk with a partial mix is blended with that dry side delayed by the
-/// insert's latency; a skipped chunk (the path's chain bypass, the slot's
+/// effect's latency; a skipped chunk (the path's chain bypass, the slot's
 /// own bypass, mix at 0, a restart's pause) plays the input delayed by that
-/// latency.  So the insert delays by its reported latency whatever happens
+/// latency.  So the effect delays by its reported latency whatever happens
 /// to it.  A switch between the plugin running and being skipped (bypass
 /// toggled, mix through 0, a restart) cannot crossfade, since only one of
 /// the two exists for the chunk; its step is smoothed over
-/// `DECLICK_SECONDS` instead.  Returns whether the insert failed.
+/// `DECLICK_SECONDS` instead.  Returns whether the effect failed.
 fn process_slot(
     slot: &mut Slot,
     left: &mut [f32],
@@ -547,7 +547,7 @@ fn process_slot(
     }
     let mix = slot.controls.mix();
     // Chain bypass skips the plugin and leaves the slot's own bypass flag
-    // alone, so clearing it restores whatever each insert was set to.
+    // alone, so clearing it restores whatever each effect was set to.
     let wet = !chain_bypass && slot.active() && mix > 0.0;
     let outcome = run_plugin(slot, left, right, wet);
     let failed = matches!(outcome, Outcome::Failed);
@@ -595,7 +595,7 @@ fn process_slot(
     failed
 }
 
-/// Runs the insert's plugin over one chunk, fully wet when `wet`.  A loaded
+/// Runs the effect's plugin over one chunk, fully wet when `wet`.  A loaded
 /// plugin is brought here every chunk, so its pause handshake is served even
 /// while it is skipped (see [`LoadedPlugin::run`](super::handle::LoadedPlugin::run)).
 /// A paused plugin is skipped for this chunk; a plugin that fails keeps its

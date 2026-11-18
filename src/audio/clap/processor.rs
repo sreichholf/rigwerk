@@ -1,6 +1,6 @@
 //! The audio-thread half of a loaded CLAP plugin: `start_processing`,
 //! `process`, `stop_processing`, and an active `params.flush` for a skipped
-//! insert.  UI parameter values arrive through the transfer queue and go
+//! effect.  UI parameter values arrive through the transfer queue and go
 //! into the input event list; the plugin's output `PARAM_VALUE` events go
 //! back to the UI through the other queue.
 //!
@@ -325,7 +325,7 @@ impl ClapProcessor {
             };
             *steady_time = steady_time.saturating_add(count as i64);
             if status == CLAP_PROCESS_ERROR {
-                // The insert fails for good: nothing is applied, and
+                // The effect fails for good: nothing is applied, and
                 // nothing is kept for a block that will not come.
                 return Err(ClapFailure::ProcessError);
             }
@@ -346,7 +346,7 @@ impl ClapProcessor {
         Ok(())
     }
 
-    /// For a processing insert the chain skips (bypass, mix at 0): hands
+    /// For a processing effect the chain skips (bypass, mix at 0): hands
     /// queued UI values, or a flush the plugin asked for, to
     /// `params.flush` on the audio thread, so a value set while bypassed
     /// still reaches the plugin (and its state).  A plugin without `flush`

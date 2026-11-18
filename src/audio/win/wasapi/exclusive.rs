@@ -1,8 +1,8 @@
-//! Exclusive-mode WASAPI playback for the clock device.
+//! Exclusive-mode WASAPI playback for the clock output.
 //!
 //! Takes the endpoint for RigWerk alone so the driver can run below the
 //! shared-mode engine period.  Other apps go silent on that device while the
-//! stream holds it.  Followers stay on shared streams.
+//! stream holds it.  Extra outputs stay on shared streams.
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::write_frame;
@@ -502,7 +502,7 @@ unsafe fn open_session(endpoint: &str) -> Result<Session, String> {
     // Exclusive + event callback: each wake writes the full GetBufferSize()
     // buffer (MSDN).  That size — not the HNS period conversion — is the step.
     // Start is deferred until the mixer thread is ready and has seeded the
-    // cushion; otherwise the device is already draining an empty ring.
+    // bridge buffer; otherwise the device is already draining an empty ring.
     let step_frames = buffer_frames.max(1);
     let _ = used_hns;
     Ok(Session {
@@ -601,12 +601,12 @@ unsafe fn run(
     mixer.publish_device_channels(&shared);
     // Exclusive event-driven: every signal requires a *full* endpoint buffer
     // (IAudioClient::GetBufferSize).  Shared REAL-style keeps one engine step
-    // queued via GetCurrentPadding; that pattern underruns here and sounds
+    // queued via GetCurrentPadding; that pattern drops out here and sounds
     // like a stutter / helicopter.  GetCurrentPadding is meaningless here
     // (MSDN / mpv): do not size the write from it.
     let frames = session.buffer_frames.max(1);
     mixer.prepare(frames as usize);
-    // Seed the ring cushion from this step before the device starts asking
+    // Seed the ring bridge buffer from this step before the device starts asking
     // for audio.  set_output on the bridge thread does the same; doing it
     // here covers the window before that call lands.
     let source = match shared.source_rate.load(Ordering::Relaxed) {

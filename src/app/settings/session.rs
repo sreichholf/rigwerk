@@ -1,21 +1,21 @@
-//! A saved patch and helpers that operate on patches.
+//! A saved session and helpers that operate on sessions.
 
 use super::path_pref::{default_path_name, sanitize_paths, PathPref};
 use super::preferences::{
-    FollowerPref, DEFAULT_BUFFER, DEFAULT_CUSHION_MS, DEFAULT_INPUT_GAIN, DEFAULT_OUTPUT_GAIN,
-    DEFAULT_SAMPLE_RATE,
+    ExtraOutputPref, DEFAULT_BRIDGE_BUFFER_MS, DEFAULT_BUFFER, DEFAULT_INPUT_GAIN,
+    DEFAULT_OUTPUT_GAIN, DEFAULT_SAMPLE_RATE,
 };
 use super::serde_util::skip_unreadable;
 use crate::audio::{EqSettings, GateSettings, OutputDeviceSettings, PluginPref, WasapiOutputMode};
 
-/// A saved patch.  Every field has a default, so a patch saved by an older or
+/// A saved session.  Every field has a default, so a session saved by an older or
 /// newer version (or with a field missing) still loads.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub(crate) struct Preset {
+pub(crate) struct Session {
     pub(crate) name: String,
     pub(crate) note: String,
-    /// Display name of the input. Patches that only stored a name leave
+    /// Display name of the input. Sessions that only stored a name leave
     /// [`Self::input_id`] and [`Self::input_backend`] empty.
     pub(crate) input: String,
     /// [`crate::audio::DeviceItem::id`] of the input.
@@ -30,30 +30,30 @@ pub(crate) struct Preset {
     pub(crate) output_backend: String,
     pub(crate) rate: u32,
     pub(crate) buffer: usize,
-    /// Output side; 0 in patches saved before the sides were separate means
+    /// Output side; 0 in sessions saved before the sides were separate means
     /// "follow the input".
     pub(crate) output_rate: u32,
     pub(crate) output_buffer: usize,
-    /// Path 1's EQs in patches from before paths existed (pre and post
-    /// inserts).  Patches from before an EQ existed have none and keep the
+    /// Path 1's EQs in sessions from before paths existed (pre and post
+    /// effects).  Sessions from before an EQ existed have none and keep the
     /// current one.  Read, never written (see [`Self::paths`]).
     #[serde(skip_serializing)]
     pub(crate) eq: Option<EqSettings>,
     #[serde(skip_serializing)]
     pub(crate) eq_post: Option<EqSettings>,
-    /// Path 1's gate in patches from before paths.  Older patches have none
+    /// Path 1's gate in sessions from before paths.  Older sessions have none
     /// and keep the current one.
     #[serde(default, skip_serializing)]
     pub(crate) gate: Option<GateSettings>,
-    /// Input fader, dB. Missing on older patches; the default is 0 dB.
+    /// Input fader, dB. Missing on older sessions; the default is 0 dB.
     pub(crate) input_gain: f32,
-    /// Output fader, dB. Missing on older patches; the default is −1.5 dB.
+    /// Output fader, dB. Missing on older sessions; the default is −1.5 dB.
     pub(crate) output_gain: f32,
     pub(crate) input_channels: [bool; 2],
-    /// Path 1's channel enable in patches from before paths.  Read only.
+    /// Path 1's channel enable in sessions from before paths.  Read only.
     #[serde(skip_serializing)]
     pub(crate) output_channels: [bool; 2],
-    /// Path 1's mono in patches from before paths.  Read only.
+    /// Path 1's mono in sessions from before paths.  Read only.
     #[serde(skip_serializing)]
     pub(crate) mono: bool,
     /// The master mute.
@@ -62,46 +62,49 @@ pub(crate) struct Preset {
     pub(crate) drift: bool,
     /// Linux low-latency / legacy Windows REAL-style switch.
     pub(crate) low_latency_output: bool,
-    /// Windows WASAPI clock mode. Missing on older patches → derived from
+    /// Windows WASAPI clock mode. Missing on older sessions → derived from
     /// [`Self::low_latency_output`].
     #[serde(default)]
     pub(crate) wasapi_output_mode: Option<WasapiOutputMode>,
-    /// Path 1's input routing in patches from before paths.  Read only.
+    /// Path 1's input routing in sessions from before paths.  Read only.
     #[serde(skip_serializing)]
     pub(crate) routes: [[bool; 4]; 2],
-    /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
-    pub(crate) cushion_mode: u8,
-    pub(crate) cushion_ms: f32,
-    /// Path 1's insert chain in patches from before paths.  An entry that
+    /// Bridge buffer: 0 Auto, 1 Minimum, 2 Fixed (size in `bridge_buffer_ms`).
+    #[serde(rename = "cushion_mode")]
+    pub(crate) bridge_buffer_mode: u8,
+    #[serde(rename = "cushion_ms")]
+    pub(crate) bridge_buffer_ms: f32,
+    /// Path 1's effect chain in sessions from before paths.  An entry that
     /// cannot be read is skipped.  Read only.
     #[serde(default, deserialize_with = "skip_unreadable", skip_serializing)]
     pub(crate) plugins: Vec<PluginPref>,
-    /// The signal paths.  Patches from before paths have none; their
+    /// The signal paths.  Sessions from before paths have none; their
     /// top-level mix fields become path 1 ([`Self::migrate_paths`]).
     pub(crate) paths: Vec<PathPref>,
-    /// Clock device level, mute and channel map.  Older patches have none,
+    /// Clock output level, mute and channel map.  Older sessions have none,
     /// which loads as today's output (L → 1, R → 2, mono copy on the rest).
-    /// Applying such a patch resets it on purpose: a patch must restore the
+    /// Applying such a session resets it on purpose: a session must restore the
     /// routing, so this is not an `Option` like the EQs and the gate.  The
     /// click mask is written (the type is the one preferences store) but
-    /// never applied: the click is not part of a patch.  Loading one gives
+    /// never applied: the click is not part of a session.  Loading one gives
     /// each device the mask that physical device has now, as the clock or
-    /// a follower (matched by id and backend), or none if it is not live.
-    pub(crate) clock_device: OutputDeviceSettings,
+    /// an extra output (matched by id and backend), or none if it is not live.
+    #[serde(rename = "clock_device")]
+    pub(crate) clock_output: OutputDeviceSettings,
     /// Extra output devices.  An entry that cannot be read is skipped.
-    /// Older patches have none; applying one clears the list on purpose,
-    /// for the same reason as [`Self::clock_device`].  Their click masks
+    /// Older sessions have none; applying one clears the list on purpose,
+    /// for the same reason as [`Self::clock_output`].  Their click masks
     /// are handled the same way.
-    #[serde(default, deserialize_with = "skip_unreadable")]
-    pub(crate) followers: Vec<FollowerPref>,
+    #[serde(default, deserialize_with = "skip_unreadable", rename = "followers")]
+    pub(crate) extra_outputs: Vec<ExtraOutputPref>,
 }
 
-impl Default for Preset {
-    /// What a saved patch falls back to field by field.  Empty device names
-    /// match no device, so loading such a patch keeps the current one.
+impl Default for Session {
+    /// What a saved session falls back to field by field.  Empty device names
+    /// match no device, so loading such a session keeps the current one.
     fn default() -> Self {
         Self {
-            name: "Untitled patch".to_owned(),
+            name: "Untitled session".to_owned(),
             note: String::new(),
             input: String::new(),
             input_id: String::new(),
@@ -127,21 +130,21 @@ impl Default for Preset {
             low_latency_output: true,
             wasapi_output_mode: Some(WasapiOutputMode::RealStyle),
             routes: [[true, false, false, false], [false, true, false, false]],
-            cushion_mode: 0,
-            cushion_ms: DEFAULT_CUSHION_MS,
+            bridge_buffer_mode: 0,
+            bridge_buffer_ms: DEFAULT_BRIDGE_BUFFER_MS,
             plugins: Vec::new(),
             paths: Vec::new(),
-            clock_device: OutputDeviceSettings::default(),
-            followers: Vec::new(),
+            clock_output: OutputDeviceSettings::default(),
+            extra_outputs: Vec::new(),
         }
     }
 }
 
-impl Preset {
-    /// Moves a patch from before paths onto `paths`: its top-level mix
-    /// fields become path 1.  What such a patch did not store (an EQ or
+impl Session {
+    /// Moves a session from before paths onto `paths`: its top-level mix
+    /// fields become path 1.  What such a session did not store (an EQ or
     /// gate from before they existed) is taken from `current`, so applying
-    /// it keeps that setting, as it always did.  A patch that has paths is
+    /// it keeps that setting, as it always did.  A session that has paths is
     /// left alone.
     pub(crate) fn migrate_paths(&mut self, current: &PathPref) {
         if !self.paths.is_empty() {
@@ -174,17 +177,17 @@ impl Preset {
     }
 }
 
-/// Keeps the first (newest) patch for each name, so older saves made before
+/// Keeps the first (newest) session for each name, so older saves made before
 /// names were matched collapse into one entry.
-pub(crate) fn unique_presets(presets: &[Preset]) -> Vec<Preset> {
-    let mut unique: Vec<Preset> = Vec::new();
-    for preset in presets {
-        let name = preset.name.trim();
+pub(crate) fn unique_sessions(sessions: &[Session]) -> Vec<Session> {
+    let mut unique: Vec<Session> = Vec::new();
+    for session in sessions {
+        let name = session.name.trim();
         if !unique
             .iter()
             .any(|kept| kept.name.trim().eq_ignore_ascii_case(name))
         {
-            unique.push(preset.clone());
+            unique.push(session.clone());
         }
     }
     unique

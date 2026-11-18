@@ -35,7 +35,7 @@ fn live_strip_puts_post_gate_after_plugins() {
     let labels: Vec<_> = entries.iter().map(|e| e.label).collect();
     assert_eq!(
         labels,
-        ["INPUT", "PRE EQ", "PLUGINS", "GATE", "POST EQ", "OUTPUT"]
+        ["INPUT", "PRE EQ", "EFFECTS", "GATE", "POST EQ", "OUTPUT"]
     );
 }
 
@@ -58,7 +58,7 @@ fn live_strip_puts_pre_gate_before_plugins() {
     let labels: Vec<_> = entries.iter().map(|e| e.label).collect();
     assert_eq!(
         labels,
-        ["INPUT", "PRE EQ", "GATE", "PLUGINS", "POST EQ", "OUTPUT"]
+        ["INPUT", "PRE EQ", "GATE", "EFFECTS", "POST EQ", "OUTPUT"]
     );
 }
 
@@ -85,7 +85,7 @@ fn chain_bypass_makes_the_plugins_stage_read_bypassed() {
     let plugins = |entries: &[super::ChainEntry]| {
         entries
             .iter()
-            .find(|entry| entry.label == "PLUGINS")
+            .find(|entry| entry.label == "EFFECTS")
             .expect("plugins stage")
             .clone()
     };

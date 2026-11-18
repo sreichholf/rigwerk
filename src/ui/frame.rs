@@ -151,7 +151,7 @@ impl eframe::App for RigWerkApp {
                     ui.add_space(10.0);
                     ui.label(
                         RichText::new(
-                            "Windows: ASIO and WASAPI (DirectSound and MME when the host lists them). Mixer can add WASAPI followers; Publish uses an installed virtual cable such as VB-Audio Cable. Linux: PipeWire is the low-latency path (own nodes linked to the source and sink you pick), with direct ALSA hw: available and PulseAudio on the system side. PipeWire clocks can add follower sinks and RigWerk Out. The ALSA period is compared with the PipeWire quantum instead of hiding a mismatch.",
+                            "Windows: ASIO and WASAPI (DirectSound and MME when the host lists them). Mixer can add WASAPI extra outputs; the virtual output uses an installed virtual cable such as VB-Audio Cable. Linux: PipeWire is the low-latency path (own nodes linked to the source and sink you pick), with direct ALSA hw: available and PulseAudio on the system side. PipeWire clocks can add extra outputs and RigWerk Out. The ALSA period is compared with the PipeWire quantum instead of hiding a mismatch.",
                         )
                         .size(ts(10.5))
                         .color(GREEN),

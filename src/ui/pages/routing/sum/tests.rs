@@ -2,13 +2,13 @@ use super::super::outputs::MapEdit;
 use super::latency_line;
 use crate::app::alignment::channel_list;
 use crate::app::blank_app;
-use crate::app::cards::Card;
+use crate::app::layouts::PathLayout;
 use crate::ui::widgets::{accesskit_frame, node_named};
 
 #[test]
 fn the_latency_line_says_what_the_device_waits_for() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::Blend));
+    assert!(app.apply_layout(PathLayout::Blend));
     let infos = app.path_infos();
     let both = [&infos[0], &infos[1]];
     let line = |app: &crate::app::RigWerkApp| {
@@ -29,12 +29,12 @@ fn the_latency_line_says_what_the_device_waits_for() {
         "Waits for Main 2, +2.0 ms. Every path on Scarlett plays 2.0 ms after its chain input."
     );
     // A trim on the first path: they no longer arrive together.
-    app.clock_device.path_map[infos[0].slot].trim_ms = 0.5;
+    app.clock_output.path_map[infos[0].slot].trim_ms = 0.5;
     assert_eq!(
         line(&app),
         "Waits for Main 2, +2.5 ms. Paths on Scarlett play up to 2.5 ms after their chain input (trims shift paths by up to 0.50 ms)."
     );
-    app.clock_device.path_map[infos[0].slot].trim_ms = 0.0;
+    app.clock_output.path_map[infos[0].slot].trim_ms = 0.0;
     app.set_device_align(0, false);
     assert_eq!(
         line(&app),
@@ -47,7 +47,7 @@ fn the_latency_line_says_what_the_device_waits_for() {
 #[test]
 fn the_sum_block_edits_trim_and_align_and_flags_the_unaligned_sum() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::DualAmp));
+    assert!(app.apply_layout(PathLayout::DualAmp));
     let second = app.path_slots()[1];
     app.apply_map_edit(
         0,
@@ -57,7 +57,7 @@ fn the_sum_block_edits_trim_and_align_and_flags_the_unaligned_sum() {
             commit: true,
         },
     );
-    assert_eq!(app.clock_device.path_map[second].trim_ms, 5.0, "clamped");
+    assert_eq!(app.clock_output.path_map[second].trim_ms, 5.0, "clamped");
     assert!(app
         .log
         .iter()

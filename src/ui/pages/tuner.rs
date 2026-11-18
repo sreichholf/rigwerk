@@ -15,7 +15,7 @@ use crate::app::tuner::{TunerDisplay, TunerListen, REFERENCE_MAX_HZ, REFERENCE_M
 use crate::app::RigWerkApp;
 use crate::audio::{
     cents_to_ratio, note_name, octave, EngineState, TuneState, TunerChannel, TunerFrame,
-    TunerTolerance, Tuning, TuningGroup, CENTER_CENTS, PRESETS,
+    TunerTolerance, Tuning, TuningGroup, CENTER_CENTS, TUNINGS,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -51,7 +51,7 @@ struct View {
 
 impl View {
     fn tuning(&self) -> Option<&'static Tuning> {
-        self.preset.and_then(|index| PRESETS.get(index))
+        self.preset.and_then(|index| TUNINGS.get(index))
     }
 }
 
@@ -110,7 +110,7 @@ impl RigWerkApp {
         let main_w = (total - gap - settings_w).max(MAIN_MIN_W);
 
         let view = View {
-            preset: self.tuner.preset,
+            preset: self.tuner.tuning,
             reference_hz: self.tuner.reference_hz,
             channel: self.tuner.channel,
             display: self.tuner.display,
@@ -187,7 +187,7 @@ impl RigWerkApp {
             self.tuner.display = display;
         }
         if let Some(listen) = actions.listen {
-            if listen == TunerListen::Single || self.tuner.preset.is_some() {
+            if listen == TunerListen::Single || self.tuner.tuning.is_some() {
                 self.tuner.listen = listen;
             }
         }
@@ -613,7 +613,7 @@ fn settings_card(
                     for group in TuningGroup::ALL {
                         ui.add_space(3.0);
                         ui.label(micro_label(group.label(), DIM));
-                        for (index, tuning) in PRESETS
+                        for (index, tuning) in TUNINGS
                             .iter()
                             .enumerate()
                             .filter(|(_, item)| item.group == group)

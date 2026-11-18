@@ -1,8 +1,8 @@
 //! Output devices under the master Output stage: their rows in the chain, the
 //! device list in the master inspector and the per-device inspectors.
 //!
-//! PipeWire clock device: followers and RigWerk Out can be added live (in-graph).
-//! ALSA / other cpal clock: generic followers on their own streams (step 3).
+//! PipeWire clock output: extra outputs and RigWerk Out can be added live (in-graph).
+//! ALSA / other cpal clock: generic extra outputs on their own streams (step 3).
 
 mod rows;
 
@@ -18,12 +18,13 @@ use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, S
 use crate::app::chain::ChainSelection;
 use crate::app::output_devices::OutputDeviceRow;
 use crate::app::settings::{
-    cushion_from_pref, cushion_to_pref, rate_label, FollowerPref, CUSHION_MS_MAX, CUSHION_MS_MIN,
+    bridge_buffer_from_pref, bridge_buffer_to_pref, rate_label, ExtraOutputPref,
+    BRIDGE_BUFFER_MS_MAX, BRIDGE_BUFFER_MS_MIN,
 };
 use crate::app::RigWerkApp;
 use crate::audio::{
-    CushionMode, EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
-    MAX_FOLLOWERS, SAFETY_GR_DB, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    BufferMode, EngineState, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
+    MAX_EXTRA_OUTPUTS, SAFETY_GR_DB, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 use crate::ui::pages::mixer::rack::RackAction;
 use crate::ui::theme::ts;
@@ -33,9 +34,9 @@ use crate::ui::widgets::{
     virtual_tag,
 };
 
-/// At the follower cap.
-pub(crate) const ADD_DEVICE_HINT_FULL: &str = "Four followers is the maximum for now";
-/// Soft warn when adding a WASAPI follower while the clock is ASIO.
+/// At the extra output cap.
+pub(crate) const ADD_DEVICE_HINT_FULL: &str = "Four extra outputs is the maximum for now";
+/// Soft warn when adding a WASAPI extra output while the clock is ASIO.
 pub(crate) const ASIO_WASAPI_CONFLICT_HINT: &str =
     "ASIO may have locked this card — Windows can refuse the stream as in use";
 
@@ -60,8 +61,8 @@ pub(crate) fn device_state(row: &OutputDeviceRow, state: EngineState) -> (&'stat
     if row.missing {
         return ("missing", RED);
     }
-    if row.virtual_out && !row.publish {
-        return ("not published", DIM);
+    if row.virtual_output && !row.virtual_output_on {
+        return ("off", DIM);
     }
     match state {
         EngineState::Running => ("running", GREEN),
@@ -75,11 +76,11 @@ pub(crate) fn device_state(row: &OutputDeviceRow, state: EngineState) -> (&'stat
 /// What a screen reader hears after a row's name.
 pub(crate) fn device_row_value(row: &OutputDeviceRow, state: EngineState) -> String {
     let role = if row.clock {
-        "clock device"
-    } else if row.virtual_out {
+        "clock output"
+    } else if row.virtual_output {
         "virtual"
     } else {
-        "follower"
+        "extra output"
     };
     let level = device_level_text(&row.settings);
     let level = match gain_reduction_text(row.reduction_db) {
@@ -90,9 +91,9 @@ pub(crate) fn device_row_value(row: &OutputDeviceRow, state: EngineState) -> Str
 }
 
 impl RigWerkApp {
-    /// Whether the clock device is a native PipeWire node (in-graph followers
+    /// Whether the clock output is a native PipeWire node (in-graph extra outputs
     /// and RigWerk Out).
-    pub(crate) fn pipewire_followers_enabled(&self) -> bool {
+    pub(crate) fn pipewire_extra_outputs_enabled(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
             crate::audio::is_native_id(&self.selected_output().id)
@@ -103,23 +104,23 @@ impl RigWerkApp {
         }
     }
 
-    /// Whether followers can be added for the current clock.
-    pub(crate) fn followers_enabled(&self) -> bool {
+    /// Whether extra outputs can be added for the current clock.
+    pub(crate) fn extra_outputs_enabled(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "windows"))
     }
 
     /// Why add is disabled, or `None` when it is enabled.
     pub(crate) fn add_output_disabled_reason(&self) -> Option<&'static str> {
-        if !self.followers_enabled() {
+        if !self.extra_outputs_enabled() {
             Some("Extra output devices are not available on this platform")
-        } else if self.followers.len() >= MAX_FOLLOWERS {
+        } else if self.extra_outputs.len() >= MAX_EXTRA_OUTPUTS {
             Some(ADD_DEVICE_HINT_FULL)
         } else {
             None
         }
     }
 
-    /// Clock device is an ASIO driver (followers are still WASAPI-only).
+    /// Clock output is an ASIO driver (extra outputs are still WASAPI-only).
     pub(crate) fn clock_is_asio(&self) -> bool {
         self.selected_output().asio_clsid.is_some()
     }
@@ -139,24 +140,24 @@ impl RigWerkApp {
             let (clicked, toggle_mute, remove_clicked) = chain_device_row(ui, row, selected, state);
             if toggle_mute {
                 if row.clock {
-                    self.clock_device.mute = !self.clock_device.mute;
-                } else if let Some(follower) = row.follower_index {
-                    if let Some(pref) = self.followers.get_mut(follower) {
+                    self.clock_output.mute = !self.clock_output.mute;
+                } else if let Some(extra_output) = row.extra_output_index {
+                    if let Some(pref) = self.extra_outputs.get_mut(extra_output) {
                         pref.settings.mute = !pref.settings.mute;
                     }
                 }
             }
             if remove_clicked {
-                if let Some(follower) = row.follower_index {
-                    remove = Some(follower);
+                if let Some(extra_output) = row.extra_output_index {
+                    remove = Some(extra_output);
                 }
             }
             if clicked {
                 *select = Some(ChainSelection::OutputDevice(index));
             }
         }
-        if let Some(follower) = remove {
-            self.remove_follower(follower);
+        if let Some(extra_output) = remove {
+            self.remove_extra_output(extra_output);
             *select = Some(ChainSelection::Output);
         }
         ui.add_space(4.0);
@@ -192,35 +193,35 @@ impl RigWerkApp {
         }
     }
 
-    /// Removes a follower live; the bridge keeps running.
-    pub(crate) fn remove_follower(&mut self, index: usize) {
-        if index < self.followers.len() {
-            self.followers.remove(index);
+    /// Removes an extra output live; the bridge keeps running.
+    pub(crate) fn remove_extra_output(&mut self, index: usize) {
+        if index < self.extra_outputs.len() {
+            self.extra_outputs.remove(index);
             self.chain_selected = self
                 .chain_selected
                 .clamp_output(self.output_device_rows().len());
         }
     }
 
-    /// Adds a hardware follower by inventory index, or RigWerk Out.
-    pub(crate) fn add_follower_device(&mut self, device_id: &str) {
+    /// Adds a hardware extra output by inventory index, or RigWerk Out.
+    pub(crate) fn add_extra_output_device(&mut self, device_id: &str) {
         if self.add_output_disabled_reason().is_some() {
             return;
         }
-        if device_id == VIRTUAL_OUT_ID || device_id.starts_with("vbcable:") {
-            if self.followers.iter().any(|f| f.virtual_out) {
+        if device_id == VIRTUAL_OUTPUT_ID || device_id.starts_with("vbcable:") {
+            if self.extra_outputs.iter().any(|f| f.virtual_output) {
                 return;
             }
             #[cfg(target_os = "linux")]
             {
-                if !self.pipewire_followers_enabled() {
+                if !self.pipewire_extra_outputs_enabled() {
                     return;
                 }
-                let mut follower = FollowerPref::virtual_out();
-                // A new device plays what the clock device plays, path by
+                let mut extra_output = ExtraOutputPref::virtual_output();
+                // A new device plays what the clock output plays, path by
                 // path, instead of every path summed on its default map.
-                follower.settings.path_map = self.clock_device.path_map;
-                self.followers.push(follower);
+                extra_output.settings.path_map = self.clock_output.path_map;
+                self.extra_outputs.push(extra_output);
             }
             #[cfg(target_os = "windows")]
             {
@@ -233,18 +234,18 @@ impl RigWerkApp {
                 else {
                     return;
                 };
-                self.followers.push(FollowerPref {
+                self.extra_outputs.push(ExtraOutputPref {
                     id: cable.id,
                     backend: cable.backend,
-                    name: VIRTUAL_OUT_NAME.to_owned(),
-                    virtual_out: true,
-                    publish: true,
-                    // Plays what the clock device plays, path by path.
+                    name: VIRTUAL_OUTPUT_NAME.to_owned(),
+                    virtual_output: true,
+                    virtual_output_on: true,
+                    // Plays what the clock output plays, path by path.
                     settings: crate::audio::OutputDeviceSettings {
-                        path_map: self.clock_device.path_map,
+                        path_map: self.clock_output.path_map,
                         ..Default::default()
                     },
-                    ..FollowerPref::default()
+                    ..ExtraOutputPref::default()
                 });
             }
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -253,7 +254,7 @@ impl RigWerkApp {
                 return;
             }
         } else {
-            if self.followers.iter().any(|f| f.id == device_id)
+            if self.extra_outputs.iter().any(|f| f.id == device_id)
                 || self.selected_output().id == device_id
             {
                 return;
@@ -269,7 +270,7 @@ impl RigWerkApp {
             };
             #[cfg(target_os = "linux")]
             {
-                let pw_clock = self.pipewire_followers_enabled();
+                let pw_clock = self.pipewire_extra_outputs_enabled();
                 let is_pw = crate::audio::linux_node_name(&device.id).is_some();
                 // PipeWire clock: only PW sinks (in-graph).  ALSA/cpal clock:
                 // only generic (non-native) devices on their own streams.
@@ -279,24 +280,24 @@ impl RigWerkApp {
             }
             #[cfg(target_os = "windows")]
             {
-                // WASAPI shared-mode followers only (no ASIO / DS / MME).
+                // WASAPI shared-mode extra outputs only (no ASIO / DS / MME).
                 if device.asio_clsid.is_some() || !device.backend.eq_ignore_ascii_case("WASAPI") {
                     return;
                 }
             }
             let settings = crate::audio::OutputDeviceSettings {
-                path_map: self.clock_device.path_map,
+                path_map: self.clock_output.path_map,
                 ..Default::default()
             };
-            self.followers.push(FollowerPref {
+            self.extra_outputs.push(ExtraOutputPref {
                 id: device.id,
                 backend: device.backend,
                 name: device.name,
                 settings,
-                ..FollowerPref::default()
+                ..ExtraOutputPref::default()
             });
         }
-        let index = self.followers.len(); // clock + this follower
+        let index = self.extra_outputs.len(); // clock + this extra output
         self.chain_selected = ChainSelection::OutputDevice(index);
     }
 
@@ -341,7 +342,7 @@ impl RigWerkApp {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(
-                    "The clock device drives the chain: plugins, gate and EQ run on its callback.",
+                    "The clock output drives the chain: plugins, gate and EQ run on its callback.",
                 )
                 .size(ts(10.5))
                 .color(MUTED),
@@ -349,7 +350,7 @@ impl RigWerkApp {
         });
     }
 
-    /// Inspector dispatcher for one device row (clock, follower or virtual).
+    /// Inspector dispatcher for one device row (clock, extra output or virtual).
     pub(super) fn output_device_inspector(
         &mut self,
         ui: &mut egui::Ui,
@@ -357,18 +358,18 @@ impl RigWerkApp {
         actions: &mut Vec<RackAction>,
     ) {
         if row.clock {
-            self.clock_device_inspector(ui, row, actions);
-        } else if row.virtual_out {
+            self.clock_output_inspector(ui, row, actions);
+        } else if row.virtual_output {
             self.virtual_device_inspector(ui, row);
         } else {
-            self.follower_device_inspector(ui, row);
+            self.extra_output_device_inspector(ui, row);
         }
     }
 
     /// Add-output list: PipeWire / ALSA on Linux, WASAPI (+ VB-Cable) on Windows.
     pub(super) fn add_output_inspector(&mut self, ui: &mut egui::Ui) {
         let clock_name = self.selected_output().name.clone();
-        let pw_clock = self.pipewire_followers_enabled();
+        let pw_clock = self.pipewire_extra_outputs_enabled();
         let asio_clock = self.clock_is_asio();
         ui.label(
             RichText::new("Add output device")
@@ -378,7 +379,7 @@ impl RigWerkApp {
         );
         ui.label(
             RichText::new(format!(
-                "New devices join as followers of {clock_name}. Adding one is live."
+                "New devices join as extra outputs of {clock_name}. Adding one is live."
             ))
             .size(ts(11.0))
             .color(DIM),
@@ -398,12 +399,12 @@ impl RigWerkApp {
         }
         let clock_id = self.selected_output().id.clone();
         let used: std::collections::HashSet<String> = self
-            .followers
+            .extra_outputs
             .iter()
             .map(|f| f.id.clone())
             .chain(std::iter::once(clock_id.clone()))
             .collect();
-        let has_virtual = self.followers.iter().any(|f| f.virtual_out);
+        let has_virtual = self.extra_outputs.iter().any(|f| f.virtual_output);
         let vb_cable = self
             .inventory
             .outputs
@@ -441,7 +442,7 @@ impl RigWerkApp {
                         {
                             return None;
                         }
-                        // VB-Cable is offered under VIRTUAL, not as a plain follower.
+                        // VB-Cable is offered under VIRTUAL, not as a plain extra output.
                         if crate::audio::is_vb_cable_render(&device.name) {
                             return None;
                         }
@@ -495,7 +496,7 @@ impl RigWerkApp {
                 ui.add_space(2.0);
             }
             if let Some(id) = picked {
-                self.add_follower_device(&id);
+                self.add_extra_output_device(&id);
             }
             if pw_clock {
                 ui.add_space(8.0);
@@ -505,7 +506,7 @@ impl RigWerkApp {
                     !has_virtual,
                     egui::Button::new(
                         RichText::new(format!(
-                            "{VIRTUAL_OUT_NAME}\nPIPEWIRE SOURCE · created by RigWerk"
+                            "{VIRTUAL_OUTPUT_NAME}\nPIPEWIRE SOURCE · created by RigWerk"
                         ))
                         .size(ts(11.0))
                         .color(TEXT),
@@ -518,13 +519,13 @@ impl RigWerkApp {
                 if has_virtual {
                     virt.on_disabled_hover_text("already added");
                 } else if virt.clicked() {
-                    self.add_follower_device(VIRTUAL_OUT_ID);
+                    self.add_extra_output_device(VIRTUAL_OUTPUT_ID);
                 }
             }
             #[cfg(target_os = "windows")]
             {
                 ui.add_space(8.0);
-                ui.label(micro_label("PUBLISH", GREEN));
+                ui.label(micro_label("VIRTUAL OUTPUT", GREEN));
                 ui.add_space(4.0);
                 let has_cable = vb_cable.is_some();
                 let virt = ui.add_enabled(
@@ -532,10 +533,10 @@ impl RigWerkApp {
                     egui::Button::new(
                         RichText::new(if has_cable {
                             format!(
-                                "{VIRTUAL_OUT_NAME}\nVB-CABLE · other apps capture CABLE Output"
+                                "{VIRTUAL_OUTPUT_NAME}\nVB-CABLE · other apps capture CABLE Output"
                             )
                         } else {
-                            format!("{VIRTUAL_OUT_NAME}\nInstall VB-Audio Cable to publish")
+                            format!("{VIRTUAL_OUTPUT_NAME}\nInstall VB-Audio Cable to use it")
                         })
                         .size(ts(11.0))
                         .color(TEXT),
@@ -552,7 +553,7 @@ impl RigWerkApp {
                         "Install VB-Audio Virtual Cable, then refresh devices.",
                     );
                 } else if virt.clicked() {
-                    self.add_follower_device(VIRTUAL_OUT_ID);
+                    self.add_extra_output_device(VIRTUAL_OUTPUT_ID);
                 }
             }
             #[cfg(not(target_os = "windows"))]
@@ -562,12 +563,16 @@ impl RigWerkApp {
         });
     }
 
-    /// Follower inspector: level, mute, remove; PW health or generic cushion.
-    pub(super) fn follower_device_inspector(&mut self, ui: &mut egui::Ui, row: &OutputDeviceRow) {
-        let Some(follower) = row.follower_index else {
+    /// Extra output inspector: level, mute, remove; PW health or generic bridge buffer.
+    pub(super) fn extra_output_device_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        row: &OutputDeviceRow,
+    ) {
+        let Some(extra_output) = row.extra_output_index else {
             return;
         };
-        let pipewire = self.pipewire_followers_enabled();
+        let pipewire = self.pipewire_extra_outputs_enabled();
         ui.horizontal(|ui| {
             ui.label(RichText::new(&row.name).size(ts(16.0)).color(TEXT).strong());
             ui.label(
@@ -577,7 +582,7 @@ impl RigWerkApp {
                     .family(FontFamily::Monospace),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(pref) = self.followers.get_mut(follower) {
+                if let Some(pref) = self.extra_outputs.get_mut(extra_output) {
                     if mute_button(ui, pref.settings.mute, &row.name).clicked() {
                         pref.settings.mute = !pref.settings.mute;
                     }
@@ -586,9 +591,9 @@ impl RigWerkApp {
         });
         ui.label(
             RichText::new(if pipewire {
-                "Follower · plays the finished mix. Handled by PipeWire."
+                "Extra output: plays the master. Handled by PipeWire."
             } else {
-                "Follower · plays the finished mix on its own clock."
+                "Extra output: plays the master on its own clock."
             })
             .size(ts(11.0))
             .color(DIM),
@@ -614,26 +619,26 @@ impl RigWerkApp {
                         .color(GREEN),
                 );
                 ui.label(
-                    RichText::new("Same graph clock as the clock device · no ring or cushion.")
+                    RichText::new("In the PipeWire graph: no bridge buffer needed.")
                         .size(ts(10.5))
                         .color(MUTED),
                 );
             });
         } else {
-            self.follower_cushion_block(ui, follower);
+            self.extra_output_bridge_buffer_block(ui, extra_output);
         }
         ui.add_space(10.0);
-        if let Some(pref) = self.followers.get_mut(follower) {
+        if let Some(pref) = self.extra_outputs.get_mut(extra_output) {
             device_level_block(
                 ui,
                 &mut pref.settings,
                 row.channels,
-                &self.meter_follower_channels[follower],
-                &self.peak_follower_channels[follower],
+                &self.meter_extra_output_channels[extra_output],
+                &self.peak_extra_output_channels[extra_output],
                 row.reduction_db,
             );
             ui.add_space(10.0);
-            self.click_block(ui, follower + 1, row.click_channels);
+            self.click_block(ui, extra_output + 1, row.click_channels);
         }
         ui.add_space(10.0);
         block(ui, |ui| {
@@ -653,7 +658,7 @@ impl RigWerkApp {
                         )
                         .clicked()
                     {
-                        self.remove_follower(follower);
+                        self.remove_extra_output(extra_output);
                     }
                 });
             });
@@ -661,7 +666,7 @@ impl RigWerkApp {
     }
 
     /// The CLICK block of output device `device` (0 = clock, then
-    /// followers).  The app applies the press.
+    /// extra outputs).  The app applies the press.
     fn click_block(&mut self, ui: &mut egui::Ui, device: usize, channels: usize) {
         let Some(mask) = self
             .device_settings()
@@ -679,14 +684,14 @@ impl RigWerkApp {
         }
     }
 
-    /// Cushion controls for a generic (non-PipeWire) follower.
-    fn follower_cushion_block(&mut self, ui: &mut egui::Ui, follower: usize) {
-        let Some(pref) = self.followers.get_mut(follower) else {
+    /// Bridge buffer controls for a generic (non-PipeWire) extra output.
+    fn extra_output_bridge_buffer_block(&mut self, ui: &mut egui::Ui, extra_output: usize) {
+        let Some(pref) = self.extra_outputs.get_mut(extra_output) else {
             return;
         };
-        let mut mode = cushion_from_pref(pref.cushion_mode);
+        let mut mode = bridge_buffer_from_pref(pref.bridge_buffer_mode);
         block(ui, |ui| {
-            ui.label(micro_label("CUSHION", BLUE));
+            ui.label(micro_label("BRIDGE BUFFER", BLUE));
             ui.add_space(4.0);
             ui.label(
                 RichText::new("Own ring between the mix and this device. Absorb clock drift here.")
@@ -696,9 +701,9 @@ impl RigWerkApp {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 for (option, label) in [
-                    (CushionMode::Safe, "Safe"),
-                    (CushionMode::LowLatency, "Low latency"),
-                    (CushionMode::Manual, "Manual"),
+                    (BufferMode::Auto, "Auto"),
+                    (BufferMode::Minimum, "Minimum"),
+                    (BufferMode::Fixed, "Fixed"),
                 ] {
                     if ui
                         .selectable_label(mode == option, RichText::new(label).size(ts(10.0)))
@@ -708,57 +713,55 @@ impl RigWerkApp {
                     }
                 }
             });
-            if mode != cushion_from_pref(pref.cushion_mode) {
-                pref.cushion_mode = cushion_to_pref(mode);
+            if mode != bridge_buffer_from_pref(pref.bridge_buffer_mode) {
+                pref.bridge_buffer_mode = bridge_buffer_to_pref(mode);
             }
-            if mode == CushionMode::Manual {
+            if mode == BufferMode::Fixed {
                 ui.add_space(4.0);
-                let mut ms = pref.cushion_ms;
+                let mut ms = pref.bridge_buffer_ms;
                 let response = ui.add(
-                    egui::Slider::new(&mut ms, CUSHION_MS_MIN..=CUSHION_MS_MAX)
+                    egui::Slider::new(&mut ms, BRIDGE_BUFFER_MS_MIN..=BRIDGE_BUFFER_MS_MAX)
                         .suffix(" ms")
                         .show_value(true),
                 );
                 if response.changed() {
-                    pref.cushion_ms = ms;
+                    pref.bridge_buffer_ms = ms;
                 }
             }
         });
     }
 
-    /// RigWerk Out inspector: publish toggle, level, remove.
+    /// RigWerk Out inspector: on/off switch, level, remove.
     pub(super) fn virtual_device_inspector(&mut self, ui: &mut egui::Ui, row: &OutputDeviceRow) {
-        let Some(follower) = row.follower_index else {
+        let Some(extra_output) = row.extra_output_index else {
             return;
         };
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(VIRTUAL_OUT_NAME)
+                RichText::new(VIRTUAL_OUTPUT_NAME)
                     .size(ts(16.0))
                     .color(TEXT)
                     .strong(),
             );
             virtual_tag(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(pref) = self.followers.get_mut(follower) {
-                    let label = if pref.publish { "PUBLISHED" } else { "OFF" };
+                if let Some(pref) = self.extra_outputs.get_mut(extra_output) {
+                    let label = if pref.virtual_output_on { "ON" } else { "OFF" };
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new(label).size(ts(9.0)).color(if pref.publish {
-                                    GREEN
-                                } else {
-                                    DIM
-                                }),
+                                RichText::new(label)
+                                    .size(ts(9.0))
+                                    .color(if pref.virtual_output_on { GREEN } else { DIM }),
                             )
-                            .fill(if pref.publish {
+                            .fill(if pref.virtual_output_on {
                                 with_alpha(GREEN, 18)
                             } else {
                                 Color32::TRANSPARENT
                             })
                             .stroke(Stroke::new(
                                 1.0,
-                                if pref.publish {
+                                if pref.virtual_output_on {
                                     with_alpha(GREEN, 55)
                                 } else {
                                     BORDER_SOFT
@@ -768,15 +771,15 @@ impl RigWerkApp {
                         )
                         .clicked()
                     {
-                        pref.publish = !pref.publish;
+                        pref.virtual_output_on = !pref.virtual_output_on;
                     }
                 }
             });
         });
-        let pipewire = self.pipewire_followers_enabled();
+        let pipewire = self.pipewire_extra_outputs_enabled();
         ui.label(
             RichText::new(if pipewire {
-                "Endpoint RigWerk creates · the finished mix for other apps to capture."
+                "Virtual output RigWerk creates · the master for other apps to record."
             } else {
                 "Plays into VB-Cable Input · other apps capture CABLE Output."
             })
@@ -785,20 +788,23 @@ impl RigWerkApp {
         );
         ui.add_space(12.0);
         block(ui, |ui| {
-            ui.label(micro_label("ENDPOINT", BLUE));
+            ui.label(micro_label("VIRTUAL OUTPUT", BLUE));
             ui.add_space(4.0);
-            let published = self.followers.get(follower).is_some_and(|f| f.publish);
+            let on = self
+                .extra_outputs
+                .get(extra_output)
+                .is_some_and(|f| f.virtual_output_on);
             ui.label(
                 RichText::new(if pipewire {
-                    if published {
-                        "Published as a PipeWire source. Other apps see RigWerk Out while the bridge runs."
+                    if on {
+                        "RigWerk Out is on. Other apps can record it while the bridge runs."
                     } else {
-                        "Not publishing. Other apps can't capture the mix."
+                        "RigWerk Out is off. Other apps can't record it."
                     }
-                } else if published {
+                } else if on {
                     "Playing into VB-Cable. Other apps should pick CABLE Output."
                 } else {
-                    "Publish is off. VB-Cable is silent until you turn it on."
+                    "The virtual output is off. VB-Cable is silent until you turn it on."
                 })
                 .size(ts(11.0))
                 .color(MUTED),
@@ -825,20 +831,20 @@ impl RigWerkApp {
                 );
             });
         } else {
-            self.follower_cushion_block(ui, follower);
+            self.extra_output_bridge_buffer_block(ui, extra_output);
         }
         ui.add_space(10.0);
-        if let Some(pref) = self.followers.get_mut(follower) {
+        if let Some(pref) = self.extra_outputs.get_mut(extra_output) {
             device_level_block(
                 ui,
                 &mut pref.settings,
                 row.channels.max(2),
-                &self.meter_follower_channels[follower],
-                &self.peak_follower_channels[follower],
+                &self.meter_extra_output_channels[extra_output],
+                &self.peak_extra_output_channels[extra_output],
                 row.reduction_db,
             );
             ui.add_space(10.0);
-            self.click_block(ui, follower + 1, row.click_channels);
+            self.click_block(ui, extra_output + 1, row.click_channels);
         }
         ui.add_space(10.0);
         block(ui, |ui| {
@@ -851,14 +857,14 @@ impl RigWerkApp {
                 )
                 .clicked()
             {
-                self.remove_follower(follower);
+                self.remove_extra_output(extra_output);
             }
         });
     }
 
-    /// Inspector for the clock device: what it is, its clock, and its own
+    /// Inspector for the clock output: what it is, its clock, and its own
     /// level and mute after the master.
-    pub(super) fn clock_device_inspector(
+    pub(super) fn clock_output_inspector(
         &mut self,
         ui: &mut egui::Ui,
         row: &OutputDeviceRow,
@@ -888,13 +894,13 @@ impl RigWerkApp {
                 .on_hover_text(&row.name);
             clock_tag(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if mute_button(ui, self.clock_device.mute, &row.name).clicked() {
-                    self.clock_device.mute = !self.clock_device.mute;
+                if mute_button(ui, self.clock_output.mute, &row.name).clicked() {
+                    self.clock_output.mute = !self.clock_output.mute;
                 }
             });
         });
         ui.label(
-            RichText::new("Clock device · the chain runs on this device's callback.")
+            RichText::new("Clock output · the chain runs on this device's callback.")
                 .size(ts(11.0))
                 .color(DIM),
         );
@@ -966,8 +972,8 @@ impl RigWerkApp {
                 };
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(mono(
-                        device_level_text(&self.clock_device),
-                        if self.clock_device.mute { RED } else { TEXT },
+                        device_level_text(&self.clock_output),
+                        if self.clock_output.mute { RED } else { TEXT },
                         12.0,
                     ));
                     if let Some(text) = gain_reduction_text(reduction) {
@@ -978,7 +984,7 @@ impl RigWerkApp {
             ui.add_space(4.0);
             db_slider(
                 ui,
-                &mut self.clock_device.level_db,
+                &mut self.clock_output.level_db,
                 DEVICE_LEVEL_MIN_DB,
                 DEVICE_LEVEL_MAX_DB,
                 (BLUE, "Device level"),
@@ -1007,7 +1013,7 @@ impl RigWerkApp {
         block(ui, |ui| {
             ui.label(
                 RichText::new(
-                    "The clock device can't be removed. To move the clock, pick a different output on Live Bridge.",
+                    "The clock output can't be removed. To move the clock, pick a different output on Live Bridge.",
                 )
                 .size(ts(10.5))
                 .color(MUTED),

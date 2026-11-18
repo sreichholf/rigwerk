@@ -3,8 +3,11 @@ use std::cell::Cell;
 use eframe::egui;
 use egui::{Align, Layout, Pos2, Rect, Vec2};
 
-use super::{cushion_mode_picker, cushion_modes_fit, cushion_tab_row_width, manual_cushion_size};
-use crate::audio::CushionMode;
+use super::{
+    bridge_buffer_mode_picker, bridge_buffer_modes_fit, bridge_buffer_tab_row_width,
+    fixed_bridge_buffer_size,
+};
+use crate::audio::BufferMode;
 use crate::ui::theme;
 
 /// Inner width of the old bridge column at the 1040 px minimum window.
@@ -42,15 +45,15 @@ fn run_column(width: f32, height: f32, draw: impl FnOnce(&mut egui::Ui)) -> Rect
 }
 
 #[test]
-fn narrow_remainder_uses_one_cushion_control() {
+fn narrow_remainder_uses_one_bridge_buffer_control() {
     let picker = Cell::new(Rect::NAN);
     let content = run_column(NARROW_W, 200.0, |ui| {
         assert!(
-            !cushion_modes_fit(ui),
+            !bridge_buffer_modes_fit(ui),
             "the fixture stopped being narrower than the three labels"
         );
-        let mut mode = CushionMode::Manual;
-        picker.set(cushion_mode_picker(ui, &mut mode));
+        let mut mode = BufferMode::Fixed;
+        picker.set(bridge_buffer_mode_picker(ui, &mut mode));
     });
     let picker = picker.get();
     assert!(
@@ -75,10 +78,10 @@ fn wide_strip_keeps_the_three_mode_tabs() {
     let picker = Cell::new(Rect::NAN);
     let predicted = Cell::new(0.0);
     let _ = run_column(400.0, 80.0, |ui| {
-        predicted.set(cushion_tab_row_width(ui));
-        assert!(cushion_modes_fit(ui));
-        let mut mode = CushionMode::Safe;
-        picker.set(cushion_mode_picker(ui, &mut mode));
+        predicted.set(bridge_buffer_tab_row_width(ui));
+        assert!(bridge_buffer_modes_fit(ui));
+        let mut mode = BufferMode::Auto;
+        picker.set(bridge_buffer_mode_picker(ui, &mut mode));
     });
     let picker = picker.get();
     let predicted = predicted.get();
@@ -87,24 +90,29 @@ fn wide_strip_keeps_the_three_mode_tabs() {
         "tab row {:.1} px, predicted {predicted:.1}",
         picker.width()
     );
-    assert!(picker.width() > 180.0 && picker.width() < 220.0);
+    // Auto, Minimum and Fixed on one row.
+    assert!(
+        picker.width() > 160.0 && picker.width() < 200.0,
+        "tab row {:.1} px",
+        picker.width()
+    );
     assert!(picker.height() <= 32.0);
 }
 
 #[test]
-fn manual_size_sits_under_the_mode_row() {
+fn fixed_size_sits_under_the_mode_row() {
     let picker = Cell::new(Rect::NAN);
     let content = run_column(720.0, 200.0, |ui| {
-        let mut mode = CushionMode::Manual;
-        picker.set(cushion_mode_picker(ui, &mut mode));
+        let mut mode = BufferMode::Fixed;
+        picker.set(bridge_buffer_mode_picker(ui, &mut mode));
         let mut ms = 12.5;
-        let _ = manual_cushion_size(ui, &mut ms);
+        let _ = fixed_bridge_buffer_size(ui, &mut ms);
     });
     let picker = picker.get();
     assert!(picker.bottom() < content.bottom() - 8.0);
     assert!(
         content.height() < 120.0,
-        "manual strip is {:.1} px tall",
+        "fixed strip is {:.1} px tall",
         content.height()
     );
 }

@@ -1,52 +1,52 @@
 use super::{
-    capture_window, endpoint_kind, follower_node_name, is_alsa_shim, is_native_id, node_followers,
-    node_latency_frames, node_name, path_delay_ns, playback_frames, EndpointKind, CAPTURE_NODE,
-    PLAYBACK_NODE,
+    capture_window, endpoint_kind, extra_output_node_name, is_alsa_shim, is_native_id,
+    node_extra_outputs, node_latency_frames, node_name, path_delay_ns, playback_frames,
+    EndpointKind, CAPTURE_NODE, PLAYBACK_NODE,
 };
-use crate::audio::output_map::{MAX_FOLLOWERS, VIRTUAL_OUT_ID};
-use crate::audio::shared::{FollowerLink, FollowerPlan};
+use crate::audio::output_map::{MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID};
+use crate::audio::shared::{ExtraOutputLink, ExtraOutputPlan};
 
 #[test]
-fn the_two_stream_bridge_plays_each_pipewire_node_follower_to_its_node() {
-    let node = |name: &str| FollowerLink {
+fn the_two_stream_bridge_plays_each_pipewire_node_extra_output_to_its_node() {
+    let node = |name: &str| ExtraOutputLink {
         device_id: format!("pipewire:{name}"),
         node_name: name.to_owned(),
-        ..FollowerLink::default()
+        ..ExtraOutputLink::default()
     };
-    let mut plan = FollowerPlan {
+    let mut plan = ExtraOutputPlan {
         count: 3,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
     // A node that is missing (no name yet), RigWerk Out, then a node; a node
     // past the count is not live.
-    plan.slots[0] = FollowerLink {
+    plan.slots[0] = ExtraOutputLink {
         node_name: String::new(),
         ..node("alsa_output.usb")
     };
-    plan.slots[1] = FollowerLink {
-        device_id: VIRTUAL_OUT_ID.to_owned(),
+    plan.slots[1] = ExtraOutputLink {
+        device_id: VIRTUAL_OUTPUT_ID.to_owned(),
         node_name: "RigWerk Out".to_owned(),
-        virtual_out: true,
-        publish: true,
+        virtual_output: true,
+        virtual_output_on: true,
     };
     plan.slots[2] = node("alsa_output.hdmi");
     plan.slots[3] = node("alsa_output.spdif");
     assert_eq!(
-        node_followers(&plan),
+        node_extra_outputs(&plan),
         vec![(2, "alsa_output.hdmi".to_owned())]
     );
     // A generic device has no node name: its own cpal stream plays it.
-    plan.slots[2] = FollowerLink {
+    plan.slots[2] = ExtraOutputLink {
         device_id: "alsa:hw:1,0".to_owned(),
-        ..FollowerLink::default()
+        ..ExtraOutputLink::default()
     };
-    assert!(node_followers(&plan).is_empty());
+    assert!(node_extra_outputs(&plan).is_empty());
 }
 
 #[test]
-fn each_follower_slot_gets_its_own_stream_name() {
-    let names: Vec<String> = (0..MAX_FOLLOWERS).map(follower_node_name).collect();
-    assert_eq!(names[0], "RigWerk Follower 1");
+fn each_extra_output_slot_gets_its_own_stream_name() {
+    let names: Vec<String> = (0..MAX_EXTRA_OUTPUTS).map(extra_output_node_name).collect();
+    assert_eq!(names[0], "RigWerk Extra output 1");
     for (index, name) in names.iter().enumerate() {
         assert!(names[index + 1..].iter().all(|other| other != name));
         assert_ne!(name, CAPTURE_NODE);

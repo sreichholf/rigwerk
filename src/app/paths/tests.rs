@@ -1,4 +1,4 @@
-use super::InsertKey;
+use super::EffectKey;
 use crate::app::blank_app;
 use crate::audio::{
     ChannelMap, OutputDeviceSettings, PathMapSettings, PathState, PluginPref, MAX_PATHS,
@@ -9,14 +9,14 @@ fn add_duplicate_and_remove_paths_in_the_app_and_the_engine() {
     let mut app = blank_app();
     assert_eq!(app.path_slots(), vec![0]);
     app.path_mut().mix.mono = true;
-    app.clock_device.path_map[0].level_db = -3.0;
+    app.clock_output.path_map[0].level_db = -3.0;
     app.push_paths_to_engine();
 
     let added = app.add_path().expect("a free slot");
     assert_eq!(added, 1);
     assert_eq!(app.selected_path, 1);
     assert!(app.path().mix.mute, "added muted");
-    assert_eq!(app.clock_device.path_map[1], PathMapSettings::unrouted());
+    assert_eq!(app.clock_output.path_map[1], PathMapSettings::unrouted());
     assert_eq!(app.engine.path_state(1), PathState::Active);
 
     let copy = app.duplicate_path(0).expect("a free slot");
@@ -25,7 +25,7 @@ fn add_duplicate_and_remove_paths_in_the_app_and_the_engine() {
     assert_eq!(path.name, "Main 2");
     assert!(path.mix.mono && path.mix.mute && !path.mix.solo);
     assert_ne!(path.colour, app.paths[0].as_ref().unwrap().colour);
-    assert_eq!(app.clock_device.path_map[2].level_db, -3.0);
+    assert_eq!(app.clock_output.path_map[2].level_db, -3.0);
     assert!(app.engine.shared.path(2).muted());
 
     // Names stay unique (ignoring case); a path may recase its own.
@@ -44,7 +44,7 @@ fn add_duplicate_and_remove_paths_in_the_app_and_the_engine() {
     assert!(app.paths[0].is_none());
     assert_eq!(app.engine.path_state(0), PathState::FadingOut);
     // It fades out where it played.
-    assert_eq!(app.clock_device.path_map[0].level_db, -3.0);
+    assert_eq!(app.clock_output.path_map[0].level_db, -3.0);
     // No bridge runs, so the next service finishes the removal.
     app.engine.service_plugins();
     assert_eq!(app.engine.path_state(0), PathState::Inactive);
@@ -63,13 +63,13 @@ fn paths_save_in_display_order_with_compacted_device_maps() {
         left: 0b0100,
         right: 0b1000,
     };
-    app.clock_device.path_map[2].map = map;
+    app.clock_output.path_map[2].map = map;
     app.remove_path(1);
     app.engine.service_plugins();
     // A path added now takes the free slot 1 but is listed last.
     let last = app.add_path().expect("slot 1 is free");
     assert_eq!(last, 1);
-    app.clock_device.path_map[1].level_db = -2.0;
+    app.clock_output.path_map[1].level_db = -2.0;
     assert_eq!(app.path_slots(), vec![0, 2, 1]);
     assert_eq!(app.path_infos()[2].slot, 1);
     assert_eq!(app.paths[1].as_ref().unwrap().name, "Path 4");
@@ -86,10 +86,10 @@ fn paths_save_in_display_order_with_compacted_device_maps() {
     app.install_paths(&paths[..2], clock, Vec::new(), 1);
     assert_eq!(app.path_slots(), vec![0, 2]);
     assert_eq!(app.selected_path, 2);
-    assert_eq!(app.clock_device.path_map[2].map, map);
+    assert_eq!(app.clock_output.path_map[2].map, map);
     assert_eq!(app.engine.path_state(1), PathState::FadingOut);
     // The fading path keeps its entry until it is silent.
-    assert_eq!(app.clock_device.path_map[1].level_db, -2.0);
+    assert_eq!(app.clock_output.path_map[1].level_db, -2.0);
     assert!(app.path_count() < MAX_PATHS);
 }
 
@@ -100,8 +100,8 @@ fn a_removed_path_fades_where_it_played() {
     let copy = app.duplicate_path(0).unwrap();
     app.set_path_mute(copy, false);
     // Path 0 on Out 1, the copy on Out 2 only, inverted.
-    app.clock_device.path_map[0].map = ChannelMap { left: 1, right: 0 };
-    app.clock_device.path_map[copy] = PathMapSettings {
+    app.clock_output.path_map[0].map = ChannelMap { left: 1, right: 0 };
+    app.clock_output.path_map[copy] = PathMapSettings {
         map: ChannelMap { left: 0, right: 2 },
         invert: true,
         ..PathMapSettings::default()
@@ -144,18 +144,18 @@ fn names_stay_unique() {
 }
 
 #[test]
-fn selecting_another_path_resets_its_insert_selection() {
+fn selecting_another_path_resets_its_effect_selection() {
     use crate::app::chain::ChainSelection;
     let mut app = blank_app();
     app.engine
-        .restore_plugins(0, vec![insert("A.vst3"), insert("B.vst3")]);
+        .restore_plugins(0, vec![effect("A.vst3"), effect("B.vst3")]);
     let second = app.add_path().unwrap();
     assert!(app.select_path(0));
     app.chain_selected = ChainSelection::Plugin(1);
-    app.plugin_insert_at = Some(1);
+    app.plugin_effect_at = Some(1);
     assert!(app.select_path(second));
     assert_eq!(app.chain_selected, ChainSelection::Plugins);
-    assert_eq!(app.plugin_insert_at, None);
+    assert_eq!(app.plugin_effect_at, None);
     assert!(!app.select_path(3), "no path there");
     assert_eq!(app.selected_path, second);
 }
@@ -165,17 +165,17 @@ fn preview_meters_sum_every_path() {
     let mut app = blank_app();
     let copy = app.duplicate_path(0).unwrap();
     app.set_path_mute(copy, false);
-    app.clock_device.path_map[copy].invert = true;
-    app.clock_device.path_map[copy].level_db = -60.0;
+    app.clock_output.path_map[copy].invert = true;
+    app.clock_output.path_map[copy].level_db = -60.0;
     let gains = app.path_gains();
     assert_eq!(gains[0], 1.0);
     let frame = app
-        .clock_device
+        .clock_output
         .settled_sum(app.live_path_mask(), gains, 2, 0.5, -0.25);
     assert_eq!(frame[..2], [0.5, -0.25], "a −∞ dB path adds nothing");
-    app.clock_device.path_map[copy].level_db = 0.0;
+    app.clock_output.path_map[copy].level_db = 0.0;
     let frame = app
-        .clock_device
+        .clock_output
         .settled_sum(app.live_path_mask(), app.path_gains(), 2, 0.5, -0.25);
     assert_eq!(frame[..2], [0.0, 0.0], "the flipped copy cancels");
     app.set_path_solo(copy, true);
@@ -184,9 +184,9 @@ fn preview_meters_sum_every_path() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_new_follower_copies_the_clock_devices_paths() {
+fn a_new_extra_output_copies_the_clock_outputs_paths() {
     let mut app = blank_app();
-    // Followers need a PipeWire clock device.
+    // Extra outputs need a PipeWire clock output.
     app.inventory.outputs.push(crate::audio::DeviceItem {
         id: "pipewire:alsa_output.usb".to_owned(),
         name: "Interface".to_owned(),
@@ -198,17 +198,17 @@ fn a_new_follower_copies_the_clock_devices_paths() {
     });
     app.output_idx = 0;
     let second = app.add_path().unwrap();
-    app.add_follower_device(crate::audio::VIRTUAL_OUT_ID);
-    let follower = app.followers.last().expect("added");
-    assert_eq!(follower.settings.path_map, app.clock_device.path_map);
+    app.add_extra_output_device(crate::audio::VIRTUAL_OUTPUT_ID);
+    let extra_output = app.extra_outputs.last().expect("added");
+    assert_eq!(extra_output.settings.path_map, app.clock_output.path_map);
     assert_eq!(
-        follower.settings.path_map[second],
+        extra_output.settings.path_map[second],
         PathMapSettings::unrouted(),
         "the empty path stays off the new device"
     );
 }
 
-fn insert(path: &str) -> PluginPref {
+fn effect(path: &str) -> PluginPref {
     PluginPref {
         path: path.to_owned(),
         name: path.to_owned(),
@@ -217,67 +217,67 @@ fn insert(path: &str) -> PluginPref {
 }
 
 #[test]
-fn a_preset_saves_and_applies_every_path() {
+fn a_session_saves_and_applies_every_path() {
     let mut app = blank_app();
     app.session_name = "Two paths".to_owned();
-    app.engine.restore_plugins(0, vec![insert("A.vst3")]);
+    app.engine.restore_plugins(0, vec![effect("A.vst3")]);
     let copy = app.duplicate_path(0).expect("a free slot");
     assert_eq!(app.engine.plugin_prefs(copy)[0].path, "A.vst3");
-    app.engine.restore_plugins(copy, vec![insert("B.vst3")]);
+    app.engine.restore_plugins(copy, vec![effect("B.vst3")]);
     app.set_path_level(copy, -5.0);
     app.set_path_mute(copy, false);
-    app.clock_device.path_map[copy].invert = true;
-    app.save_preset();
+    app.clock_output.path_map[copy].invert = true;
+    app.save_session();
     let saved = app.sessions[0].clone();
     assert_eq!(saved.paths.len(), 2);
     assert_eq!(saved.paths[1].name, "Main 2");
     assert_eq!(saved.paths[1].plugins[0].path, "B.vst3");
     assert_eq!(saved.paths[1].level_db, -5.0);
-    assert!(saved.clock_device.path_map[1].invert);
+    assert!(saved.clock_output.path_map[1].invert);
 
     // Back to one path, then apply: both paths come back, live.
     assert!(app.remove_path(copy));
     app.engine.service_plugins();
-    app.clock_device = OutputDeviceSettings::default();
-    app.apply_preset(0);
+    app.clock_output = OutputDeviceSettings::default();
+    app.apply_session(0);
     assert_eq!(app.path_slots(), vec![0, 1]);
     assert_eq!(app.engine.path_state(1), PathState::Active);
     assert_eq!(app.engine.plugin_prefs(0)[0].path, "A.vst3");
     assert_eq!(app.engine.plugin_prefs(1)[0].path, "B.vst3");
     assert_eq!(app.engine.shared.path(1).level_db(), -5.0);
     assert!(!app.engine.shared.path(1).muted());
-    assert!(app.clock_device.path_map[1].invert);
-    assert_eq!(app.engine.shared.clock_device.path_gain(1), -1.0);
+    assert!(app.clock_output.path_map[1].invert);
+    assert_eq!(app.engine.shared.clock_output.path_gain(1), -1.0);
 
-    // A patch with one path removes the second, with a fade.
-    app.sessions.push(crate::app::settings::Preset {
+    // A session with one path removes the second, with a fade.
+    app.sessions.push(crate::app::settings::Session {
         name: "One".to_owned(),
-        ..crate::app::settings::Preset::default()
+        ..crate::app::settings::Session::default()
     });
-    app.apply_preset(1);
+    app.apply_session(1);
     assert_eq!(app.path_slots(), vec![0]);
     assert_eq!(app.engine.path_state(1), PathState::FadingOut);
     assert!(app.engine.plugin_prefs(0).is_empty());
 }
 
 #[test]
-fn plugin_editors_are_keyed_by_path_and_insert() {
+fn plugin_editors_are_keyed_by_path_and_effect() {
     let mut app = blank_app();
     app.engine
-        .restore_plugins(0, vec![insert("A.vst3"), insert("B.vst3")]);
+        .restore_plugins(0, vec![effect("A.vst3"), effect("B.vst3")]);
     let second = app.add_path().expect("a free slot");
-    app.engine.restore_plugins(second, vec![insert("C.vst3")]);
-    app.plugin_editor = Some(InsertKey { path: 0, insert: 1 });
+    app.engine.restore_plugins(second, vec![effect("C.vst3")]);
+    app.plugin_editor = Some(EffectKey { path: 0, effect: 1 });
     // The selected path is the new one: its removal leaves path 0's
     // editor alone.
     app.remove_plugin(0);
-    assert_eq!(app.plugin_editor, Some(InsertKey { path: 0, insert: 1 }));
+    assert_eq!(app.plugin_editor, Some(EffectKey { path: 0, effect: 1 }));
     assert!(app.engine.plugin_views(second).is_empty());
     assert_eq!(app.engine.plugin_views(0).len(), 2);
-    // On path 0, the editor follows its insert as it slides up.
+    // On path 0, the editor follows its effect as it slides up.
     assert!(app.select_path(0));
     app.remove_plugin(0);
-    assert_eq!(app.plugin_editor, Some(InsertKey { path: 0, insert: 0 }));
+    assert_eq!(app.plugin_editor, Some(EffectKey { path: 0, effect: 0 }));
     // Removing the path closes its editor.
     assert!(app.remove_path(0));
     assert_eq!(app.plugin_editor, None);
@@ -298,27 +298,27 @@ fn apply_click_pair_routes_music_to_one_and_two_and_the_click_to_three_and_four(
         preferred: true,
         asio_clsid: None,
     });
-    app.clock_device.level_db = -3.0;
-    app.clock_device.mute = true;
-    app.clock_device.align = false;
-    app.clock_device.click_mask = 0;
-    app.clock_device.path_map[0].level_db = -6.0;
-    app.clock_device.path_map[0].invert = true;
-    app.clock_device.path_map[0].trim_ms = 1.25;
-    app.clock_device.path_map[0].map = ChannelMap {
+    app.clock_output.level_db = -3.0;
+    app.clock_output.mute = true;
+    app.clock_output.align = false;
+    app.clock_output.click_mask = 0;
+    app.clock_output.path_map[0].level_db = -6.0;
+    app.clock_output.path_map[0].invert = true;
+    app.clock_output.path_map[0].trim_ms = 1.25;
+    app.clock_output.path_map[0].map = ChannelMap {
         left: 0b1000_0001,
         right: 0b1000_0010,
     };
-    app.clock_device.path_map[1] = PathMapSettings {
+    app.clock_output.path_map[1] = PathMapSettings {
         level_db: -2.0,
         invert: true,
         trim_ms: 0.5,
         map: ChannelMap { left: 0, right: 0 },
     };
-    let wide = app.clock_device.path_map[0].map;
+    let wide = app.clock_output.path_map[0].map;
     app.apply_click_pair(0);
 
-    let routed = app.clock_device.path_map[0];
+    let routed = app.clock_output.path_map[0];
     assert_eq!(
         routed.map,
         wide.with_preset(MapPreset::Stereo12, 4),
@@ -328,53 +328,53 @@ fn apply_click_pair_routes_music_to_one_and_two_and_the_click_to_three_and_four(
     assert_eq!(routed.level_db, -6.0);
     assert!(routed.invert);
     assert_eq!(routed.trim_ms, 1.25);
-    let empty = app.clock_device.path_map[1];
+    let empty = app.clock_output.path_map[1];
     assert!(empty.map.is_empty(), "an unrouted path stays unrouted");
     assert_eq!(empty.level_db, -2.0);
     assert!(empty.invert);
     assert_eq!(empty.trim_ms, 0.5);
-    assert_eq!(app.clock_device.unused, UnusedChannels::Silent);
-    assert_eq!(app.clock_device.click_mask, 0b1100);
+    assert_eq!(app.clock_output.unused, UnusedChannels::Silent);
+    assert_eq!(app.clock_output.click_mask, 0b1100);
     // A bit past this device's width is kept when the pair is applied again.
-    app.clock_device.click_mask = 0b1000_0000;
+    app.clock_output.click_mask = 0b1000_0000;
     app.apply_click_pair(0);
-    assert_eq!(app.clock_device.click_mask, 0b1000_1100);
-    assert!(app.clock_device.path_map[1].map.is_empty());
-    assert_eq!(app.clock_device.level_db, -3.0);
-    assert!(app.clock_device.mute);
-    assert!(!app.clock_device.align);
+    assert_eq!(app.clock_output.click_mask, 0b1000_1100);
+    assert!(app.clock_output.path_map[1].map.is_empty());
+    assert_eq!(app.clock_output.level_db, -3.0);
+    assert!(app.clock_output.mute);
+    assert!(!app.clock_output.align);
 }
 
 #[test]
 fn set_click_channel_moves_one_bit_of_one_device() {
     let mut app = blank_app();
-    app.followers
-        .push(crate::app::settings::FollowerPref::default());
-    app.clock_device.click_mask = 0b1000_0001;
-    app.followers[0].settings.click_mask = 0;
-    let routing = app.clock_device.path_map;
+    app.extra_outputs
+        .push(crate::app::settings::ExtraOutputPref::default());
+    app.clock_output.click_mask = 0b1000_0001;
+    app.extra_outputs[0].settings.click_mask = 0;
+    let routing = app.clock_output.path_map;
 
     app.set_click_channel(0, 2, true);
-    assert_eq!(app.clock_device.click_mask, 0b1000_0101);
+    assert_eq!(app.clock_output.click_mask, 0b1000_0101);
     app.set_click_channel(0, 0, false);
-    assert_eq!(app.clock_device.click_mask, 0b1000_0100);
+    assert_eq!(app.clock_output.click_mask, 0b1000_0100);
     app.set_click_channel(0, 2, true);
     assert_eq!(
-        app.clock_device.click_mask, 0b1000_0100,
+        app.clock_output.click_mask, 0b1000_0100,
         "setting twice is a no-op"
     );
-    assert_eq!(app.clock_device.path_map, routing, "routing is unchanged");
-    assert_eq!(app.followers[0].settings.click_mask, 0);
+    assert_eq!(app.clock_output.path_map, routing, "routing is unchanged");
+    assert_eq!(app.extra_outputs[0].settings.click_mask, 0);
 
     app.set_click_channel(1, 3, true);
-    assert_eq!(app.followers[0].settings.click_mask, 0b1000);
-    assert_eq!(app.clock_device.click_mask, 0b1000_0100);
+    assert_eq!(app.extra_outputs[0].settings.click_mask, 0b1000);
+    assert_eq!(app.clock_output.click_mask, 0b1000_0100);
 
     // Past the mask, or no such device: nothing moves.
     app.set_click_channel(0, crate::audio::MAX_OUTPUT_CHANNELS, true);
     app.set_click_channel(2, 0, true);
-    assert_eq!(app.clock_device.click_mask, 0b1000_0100);
-    assert_eq!(app.followers[0].settings.click_mask, 0b1000);
+    assert_eq!(app.clock_output.click_mask, 0b1000_0100);
+    assert_eq!(app.extra_outputs[0].settings.click_mask, 0b1000);
 }
 
 #[test]

@@ -4,17 +4,17 @@
 //! paths group sideways.  It is pure, so the spec's table is its test.
 //!
 //! Input and Master are one strip each.  The counts are clamped to 1 to
-//! `MAX_PATHS` paths and 1 to the clock plus `MAX_FOLLOWERS` outputs, so a
+//! `MAX_PATHS` paths and 1 to the clock plus `MAX_EXTRA_OUTPUTS` outputs, so a
 //! caller never gets a layout for a setup that cannot exist.
 
-use crate::audio::{MAX_FOLLOWERS, MAX_PATHS};
+use crate::audio::{MAX_EXTRA_OUTPUTS, MAX_PATHS};
 
 /// Window padding (24), the gaps between the groups (36), and the two add
 /// columns with their gaps (80).
 const FIXED_WIDTH: f32 = 24.0 + 36.0 + 80.0;
 
-/// The clock output plus every follower.
-const MAX_OUTPUTS: usize = 1 + MAX_FOLLOWERS;
+/// The clock output plus every extra output.
+const MAX_OUTPUTS: usize = 1 + MAX_EXTRA_OUTPUTS;
 
 /// Step 1 is the widest; step 5 scrolls the paths group.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -106,7 +106,7 @@ pub(crate) struct Density {
 }
 
 /// The widest step that fits `available` points with `paths` paths and
-/// `outputs` outputs (the clock device included).  A width that is not a
+/// `outputs` outputs (the clock output included).  A width that is not a
 /// number counts as 0.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn density(available: f32, paths: usize, outputs: usize) -> Density {

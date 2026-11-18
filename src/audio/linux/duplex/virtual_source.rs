@@ -1,4 +1,4 @@
-//! RigWerk Out virtual source and the publish slot that feeds it.
+//! RigWerk Out virtual source and the virtual output slot that feeds it.
 
 use std::ffi::{c_void, CString};
 use std::ptr::{self, NonNull};
@@ -11,13 +11,13 @@ use pw::sys as pw_sys;
 use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
-use crate::audio::output_map::VIRTUAL_OUT_NAME;
+use crate::audio::output_map::VIRTUAL_OUTPUT_NAME;
 
 use super::{properties, MAX_FRAMES};
 
 /// Stereo block the duplex callback writes for RigWerk Out; the virtual
 /// source filter reads it.  Seqlock: odd `gen` means a write is in flight.
-pub(super) struct PublishSlot {
+pub(super) struct VirtualOutputSlot {
     gen: AtomicU64,
     frames: AtomicUsize,
     left: std::cell::UnsafeCell<[f32; MAX_FRAMES]>,
@@ -26,9 +26,9 @@ pub(super) struct PublishSlot {
 
 // One writer (duplex process) and one reader (virtual process); both on the
 // PipeWire data thread, coordinated by the seqlock.
-unsafe impl Sync for PublishSlot {}
+unsafe impl Sync for VirtualOutputSlot {}
 
-impl PublishSlot {
+impl VirtualOutputSlot {
     pub(super) fn new() -> Self {
         Self {
             gen: AtomicU64::new(0),
@@ -93,7 +93,7 @@ impl PublishSlot {
 
 /// Process data for the RigWerk Out virtual source filter.
 struct VirtualProcess {
-    publish: Arc<PublishSlot>,
+    virtual_output: Arc<VirtualOutputSlot>,
     ports: [*mut c_void; 2],
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
@@ -124,7 +124,7 @@ unsafe extern "C" fn on_virtual_process(
         data.scratch_r.resize(n, 0.0);
     }
     let want = frames.min(MAX_FRAMES);
-    let got = data.publish.read(
+    let got = data.virtual_output.read(
         &mut data.scratch_l[..want],
         &mut data.scratch_r[..want],
         want,
@@ -145,7 +145,7 @@ unsafe extern "C" fn on_virtual_process(
 }
 
 /// RigWerk Out: a virtual source other apps can capture.  Created and
-/// destroyed live when publish is toggled.
+/// destroyed live when the virtual output is switched.
 pub(super) struct VirtualSource {
     raw: NonNull<pw_sys::pw_filter>,
     _hooks: Box<spa_sys::spa_hook>,
@@ -160,23 +160,26 @@ impl Drop for VirtualSource {
 }
 
 impl VirtualSource {
-    pub(super) fn new(core: &pw::core::CoreRc, publish: Arc<PublishSlot>) -> Result<Self, String> {
+    pub(super) fn new(
+        core: &pw::core::CoreRc,
+        virtual_output: Arc<VirtualOutputSlot>,
+    ) -> Result<Self, String> {
         let props = properties(&[
             ("media.type", "Audio"),
             ("media.class", "Audio/Source/Virtual"),
             ("media.role", "DSP"),
-            ("node.name", VIRTUAL_OUT_NAME),
-            ("node.description", VIRTUAL_OUT_NAME),
+            ("node.name", VIRTUAL_OUTPUT_NAME),
+            ("node.description", VIRTUAL_OUTPUT_NAME),
             ("node.virtual", "true"),
             ("node.autoconnect", "false"),
         ]);
-        let name = CString::new(VIRTUAL_OUT_NAME).expect("node name has no NUL");
+        let name = CString::new(VIRTUAL_OUTPUT_NAME).expect("node name has no NUL");
         let raw =
             unsafe { pw_sys::pw_filter_new(core.as_raw_ptr(), name.as_ptr(), props.into_raw()) };
         let raw =
             NonNull::new(raw).ok_or_else(|| "pw_filter_new (RigWerk Out) failed".to_owned())?;
         let mut data = Box::new(VirtualProcess {
-            publish,
+            virtual_output,
             ports: [ptr::null_mut(); 2],
             scratch_l: vec![0.0; MAX_FRAMES],
             scratch_r: vec![0.0; MAX_FRAMES],

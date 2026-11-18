@@ -1,7 +1,7 @@
 //! Live Bridge: the page layout and the activity strip.  Each card lives in
 //! its own file under `live/`.  Input and Output share one row, the same
 //! width and the same height.  The bridge is the strip under that row: one
-//! line when a PipeWire node has no ring, and the cushion when it does.
+//! line when a PipeWire node has no ring, and the bridge buffer when it does.
 //! The record row (`live/record.rs`) sits directly under that strip.  The
 //! Issues strip (`live/issues.rs`) sits on top while there are issues,
 //! and "Show on <card>" there rings the bridge strip or the Output card.
@@ -42,7 +42,7 @@ impl RigWerkApp {
         self.record_row(ui);
 
         ui.add_space(10.0);
-        self.publish_banner(ui, total);
+        self.virtual_output_banner(ui, total);
         ui.add_space(10.0);
         // The full mixer and EQ live on their own page; this line sums them up.
         self.chain_strip(ui, total);
@@ -182,36 +182,36 @@ impl RigWerkApp {
         }
     }
 
-    /// Publish status for RigWerk Out: on, off, or missing.
-    pub(crate) fn publish_banner(&mut self, ui: &mut egui::Ui, width: f32) {
+    /// The virtual output's status: on, off, or missing.
+    pub(crate) fn virtual_output_banner(&mut self, ui: &mut egui::Ui, width: f32) {
         use crate::app::chain::ChainSelection;
-        use crate::audio::VIRTUAL_OUT_NAME;
+        use crate::audio::VIRTUAL_OUTPUT_NAME;
         use crate::ui::theme::GREEN;
 
-        let virtual_index = self.followers.iter().position(|f| f.virtual_out);
-        let published = virtual_index
-            .and_then(|index| self.followers.get(index))
-            .is_some_and(|f| f.publish);
-        let (fill, border, text, button) = if published {
+        let virtual_index = self.extra_outputs.iter().position(|f| f.virtual_output);
+        let on = virtual_index
+            .and_then(|index| self.extra_outputs.get(index))
+            .is_some_and(|f| f.virtual_output_on);
+        let (fill, border, text, button) = if on {
             (
                 with_alpha(GREEN, 14),
                 with_alpha(GREEN, 55),
-                format!("Published · {VIRTUAL_OUT_NAME} · PipeWire source"),
+                format!("{VIRTUAL_OUTPUT_NAME} is on. Other apps can record it."),
                 "ON",
             )
         } else if virtual_index.is_some() {
             (
                 CARD,
                 BORDER,
-                format!("{VIRTUAL_OUT_NAME} is off."),
-                "Publish",
+                format!("{VIRTUAL_OUTPUT_NAME} is off."),
+                "Turn on",
             )
         } else {
             (
                 CARD,
                 BORDER,
-                "Not publishing. Other apps can't capture the mix.".to_owned(),
-                "Publish…",
+                "No virtual output. Other apps can't record the master.".to_owned(),
+                "Add…",
             )
         };
         egui::Frame::new()
@@ -225,25 +225,23 @@ impl RigWerkApp {
                     ui.label(RichText::new(text).size(ts(11.0)).color(MUTED));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let go = ui.add(
-                            egui::Button::new(
-                                RichText::new(button).size(ts(9.5)).color(if published {
-                                    GREEN
-                                } else {
-                                    BLUE
-                                }),
-                            )
-                            .fill(with_alpha(if published { GREEN } else { BLUE }, 14))
+                            egui::Button::new(RichText::new(button).size(ts(9.5)).color(if on {
+                                GREEN
+                            } else {
+                                BLUE
+                            }))
+                            .fill(with_alpha(if on { GREEN } else { BLUE }, 14))
                             .stroke(Stroke::new(
                                 1.0,
-                                with_alpha(if published { GREEN } else { BLUE }, 45),
+                                with_alpha(if on { GREEN } else { BLUE }, 45),
                             ))
                             .corner_radius(CornerRadius::same(7)),
                         );
                         if go.clicked() {
                             if let Some(index) = virtual_index {
-                                if let Some(follower) = self.followers.get_mut(index) {
-                                    if !follower.publish {
-                                        follower.publish = true;
+                                if let Some(extra_output) = self.extra_outputs.get_mut(index) {
+                                    if !extra_output.virtual_output_on {
+                                        extra_output.virtual_output_on = true;
                                     }
                                 }
                                 self.chain_selected = ChainSelection::OutputDevice(index + 1);

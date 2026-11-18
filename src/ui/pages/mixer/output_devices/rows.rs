@@ -178,7 +178,7 @@ pub(super) fn mute_button(ui: &mut egui::Ui, mute: bool, device: &str) -> egui::
     response
 }
 
-/// A device row under the Output stage, styled like an insert row: state
+/// A device row under the Output stage, styled like an effect row: state
 /// dot, name with its tag, backend and channels, level, mute and optional
 /// remove. Returns (row clicked, mute clicked, remove clicked).
 pub(super) fn chain_device_row(
@@ -339,7 +339,7 @@ pub(super) fn chain_device_row(
     let text_right = level_right - level_w - gr_span - 10.0;
     let (tag, tag_color) = if row.clock {
         (Some("CLOCK"), BLUE)
-    } else if row.virtual_out {
+    } else if row.virtual_output {
         (Some("VIRTUAL"), GREEN)
     } else {
         (None, BLUE)
@@ -484,7 +484,7 @@ pub(super) fn list_device_row(
     }
     if row.clock {
         paint_tag(ui, egui::pos2(tag_x, center_y), "CLOCK", BLUE);
-    } else if row.virtual_out {
+    } else if row.virtual_output {
         paint_tag(ui, egui::pos2(tag_x, center_y), "VIRTUAL", GREEN);
     }
     let name_font = FontId::new(ts(10.5), FontFamily::Proportional);

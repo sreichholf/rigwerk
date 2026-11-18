@@ -7,7 +7,7 @@
 //! summary (the added latency on the Output chip) and Live Issues.
 //!
 //! Alignment lines up the paths on one device.  It does not line devices
-//! up with each other: a follower's cushion and every device's own buffer
+//! up with each other: an extra output's bridge buffer and every device's own buffer
 //! still differ.
 //!
 //! Warnings: two paths that sound on one channel of a device and arrive on
@@ -111,7 +111,7 @@ impl DeviceAlignment {
 
 impl RigWerkApp {
     /// What the alignment does on output device `device` (0 = clock
-    /// device, then followers).  From the running mixer when it has
+    /// output, then extra outputs).  From the running mixer when it has
     /// published one with the same switch (the engine only reports while a
     /// bridge runs and the device is fed), else worked out from the
     /// settings, the paths' chain latency and the plugin chains' rate.
@@ -183,7 +183,7 @@ pub(crate) struct RoutingWarning {
 
 impl RigWerkApp {
     /// What the Signal Routing page should warn about on output device
-    /// `device` (0 = clock device, then followers).  Every live path counts,
+    /// `device` (0 = clock output, then extra outputs).  Every live path counts,
     /// muted or not: the routing decides, as for alignment.  Only paths
     /// that arrive on different frames (chain latency, alignment and trim)
     /// warn: `Sum` when they add up on one channel (also on an aligned

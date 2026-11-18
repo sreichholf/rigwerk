@@ -9,12 +9,12 @@
 //! and as the fallback. `node.latency` is set on our streams only. The desktop-wide
 //! `clock.force-quantum` switch stays in the metadata path.
 //!
-//! The two-stream bridge plays to generic (cpal) followers when its clock is
+//! The two-stream bridge plays to generic (cpal) extra outputs when its clock is
 //! a cpal output, from a supervisor thread as in `bridge.rs`.  With a
-//! PipeWire clock it plays each PipeWire node follower on its own playback
-//! stream ("RigWerk Follower n"), made and retried from the main loop's
-//! timer.  That stream drains the slot's ring through a `FollowerMixer`,
-//! like a cpal follower: the follower node may run on another driver, so
+//! PipeWire clock it plays each PipeWire node extra output on its own playback
+//! stream ("RigWerk Extra output n"), made and retried from the main loop's
+//! timer.  That stream drains the slot's ring through a `ExtraOutputMixer`,
+//! like a cpal extra output: the extra output node may run on another driver, so
 //! the ring and the drift loop cross the two clocks.  RigWerk Out is
 //! published by the duplex node only, so it stays silent here.
 //!
@@ -35,13 +35,15 @@ use pw::spa;
 use pw::spa::pod::Pod;
 
 use crate::audio::denormal::DenormalGuard;
-use crate::audio::follower::{lay_out_ring, FollowerMixer, FollowerOutputs, FollowerSlots};
+use crate::audio::extra_output::{
+    lay_out_ring, ExtraOutputMixer, ExtraOutputOutputs, ExtraOutputSlots,
+};
 use crate::audio::input::{make_input_stream, open_input_device};
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
 use crate::audio::output_map::DeviceFrame;
 use crate::audio::record::{push_device_frame, RecordSource};
-use crate::audio::shared::{FollowerPlan, Shared};
+use crate::audio::shared::{ExtraOutputPlan, Shared};
 use crate::audio::types::{DeviceItem, OutputMode, StartConfig};
 
 use super::alsa::{alsa_pcm_is_default, alsa_pcm_name};
@@ -50,8 +52,8 @@ use super::pipewire::{self, LOW_QUANTUM};
 const PREFIX: &str = "pipewire:";
 const CAPTURE_NODE: &str = "RigWerk Capture";
 const PLAYBACK_NODE: &str = "RigWerk Playback";
-/// Follower streams are named this plus the slot number from 1.
-const FOLLOWER_NODE: &str = "RigWerk Follower";
+/// Extra output streams are named this plus the slot number from 1.
+const EXTRA_OUTPUT_NODE: &str = "RigWerk Extra output";
 /// Front left / front right in `spa_audio_channel`.
 const CHANNEL_FL: u32 = 3;
 const CHANNEL_FR: u32 = 4;
@@ -560,18 +562,18 @@ fn run_graph(
                 .map_err(|error| format!("Connecting PipeWire output: {error}"))?;
         }
 
-        // Generic followers, for a cpal clock only (a PipeWire clock is offered
-        // PipeWire node followers): their own cpal streams, synced from a
+        // Generic extra outputs, for a cpal clock only (a PipeWire clock is offered
+        // PipeWire node extra outputs): their own cpal streams, synced from a
         // supervisor thread as in `bridge.rs`.  Opening a cpal device blocks, so
         // it stays off this main loop.  The scope joins that thread, which drops
-        // the followers, before the streams below go.
+        // the extra outputs, before the streams below go.
         //
-        // PipeWire node followers, for a PipeWire clock: one playback stream
+        // PipeWire node extra outputs, for a PipeWire clock: one playback stream
         // each, created and retried from the main loop's timer (a stream
         // connects without blocking).  The timer owns them, so they close
         // before the streams below too.
         let tick: Box<dyn Fn(bool)> = if output_native {
-            let nodes = RefCell::new(FollowerSlots::<NodeFollower>::new());
+            let nodes = RefCell::new(ExtraOutputSlots::<NodeExtraOutput>::new());
             let shared = Arc::clone(&shared);
             let core = core.clone();
             let buffer_frames = config.output_buffer;
@@ -585,9 +587,9 @@ fn run_graph(
                     nodes.borrow_mut().close_all(&shared);
                     return;
                 }
-                let wanted = node_followers(&shared.follower_plan());
+                let wanted = node_extra_outputs(&shared.extra_output_plan());
                 nodes.borrow_mut().sync(&shared, &wanted, |slot, node| {
-                    open_node_follower(
+                    open_node_extra_output(
                         &core,
                         &shared,
                         slot,
@@ -606,9 +608,10 @@ fn run_graph(
         std::thread::scope(|scope| {
             if !output_native {
                 scope.spawn(|| {
-                    let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
+                    let mut extra_outputs =
+                        ExtraOutputOutputs::new(config.output_buffer, output_rate);
                     while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
-                        followers.sync(&shared);
+                        extra_outputs.sync(&shared);
                         std::thread::sleep(Duration::from_millis(20));
                     }
                 });
@@ -718,31 +721,31 @@ fn write_stereo(bytes: &mut [u8], index: usize, mapped: &DeviceFrame) -> bool {
     true
 }
 
-/// The plan's PipeWire node followers, with the node each one plays to.
-/// RigWerk Out is not one: only the duplex node publishes it.
-fn node_followers(plan: &FollowerPlan) -> Vec<(usize, String)> {
+/// The plan's PipeWire node extra outputs, with the node each one plays to.
+/// RigWerk Out is not one: only the duplex node plays it.
+fn node_extra_outputs(plan: &ExtraOutputPlan) -> Vec<(usize, String)> {
     plan.slots
         .iter()
         .take(plan.count)
         .enumerate()
-        .filter(|(_, link)| !link.virtual_out && !link.node_name.is_empty())
+        .filter(|(_, link)| !link.virtual_output && !link.node_name.is_empty())
         .map(|(slot, link)| (slot, link.node_name.clone()))
         .collect()
 }
 
-/// The node name of follower `slot`'s playback stream.
-fn follower_node_name(slot: usize) -> String {
-    format!("{FOLLOWER_NODE} {}", slot + 1)
+/// The node name of extra output `slot`'s playback stream.
+fn extra_output_node_name(slot: usize) -> String {
+    format!("{EXTRA_OUTPUT_NODE} {}", slot + 1)
 }
 
-/// One PipeWire node follower: a playback stream linked to the node by name
-/// that drains the slot's ring, like a generic follower's cpal stream.
-struct NodeFollower {
+/// One PipeWire node extra output: a playback stream linked to the node by name
+/// that drains the slot's ring, like a generic extra output's cpal stream.
+struct NodeExtraOutput {
     stream: pw::stream::StreamRc,
-    listener: Option<pw::stream::StreamListener<FollowerData>>,
+    listener: Option<pw::stream::StreamListener<ExtraOutputData>>,
 }
 
-impl Drop for NodeFollower {
+impl Drop for NodeExtraOutput {
     fn drop(&mut self) {
         // Out of the data loop first, so no process callback still reads the
         // listener's data when it goes; the stream itself is destroyed last.
@@ -751,16 +754,16 @@ impl Drop for NodeFollower {
     }
 }
 
-struct FollowerData {
+struct ExtraOutputData {
     shared: Arc<Shared>,
     slot: usize,
-    mixer: FollowerMixer,
+    mixer: ExtraOutputMixer,
 }
 
-/// Opens follower `slot` as a stereo playback stream to `node` at the clock
-/// rate.  PipeWire converts to the node's own rate; the follower mixer steers
+/// Opens extra output `slot` as a stereo playback stream to `node` at the clock
+/// rate.  PipeWire converts to the node's own rate; the extra output mixer steers
 /// the ring fill across the two drivers' clocks.
-fn open_node_follower(
+fn open_node_extra_output(
     core: &pw::core::CoreRc,
     shared: &Arc<Shared>,
     slot: usize,
@@ -768,9 +771,9 @@ fn open_node_follower(
     rate: u32,
     buffer_frames: usize,
     latency: &str,
-) -> Result<NodeFollower, String> {
+) -> Result<NodeExtraOutput, String> {
     lay_out_ring(shared, slot, 2, rate, buffer_frames);
-    let name = follower_node_name(slot);
+    let name = extra_output_node_name(slot);
     let mut props = stream_properties("Playback", &name, Some(node), latency);
     // A missing or removed node must not play to the default sink (the
     // clock's, often): the stream errors, the slot shows missing, and a later
@@ -779,24 +782,24 @@ fn open_node_follower(
     props.insert("node.dont-reconnect", "true");
     props.insert("node.dont-fallback", "true");
     let stream = pw::stream::StreamRc::new(core.clone(), &name, props)
-        .map_err(|error| format!("PipeWire follower: {error}"))?;
+        .map_err(|error| format!("PipeWire extra output: {error}"))?;
 
-    let mut mixer = FollowerMixer::new(slot, rate, 2);
+    let mut mixer = ExtraOutputMixer::new(slot, rate, 2);
     mixer.follow_source_rate(shared);
     mixer.publish_channels(shared);
     let state_shared = Arc::clone(shared);
     let listener = stream
-        .add_local_listener_with_user_data(FollowerData {
+        .add_local_listener_with_user_data(ExtraOutputData {
             shared: Arc::clone(shared),
             slot,
             mixer,
         })
         .state_changed(move |_, _, _, new| {
             if let pw::stream::StreamState::Error(_) = new {
-                // Never stop the bridge for a follower: the supervisor drops
+                // Never stop the bridge for an extra output: the supervisor drops
                 // this stream and retries.
                 state_shared
-                    .follower_bus(slot)
+                    .extra_output_bus(slot)
                     .missing
                     .store(true, Ordering::Relaxed);
             }
@@ -811,7 +814,7 @@ fn open_node_follower(
                     if write_stereo(bytes, index, mapped) {
                         push_device_frame(
                             &data.shared.recorder,
-                            RecordSource::Follower(slot),
+                            RecordSource::ExtraOutput(slot),
                             mapped,
                             2,
                         );
@@ -820,15 +823,15 @@ fn open_node_follower(
             });
         })
         .register()
-        .map_err(|error| format!("PipeWire follower listener: {error}"))?;
-    let follower = NodeFollower {
+        .map_err(|error| format!("PipeWire extra output listener: {error}"))?;
+    let extra_output = NodeExtraOutput {
         stream,
         listener: Some(listener),
     };
 
     let format = enum_format(rate)?;
     let mut params = [pod(&format)?];
-    follower
+    extra_output
         .stream
         .connect(
             spa::utils::Direction::Output,
@@ -838,10 +841,10 @@ fn open_node_follower(
                 | pw::stream::StreamFlags::RT_PROCESS,
             &mut params,
         )
-        .map_err(|error| format!("Connecting PipeWire follower: {error}"))?;
+        .map_err(|error| format!("Connecting PipeWire extra output: {error}"))?;
     // The rate this stream plays; PipeWire converts to the node's.
-    shared.follower_bus(slot).set_playback_rate(rate);
-    Ok(follower)
+    shared.extra_output_bus(slot).set_playback_rate(rate);
+    Ok(extra_output)
 }
 
 /// Where the valid capture frames sit in a mapped buffer.

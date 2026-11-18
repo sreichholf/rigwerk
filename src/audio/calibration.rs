@@ -393,7 +393,7 @@ fn unpack(word: u64) -> (u64, CalibrationState) {
     (word >> 8, CalibrationState::from_u32((word & 0xff) as u32))
 }
 
-/// The next arm id.  Zero is the session's initial idle word, so a bump
+/// The next arm id.  Zero is the run's initial idle word, so a bump
 /// that would wrap skips it.
 fn next_generation(generation: u64) -> u64 {
     let next = generation.wrapping_add(1) & 0xffff_ffff;
@@ -407,7 +407,7 @@ fn next_generation(generation: u64) -> u64 {
 /// The armed measurement: the preallocated capture, the click and the
 /// atomics the three threads share.
 pub(crate) struct Calibration {
-    /// The clock the stamps are relative to.  Set when the session is built,
+    /// The clock the stamps are relative to.  Set when the run is built,
     /// so every thread reads the same monotonic time base without a lock.
     epoch: Instant,
     /// [`pack`] of the arm generation and the [`CalibrationState`].

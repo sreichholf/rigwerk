@@ -36,7 +36,7 @@ const PANE_HEAD_H: f32 = 36.0;
 const PANE_PAD_X: f32 = 14.0;
 
 pub(super) enum RackAction {
-    /// Path-level insert bypass.  Does not write each slot's own bypass.
+    /// Path-level effect bypass.  Does not write each slot's own bypass.
     ChainBypass(bool),
     Bypass(usize, bool),
     Mix(usize, f32),
@@ -87,7 +87,7 @@ impl RigWerkApp {
         let mut path_actions: Vec<PathAction> = Vec::new();
         let mut select: Option<ChainSelection> = None;
         let total = ui.available_width();
-        // Wide enough for a long insert name next to its controls; the
+        // Wide enough for a long effect name next to its controls; the
         // minimum window still leaves the EQ inspector about 370 px.
         let chain_w = (total * 0.36).clamp(400.0, 440.0);
 
@@ -101,7 +101,7 @@ impl RigWerkApp {
                 );
             }
             ui.add_space(4.0);
-            // Keep the counters and "+ Add insert" on the right clear.
+            // Keep the counters and "+ Add effect" on the right clear.
             const RIGHT_W: f32 = 260.0;
             path_toolbar(
                 ui,
@@ -113,12 +113,12 @@ impl RigWerkApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .add(
-                        egui::Button::new(RichText::new("+ Add insert").size(ts(9.5)).color(TEAL))
+                        egui::Button::new(RichText::new("+ Add effect").size(ts(9.5)).color(TEAL))
                             .fill(with_alpha(TEAL, 14))
                             .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
                             .corner_radius(CornerRadius::same(7)),
                     )
-                    .on_hover_text("Browse the plugin library and add an insert")
+                    .on_hover_text("Browse the plugin library and add an effect")
                     .clicked()
                 {
                     actions.push(RackAction::OpenPlugins);
@@ -126,7 +126,7 @@ impl RigWerkApp {
                 ui.add_space(8.0);
                 ui.label(mono(
                     format!(
-                        "{} INSERT{} · {} OUTPUT{}",
+                        "{} EFFECT{} · {} OUTPUT{}",
                         views.len(),
                         if views.len() == 1 { "" } else { "S" },
                         devices.len(),
@@ -239,9 +239,9 @@ impl RigWerkApp {
                     }
                 }
                 RackAction::OpenPlugins => {
-                    self.plugin_insert_at = self
+                    self.plugin_effect_at = self
                         .chain_selected
-                        .plugin_insert_at(self.engine.plugin_views(self.selected_path).len());
+                        .plugin_effect_at(self.engine.plugin_views(self.selected_path).len());
                     self.page = Page::Plugins;
                 }
                 RackAction::OpenLive => self.page = Page::Live,
@@ -355,7 +355,7 @@ impl RigWerkApp {
                 ui.painter().text(
                     egui::pos2(group_rect.left() + 24.0, group_rect.center().y),
                     egui::Align2::LEFT_CENTER,
-                    format!("Plugins · {}", views.len()),
+                    format!("Effects {}", views.len()),
                     FontId::new(ts(10.0), FontFamily::Proportional),
                     if plugins_selected { TEXT } else { AMBER },
                 );
@@ -364,7 +364,7 @@ impl RigWerkApp {
                 let reorder = ui
                     .painter()
                     .layout_no_wrap("reorder".to_owned(), reorder_font, DIM);
-                let pill_w = 40.0;
+                let pill_w = 78.0;
                 let reorder_right = group_rect.right() - 8.0 - pill_w - 8.0;
                 ui.painter().galley(
                     egui::pos2(
@@ -397,7 +397,7 @@ impl RigWerkApp {
                 let pointer = ui.input(|input| input.pointer.interact_pos());
                 let on_pill = pointer.is_some_and(|pos| pill_rect.contains(pos));
                 if group_response
-                    .on_hover_text("Insert group — reorder plugins below")
+                    .on_hover_text("Effect group — reorder effects below")
                     .clicked()
                     && !on_pill
                     && !toggled
@@ -405,12 +405,12 @@ impl RigWerkApp {
                     *select = Some(ChainSelection::Plugins);
                 }
 
-                ui.indent("plugin_inserts", |ui| {
+                ui.indent("plugin_effects", |ui| {
                     if views.is_empty() {
-                        ui.label(RichText::new("No inserts yet").size(ts(10.5)).color(MUTED));
+                        ui.label(RichText::new("No effects yet").size(ts(10.5)).color(MUTED));
                     } else {
                         for (index, view) in views.iter().enumerate() {
-                            if insert_row(
+                            if effect_row(
                                 ui,
                                 index,
                                 view,
@@ -425,7 +425,7 @@ impl RigWerkApp {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("+ add insert").size(ts(10.0)).color(DIM),
+                                RichText::new("+ add effect").size(ts(10.0)).color(DIM),
                             )
                             .fill(Color32::TRANSPARENT)
                             .stroke(Stroke::new(1.0, BORDER_SOFT))
@@ -515,7 +515,7 @@ impl RigWerkApp {
             ui.add_space(PANE_PAD_X);
             ui.label(
                 RichText::new(format!(
-                    "{} stages · {active} active insert{} · {} output{}",
+                    "{} stages · {active} active effect{} · {} output{}",
                     if path_stage.is_some() { 7 } else { 6 },
                     if active == 1 { "" } else { "s" },
                     devices.len(),
@@ -945,7 +945,7 @@ fn stage_row(
     response.clicked()
 }
 
-fn insert_row(
+fn effect_row(
     ui: &mut egui::Ui,
     index: usize,
     view: &PluginView,
@@ -1004,7 +1004,7 @@ fn insert_row(
         // width is left and is truncated to it instead of running under them.
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if remove_button(ui)
-                .on_hover_text("Remove this insert")
+                .on_hover_text("Remove this effect")
                 .clicked()
             {
                 actions.push(RackAction::Remove(index));
@@ -1028,9 +1028,9 @@ fn insert_row(
             if view.error.is_none()
                 && editor_button(ui)
                     .on_hover_text(if view.has_editor {
-                        "Open the plugin's editor (or double-click the insert)"
+                        "Open the plugin's editor (or double-click the effect)"
                     } else {
-                        "Open its parameters; it has no editor of its own (or double-click the insert)"
+                        "Open its parameters; it has no editor of its own (or double-click the effect)"
                     })
                     .clicked()
             {
@@ -1040,13 +1040,13 @@ fn insert_row(
             let bypass = view.bypass;
             if hinted_tab(
                 ui,
-                if bypass { "BYP" } else { "ON" },
+                if bypass { "Bypass" } else { "ON" },
                 !bypass,
                 AMBER,
                 if bypass {
-                    "Enable this insert"
+                    "Enable this effect"
                 } else {
-                    "Bypass this insert"
+                    "Bypass this effect"
                 },
             ) {
                 actions.push(RackAction::Bypass(index, !bypass));
@@ -1088,7 +1088,7 @@ fn insert_row(
     row_response.clicked() && !controls_clicked
 }
 
-/// The button that opens an insert's editor, painted as a small window
+/// The button that opens an effect's editor, painted as a small window
 /// (egui's default font has no icon for it).
 fn editor_button(ui: &mut egui::Ui) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
@@ -1117,7 +1117,7 @@ fn editor_button(ui: &mut egui::Ui) -> egui::Response {
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The "×" that removes an insert: dim until hovered, then red, since it is
+/// The "×" that removes an effect: dim until hovered, then red, since it is
 /// the one destructive control on the row.
 fn remove_button(ui: &mut egui::Ui) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
@@ -1137,9 +1137,9 @@ fn remove_button(ui: &mut egui::Ui) -> egui::Response {
 }
 
 fn plugins_group_inspector(ui: &mut egui::Ui, views: &[PluginView], actions: &mut Vec<RackAction>) {
-    ui.label(RichText::new("Plugins").size(ts(16.0)).color(TEXT).strong());
+    ui.label(RichText::new("Effects").size(ts(16.0)).color(TEXT).strong());
     ui.label(
-        RichText::new("Insert group · reorder on the left · library on the Plugins page")
+        RichText::new("Effect group · reorder on the left · library on the Plugins page")
             .size(ts(11.0))
             .color(DIM),
     );
@@ -1156,7 +1156,7 @@ fn plugins_group_inspector(ui: &mut egui::Ui, views: &[PluginView], actions: &mu
     ui.add_space(12.0);
     if ui
         .add(
-            egui::Button::new(RichText::new("+ Add insert").size(ts(11.0)).color(TEAL))
+            egui::Button::new(RichText::new("+ Add effect").size(ts(11.0)).color(TEAL))
                 .fill(with_alpha(TEAL, 14))
                 .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
                 .corner_radius(CornerRadius::same(8))
@@ -1168,7 +1168,7 @@ fn plugins_group_inspector(ui: &mut egui::Ui, views: &[PluginView], actions: &mu
     }
     ui.add_space(10.0);
     ui.label(
-        RichText::new("Select an insert for bypass and mix.  Double-click one to open its editor.")
+        RichText::new("Select an effect for bypass and mix.  Double-click one to open its editor.")
             .size(ts(11.0))
             .color(MUTED),
     );
@@ -1191,13 +1191,13 @@ fn plugin_inspector(
             let bypass = view.bypass;
             if hinted_tab(
                 ui,
-                if bypass { "BYP" } else { "ON" },
+                if bypass { "Bypass" } else { "ON" },
                 !bypass,
                 AMBER,
                 if bypass {
-                    "Enable this insert"
+                    "Enable this effect"
                 } else {
-                    "Bypass this insert"
+                    "Bypass this effect"
                 },
             ) {
                 actions.push(RackAction::Bypass(index, !bypass));
@@ -1293,7 +1293,7 @@ fn plugin_inspector(
     ui.add_space(10.0);
     if ui
         .add(
-            egui::Button::new(RichText::new("Remove insert").size(ts(11.0)).color(DIM))
+            egui::Button::new(RichText::new("Remove effect").size(ts(11.0)).color(DIM))
                 .fill(CARD_RAISED)
                 .stroke(Stroke::new(1.0, BORDER_SOFT))
                 .corner_radius(CornerRadius::same(8)),
@@ -1305,7 +1305,7 @@ fn plugin_inspector(
 
     ui.add_space(14.0);
     ui.label(
-        RichText::new("Double-click an insert in the chain to open its editor.")
+        RichText::new("Double-click an effect in the chain to open its editor.")
             .size(ts(11.0))
             .color(MUTED),
     );

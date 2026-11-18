@@ -45,7 +45,7 @@ use super::processor::{stop_processing, ClapProcessor, ClapRange, EventBuffer, O
 use super::scan::fixed_string;
 use super::state::{StateReader, StateWriter, MAX_STATE_BYTES};
 
-/// The largest block the insert chain accepts.  Kept in step with the VST3
+/// The largest block the effect chain accepts.  Kept in step with the VST3
 /// side: plugins get set up with this size, so it must stay a block size that
 /// fixed-buffer effects can handle, and longer bridge blocks are split.
 pub(super) const MAX_BLOCK: usize = 512;
@@ -290,7 +290,7 @@ impl ClapInstance {
         let outputs = PortBuffers::new(&layout.outputs, layout.main_output, block);
         instance.activate()?;
         instance.query_latency();
-        // The first value goes out with the views of the new insert.
+        // The first value goes out with the views of the new effect.
         shared.take_latency_change();
 
         let mut views = instance.parameters();
@@ -517,7 +517,7 @@ impl ClapInstance {
     /// views, or `None` without a request.  A rescan that changes the ids
     /// or ranges the processor was built with cannot be followed: the
     /// processor, the views and every value sent use that one table.  The
-    /// old list is kept and a reload is asked for: the insert stops
+    /// old list is kept and a reload is asked for: the effect stops
     /// processing and the path rebuilds it with the new controls.
     pub(crate) fn rescan_if_requested(&mut self) -> Option<Vec<PluginParamView>> {
         if !self.core.host.params_rescan.swap(false, Ordering::Relaxed) {

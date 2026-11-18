@@ -1,14 +1,14 @@
 #![allow(clippy::needless_range_loop)] // Frames of several devices, indexed alike.
 
 //! Latency alignment through the whole mixer: two identical paths, one with
-//! a latent insert (a pure delay standing in for a lookahead plugin), on
-//! the clock device, the followers of the PipeWire direct path and a generic
-//! follower fed through its ring.
+//! a latent effect (a pure delay standing in for a lookahead plugin), on
+//! the clock output, the extra outputs of the PipeWire direct path and a generic
+//! extra output fed through its ring.
 
 use super::super::eq::EqSettings;
 use super::super::output_map::{ChannelMap, OutputDeviceSettings, PathMapSettings, UnusedChannels};
 use super::super::path::PathMix;
-use super::super::shared::{FollowerPlan, Shared};
+use super::super::shared::{ExtraOutputPlan, Shared};
 use super::OutputMixer;
 
 const RATE: u32 = 48_000;
@@ -26,11 +26,11 @@ fn delayed(n: usize, by: usize) -> f32 {
 }
 
 /// Two identical paths (EQs off, IN 1/2 on L/R), path 0 with a pure delay
-/// of `latency` frames, both on every device; `followers` stereo followers.
-fn aligned_mixer(latency: u32, followers: usize) -> (OutputMixer, Shared) {
+/// of `latency` frames, both on every device; `extra_outputs` stereo extra outputs.
+fn aligned_mixer(latency: u32, extra_outputs: usize) -> (OutputMixer, Shared) {
     let shared = Shared::new(RATE);
     shared.set_master(false, true, [true, true], false);
-    // The duplex graph: it plays the followers in-graph.
+    // The duplex graph: it plays the extra outputs in-graph.
     shared
         .direct
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -46,12 +46,12 @@ fn aligned_mixer(latency: u32, followers: usize) -> (OutputMixer, Shared) {
     shared.restore_path(1, &mix, Vec::new());
     shared.paths[0].edit_chain(|chain| chain.insert_delay_for_test(latency));
     assert_eq!(shared.paths[0].latency_samples(), latency);
-    let plan = FollowerPlan {
-        count: followers,
-        ..FollowerPlan::default()
+    let plan = ExtraOutputPlan {
+        count: extra_outputs,
+        ..ExtraOutputPlan::default()
     };
-    shared.set_followers(
-        &vec![OutputDeviceSettings::default(); followers],
+    shared.set_extra_outputs(
+        &vec![OutputDeviceSettings::default(); extra_outputs],
         &plan,
         &[],
     );
@@ -66,7 +66,7 @@ fn run(
     clock: &mut usize,
     blocks: usize,
 ) -> Vec<Vec<[f32; 2]>> {
-    let devices = 1 + shared.follower_count();
+    let devices = 1 + shared.extra_output_count();
     let mut out = vec![Vec::new(); devices];
     for _ in 0..blocks {
         let left: Vec<f32> = (*clock..*clock + BLOCK).map(signal).collect();
@@ -98,7 +98,7 @@ fn aligned_paths_sum_to_twice_the_delayed_signal() {
         assert_eq!(frame[1], -want, "frame {n}");
     }
     // What the mixer applies is published for the UI.
-    let report = shared.clock_device.alignment().expect("published");
+    let report = shared.clock_output.alignment().expect("published");
     assert_eq!(report.delays[0], Some(0));
     assert_eq!(report.delays[1], Some(LATENCY as u32));
     assert_eq!(report.waits_for, Some(0));
@@ -110,7 +110,7 @@ fn aligned_paths_sum_to_twice_the_delayed_signal() {
 fn without_alignment_the_paths_comb() {
     const LATENCY: usize = 64;
     let (mut mixer, shared) = aligned_mixer(LATENCY as u32, 0);
-    shared.clock_device.set(&OutputDeviceSettings {
+    shared.clock_output.set(&OutputDeviceSettings {
         align: false,
         ..OutputDeviceSettings::default()
     });
@@ -123,7 +123,7 @@ fn without_alignment_the_paths_comb() {
         worst = worst.max((frame[0] - 2.0 * delayed(n, LATENCY)).abs());
     }
     assert!(worst > 0.3, "the sum differs from the aligned one: {worst}");
-    let report = shared.clock_device.alignment().unwrap();
+    let report = shared.clock_output.alignment().unwrap();
     assert_eq!(report.delays, [Some(0), Some(0), None, None]);
     assert_eq!(report.waits_for, None);
 }
@@ -132,39 +132,43 @@ fn without_alignment_the_paths_comb() {
 fn a_path_on_its_own_device_keeps_its_own_latency() {
     const LATENCY: usize = 96;
     let (mut mixer, shared) = aligned_mixer(LATENCY as u32, 2);
-    // Clock device: path 0 only.  Follower 0: path 1 only.  Follower 1:
+    // Clock output: path 0 only.  Extra output 0: path 1 only.  Extra output 1:
     // both.
     let only = |slot: usize| {
         let mut settings = OutputDeviceSettings::default();
         settings.path_map[1 - slot] = PathMapSettings::unrouted();
         settings
     };
-    shared.clock_device.set(&only(0));
-    let plan = FollowerPlan {
+    shared.clock_output.set(&only(0));
+    let plan = ExtraOutputPlan {
         count: 2,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    shared.set_followers(&[only(1), OutputDeviceSettings::default()], &plan, &[]);
+    shared.set_extra_outputs(&[only(1), OutputDeviceSettings::default()], &plan, &[]);
     let mut clock = 0;
     let out = run(&mut mixer, &shared, &mut clock, 6);
     for n in 0..out[0].len() {
         assert_eq!(out[0][n][0], delayed(n, LATENCY), "clock {n}");
-        assert_eq!(out[1][n][0], signal(n), "follower 0 {n}");
-        assert_eq!(out[2][n][0], 2.0 * delayed(n, LATENCY), "follower 1 {n}");
+        assert_eq!(out[1][n][0], signal(n), "extra output 0 {n}");
+        assert_eq!(
+            out[2][n][0],
+            2.0 * delayed(n, LATENCY),
+            "extra output 1 {n}"
+        );
     }
     assert_eq!(
-        shared.clock_device.alignment().unwrap().total,
+        shared.clock_output.alignment().unwrap().total,
         LATENCY as u32
     );
-    let alone = shared.followers[0].alignment().unwrap();
+    let alone = shared.extra_outputs[0].alignment().unwrap();
     assert_eq!((alone.total, alone.added), (0, 0));
     assert_eq!(alone.delays, [None, Some(0), None, None]);
 }
 
 #[test]
-fn a_generic_follower_is_aligned_on_the_clock_callback() {
-    use super::super::shared::FollowerLink;
-    use super::super::types::CushionMode;
+fn a_generic_extra_output_is_aligned_on_the_clock_callback() {
+    use super::super::shared::ExtraOutputLink;
+    use super::super::types::BufferMode;
     const LATENCY: usize = 80;
     let (mut mixer, shared) = aligned_mixer(LATENCY as u32, 0);
     // The ring path: input frames through the clock bridge's ring.
@@ -172,28 +176,28 @@ fn a_generic_follower_is_aligned_on_the_clock_callback() {
         .direct
         .store(false, std::sync::atomic::Ordering::Relaxed);
     shared.set_source_rate(RATE);
-    shared.set_cushion(CushionMode::Manual, 100.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
     for n in 0..8_000 {
         shared.push_frame(signal(n), -signal(n));
     }
-    // A generic follower that plays path 1 only, so it keeps its own (zero)
-    // latency, while the clock device waits for path 0.
+    // A generic extra output that plays path 1 only, so it keeps its own (zero)
+    // latency, while the clock output waits for path 0.
     let mut only_path_1 = OutputDeviceSettings::default();
     only_path_1.path_map[0] = PathMapSettings::unrouted();
-    let mut plan = FollowerPlan {
+    let mut plan = ExtraOutputPlan {
         count: 1,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    plan.slots[0] = FollowerLink {
-        device_id: "test:follower".to_owned(),
-        ..FollowerLink::default()
+    plan.slots[0] = ExtraOutputLink {
+        device_id: "test:extra-output".to_owned(),
+        ..ExtraOutputLink::default()
     };
-    shared.set_followers(&[only_path_1], &plan, &[(CushionMode::Safe, 10.0)]);
-    let bus = shared.follower_bus(0);
+    shared.set_extra_outputs(&[only_path_1], &plan, &[(BufferMode::Auto, 10.0)]);
+    let bus = shared.extra_output_bus(0);
     bus.set_device_channels(2);
     bus.reset_playback();
     shared
-        .follower_ring_active(0)
+        .extra_output_ring_active(0)
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mut clock = Vec::new();
@@ -202,23 +206,23 @@ fn a_generic_follower_is_aligned_on_the_clock_callback() {
             clock.push([mapped.sample(0), mapped.sample(1)]);
         });
     }
-    let mut follower = Vec::new();
+    let mut extra_output = Vec::new();
     let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
     while bus.pop_frame(&mut frame) {
-        follower.push([frame[0], frame[1]]);
+        extra_output.push([frame[0], frame[1]]);
     }
-    assert_eq!(follower.len(), clock.len());
-    assert!(follower.iter().any(|frame| frame[0].abs() > 0.1));
-    // The clock device sums both paths, aligned on path 0's latency; the
-    // follower plays path 1 as it comes.
+    assert_eq!(extra_output.len(), clock.len());
+    assert!(extra_output.iter().any(|frame| frame[0].abs() > 0.1));
+    // The clock output sums both paths, aligned on path 0's latency; the
+    // extra output plays path 1 as it comes.
     for n in LATENCY..clock.len() {
-        assert_eq!(clock[n][0], 2.0 * follower[n - LATENCY][0], "frame {n}");
+        assert_eq!(clock[n][0], 2.0 * extra_output[n - LATENCY][0], "frame {n}");
     }
     assert_eq!(
-        shared.clock_device.alignment().unwrap().total,
+        shared.clock_output.alignment().unwrap().total,
         LATENCY as u32
     );
-    let alone = shared.followers[0].alignment().unwrap();
+    let alone = shared.extra_outputs[0].alignment().unwrap();
     assert_eq!((alone.total, alone.added), (0, 0));
 }
 
@@ -226,18 +230,18 @@ fn a_generic_follower_is_aligned_on_the_clock_callback() {
 fn polarity_cancels_and_a_trim_moves_one_path() {
     const LATENCY: usize = 32;
     let (mut mixer, shared) = aligned_mixer(LATENCY as u32, 1);
-    // Clock device: path 1 inverted, so the aligned paths cancel.
+    // Clock output: path 1 inverted, so the aligned paths cancel.
     let mut inverted = OutputDeviceSettings::default();
     inverted.path_map[1].invert = true;
-    shared.clock_device.set(&inverted);
-    // Follower: path 1 trimmed by +1 ms (48 frames) on top of the alignment.
+    shared.clock_output.set(&inverted);
+    // Extra output: path 1 trimmed by +1 ms (48 frames) on top of the alignment.
     let mut trimmed = OutputDeviceSettings::default();
     trimmed.path_map[1].trim_ms = 1.0;
-    let plan = FollowerPlan {
+    let plan = ExtraOutputPlan {
         count: 1,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    shared.set_followers(&[trimmed], &plan, &[]);
+    shared.set_extra_outputs(&[trimmed], &plan, &[]);
     let mut clock = 0;
     let out = run(&mut mixer, &shared, &mut clock, 6);
     for n in 0..out[0].len() {
@@ -246,16 +250,16 @@ fn polarity_cancels_and_a_trim_moves_one_path() {
         assert!((out[1][n][0] - want).abs() < 1e-6, "trimmed at {n}");
     }
     assert_eq!(
-        shared.followers[0].alignment().unwrap().delays[1],
+        shared.extra_outputs[0].alignment().unwrap().delays[1],
         Some(LATENCY as u32 + 48)
     );
 
     // A negative trim beyond the latency: path 1 would have to play before
     // its input, so path 0 waits instead (the smallest delay is 0).
     trimmed.path_map[1].trim_ms = -1.0;
-    shared.set_followers(&[trimmed], &plan, &[]);
+    shared.set_extra_outputs(&[trimmed], &plan, &[]);
     let _settle = run(&mut mixer, &shared, &mut clock, 8);
-    let report = shared.followers[0].alignment().unwrap();
+    let report = shared.extra_outputs[0].alignment().unwrap();
     assert_eq!(report.delays[0], Some(48 - LATENCY as u32));
     assert_eq!(report.delays[1], Some(0));
 }
@@ -277,14 +281,14 @@ fn a_latency_change_crossfades_the_other_path_without_a_click() {
         left: 0b10,
         right: 0,
     };
-    shared.clock_device.set(&settings);
+    shared.clock_output.set(&settings);
     let mut clock = 0;
     let before = run(&mut mixer, &shared, &mut clock, 4);
     let start = clock;
-    // The insert reports a new latency while the mixer holds the chain.
+    // The effect reports a new latency while the mixer holds the chain.
     shared.paths[0]
         .slot_link(0)
-        .expect("one insert")
+        .expect("one effect")
         .set_test_latency(640);
     let out = run(&mut mixer, &shared, &mut clock, 12);
     // The sine moves by at most 0.01 per frame; the fade adds the gap
@@ -295,7 +299,7 @@ fn a_latency_change_crossfades_the_other_path_without_a_click() {
     let last = out[0].len() - 1;
     assert_eq!(out[0][last][1], delayed(start + last, 640));
     assert_eq!(
-        shared.clock_device.alignment().unwrap().delays[1],
+        shared.clock_output.alignment().unwrap().delays[1],
         Some(640)
     );
 }
@@ -331,7 +335,7 @@ fn one_path_without_latency_has_no_delay() {
     let (mut mixer, shared) = aligned_mixer(0, 0);
     let mut only = OutputDeviceSettings::default();
     only.path_map[1] = PathMapSettings::unrouted();
-    shared.clock_device.set(&only);
+    shared.clock_output.set(&only);
     let mut clock = 0;
     let out = run(&mut mixer, &shared, &mut clock, 2);
     for (n, frame) in out[0].iter().enumerate() {
@@ -342,19 +346,19 @@ fn one_path_without_latency_has_no_delay() {
 #[test]
 fn only_devices_that_play_publish_an_alignment() {
     let (mut mixer, shared) = aligned_mixer(64, 1);
-    // A generic follower whose stream does not drain its ring yet.
+    // A generic extra output whose stream does not drain its ring yet.
     shared
         .direct
         .store(false, std::sync::atomic::Ordering::Relaxed);
     let mut clock = 0;
     let _ = run(&mut mixer, &shared, &mut clock, 1);
-    assert!(shared.clock_device.alignment().is_some());
-    assert!(shared.followers[0].alignment().is_none());
+    assert!(shared.clock_output.alignment().is_some());
+    assert!(shared.extra_outputs[0].alignment().is_none());
     // Nor one the plan dropped.
-    assert!(shared.followers[1].alignment().is_none());
+    assert!(shared.extra_outputs[1].alignment().is_none());
     // A stopped bridge clears what it published.
-    shared.clock_device.clear_alignment();
-    assert!(shared.clock_device.alignment().is_none());
+    shared.clock_output.clear_alignment();
+    assert!(shared.clock_output.alignment().is_none());
 }
 
 #[test]
@@ -385,7 +389,7 @@ fn a_missed_chain_fades_into_the_fallback_without_a_click() {
     });
     let mut only = OutputDeviceSettings::default();
     only.path_map[1] = PathMapSettings::unrouted();
-    shared.clock_device.set(&only);
+    shared.clock_output.set(&only);
     let mut clock = 0;
     let mut out = run(&mut mixer, &shared, &mut clock, 2).remove(0);
     // The fake plugin writes 1 and 2.  The safety ceiling holds the peak,
@@ -423,7 +427,7 @@ fn a_removed_path_plays_out_its_alignment_delay_before_it_stops() {
     let (mut mixer, shared) = aligned_mixer(LATENCY as u32, 0);
     let mut clock = 0;
     let mut out = run(&mut mixer, &shared, &mut clock, 24).remove(0);
-    // Path 1 waits 4800 frames for path 0 on the clock device: its fade
+    // Path 1 waits 4800 frames for path 0 on the clock output: its fade
     // reaches the device that much later, and must not be cut off.
     assert!(shared.remove_path(1));
     let mut blocks = 0;

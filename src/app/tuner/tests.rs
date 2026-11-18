@@ -78,7 +78,7 @@ fn auto_mute_follows_the_truth_table() {
 #[test]
 fn defaults_are_chromatic_single_and_standard() {
     let tuner = TunerState::new(&chromatic(), false);
-    assert!(tuner.preset.is_none());
+    assert!(tuner.tuning.is_none());
     assert_eq!(tuner.preset_id(), DEFAULT_PRESET_ID);
     assert_eq!(tuner.reference_hz, DEFAULT_REFERENCE_HZ);
     assert_eq!(tuner.channel, TunerChannel::Sum);
@@ -123,7 +123,7 @@ fn invalid_persisted_values_fall_back() {
     preferences.tuner_tolerance = 9;
 
     let tuner = TunerState::new(&preferences, false);
-    assert!(tuner.preset.is_none());
+    assert!(tuner.tuning.is_none());
     assert_eq!(tuner.reference_hz, DEFAULT_REFERENCE_HZ);
     assert_eq!(tuner.channel, TunerChannel::Sum);
     assert_eq!(tuner.display, TunerDisplay::Strobe);
@@ -171,19 +171,19 @@ fn channel_codes_round_trip() {
 fn every_preset_round_trips_by_id() {
     let mut preferences = chromatic();
     let mut tuner = TunerState::new(&preferences, false);
-    for (index, tuning) in PRESETS.iter().enumerate() {
+    for (index, tuning) in TUNINGS.iter().enumerate() {
         preferences.tuner_tuning = tuning.id.to_owned();
         let restored = TunerState::new(&preferences, false);
-        assert_eq!(restored.preset, Some(index));
+        assert_eq!(restored.tuning, Some(index));
         assert_eq!(restored.preset_id(), tuning.id);
         assert_eq!(restored.preset().map(|t| t.id), Some(tuning.id));
 
         tuner.set_preset(Some(index));
         assert_eq!(tuner.preset_id(), tuning.id);
     }
-    assert_eq!(PRESETS.len(), 20);
+    assert_eq!(TUNINGS.len(), 20);
     assert_eq!(
-        PRESETS
+        TUNINGS
             .iter()
             .filter(|tuning| tuning.group == TuningGroup::Bass)
             .count(),

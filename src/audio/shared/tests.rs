@@ -1,13 +1,13 @@
 use std::sync::atomic::Ordering;
 
-use crate::audio::{ClickRhythm, CushionMode, OutputMode};
+use crate::audio::{BufferMode, ClickRhythm, OutputMode};
 
 const FOUR_FOUR: u8 = ClickRhythm::FourFour as u8;
 
 /// A bridge like the BT-W3 case: 128-sample input, 480-sample output step.
-fn cushion_bridge(mode: CushionMode, manual_ms: f32) -> super::Shared {
+fn shared_with_bridge_buffer(mode: BufferMode, fixed_ms: f32) -> super::Shared {
     let shared = super::Shared::new(48_000);
-    shared.set_cushion(mode, manual_ms);
+    shared.set_bridge_buffer(mode, fixed_ms);
     shared.set_source_rate(48_000);
     shared.set_target_frames(super::initial_target(128));
     shared.note_input_block(128);
@@ -45,22 +45,22 @@ fn scope_lane_keeps_peak_hold_bins_in_order() {
 }
 
 #[test]
-fn safe_cushion_keeps_two_output_blocks_and_grows_256() {
-    let shared = cushion_bridge(CushionMode::Safe, 10.0);
+fn auto_bridge_buffer_keeps_two_output_blocks_and_grows_256() {
+    let shared = shared_with_bridge_buffer(BufferMode::Auto, 10.0);
     assert_eq!(shared.target_frames(), 960);
-    shared.raise_target_after_underrun();
+    shared.raise_target_after_dropout();
     assert_eq!(shared.target_frames(), 1216);
     shared.relax_target();
     assert_eq!(shared.target_frames(), 1152);
 }
 
 #[test]
-fn set_output_lifts_the_safe_cushion_for_a_large_exclusive_step() {
+fn set_output_lifts_the_auto_bridge_buffer_for_a_large_exclusive_step() {
     // Bridge opens output before input has filled anything; exclusive may
-    // wake with a 10 ms (or larger) GetBufferSize.  The cushion must already
-    // cover two of those steps or the first audible block underruns.
+    // wake with a 10 ms (or larger) GetBufferSize.  The bridge buffer must already
+    // cover two of those steps or the first audible block drops out.
     let shared = super::Shared::new(48_000);
-    shared.set_cushion(CushionMode::Safe, 10.0);
+    shared.set_bridge_buffer(BufferMode::Auto, 10.0);
     shared.set_source_rate(48_000);
     shared.set_target_frames(super::initial_target(128));
     shared.note_input_block(128);
@@ -71,31 +71,31 @@ fn set_output_lifts_the_safe_cushion_for_a_large_exclusive_step() {
 }
 
 #[test]
-fn low_latency_cushion_is_one_block_from_each_side() {
-    let shared = cushion_bridge(CushionMode::LowLatency, 10.0);
+fn minimum_bridge_buffer_is_one_block_from_each_side() {
+    let shared = shared_with_bridge_buffer(BufferMode::Minimum, 10.0);
     assert_eq!(shared.target_frames(), 608);
-    shared.raise_target_after_underrun();
+    shared.raise_target_after_dropout();
     assert_eq!(shared.target_frames(), 728);
     shared.relax_target();
     assert_eq!(shared.target_frames(), 696);
 }
 
 #[test]
-fn manual_cushion_stays_where_it_is_put() {
-    let shared = cushion_bridge(CushionMode::Manual, 7.5);
+fn fixed_bridge_buffer_stays_where_it_is_put() {
+    let shared = shared_with_bridge_buffer(BufferMode::Fixed, 7.5);
     assert_eq!(shared.target_frames(), 360);
-    shared.raise_target_after_underrun();
+    shared.raise_target_after_dropout();
     assert_eq!(shared.target_frames(), 360);
     // Changing the size while running applies at once.
-    shared.set_cushion(CushionMode::Manual, 12.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 12.0);
     assert_eq!(shared.target_frames(), 576);
 }
 
 #[test]
 fn switching_mode_while_running_applies_at_once() {
-    let shared = cushion_bridge(CushionMode::Safe, 10.0);
-    shared.raise_target_after_underrun();
-    shared.set_cushion(CushionMode::LowLatency, 10.0);
+    let shared = shared_with_bridge_buffer(BufferMode::Auto, 10.0);
+    shared.raise_target_after_dropout();
+    shared.set_bridge_buffer(BufferMode::Minimum, 10.0);
     assert_eq!(shared.target_frames(), 608);
 }
 
@@ -380,7 +380,7 @@ fn structural_edits_never_wait_for_the_audio_side() {
     path.restore_plugins(Vec::new());
 }
 
-/// Dragging an insert's mix, toggling its bypass and moving a plugin
+/// Dragging an effect's mix, toggling its bypass and moving a plugin
 /// control reach the plugin without the runtime, so they never wait for
 /// the audio side: the worker finishes while this thread holds it.
 #[test]
@@ -427,7 +427,7 @@ fn mix_bypass_and_controls_never_wait_for_the_audio_side() {
 /// A state capture, a preference save, marking a state stale and a full
 /// editor sync all go through the published links: the worker finishes
 /// while this thread holds the chain runtime, and its capture succeeds.  A
-/// capture off the plugin's main thread is deferred and leaves the insert
+/// capture off the plugin's main thread is deferred and leaves the effect
 /// stale with its previous blob.
 #[test]
 fn capture_and_prefs_never_wait_for_the_audio_side() {
@@ -561,12 +561,12 @@ fn a_latency_change_republishes_without_the_audio_side() {
     });
 }
 
-/// The audio thread is held inside a CLAP insert's `process` (it holds the
+/// The audio thread is held inside a CLAP effect's `process` (it holds the
 /// chain lock and the plugin's processor) while the UI sets a control
 /// 10 000 times and services, reads and captures the plugin.  None of it
 /// may wait for the audio side: it all finishes while the block is still
 /// held.  Released, the audio side delivers the newest value, and the
-/// insert was never paused or skipped.
+/// effect was never paused or skipped.
 #[test]
 fn clap_controls_never_wait_for_the_audio_side() {
     use crate::audio::clap::tests::{
@@ -721,7 +721,7 @@ fn views_name_the_loaded_instance() {
         Some(handle.instance_id())
     );
     // An editor still holding the old instance no longer matches once
-    // the insert is replaced.
+    // the effect is replaced.
     shared.remove_plugin(1);
     shared.paths[0].edit_chain(|chain| {
         chain.insert_clap_for_test(crate::audio::clap::tests::fake_plugin_for_test(false))
@@ -748,7 +748,7 @@ fn a_processing_failure_is_published_on_the_next_service_frame() {
     shared.paths[0].process_plugins(&mut left, &mut right, 64);
     assert!(
         !shared.paths[0].has_plugins(),
-        "the failed insert left the chain"
+        "the failed effect left the chain"
     );
     assert_eq!(
         shared.plugin_views_version(),
@@ -772,10 +772,10 @@ fn a_processing_failure_is_published_on_the_next_service_frame() {
 }
 
 /// A CLAP port change is a reload request: the next service frame
-/// rebuilds the insert, with no error, and its latency stays counted until
+/// rebuilds the effect, with no error, and its latency stays counted until
 /// then.
 #[test]
-fn a_clap_port_change_reloads_the_insert_on_the_next_service_frame() {
+fn a_clap_port_change_reloads_the_effect_on_the_next_service_frame() {
     let _main = claim_main_thread();
     let loads = std::rc::Rc::new(std::cell::Cell::new(0));
     let counted = std::rc::Rc::clone(&loads);
@@ -852,28 +852,28 @@ fn a_reload_request_with_a_new_device_rate_pending_loads_once_at_that_rate() {
 }
 
 #[test]
-fn followers_are_pushed_live_and_cleared() {
-    use super::{FollowerLink, FollowerPlan};
+fn extra_outputs_are_pushed_live_and_cleared() {
+    use super::{ExtraOutputLink, ExtraOutputPlan};
     use crate::audio::output_map::OutputDeviceSettings;
 
     let shared = super::Shared::new(48_000);
-    let mut plan = FollowerPlan {
+    let mut plan = ExtraOutputPlan {
         count: 2,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    plan.slots[0] = FollowerLink {
+    plan.slots[0] = ExtraOutputLink {
         device_id: "ALSA:hw:CARD=1,DEV=0".to_owned(),
         node_name: "speakers".to_owned(),
-        virtual_out: false,
-        publish: false,
+        virtual_output: false,
+        virtual_output_on: false,
     };
-    plan.slots[1] = FollowerLink {
+    plan.slots[1] = ExtraOutputLink {
         device_id: String::new(),
         node_name: String::new(),
-        virtual_out: true,
-        publish: true,
+        virtual_output: true,
+        virtual_output_on: true,
     };
-    shared.set_followers(
+    shared.set_extra_outputs(
         &[
             OutputDeviceSettings {
                 level_db: -6.0,
@@ -883,22 +883,22 @@ fn followers_are_pushed_live_and_cleared() {
             OutputDeviceSettings::default(),
         ],
         &plan,
-        &[(CushionMode::LowLatency, 10.0), (CushionMode::Safe, 10.0)],
+        &[(BufferMode::Minimum, 10.0), (BufferMode::Auto, 10.0)],
     );
-    assert_eq!(shared.follower_count(), 2);
-    assert_eq!(shared.snapshot().follower_count, 2);
-    let live = shared.follower_plan();
+    assert_eq!(shared.extra_output_count(), 2);
+    assert_eq!(shared.snapshot().extra_output_count, 2);
+    let live = shared.extra_output_plan();
     assert_eq!(live.slots[0].node_name, "speakers");
     assert_eq!(live.slots[0].device_id, "ALSA:hw:CARD=1,DEV=0");
-    assert!(live.slots[1].virtual_out && live.slots[1].publish);
+    assert!(live.slots[1].virtual_output && live.slots[1].virtual_output_on);
     assert_eq!(
-        shared.follower_bus(0).cushion_mode(),
-        CushionMode::LowLatency
+        shared.extra_output_bus(0).bridge_buffer_mode(),
+        BufferMode::Minimum
     );
 
-    shared.set_followers(&[], &FollowerPlan::default(), &[]);
-    assert_eq!(shared.follower_count(), 0);
-    assert!(shared.follower_plan().slots[0].node_name.is_empty());
+    shared.set_extra_outputs(&[], &ExtraOutputPlan::default(), &[]);
+    assert_eq!(shared.extra_output_count(), 0);
+    assert!(shared.extra_output_plan().slots[0].node_name.is_empty());
 }
 
 #[test]
@@ -965,8 +965,8 @@ fn tap_needs_enough_frames() {
         shared.copy_tap(&mut oversized, super::TAP_CAPACITY_FRAMES + 1),
         0
     );
-    // A session reset empties the tap: nothing is read until the new
-    // session has written a whole window again.
+    // A run reset empties the tap: nothing is read until the new
+    // run has written a whole window again.
     shared.reset();
     assert_eq!(shared.copy_tap(&mut out, 32), 0);
 }
@@ -992,7 +992,7 @@ fn tap_does_not_touch_bridge_ring() {
 }
 
 #[test]
-fn a_new_session_keeps_record_the_click() {
+fn a_new_run_keeps_record_the_click() {
     let previous = super::Shared::new(48_000);
     let mut next = super::Shared::new(48_000);
     next.adopt_settings_from(&previous);
@@ -1004,7 +1004,7 @@ fn a_new_session_keeps_record_the_click() {
 }
 
 #[test]
-fn a_new_session_keeps_the_metronome_transport_but_not_the_beat() {
+fn a_new_run_keeps_the_metronome_transport_but_not_the_beat() {
     let previous = super::Shared::new(48_000);
     previous.metronome_running.store(true, Ordering::Relaxed);
     previous

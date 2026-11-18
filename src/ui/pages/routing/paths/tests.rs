@@ -1,7 +1,7 @@
 use super::{
-    align_status, card_caption, card_hint, custom_label, step_level, step_trim, trim_text,
+    align_status, custom_label, layout_caption, layout_hint, step_level, step_trim, trim_text,
 };
-use crate::app::cards::Card;
+use crate::app::layouts::PathLayout;
 use crate::ui::widgets::path_level_text;
 
 #[test]
@@ -16,10 +16,10 @@ fn levels_read_and_step_within_the_range() {
 }
 
 #[test]
-fn every_card_has_a_caption() {
-    for card in Card::ALL {
-        assert!(!card_caption(card).is_empty());
-        assert!(!card_hint(card).is_empty());
+fn every_layout_has_a_caption() {
+    for layout in PathLayout::ALL {
+        assert!(!layout_caption(layout).is_empty());
+        assert!(!layout_hint(layout).is_empty());
     }
 }
 
@@ -36,16 +36,16 @@ fn trims_step_within_five_ms() {
 }
 
 #[test]
-fn custom_names_the_last_card_and_align_reads_the_latencies() {
+fn custom_names_the_last_layout_and_align_reads_the_latencies() {
     assert_eq!(custom_label(None), "Custom");
     assert_eq!(
-        custom_label(Some(Card::PerDevice)),
+        custom_label(Some(PathLayout::PerDevice)),
         "Custom · edited from Per-device mixes"
     );
     let mut app = crate::app::blank_app();
-    assert!(app.apply_card(Card::Blend));
+    assert!(app.apply_layout(PathLayout::Blend));
     let devices =
-        |app: &crate::app::RigWerkApp| vec![app.device_alignment(0).expect("the clock device")];
+        |app: &crate::app::RigWerkApp| vec![app.device_alignment(0).expect("the clock output")];
     assert_eq!(align_status(&devices(&app)), "nothing to align");
     let second = app.path_slots()[1];
     app.engine.screenshot_path_latency(second, 96);

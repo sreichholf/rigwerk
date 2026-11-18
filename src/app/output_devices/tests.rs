@@ -1,7 +1,7 @@
 use super::{click_channels, device_channel_count, loudest};
 use crate::app::blank_app;
 use crate::app::devices::inventory_fingerprint;
-use crate::app::settings::FollowerPref;
+use crate::app::settings::ExtraOutputPref;
 use crate::audio::{DeviceItem, EngineState, MAX_OUTPUT_CHANNELS};
 
 #[test]
@@ -31,7 +31,7 @@ fn click_chips_stop_at_the_native_pipewire_stereo_stream() {
 }
 
 #[test]
-fn a_pipewire_labelled_follower_keeps_its_open_channel_count() {
+fn a_pipewire_labelled_extra_output_keeps_its_open_channel_count() {
     let mut app = blank_app();
     app.inventory.outputs.push(DeviceItem {
         id: "alsa:pipewire".to_owned(),
@@ -42,17 +42,17 @@ fn a_pipewire_labelled_follower_keeps_its_open_channel_count() {
         preferred: false,
         asio_clsid: None,
     });
-    app.followers.push(FollowerPref {
+    app.extra_outputs.push(ExtraOutputPref {
         id: "alsa:pipewire".to_owned(),
         backend: "PIPEWIRE".to_owned(),
         name: "PipeWire Sound Server".to_owned(),
-        ..FollowerPref::default()
+        ..ExtraOutputPref::default()
     });
     app.engine.state = EngineState::Running;
-    app.snapshot.follower_channel_counts[0] = 6;
+    app.snapshot.extra_output_channel_counts[0] = 6;
     let rows = app.output_device_rows();
     let row = &rows[1];
-    assert_eq!(row.follower_index, Some(0));
+    assert_eq!(row.extra_output_index, Some(0));
     assert_eq!(row.channels, 6);
     assert_eq!(row.click_channels, 6);
 }
@@ -70,7 +70,7 @@ fn output(id: &str, name: &str) -> DeviceItem {
 }
 
 #[test]
-fn a_clock_device_the_scan_missed_reads_missing() {
+fn a_clock_output_the_scan_missed_reads_missing() {
     let mut app = blank_app();
     app.inventory.outputs.push(output("hw:Speaker", "Studio"));
     app.inventory.outputs.push(output("hw:Phones", "Phones"));
@@ -94,7 +94,7 @@ fn a_clock_device_the_scan_missed_reads_missing() {
 }
 
 #[test]
-fn a_clock_device_back_in_the_scan_is_not_missing() {
+fn a_clock_output_back_in_the_scan_is_not_missing() {
     let mut app = blank_app();
     app.inventory.outputs.push(output("hw:Speaker", "Studio"));
     app.output_idx = 0;
@@ -109,7 +109,7 @@ fn a_clock_device_back_in_the_scan_is_not_missing() {
 }
 
 #[test]
-fn a_clock_device_chosen_after_a_miss_is_not_missing() {
+fn a_clock_output_chosen_after_a_miss_is_not_missing() {
     let mut app = blank_app();
     app.inventory.outputs.push(output("hw:Speaker", "Studio"));
     app.inventory.outputs.push(output("hw:Phones", "Phones"));
@@ -133,7 +133,7 @@ fn a_clock_device_chosen_after_a_miss_is_not_missing() {
 }
 
 #[test]
-fn a_preview_clock_device_is_never_missing() {
+fn a_preview_clock_output_is_never_missing() {
     let app = blank_app();
     assert!(app.selected_output().demo);
     assert!(!app.output_device_rows()[0].missing);
@@ -149,41 +149,51 @@ fn the_loudest_channel_stops_at_the_device_count() {
 #[test]
 fn device_levels_follow_the_rows_and_their_meters() {
     let mut app = blank_app();
-    let mut out = FollowerPref::virtual_out();
+    let mut out = ExtraOutputPref::virtual_output();
     out.settings.mute = true;
-    app.followers.push(out);
+    app.extra_outputs.push(out);
     app.meter_out_channels[1] = 0.5;
     app.peak_out_channels[1] = 0.6;
     app.peak_out_channels[4] = 1.0;
-    app.meter_follower_channels[0][0] = 0.25;
-    app.peak_follower_channels[0][0] = 0.3;
+    app.meter_extra_output_channels[0][0] = 0.25;
+    app.peak_extra_output_channels[0][0] = 0.3;
     let levels = app.output_device_levels();
     assert_eq!(levels.len(), 2);
     let clock = &levels[0];
     assert_eq!((clock.meter, clock.peak, clock.mute), (0.5, 0.6, false));
-    let virtual_out = &levels[1];
-    assert_eq!(virtual_out.name, FollowerPref::virtual_out().name);
+    let virtual_output = &levels[1];
+    assert_eq!(virtual_output.name, ExtraOutputPref::virtual_output().name);
     assert_eq!(
-        (virtual_out.meter, virtual_out.peak, virtual_out.mute),
+        (
+            virtual_output.meter,
+            virtual_output.peak,
+            virtual_output.mute
+        ),
         (0.25, 0.3, true)
     );
 }
 
 #[test]
-fn a_follower_reading_needs_a_running_bridge_and_a_stream() {
+fn a_extra_output_reading_needs_a_running_bridge_and_a_stream() {
     let mut app = blank_app();
     app.snapshot.output_rate = 48_000;
-    app.snapshot.follower_rates[1] = 44_100;
-    app.snapshot.follower_buffer_frames[1] = 256;
-    app.snapshot.follower_ring_fill[1] = 0.5;
-    app.snapshot.follower_target_frames[1] = 240;
-    assert_eq!(app.follower_reading(1), None, "stopped");
+    app.snapshot.extra_output_rates[1] = 44_100;
+    app.snapshot.extra_output_buffer_frames[1] = 256;
+    app.snapshot.extra_output_ring_fill[1] = 0.5;
+    app.snapshot.extra_output_target_frames[1] = 240;
+    assert_eq!(app.extra_output_reading(1), None, "stopped");
     app.engine.state = EngineState::Running;
-    let reading = app.follower_reading(1).expect("a stream");
+    let reading = app.extra_output_reading(1).expect("a stream");
     assert_eq!(reading.rate, 44_100);
     assert_eq!(reading.buffer_frames, 256);
     assert_eq!(reading.fill, 0.5);
-    assert!((reading.cushion_ms - 5.0).abs() < 1.0e-4, "{reading:?}");
-    assert_eq!(app.follower_reading(0), None, "no stream of its own");
-    assert_eq!(app.follower_reading(crate::audio::MAX_FOLLOWERS), None);
+    assert!(
+        (reading.bridge_buffer_ms - 5.0).abs() < 1.0e-4,
+        "{reading:?}"
+    );
+    assert_eq!(app.extra_output_reading(0), None, "no stream of its own");
+    assert_eq!(
+        app.extra_output_reading(crate::audio::MAX_EXTRA_OUTPUTS),
+        None
+    );
 }

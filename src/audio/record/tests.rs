@@ -156,14 +156,14 @@ fn a_full_ring_records_exactly_those_frames() {
 fn frames_are_channel_interleaved_and_other_sources_are_ignored() {
     let temp = TempTake::new("interleaved");
     let recorder = Recorder::new();
-    assert!(recorder.arm(temp.wav(), 8, 2, RecordSource::Follower(1)));
+    assert!(recorder.arm(temp.wav(), 8, 2, RecordSource::ExtraOutput(1)));
     wait_phase(&recorder, RecordPhase::Recording);
 
     recorder.push(RecordSource::Clock, &[9.0, 9.0]);
-    recorder.push(RecordSource::Follower(0), &[8.0, 8.0]);
-    recorder.push(RecordSource::Follower(1), &[0.25, -0.5]);
-    recorder.push(RecordSource::Follower(2), &[7.0, 7.0]);
-    recorder.push(RecordSource::Follower(1), &[0.75, 0.125]);
+    recorder.push(RecordSource::ExtraOutput(0), &[8.0, 8.0]);
+    recorder.push(RecordSource::ExtraOutput(1), &[0.25, -0.5]);
+    recorder.push(RecordSource::ExtraOutput(2), &[7.0, 7.0]);
+    recorder.push(RecordSource::ExtraOutput(1), &[0.75, 0.125]);
     let live = recorder.status();
     assert_eq!(live.frames, 2);
     assert_eq!(live.overruns, 0);
@@ -185,7 +185,7 @@ fn arm_returns_false_while_a_take_is_recording() {
     let path = temp.wav();
     assert!(recorder.arm(path.clone(), 8, 1, RecordSource::Clock));
     wait_phase(&recorder, RecordPhase::Recording);
-    assert!(!recorder.arm(path, 48_000, 2, RecordSource::Follower(0)));
+    assert!(!recorder.arm(path, 48_000, 2, RecordSource::ExtraOutput(0)));
     let status = recorder.status();
     assert_eq!(status.phase, RecordPhase::Recording);
     assert_eq!(status.rate, 8);
@@ -202,7 +202,7 @@ fn a_push_while_idle_does_nothing() {
     let recorder = Recorder::new();
     let mapped = DeviceFrame::from_lanes(&[0.5, -0.25], 2);
     recorder.push(RecordSource::Clock, &[0.5, -0.25]);
-    push_device_frame(&recorder, RecordSource::Follower(0), &mapped, 2);
+    push_device_frame(&recorder, RecordSource::ExtraOutput(0), &mapped, 2);
     recorder.disarm();
     let status = recorder.status();
     assert_eq!(status.phase, RecordPhase::Idle);
@@ -244,7 +244,7 @@ fn push_device_frame_writes_the_mapped_channels() {
     assert!(recorder.arm(temp.wav(), 8, 2, RecordSource::Clock));
     wait_phase(&recorder, RecordPhase::Recording);
     let mapped = DeviceFrame::from_lanes(&[0.25, -0.5, 0.75], 2);
-    push_device_frame(&recorder, RecordSource::Follower(3), &mapped, 2);
+    push_device_frame(&recorder, RecordSource::ExtraOutput(3), &mapped, 2);
     push_device_frame(&recorder, RecordSource::Clock, &mapped, 2);
     let done = finish(&recorder);
     assert!(done.error.is_none(), "{done:?}");

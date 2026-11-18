@@ -83,10 +83,10 @@ impl RigWerkApp {
                     };
                     let hint = match slot {
                         GateSlot::Pre => {
-                            "Before inserts: gates single-coil / interface hiss into amp sims."
+                            "Before effects: gates single-coil / interface hiss into amp sims."
                         }
                         GateSlot::Post => {
-                            "After inserts (default): gates idle roar / gain-stage hiss."
+                            "After effects (default): gates idle roar / gain-stage hiss."
                         }
                     };
                     if hinted_tab(ui, label, gate.slot == slot, TEAL, hint) {
@@ -178,8 +178,8 @@ impl RigWerkApp {
             ui.add_space(10.0);
             ui.label(
                 RichText::new(match gate.slot {
-                    GateSlot::Pre => "PRE · before inserts",
-                    GateSlot::Post => "POST · after inserts",
+                    GateSlot::Pre => "PRE · before effects",
+                    GateSlot::Post => "POST · after effects",
                 })
                 .size(ts(10.5))
                 .color(MUTED),
@@ -202,8 +202,8 @@ impl RigWerkApp {
             } else if gate.slot != current.slot {
                 self.push_log(
                     match gate.slot {
-                        GateSlot::Pre => "Gate slot: PRE inserts.",
-                        GateSlot::Post => "Gate slot: POST inserts.",
+                        GateSlot::Pre => "Gate slot: PRE effects.",
+                        GateSlot::Post => "Gate slot: POST effects.",
                     },
                     LogTone::Amber,
                 );

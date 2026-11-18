@@ -5,28 +5,28 @@ use super::{
     default_record_folder, folder_from_env, format_elapsed, overrun_label, record_source,
     record_source_for, recording_path, resolved_record_folder, sanitize_take_name, stamp_from_unix,
 };
-use crate::app::settings::FollowerPref;
+use crate::app::settings::ExtraOutputPref;
 use crate::audio::RecordSource;
 
-fn follower(name: &str) -> FollowerPref {
-    FollowerPref {
+fn extra_output(name: &str) -> ExtraOutputPref {
+    ExtraOutputPref {
         name: name.to_owned(),
-        ..FollowerPref::default()
+        ..ExtraOutputPref::default()
     }
 }
 
 #[test]
 fn record_source_uses_the_clock_without_a_cable() {
-    let followers = [
-        follower("Speakers (Realtek)"),
-        follower("CABLE Output (VB-Audio Virtual Cable)"),
+    let extra_outputs = [
+        extra_output("Speakers (Realtek)"),
+        extra_output("CABLE Output (VB-Audio Virtual Cable)"),
     ];
     assert!(matches!(
-        record_source_for(true, &followers),
+        record_source_for(true, &extra_outputs),
         RecordSource::Clock
     ));
     assert!(matches!(
-        record_source_for(false, &followers),
+        record_source_for(false, &extra_outputs),
         RecordSource::Clock
     ));
     assert!(matches!(record_source_for(true, &[]), RecordSource::Clock));
@@ -34,48 +34,48 @@ fn record_source_uses_the_clock_without_a_cable() {
 
 #[test]
 fn record_source_uses_the_first_vb_cable_on_windows() {
-    let followers = [
-        follower("Speakers (Realtek)"),
-        follower("CABLE Input (VB-Audio Virtual Cable)"),
-        follower("cable input (vb-audio)"),
+    let extra_outputs = [
+        extra_output("Speakers (Realtek)"),
+        extra_output("CABLE Input (VB-Audio Virtual Cable)"),
+        extra_output("cable input (vb-audio)"),
     ];
     assert!(matches!(
-        record_source_for(true, &followers),
-        RecordSource::Follower(1)
+        record_source_for(true, &extra_outputs),
+        RecordSource::ExtraOutput(1)
     ));
     assert!(matches!(
-        record_source_for(false, &followers),
+        record_source_for(false, &extra_outputs),
         RecordSource::Clock
     ));
-    let only = [follower("CABLE Input (VB-Audio Virtual Cable)")];
+    let only = [extra_output("CABLE Input (VB-Audio Virtual Cable)")];
     assert!(matches!(
         record_source_for(true, &only),
-        RecordSource::Follower(0)
+        RecordSource::ExtraOutput(0)
     ));
 
-    // The publish slot keeps the name "RigWerk Out" after it is bound to the
+    // The virtual output keeps the name "RigWerk Out" after it is bound to the
     // cable.  The display name is not "CABLE Input".
     let published = [
-        follower("Speakers (Realtek)"),
-        FollowerPref {
+        extra_output("Speakers (Realtek)"),
+        ExtraOutputPref {
             name: "RigWerk Out".into(),
-            virtual_out: true,
-            ..FollowerPref::default()
+            virtual_output: true,
+            ..ExtraOutputPref::default()
         },
-        follower("CABLE Input (VB-Audio Virtual Cable)"),
+        extra_output("CABLE Input (VB-Audio Virtual Cable)"),
     ];
     assert!(matches!(
         record_source_for(true, &published),
-        RecordSource::Follower(1)
+        RecordSource::ExtraOutput(1)
     ));
     assert!(matches!(
         record_source_for(false, &published),
         RecordSource::Clock
     ));
 
-    let chosen = record_source(&followers);
+    let chosen = record_source(&extra_outputs);
     if cfg!(target_os = "windows") {
-        assert!(matches!(chosen, RecordSource::Follower(1)));
+        assert!(matches!(chosen, RecordSource::ExtraOutput(1)));
     } else {
         assert!(matches!(chosen, RecordSource::Clock));
     }

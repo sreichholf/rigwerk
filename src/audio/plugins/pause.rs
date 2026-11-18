@@ -46,7 +46,7 @@ pub(crate) enum BlockAction {
     /// Process as usual.
     Process,
     /// Make the stop call (`setProcessing(false)` / `stop_processing`),
-    /// then call [`PauseHandshake::stopped`].  The insert plays this block
+    /// then call [`PauseHandshake::stopped`].  The effect plays this block
     /// dry-delayed through the skip path.
     Stop,
     /// Stopped: keep playing dry-delayed.
@@ -55,7 +55,7 @@ pub(crate) enum BlockAction {
     /// call [`PauseHandshake::started`] if it succeeded, then process this
     /// block.  If it failed, call [`PauseHandshake::start_failed`] and play
     /// the block dry: the plugin is then paused and later blocks skip until
-    /// the UI resumes it.  An insert that already failed skips the start
+    /// the UI resumes it.  An effect that already failed skips the start
     /// call and goes straight to `start_failed`.
     Start,
 }
@@ -335,7 +335,7 @@ impl PauseHandshake {
     }
 
     /// Blocks the audio side played dry because of a pause, ever.
-    // Read by the tests; Diagnostics counts pauses per insert instead
+    // Read by the tests; Diagnostics counts pauses per effect instead
     // (`SlotControls`), so a reset there does not clear this.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn paused_blocks(&self) -> u64 {

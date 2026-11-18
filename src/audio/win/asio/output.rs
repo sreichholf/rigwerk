@@ -23,7 +23,7 @@ use super::samples::write_asio_sample;
 use super::ASIO_OUTPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
 use crate::audio::devices::pick_input_config;
-use crate::audio::follower::FollowerOutputs;
+use crate::audio::extra_output::ExtraOutputOutputs;
 use crate::audio::input::{make_input_stream, open_input_device};
 use crate::audio::AsioPanelSide;
 
@@ -58,9 +58,9 @@ pub(crate) fn run_asio_output_bridge(
         // The worker publishes `output_rate` before the driver starts.  The
         // UI thread reloads plugins; this thread must not.
 
-        let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
-        input.run(output_rate, &shared, &stop, || followers.sync(&shared))?;
-        drop(followers);
+        let mut extra_outputs = ExtraOutputOutputs::new(config.output_buffer, output_rate);
+        input.run(output_rate, &shared, &stop, || extra_outputs.sync(&shared))?;
+        drop(extra_outputs);
         drop(worker);
     } else {
         // Open the input first and publish its real rate, so the ASIO output
@@ -103,12 +103,12 @@ pub(crate) fn run_asio_output_bridge(
             output_channels
         ));
 
-        let mut followers = FollowerOutputs::new(config.output_buffer, output_rate);
+        let mut extra_outputs = ExtraOutputOutputs::new(config.output_buffer, output_rate);
         while !stop.load(Ordering::Relaxed) {
-            followers.sync(&shared);
+            extra_outputs.sync(&shared);
             thread::sleep(Duration::from_millis(20));
         }
-        drop(followers);
+        drop(extra_outputs);
         drop(input_stream);
         drop(worker);
     }
@@ -174,7 +174,7 @@ pub(crate) fn open_asio_output_worker(
         }
         Err(error) => {
             // Same as the WASAPI open: never leave a driver open running
-            // detached, or a later session could open the device a second
+            // detached, or a later run could open the device a second
             // time.  The bridge thread stays alive until the driver returns,
             // so the engine keeps reporting the teardown as pending.
             worker_stop.store(true, Ordering::Relaxed);
@@ -238,7 +238,7 @@ pub(crate) fn run_asio_output_loop(
         return Err(error);
     }
     // Cap at the map's addressable width so routing layer ② can reach every
-    // open channel.  Unused channels follow the clock device's unused mode
+    // open channel.  Unused channels follow the clock output's unused mode
     // (Silent vs MonoCopy).
     let output_channels = (counts.out as usize).min(crate::audio::MAX_OUTPUT_CHANNELS);
 

@@ -40,14 +40,14 @@ pub(super) fn sync_wanted_links(
     own: u32,
     source: &str,
     sink: &str,
-    followers: &[(usize, &str)],
+    extra_outputs: &[(usize, &str)],
     shared: &Shared,
 ) {
     // Nothing changed and no link is still waiting to appear.
     if !graph.dirty && made.values().all(|link| link.seen) {
-        // Still re-check when the follower list may have changed: compare
+        // Still re-check when the extra output list may have changed: compare
         // against what we would want now.
-        let wanted = graph.wanted_links(own, source, sink, followers);
+        let wanted = graph.wanted_links(own, source, sink, extra_outputs);
         let wanted_ports: HashSet<(u32, u32)> =
             wanted.iter().map(|link| (link.1, link.3)).collect();
         if made.len() == wanted_ports.len() && made.keys().all(|ports| wanted_ports.contains(ports))
@@ -56,7 +56,7 @@ pub(super) fn sync_wanted_links(
         }
     }
     graph.dirty = false;
-    let wanted = graph.wanted_links(own, source, sink, followers);
+    let wanted = graph.wanted_links(own, source, sink, extra_outputs);
     let wanted_ports: HashSet<(u32, u32)> = wanted.iter().map(|link| (link.1, link.3)).collect();
     // Links that are no longer wanted (a device came back with other
     // ports) are removed, on the server too if they still exist.

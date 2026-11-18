@@ -21,7 +21,7 @@ use super::callback::{
 use super::panel::service_asio_panel;
 use super::ASIO_INPUT_CALLBACKS;
 use crate::audio::bridge::rate_path;
-use crate::audio::follower::FollowerOutputs;
+use crate::audio::extra_output::ExtraOutputOutputs;
 use crate::audio::output::open_output;
 use crate::audio::AsioPanelSide;
 
@@ -159,12 +159,12 @@ pub(crate) fn run_asio_bridge(
         output.channels
     ));
 
-    let mut followers = FollowerOutputs::new(config.output_buffer, output.rate);
+    let mut extra_outputs = ExtraOutputOutputs::new(config.output_buffer, output.rate);
     let wait = wait_for_callbacks(
         registration.signal(),
         || stop.load(Ordering::Relaxed),
         || {
-            followers.sync(&shared);
+            extra_outputs.sync(&shared);
             // A stop already in flight must not open the panel on its way out.
             !stop.load(Ordering::Relaxed)
                 && service_asio_panel(&driver, &shared, &[AsioPanelSide::Input])
@@ -176,7 +176,7 @@ pub(crate) fn run_asio_bridge(
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.clear();
-            drop(followers);
+            drop(extra_outputs);
             return Err(if matches!(wait, CallbackWait::Reset) {
                 DRIVER_RESET_MESSAGE
             } else {
@@ -188,7 +188,7 @@ pub(crate) fn run_asio_bridge(
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.abandon();
-            drop(followers);
+            drop(extra_outputs);
             shared.set_device_lost(
                 "The ASIO input stopped responding — the interface may have been unplugged"
                     .to_owned(),
@@ -200,7 +200,7 @@ pub(crate) fn run_asio_bridge(
     let _ = driver.stop();
     let _ = driver.dispose_buffers();
     registration.clear();
-    drop(followers);
+    drop(extra_outputs);
     drop(output);
     Ok(())
 }
@@ -347,7 +347,7 @@ impl<D: Driver> PreparedAsioInput<D> {
             return Ok(());
         };
         // The output side already set its target; this input's blocks feed
-        // into the cushion's floor on top of it.
+        // into the bridge buffer's floor on top of it.
         shared.note_input_block(self.buffer_frames);
 
         if let Err(error) = self.driver.start() {

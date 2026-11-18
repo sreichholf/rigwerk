@@ -1,8 +1,8 @@
 use super::{device_level_line, device_levels_value, output_summary, path_count_label};
 use crate::app::blank_app;
-use crate::app::cards::Card;
+use crate::app::layouts::PathLayout;
 use crate::app::output_devices::DeviceLevel;
-use crate::app::settings::FollowerPref;
+use crate::app::settings::ExtraOutputPref;
 use crate::ui::widgets::{accesskit_frame, node_named};
 use eframe::egui;
 
@@ -21,7 +21,7 @@ fn the_strip_counts_paths_and_shows_the_alignment() {
     assert_eq!(output_summary("+0.0 dB", 2.0), "+0.0 dB · +2.0 ms");
     let mut app = blank_app();
     assert_eq!(app.added_alignment_ms(), 0.0);
-    assert!(app.apply_card(Card::Blend));
+    assert!(app.apply_layout(PathLayout::Blend));
     let second = app.path_slots()[1];
     app.engine.screenshot_path_latency(second, 96);
     assert!((app.added_alignment_ms() - 2.0).abs() < 1e-3);
@@ -47,10 +47,10 @@ fn each_device_reads_its_peak_or_muted() {
 #[test]
 fn the_output_chip_names_each_device_level() {
     let mut app = blank_app();
-    let mut out = FollowerPref::virtual_out();
+    let mut out = ExtraOutputPref::virtual_output();
     out.settings.mute = true;
     let out_name = out.name.clone();
-    app.followers.push(out);
+    app.extra_outputs.push(out);
     app.peak_out_channels[0] = 0.5;
     let clock = app.output_device_rows()[0].name.clone();
     let tree = accesskit_frame(|ui| app.chain_strip(ui, 1200.0));

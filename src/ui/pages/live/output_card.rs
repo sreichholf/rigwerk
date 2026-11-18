@@ -24,7 +24,7 @@ impl RigWerkApp {
     pub(crate) fn output_card(&mut self, ui: &mut egui::Ui) {
         // Top-down, so the card is as tall as its content and the Input card
         // can match that height.  A fixed frame used to pin this row to the
-        // bottom; the followers now follow the body, and nothing is clipped.
+        // bottom; the extra outputs now follow the body, and nothing is clipped.
         ui.set_min_width(ui.available_width());
         self.output_card_body(ui);
         ui.add_space(8.0);
@@ -279,7 +279,7 @@ impl RigWerkApp {
         });
     }
 
-    /// One row under the Output body: a hairline, then the label, follower
+    /// One row under the Output body: a hairline, then the label, extra output
     /// chips and + add.
     pub(crate) fn also_playing_on(&mut self, ui: &mut egui::Ui) {
         use crate::app::chain::ChainSelection;
@@ -287,7 +287,7 @@ impl RigWerkApp {
         use crate::ui::widgets::horizontal_line;
 
         let rows = self.output_device_rows();
-        let followers: Vec<_> = rows.into_iter().filter(|row| !row.clock).collect();
+        let extra_outputs: Vec<_> = rows.into_iter().filter(|row| !row.clock).collect();
         horizontal_line(ui, BORDER_SOFT);
         ui.add_space(6.0);
         // Exact row height (chip text + button padding).
@@ -320,20 +320,20 @@ impl RigWerkApp {
                     // Remaining width, left-to-right so names read naturally.
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-                        if followers.is_empty() {
+                        if extra_outputs.is_empty() {
                             ui.label(RichText::new("clock only").size(ts(9.5)).color(MUTED));
                             return;
                         }
                         // Short chips so about six still fit beside + add.
-                        let name_chars = match followers.len() {
+                        let name_chars = match extra_outputs.len() {
                             1 => 18,
                             2 => 14,
                             3 => 11,
                             _ => 9,
                         };
-                        for (offset, row) in followers.iter().enumerate() {
+                        for (offset, row) in extra_outputs.iter().enumerate() {
                             let index = offset + 1; // clock is 0
-                            let tip = if row.virtual_out {
+                            let tip = if row.virtual_output {
                                 format!("{} · virtual · open in Mixer", row.name)
                             } else if row.missing {
                                 format!("{} · missing · open in Mixer", row.name)
@@ -393,7 +393,7 @@ impl RigWerkApp {
                     "REAL-style: run the WASAPI device at the smallest shared step its driver allows (often about 3 ms instead of 10 ms), like the REAL tool, and queue only that one step. Other apps stay audible and get the shorter step too. Some drivers only offer their 10 ms default; then RigWerk still uses that minimum and labels it in the MODE line."
                 }
                 WasapiOutputMode::Exclusive => {
-                    "Exclusive: open this WASAPI clock device alone at its smallest exclusive period — often lower than shared REAL-style. Other apps cannot play on this device while the bridge holds it. If the driver refuses, RigWerk falls back to shared output with the chosen buffer."
+                    "Exclusive: open this WASAPI clock output alone at its smallest exclusive period — often lower than shared REAL-style. Other apps cannot play on this device while the bridge holds it. If the driver refuses, RigWerk falls back to shared output with the chosen buffer."
                 }
             });
         let _ = response;
@@ -423,7 +423,7 @@ impl RigWerkApp {
     pub(crate) fn output_clock_controls(&mut self, ui: &mut egui::Ui) {
         let special_wasapi = self.wants_low_latency_output();
         ui.horizontal(|ui| {
-            ui.label(micro_label("OUT CLOCK", DIM));
+            ui.label(micro_label("Clock output", DIM));
             let mut rate = self.output_rate;
             let shown = if rate == 0 {
                 "Match input".to_owned()

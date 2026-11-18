@@ -5,7 +5,7 @@ use crate::app::blank_app;
 use crate::audio::claim_main_thread;
 
 #[test]
-fn the_report_names_the_chain_and_insert_counts() {
+fn the_report_names_the_chain_and_effect_counts() {
     let app = blank_app();
     let path = app.engine.shared.path(0);
     path.insert_delay_for_test(16);
@@ -50,30 +50,30 @@ fn a_skip_that_rounds_to_zero_reads_below_one_percent() {
 }
 
 #[test]
-fn a_chain_that_skipped_every_chunk_says_no_insert_ran() {
+fn a_chain_that_skipped_every_chunk_says_no_effect_ran() {
     use crate::audio::{LockStats, PluginLockReport};
     let skipped = PluginLockReport {
         chain: LockStats {
             attempts: 4,
             skips: 4,
         },
-        inserts: vec![LockStats::default()],
+        effects: vec![LockStats::default()],
         chain_poisoned: false,
     };
-    assert!(super::no_insert_ran(&skipped));
+    assert!(super::no_effect_ran(&skipped));
     let ran = PluginLockReport {
-        inserts: vec![LockStats {
+        effects: vec![LockStats {
             attempts: 2,
             skips: 0,
         }],
         ..skipped.clone()
     };
-    assert!(!super::no_insert_ran(&ran));
+    assert!(!super::no_effect_ran(&ran));
     let poisoned = PluginLockReport {
         chain_poisoned: true,
         ..skipped
     };
-    assert!(!super::no_insert_ran(&poisoned));
+    assert!(!super::no_effect_ran(&poisoned));
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn a_poisoned_chain_is_named_instead_of_a_skip_rate() {
         "{text}"
     );
     assert!(!text.contains("chain: 0 skipped of 1 chunk"), "{text}");
-    assert!(!text.contains(super::NO_INSERT_TRIED), "{text}");
+    assert!(!text.contains(super::NO_EFFECT_TRIED), "{text}");
 
     // Reset clears the attempts but not the poison, so the section still
     // has to show the dead chain instead of "No plugin blocks yet.".
@@ -123,7 +123,7 @@ fn a_zero_latency_edit_panic_is_named_in_diagnostics() {
         text.contains("chain unavailable after an internal error"),
         "{text}"
     );
-    assert!(!text.contains(super::NO_INSERT_TRIED), "{text}");
+    assert!(!text.contains(super::NO_EFFECT_TRIED), "{text}");
 }
 
 #[test]

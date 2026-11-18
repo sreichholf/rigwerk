@@ -1,11 +1,11 @@
 //! One line on Live Bridge summing up the Mixer page: each stage of the
 //! selected path's chain in order, with a way to open the full mixer.
-//! The PLUGINS stage's BYP pill skips that path's inserts without writing
-//! each insert's own bypass.  With several paths the label names the path
+//! The EFFECTS stage's Bypass all pill skips that path's effects without
+//! writing each effect's own bypass.  With several paths the label names the path
 //! and counts them ("Main · 3 paths"), and the Output chip adds what the
 //! alignment delays the output by (`RigWerkApp::added_alignment_ms`).
 //! Under its text the Output chip draws one thin meter per output device
-//! (`RigWerkApp::output_device_levels`), clock device first; its hover text
+//! (`RigWerkApp::output_device_levels`), clock output first; its hover text
 //! and AccessKit value name each device and its peak.
 
 use eframe::egui;
@@ -134,7 +134,7 @@ impl RigWerkApp {
                 let arrow_w = 18.0;
                 let chain_w = (ui.available_width() - button_w - button_gap).max(0.0);
                 let arrows = (stages.len().saturating_sub(1)) as f32 * arrow_w;
-                let stage_w = ((chain_w - arrows) / stages.len().max(1) as f32).max(72.0);
+                let stage_w = ((chain_w - arrows) / stages.len().max(1) as f32).max(108.0);
                 let (chain_rect, _) =
                     ui.allocate_exact_size(Vec2::new(chain_w, 40.0), Sense::hover());
                 let mut chain = ui.new_child(
@@ -181,8 +181,9 @@ impl RigWerkApp {
                     let plugins = entry.selection == ChainSelection::Plugins;
                     // The pill sits on the label row.  A label that still fits
                     // is unchanged, so an off bypass looks like the stage did.
-                    let fitted = plugins
-                        .then(|| fit_text(ui, entry.label, &label_font, (stage_w - 42.0).max(0.0)));
+                    let fitted = plugins.then(|| {
+                        fit_text(ui, entry.label, &label_font, (stage_w - 86.0).max(0.0))
+                    });
                     ui.painter().text(
                         rect.left_top() + Vec2::new(9.0, 7.0),
                         egui::Align2::LEFT_TOP,
@@ -215,7 +216,7 @@ impl RigWerkApp {
                         Some(value),
                     );
                     let pill_rect = egui::Rect::from_min_max(
-                        egui::pos2(rect.right() - 40.0, rect.top() + 3.0),
+                        egui::pos2(rect.right() - 82.0, rect.top() + 3.0),
                         egui::pos2(rect.right() - 4.0, rect.top() + 20.0),
                     );
                     if plugins {

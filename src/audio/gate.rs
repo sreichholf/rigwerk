@@ -12,18 +12,18 @@
 //! 3. One-pole smooth of the gain toward 1 (open/hold) or the range floor
 //!    (closed), using the gate's attack when rising and release when falling.
 //!
-//! The PRE/POST slot is where this stage sits relative to the plugin inserts;
+//! The PRE/POST slot is where this stage sits relative to the plugin effects;
 //! the DSP itself is the same in either place.
 
 use serde::{Deserialize, Serialize};
 
-/// Where the gate sits relative to the plugin inserts.
+/// Where the gate sits relative to the plugin effects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GateSlot {
-    /// Before inserts: gates single-coil / interface hiss into amp sims.
+    /// Before effects: gates single-coil / interface hiss into amp sims.
     Pre,
-    /// After inserts: gates idle roar / gain-stage hiss.  The default.
+    /// After effects: gates idle roar / gain-stage hiss.  The default.
     #[default]
     Post,
 }

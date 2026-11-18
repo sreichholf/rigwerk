@@ -2,7 +2,7 @@
 //!
 //! The device list is the Mixer's (`output_device_rows`), in the same order.
 //! The page keeps its own selected device (`routing_device`); "Open in
-//! Mixer" selects that device there. Followers and RigWerk Out appear when
+//! Mixer" selects that device there. Extra outputs and RigWerk Out appear when
 //! they are in the session.
 //!
 //! With one path the matrix is today's Mix L / Mix R onto the device's
@@ -23,8 +23,8 @@ use egui::{
 };
 
 use crate::app::alignment::{channel_list, RoutingWarning, RoutingWarningKind};
-use crate::app::cards::Card;
 use crate::app::chain::ChainSelection;
+use crate::app::layouts::PathLayout;
 use crate::app::output_devices::OutputDeviceRow;
 use crate::app::paths::PathInfo;
 use crate::app::{Page, RigWerkApp};
@@ -58,9 +58,9 @@ pub(crate) const OUTPUTS_STACK_BELOW: f32 = 760.0;
 pub(crate) const SAME_DEVICES_NOTE: &str =
     "Same devices, same order as Mixer -> Output. Add, remove and set levels there.";
 
-/// Under the clock device's matrix.
-pub(crate) const CLOCK_DEVICE_NOTE: &str =
-    "Extra pairs on the clock device cost nothing: same callback, no extra clock or cushion.";
+/// Under the clock output's matrix.
+pub(crate) const CLOCK_OUTPUT_NOTE: &str =
+    "Extra pairs on the clock output cost nothing: same callback, no extra clock or bridge buffer.";
 
 /// Under a 1-channel device's matrix: the mapping rule for mono devices.
 pub(crate) const MONO_DEVICE_NOTE: &str =
@@ -157,7 +157,7 @@ pub(crate) fn shows_unused_choice(
 }
 
 /// The device the page shows: `index` while it exists, else the clock
-/// device.
+/// output.
 pub(crate) fn selected_device(index: usize, count: usize) -> usize {
     if index < count {
         index
@@ -185,8 +185,8 @@ pub(crate) enum RoutingAction {
     Select(usize),
     /// Go to the Mixer with this device selected.
     OpenInMixer(usize),
-    /// Set up paths and routing from a card.
-    ApplyCard(Card),
+    /// Set up paths and routing from a layout.
+    ApplyLayout(PathLayout),
     /// Add an empty, muted path.
     AddPath,
     /// Add a muted copy of this path slot.
@@ -380,7 +380,7 @@ fn device_row(
     let text_right = rect.right() - 10.0;
     let (tag, tag_color) = if row.clock {
         (Some("CLOCK"), BLUE)
-    } else if row.virtual_out {
+    } else if row.virtual_output {
         (Some("VIRTUAL"), GREEN)
     } else {
         (None, BLUE)
@@ -598,14 +598,14 @@ fn paths_reaching<'a>(
 }
 
 impl RigWerkApp {
-    /// The stored settings of output device `index` (0 = clock, then followers).
+    /// The stored settings of output device `index` (0 = clock, then extra outputs).
     fn output_settings_mut(&mut self, index: usize) -> Option<&mut OutputDeviceSettings> {
         if index == 0 {
-            Some(&mut self.clock_device)
+            Some(&mut self.clock_output)
         } else {
-            self.followers
+            self.extra_outputs
                 .get_mut(index - 1)
-                .map(|follower| &mut follower.settings)
+                .map(|extra_output| &mut extra_output.settings)
         }
     }
 
@@ -616,10 +616,10 @@ impl RigWerkApp {
                 self.chain_selected = ChainSelection::OutputDevice(index);
                 self.page = Page::Mixer;
             }
-            RoutingAction::ApplyCard(card) => {
-                if !self.apply_card(card) {
+            RoutingAction::ApplyLayout(layout) => {
+                if !self.apply_layout(layout) {
                     self.push_log(
-                        format!("{}: no free path slot yet, try again.", card.label()),
+                        format!("{}: no free path slot yet, try again.", layout.label()),
                         LogTone::Amber,
                     );
                 }
@@ -1060,7 +1060,7 @@ impl RigWerkApp {
             let title_font = FontId::new(ts(16.0), FontFamily::Proportional);
             let tag_w = if row.clock {
                 tag_width(ui, "CLOCK") + ui.spacing().item_spacing.x
-            } else if row.virtual_out {
+            } else if row.virtual_output {
                 tag_width(ui, "VIRTUAL") + ui.spacing().item_spacing.x
             } else {
                 0.0
@@ -1075,7 +1075,7 @@ impl RigWerkApp {
                 .on_hover_text(&row.name);
             if row.clock {
                 clock_tag(ui);
-            } else if row.virtual_out {
+            } else if row.virtual_output {
                 crate::ui::widgets::virtual_tag(ui);
             }
             if multi {
@@ -1236,13 +1236,14 @@ impl RigWerkApp {
                                 self.meter_out_channels[channel],
                                 self.peak_out_channels[channel],
                             )
-                        } else if let Some(follower) = index
-                            .checked_sub(1)
-                            .filter(|&follower| follower < self.meter_follower_channels.len())
+                        } else if let Some(extra_output) =
+                            index.checked_sub(1).filter(|&extra_output| {
+                                extra_output < self.meter_extra_output_channels.len()
+                            })
                         {
                             (
-                                self.meter_follower_channels[follower][channel],
-                                self.peak_follower_channels[follower][channel],
+                                self.meter_extra_output_channels[extra_output][channel],
+                                self.peak_extra_output_channels[extra_output][channel],
                             )
                         } else {
                             (0.0, 0.0)
@@ -1320,7 +1321,7 @@ impl RigWerkApp {
         }
         if row.clock {
             ui.add(
-                egui::Label::new(RichText::new(CLOCK_DEVICE_NOTE).size(ts(10.0)).color(MUTED))
+                egui::Label::new(RichText::new(CLOCK_OUTPUT_NOTE).size(ts(10.0)).color(MUTED))
                     .wrap(),
             );
         }

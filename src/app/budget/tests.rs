@@ -51,7 +51,7 @@ fn the_budget_adds_the_reported_parts_and_labels_their_origin() {
         labels,
         vec![
             "INPUT BLOCK",
-            "BRIDGE CUSHION",
+            "BRIDGE BUFFER",
             "PLUGIN CHAIN",
             "OUTPUT STEP",
             "AFTER PLAYBACK NODE"
@@ -92,7 +92,7 @@ fn a_stopped_budget_labels_planned_buffers_and_leaves_out_the_unknown_part() {
     };
     assert_eq!(source("INPUT BLOCK"), LatencySource::Planned);
     assert_eq!(source("OUTPUT STEP"), LatencySource::Planned);
-    assert_eq!(source("BRIDGE CUSHION"), LatencySource::Setting);
+    assert_eq!(source("BRIDGE BUFFER"), LatencySource::Setting);
     assert!(budget
         .parts
         .iter()

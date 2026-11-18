@@ -627,7 +627,7 @@ fn merge_native_nodes(
         }
     };
     if nodes.sources.is_empty() && nodes.sinks.is_empty() {
-        notes.push("PipeWire is running but published no audio sources or sinks.".to_owned());
+        notes.push("PipeWire is running but offers no audio sources or sinks.".to_owned());
         return;
     }
     if !nodes.sources.is_empty() {

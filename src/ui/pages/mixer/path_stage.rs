@@ -394,7 +394,7 @@ pub(super) fn path_inspector(
                     .stroke(Stroke::new(1.0, BORDER_SOFT))
                     .corner_radius(CornerRadius::same(8)),
             )
-            .on_hover_text("Fade this path out and drop it with its inserts")
+            .on_hover_text("Fade this path out and drop it with its effects")
             .clicked()
         {
             actions.push(PathAction::Remove(info.slot));

@@ -125,7 +125,7 @@ fn arm_recording_refuses_a_clock_with_no_opened_endpoint() {
         !engine.arm_recording(path.clone(), RecordSource::Clock),
         "a rate without a channel count is not an endpoint"
     );
-    engine.shared.clock_device.set_channels(2);
+    engine.shared.clock_output.set_channels(2);
     engine.shared.output_rate.store(0, Ordering::Relaxed);
     assert!(!engine.arm_recording(path.clone(), RecordSource::Clock));
     engine
@@ -141,39 +141,39 @@ fn arm_recording_refuses_a_clock_with_no_opened_endpoint() {
 }
 
 #[test]
-fn arm_recording_uses_the_followers_opened_rate() {
+fn arm_recording_uses_the_extra_outputs_opened_rate() {
     let engine = AudioEngine::new(48_000);
-    let path = recording_file("follower-rate");
+    let path = recording_file("extra-output-rate");
     engine
         .shared
         .set_output(44_100, 64, crate::audio::OutputMode::Standard, "test");
-    engine.shared.followers[0].set_channels(2);
+    engine.shared.extra_outputs[0].set_channels(2);
     assert!(
-        !engine.arm_recording(path.clone(), RecordSource::Follower(0)),
-        "a generic follower with no opened rate does not borrow the clock rate"
+        !engine.arm_recording(path.clone(), RecordSource::ExtraOutput(0)),
+        "a generic extra output with no opened rate does not borrow the clock rate"
     );
-    assert!(!engine.arm_recording(path.clone(), RecordSource::Follower(99)));
+    assert!(!engine.arm_recording(path.clone(), RecordSource::ExtraOutput(99)));
 
-    engine.shared.follower_bus(0).set_playback_rate(48_000);
-    assert!(engine.arm_recording(path.clone(), RecordSource::Follower(0)));
+    engine.shared.extra_output_bus(0).set_playback_rate(48_000);
+    assert!(engine.arm_recording(path.clone(), RecordSource::ExtraOutput(0)));
     wait_until_recording(&engine);
     assert_eq!(engine.recording_status().rate, 48_000);
     assert_eq!(engine.recording_status().channels, 2);
     engine.disarm_recording();
     wait_until_idle(&engine);
 
-    // In-graph duplex followers are written at the graph rate, with no
+    // In-graph duplex extra outputs are written at the graph rate, with no
     // resampler.  That is the one fallback to the clock rate.
-    engine.shared.follower_bus(0).set_playback_rate(0);
+    engine.shared.extra_output_bus(0).set_playback_rate(0);
     engine.shared.direct.store(true, Ordering::Relaxed);
-    assert!(engine.arm_recording(path.clone(), RecordSource::Follower(0)));
+    assert!(engine.arm_recording(path.clone(), RecordSource::ExtraOutput(0)));
     wait_until_recording(&engine);
     assert_eq!(engine.recording_status().rate, 44_100);
     engine.disarm_recording();
     wait_until_idle(&engine);
 
-    engine.shared.followers[0].set_channels(0);
-    assert!(!engine.arm_recording(path.clone(), RecordSource::Follower(0)));
+    engine.shared.extra_outputs[0].set_channels(0);
+    assert!(!engine.arm_recording(path.clone(), RecordSource::ExtraOutput(0)));
     let _ = std::fs::remove_file(path);
 }
 
@@ -183,7 +183,7 @@ fn arm_recording_stop_lets_the_writer_finish() {
     engine
         .shared
         .set_output(48_000, 64, crate::audio::OutputMode::Standard, "test");
-    engine.shared.clock_device.set_channels(2);
+    engine.shared.clock_output.set_channels(2);
     let path = recording_file("stop");
     assert!(engine.arm_recording(path.clone(), RecordSource::Clock));
     wait_until_recording(&engine);

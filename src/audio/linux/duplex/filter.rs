@@ -12,20 +12,20 @@ use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::mixer::OutputMixer;
-use crate::audio::output_map::MAX_FOLLOWERS;
+use crate::audio::output_map::MAX_EXTRA_OUTPUTS;
 use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::Shared;
 
 use super::links::Observed;
-use super::virtual_source::PublishSlot;
+use super::virtual_source::VirtualOutputSlot;
 use super::{properties, MAX_FRAMES};
 
 /// The node RigWerk publishes for the duplex path.
 const DUPLEX_NODE: &str = "RigWerk";
-/// Input FL/FR, clock output FL/FR, then one stereo pair per follower slot.
+/// Input FL/FR, clock output FL/FR, then one stereo pair per extra output slot.
 const INPUT_PORTS: usize = 2;
 const CLOCK_OUT: usize = 2;
-const TOTAL_PORTS: usize = INPUT_PORTS + CLOCK_OUT + MAX_FOLLOWERS * 2;
+const TOTAL_PORTS: usize = INPUT_PORTS + CLOCK_OUT + MAX_EXTRA_OUTPUTS * 2;
 
 /// State the realtime callback owns.  The main loop only reads the atomics
 /// it shares through `Arc`s; the struct itself lives in a `Box` that the
@@ -37,8 +37,8 @@ struct ProcessData {
     ports: [*mut c_void; TOTAL_PORTS],
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
-    /// Finished mix for the published RigWerk Out virtual source.
-    publish: Arc<PublishSlot>,
+    /// Finished mix for RigWerk Out, the virtual output.
+    virtual_output: Arc<VirtualOutputSlot>,
     rate: u32,
     /// The graph rate and quantum the callback last ran with, for the main
     /// loop's status text.
@@ -89,14 +89,14 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         ports,
         scratch_l,
         scratch_r,
-        publish,
+        virtual_output,
         ..
     } = data;
     let shared: &Shared = shared;
     let in_l = buffer(ports[0]);
     let in_r = buffer(ports[1]);
-    // Clock + every preallocated follower pair; unlinked ports stay null.
-    let mut out_bufs = [ptr::null_mut::<f32>(); CLOCK_OUT + MAX_FOLLOWERS * 2];
+    // Clock + every preallocated extra output pair; unlinked ports stay null.
+    let mut out_bufs = [ptr::null_mut::<f32>(); CLOCK_OUT + MAX_EXTRA_OUTPUTS * 2];
     for (slot, out) in out_bufs.iter_mut().enumerate() {
         *out = buffer(ports[INPUT_PORTS + slot]);
     }
@@ -116,16 +116,16 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     let enabled_r = shared.input_enabled[1].load(Ordering::Relaxed);
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
-    let publish_active = (0..shared.follower_count())
-        .any(|slot| shared.follower_is_virtual(slot) && shared.follower_is_published(slot));
-    if publish_active {
-        publish.begin_write();
+    let virtual_output_active = (0..shared.extra_output_count())
+        .any(|slot| shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot));
+    if virtual_output_active {
+        virtual_output.begin_write();
     }
     // A cycle longer than the scratch runs in scratch-sized pieces, so every
-    // output sample of the cycle is written.  The publish slot only keeps the
+    // output sample of the cycle is written.  The virtual output slot only keeps the
     // first MAX_FRAMES; device ports still get the whole cycle.
     let mut offset = 0;
-    let mut published = 0usize;
+    let mut written = 0usize;
     while offset < frames {
         let count = (frames - offset).min(MAX_FRAMES);
         for index in 0..count {
@@ -174,30 +174,34 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
                         wrote = true;
                     }
                 }
-                // Stereo port pair (clock, then each follower).  Record the
+                // Stereo port pair (clock, then each extra output).  Record the
                 // frame written into that device buffer.  The RigWerk Out
-                // publish below is a different endpoint and is not recorded.
+                // virtual output below is a different endpoint and is not recorded.
                 if wrote {
                     let source = if device == 0 {
                         RecordSource::Clock
                     } else {
-                        RecordSource::Follower(device - 1)
+                        RecordSource::ExtraOutput(device - 1)
                     };
                     push_device_frame(&shared.recorder, source, mapped, 2);
                 }
-                if publish_active && device > 0 && published + index < MAX_FRAMES {
+                if virtual_output_active && device > 0 && written + index < MAX_FRAMES {
                     let slot = device - 1;
-                    if shared.follower_is_virtual(slot) && shared.follower_is_published(slot) {
-                        publish.write_frame(published + index, mapped.sample(0), mapped.sample(1));
+                    if shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot) {
+                        virtual_output.write_frame(
+                            written + index,
+                            mapped.sample(0),
+                            mapped.sample(1),
+                        );
                     }
                 }
             },
         );
-        published = (published + count).min(MAX_FRAMES);
+        written = (written + count).min(MAX_FRAMES);
         offset += count;
     }
-    if publish_active {
-        publish.end_write(published);
+    if virtual_output_active {
+        virtual_output.end_write(written);
     }
     shared.in_l.store(peak_l.to_bits(), Ordering::Relaxed);
     shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
@@ -254,7 +258,7 @@ impl Filter {
         rate: u32,
         shared: Arc<Shared>,
         observed: &Observed,
-        publish: Arc<PublishSlot>,
+        virtual_output: Arc<VirtualOutputSlot>,
     ) -> Result<Self, String> {
         let rate_hint = format!("1/{}", rate.max(1));
         let props = properties(&[
@@ -277,11 +281,11 @@ impl Filter {
             unsafe { pw_sys::pw_filter_new(core.as_raw_ptr(), name.as_ptr(), props.into_raw()) };
         let raw = NonNull::new(raw).ok_or_else(|| "pw_filter_new failed".to_owned())?;
 
-        // Clock device is stereo; followers get their own stereo port pairs.
+        // Clock output is stereo; extra outputs get their own stereo port pairs.
         let mut mixer = OutputMixer::new(rate, 2);
         mixer.prepare(MAX_FRAMES);
         mixer.publish_device_channels(&shared);
-        mixer.publish_follower_channels(&shared);
+        mixer.publish_extra_output_channels(&shared);
         let mut state = Box::new(StateData {
             shared: Arc::clone(&shared),
             error: Arc::clone(&observed.error),
@@ -292,7 +296,7 @@ impl Filter {
             ports: [ptr::null_mut(); TOTAL_PORTS],
             scratch_l: vec![0.0; MAX_FRAMES],
             scratch_r: vec![0.0; MAX_FRAMES],
-            publish,
+            virtual_output,
             // Unknown until the first cycle, which then publishes the real
             // graph rate.
             rate: 0,
@@ -328,7 +332,7 @@ impl Filter {
             ("output_FL".to_owned(), "FL", spa_sys::SPA_DIRECTION_OUTPUT),
             ("output_FR".to_owned(), "FR", spa_sys::SPA_DIRECTION_OUTPUT),
         ];
-        for slot in 0..MAX_FOLLOWERS {
+        for slot in 0..MAX_EXTRA_OUTPUTS {
             port_names.push((
                 format!("follow_{slot}_FL"),
                 "FL",

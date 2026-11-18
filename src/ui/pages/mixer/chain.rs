@@ -77,11 +77,11 @@ pub(crate) fn output_summary(output_gain: f32, mute: bool, devices: usize) -> St
     )
 }
 
-/// Tooltip for the path-level insert bypass, shared by Live and Mixer.
+/// Tooltip for the path-level effect bypass, shared by Live and Mixer.
 pub(crate) const CHAIN_BYPASS_HINT: &str =
-    "Skips the inserts on this path and keeps their latency.";
+    "Skips the effects on this path and keeps their latency.";
 
-/// Turns the Live PLUGINS stage hot while the path's chain bypass is on:
+/// Turns the Live EFFECTS stage hot while the path's chain bypass is on:
 /// amber, and the summary reads `bypassed`.  Off leaves the stages as
 /// [`live_chain_entries`] built them.
 pub(crate) fn apply_chain_bypass(entries: &mut [ChainEntry], chain_bypass: bool) {
@@ -109,12 +109,12 @@ pub(crate) fn plugin_group_summary(views: &[PluginView]) -> (String, bool) {
     } else if views.len() == 1 {
         (views[0].name.clone(), true)
     } else {
-        (format!("{active} inserts"), active > 0)
+        (format!("{active} effects"), active > 0)
     }
 }
 
-/// Fixed-order stages for Live (inserts collapsed to one chip).  Gate sits
-/// before or after inserts according to its slot.
+/// Fixed-order stages for Live (effects collapsed to one chip).  Gate sits
+/// before or after effects according to its slot.
 pub(crate) fn live_chain_entries(
     input_gain: f32,
     pre: &EqSettings,
@@ -146,7 +146,7 @@ pub(crate) fn live_chain_entries(
     ];
     let plugins = ChainEntry {
         selection: ChainSelection::Plugins,
-        label: "PLUGINS",
+        label: "EFFECTS",
         summary: plugins_summary,
         color: AMBER,
         live: plugins_on,

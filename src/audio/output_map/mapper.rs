@@ -110,7 +110,7 @@ pub(crate) struct DeviceControls {
     /// What the mapper last aligned with, for the UI: the delay per path
     /// slot ([`NOT_ROUTED`] when the device does not play it), the path it
     /// waits for ([`NO_PATH`]), each path's chain latency, and the rate (0:
-    /// no mixer has published in this session yet).
+    /// no mixer has published in this run yet).
     applied: [AtomicU32; MAX_PATHS],
     applied_latency: [AtomicU32; MAX_PATHS],
     waits_for: AtomicU8,
@@ -157,7 +157,7 @@ impl DeviceControls {
             .store(settings.click_mask, Ordering::Relaxed);
     }
 
-    /// Copies the settings (not the meters) of a previous session.
+    /// Copies the settings (not the meters) of a previous run.
     pub(crate) fn adopt_settings_from(&self, previous: &Self) {
         let copy_bool = |to: &AtomicBool, from: &AtomicBool| {
             to.store(from.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -180,7 +180,7 @@ impl DeviceControls {
         );
     }
 
-    /// Clears the meters and the channel count for a fresh session.
+    /// Clears the meters and the channel count for a fresh run.
     pub(crate) fn reset(&self) {
         for meter in &self.meters {
             meter.store(0.0f32.to_bits(), Ordering::Relaxed);
@@ -191,7 +191,7 @@ impl DeviceControls {
     }
 
     /// Forgets the published alignment: no mixer maps this device now (the
-    /// bridge stopped, or a follower that is not fed).  Atomics only.
+    /// bridge stopped, or an extra output that is not fed).  Atomics only.
     pub(crate) fn clear_alignment(&self) {
         self.applied_rate.store(0, Ordering::Release);
     }
@@ -202,7 +202,7 @@ impl DeviceControls {
     }
 
     /// The alignment the mapper works with right now (the delays its taps
-    /// settle on), or `None` before a mixer published one in this session.
+    /// settle on), or `None` before a mixer published one in this run.
     pub(crate) fn alignment(&self) -> Option<AlignmentReport> {
         let rate = self.applied_rate.load(Ordering::Acquire);
         if rate == 0 {
@@ -259,7 +259,7 @@ impl DeviceControls {
     }
 
     /// Publishes a known channel count outside the callback (stream open or
-    /// a live follower add).
+    /// a live extra output add).
     pub(crate) fn set_channels(&self, channels: usize) {
         self.channels
             .store(channels.min(u32::MAX as usize) as u32, Ordering::Relaxed);
@@ -320,7 +320,7 @@ impl DeviceControls {
 /// all carry the same unused-channel value.
 const EXTRA: usize = MAX_OUTPUT_CHANNELS;
 /// Samples a [`DeviceFrame`] holds: one per mapped channel plus the shared
-/// slot.  A generic follower's ring carries this many lanes at most.
+/// slot.  A generic extra output's ring carries this many lanes at most.
 pub(crate) const SLOTS: usize = MAX_OUTPUT_CHANNELS + 1;
 
 /// How many lanes carry every channel of a `channels`-channel device: one
@@ -564,7 +564,7 @@ impl DeviceMapper {
         }
     }
 
-    /// Follows a device whose channel count changed (a generic follower's
+    /// Follows a device whose channel count changed (a generic extra output's
     /// stream reopened on another device).  Fixed storage, so this is safe
     /// in the callback; the next block adopts the controls outright.
     pub(crate) fn set_channels(&mut self, channels: usize) {
@@ -618,7 +618,7 @@ impl DeviceMapper {
             self.click_mask
         };
         if !self.click_mapped {
-            // Not mapped last block (a follower whose ring was not fed, or
+            // Not mapped last block (an extra output whose ring was not fed, or
             // a mapper that just went live): what the line holds is stale.
             self.silence_click_line();
         }
@@ -692,7 +692,7 @@ impl DeviceMapper {
 
     /// Forgets every queued tick.  O(1); the line then reads silence and is
     /// skipped until the next non-zero tick.  The mixer calls it for a
-    /// follower slot that is not live, so one that comes back does not
+    /// extra output slot that is not live, so one that comes back does not
     /// replay what it held.
     pub(crate) fn silence_click_line(&mut self) {
         self.click_line.reset();

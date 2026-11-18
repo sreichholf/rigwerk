@@ -15,7 +15,7 @@ use crate::audio::shared::Shared;
 /// Opens the panel when any of `sides` was requested.  One driver (a duplex
 /// bridge) passes both sides and opens once.  Returns whether the call ran,
 /// so the callback watchdog can ignore the time the panel held this thread.
-/// A driver with no panel, or one that refuses, does not end the session.
+/// A driver with no panel, or one that refuses, does not end the run.
 pub(crate) fn service_asio_panel(
     driver: &impl Driver,
     shared: &Shared,
@@ -33,7 +33,7 @@ pub(crate) fn service_asio_panel(
     // Held across the call, including a panic, so a stalled heartbeat is
     // not left suppressed after the panel returns.
     let _open = shared.asio_panel.enter();
-    // The driver's own reset request ends the session when the panel
+    // The driver's own reset request ends the run when the panel
     // changes the buffer or the rate.  A panel that fails to open does not.
     let _ = driver.open_control_panel();
     true

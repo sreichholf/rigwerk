@@ -47,7 +47,7 @@ pub(crate) enum OutputStream {
 
 /// Opens the playback side.
 ///
-/// On Windows, `exclusive` tries WASAPI exclusive mode first (clock device
+/// On Windows, `exclusive` tries WASAPI exclusive mode first (clock output
 /// only).  On refuse it falls back to shared cpal with `buffer_frames` — not
 /// REAL-style.  `real_style` opens IAudioClient3 at the driver's smallest
 /// shared engine step; on refuse it also falls back to shared cpal.

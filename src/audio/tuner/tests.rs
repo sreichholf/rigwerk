@@ -198,10 +198,10 @@ fn cents_sign_points_at_the_direction_to_tune() {
 
 #[test]
 fn presets_are_well_formed() {
-    assert_eq!(PRESETS.len(), 20);
-    for (index, tuning) in PRESETS.iter().enumerate() {
+    assert_eq!(TUNINGS.len(), 20);
+    for (index, tuning) in TUNINGS.iter().enumerate() {
         assert!(
-            PRESETS[..index].iter().all(|other| other.id != tuning.id),
+            TUNINGS[..index].iter().all(|other| other.id != tuning.id),
             "duplicate id {}",
             tuning.id
         );
@@ -275,8 +275,8 @@ fn preset_ids_and_names_match_the_table() {
         ("bass-5-drop-a", &["A0", "E1", "A1", "D2", "G2"]),
         ("bass-6-b", &["B0", "E1", "A1", "D2", "G2", "C3"]),
     ];
-    assert_eq!(PRESETS.len(), EXPECTED.len());
-    for (tuning, (id, names)) in PRESETS.iter().zip(EXPECTED) {
+    assert_eq!(TUNINGS.len(), EXPECTED.len());
+    for (tuning, (id, names)) in TUNINGS.iter().zip(EXPECTED) {
         assert_eq!(tuning.id, id);
         let actual: Vec<&str> = tuning.strings.iter().map(|(name, _)| *name).collect();
         assert_eq!(actual, names, "{}: string names", id);
@@ -287,7 +287,7 @@ fn preset_ids_and_names_match_the_table() {
 fn preset_groups_are_listed_in_order() {
     let mut seen = Vec::new();
     let mut counts = [0usize; 3];
-    for tuning in PRESETS {
+    for tuning in TUNINGS {
         let position = TuningGroup::ALL
             .iter()
             .position(|group| *group == tuning.group)
@@ -312,7 +312,7 @@ fn preset_groups_are_listed_in_order() {
 
 #[test]
 fn preset_lookup_round_trips() {
-    for (index, tuning) in PRESETS.iter().enumerate() {
+    for (index, tuning) in TUNINGS.iter().enumerate() {
         assert_eq!(tuning_index(tuning.id), Some(index));
         assert_eq!(
             tuning_by_id(tuning.id).map(|found| found.id),
@@ -490,7 +490,7 @@ fn preset_folds_harmonics_to_the_open_string() {
 fn open_strings_match_their_own_row() {
     // Every string of every preset, including the octave pairs a
     // divisor tie could otherwise fold downward.
-    for tuning in PRESETS {
+    for tuning in TUNINGS {
         let id = tuning.id;
         for (index, (name, midi)) in tuning.strings.iter().enumerate() {
             let mono = tone(midi_to_hz(*midi, 440.0), RATE, 0.5, frames_for(RATE), 1);

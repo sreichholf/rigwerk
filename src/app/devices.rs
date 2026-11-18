@@ -199,7 +199,7 @@ pub(crate) fn restore_device(
 /// A device identity from the preferences file that startup did not confirm.
 ///
 /// `save` writes this back, and leaves the on-screen row on the fallback,
-/// until the person picks that side or a patch finds a device there.
+/// until the person picks that side or a session finds a device there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HeldDevice {
     pub(crate) name: Option<String>,
@@ -444,18 +444,18 @@ impl RigWerkApp {
             .unwrap_or_else(|| missing_output_device())
     }
 
-    /// The person chose this low-latency input, or a patch found it.
+    /// The person chose this low-latency input, or a session found it.
     /// Later saves may write that identity. A silent fallback does not call this.
     pub(crate) fn accept_asio_device(&mut self) {
         self.asio_held = None;
     }
 
-    /// The person chose this system input, or a patch found it.
+    /// The person chose this system input, or a session found it.
     pub(crate) fn accept_input_device(&mut self) {
         self.input_held = None;
     }
 
-    /// The person chose this output, or a patch found it.  No scan has
+    /// The person chose this output, or a session found it.  No scan has
     /// missed it yet, so its clock row does not read missing.
     pub(crate) fn accept_output_device(&mut self) {
         self.output_held = None;
@@ -750,8 +750,8 @@ impl RigWerkApp {
 
         self.inventory = fresh;
         self.inventory_fingerprint = inventory_fingerprint(&self.inventory);
-        crate::app::settings::rematch_windows_virtual_out(
-            &mut self.followers,
+        crate::app::settings::rematch_windows_virtual_output(
+            &mut self.extra_outputs,
             &self.inventory.outputs,
         );
         self.asio_idx = device_index(&self.inventory.asio, &asio_id, &asio_backend, &asio_name)

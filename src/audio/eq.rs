@@ -1,5 +1,5 @@
 //! The built-in 5-band guitar EQ on the master mix.  There are two: one
-//! before the plugin inserts and one after them.
+//! before the plugin effects and one after them.
 //!
 //! Two shelves and three bells, each a biquad filter from the Audio EQ
 //! Cookbook (R. Bristow-Johnson).  Every sample is filtered as it passes, so
@@ -10,9 +10,9 @@ use std::f32::consts::PI;
 /// Where an EQ sits in the master chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EqSlot {
-    /// Before the plugin inserts: shapes what the plugins receive.
+    /// Before the plugin effects: shapes what the plugins receive.
     Pre = 0,
-    /// After the plugin inserts: shapes what the plugins produce.
+    /// After the plugin effects: shapes what the plugins produce.
     Post = 1,
 }
 

@@ -6,8 +6,8 @@ use eframe::App;
 
 use crate::ui::widgets::{run_frame, test_input};
 
-use super::settings::FollowerPref;
-use super::settings::{load_preferences, Preferences, Preset, PREFERENCES_KEY};
+use super::settings::ExtraOutputPref;
+use super::settings::{load_preferences, Preferences, Session, PREFERENCES_KEY};
 use super::startup::{restore_saved_devices, StartupGate};
 use super::{blank_app, repaint_interval, ACTIVE_REPAINT, IDLE_REPAINT};
 use crate::audio::{
@@ -149,7 +149,7 @@ fn record_the_click_reaches_the_engine_and_the_save() {
 #[test]
 fn save_writes_the_output_devices() {
     let mut app = blank_app();
-    app.clock_device = OutputDeviceSettings {
+    app.clock_output = OutputDeviceSettings {
         level_db: -9.0,
         mute: true,
         path_map: crate::audio::PathMapSettings::first(ChannelMap {
@@ -160,16 +160,16 @@ fn save_writes_the_output_devices() {
         align: false,
         click_mask: 0,
     };
-    app.followers = vec![FollowerPref {
+    app.extra_outputs = vec![ExtraOutputPref {
         id: "hw:Phones".to_owned(),
         backend: "ALSA".to_owned(),
         name: "Phones".to_owned(),
-        cushion_mode: 1,
-        ..FollowerPref::default()
+        bridge_buffer_mode: 1,
+        ..ExtraOutputPref::default()
     }];
     let (_, saved) = save_text(&mut app);
-    assert_eq!(saved.clock_device, app.clock_device);
-    assert_eq!(saved.followers, app.followers);
+    assert_eq!(saved.clock_output, app.clock_output);
+    assert_eq!(saved.extra_outputs, app.extra_outputs);
 }
 
 #[test]
@@ -346,10 +346,10 @@ fn an_explicit_output_pick_replaces_the_held_identity() {
 }
 
 #[test]
-fn a_preset_that_finds_the_output_may_be_saved() {
+fn a_session_that_finds_the_output_may_be_saved() {
     let mut app = absent_studio();
     assert!(app.output_held.is_some());
-    app.sessions.push(Preset {
+    app.sessions.push(Session {
         name: "Phones".to_owned(),
         input: "Other interface".to_owned(),
         input_id: "asio:other".to_owned(),
@@ -357,9 +357,9 @@ fn a_preset_that_finds_the_output_may_be_saved() {
         output: "Headphones".to_owned(),
         output_id: "phones".to_owned(),
         output_backend: "WASAPI".to_owned(),
-        ..Preset::default()
+        ..Session::default()
     });
-    app.apply_preset(0);
+    app.apply_session(0);
     assert!(app.output_held.is_none());
     assert!(app.asio_held.is_none());
     assert_eq!(app.selected_output().id, "phones");
@@ -371,9 +371,9 @@ fn a_preset_that_finds_the_output_may_be_saved() {
 }
 
 #[test]
-fn a_preset_that_misses_the_device_keeps_the_stored_id() {
+fn a_session_that_misses_the_device_keeps_the_stored_id() {
     let mut app = absent_studio();
-    app.sessions.push(Preset {
+    app.sessions.push(Session {
         name: "Gone".to_owned(),
         input: "Missing interface".to_owned(),
         input_id: "asio:missing".to_owned(),
@@ -381,9 +381,9 @@ fn a_preset_that_misses_the_device_keeps_the_stored_id() {
         output: "Missing monitors".to_owned(),
         output_id: "asio-out:nope".to_owned(),
         output_backend: "ASIO".to_owned(),
-        ..Preset::default()
+        ..Session::default()
     });
-    app.apply_preset(0);
+    app.apply_session(0);
     assert_eq!(
         app.output_held.as_ref().map(|held| held.id.as_str()),
         Some("asio-out:studio")

@@ -1,4 +1,4 @@
-//! The multi-path parts of Signal Routing: the routing cards (starting
+//! The multi-path parts of Signal Routing: the routing layouts (starting
 //! points), the signal flow strip, and the Paths layer (one card per path).
 //!
 //! Everything here only draws and queues [`RoutingAction`]s; the page
@@ -8,7 +8,7 @@ use eframe::egui;
 use egui::{Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Sense, Stroke, Vec2};
 
 use crate::app::alignment::DeviceAlignment;
-use crate::app::cards::Card;
+use crate::app::layouts::PathLayout;
 use crate::app::paths::PathInfo;
 use crate::app::RigWerkApp;
 use crate::audio::{MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_TRIM_MAX_MS};
@@ -23,28 +23,28 @@ use crate::ui::widgets::{
 use super::outputs::RoutingAction;
 use crate::ui::theme::path_colour;
 
-/// Under the cards.
-pub(crate) const CARDS_NOTE: &str =
-    "A card sets up paths and routing. It never deletes inserts; missing paths are added.";
+/// Under the layouts.
+pub(crate) const LAYOUTS_NOTE: &str =
+    "A layout sets up paths and routing. It never deletes effects; missing paths are added.";
 
 /// Height of one path card (and of the Add path tile).
 const PATH_CARD_H: f32 = 176.0;
 
-/// The mono line under a card's title.
-pub(crate) fn card_caption(card: Card) -> &'static str {
-    match card {
-        Card::Single => "today · one chain",
-        Card::DryWet => "split · no sum",
-        Card::Blend => "sum · clean under drive",
-        Card::DualAmp => "sum · two amps",
-        Card::PerDevice => "each device own path",
+/// The mono line under a layout's title.
+pub(crate) fn layout_caption(layout: PathLayout) -> &'static str {
+    match layout {
+        PathLayout::Single => "today · one chain",
+        PathLayout::DryWet => "split · no sum",
+        PathLayout::Blend => "sum · clean under drive",
+        PathLayout::DualAmp => "sum · two amps",
+        PathLayout::PerDevice => "each device own path",
     }
 }
 
-/// The tag shown when the routing matches no card.
-pub(crate) fn custom_label(last: Option<Card>) -> String {
+/// The tag shown when the routing matches no layout.
+pub(crate) fn custom_label(last: Option<PathLayout>) -> String {
     match last {
-        Some(card) => format!("Custom · edited from {}", card.label()),
+        Some(layout) => format!("Custom · edited from {}", layout.label()),
         None => "Custom".to_owned(),
     }
 }
@@ -155,7 +155,7 @@ pub(crate) fn step_level(level_db: f32, step: f32) -> f32 {
 }
 
 /// The stage names of one path's chain, in signal order: the built-in
-/// stages that are on and every insert.
+/// stages that are on and every effect.
 pub(crate) fn chain_stage_names(app: &RigWerkApp, slot: usize) -> Vec<String> {
     let Some(path) = app.paths.get(slot).and_then(Option::as_ref) else {
         return Vec::new();
@@ -333,8 +333,8 @@ pub(crate) fn small_button(ui: &mut egui::Ui, label: &str, color: Color32) -> eg
     )
 }
 
-/// One starting-point card.  Returns whether it was clicked.
-fn card_pick(ui: &mut egui::Ui, card: Card, on: bool) -> bool {
+/// One starting-point layout.  Returns whether it was clicked.
+fn layout_pick(ui: &mut egui::Ui, layout: PathLayout, on: bool) -> bool {
     let size = Vec2::new(158.0, 46.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
@@ -355,11 +355,11 @@ fn card_pick(ui: &mut egui::Ui, card: Card, on: bool) -> bool {
     painter.text(
         rect.left_top() + Vec2::new(12.0, 15.0),
         Align2::LEFT_CENTER,
-        card.label(),
+        layout.label(),
         FontId::new(ts(11.0), FontFamily::Proportional),
         if on { TEAL } else { TEXT },
     );
-    let caption = card_caption(card);
+    let caption = layout_caption(layout);
     painter.text(
         rect.left_top() + Vec2::new(12.0, 32.0),
         Align2::LEFT_CENTER,
@@ -368,30 +368,30 @@ fn card_pick(ui: &mut egui::Ui, card: Card, on: bool) -> bool {
         MUTED,
     );
     show_focus_ring(ui, &response, rect, 9);
-    let response = response.on_hover_text(card_hint(card));
+    let response = response.on_hover_text(layout_hint(layout));
     row_info(
         &response,
         egui::Role::Button,
         true,
-        format!("{} card", card.label()),
+        format!("{} layout", layout.label()),
         Some(on),
         Some(caption.to_owned()),
     );
     response.clicked()
 }
 
-/// A card's tooltip.
-pub(crate) fn card_hint(card: Card) -> &'static str {
-    match card {
-        Card::Single => "One path on Out 1/2: the routing before paths existed.",
-        Card::DryWet => "The first path on the left channels, the second on the right. Nothing adds up.",
-        Card::Blend => {
+/// A layout's tooltip.
+pub(crate) fn layout_hint(layout: PathLayout) -> &'static str {
+    match layout {
+        PathLayout::Single => "One path on Out 1/2: the routing before paths existed.",
+        PathLayout::DryWet => "The first path on the left channels, the second on the right. Nothing adds up.",
+        PathLayout::Blend => {
             "A copy of the first path, both summed: the clean one at −6 dB under the driven one. The devices align them."
         }
-        Card::DualAmp => {
+        PathLayout::DualAmp => {
             "A copy of the first path, both summed, the second with its polarity flipped. Put a different amp on each; the devices align them."
         }
-        Card::PerDevice => "The first path on the clock device, the second on every follower.",
+        PathLayout::PerDevice => "The first path on the clock output, the second on every extra output.",
     }
 }
 
@@ -465,34 +465,39 @@ fn flow_arrow(ui: &mut egui::Ui) {
 }
 
 impl RigWerkApp {
-    /// The starting-point cards, the current one highlighted, "Custom"
+    /// The starting-point layouts, the current one highlighted, "Custom"
     /// when the routing matches none.
-    pub(super) fn routing_cards_row(
+    pub(super) fn routing_layouts_row(
         &self,
         ui: &mut egui::Ui,
         width: f32,
         actions: &mut Vec<RoutingAction>,
     ) {
-        let current = self.current_card();
+        let current = self.current_layout();
         card(ui, CARD, BORDER, |ui| {
             ui.set_width(width - 32.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(78.0, 46.0), Sense::hover());
-                ui.painter().text(
-                    rect.left_center(),
-                    Align2::LEFT_CENTER,
-                    "START FROM",
+                let label = "Layout";
+                let galley = ui.painter().layout_no_wrap(
+                    label.to_owned(),
                     FontId::new(ts(9.0), FontFamily::Proportional),
                     MUTED,
                 );
-                for card in Card::ALL {
-                    if card_pick(ui, card, current == Some(card)) {
-                        actions.push(RoutingAction::ApplyCard(card));
+                let (rect, _) =
+                    ui.allocate_exact_size(Vec2::new(galley.size().x, 46.0), Sense::hover());
+                ui.painter().galley(
+                    rect.left_center() - Vec2::new(0.0, galley.size().y * 0.5),
+                    galley,
+                    MUTED,
+                );
+                for layout in PathLayout::ALL {
+                    if layout_pick(ui, layout, current == Some(layout)) {
+                        actions.push(RoutingAction::ApplyLayout(layout));
                     }
                 }
                 if current.is_none() {
-                    let text = custom_label(self.routing_last_card);
+                    let text = custom_label(self.routing_last_layout);
                     let galley = ui.painter().layout_no_wrap(
                         text,
                         FontId::new(ts(9.0), FontFamily::Monospace),
@@ -510,7 +515,7 @@ impl RigWerkApp {
                     );
                     ui.painter()
                         .galley(tag.center() - galley.size() / 2.0, galley, AMBER);
-                    let _ = response.on_hover_text("The routing was edited and matches no card.");
+                    let _ = response.on_hover_text("The routing was edited and matches no layout.");
                 }
                 // The note fills what is left of the row, right-aligned; on
                 // a narrow page it is left out rather than wrapped below.
@@ -527,7 +532,7 @@ impl RigWerkApp {
                     );
                     note.add(
                         egui::Label::new(
-                            egui::RichText::new(CARDS_NOTE).size(ts(9.5)).color(MUTED),
+                            egui::RichText::new(LAYOUTS_NOTE).size(ts(9.5)).color(MUTED),
                         )
                         .halign(Align::Max)
                         .wrap(),

@@ -1,4 +1,4 @@
-//! Built-in EQ inspector: one of the two master-bus EQs (pre or post inserts).
+//! Built-in EQ inspector: one of the two master-bus EQs (pre or post effects).
 
 use crate::app::LogTone;
 use eframe::egui;
@@ -322,10 +322,10 @@ pub(crate) fn slot_title(slot: EqSlot) -> &'static str {
 pub(crate) fn slot_hint(slot: EqSlot) -> &'static str {
     match slot {
         EqSlot::Pre => {
-            "Before the plugin inserts: shapes what the plugins receive, e.g. tighten the low end before an amp sim."
+            "Before the plugin effects: shapes what the plugins receive, e.g. tighten the low end before an amp sim."
         }
         EqSlot::Post => {
-            "After the plugin inserts: shapes what the plugins produce, e.g. tame fizz after an amp sim."
+            "After the plugin effects: shapes what the plugins produce, e.g. tame fizz after an amp sim."
         }
     }
 }

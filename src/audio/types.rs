@@ -1,7 +1,7 @@
 //! The public vocabulary of the audio side: devices, inventory, engine
-//! state, live snapshot, cushion mode and the bridge's start settings.
+//! state, live snapshot, bridge buffer mode and the bridge's start settings.
 
-use super::output_map::{MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS};
+use super::output_map::{MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS};
 use super::path::MAX_PATHS;
 
 pub const DEMO_ASIO_ID: &str = "demo:asio";
@@ -58,7 +58,7 @@ impl QuantumInfo {
         let fits = alsa_period > 0 && alsa_period <= quantum && quantum.is_multiple_of(alsa_period);
         let note = if !low_latency {
             format!(
-                "Desktop PipeWire graph is still at {quantum} frames ({:.1} ms at the graph's {:.1} kHz) — that is the shared desktop block, not the OUT CLOCK below. RigWerk marks this route as shared; low latency asks the graph for {} frames.",
+                "Desktop PipeWire graph is still at {quantum} frames ({:.1} ms at the graph's {:.1} kHz) — that is the shared desktop block, not the Clock output below. RigWerk marks this route as shared; low latency asks the graph for {} frames.",
                 ms(quantum),
                 rate as f32 / 1000.0,
                 PIPEWIRE_LOW_QUANTUM
@@ -87,7 +87,7 @@ impl QuantumInfo {
             )
         } else {
             format!(
-                "The ALSA period ({alsa_period} frames) does not divide the PipeWire quantum ({quantum} frames), so the two clocks do not line up and can xrun. Pick a period that divides {quantum} (for example 32 or 64 frames)."
+                "The ALSA period ({alsa_period} frames) does not divide the PipeWire quantum ({quantum} frames), so the two clocks do not line up and can cause a dropout. Pick a period that divides {quantum} (for example 32 or 64 frames)."
             )
         };
         Self {
@@ -167,48 +167,48 @@ pub struct Snapshot {
     /// safety ceiling, metronome and mute.  The tick is included.  Channels
     /// the device does not have read 0.
     pub out_channels: [f32; MAX_OUTPUT_CHANNELS],
-    /// Safety-limiter gain reduction on the clock device, dB.  0 when it
+    /// Safety-limiter gain reduction on the clock output, dB.  0 when it
     /// is not limiting.
     pub out_reduction_db: f32,
-    /// The clock device's real channel count (0 until its first block).
+    /// The clock output's real channel count (0 until its first block).
     pub output_channels: u32,
-    /// How many followers the engine currently maps (≤ [`MAX_FOLLOWERS`]).
-    #[allow(dead_code)] // Exposed for Live / Mixer follower summaries.
-    pub follower_count: usize,
-    /// Block peak per follower channel, after that follower's map, level,
+    /// How many extra outputs the engine currently maps (≤ [`MAX_EXTRA_OUTPUTS`]).
+    #[allow(dead_code)] // Exposed for Live / Mixer extra output summaries.
+    pub extra_output_count: usize,
+    /// Block peak per extra output channel, after that extra output's map, level,
     /// safety ceiling, metronome and mute.  The tick is included.
-    pub follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
-    /// Safety-limiter gain reduction per follower, dB.  0 when not limiting.
-    /// The virtual publish device is one of these slots.
-    pub follower_reduction_db: [f32; MAX_FOLLOWERS],
-    /// Each follower's real channel count (0 until published).
-    pub follower_channel_counts: [u32; MAX_FOLLOWERS],
-    /// Generic followers that failed to open or were lost, and are being
-    /// retried.  PipeWire in-graph followers always read false.
-    pub follower_missing: [bool; MAX_FOLLOWERS],
-    /// Underruns of each generic follower's own ring since its stream
+    pub extra_output_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
+    /// Safety-limiter gain reduction per extra output, dB.  0 when not limiting.
+    /// The virtual output is one of these slots.
+    pub extra_output_reduction_db: [f32; MAX_EXTRA_OUTPUTS],
+    /// Each extra output's real channel count (0 until published).
+    pub extra_output_channel_counts: [u32; MAX_EXTRA_OUTPUTS],
+    /// Generic extra outputs that failed to open or were lost, and are being
+    /// retried.  PipeWire in-graph extra outputs always read false.
+    pub extra_output_missing: [bool; MAX_EXTRA_OUTPUTS],
+    /// Dropouts of each generic extra output's own ring since its stream
     /// opened (a reopen starts again from 0).
-    pub follower_underruns: [u64; MAX_FOLLOWERS],
-    /// Generic followers whose drift loop is pinned at its limit.
-    pub follower_drift_at_limit: [bool; MAX_FOLLOWERS],
-    /// The rate each follower's own stream opened at, Hz.  0 while it has
+    pub extra_output_dropouts: [u64; MAX_EXTRA_OUTPUTS],
+    /// Generic extra outputs whose drift loop is pinned at its limit.
+    pub extra_output_drift_at_limit: [bool; MAX_EXTRA_OUTPUTS],
+    /// The rate each extra output's own stream opened at, Hz.  0 while it has
     /// no stream: not open yet, missing, or played in the PipeWire graph.
     #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
-    pub follower_rates: [u32; MAX_FOLLOWERS],
-    /// The frames each follower's driver asks for per callback (its real
+    pub extra_output_rates: [u32; MAX_EXTRA_OUTPUTS],
+    /// The frames each extra output's driver asks for per callback (its real
     /// buffer size).  0 while it has no stream, and until its first
     /// callback.
     #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
-    pub follower_buffer_frames: [u32; MAX_FOLLOWERS],
-    /// Each follower's ring fill against its cushion, 0 to 1 (as
+    pub extra_output_buffer_frames: [u32; MAX_EXTRA_OUTPUTS],
+    /// Each extra output's ring fill against its bridge buffer, 0 to 1 (as
     /// [`Self::ring_fill`]).  0 while it has no stream.
     #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
-    pub follower_ring_fill: [f32; MAX_FOLLOWERS],
-    /// Each follower's cushion (its ring's fill target), in frames at the
+    pub extra_output_ring_fill: [f32; MAX_EXTRA_OUTPUTS],
+    /// Each extra output's bridge buffer (its ring's fill target), in frames at the
     /// clock output's rate.  0 while it has no stream.
     #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
-    pub follower_target_frames: [usize; MAX_FOLLOWERS],
-    pub underruns: u64,
+    pub extra_output_target_frames: [usize; MAX_EXTRA_OUTPUTS],
+    pub dropouts: u64,
     /// Frames the input callback dropped because the ring was full.
     #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
     pub overruns: u64,
@@ -244,7 +244,7 @@ pub struct Snapshot {
     /// first timing sample. Bluetooth A2DP often lands around 100–200 ms here.
     pub path_delay_ms: Option<f32>,
     /// True when input and output run in one PipeWire graph callback (the
-    /// duplex node): there is no ring, cushion or drift correction.
+    /// duplex node): there is no ring, bridge buffer or drift correction.
     pub direct: bool,
     /// Metronome beat the mixer last published.  0 when it is stopped,
     /// otherwise `1..=clicks` of [`Self::metronome_rhythm`].  The Live page
@@ -256,31 +256,31 @@ pub struct Snapshot {
     pub metronome_rhythm: u8,
 }
 
-/// How the cushion between input and output (the ring buffer's fill target)
-/// is sized.  It can change while the bridge runs.
+/// How the bridge buffer between input and output (the ring buffer's fill
+/// target) is sized.  It can change while the bridge runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CushionMode {
+pub enum BufferMode {
     /// Twice the input buffer, at least two output blocks; grows 256 samples
     /// per dropout and shrinks 64 after 4 calm seconds.
-    Safe = 0,
+    Auto = 0,
     /// One input block plus one output block; grows and shrinks in smaller,
     /// quicker steps.
-    LowLatency = 1,
+    Minimum = 1,
     /// A fixed size in milliseconds that never grows on its own.
-    Manual = 2,
+    Fixed = 2,
 }
 
-impl CushionMode {
+impl BufferMode {
     pub(crate) fn from_u32(value: u32) -> Self {
         match value {
-            1 => Self::LowLatency,
-            2 => Self::Manual,
-            _ => Self::Safe,
+            1 => Self::Minimum,
+            2 => Self::Fixed,
+            _ => Self::Auto,
         }
     }
 }
 
-/// How the Windows WASAPI clock device opens.  Followers stay shared.
+/// How the Windows WASAPI clock output opens.  Extra outputs stay shared.
 ///
 /// Older preferences only stored a `low_latency_output` bool; `true` maps to
 /// [`Self::RealStyle`], `false` to [`Self::Shared`].
@@ -291,7 +291,7 @@ pub enum WasapiOutputMode {
     Shared,
     /// Shared IAudioClient3 at the driver's smallest engine step (REAL-style).
     RealStyle,
-    /// Exclusive mode on the clock device only; other apps cannot play there.
+    /// Exclusive mode on the clock output only; other apps cannot play there.
     Exclusive,
 }
 
@@ -396,7 +396,7 @@ pub struct StartConfig {
     /// output falls back to a normal shared stream with `output_buffer`.
     /// Ignored when [`Self::exclusive_output`] is set.
     pub real_style_output: bool,
-    /// WASAPI exclusive mode for the clock device only.  On refuse, falls back
+    /// WASAPI exclusive mode for the clock output only.  On refuse, falls back
     /// to shared cpal with `output_buffer` (not REAL-style).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub exclusive_output: bool,

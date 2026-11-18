@@ -5,7 +5,7 @@ use crate::app::settings::{
 use crate::app::LogTone;
 use crate::app::Page;
 use crate::app::RigWerkApp;
-use crate::audio::{CushionMode, DeviceItem, PluginFormat, PluginPref};
+use crate::audio::{BufferMode, DeviceItem, PluginFormat, PluginPref};
 
 fn device(id: &str, name: &str, backend: &str) -> DeviceItem {
     DeviceItem {
@@ -40,7 +40,7 @@ fn log_lines(app: &RigWerkApp) -> Vec<&str> {
 fn a_missing_device_is_an_error_and_the_mix_still_applies() {
     let mut app = test_app();
     let routes = [[false, true, false, false], [true, false, false, true]];
-    app.sessions.push(crate::app::settings::Preset {
+    app.sessions.push(crate::app::settings::Session {
         name: "Gone".to_owned(),
         input: "Other interface".to_owned(),
         input_id: "asio:missing".to_owned(),
@@ -54,13 +54,13 @@ fn a_missing_device_is_an_error_and_the_mix_still_applies() {
         input_channels: [true, false],
         output_channels: [false, true],
         mono: true,
-        ..crate::app::settings::Preset::default()
+        ..crate::app::settings::Session::default()
     });
     app.input_gain = -12.0;
     app.asio_idx = 0;
     app.output_idx = 0;
 
-    app.apply_preset(0);
+    app.apply_session(0);
 
     assert_eq!(app.input_gain, 4.5);
     assert_eq!(app.output_gain, -8.0);
@@ -78,7 +78,7 @@ fn a_missing_device_is_an_error_and_the_mix_still_applies() {
         "{lines:?}"
     );
     assert!(
-        lines.iter().all(|line| !line.contains("Loaded patch")),
+        lines.iter().all(|line| !line.contains("Loaded session")),
         "{lines:?}"
     );
     assert!(app
@@ -91,9 +91,9 @@ fn a_missing_device_is_an_error_and_the_mix_still_applies() {
 }
 
 #[test]
-fn applying_a_preset_rejects_nan_gain_and_unknown_rate() {
+fn applying_a_session_rejects_nan_gain_and_unknown_rate() {
     let mut app = test_app();
-    app.sessions.push(crate::app::settings::Preset {
+    app.sessions.push(crate::app::settings::Session {
         name: "Hot".to_owned(),
         input: "Focusrite".to_owned(),
         input_id: "asio:focusrite".to_owned(),
@@ -107,10 +107,10 @@ fn applying_a_preset_rejects_nan_gain_and_unknown_rate() {
         buffer: 7,
         output_rate: 12_345,
         output_buffer: 4,
-        ..crate::app::settings::Preset::default()
+        ..crate::app::settings::Session::default()
     });
 
-    app.apply_preset(0);
+    app.apply_session(0);
 
     assert!(app.input_gain.is_finite());
     assert_eq!(app.input_gain, DEFAULT_INPUT_GAIN);
@@ -136,18 +136,18 @@ fn applying_a_preset_rejects_nan_gain_and_unknown_rate() {
     assert!((input_linear - 1.0).abs() < 1e-5);
     assert!(log_lines(&app)
         .iter()
-        .any(|line| line.contains("Loaded patch")));
+        .any(|line| line.contains("Loaded session")));
     assert_eq!(
         app.log
             .iter()
-            .find(|entry| entry.text.contains("Loaded patch"))
+            .find(|entry| entry.text.contains("Loaded session"))
             .map(|entry| entry.tone),
         Some(LogTone::Blue)
     );
 }
 
 #[test]
-fn saving_and_applying_a_preset_round_trips_the_mix() {
+fn saving_and_applying_a_session_round_trips_the_mix() {
     let mut app = test_app();
     app.session_name = "Gig".to_owned();
     app.input_gain = 6.0;
@@ -161,8 +161,8 @@ fn saving_and_applying_a_preset_round_trips_the_mix() {
     app.low_latency_output = false;
     app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
     app.path_mut().mix.routes = [[false, true, false, true], [true, false, true, false]];
-    app.cushion_mode = CushionMode::Manual;
-    app.cushion_ms = 7.5;
+    app.bridge_buffer_mode = BufferMode::Fixed;
+    app.bridge_buffer_ms = 7.5;
     app.sample_rate = 96_000;
     app.buffer_size = 64;
     app.output_rate = 48_000;
@@ -178,7 +178,7 @@ fn saving_and_applying_a_preset_round_trips_the_mix() {
         }],
     );
 
-    app.save_preset();
+    app.save_session();
     let saved = app.sessions[0].clone();
     assert_eq!(saved.input_id, "asio:focusrite");
     assert_eq!(saved.input_backend, "ASIO");
@@ -204,8 +204,8 @@ fn saving_and_applying_a_preset_round_trips_the_mix() {
     app.wasapi_output_mode = crate::audio::WasapiOutputMode::RealStyle;
     app.input_channels = [true, true];
     app.path_mut().mix.output_enabled = [true, true];
-    app.cushion_mode = CushionMode::Safe;
-    app.cushion_ms = 10.0;
+    app.bridge_buffer_mode = BufferMode::Auto;
+    app.bridge_buffer_ms = 10.0;
     app.sample_rate = 48_000;
     app.buffer_size = 128;
     app.output_rate = 0;
@@ -220,7 +220,7 @@ fn saving_and_applying_a_preset_round_trips_the_mix() {
         .insert(0, device("hw:Other", "Other out", "ALSA"));
     app.output_idx = 0;
 
-    app.apply_preset(0);
+    app.apply_session(0);
 
     assert_eq!(app.input_gain, 6.0);
     assert_eq!(app.output_gain, -12.0);
@@ -239,8 +239,8 @@ fn saving_and_applying_a_preset_round_trips_the_mix() {
         app.path().mix.routes,
         [[false, true, false, true], [true, false, true, false]]
     );
-    assert_eq!(app.cushion_mode, CushionMode::Manual);
-    assert_eq!(app.cushion_ms, 7.5);
+    assert_eq!(app.bridge_buffer_mode, BufferMode::Fixed);
+    assert_eq!(app.bridge_buffer_ms, 7.5);
     assert_eq!(app.sample_rate, 96_000);
     assert_eq!(app.buffer_size, 64);
     assert_eq!(app.output_rate, 48_000);
@@ -254,13 +254,13 @@ fn saving_and_applying_a_preset_round_trips_the_mix() {
     assert!((app.engine.shared.input_gain() - 10.0f32.powf(6.0 / 20.0)).abs() < 1e-4);
     assert!(log_lines(&app)
         .iter()
-        .any(|line| line.contains("Loaded patch")));
+        .any(|line| line.contains("Loaded session")));
 }
 
 #[test]
-fn an_old_preset_output_buffer_follows_the_input_buffer() {
+fn an_old_session_output_buffer_follows_the_input_buffer() {
     let mut app = test_app();
-    app.sessions.push(crate::app::settings::Preset {
+    app.sessions.push(crate::app::settings::Session {
         name: "Old".to_owned(),
         input: "Focusrite".to_owned(),
         input_id: "asio:focusrite".to_owned(),
@@ -272,9 +272,9 @@ fn an_old_preset_output_buffer_follows_the_input_buffer() {
         buffer: 64,
         output_rate: 0,
         output_buffer: 0,
-        ..crate::app::settings::Preset::default()
+        ..crate::app::settings::Session::default()
     });
-    app.apply_preset(0);
+    app.apply_session(0);
     assert_eq!(app.buffer_size, 64);
     assert_eq!(app.output_buffer, 64);
     assert_eq!(app.sessions[0].output_buffer, 0);
@@ -282,7 +282,7 @@ fn an_old_preset_output_buffer_follows_the_input_buffer() {
 }
 
 #[test]
-fn applying_a_preset_restores_gate_settings() {
+fn applying_a_session_restores_gate_settings() {
     use crate::audio::{GateSettings, GateSlot};
 
     let mut app = test_app();
@@ -296,7 +296,7 @@ fn applying_a_preset_restores_gate_settings() {
         release_ms: 200.0,
         hold_ms: 30.0,
     };
-    app.sessions.push(crate::app::settings::Preset {
+    app.sessions.push(crate::app::settings::Session {
         name: "Gated".to_owned(),
         input: "Focusrite".to_owned(),
         input_id: "asio:focusrite".to_owned(),
@@ -305,17 +305,17 @@ fn applying_a_preset_restores_gate_settings() {
         output_id: "hw:Speaker".to_owned(),
         output_backend: "ALSA".to_owned(),
         gate: Some(gate),
-        ..crate::app::settings::Preset::default()
+        ..crate::app::settings::Session::default()
     });
     app.path_mut().mix.gate = GateSettings::default();
-    app.apply_preset(0);
+    app.apply_session(0);
     assert_eq!(app.path().mix.gate, gate);
     assert_eq!(app.engine.shared.paths[0].try_gate(), Some(gate));
 }
 
 #[test]
-fn presets_carry_the_output_devices() {
-    use crate::app::settings::FollowerPref;
+fn sessions_carry_the_output_devices() {
+    use crate::app::settings::ExtraOutputPref;
     use crate::audio::{ChannelMap, OutputDeviceSettings, UnusedChannels};
 
     let mut app = test_app();
@@ -330,135 +330,135 @@ fn presets_carry_the_output_devices() {
         align: false,
         click_mask: 0,
     };
-    let followers = vec![
-        FollowerPref {
+    let extra_outputs = vec![
+        ExtraOutputPref {
             id: "hw:Phones".to_owned(),
             backend: "ALSA".to_owned(),
             name: "Phones".to_owned(),
-            cushion_mode: 2,
-            cushion_ms: 15.0,
-            ..FollowerPref::default()
+            bridge_buffer_mode: 2,
+            bridge_buffer_ms: 15.0,
+            ..ExtraOutputPref::default()
         },
-        FollowerPref {
+        ExtraOutputPref {
             id: "hw:Monitor".to_owned(),
             name: "Monitor".to_owned(),
-            ..FollowerPref::default()
+            ..ExtraOutputPref::default()
         },
     ];
     app.session_name = "Two outs".to_owned();
-    app.clock_device = clock;
-    app.followers = followers.clone();
+    app.clock_output = clock;
+    app.extra_outputs = extra_outputs.clone();
 
-    app.save_preset();
-    assert_eq!(app.sessions[0].clock_device, clock);
-    assert_eq!(app.sessions[0].followers, followers);
+    app.save_session();
+    assert_eq!(app.sessions[0].clock_output, clock);
+    assert_eq!(app.sessions[0].extra_outputs, extra_outputs);
 
-    app.clock_device = OutputDeviceSettings::default();
-    app.followers.clear();
-    app.apply_preset(0);
-    assert_eq!(app.clock_device, clock);
-    assert_eq!(app.followers, followers);
+    app.clock_output = OutputDeviceSettings::default();
+    app.extra_outputs.clear();
+    app.apply_session(0);
+    assert_eq!(app.clock_output, clock);
+    assert_eq!(app.extra_outputs, extra_outputs);
 
-    // An older patch without them brings back today's output.
-    app.sessions.push(crate::app::settings::Preset {
+    // An older session without them brings back today's output.
+    app.sessions.push(crate::app::settings::Session {
         name: "Old".to_owned(),
-        ..crate::app::settings::Preset::default()
+        ..crate::app::settings::Session::default()
     });
-    app.apply_preset(1);
-    assert_eq!(app.clock_device, OutputDeviceSettings::default());
-    assert!(app.followers.is_empty());
+    app.apply_session(1);
+    assert_eq!(app.clock_output, OutputDeviceSettings::default());
+    assert!(app.extra_outputs.is_empty());
 }
 
 #[test]
-fn applying_a_patch_keeps_the_click_mask() {
-    use crate::app::settings::FollowerPref;
+fn applying_a_session_keeps_the_click_mask() {
+    use crate::app::settings::ExtraOutputPref;
 
     let mut app = test_app();
-    let phones = FollowerPref {
+    let phones = ExtraOutputPref {
         id: "hw:Phones".to_owned(),
         backend: "ALSA".to_owned(),
         name: "Phones".to_owned(),
-        ..FollowerPref::default()
+        ..ExtraOutputPref::default()
     };
-    let monitor = FollowerPref {
+    let monitor = ExtraOutputPref {
         id: "hw:Monitor".to_owned(),
         backend: "ALSA".to_owned(),
         name: "Monitor".to_owned(),
-        ..FollowerPref::default()
+        ..ExtraOutputPref::default()
     };
     app.session_name = "Click".to_owned();
-    app.clock_device.click_mask = 0b0011;
-    app.followers = vec![phones.clone(), monitor.clone()];
-    app.followers[0].settings.click_mask = 0b0100;
-    app.followers[1].settings.click_mask = 0b1000;
-    app.save_preset();
+    app.clock_output.click_mask = 0b0011;
+    app.extra_outputs = vec![phones.clone(), monitor.clone()];
+    app.extra_outputs[0].settings.click_mask = 0b0100;
+    app.extra_outputs[1].settings.click_mask = 0b1000;
+    app.save_session();
     // Saving still records the mask.
-    assert_eq!(app.sessions[0].clock_device.click_mask, 0b0011);
-    assert_eq!(app.sessions[0].followers[0].settings.click_mask, 0b0100);
+    assert_eq!(app.sessions[0].clock_output.click_mask, 0b0011);
+    assert_eq!(app.sessions[0].extra_outputs[0].settings.click_mask, 0b0100);
 
-    // The click moves after the save; the patch does not move it back.
-    // Followers are matched by id and backend, not by position.
-    app.clock_device.click_mask = 0b1100;
-    app.followers = vec![monitor.clone()];
-    app.followers[0].settings.click_mask = 0b0001;
-    app.followers[0].settings.level_db = -6.0;
-    app.apply_preset(0);
-    assert_eq!(app.clock_device.click_mask, 0b1100);
-    assert_eq!(app.followers.len(), 2);
+    // The click moves after the save; the session does not move it back.
+    // Extra outputs are matched by id and backend, not by position.
+    app.clock_output.click_mask = 0b1100;
+    app.extra_outputs = vec![monitor.clone()];
+    app.extra_outputs[0].settings.click_mask = 0b0001;
+    app.extra_outputs[0].settings.level_db = -6.0;
+    app.apply_session(0);
+    assert_eq!(app.clock_output.click_mask, 0b1100);
+    assert_eq!(app.extra_outputs.len(), 2);
     // Phones is not live now: no click there.
-    assert_eq!(app.followers[0].id, "hw:Phones");
-    assert_eq!(app.followers[0].settings.click_mask, 0);
-    // Monitor keeps its live mask; the rest comes from the patch.
-    assert_eq!(app.followers[1].id, "hw:Monitor");
-    assert_eq!(app.followers[1].settings.click_mask, 0b0001);
-    assert_eq!(app.followers[1].settings.level_db, 0.0);
+    assert_eq!(app.extra_outputs[0].id, "hw:Phones");
+    assert_eq!(app.extra_outputs[0].settings.click_mask, 0);
+    // Monitor keeps its live mask; the rest comes from the session.
+    assert_eq!(app.extra_outputs[1].id, "hw:Monitor");
+    assert_eq!(app.extra_outputs[1].settings.click_mask, 0b0001);
+    assert_eq!(app.extra_outputs[1].settings.level_db, 0.0);
 
-    // An older patch without a mask does not silence the click.
-    app.sessions.push(crate::app::settings::Preset {
+    // An older session without a mask does not silence the click.
+    app.sessions.push(crate::app::settings::Session {
         name: "Old".to_owned(),
-        ..crate::app::settings::Preset::default()
+        ..crate::app::settings::Session::default()
     });
-    app.apply_preset(1);
-    assert_eq!(app.clock_device.click_mask, 0b1100);
+    app.apply_session(1);
+    assert_eq!(app.clock_output.click_mask, 0b1100);
 }
 
 #[test]
-fn the_click_mask_follows_the_device_when_a_patch_swaps_clock_and_follower() {
-    use crate::app::settings::FollowerPref;
+fn the_click_mask_follows_the_device_when_a_session_swaps_clock_and_extra_output() {
+    use crate::app::settings::ExtraOutputPref;
 
     let mut app = test_app();
     app.inventory
         .outputs
         .push(device("hw:Monitor", "Monitor", "ALSA"));
-    let as_follower = |id: &str, name: &str| FollowerPref {
+    let as_extra_output = |id: &str, name: &str| ExtraOutputPref {
         id: id.to_owned(),
         backend: "ALSA".to_owned(),
         name: name.to_owned(),
-        ..FollowerPref::default()
+        ..ExtraOutputPref::default()
     };
-    // Saved with Speaker as the clock and Monitor as a follower.
+    // Saved with Speaker as the clock and Monitor as an extra output.
     app.session_name = "Speaker clock".to_owned();
     app.output_idx = 0;
-    app.followers = vec![as_follower("hw:Monitor", "Monitor")];
-    app.save_preset();
+    app.extra_outputs = vec![as_extra_output("hw:Monitor", "Monitor")];
+    app.save_session();
 
-    // Now Monitor is the clock and Speaker a follower, each with its click.
+    // Now Monitor is the clock and Speaker an extra output, each with its click.
     app.output_idx = 1;
-    app.clock_device.click_mask = 0b0011;
-    app.followers = vec![as_follower("hw:Speaker", "Speaker")];
-    app.followers[0].settings.click_mask = 0b1100;
-    app.apply_preset(0);
+    app.clock_output.click_mask = 0b0011;
+    app.extra_outputs = vec![as_extra_output("hw:Speaker", "Speaker")];
+    app.extra_outputs[0].settings.click_mask = 0b1100;
+    app.apply_session(0);
 
     // The masks move with the devices, not with the roles.
     assert_eq!(app.selected_output().id, "hw:Speaker");
-    assert_eq!(app.clock_device.click_mask, 0b1100);
-    assert_eq!(app.followers.len(), 1);
-    assert_eq!(app.followers[0].id, "hw:Monitor");
-    assert_eq!(app.followers[0].settings.click_mask, 0b0011);
+    assert_eq!(app.clock_output.click_mask, 0b1100);
+    assert_eq!(app.extra_outputs.len(), 1);
+    assert_eq!(app.extra_outputs[0].id, "hw:Monitor");
+    assert_eq!(app.extra_outputs[0].settings.click_mask, 0b0011);
 }
 
 #[test]
-fn saving_a_preset_writes_current_gate() {
+fn saving_a_session_writes_current_gate() {
     use crate::audio::{GateSettings, GateSlot};
 
     let mut app = test_app();
@@ -476,7 +476,7 @@ fn saving_a_preset_writes_current_gate() {
         release_ms: 90.0,
         hold_ms: 25.0,
     };
-    app.save_preset();
+    app.save_session();
     assert_eq!(app.sessions.len(), 1);
     assert_eq!(app.sessions[0].paths[0].gate, app.path().mix.gate);
 }

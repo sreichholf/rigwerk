@@ -37,7 +37,7 @@ pub(super) struct SumView<'a> {
 }
 
 /// Under the latency bars: what alignment does not cover.
-pub(crate) const ALIGN_SCOPE_NOTE: &str = "Alignment lines up the paths on this device only. Each device still has its own buffer, and a follower its cushion, so devices differ from each other.";
+pub(crate) const ALIGN_SCOPE_NOTE: &str = "Alignment lines up the paths on this device only. Each device still has its own buffer, and an extra output its bridge buffer, so devices differ from each other.";
 
 /// The device's "Align paths  On | Off" switch.  Returns the new state on
 /// a click that changes it.

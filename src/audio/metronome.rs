@@ -23,14 +23,14 @@ use super::output_map::{level_gain, DEVICE_LEVEL_MIN_DB};
 pub const METRONOME_BPM_MIN: f32 = 40.0;
 /// Fastest tempo, BPM.
 pub const METRONOME_BPM_MAX: f32 = 240.0;
-/// Tempo a new session starts at, BPM.
+/// Tempo a new run starts at, BPM.
 pub const METRONOME_BPM_DEFAULT: f32 = 120.0;
 
 /// Quietest click, dB.  The same floor as the device fader.
 pub const CLICK_LEVEL_MIN_DB: f32 = DEVICE_LEVEL_MIN_DB;
 /// Loudest click, dB.  0 dB makes the accent peak the safety ceiling.
 pub const CLICK_LEVEL_MAX_DB: f32 = 0.0;
-/// Click level a new session starts at, dB.
+/// Click level a new run starts at, dB.
 pub const CLICK_LEVEL_DEFAULT_DB: f32 = -12.0;
 
 /// The one, Hz.

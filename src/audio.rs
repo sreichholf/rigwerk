@@ -19,8 +19,8 @@
 //! - `asio_panel`: the UI's request to open an ASIO control panel.  The
 //!   bridge thread that owns the driver takes it; the call is Windows-only.
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
-//! - `shared`: the ring buffer, cushion, meters and tuner tap both sides share.
-//! - `path`: one signal path's controls (routing, EQs, gate, inserts).
+//! - `shared`: the ring buffer, bridge buffer, meters and tuner tap both sides share.
+//! - `path`: one signal path's controls (routing, EQs, gate, effects).
 //! - `plugins`: the VST3 and CLAP chain on each path.  The slot owns each
 //!   plugin's processor; the UI reaches the rest through its handle and
 //!   holds views.  The audio side owns each chain's runtime and the UI
@@ -39,13 +39,13 @@
 //!   the measured loopback (the estimate stays in `app::budget`).
 //! - `metronome`: the click generator.  One voice, mixed onto device
 //!   channels after the safety ceiling.
-//! - `follower`: generic multi-output (each follower mixed and mapped on the
+//! - `extra_output`: generic multi-output (each extra output mixed and mapped on the
 //!   clock callback → own ring + cpal stream).
-//! - `ring`: lock-free multi-lane SPSC ring for each generic follower.
+//! - `ring`: lock-free multi-lane SPSC ring for each generic extra output.
 //! - `record`: one armed endpoint into a WAV file.  The callback only
 //!   pushes; a writer thread owns the disk.
-//! - `eq`: the built-in 5-band EQs before and after the plugin inserts.
-//! - `gate`: the built-in noise gate (PRE or POST inserts).
+//! - `eq`: the built-in 5-band EQs before and after the plugin effects.
+//! - `gate`: the built-in noise gate (PRE or POST effects).
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute, safety ceiling and channel map.
 //! - `limiter`: the per-device sample-peak ceiling after the device level.
@@ -62,11 +62,11 @@ mod denormal;
 mod devices;
 mod engine;
 mod eq;
-mod follower;
+mod extra_output;
 #[cfg(target_os = "windows")]
-pub(crate) use follower::is_generic_follower;
-pub(crate) use follower::is_vb_cable_render;
-pub(crate) use follower::FOLLOWER_DRIFT_LIMIT_PPM;
+pub(crate) use extra_output::is_generic_extra_output;
+pub(crate) use extra_output::is_vb_cable_render;
+pub(crate) use extra_output::EXTRA_OUTPUT_DRIFT_LIMIT_PPM;
 mod gate;
 mod input;
 mod limiter;
@@ -138,8 +138,8 @@ pub(crate) use mixer::OutputMixer;
 pub(crate) use output_map::low_bits;
 pub use output_map::{
     AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
-    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS,
-    VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_EXTRA_OUTPUTS,
+    MAX_OUTPUT_CHANNELS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 #[cfg(test)]
 pub(crate) use shared::tests::claim_main_thread;
@@ -165,17 +165,17 @@ pub(crate) use plugins::PluginHandle;
 pub(crate) use plugins::MAX_ALIGN;
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
-pub(crate) use shared::{FollowerLink, FollowerPlan, SCOPE_LEN};
+pub(crate) use shared::{ExtraOutputLink, ExtraOutputPlan, SCOPE_LEN};
 pub(crate) use tuner::{
     cents_to_ratio, note_name, octave, tuning_index, StringReading, TuneState, TunerAnalysis,
     TunerChannel, TunerFrame, TunerTolerance, Tuning, TuningGroup, CENTER_CENTS, DEFAULT_PRESET_ID,
-    PRESETS, TAP_COPY_FRAMES,
+    TAP_COPY_FRAMES, TUNINGS,
 };
 #[cfg(test)]
 pub(crate) use tuner::{tuning_by_id, TunerReading};
 #[cfg(target_os = "linux")]
 pub use types::QuantumInfo;
 pub use types::{
-    CushionMode, DeviceItem, EngineState, Inventory, OutputMode, Snapshot, StartConfig,
+    BufferMode, DeviceItem, EngineState, Inventory, OutputMode, Snapshot, StartConfig,
     WasapiOutputMode, PIPEWIRE_LOW_QUANTUM,
 };

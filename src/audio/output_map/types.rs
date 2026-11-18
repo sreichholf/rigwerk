@@ -9,16 +9,16 @@ use super::weights::{level_gain, path_channel_weights, routed_paths};
 /// Most device channels a [`ChannelMap`] can address.
 pub const MAX_OUTPUT_CHANNELS: usize = 8;
 
-/// Most follower output devices beside the clock device.  Extra entries in a
+/// Most extra outputs beside the clock output.  Extra entries in a
 /// save are dropped on load.  PipeWire preallocates one stereo port pair per
 /// slot so add/remove stays live.
-pub const MAX_FOLLOWERS: usize = 4;
+pub const MAX_EXTRA_OUTPUTS: usize = 4;
 
-/// Display name and PipeWire `node.name` of the virtual publish source.
-pub const VIRTUAL_OUT_NAME: &str = "RigWerk Out";
+/// Display name and PipeWire `node.name` of the virtual output.
+pub const VIRTUAL_OUTPUT_NAME: &str = "RigWerk Out";
 
-/// Session id of the virtual publish follower (`pipewire:RigWerk Out`).
-pub const VIRTUAL_OUT_ID: &str = "pipewire:RigWerk Out";
+/// Session id of the virtual output (`pipewire:RigWerk Out`).
+pub const VIRTUAL_OUTPUT_ID: &str = "pipewire:RigWerk Out";
 
 /// Device level range, dB.  The same as the master output fader for now.
 pub const DEVICE_LEVEL_MIN_DB: f32 = -36.0;

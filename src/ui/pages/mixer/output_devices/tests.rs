@@ -15,10 +15,10 @@ fn clock_row(level_db: f32, mute: bool) -> OutputDeviceRow {
         channels: 2,
         click_channels: 2,
         clock: true,
-        virtual_out: false,
-        follower_index: None,
+        virtual_output: false,
+        extra_output_index: None,
         missing: false,
-        publish: false,
+        virtual_output_on: false,
         reduction_db: 0.0,
         settings: OutputDeviceSettings {
             level_db,
@@ -53,7 +53,7 @@ fn device_row_names_the_reduction_when_the_ceiling_holds() {
     );
     assert_eq!(
         device_row_value(&row, EngineState::Running),
-        "clock device · +0.0 dB · 3.2 dB · running"
+        "clock output · +0.0 dB · 3.2 dB · running"
     );
 }
 
@@ -65,19 +65,19 @@ fn device_state_follows_the_bridge() {
     assert_eq!(device_state(&row, EngineState::Error).0, "error");
     assert_eq!(
         device_row_value(&clock_row(-6.0, false), EngineState::Running),
-        "clock device · -6.0 dB · running"
+        "clock output · -6.0 dB · running"
     );
 }
 
 #[test]
-fn a_missing_clock_device_has_its_own_state() {
+fn a_missing_clock_output_has_its_own_state() {
     let mut row = clock_row(0.0, false);
     row.missing = true;
     assert_eq!(device_state(&row, EngineState::Running).0, "missing");
     assert_eq!(device_state(&row, EngineState::Idle).0, "missing");
     assert_eq!(
         device_row_value(&row, EngineState::Running),
-        "clock device · +0.0 dB · missing"
+        "clock output · +0.0 dB · missing"
     );
 }
 
@@ -91,7 +91,7 @@ fn chain_device_row_exposes_name_selection_and_mute() {
     let node = node_named(&tree, "AKG N9 Hybrid");
     assert_eq!(node.role(), egui::Role::Button);
     assert_eq!(node.toggled(), Some(Toggled::True));
-    assert_eq!(node.value(), Some("clock device · muted · stopped"));
+    assert_eq!(node.value(), Some("clock output · muted · stopped"));
     let mute = node_named(&tree, "Mute AKG N9 Hybrid");
     assert_eq!(mute.role(), egui::Role::Button);
     assert_eq!(mute.toggled(), Some(Toggled::True));
@@ -106,7 +106,7 @@ fn inspector_list_row_exposes_name_and_level() {
     let node = node_named(&tree, "AKG N9 Hybrid in output devices");
     assert_eq!(node.role(), egui::Role::Button);
     assert_eq!(node.toggled(), Some(Toggled::False));
-    assert_eq!(node.value(), Some("clock device · -1.5 dB · running"));
+    assert_eq!(node.value(), Some("clock output · -1.5 dB · running"));
 }
 
 #[test]

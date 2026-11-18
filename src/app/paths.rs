@@ -20,7 +20,7 @@
 //! where it played; the next path in that slot overwrites them.
 
 use crate::app::chain::ChainSelection;
-use crate::app::settings::{default_path_name, FollowerPref, PathPref};
+use crate::app::settings::{default_path_name, ExtraOutputPref, PathPref};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{
@@ -63,12 +63,12 @@ impl Default for SignalPath {
     }
 }
 
-/// One plugin insert of one path: what plugin editors and GUI windows are
+/// One plugin effect of one path: what plugin editors and GUI windows are
 /// keyed by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct InsertKey {
+pub(crate) struct EffectKey {
     pub(crate) path: usize,
-    pub(crate) insert: usize,
+    pub(crate) effect: usize,
 }
 
 /// What the UI shows for one live path (sidebar entry, path chips, cards).
@@ -78,10 +78,10 @@ pub(crate) struct PathInfo {
     pub(crate) name: String,
     /// Index into the path palette.
     pub(crate) colour_index: u8,
-    /// Built-in stages that are on (pre EQ, gate, post EQ) plus inserts.
+    /// Built-in stages that are on (pre EQ, gate, post EQ) plus effects.
     pub(crate) stages: usize,
-    /// Plugin inserts on the path.
-    pub(crate) inserts: usize,
+    /// Plugin effects on the path.
+    pub(crate) effects: usize,
     /// Plugin latency of the chain, samples and ms at the running rate.
     pub(crate) latency_samples: u32,
     pub(crate) latency_ms: f32,
@@ -182,14 +182,14 @@ impl RigWerkApp {
     }
 
     /// Makes `slot` the path the Mixer and Plugins pages edit.  The Mixer's
-    /// insert selection and the next insert position belong to a path, so
+    /// effect selection and the next effect position belong to a path, so
     /// they are reset when the path changes.
     pub(crate) fn select_path(&mut self, slot: usize) -> bool {
         if !self.paths.get(slot).is_some_and(Option::is_some) {
             return false;
         }
         if slot != self.selected_path {
-            self.plugin_insert_at = None;
+            self.plugin_effect_at = None;
             if let ChainSelection::Plugin(index) = self.chain_selected {
                 if index >= self.engine.plugin_views(slot).len() {
                     self.chain_selected = ChainSelection::Plugins;
@@ -213,7 +213,7 @@ impl RigWerkApp {
             .into_iter()
             .filter_map(|slot| {
                 let path = self.paths[slot].as_ref()?;
-                let inserts = self.engine.plugin_views(slot).len();
+                let effects = self.engine.plugin_views(slot).len();
                 let mix = &path.mix;
                 let builtins = [
                     mix.eqs[0].is_active(),
@@ -228,8 +228,8 @@ impl RigWerkApp {
                     slot,
                     name: path.name.clone(),
                     colour_index: path.colour,
-                    stages: builtins + inserts,
-                    inserts,
+                    stages: builtins + effects,
+                    effects,
                     latency_samples,
                     latency_ms: latency_samples as f32 * 1000.0 / rate as f32,
                     level_db: mix.level_db,
@@ -353,7 +353,7 @@ impl RigWerkApp {
         if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
             if key.path == source {
                 // What the plugin's own window changed since its last sync.
-                self.engine.finish_plugin_editor(key.path, key.insert);
+                self.engine.finish_plugin_editor(key.path, key.effect);
             }
         }
         let slot = self.engine.duplicate_path(source)?;
@@ -457,7 +457,7 @@ impl RigWerkApp {
         self.path_mut().mix.output_enabled = enabled;
     }
 
-    /// Skips every insert on the selected path.  Each insert's own bypass
+    /// Skips every effect on the selected path.  Each effect's own bypass
     /// is left as it is.  Pushed now, so the audio thread sees it before
     /// the next frame.
     pub(crate) fn set_chain_bypass(&mut self, bypass: bool) {
@@ -510,20 +510,24 @@ impl RigWerkApp {
         }
     }
 
-    /// The output devices' settings (0 = clock device, then followers).
+    /// The output devices' settings (0 = clock output, then extra outputs).
     pub(crate) fn device_settings(&self) -> Vec<&OutputDeviceSettings> {
-        std::iter::once(&self.clock_device)
-            .chain(self.followers.iter().map(|follower| &follower.settings))
+        std::iter::once(&self.clock_output)
+            .chain(
+                self.extra_outputs
+                    .iter()
+                    .map(|extra_output| &extra_output.settings),
+            )
             .collect()
     }
 
     pub(super) fn device_settings_mut(
         &mut self,
     ) -> impl Iterator<Item = &mut OutputDeviceSettings> {
-        std::iter::once(&mut self.clock_device).chain(
-            self.followers
+        std::iter::once(&mut self.clock_output).chain(
+            self.extra_outputs
                 .iter_mut()
-                .map(|follower| &mut follower.settings),
+                .map(|extra_output| &mut extra_output.settings),
         )
     }
 
@@ -535,7 +539,7 @@ impl RigWerkApp {
     }
 
     /// Whether path `slot`'s own map reaches some channel of output device
-    /// `device` (0 = clock device, then followers).  The mono copy on
+    /// `device` (0 = clock output, then extra outputs).  The mono copy on
     /// unreached channels does not count.
     pub(crate) fn path_reaches_device(&self, slot: usize, device: usize) -> bool {
         if slot >= MAX_PATHS || self.paths[slot].is_none() {
@@ -548,14 +552,14 @@ impl RigWerkApp {
     }
 
     /// Path `slot`'s map, level, polarity and trim on output device
-    /// `device` (0 = clock device, then followers).
+    /// `device` (0 = clock output, then extra outputs).
     pub(crate) fn device_path_map(&self, device: usize, slot: usize) -> Option<PathMapSettings> {
         let settings = self.device_settings().get(device).copied()?;
         settings.path_map.get(slot).copied()
     }
 
     /// Puts music on channels 1 and 2 and the click alone on 3 and 4 of
-    /// output device `device` (0 = clock, then followers).  An unrouted
+    /// output device `device` (0 = clock, then extra outputs).  An unrouted
     /// path stays unrouted.  Level, mute, alignment, trims and polarity
     /// stay.  Bits of the click mask at or past the device width stay too.
     pub(crate) fn apply_click_pair(&mut self, device: usize) {
@@ -578,7 +582,7 @@ impl RigWerkApp {
     }
 
     /// Puts the click on channel `channel` of output device `device` (0 =
-    /// clock, then followers), or takes it off.  Only that bit of the click
+    /// clock, then extra outputs), or takes it off.  Only that bit of the click
     /// mask moves; routing is unchanged.  The frame pushes it with the
     /// device settings.
     pub(crate) fn set_click_channel(&mut self, device: usize, channel: usize, on: bool) {
@@ -597,7 +601,7 @@ impl RigWerkApp {
     }
 
     /// Sets path `slot`'s map, level, polarity and trim on output device
-    /// `device` (0 = clock device, then followers).  Live, crossfaded.
+    /// `device` (0 = clock output, then extra outputs).  Live, crossfaded.
     pub(crate) fn set_device_path_map(
         &mut self,
         device: usize,
@@ -621,14 +625,14 @@ impl RigWerkApp {
         }
     }
 
-    /// Pushes the clock device and the followers to the engine.
+    /// Pushes the clock output and the extra outputs to the engine.
     pub(crate) fn push_devices_to_engine(&mut self) {
-        self.engine.set_clock_device(&self.clock_device);
-        self.push_followers_to_engine();
+        self.engine.set_clock_output(&self.clock_output);
+        self.push_extra_outputs_to_engine();
     }
 
-    /// Replaces every path with `prefs` (a loaded session or patch) and the
-    /// output devices with `clock` and `followers`, whose `path_map` is in
+    /// Replaces every path with `prefs` (a loaded session) and the
+    /// output devices with `clock` and `extra_outputs`, whose `path_map` is in
     /// the order of `prefs`.  The paths reuse the live slots first, in
     /// display order (so a live path just changes its settings, with the
     /// usual ramps), then free slots.  Live paths left over are removed with
@@ -639,7 +643,7 @@ impl RigWerkApp {
         &mut self,
         prefs: &[PathPref],
         clock: OutputDeviceSettings,
-        followers: Vec<FollowerPref>,
+        extra_outputs: Vec<ExtraOutputPref>,
         selected: usize,
     ) {
         let prefs: Vec<PathPref> = if prefs.is_empty() {
@@ -651,7 +655,7 @@ impl RigWerkApp {
         self.finish_plugin_gui();
         self.plugin_editor = None;
         self.plugin_param_filter.clear();
-        self.plugin_insert_at = None;
+        self.plugin_effect_at = None;
 
         // Live in the app, then live only in the engine (a fresh start),
         // then free, then still fading out.
@@ -690,18 +694,18 @@ impl RigWerkApp {
             }
             out
         };
-        let old_followers: Vec<OutputDeviceSettings> = self
-            .followers
+        let old_extra_outputs: Vec<OutputDeviceSettings> = self
+            .extra_outputs
             .iter()
-            .map(|follower| follower.settings)
+            .map(|extra_output| extra_output.settings)
             .collect();
-        self.clock_device = remap(&clock, Some(&self.clock_device));
-        self.followers = followers
+        self.clock_output = remap(&clock, Some(&self.clock_output));
+        self.extra_outputs = extra_outputs
             .into_iter()
             .enumerate()
-            .map(|(index, follower)| FollowerPref {
-                settings: remap(&follower.settings, old_followers.get(index)),
-                ..follower
+            .map(|(index, extra_output)| ExtraOutputPref {
+                settings: remap(&extra_output.settings, old_extra_outputs.get(index)),
+                ..extra_output
             })
             .collect();
 
@@ -734,7 +738,7 @@ impl RigWerkApp {
     /// the slot order they are saved in (the display order).
     ///
     /// The open editor is read in full first: a plugin may change a value
-    /// without reporting it, and the save lists the inserts from what that
+    /// without reporting it, and the save lists the effects from what that
     /// read stored.  No editor open makes this a no-op.
     pub(crate) fn saved_paths(&self) -> (Vec<PathPref>, Vec<usize>) {
         self.sync_plugin_editor();
@@ -755,22 +759,22 @@ impl RigWerkApp {
         order.iter().position(|&slot| slot == selected).unwrap_or(0)
     }
 
-    /// The clock device and the followers with `path_map` compacted to the
+    /// The clock output and the extra outputs with `path_map` compacted to the
     /// saved path order.
     pub(crate) fn saved_devices(
         &self,
         order: &[usize],
-    ) -> (OutputDeviceSettings, Vec<FollowerPref>) {
-        let clock = self.clock_device.with_path_order(order);
-        let followers = self
-            .followers
+    ) -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
+        let clock = self.clock_output.with_path_order(order);
+        let extra_outputs = self
+            .extra_outputs
             .iter()
-            .map(|follower| FollowerPref {
-                settings: follower.settings.with_path_order(order),
-                ..follower.clone()
+            .map(|extra_output| ExtraOutputPref {
+                settings: extra_output.settings.with_path_order(order),
+                ..extra_output.clone()
             })
             .collect();
-        (clock, followers)
+        (clock, extra_outputs)
     }
 }
 

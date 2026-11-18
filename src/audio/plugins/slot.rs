@@ -1,4 +1,4 @@
-//! Insert slots, the links the UI reaches them by, and deferred plugin
+//! Effect slots, the links the UI reaches them by, and deferred plugin
 //! teardown.
 
 #[cfg(test)]
@@ -13,12 +13,12 @@ use super::pref::{PluginPref, PluginView};
 use super::MAX_ALIGN;
 use crate::audio::LockStats;
 
-/// An insert's mix and bypass as atomics: the UI sets them through the
-/// insert's link and the audio thread reads them every chunk, without a
+/// An effect's mix and bypass as atomics: the UI sets them through the
+/// effect's link and the audio thread reads them every chunk, without a
 /// chain edit.  The slot's `pref.mix` / `pref.bypass` are only the values it
 /// was made with; [`SlotLink::saved_pref`] and the views read these.
 ///
-/// It also counts how often the audio thread tried to run the insert's
+/// It also counts how often the audio thread tried to run the effect's
 /// plugin, and how many of those chunks found it paused (a restart, a
 /// failed start).  Measurement only: the audio thread writes these
 /// relaxedly and Diagnostics reads them.
@@ -47,7 +47,7 @@ fn now_ms() -> u64 {
 }
 
 /// How many rebuilds a plugin may ask for within [`RELOAD_WINDOW_MS`]:
-/// the next request in that window fails the insert instead ("keeps
+/// the next request in that window fails the effect instead ("keeps
 /// asking"), so a plugin that asks on every load, or after a fixed delay,
 /// cannot reload forever.  Two in quick succession (a user changing the
 /// buses twice) are fine.
@@ -89,8 +89,8 @@ impl SlotControls {
         self.bypass.store(bypass, Ordering::Relaxed);
     }
 
-    /// Counts one attempt to run the insert's plugin (audio thread, once
-    /// per chunk the insert runs).
+    /// Counts one attempt to run the effect's plugin (audio thread, once
+    /// per chunk the effect runs).
     pub(crate) fn note_attempt(&self) {
         self.attempts.fetch_add(1, Ordering::Relaxed);
     }
@@ -156,7 +156,7 @@ impl SlotControls {
 }
 
 pub(crate) struct Slot {
-    /// The insert's identity, and what an unloaded slot restores with.
+    /// The effect's identity, and what an unloaded slot restores with.
     /// Once a plugin is loaded its saved values and state blob move to its
     /// handle (see [`SlotLink::saved_pref`]) and these are left empty.
     /// Shared with the published link, so a publish copies nothing.
@@ -165,7 +165,7 @@ pub(crate) struct Slot {
     /// when the slot is reopened or rebuilt for a new rate.
     pub(crate) controls: Arc<SlotControls>,
     /// The loaded plugin.  A processing failure is recorded in its
-    /// [`super::link::PluginShared`]; the insert then stays out of the
+    /// [`super::link::PluginShared`]; the effect then stays out of the
     /// chain like one with an `error`.
     pub(crate) plugin: Option<LoadedPlugin>,
     /// A load failure.
@@ -174,10 +174,10 @@ pub(crate) struct Slot {
     /// restored slot stays distinguishable from one opened at a rate.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) built_rate: Option<u32>,
-    /// The insert's input, read back delayed by its latency through
+    /// The effect's input, read back delayed by its latency through
     /// `dry_tap`: the dry side of a partial mix, and the whole output of a
-    /// block the insert skips, so the chain delays by
-    /// [`Self::latency_samples`] whatever the insert does.  Sized for
+    /// block the effect skips, so the chain delays by
+    /// [`Self::latency_samples`] whatever the effect does.  Sized for
     /// [`MAX_ALIGN`] plus one chunk when a plugin loads (on the UI thread);
     /// empty (silent, never written) while nothing is loaded.
     pub(crate) dry: DelayLine,
@@ -243,12 +243,12 @@ impl Slot {
         }
     }
 
-    /// The dry delay line a loaded insert needs (allocates; UI thread).
+    /// The dry delay line a loaded effect needs (allocates; UI thread).
     pub(crate) fn dry_line() -> DelayLine {
         DelayLine::new(MAX_ALIGN as usize + MAX_BLOCK)
     }
 
-    /// An insert that delays its input by `latency` frames and reports that
+    /// An effect that delays its input by `latency` frames and reports that
     /// latency, like a lookahead plugin with nothing to do: lets the tests
     /// check the alignment sample by sample.
     #[cfg(test)]
@@ -334,19 +334,19 @@ impl Slot {
                 .is_some_and(|plugin| plugin.shared().reload_wanted())
     }
 
-    /// The latency in samples this insert adds to the chain, as the plugin
+    /// The latency in samples this effect adds to the chain, as the plugin
     /// last reported it.  Lock-free (atomics only), so the audio thread may
     /// call it.
     ///
-    /// A bypassed insert still counts: bypass only skips the processing,
+    /// A bypassed effect still counts: bypass only skips the processing,
     /// while the alignment around the chain is sized for the plugin's
     /// latency, so toggling bypass never moves the alignment (and never
     /// makes the paths jump against each other).  So does one waiting for
-    /// a reload.  An insert that is not loaded or failed counts 0: it stays
+    /// a reload.  An effect that is not loaded or failed counts 0: it stays
     /// out of the chain until it is loaded again.
     ///
-    /// Whenever the chain skips the insert (bypass, mix at 0, a restart's
-    /// pause) it plays the insert's input
+    /// Whenever the chain skips the effect (bypass, mix at 0, a restart's
+    /// pause) it plays the effect's input
     /// delayed by this many frames instead, and a partial mix delays its
     /// dry side by it, so the chain always delays by its reported total.
     /// Values are clamped to [`MAX_ALIGN`] where they are read.
@@ -383,7 +383,7 @@ impl Slot {
         self.link().view()
     }
 
-    /// What the UI needs to reach this insert while the runtime holds it (UI
+    /// What the UI needs to reach this effect while the runtime holds it (UI
     /// thread; allocates).
     pub(crate) fn link(&self) -> SlotLink {
         SlotLink {
@@ -402,7 +402,7 @@ impl Slot {
     }
 }
 
-/// One insert as the UI reaches it while the runtime holds it, published with
+/// One effect as the UI reaches it while the runtime holds it, published with
 /// the views (see `PathControls::slot_links`).  Everything it reads is the
 /// handle's UI-side state or atomics, so the views, the saved prefs and the
 /// latency total can be rebuilt from the links alone.
@@ -470,7 +470,7 @@ impl SlotLink {
                 .is_some_and(|plugin| plugin.failure().is_some())
     }
 
-    /// Whether the insert is paused for a restart or a reactivation, and
+    /// Whether the effect is paused for a restart or a reactivation, and
     /// not failed (see [`PluginView::paused`]).  Atomics only.
     pub(crate) fn paused(&self) -> bool {
         !self.failed()
@@ -501,7 +501,7 @@ impl SlotLink {
         !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.reload_wanted()
     }
 
-    /// The first error the insert should show: a load or processing
+    /// The first error the effect should show: a load or processing
     /// failure.  Allocates: UI thread only, which is where a processing
     /// failure gets its text.
     pub(crate) fn resolved_error(&self) -> Option<String> {

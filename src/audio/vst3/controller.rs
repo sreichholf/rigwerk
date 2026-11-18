@@ -239,7 +239,7 @@ impl Vst3Controller {
             // activation.
             this.layout = this.read_layout()?;
             this.shared.set_latency(this.processor.getLatencySamples());
-            // The first value goes out with the views of the new insert.
+            // The first value goes out with the views of the new effect.
             this.shared.take_latency_change();
             // What the plugin raised while it was set up and activated is
             // done already: the buses were read after the arrangement, and

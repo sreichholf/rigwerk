@@ -356,7 +356,7 @@ fn meters_hold_each_channels_block_peak() {
 }
 
 #[test]
-fn controls_store_the_sanitized_level_and_copy_to_a_new_session() {
+fn controls_store_the_sanitized_level_and_copy_to_a_new_run() {
     let controls = DeviceControls::new();
     let (map, unused, gain) = controls.load();
     assert_eq!(

@@ -263,7 +263,7 @@ impl RigWerkApp {
             ),
             Page::Plugins => (
                 "Plugins".to_owned(),
-                "Browse VST3 and CLAP effects · inserts are edited on the Mixer.".to_owned(),
+                "Browse VST3 and CLAP plugins · effects are edited on the Mixer.".to_owned(),
             ),
             Page::Sessions => (
                 "Sessions".to_owned(),

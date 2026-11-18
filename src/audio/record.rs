@@ -22,9 +22,9 @@
 //! A take is the endpoint's frame without the metronome tick and the
 //! calibration click, unless [`Recorder::set_with_click`] asks for the
 //! frame as played.  The flag is read per frame, so it applies mid-take.
-//! A generic follower with more than 4 channels cannot carry the
+//! A generic extra output with more than 4 channels cannot carry the
 //! click-free frame through its ring, so its take keeps the click (see
-//! `follower::bus`).
+//! `extra_output::bus`).
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -45,7 +45,7 @@ pub(crate) const RECORD_SECONDS: u32 = 5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordSource {
     Clock,
-    Follower(usize),
+    ExtraOutput(usize),
 }
 
 /// Where a take is.  The audio thread may read this; it never waits on it.
@@ -93,7 +93,7 @@ const IEEE_FLOAT_GUID: [u8; 16] = [
     0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
 ];
 
-/// Clock encodes as 0.  A follower encodes as `index + 1`, so the two never
+/// Clock encodes as 0.  An extra output encodes as `index + 1`, so the two never
 /// share a value for any index a device list can hold.
 const SOURCE_CLOCK: u64 = 0;
 
@@ -526,7 +526,7 @@ pub(crate) fn push_device_frame(
 fn encode_source(source: RecordSource) -> u64 {
     match source {
         RecordSource::Clock => SOURCE_CLOCK,
-        RecordSource::Follower(index) => (index as u64).saturating_add(1),
+        RecordSource::ExtraOutput(index) => (index as u64).saturating_add(1),
     }
 }
 

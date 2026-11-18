@@ -1,6 +1,6 @@
 //! The Live scope and the bridge health tiles.  Readings only: the
-//! underrun count on BUFFER and the MODE line stay neutral, and the
-//! judgments about them (underruns, a quantum that does not fit) are Live
+//! dropout count on BUFFER and the MODE line stay neutral, and the
+//! judgments about them (dropouts, a quantum that does not fit) are Live
 //! Issues rows (`app::issues`).
 
 use eframe::egui;
@@ -83,9 +83,9 @@ impl RigWerkApp {
         };
         let path_ms = self.latency_ms();
         let path_hint = if self.engine.state == EngineState::Running && self.snapshot.direct {
-            "Estimated RigWerk path only (input block + output step; the duplex node has no cushion). Not a loopback measurement."
+            "Estimated RigWerk path only (input block + output step; the duplex node has no bridge buffer). Not a loopback measurement."
         } else {
-            "Estimated RigWerk path only (block + cushion + output step). What you can tune here; not a loopback measurement."
+            "Estimated RigWerk path only (block + bridge buffer + output step). What you can tune here; not a loopback measurement."
         };
         let buffer_fill = if self.engine.state == EngineState::Preview {
             0.38 + (ui.input(|input| input.time) as f32 * 0.8).sin() * 0.04
@@ -100,11 +100,11 @@ impl RigWerkApp {
         } else {
             format!("{}", (buffer_fill * 100.0).round() as i32)
         };
-        let underruns = self.snapshot.underruns;
+        let dropouts = self.snapshot.dropouts;
 
         // When the graph/device delay is known: PATH + HEARD on top, BUFFER +
-        // DRIFT below, with underruns as a badge on BUFFER. Otherwise keep a
-        // full UNDERRUNS tile — path delay is often missing on non-PipeWire.
+        // DRIFT below, with dropouts as a badge on BUFFER. Otherwise keep a
+        // full DROPOUTS tile — path delay is often missing on non-PipeWire.
         if let Some(heard) = self.heard_latency_ms() {
             let after = self.path_delay_ms().unwrap_or(0.0);
             ui.horizontal(|ui| {
@@ -117,13 +117,13 @@ impl RigWerkApp {
                     ),
                 );
             });
-            let underrun_badge = (
-                if underruns == 0 {
-                    "0 drop".to_owned()
-                } else if underruns == 1 {
-                    "1 drop".to_owned()
+            let dropout_badge = (
+                if dropouts == 0 {
+                    "0 dropouts".to_owned()
+                } else if dropouts == 1 {
+                    "1 dropout".to_owned()
                 } else {
-                    format!("{underruns} drops")
+                    format!("{dropouts} dropouts")
                 },
                 DIM,
             );
@@ -135,13 +135,15 @@ impl RigWerkApp {
                     "%",
                     AMBER,
                     tile_w,
-                    Some((underrun_badge.0.as_str(), underrun_badge.1)),
+                    Some((dropout_badge.0.as_str(), dropout_badge.1)),
                 )
-                .on_hover_text(if underruns == 0 {
-                    "Ring-buffer fill. No underruns this session.".to_owned()
+                .on_hover_text(if dropouts == 0 {
+                    "Bridge buffer fill. No dropouts this run.".to_owned()
+                } else if dropouts == 1 {
+                    "Bridge buffer fill. 1 dropout this run. The Issues strip says what to change.".to_owned()
                 } else {
                     format!(
-                        "Ring-buffer fill. {underruns} underrun(s) this session: the ring ran empty. The Issues strip says what to change."
+                        "Bridge buffer fill. {dropouts} dropouts this run. The Issues strip says what to change."
                     )
                 });
                 metric_tile(ui, "DRIFT", &drift_value, drift_unit, GREEN, tile_w);
@@ -156,7 +158,7 @@ impl RigWerkApp {
             });
             ui.horizontal(|ui| {
                 metric_tile(ui, "BUFFER", &buffer_pct, "%", AMBER, tile_w);
-                metric_tile(ui, "UNDERRUNS", &format!("{underruns}"), "", BLUE, tile_w);
+                metric_tile(ui, "DROPOUTS", &format!("{dropouts}"), "", BLUE, tile_w);
             });
         }
 

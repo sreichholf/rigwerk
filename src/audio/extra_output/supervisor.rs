@@ -1,7 +1,7 @@
-//! Keeps follower streams in step with the live follower plan.
+//! Keeps extra output streams in step with the live extra output plan.
 //! Add/remove/reconnect never stops the clock bridge.
 //!
-//! [`FollowerSlots`] is the open / close / retry bookkeeping for one kind of
+//! [`ExtraOutputSlots`] is the open / close / retry bookkeeping for one kind of
 //! stream: cpal here, PipeWire node streams in `linux::native`.  A table
 //! only touches the flags of a slot it opened or is retrying.
 
@@ -9,58 +9,58 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::super::output_map::MAX_FOLLOWERS;
-use super::super::shared::{FollowerPlan, Shared};
-use super::stream::{open_follower, OpenedFollower};
+use super::super::output_map::MAX_EXTRA_OUTPUTS;
+use super::super::shared::{ExtraOutputPlan, Shared};
+use super::stream::{open_extra_output, OpenedExtraOutput};
 
 /// How long to wait after a failed open before trying again.
 const RETRY_AFTER: Duration = Duration::from_millis(750);
 
-/// Live generic (cpal) follower streams owned by the bridge thread.
-pub(crate) struct FollowerOutputs {
-    streams: FollowerSlots<OpenedFollower>,
+/// Live generic (cpal) extra output streams owned by the bridge thread.
+pub(crate) struct ExtraOutputOutputs {
+    streams: ExtraOutputSlots<OpenedExtraOutput>,
     buffer_frames: usize,
     sample_rate: u32,
 }
 
-impl FollowerOutputs {
+impl ExtraOutputOutputs {
     pub(crate) fn new(buffer_frames: usize, sample_rate: u32) -> Self {
         Self {
-            streams: FollowerSlots::new(),
+            streams: ExtraOutputSlots::new(),
             buffer_frames,
             sample_rate,
         }
     }
 
-    /// Opens, closes and reconnects followers to match the plan.  Safe to call
+    /// Opens, closes and reconnects extra outputs to match the plan.  Safe to call
     /// every bridge tick.
     pub(crate) fn sync(&mut self, shared: &Arc<Shared>) {
-        // PipeWire duplex fans out in-graph; never open cpal followers there.
+        // PipeWire duplex fans out in-graph; never open cpal extra outputs there.
         if shared.direct.load(Ordering::Relaxed) {
             self.streams.close_all(shared);
             return;
         }
-        let wanted = generic_followers(&shared.follower_plan());
+        let wanted = generic_extra_outputs(&shared.extra_output_plan());
         let (rate, buffer) = (self.sample_rate, self.buffer_frames);
         self.streams.sync(shared, &wanted, |slot, device_id| {
-            open_follower(slot, device_id, rate, shared, buffer)
+            open_extra_output(slot, device_id, rate, shared, buffer)
         });
     }
 }
 
-/// One open stream per follower slot, keyed by what it was opened for (a
+/// One open stream per extra output slot, keyed by what it was opened for (a
 /// device id or a node name), with the retry backoff of a slot that failed.
-pub(crate) struct FollowerSlots<T> {
-    slots: [Option<(String, T)>; MAX_FOLLOWERS],
+pub(crate) struct ExtraOutputSlots<T> {
+    slots: [Option<(String, T)>; MAX_EXTRA_OUTPUTS],
     /// Next time a missing slot may be retried.
-    retry_at: [Option<Instant>; MAX_FOLLOWERS],
+    retry_at: [Option<Instant>; MAX_EXTRA_OUTPUTS],
 }
 
-impl<T> FollowerSlots<T> {
+impl<T> ExtraOutputSlots<T> {
     pub(crate) fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| None),
-            retry_at: [None; MAX_FOLLOWERS],
+            retry_at: [None; MAX_EXTRA_OUTPUTS],
         }
     }
 
@@ -78,11 +78,11 @@ impl<T> FollowerSlots<T> {
     ) {
         let wanted: Vec<&(usize, String)> = wanted
             .iter()
-            .filter(|(slot, _)| *slot < MAX_FOLLOWERS)
+            .filter(|(slot, _)| *slot < MAX_EXTRA_OUTPUTS)
             .collect();
 
         // Close slots that left the plan or changed device.
-        for slot in 0..MAX_FOLLOWERS {
+        for slot in 0..MAX_EXTRA_OUTPUTS {
             let key = wanted.iter().find(|(s, _)| *s == slot).map(|(_, key)| key);
             let keep = key.is_some_and(|key| {
                 self.slots[slot]
@@ -104,7 +104,7 @@ impl<T> FollowerSlots<T> {
             if key.is_none() && owned {
                 self.retry_at[slot] = None;
                 shared
-                    .follower_bus(slot)
+                    .extra_output_bus(slot)
                     .missing
                     .store(false, Ordering::Relaxed);
             }
@@ -114,7 +114,11 @@ impl<T> FollowerSlots<T> {
         for (slot, key) in wanted {
             let slot = *slot;
             if self.slots[slot].is_some() {
-                if !shared.follower_bus(slot).missing.load(Ordering::Relaxed) {
+                if !shared
+                    .extra_output_bus(slot)
+                    .missing
+                    .load(Ordering::Relaxed)
+                {
                     continue;
                 }
                 // Device reported lost: drop it and retry after the backoff.
@@ -136,28 +140,28 @@ impl<T> FollowerSlots<T> {
             match open(slot, key) {
                 Ok(opened) => {
                     shared
-                        .follower_ring_active(slot)
+                        .extra_output_ring_active(slot)
                         .store(true, Ordering::Release);
                     shared
-                        .follower_bus(slot)
+                        .extra_output_bus(slot)
                         .missing
                         .store(false, Ordering::Relaxed);
                     // Tell the producer the clock's block size once we know the
                     // output rate (open_output already published it).
                     let clock_step = shared.output_step_frames.load(Ordering::Relaxed) as usize;
                     if clock_step > 0 {
-                        shared.follower_bus(slot).note_input_block(clock_step);
+                        shared.extra_output_bus(slot).note_input_block(clock_step);
                     }
                     self.slots[slot] = Some((key.clone(), opened));
                     self.retry_at[slot] = None;
                 }
                 Err(_) => {
                     shared
-                        .follower_bus(slot)
+                        .extra_output_bus(slot)
                         .missing
                         .store(true, Ordering::Relaxed);
                     shared
-                        .follower_ring_active(slot)
+                        .extra_output_ring_active(slot)
                         .store(false, Ordering::Release);
                     self.retry_at[slot] = Some(now + RETRY_AFTER);
                 }
@@ -166,7 +170,7 @@ impl<T> FollowerSlots<T> {
     }
 
     pub(crate) fn close_all(&mut self, shared: &Shared) {
-        for slot in 0..MAX_FOLLOWERS {
+        for slot in 0..MAX_EXTRA_OUTPUTS {
             if self.slots[slot].take().is_some() {
                 stop_feeding(shared, slot);
             }
@@ -178,28 +182,28 @@ impl<T> FollowerSlots<T> {
 /// The clock side stops pushing into `slot`'s ring.
 fn stop_feeding(shared: &Shared, slot: usize) {
     shared
-        .follower_ring_active(slot)
+        .extra_output_ring_active(slot)
         .store(false, Ordering::Release);
-    shared.follower_bus(slot).set_playback_rate(0);
+    shared.extra_output_bus(slot).set_playback_rate(0);
 }
 
 /// The plan's slots that play on their own cpal stream, with their device
-/// ids.  A PipeWire node follower is not one: the duplex node links it, and
+/// ids.  A PipeWire node extra output is not one: the duplex node links it, and
 /// the native two-stream bridge opens a node stream for it.
-fn generic_followers(plan: &FollowerPlan) -> Vec<(usize, String)> {
+fn generic_extra_outputs(plan: &ExtraOutputPlan) -> Vec<(usize, String)> {
     plan.slots
         .iter()
         .take(plan.count)
         .enumerate()
         .filter_map(|(slot, link)| {
-            if link.device_id.is_empty() || !super::is_generic_follower(&link.device_id) {
+            if link.device_id.is_empty() || !super::is_generic_extra_output(&link.device_id) {
                 return None;
             }
-            // PipeWire RigWerk Out is in-graph.  Windows VB-Cable publish
-            // is a WASAPI follower that only plays while publish is on.
-            if link.virtual_out {
+            // PipeWire RigWerk Out is in-graph.  The Windows VB-Cable virtual
+            // output is a WASAPI extra output that only plays while it is on.
+            if link.virtual_output {
                 #[cfg(target_os = "windows")]
-                if link.publish {
+                if link.virtual_output_on {
                     return Some((slot, link.device_id.clone()));
                 }
                 return None;

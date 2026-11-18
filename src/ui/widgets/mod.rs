@@ -102,12 +102,12 @@ pub(crate) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
         .galley(rect.center() - galley.size() / 2.0, galley, color);
 }
 
-/// A small BYP pill.  `on` is the hot amber state; off stays a quiet
-/// outline.  The caller adds the tooltip.
+/// The chain's *Bypass all* pill.  `on` is the hot amber state; off stays
+/// a quiet outline.  The caller adds the tooltip.
 pub(crate) fn bypass_pill(ui: &mut egui::Ui, on: bool) -> egui::Response {
     let color = if on { AMBER } else { DIM };
     let galley = ui.painter().layout_no_wrap(
-        "BYP".to_owned(),
+        "Bypass all".to_owned(),
         FontId::new(ts(7.0), FontFamily::Monospace),
         color,
     );
@@ -535,7 +535,7 @@ pub(crate) fn metric_tile(
     metric_tile_with_badge(ui, label, value, unit, color, width, None)
 }
 
-/// Like [`metric_tile`], with an optional top-right micro badge (e.g. underruns).
+/// Like [`metric_tile`], with an optional top-right micro badge (e.g. dropouts).
 pub(crate) fn metric_tile_with_badge(
     ui: &mut egui::Ui,
     label: &str,

@@ -1,7 +1,7 @@
 //! The RigWerk window: app state, start-up, and the logic and save the frame calls.
 //!
 //! Logic is grouped in `app/` (settings, devices, bridge control, recording,
-//! patches, screenshots, tuner, theme and size).  Drawing belongs in `ui/`.  The frame shell
+//! sessions, screenshots, tuner, theme and size).  Drawing belongs in `ui/`.  The frame shell
 //! (`impl eframe::App`) lives in `ui/frame.rs`; this file does not paint.
 
 pub(crate) mod alignment;
@@ -9,19 +9,19 @@ pub(crate) mod appearance;
 pub(crate) mod bridge;
 pub(crate) mod budget;
 pub(crate) mod calibration;
-pub(crate) mod cards;
 pub(crate) mod chain;
 pub(crate) mod devices;
 pub(crate) mod driver_check;
 pub(crate) mod issues;
 pub(crate) mod latency;
+pub(crate) mod layouts;
 pub(crate) mod output_devices;
 pub(crate) mod paths;
 pub(crate) mod plugin_gui;
 pub(crate) mod plugins;
-pub(crate) mod presets;
 pub(crate) mod record;
 pub(crate) mod screenshot;
+pub(crate) mod sessions;
 pub(crate) mod settings;
 pub(crate) mod startup;
 pub(crate) mod tuner;
@@ -35,14 +35,14 @@ use eframe::egui;
 use crate::app::devices::{inventory_fingerprint, HeldDevice};
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
-    cushion_from_pref, cushion_to_pref, load_preferences, page_from_key, page_key,
-    preferences_backup_key, resolved_wasapi_output_mode, store_preferences, unique_presets,
-    FollowerPref, Preferences, Preset, PREFERENCES_KEY, PREFERENCES_SCHEMA,
+    bridge_buffer_from_pref, bridge_buffer_to_pref, load_preferences, page_from_key, page_key,
+    preferences_backup_key, resolved_wasapi_output_mode, store_preferences, unique_sessions,
+    ExtraOutputPref, Preferences, Session, PREFERENCES_KEY, PREFERENCES_SCHEMA,
 };
 use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
-    self, AudioEngine, CushionMode, EngineState, EqSlot, Inventory, OutputDeviceSettings, Snapshot,
-    WasapiOutputMode, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
+    self, AudioEngine, BufferMode, EngineState, EqSlot, Inventory, OutputDeviceSettings, Snapshot,
+    WasapiOutputMode, MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub(crate) fn initial_page() -> Page {
 }
 
 /// Test hook for screenshots of a Mixer stage: `RIGWERK_MIXER_STAGE=output`
-/// (or `device` for the clock device). Normal launches open the last EQ.
+/// (or `device` for the clock output). Normal launches open the last EQ.
 fn initial_mixer_stage() -> Option<chain::ChainSelection> {
     let key = std::env::var("RIGWERK_MIXER_STAGE").ok()?;
     chain::ChainSelection::from_key(&key.to_lowercase())
@@ -204,7 +204,7 @@ pub struct RigWerkApp {
     /// On Windows this stays aligned with [`Self::wasapi_output_mode`] for
     /// older code paths and cross-platform preference saves.
     pub(crate) low_latency_output: bool,
-    /// Windows WASAPI clock device mode (Shared / REAL-style / Exclusive).
+    /// Windows WASAPI clock output mode (Shared / REAL-style / Exclusive).
     pub(crate) wasapi_output_mode: crate::audio::WasapiOutputMode,
     /// Output side rate (0 follows the input) and buffer.
     pub(crate) output_rate: u32,
@@ -212,9 +212,9 @@ pub struct RigWerkApp {
     /// Which output list is shown: the low-latency driver's (ASIO) or the
     /// system's.  Follows the selected output unless that list is empty.
     pub(crate) output_tab_low_latency: bool,
-    pub(crate) cushion_mode: CushionMode,
-    /// Manual cushion size in milliseconds.
-    pub(crate) cushion_ms: f32,
+    pub(crate) bridge_buffer_mode: BufferMode,
+    /// Fixed bridge buffer size in milliseconds.
+    pub(crate) bridge_buffer_ms: f32,
     /// The signal paths by engine slot: name, colour, routing, mono,
     /// enable, EQs, gate, level, mute and solo (see `app::paths`).  At
     /// least one is always `Some`.  Pushed to the engine every frame.
@@ -223,11 +223,11 @@ pub struct RigWerkApp {
     pub(crate) path_order: Vec<usize>,
     /// The path slot the Mixer and Plugins pages edit.
     pub(crate) selected_path: usize,
-    /// Level, mute and per-path channel maps of the clock device (the
+    /// Level, mute and per-path channel maps of the clock output (the
     /// selected output), pushed to the engine every frame.
-    pub(crate) clock_device: OutputDeviceSettings,
-    /// Extra output devices.  Pushed live by `push_followers_to_engine`.
-    pub(crate) followers: Vec<FollowerPref>,
+    pub(crate) clock_output: OutputDeviceSettings,
+    /// Extra output devices.  Pushed live by `push_extra_outputs_to_engine`.
+    pub(crate) extra_outputs: Vec<ExtraOutputPref>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
     /// Selected stage in the Mixer rack / Live chain strip.
@@ -238,16 +238,16 @@ pub struct RigWerkApp {
     /// Path slot the Signal Routing presets set (page-local; falls back to
     /// the selected path).
     pub(crate) routing_preset_path: Option<usize>,
-    /// The routing card applied last, for "Custom · edited from <card>".
-    pub(crate) routing_last_card: Option<crate::app::cards::Card>,
+    /// The routing layout applied last, for "Custom · edited from <layout>".
+    pub(crate) routing_last_layout: Option<crate::app::layouts::PathLayout>,
     /// The Live Issues strip shows only its header (not persisted).
     pub(crate) live_issues_collapsed: bool,
     /// What the Live Issues keep between frames (the DSP hysteresis, the
-    /// session's underruns, a lost device and the errors already shown).
+    /// session's dropouts, a lost device and the errors already shown).
     /// Moved once per tick by `tick_issues`.
     pub(crate) issue_state: crate::app::issues::IssueState,
     /// Where the next Plugins-page add should land (`None` = append).
-    pub(crate) plugin_insert_at: Option<usize>,
+    pub(crate) plugin_effect_at: Option<usize>,
     pub(crate) meter_in_l: f32,
     pub(crate) meter_in_r: f32,
     pub(crate) meter_out_l: f32,
@@ -260,10 +260,10 @@ pub struct RigWerkApp {
     /// [`Snapshot::out_channels`].
     pub(crate) meter_out_channels: [f32; MAX_OUTPUT_CHANNELS],
     pub(crate) peak_out_channels: [f32; MAX_OUTPUT_CHANNELS],
-    /// Smoothed meter and peak per follower channel, from
-    /// [`Snapshot::follower_channels`].
-    pub(crate) meter_follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
-    pub(crate) peak_follower_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+    /// Smoothed meter and peak per extra output channel, from
+    /// [`Snapshot::extra_output_channels`].
+    pub(crate) meter_extra_output_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
+    pub(crate) peak_extra_output_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
     /// Per path slot (L, R): after the path's chain, level, mute and solo,
     /// before the master.  Smoothed and peak-held like the other meters.
     pub(crate) meter_paths: [[f32; 2]; MAX_PATHS],
@@ -283,7 +283,7 @@ pub struct RigWerkApp {
     pub(crate) record_folder: String,
     /// "Record the click": takes carry the metronome and calibration click.
     pub(crate) record_click: bool,
-    pub(crate) sessions: Vec<Preset>,
+    pub(crate) sessions: Vec<Session>,
     pub(crate) selected_session: Option<usize>,
     pub(crate) pending_delete: Option<usize>,
     pub(crate) log: Vec<LogEntry>,
@@ -313,8 +313,8 @@ pub struct RigWerkApp {
     pub(crate) last_output_driver: Option<(String, driver_check::DriverActual)>,
     /// What the plugin browser found and what is being typed into it.
     pub(crate) plugin_browser: plugins::PluginBrowser,
-    /// The insert (path, index) whose control panel is open.
-    pub(crate) plugin_editor: Option<paths::InsertKey>,
+    /// The effect (path, index) whose control panel is open.
+    pub(crate) plugin_editor: Option<paths::EffectKey>,
     /// The plugin's own editor window, when it has one open.
     pub(crate) plugin_gui: Option<plugin_gui::PluginGuiWindow>,
     /// egui's points-to-pixels factor, read every frame.  A CLAP editor
@@ -401,7 +401,7 @@ impl RigWerkApp {
             return;
         }
         // An open editor may have changed a value without reporting it, so
-        // `saved_paths` reads it in full before it lists the inserts.
+        // `saved_paths` reads it in full before it lists the effects.
         // A side whose stored identity startup did not find keeps that
         // name, id, and backend. The on-screen row can still be the fallback.
         // An id match, a legacy name match, and a side with nothing stored
@@ -416,7 +416,7 @@ impl RigWerkApp {
             persisted_identity(self.output_held.as_ref(), Some(self.selected_output()));
         let (paths, order) = self.saved_paths();
         let selected_path = self.saved_selected_path(&order);
-        let (clock_device, followers) = self.saved_devices(&order);
+        let (clock_output, extra_outputs) = self.saved_devices(&order);
         let preferences = Preferences {
             schema_version: PREFERENCES_SCHEMA,
             auto_start_bridge: self.auto_start_bridge,
@@ -452,12 +452,12 @@ impl RigWerkApp {
             }),
             output_rate: self.output_rate,
             output_buffer: self.output_buffer,
-            cushion_mode: cushion_to_pref(self.cushion_mode),
-            cushion_ms: self.cushion_ms,
+            bridge_buffer_mode: bridge_buffer_to_pref(self.bridge_buffer_mode),
+            bridge_buffer_ms: self.bridge_buffer_ms,
             paths,
             selected_path,
-            clock_device,
-            followers,
+            clock_output,
+            extra_outputs,
             measured_latency: self.measured_latency.clone(),
             tuner_tuning: self.tuner.preset_id().to_owned(),
             tuner_reference_hz: self.tuner.reference_hz,
@@ -518,7 +518,7 @@ impl RigWerkApp {
             None => true,
         };
         let engine = AudioEngine::new(48_000);
-        let sessions = unique_presets(&preferences.sessions);
+        let sessions = unique_sessions(&preferences.sessions);
         let selected_session = preferences
             .selected_session
             .filter(|index| *index < sessions.len());
@@ -535,7 +535,7 @@ impl RigWerkApp {
             input_idx,
             output_idx,
             use_asio_input,
-            // Rates, buffers, gains and the cushion were checked in
+            // Rates, buffers, gains and the bridge buffer were checked in
             // `load_preferences` (`validate_bridge_settings`). The defaults
             // used when nothing was stored are already inside those ranges.
             sample_rate: preferences.sample_rate,
@@ -566,22 +566,22 @@ impl RigWerkApp {
             output_rate: preferences.output_rate,
             output_buffer: preferences.output_buffer,
             output_tab_low_latency: preferences.output_tab_low_latency,
-            cushion_mode: cushion_from_pref(preferences.cushion_mode),
-            cushion_ms: preferences.cushion_ms,
+            bridge_buffer_mode: bridge_buffer_from_pref(preferences.bridge_buffer_mode),
+            bridge_buffer_ms: preferences.bridge_buffer_ms,
             // Filled by `install_paths` below.
             paths: std::array::from_fn(|_| None),
             path_order: Vec::new(),
             selected_path: 0,
-            clock_device: preferences.clock_device.sanitized(),
-            followers: {
-                let mut followers: Vec<_> = preferences
-                    .followers
+            clock_output: preferences.clock_output.sanitized(),
+            extra_outputs: {
+                let mut extra_outputs: Vec<_> = preferences
+                    .extra_outputs
                     .iter()
                     .cloned()
-                    .map(FollowerPref::sanitized)
+                    .map(ExtraOutputPref::sanitized)
                     .collect();
-                followers.truncate(crate::audio::MAX_FOLLOWERS);
-                followers
+                extra_outputs.truncate(crate::audio::MAX_EXTRA_OUTPUTS);
+                extra_outputs
             },
             eq_edit: if preferences.eq_edit == 1 {
                 EqSlot::Post
@@ -595,10 +595,10 @@ impl RigWerkApp {
             }),
             routing_device: 0,
             routing_preset_path: None,
-            routing_last_card: None,
+            routing_last_layout: None,
             live_issues_collapsed: false,
             issue_state: Default::default(),
-            plugin_insert_at: None,
+            plugin_effect_at: None,
             meter_in_l: 0.0,
             meter_in_r: 0.0,
             meter_out_l: 0.0,
@@ -609,10 +609,10 @@ impl RigWerkApp {
             peak_out_r: 0.0,
             meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
             peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
-            meter_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+            meter_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
             meter_paths: [[0.0; 2]; MAX_PATHS],
             peak_paths: [[0.0; 2]; MAX_PATHS],
-            peak_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+            peak_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
             scope_in: vec![0.0; audio::SCOPE_LEN],
             scope_out: vec![0.0; audio::SCOPE_LEN],
             snapshot: Snapshot::default(),
@@ -679,14 +679,14 @@ impl RigWerkApp {
         app.engine
             .set_master(app.mute, app.monitor, app.input_channels, app.drift);
         // Old files (and no file) load as one path.
-        let (clock, followers) = (app.clock_device, app.followers.clone());
+        let (clock, extra_outputs) = (app.clock_output, app.extra_outputs.clone());
         app.install_paths(
             &preferences.path_prefs(),
             clock,
-            followers,
+            extra_outputs,
             preferences.selected_path,
         );
-        app.apply_cushion();
+        app.apply_bridge_buffer();
         if !screenshot_mode {
             app.begin_plugin_scan();
         }
@@ -707,8 +707,8 @@ impl RigWerkApp {
         let scan_notes = fresh.notes.clone();
         self.inventory = fresh;
         self.inventory_fingerprint = inventory_fingerprint(&self.inventory);
-        crate::app::settings::rematch_windows_virtual_out(
-            &mut self.followers,
+        crate::app::settings::rematch_windows_virtual_output(
+            &mut self.extra_outputs,
             &self.inventory.outputs,
         );
         let restored = restore_saved_devices(&self.inventory, &gate.preferences);
@@ -822,21 +822,21 @@ pub(crate) fn blank_app() -> RigWerkApp {
         output_rate: 0,
         output_buffer: 128,
         output_tab_low_latency: false,
-        cushion_mode: CushionMode::Safe,
-        cushion_ms: 10.0,
+        bridge_buffer_mode: BufferMode::Auto,
+        bridge_buffer_ms: 10.0,
         paths: std::array::from_fn(|slot| (slot == 0).then(paths::SignalPath::default)),
         path_order: vec![0],
         selected_path: 0,
-        clock_device: OutputDeviceSettings::default(),
-        followers: Vec::new(),
+        clock_output: OutputDeviceSettings::default(),
+        extra_outputs: Vec::new(),
         eq_edit: EqSlot::Pre,
         chain_selected: chain::ChainSelection::PreEq,
         routing_device: 0,
         routing_preset_path: None,
-        routing_last_card: None,
+        routing_last_layout: None,
         live_issues_collapsed: false,
         issue_state: Default::default(),
-        plugin_insert_at: None,
+        plugin_effect_at: None,
         meter_in_l: 0.0,
         meter_in_r: 0.0,
         meter_out_l: 0.0,
@@ -847,10 +847,10 @@ pub(crate) fn blank_app() -> RigWerkApp {
         peak_out_r: 0.0,
         meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
         peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
-        meter_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+        meter_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
         meter_paths: [[0.0; 2]; MAX_PATHS],
         peak_paths: [[0.0; 2]; MAX_PATHS],
-        peak_follower_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_FOLLOWERS],
+        peak_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
         scope_in: vec![0.0; audio::SCOPE_LEN],
         scope_out: vec![0.0; audio::SCOPE_LEN],
         snapshot: Snapshot::default(),

@@ -1,12 +1,12 @@
-use super::{preset_row, PresetAction};
+use super::{session_row, SessionAction};
 use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
 use eframe::egui::{self, accesskit::Toggled};
 
 #[test]
-fn a_preset_row_exposes_its_name_and_delete_control() {
+fn a_session_row_exposes_its_name_and_delete_control() {
     let tree = accesskit_frame(|ui| {
         assert_eq!(
-            preset_row(
+            session_row(
                 ui,
                 "Clean",
                 "dry vocal",
@@ -15,7 +15,7 @@ fn a_preset_row_exposes_its_name_and_delete_control() {
                 true,
                 false
             ),
-            PresetAction::None
+            SessionAction::None
         );
     });
     let row = node_named(&tree, "Clean");
@@ -28,10 +28,10 @@ fn a_preset_row_exposes_its_name_and_delete_control() {
 }
 
 #[test]
-fn enter_on_a_focused_preset_row_loads_it() {
+fn enter_on_a_focused_session_row_loads_it() {
     let ctx = egui::Context::default();
     let show = |ui: &mut egui::Ui| {
-        preset_row(
+        session_row(
             ui,
             "Clean",
             "dry vocal",
@@ -42,14 +42,14 @@ fn enter_on_a_focused_preset_row_loads_it() {
         )
     };
     let _ = run_frame(&ctx, test_input(None), |ui| {
-        assert_eq!(show(ui), PresetAction::None);
+        assert_eq!(show(ui), SessionAction::None);
     });
     let _ = run_frame(&ctx, test_input(Some(egui::Key::Tab)), |ui| {
-        assert_eq!(show(ui), PresetAction::None);
+        assert_eq!(show(ui), SessionAction::None);
     });
-    let mut action = PresetAction::None;
+    let mut action = SessionAction::None;
     let _ = run_frame(&ctx, test_input(Some(egui::Key::Enter)), |ui| {
         action = show(ui);
     });
-    assert_eq!(action, PresetAction::Load);
+    assert_eq!(action, SessionAction::Load);
 }

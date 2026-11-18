@@ -10,7 +10,7 @@ use crate::audio::EqSlot;
 pub(crate) enum ChainSelection {
     Input,
     PreEq,
-    /// The insert group header — not a single plugin.
+    /// The effect group header — not a single plugin.
     Plugins,
     Plugin(usize),
     Gate,
@@ -19,7 +19,7 @@ pub(crate) enum ChainSelection {
     Path,
     /// The master stage: master level and mute, and the device list.
     Output,
-    /// One output device under the master; 0 is the clock device.
+    /// One output device under the master; 0 is the clock output.
     OutputDevice(usize),
     /// The add-output-device list under the Output stage.
     AddOutput,
@@ -83,9 +83,9 @@ impl ChainSelection {
         })
     }
 
-    /// The selection after the insert at `removed` left the chain, with
-    /// `plugin_count` inserts remaining: a later insert keeps its selection as
-    /// it slides up. Removing the selected insert selects the next one, or the
+    /// The selection after the effect at `removed` left the chain, with
+    /// `plugin_count` effects remaining: a later effect keeps its selection as
+    /// it slides up. Removing the selected effect selects the next one, or the
     /// previous one when it was the last.
     pub(crate) fn after_removal(self, removed: usize, plugin_count: usize) -> Self {
         match self {
@@ -94,8 +94,8 @@ impl ChainSelection {
         }
     }
 
-    /// Where a newly added insert should land. `None` means append.
-    pub(crate) fn plugin_insert_at(self, plugin_count: usize) -> Option<usize> {
+    /// Where a newly added effect should land. `None` means append.
+    pub(crate) fn plugin_effect_at(self, plugin_count: usize) -> Option<usize> {
         match self {
             Self::Plugin(index) => Some((index + 1).min(plugin_count)),
             Self::Plugins => None,

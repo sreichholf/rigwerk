@@ -1,4 +1,4 @@
-//! Plugins: browse installed VST3 and CLAP effects. The insert chain itself
+//! Plugins: browse installed VST3 and CLAP plugins. The effect chain itself
 //! lives on the Mixer rack; this page is the library.
 
 use eframe::egui;
@@ -251,14 +251,14 @@ fn parameter_card(ui: &mut egui::Ui, parameter: &PluginParamView, accent: Color3
 }
 
 impl RigWerkApp {
-    /// The control panel for one insert.  It is a compact, centred card: the
+    /// The control panel for one effect.  It is a compact, centred card: the
     /// plugin's parameters on top, and a way into the plugin's own editor when
     /// it has one.
     pub(crate) fn plugin_editor_window(&mut self, ctx: &egui::Context) {
         let Some(key) = self.plugin_editor else {
             return;
         };
-        let index = key.insert;
+        let index = key.effect;
         let views = self.engine.plugin_views(key.path);
         let Some(view) = views.get(index) else {
             self.plugin_editor = None;
@@ -275,7 +275,7 @@ impl RigWerkApp {
         let has_editor = view.has_editor;
         let parameters = view.parameters.clone();
         let gui_is_open = self.plugin_gui.as_ref().is_some_and(|gui| gui.key == key);
-        // With several paths the panel says whose insert it is.
+        // With several paths the panel says whose effect it is.
         let owner = (self.path_count() > 1)
             .then(|| self.paths.get(key.path).and_then(Option::as_ref))
             .flatten()
@@ -364,7 +364,7 @@ impl RigWerkApp {
                                 ui.painter().circle_filled(dot.center(), 3.5, *colour);
                                 ui.label(
                                     RichText::new(format!(
-                                        "{} · insert {:02}",
+                                        "{} · effect {:02}",
                                         ellipsize(path_name, 24),
                                         index + 1
                                     ))
@@ -428,9 +428,9 @@ impl RigWerkApp {
                             .min_size(Vec2::new(54.0, 22.0)),
                         )
                         .on_hover_text(if bypass {
-                            "Let this insert process audio again"
+                            "Let this effect process audio again"
                         } else {
-                            "Leave the insert in place but pass audio through"
+                            "Leave the effect in place but pass audio through"
                         })
                         .clicked()
                     {
@@ -454,7 +454,7 @@ impl RigWerkApp {
                                     .min_size(Vec2::new(150.0, 26.0)),
                                 )
                                 .on_hover_text(
-                                    "Open the editor the plugin draws itself. Changes made there are saved with this insert too.",
+                                    "Open the editor the plugin draws itself. Changes made there are saved with this effect too.",
                                 )
                                 .clicked()
                         {
@@ -493,7 +493,7 @@ impl RigWerkApp {
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(if has_editor {
-                                "Use Open editor above; its settings are saved with this insert."
+                                "Use Open editor above; its settings are saved with this effect."
                             } else if error.is_some() {
                                 "The effect did not load, so there is nothing to control yet."
                             } else {
@@ -612,7 +612,7 @@ impl RigWerkApp {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new("Changes apply live and are saved with this insert.")
+                            RichText::new("Changes apply live and are saved with this effect.")
                                 .size(ts(8.2))
                                 .color(DIM),
                         );
@@ -642,7 +642,7 @@ impl RigWerkApp {
     pub(crate) fn plugins_page(&mut self, ui: &mut egui::Ui) {
         let views = self.engine.plugin_views(self.selected_path);
         // With several paths, each library row names the paths holding it,
-        // and a chip row picks the path new inserts go to.
+        // and a chip row picks the path new effects go to.
         let paths = self.path_infos();
         let several = paths.len() > 1;
         let path_chains: Vec<(Color32, String, std::sync::Arc<[crate::audio::PluginView]>)> =
@@ -680,9 +680,9 @@ impl RigWerkApp {
             .find(|info| info.selected)
             .map(|info| ellipsize(&info.name, 14))
             .unwrap_or_default();
-        let insert_hint = match (self.plugin_insert_at, several) {
-            (Some(index), false) => format!("Next add inserts at position {}.", index + 1),
-            (None, false) => "Next add appends to the Mixer insert chain.".to_owned(),
+        let effect_hint = match (self.plugin_effect_at, several) {
+            (Some(index), false) => format!("Next add effects at position {}.", index + 1),
+            (None, false) => "Next add appends to the Mixer effect chain.".to_owned(),
             (Some(index), true) => {
                 format!("Next add: position {} of {selected_name}.", index + 1)
             }
@@ -699,7 +699,7 @@ impl RigWerkApp {
                 .color(DIM),
             );
             ui.add_space(12.0);
-            ui.label(RichText::new(insert_hint).size(ts(9.5)).color(MUTED));
+            ui.label(RichText::new(effect_hint).size(ts(9.5)).color(MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ghost_button(ui, if scanning { "Scanning…" } else { "Rescan" }, 112.0)
                     && !scanning
@@ -784,7 +784,7 @@ impl RigWerkApp {
                             .stroke(Stroke::new(1.0, with_alpha(TEAL, 45)))
                             .corner_radius(CornerRadius::same(7)),
                         )
-                        .on_hover_text("Reorder, bypass and mix inserts on the Mixer rack")
+                        .on_hover_text("Reorder, bypass and mix effects on the Mixer rack")
                         .clicked()
                     {
                         open_mixer = true;
@@ -796,7 +796,7 @@ impl RigWerkApp {
             ui.add_space(3.0);
             ui.label(
                 RichText::new(
-                    "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the Mixer insert chain. On the Mixer page, double-click an insert to open its editor.",
+                    "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the Mixer effect chain. On the Mixer page, double-click an effect to open its editor.",
                 )
                 .size(ts(9.5))
                 .color(MUTED),

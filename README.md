@@ -13,8 +13,8 @@ WASAPI). It is alpha software: expect rough edges and changes.
 - **Any input to any output.** Input and output keep their own clocks and
   sample rates. RigWerk converts between them and corrects the slow drift.
 - **Effects.** EQ, VST3 and CLAP plugins, and a noise gate.
-- **Several outputs at once.** Play on extra devices, or publish the mix
-  for other apps to record.
+- **Several outputs at once.** Play on extra outputs, or on a virtual
+  output other apps record from.
 - **Up to four signal paths**, each with its own effects, kept in time
   with each other.
 - **Low latency when you want it**, with the real buffer sizes shown, not
@@ -70,9 +70,9 @@ reordered and mixed with the dry signal, and open either in their own
 window or as a list of parameters.
 
 The Output stage lists every device that plays the mix. Add extra outputs
-here, each with its own level, mute and safety buffer (Safe, Low latency or
-Manual), or add RigWerk Out to publish the mix as a source other apps can
-record (on Windows this needs a virtual cable such as VB-Audio Cable). If
+here, each with its own level, mute and bridge buffer (Auto, Minimum or
+Fixed), or add RigWerk Out, a virtual output other apps can
+record from (on Windows this needs a virtual cable such as VB-Audio Cable). If
 an extra output drops out, the rest keep playing and RigWerk keeps trying
 to reopen it. Each output has a safety limiter that holds it at −1 dBFS and
 shows how much it is reducing.
@@ -101,7 +101,7 @@ output, and the metronome, while the page is open.
 
 ### Plugins
 
-The library of VST3 and CLAP effects found in the standard folders (and in
+The library of VST3 and CLAP plugins found in the standard folders (and in
 `CLAP_PATH` or `RIGWERK_CLAP_PATH` for CLAP). Search it, add an effect to a
 path with one click, or add one by file path. A path holds up to 32
 effects. Adding, removing or reordering them does not stall the audio.
@@ -164,7 +164,7 @@ latency.
   Windows.
 - **Diagnostics** has the activity log, how much of each audio buffer every
   path's effects use, and the latency budget: each part of the path (input
-  block, bridge cushion, plugin chain, output step, the delay after
+  block, bridge buffer, plugin chain, output step, the delay after
   RigWerk's playback node) with where its number comes from, the estimate
   those add up to, and the last measured loopback with its date and
   conditions. The measurement and the estimate cover different legs of the

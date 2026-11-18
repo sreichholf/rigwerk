@@ -81,7 +81,7 @@ impl RigWerkApp {
                             RichText::new("Record the click").size(ts(10.5)).color(MUTED),
                         )
                         .on_hover_text(
-                            "Keep the metronome and the latency click in the take. Applies right away, also during a take. A follower with more than 4 channels always keeps its metronome.",
+                            "Keep the metronome and the latency click in the take. Applies right away, also during a take. An extra output with more than 4 channels always keeps its metronome.",
                         )
                         .changed()
                     {

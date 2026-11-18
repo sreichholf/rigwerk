@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use pipewire as pw;
 use pw::spa;
 
-use crate::audio::output_map::MAX_FOLLOWERS;
+use crate::audio::output_map::MAX_EXTRA_OUTPUTS;
 
 /// One audio port of another node, as the registry describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,14 +138,14 @@ impl Graph {
 
     /// The links the bridge needs, as (output node, output port, input node,
     /// input port).  Empty until RigWerk's own ports and the device ports
-    /// are all known.  `followers` is `(slot, sink node.name)` for each
-    /// hardware follower that should play; virtual slots are omitted.
+    /// are all known.  `extra_outputs` is `(slot, sink node.name)` for each
+    /// hardware extra output that should play; virtual slots are omitted.
     pub(crate) fn wanted_links(
         &self,
         own: u32,
         source: &str,
         sink: &str,
-        followers: &[(usize, &str)],
+        extra_outputs: &[(usize, &str)],
     ) -> Vec<(u32, u32, u32, u32)> {
         let mut wanted = Vec::new();
         if let Some(source_node) = self.node_by_name(source) {
@@ -157,8 +157,8 @@ impl Graph {
             }
         }
         self.link_sink(&mut wanted, own, sink, ["output_FL", "output_FR"]);
-        for &(slot, name) in followers {
-            if slot >= MAX_FOLLOWERS || name.is_empty() {
+        for &(slot, name) in extra_outputs {
+            if slot >= MAX_EXTRA_OUTPUTS || name.is_empty() {
                 continue;
             }
             let ports = [format!("follow_{slot}_FL"), format!("follow_{slot}_FR")];

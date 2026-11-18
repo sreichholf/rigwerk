@@ -69,12 +69,12 @@ impl RigWerkApp {
         }
         self.bridge_restart_pending = false;
         self.bridge_signature = self.current_bridge_signature();
-        // The new session is rebuilt from the saved inserts (their
+        // The new run is rebuilt from the saved effects (their
         // preferences and state blobs), and a plugin may change a value
         // without reporting it, so read the open editor in full here.
         self.sync_plugin_editor();
         self.driver_checked = false;
-        self.issue_state.new_session();
+        self.issue_state.new_run();
         self.issue_state.device_lost = None;
         self.apply_gains();
         self.apply_metronome();
@@ -130,7 +130,7 @@ impl RigWerkApp {
         self.bridge_restart_pending = false;
         self.bridge_signature = 0;
         self.engine.stop();
-        self.issue_state.new_session();
+        self.issue_state.new_run();
         #[cfg(target_os = "linux")]
         self.refresh_quantum_if_idle();
         if self.engine.state == EngineState::Stopping {
@@ -173,7 +173,7 @@ impl RigWerkApp {
     /// The bridge stopped because a device went away: the alert window now,
     /// and the Live Issues row once that is dismissed.
     pub(crate) fn alert_lost_device(&mut self, alert: String) {
-        self.issue_state.new_session();
+        self.issue_state.new_run();
         self.issue_state.device_lost = Some(alert.clone());
         self.device_alert = Some(alert);
     }
@@ -295,7 +295,7 @@ impl RigWerkApp {
         let path_gains = self.path_gains();
         let channel_targets = match self.engine.state {
             EngineState::Running => self.snapshot.out_channels,
-            EngineState::Preview => self.clock_device.settled_sum(
+            EngineState::Preview => self.clock_output.settled_sum(
                 live,
                 path_gains,
                 self.selected_output().channels.max(1),
@@ -310,11 +310,11 @@ impl RigWerkApp {
             let peak = &mut self.peak_out_channels[channel];
             *peak = peak.max(*meter * 0.98).max(0.0);
         }
-        // Followers / RigWerk Out: same smoothing as the clock device.
-        let follower_targets = match self.engine.state {
-            EngineState::Running => self.snapshot.follower_channels,
+        // Extra outputs / RigWerk Out: same smoothing as the clock output.
+        let extra_output_targets = match self.engine.state {
+            EngineState::Running => self.snapshot.extra_output_channels,
             EngineState::Preview => std::array::from_fn(|index| {
-                self.followers
+                self.extra_outputs
                     .get(index)
                     .map(|pref| {
                         pref.settings.settled_sum(
@@ -327,13 +327,13 @@ impl RigWerkApp {
                     })
                     .unwrap_or([0.0; audio::MAX_OUTPUT_CHANNELS])
             }),
-            _ => [[0.0; audio::MAX_OUTPUT_CHANNELS]; audio::MAX_FOLLOWERS],
+            _ => [[0.0; audio::MAX_OUTPUT_CHANNELS]; audio::MAX_EXTRA_OUTPUTS],
         };
-        for (index, meters) in self.meter_follower_channels.iter_mut().enumerate() {
+        for (index, meters) in self.meter_extra_output_channels.iter_mut().enumerate() {
             for (channel, meter) in meters.iter_mut().enumerate() {
-                let target = follower_targets[index][channel].abs();
+                let target = extra_output_targets[index][channel].abs();
                 *meter = smooth(*meter, target);
-                let peak = &mut self.peak_follower_channels[index][channel];
+                let peak = &mut self.peak_extra_output_channels[index][channel];
                 *peak = peak.max(*meter * 0.98).max(0.0);
             }
         }
@@ -362,7 +362,7 @@ impl RigWerkApp {
         for peak in &mut self.peak_out_channels {
             *peak *= decay;
         }
-        for peaks in &mut self.peak_follower_channels {
+        for peaks in &mut self.peak_extra_output_channels {
             for peak in peaks {
                 *peak *= decay;
             }
@@ -387,7 +387,7 @@ impl RigWerkApp {
 
     /// The parts of RigWerk's own path, as `latency_ms` and the latency
     /// budget read them.  While stopped, the requested buffer and a planned
-    /// cushion of twice that buffer stand in, so a cushion left over from the
+    /// bridge buffer of twice that buffer stand in, so a bridge buffer left over from the
     /// last run is not shown.
     pub(crate) fn latency_parts(&self) -> LatencyParts {
         let running = self.engine.state == EngineState::Running;
@@ -399,7 +399,7 @@ impl RigWerkApp {
         };
         // The PipeWire duplex node has no bridge buffer: input and output
         // run in the same graph cycle.
-        let cushion = if running && self.snapshot.direct {
+        let bridge_buffer = if running && self.snapshot.direct {
             0
         } else if running && self.snapshot.target_frames > 0 {
             self.snapshot.target_frames as u32
@@ -410,7 +410,7 @@ impl RigWerkApp {
             running,
             direct: running && self.snapshot.direct,
             input_block: pick(self.snapshot.input_block_frames, self.buffer_size as u32),
-            cushion,
+            bridge_buffer,
             output_step: pick(self.snapshot.output_step_frames, self.output_buffer as u32),
             input_rate: pick(self.snapshot.input_rate, self.sample_rate).max(1),
             output_rate: pick(self.snapshot.output_rate, planned_output_rate).max(1),
@@ -419,7 +419,7 @@ impl RigWerkApp {
         }
     }
 
-    /// RigWerk's own path: input block + cushion + output step.  AD/DA, the
+    /// RigWerk's own path: input block + bridge buffer + output step.  AD/DA, the
     /// driver, plugins, alignment trims, and anything past our playback node
     /// are not included; see `app::budget` for the full reading.
     pub(crate) fn latency_ms(&self) -> f32 {
@@ -459,65 +459,66 @@ impl RigWerkApp {
         (frames > 0 && rate > 0).then(|| (frames, frames as f32 / rate as f32 * 1000.0))
     }
 
-    /// Pushes follower settings, cushions and the link / open plan into the
+    /// Pushes extra output settings, bridge buffers and the link / open plan into the
     /// engine.  Live: not part of the bridge signature.
-    pub(crate) fn push_followers_to_engine(&mut self) {
-        use crate::app::settings::{cushion_from_pref, rematch_windows_virtual_out};
-        use crate::audio::{FollowerLink, FollowerPlan, MAX_FOLLOWERS};
+    pub(crate) fn push_extra_outputs_to_engine(&mut self) {
+        use crate::app::settings::{bridge_buffer_from_pref, rematch_windows_virtual_output};
+        use crate::audio::{ExtraOutputLink, ExtraOutputPlan, MAX_EXTRA_OUTPUTS};
 
-        rematch_windows_virtual_out(&mut self.followers, &self.inventory.outputs);
+        rematch_windows_virtual_output(&mut self.extra_outputs, &self.inventory.outputs);
 
-        let count = self.followers.len().min(MAX_FOLLOWERS);
+        let count = self.extra_outputs.len().min(MAX_EXTRA_OUTPUTS);
         let mut settings = Vec::with_capacity(count);
-        let mut cushions = Vec::with_capacity(count);
-        let mut plan = FollowerPlan {
+        let mut bridge_buffers = Vec::with_capacity(count);
+        let mut plan = ExtraOutputPlan {
             count,
-            ..FollowerPlan::default()
+            ..ExtraOutputPlan::default()
         };
-        for (index, follower) in self.followers.iter().take(count).enumerate() {
-            settings.push(follower.settings);
-            cushions.push((
-                cushion_from_pref(follower.cushion_mode),
-                follower.cushion_ms,
+        for (index, extra_output) in self.extra_outputs.iter().take(count).enumerate() {
+            settings.push(extra_output.settings);
+            bridge_buffers.push((
+                bridge_buffer_from_pref(extra_output.bridge_buffer_mode),
+                extra_output.bridge_buffer_ms,
             ));
-            let node_name = if follower.virtual_out {
+            let node_name = if extra_output.virtual_output {
                 String::new()
             } else {
                 #[cfg(target_os = "linux")]
                 {
-                    audio::linux_node_name(&follower.id)
+                    audio::linux_node_name(&extra_output.id)
                         .unwrap_or("")
                         .to_owned()
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let _ = &follower.id;
+                    let _ = &extra_output.id;
                     String::new()
                 }
             };
-            // PipeWire RigWerk Out has no cpal id (in-graph).  Windows
-            // VB-Cable publish keeps the WASAPI render id so the supervisor
-            // can open it while publish is on.
-            let device_id = if follower.virtual_out {
+            // PipeWire RigWerk Out has no cpal id (in-graph).  The Windows
+            // VB-Cable virtual output keeps the WASAPI render id so the
+            // supervisor can open it while it is on.
+            let device_id = if extra_output.virtual_output {
                 #[cfg(target_os = "windows")]
                 {
-                    follower.id.clone()
+                    extra_output.id.clone()
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
                     String::new()
                 }
             } else {
-                follower.id.clone()
+                extra_output.id.clone()
             };
-            plan.slots[index] = FollowerLink {
+            plan.slots[index] = ExtraOutputLink {
                 device_id,
                 node_name,
-                virtual_out: follower.virtual_out,
-                publish: follower.publish,
+                virtual_output: extra_output.virtual_output,
+                virtual_output_on: extra_output.virtual_output_on,
             };
         }
-        self.engine.set_followers(&settings, &plan, &cushions);
+        self.engine
+            .set_extra_outputs(&settings, &plan, &bridge_buffers);
     }
 
     /// How the output runs right now, or how it will try to run.
@@ -626,9 +627,10 @@ impl RigWerkApp {
         self.apply_metronome();
     }
 
-    /// Pushes the stored cushion mode and size.
-    pub(crate) fn apply_cushion(&self) {
-        self.engine.set_cushion(self.cushion_mode, self.cushion_ms);
+    /// Pushes the stored bridge buffer mode and size.
+    pub(crate) fn apply_bridge_buffer(&self) {
+        self.engine
+            .set_bridge_buffer(self.bridge_buffer_mode, self.bridge_buffer_ms);
     }
 
     /// `(real_style_output, exclusive_output)` for [`StartConfig`].
@@ -665,7 +667,7 @@ pub(crate) struct LatencyParts {
     /// The block the input really delivers, frames.
     pub(crate) input_block: u32,
     /// The ring's fill target, frames (0 on the duplex node).
-    pub(crate) cushion: u32,
+    pub(crate) bridge_buffer: u32,
     /// The step the output really runs at, frames.
     pub(crate) output_step: u32,
     pub(crate) input_rate: u32,
@@ -677,10 +679,10 @@ pub(crate) struct LatencyParts {
 }
 
 impl LatencyParts {
-    /// Input block + cushion at the input rate, plus the output step at the
+    /// Input block + bridge buffer at the input rate, plus the output step at the
     /// output rate.
     pub(crate) fn bridge_ms(&self) -> f32 {
-        ((self.input_block + self.cushion) as f32 / self.input_rate.max(1) as f32
+        ((self.input_block + self.bridge_buffer) as f32 / self.input_rate.max(1) as f32
             + self.output_step as f32 / self.output_rate.max(1) as f32)
             * 1000.0
     }

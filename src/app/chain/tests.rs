@@ -23,8 +23,8 @@ fn plugin_selection_clamps_after_remove() {
 }
 
 #[test]
-fn selection_follows_its_insert_after_remove() {
-    // Removing an earlier insert keeps the same insert selected.
+fn selection_follows_its_effect_after_remove() {
+    // Removing an earlier effect keeps the same effect selected.
     assert_eq!(
         ChainSelection::Plugin(2).after_removal(0, 2),
         ChainSelection::Plugin(1)
@@ -34,7 +34,7 @@ fn selection_follows_its_insert_after_remove() {
         ChainSelection::Plugin(0).after_removal(1, 2),
         ChainSelection::Plugin(0)
     );
-    // Removing the selected last insert selects the new last one.
+    // Removing the selected last effect selects the new last one.
     assert_eq!(
         ChainSelection::Plugin(2).after_removal(2, 2),
         ChainSelection::Plugin(1)
@@ -47,7 +47,7 @@ fn selection_follows_its_insert_after_remove() {
         ChainSelection::Gate.after_removal(0, 0),
         ChainSelection::Gate
     );
-    // Removing the selected insert selects the one that slid into place.
+    // Removing the selected effect selects the one that slid into place.
     assert_eq!(
         ChainSelection::Plugin(1).after_removal(1, 2),
         ChainSelection::Plugin(1)
@@ -69,12 +69,12 @@ fn output_device_selection_falls_back_to_the_master() {
         ChainSelection::Output
     );
     assert_eq!(ChainSelection::Gate.clamp_output(0), ChainSelection::Gate);
-    // The insert clamp leaves output devices alone.
+    // The effect clamp leaves output devices alone.
     assert_eq!(
         ChainSelection::OutputDevice(0).clamp(0),
         ChainSelection::OutputDevice(0)
     );
-    assert_eq!(ChainSelection::OutputDevice(0).plugin_insert_at(2), None);
+    assert_eq!(ChainSelection::OutputDevice(0).plugin_effect_at(2), None);
     assert_eq!(ChainSelection::OutputDevice(0).eq_slot(), None);
 }
 
@@ -105,8 +105,8 @@ fn path_stage_needs_several_paths() {
 }
 
 #[test]
-fn insert_point_follows_selected_plugin() {
-    assert_eq!(ChainSelection::Plugin(1).plugin_insert_at(3), Some(2));
-    assert_eq!(ChainSelection::Plugins.plugin_insert_at(3), None);
-    assert_eq!(ChainSelection::PreEq.plugin_insert_at(3), None);
+fn effect_point_follows_selected_plugin() {
+    assert_eq!(ChainSelection::Plugin(1).plugin_effect_at(3), Some(2));
+    assert_eq!(ChainSelection::Plugins.plugin_effect_at(3), None);
+    assert_eq!(ChainSelection::PreEq.plugin_effect_at(3), None);
 }

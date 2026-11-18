@@ -1,4 +1,4 @@
-//! Sessions: save, load and delete patches.
+//! Saving, loading and deleting sessions.
 
 use crate::app::LogTone;
 use eframe::egui;
@@ -17,7 +17,7 @@ use crate::ui::widgets::{
     show_focus_ring, small_fact,
 };
 
-pub(crate) fn preset_row(
+pub(crate) fn session_row(
     ui: &mut egui::Ui,
     name: &str,
     note: &str,
@@ -25,7 +25,7 @@ pub(crate) fn preset_row(
     facts: &str,
     selected: bool,
     confirming_delete: bool,
-) -> PresetAction {
+) -> SessionAction {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 64.0), Sense::click());
     // The delete control sits on top of the row, so it is registered after the
@@ -122,9 +122,9 @@ pub(crate) fn preset_row(
         );
     }
     let delete = delete.on_hover_text(if confirming_delete {
-        "Click again to delete this patch for good"
+        "Click again to delete this session for good"
     } else {
-        "Delete this patch"
+        "Delete this session"
     });
     show_focus_ring(ui, &response, rect, 8);
     show_focus_ring(ui, &delete, delete_rect, 5);
@@ -153,16 +153,16 @@ pub(crate) fn preset_row(
         None,
     );
     if delete.clicked() {
-        PresetAction::Delete
+        SessionAction::Delete
     } else if response.clicked() {
-        PresetAction::Load
+        SessionAction::Load
     } else {
-        PresetAction::None
+        SessionAction::None
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum PresetAction {
+pub(crate) enum SessionAction {
     None,
     Load,
     Delete,
@@ -181,7 +181,7 @@ impl RigWerkApp {
                     ui.set_min_size(Vec2::new(left_w, 330.0));
                     card(ui, CARD, BORDER, |ui| {
                         ui.set_width(left_w - 32.0);
-                        ui.label(micro_label("CURRENT PATCH", TEAL));
+                        ui.label(micro_label("Session", TEAL));
                         ui.add_space(8.0);
                         egui::Frame::new()
                             .fill(CARD_DEEP)
@@ -194,7 +194,7 @@ impl RigWerkApp {
                                     egui::TextEdit::singleline(&mut self.session_name)
                                         .frame(egui::Frame::NONE)
                                         .text_color(TEXT)
-                                        .hint_text("Name this patch")
+                                        .hint_text("Name this session")
                                         .font(FontId::new(ts(14.0), FontFamily::Proportional)),
                                 );
                             });
@@ -217,18 +217,18 @@ impl RigWerkApp {
                             );
                         });
                         ui.add_space(12.0);
-                        let save_label = if self.preset_named(&self.session_name).is_some() {
-                            "Update saved patch"
+                        let save_label = if self.session_named(&self.session_name).is_some() {
+                            "Update saved session"
                         } else {
-                            "Save as new patch"
+                            "Save as new session"
                         };
                         if primary_button(ui, save_label, TEAL, ui.available_width()) {
-                            self.save_preset();
+                            self.save_session();
                         }
                         ui.add_space(5.0);
                         if ghost_button(ui, "Start from blank", ui.available_width()) {
-                            self.session_name = "Untitled patch".to_owned();
-                            self.push_log("New blank patch ready.", LogTone::Muted);
+                            self.session_name = "Untitled session".to_owned();
+                            self.push_log("New blank session ready.", LogTone::Muted);
                         }
                     });
                 },
@@ -241,7 +241,7 @@ impl RigWerkApp {
                     card(ui, CARD, BORDER, |ui| {
                         ui.set_width(right_w - 32.0);
                         ui.horizontal(|ui| {
-                            ui.label(micro_label("SAVED PATCHES", DIM));
+                            ui.label(micro_label("Saved sessions", DIM));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(mono(format!("{}", self.sessions.len()), DIM, 9.5));
                             });
@@ -264,7 +264,7 @@ impl RigWerkApp {
                                         );
                                         ui.add_space(3.0);
                                         ui.label(
-                                            RichText::new("No saved patches yet")
+                                            RichText::new("No saved sessions yet")
                                                 .size(ts(12.5))
                                                 .color(TEXT)
                                                 .strong(),
@@ -293,19 +293,19 @@ impl RigWerkApp {
                             let sessions: Vec<(String, String, String, String, u32, usize)> = self
                                 .sessions
                                 .iter()
-                                .map(|preset| {
+                                .map(|session| {
                                     (
-                                        preset.name.clone(),
-                                        preset.note.clone(),
-                                        preset.input.clone(),
-                                        preset.output.clone(),
-                                        preset.rate,
-                                        preset.buffer,
+                                        session.name.clone(),
+                                        session.note.clone(),
+                                        session.input.clone(),
+                                        session.output.clone(),
+                                        session.rate,
+                                        session.buffer,
                                     )
                                 })
                                 .collect();
                             egui::ScrollArea::vertical()
-                                .id_salt("saved_patches")
+                                .id_salt("saved_sessions")
                                 .max_height(236.0)
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
@@ -314,7 +314,7 @@ impl RigWerkApp {
                                     for (index, (name, note, input, output, rate, buffer)) in
                                         sessions.iter().enumerate()
                                     {
-                                        match preset_row(
+                                        match session_row(
                                             ui,
                                             name,
                                             note,
@@ -323,18 +323,18 @@ impl RigWerkApp {
                                             Some(index) == self.selected_session,
                                             Some(index) == self.pending_delete,
                                         ) {
-                                            PresetAction::None => {}
+                                            SessionAction::None => {}
                                             choice => action = Some((index, choice)),
                                         }
                                         ui.add_space(3.0);
                                     }
                                     match action {
-                                        Some((index, PresetAction::Load)) => {
-                                            self.apply_preset(index)
+                                        Some((index, SessionAction::Load)) => {
+                                            self.apply_session(index)
                                         }
-                                        Some((index, PresetAction::Delete)) => {
+                                        Some((index, SessionAction::Delete)) => {
                                             if self.pending_delete == Some(index) {
-                                                self.delete_preset(index);
+                                                self.delete_session(index);
                                             } else {
                                                 self.pending_delete = Some(index);
                                             }
@@ -345,7 +345,7 @@ impl RigWerkApp {
                         }
                         ui.add_space(8.0);
                         ui.label(
-                            RichText::new("Patches are saved on this computer.")
+                            RichText::new("Sessions are saved on this computer.")
                                 .size(ts(9.0))
                                 .color(DIM),
                         );

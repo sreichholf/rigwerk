@@ -3,10 +3,10 @@
 
 use std::sync::atomic::Ordering;
 
-use super::super::super::shared::{FollowerLink, FollowerPlan, Shared};
-use super::{generic_followers, FollowerSlots};
+use super::super::super::shared::{ExtraOutputLink, ExtraOutputPlan, Shared};
+use super::{generic_extra_outputs, ExtraOutputSlots};
 
-/// A cpal id of this platform's follower host.
+/// A cpal id of this platform's extra output host.
 #[cfg(target_os = "linux")]
 const GENERIC: &str = "alsa:hw:1,0";
 #[cfg(target_os = "windows")]
@@ -14,25 +14,25 @@ const GENERIC: &str = "wasapi:speakers";
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 const GENERIC: &str = "coreaudio:speakers";
 
-fn link(device_id: &str) -> FollowerLink {
-    FollowerLink {
+fn link(device_id: &str) -> ExtraOutputLink {
+    ExtraOutputLink {
         device_id: device_id.to_owned(),
-        ..FollowerLink::default()
+        ..ExtraOutputLink::default()
     }
 }
 
-fn plan(links: &[FollowerLink]) -> FollowerPlan {
-    let mut plan = FollowerPlan {
+fn plan(links: &[ExtraOutputLink]) -> ExtraOutputPlan {
+    let mut plan = ExtraOutputPlan {
         count: links.len(),
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
     plan.slots[..links.len()].clone_from_slice(links);
     plan
 }
 
 #[test]
-fn a_generic_follower_keeps_its_slot() {
-    let wanted = generic_followers(&plan(&[link(""), link(GENERIC)]));
+fn a_generic_extra_output_keeps_its_slot() {
+    let wanted = generic_extra_outputs(&plan(&[link(""), link(GENERIC)]));
     assert_eq!(wanted, vec![(1, GENERIC.to_owned())]);
 }
 
@@ -40,32 +40,32 @@ fn a_generic_follower_keeps_its_slot() {
 fn slots_past_the_count_are_not_opened() {
     let mut plan = plan(&[link(GENERIC)]);
     plan.slots[1] = link(GENERIC);
-    assert_eq!(generic_followers(&plan), vec![(0, GENERIC.to_owned())]);
+    assert_eq!(generic_extra_outputs(&plan), vec![(0, GENERIC.to_owned())]);
 }
 
 #[test]
 fn an_unparsable_id_is_not_opened() {
-    assert!(generic_followers(&plan(&[link("no host here")])).is_empty());
+    assert!(generic_extra_outputs(&plan(&[link("no host here")])).is_empty());
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn pipewire_nodes_and_rigwerk_out_are_not_opened_on_linux() {
-    let virtual_out = FollowerLink {
-        device_id: crate::audio::output_map::VIRTUAL_OUT_ID.to_owned(),
-        virtual_out: true,
-        publish: true,
-        ..FollowerLink::default()
+    let virtual_output = ExtraOutputLink {
+        device_id: crate::audio::output_map::VIRTUAL_OUTPUT_ID.to_owned(),
+        virtual_output: true,
+        virtual_output_on: true,
+        ..ExtraOutputLink::default()
     };
-    let generic_virtual = FollowerLink {
+    let generic_virtual = ExtraOutputLink {
         device_id: GENERIC.to_owned(),
-        virtual_out: true,
-        publish: true,
-        ..FollowerLink::default()
+        virtual_output: true,
+        virtual_output_on: true,
+        ..ExtraOutputLink::default()
     };
-    let wanted = generic_followers(&plan(&[
+    let wanted = generic_extra_outputs(&plan(&[
         link("pipewire:alsa_output.usb"),
-        virtual_out,
+        virtual_output,
         generic_virtual,
         link(GENERIC),
     ]));
@@ -74,23 +74,28 @@ fn pipewire_nodes_and_rigwerk_out_are_not_opened_on_linux() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn a_vb_cable_virtual_out_plays_only_while_published_on_windows() {
-    let cable = |publish: bool| FollowerLink {
+fn a_vb_cable_virtual_output_plays_only_while_on_on_windows() {
+    let cable = |virtual_output_on: bool| ExtraOutputLink {
         device_id: GENERIC.to_owned(),
-        virtual_out: true,
-        publish,
-        ..FollowerLink::default()
+        virtual_output: true,
+        virtual_output_on,
+        ..ExtraOutputLink::default()
     };
-    let wanted = generic_followers(&plan(&[cable(true), cable(false)]));
+    let wanted = generic_extra_outputs(&plan(&[cable(true), cable(false)]));
     assert_eq!(wanted, vec![(0, GENERIC.to_owned())]);
 }
 
 fn missing(shared: &Shared, slot: usize) -> bool {
-    shared.follower_bus(slot).missing.load(Ordering::Relaxed)
+    shared
+        .extra_output_bus(slot)
+        .missing
+        .load(Ordering::Relaxed)
 }
 
 fn feeding(shared: &Shared, slot: usize) -> bool {
-    shared.follower_ring_active(slot).load(Ordering::Acquire)
+    shared
+        .extra_output_ring_active(slot)
+        .load(Ordering::Acquire)
 }
 
 fn wanted(slot: usize, key: &str) -> Vec<(usize, String)> {
@@ -100,7 +105,7 @@ fn wanted(slot: usize, key: &str) -> Vec<(usize, String)> {
 #[test]
 fn an_opened_slot_feeds_its_ring_and_is_not_reopened() {
     let shared = Shared::new(48_000);
-    let mut table = FollowerSlots::<()>::new();
+    let mut table = ExtraOutputSlots::<()>::new();
     let mut opens = 0;
     for _ in 0..3 {
         table.sync(&shared, &wanted(1, "sink"), |_, _| {
@@ -117,7 +122,7 @@ fn an_opened_slot_feeds_its_ring_and_is_not_reopened() {
 #[test]
 fn a_failed_open_is_missing_and_waits_before_it_retries() {
     let shared = Shared::new(48_000);
-    let mut table = FollowerSlots::<()>::new();
+    let mut table = ExtraOutputSlots::<()>::new();
     let mut opens = 0;
     for _ in 0..2 {
         table.sync(&shared, &wanted(0, "sink"), |_, _| {
@@ -133,7 +138,7 @@ fn a_failed_open_is_missing_and_waits_before_it_retries() {
 #[test]
 fn a_stream_that_reports_itself_lost_is_reopened() {
     let shared = Shared::new(48_000);
-    let mut table = FollowerSlots::<()>::new();
+    let mut table = ExtraOutputSlots::<()>::new();
     let opens = std::cell::Cell::new(0);
     let open = |_: usize, _: &str| {
         opens.set(opens.get() + 1);
@@ -141,7 +146,7 @@ fn a_stream_that_reports_itself_lost_is_reopened() {
     };
     table.sync(&shared, &wanted(0, "sink"), open);
     shared
-        .follower_bus(0)
+        .extra_output_bus(0)
         .missing
         .store(true, Ordering::Relaxed);
     for _ in 0..2 {
@@ -162,7 +167,7 @@ fn a_stream_that_reports_itself_lost_is_reopened() {
 #[test]
 fn a_new_key_reopens_and_a_slot_that_leaves_stops_its_ring() {
     let shared = Shared::new(48_000);
-    let mut table = FollowerSlots::<String>::new();
+    let mut table = ExtraOutputSlots::<String>::new();
     let open = |_: usize, key: &str| Ok(key.to_owned());
     table.sync(&shared, &wanted(0, "a"), open);
     let mut reopened = None;
@@ -182,8 +187,8 @@ fn a_new_key_reopens_and_a_slot_that_leaves_stops_its_ring() {
 fn a_table_leaves_the_slots_of_another_table_alone() {
     // A table clears only the flags of the slots it opened or retries.
     let shared = Shared::new(48_000);
-    let mut cpal = FollowerSlots::<()>::new();
-    let mut nodes = FollowerSlots::<()>::new();
+    let mut cpal = ExtraOutputSlots::<()>::new();
+    let mut nodes = ExtraOutputSlots::<()>::new();
     let plan = [(0, "sink".to_owned()), (1, "gone".to_owned())];
     nodes.sync(&shared, &plan, |slot, _| match slot {
         0 => Ok(()),

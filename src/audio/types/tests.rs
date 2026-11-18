@@ -33,7 +33,7 @@ fn a_large_quantum_is_marked_as_shared_not_low_latency() {
     let info = QuantumInfo::assess(true, 1024, 48_000, 64);
     assert!(!info.low_latency);
     assert!(info.note.contains("Desktop PipeWire graph"));
-    assert!(info.note.contains("not the OUT CLOCK"));
+    assert!(info.note.contains("not the Clock output"));
     assert!(info.note.contains("shared"));
 }
 

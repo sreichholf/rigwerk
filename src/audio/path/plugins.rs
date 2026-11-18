@@ -8,17 +8,17 @@
 //! the runtime the audio thread owns and runs, and the model the UI edits.
 //! They share no lock, so nothing the UI does makes the audio thread miss
 //! the chain:
-//! - mix and bypass are atomics per insert (`SlotControls`) that the audio
+//! - mix and bypass are atomics per effect (`SlotControls`) that the audio
 //!   thread reads every chunk;
 //! - the path's chain bypass is one atomic the runtime loads every block:
-//!   it skips every insert without writing the slots' own bypass, and the
+//!   it skips every effect without writing the slots' own bypass, and the
 //!   latency stays counted;
 //! - a plugin control, a reset, an editor sync, a state capture and a
-//!   preference save go to the plugin's handle through the published insert
+//!   preference save go to the plugin's handle through the published effect
 //!   links (`slot_links`).  The handle keeps the views, the saved values and
 //!   the state blob behind its own UI-only lock; the published view is
 //!   patched at once;
-//! - a structural edit (adding, removing, moving or restoring inserts,
+//! - a structural edit (adding, removing, moving or restoring effects,
 //!   reopening them for a new rate or because a plugin changed its layout,
 //!   opening a never-opened slot) changes the model under its UI-only lock,
 //!   builds and loads any new slot on the UI thread, and queues commands.
@@ -30,10 +30,10 @@
 //!
 //! The mixer still keeps the timing when a block finds no runtime to run:
 //! the moment the UI holds the parked runtime to apply an edit, a second
-//! mixer of the same session while the first still holds it, or a chain
+//! mixer of the same run while the first still holds it, or a chain
 //! left unusable by a panicking edit.  It plays the chunk's chain input
 //! delayed by [`PathControls::latency_samples`]
-//! (`mixer::PathProcessor::run_inserts`).  The path stays in time in the
+//! (`mixer::PathProcessor::run_effects`).  The path stays in time in the
 //! sum, so nothing combs and the phase does not jump, but for that chunk it
 //! plays dry.  The step into the fallback is smoothed, and the chain's own
 //! output fades back in once it runs again, after one latency's worth of
@@ -44,7 +44,7 @@ use std::sync::{Arc, PoisonError};
 
 use super::super::plugins::{
     ChainLease, ChainModel, PluginHandle, PluginPref, PluginView, ProcessFailure, ReloadPlan, Slot,
-    SlotLink, MAX_INSERTS,
+    SlotLink, MAX_EFFECTS,
 };
 use super::{LockStats, PathControls, PluginLockReport};
 
@@ -65,7 +65,7 @@ impl Drop for PublishOnUnwind<'_> {
 
 /// Builds a slot for `pref` at `rate` on this (the UI) thread.  A failed
 /// load is returned as an error but is still a valid slot, so the failure
-/// stays visible in the insert list.
+/// stays visible in the effect list.
 fn load_slot(pref: PluginPref, rate: u32) -> (Slot, Result<(), String>) {
     let slot = Slot::loaded(pref, rate);
     let result = match &slot.error {
@@ -112,7 +112,7 @@ impl PathControls {
         drop(returned);
     }
 
-    /// The insert at `index` as last published.
+    /// The effect at `index` as last published.
     pub(in crate::audio) fn slot_link(&self, index: usize) -> Option<SlotLink> {
         self.slot_links
             .lock()
@@ -121,7 +121,7 @@ impl PathControls {
             .cloned()
     }
 
-    /// Changes one insert in the published views, without the model lock.
+    /// Changes one effect in the published views, without the model lock.
     fn patch_view(&self, index: usize, patch: impl FnOnce(&mut PluginView)) {
         let mut views = self
             .plugin_views
@@ -135,7 +135,7 @@ impl PathControls {
         }
     }
 
-    /// The latency in samples this path's insert chain should add (see
+    /// The latency in samples this path's effect chain should add (see
     /// `ChainRuntime::latency_samples`).  Lock-free, for the audio thread.
     pub(crate) fn latency_samples(&self) -> u32 {
         self.latency.load(Ordering::Acquire)
@@ -147,7 +147,7 @@ impl PathControls {
         self.latency.store(samples, Ordering::Release);
     }
 
-    /// What a dead chain looks like to every reader: no inserts, nothing to
+    /// What a dead chain looks like to every reader: no effects, nothing to
     /// service, nothing to reopen, and nothing for the audio side to run.
     fn publish_poisoned(&self) {
         // Cleared before the next block, so a zero-latency chain never
@@ -236,18 +236,18 @@ impl PathControls {
         self.publish_from(&links);
     }
 
-    /// Replaces the saved insert list without loading anything.  Plugins are
+    /// Replaces the saved effect list without loading anything.  Plugins are
     /// opened when the bridge starts (or when one is added in the UI).
     pub(crate) fn restore_plugins(&self, prefs: Vec<PluginPref>) {
         self.edit_chain(|chain| chain.restore(prefs));
-        // The insert counters come from the fresh SlotControls; the chain's
+        // The effect counters come from the fresh SlotControls; the chain's
         // own counters belong to the chain this replaces.
         self.chain_attempts.store(0, Ordering::Relaxed);
         self.chain_skips.store(0, Ordering::Relaxed);
     }
 
-    /// Adds the pure-delay test insert (see `Slot::delay_for_test`).  Lets a
-    /// test outside `audio` give a path one active insert.
+    /// Adds the pure-delay test effect (see `Slot::delay_for_test`).  Lets a
+    /// test outside `audio` give a path one active effect.
     #[cfg(test)]
     pub(crate) fn insert_delay_for_test(&self, latency: u32) {
         self.edit_chain(|chain| chain.insert_delay_for_test(latency));
@@ -338,12 +338,12 @@ impl PathControls {
     pub(crate) fn add_plugin(&self, pref: PluginPref) -> Result<(), String> {
         self.edit_chain(|chain| {
             if chain.is_full() {
-                return Err(format!("A path holds at most {MAX_INSERTS} inserts."));
+                return Err(format!("A path holds at most {MAX_EFFECTS} effects."));
             }
             let (slot, result) = load_slot(pref, chain.rate());
             match chain.push(slot) {
                 Ok(()) => result,
-                Err(_) => Err(format!("A path holds at most {MAX_INSERTS} inserts.")),
+                Err(_) => Err(format!("A path holds at most {MAX_EFFECTS} effects.")),
             }
         })
         .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()))
@@ -357,7 +357,7 @@ impl PathControls {
         self.edit_chain(|chain| chain.move_slot(index, delta));
     }
 
-    /// Bypasses one insert through its link: the audio thread reads the
+    /// Bypasses one effect through its link: the audio thread reads the
     /// flag with its next chunk.
     pub(crate) fn set_plugin_bypass(&self, index: usize, bypass: bool) {
         let Some(link) = self.slot_link(index) else {
@@ -365,13 +365,13 @@ impl PathControls {
         };
         link.controls.set_bypass(bypass);
         if !bypass {
-            // The audio thread recounts the active inserts itself.
-            self.wake_inserts();
+            // The audio thread recounts the active effects itself.
+            self.wake_effects();
         }
         self.patch_view(index, |view| view.bypass = bypass);
     }
 
-    /// Sets one insert's dry/wet mix through its link.
+    /// Sets one effect's dry/wet mix through its link.
     pub(crate) fn set_plugin_mix(&self, index: usize, mix: f32) {
         let Some(link) = self.slot_link(index) else {
             return;
@@ -385,18 +385,18 @@ impl PathControls {
         self.edit_chain(|chain| chain.ensure_loaded(index));
     }
 
-    /// The loaded plugin behind one insert, for its own editor window.
+    /// The loaded plugin behind one effect, for its own editor window.
     /// From the published links, without the model lock.
     pub(crate) fn plugin_handle(&self, index: usize) -> Option<PluginHandle> {
         self.slot_link(index).and_then(|link| link.plugin)
     }
 
-    /// Reads every control of a loaded insert again and stores them as its
+    /// Reads every control of a loaded effect again and stores them as its
     /// views and saved values (see `PluginHandle::sync_full`), after its
     /// editor changed them.  The service frames already follow edits and
     /// reported values as they happen; this is the last full read on save,
     /// close or bridge start.  Without the chain lock.  A missing or
-    /// unloaded insert is a silent no-op.
+    /// unloaded effect is a silent no-op.
     pub(crate) fn sync_plugin_parameters(&self, index: usize) {
         let Some(handle) = self.plugin_handle(index) else {
             return;
@@ -408,7 +408,7 @@ impl PathControls {
 
     /// Sets one plugin control.  A loaded plugin is reached through the
     /// published links, without the model lock: its handle stores the value
-    /// and the published view is patched at once.  An insert that
+    /// and the published view is patched at once.  An effect that
     /// is not open yet goes through the chain, which opens it.
     pub(crate) fn set_plugin_parameter(
         &self,
@@ -423,7 +423,7 @@ impl PathControls {
         };
         let value = value.clamp(0.0, 1.0);
         let display = handle.set_parameter(id, value)?;
-        self.wake_inserts();
+        self.wake_effects();
         self.patch_view(index, |view| {
             if let Some(parameter) = view
                 .parameters
@@ -449,20 +449,20 @@ impl PathControls {
                 .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()));
         };
         let parameters = handle.reset_parameters()?;
-        self.wake_inserts();
+        self.wake_effects();
         self.patch_view(index, |view| view.parameters = parameters);
         Ok(())
     }
 
     /// Makes the audio thread enter the chain with its next block, even if
-    /// every insert is bypassed at latency 0, so a skipped insert flushes
-    /// the values just queued for it.  It recounts the active inserts
+    /// every effect is bypassed at latency 0, so a skipped effect flushes
+    /// the values just queued for it.  It recounts the active effects
     /// itself.
-    fn wake_inserts(&self) {
+    fn wake_effects(&self) {
         self.plugin_wake.store(true, Ordering::Release);
     }
 
-    /// The insert views as last published.  Never takes the model lock, so
+    /// The effect views as last published.  Never takes the model lock, so
     /// drawing never waits for an edit in progress.
     pub(crate) fn plugin_views(&self) -> Arc<[PluginView]> {
         Arc::clone(
@@ -519,7 +519,7 @@ impl PathControls {
         drop(links);
     }
 
-    /// Whether an insert went into or out of a pause (a restart, a
+    /// Whether an effect went into or out of a pause (a restart, a
     /// reactivation) since its view was published.
     fn pause_moved(&self, links: &[SlotLink]) -> bool {
         let views = self.plugin_views();
@@ -529,7 +529,7 @@ impl PathControls {
             .any(|(link, view)| link.paused() != view.paused)
     }
 
-    /// Rebuilds the inserts whose plugin asked for it (a layout change):
+    /// Rebuilds the effects whose plugin asked for it (a layout change):
     /// their state and values are captured from the old instance, a fresh
     /// one is loaded from them on this thread and swapped in, as a rate
     /// change does for every slot (`reload_plugins_for_rate`).  The old
@@ -588,14 +588,14 @@ impl PathControls {
         }
     }
 
-    /// Marks one insert's saved state as out of date (its editor closed).
+    /// Marks one effect's saved state as out of date (its editor closed).
     pub(crate) fn mark_plugin_state_stale(&self, index: usize) {
         if let Some(handle) = self.plugin_handle(index) {
             handle.mark_state_stale();
         }
     }
 
-    /// The insert chain as it should be saved, with fresh plugin state.
+    /// The effect chain as it should be saved, with fresh plugin state.
     /// Built from the published links, without the model lock.  Call it
     /// from the UI thread.
     pub(crate) fn plugin_prefs(&self) -> Vec<PluginPref> {
@@ -620,12 +620,12 @@ impl PathControls {
     /// free.  A latency that moved since the last block (a plugin re-read
     /// it) asks the UI thread to rebuild the views.
     ///
-    /// Returns whether a restored insert is still unopened, so the mixer
+    /// Returns whether a restored effect is still unopened, so the mixer
     /// keeps the path silent rather than playing it dry.  Without the
     /// runtime that is the model's published flag.
     pub(crate) fn begin_chain(&self, seat: &mut Option<ChainLease>) -> bool {
-        // A mixer renders one session, so its lease is from this home.  Were
-        // it not, it goes back to its own home; that session's `Shared` is
+        // A mixer renders one run, so its lease is from this home.  Were
+        // it not, it goes back to its own home; that run's `Shared` is
         // alive while its mixer runs, so this never frees the runtime here.
         debug_assert!(seat
             .as_ref()
@@ -660,19 +660,19 @@ impl PathControls {
     /// same block, with the same `seat`.  Returns whether the chain ran;
     /// `false` leaves the block untouched and the caller plays the chain's
     /// input delayed by [`Self::latency_samples`] instead (see
-    /// `mixer::PathProcessor::run_inserts` and the module docs).
+    /// `mixer::PathProcessor::run_effects` and the module docs).
     ///
     /// The flags keep the common no-plugin case cheap.  A chain with no
-    /// active insert but some latency (every insert bypassed) still runs, so
-    /// its skipped inserts delay the block by their latency.  The path's
+    /// active effect but some latency (every effect bypassed) still runs, so
+    /// its skipped effects delay the block by their latency.  The path's
     /// chain bypass is an atomic the runtime loads; when it is set, every
-    /// insert is skipped, the latency still counts, and each slot's own
+    /// effect is skipped, the latency still counts, and each slot's own
     /// bypass is left alone.
     ///
     /// Every real attempt is counted; so is one that found no runtime in
     /// `seat`, which leaves the block to the dry fallback.  A dead chain (a
     /// panicking edit) is not counted as a skip: it is not contention, and
-    /// it stays unused for the rest of the session (see
+    /// it stays unused for the rest of the run (see
     /// [`PluginLockReport::chain_poisoned`]).  Measurement only: the
     /// counters are written relaxedly and Diagnostics reads them.
     pub(crate) fn run_plugins(
@@ -737,7 +737,7 @@ impl PathControls {
     }
 
     /// This path's plugin counters: the chunks the chain missed and each
-    /// insert's pauses.  Measurement only; it reads the published links.
+    /// effect's pauses.  Measurement only; it reads the published links.
     pub(crate) fn plugin_lock_report(&self) -> PluginLockReport {
         let links = Arc::clone(
             &self
@@ -750,7 +750,7 @@ impl PathControls {
                 attempts: self.chain_attempts.load(Ordering::Relaxed),
                 skips: self.chain_skips.load(Ordering::Relaxed),
             },
-            inserts: links
+            effects: links
                 .iter()
                 .map(|link| link.controls.lock_stats())
                 .collect(),

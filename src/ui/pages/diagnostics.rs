@@ -1,7 +1,7 @@
 //! Diagnostics: the activity log, scan notes, the bridge status line, the
 //! signal paths' DSP time (per path, against the block it must fit), the
 //! chunks the audio thread could not run a path's chain (it did not hold
-//! the chain's runtime), and the chunks it found an insert paused.
+//! the chain's runtime), and the chunks it found an effect paused.
 //!
 //! The header pill still follows the engine state. This page shows the
 //! bridge's own status string beside that, and keeps scan notes and quantum
@@ -62,25 +62,25 @@ fn percent_text(stats: &crate::audio::LockStats) -> String {
     }
 }
 
-/// Why the chain count and the insert counts differ; the card and the export
+/// Why the chain count and the effect counts differ; the card and the export
 /// say the same thing.
-const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Insert counts cover only chunks the chain ran. An insert pauses while it restarts, and stays paused after a failed start.";
+const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Effect counts cover only chunks the chain ran. An effect pauses while it restarts, and stays paused after a failed start.";
 
-/// The line under a chain whose inserts were never reached.  A bypassed
-/// insert or one at mix 0 never runs its plugin, which is normal, and a
-/// chain that never ran also keeps the inserts out.
-const NO_INSERT_TRIED: &str = "(no insert ran — bypassed, at mix 0, or the chain never ran)";
+/// The line under a chain whose effects were never reached.  A bypassed
+/// effect or one at mix 0 never runs its plugin, which is normal, and a
+/// chain that never ran also keeps the effects out.
+const NO_EFFECT_TRIED: &str = "(no effect ran — bypassed, at mix 0, or the chain never ran)";
 
-/// Whether the path got chunks through its chain but none through an insert,
+/// Whether the path got chunks through its chain but none through an effect,
 /// so nothing below the chain line explains what happened.  A poisoned chain
-/// never processed its chunks, so it does not read as "no insert ran".  A
-/// bypassed insert or one at mix 0 never runs its plugin either, which is
+/// never processed its chunks, so it does not read as "no effect ran".  A
+/// bypassed effect or one at mix 0 never runs its plugin either, which is
 /// normal, so the line names those causes instead of
 /// reading as a fault.
-fn no_insert_ran(report: &crate::audio::PluginLockReport) -> bool {
+fn no_effect_ran(report: &crate::audio::PluginLockReport) -> bool {
     !report.chain_poisoned
         && report.chain.attempts > 0
-        && report.inserts.iter().all(|insert| insert.attempts == 0)
+        && report.effects.iter().all(|effect| effect.attempts == 0)
 }
 
 /// One path's chain line: its skip share, or why there is none.  A dead
@@ -199,13 +199,13 @@ impl RigWerkApp {
                 (info, report, views)
             })
             .collect();
-        lines.push("Plugin blocks (chain skipped, insert paused / attempted):".to_owned());
+        lines.push("Plugin blocks (chain skipped, effect paused / attempted):".to_owned());
         let any_attempts = lock_reports.iter().any(|(_, report, _)| {
             // A poisoned chain has no attempts to show; it is still the only
             // thing the section has to say about that path.
             report.chain_poisoned
                 || report.chain.attempts > 0
-                || report.inserts.iter().any(|insert| insert.attempts > 0)
+                || report.effects.iter().any(|effect| effect.attempts > 0)
         });
         if !any_attempts {
             lines.push("No plugin blocks yet.".to_owned());
@@ -213,9 +213,9 @@ impl RigWerkApp {
             for (info, report, views) in &lock_reports {
                 let path_attempts = report.chain.attempts
                     + report
-                        .inserts
+                        .effects
                         .iter()
-                        .map(|insert| insert.attempts)
+                        .map(|effect| effect.attempts)
                         .sum::<u64>();
                 // Reset clears the attempts but not the poison, so a poisoned
                 // chain must stay visible with nothing counted.
@@ -223,22 +223,22 @@ impl RigWerkApp {
                     continue;
                 }
                 lines.push(format!("- {}: {}", info.name, chain_lock_text(report)));
-                if no_insert_ran(report) {
-                    lines.push(format!("  - {NO_INSERT_TRIED}"));
+                if no_effect_ran(report) {
+                    lines.push(format!("  - {NO_EFFECT_TRIED}"));
                 }
-                for (index, insert) in report.inserts.iter().enumerate() {
-                    if insert.attempts == 0 {
+                for (index, effect) in report.effects.iter().enumerate() {
+                    if effect.attempts == 0 {
                         continue;
                     }
                     let name = views
                         .get(index)
                         .map(|view| view.name.clone())
-                        .unwrap_or_else(|| format!("Insert {}", index + 1));
+                        .unwrap_or_else(|| format!("Effect {}", index + 1));
                     lines.push(format!(
                         "  - {name}: {} paused of {} ({})",
-                        insert.skipped(),
-                        chunk_text(insert.attempts),
-                        percent_text(insert)
+                        effect.skipped(),
+                        chunk_text(effect.attempts),
+                        percent_text(effect)
                     ));
                 }
             }
@@ -383,7 +383,7 @@ impl RigWerkApp {
                 AMBER,
                 "estimated",
                 budget.estimate_gap.as_deref().unwrap_or(
-                    "Input block + cushion + plugin chain + output step + after-node delay, at the rates they run at. The Live US readout is the bridge alone, so it differs from this by the chain and the after-node delay; alignment trims are not included.",
+                    "Input block + bridge buffer + plugin chain + output step + after-node delay, at the rates they run at. The Live US readout is the bridge alone, so it differs from this by the chain and the after-node delay; alignment trims are not included.",
                 ),
             );
             ui.add_space(3.0);
@@ -417,7 +417,7 @@ impl RigWerkApp {
             ui.add_space(2.0);
             ui.label(
                 RichText::new(
-                    "Reported means the driver, graph or a plugin said so; planned is the size asked for before the driver has opened; setting is RigWerk's own cushion; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
+                    "Reported means the driver, graph or a plugin said so; planned is the size asked for before the driver has opened; setting is RigWerk's own bridge buffer; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
                 )
                 .size(ts(10.0))
                 .color(DIM),
@@ -458,7 +458,7 @@ impl RigWerkApp {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(
-                    "Time the mixer spends on each path's chain per block (routing, EQs, gate, inserts), smoothed and as a peak that decays over about two seconds, against the block's length: the graph quantum on the PipeWire duplex path, the output block otherwise.",
+                    "Time the mixer spends on each path's chain per block (routing, EQs, gate, effects), smoothed and as a peak that decays over about two seconds, against the block's length: the graph quantum on the PipeWire duplex path, the output block otherwise.",
                 )
                 .size(ts(10.0))
                 .color(DIM),
@@ -485,7 +485,7 @@ impl RigWerkApp {
                 // See the export above: a poisoned chain outlives a reset.
                 report.chain_poisoned
                     || report.chain.attempts > 0
-                    || report.inserts.iter().any(|insert| insert.attempts > 0)
+                    || report.effects.iter().any(|effect| effect.attempts > 0)
             });
             if !any_attempts {
                 ui.label(
@@ -497,9 +497,9 @@ impl RigWerkApp {
                 for (info, report) in &reports {
                     let path_attempts = report.chain.attempts
                         + report
-                            .inserts
+                            .effects
                             .iter()
-                            .map(|insert| insert.attempts)
+                            .map(|effect| effect.attempts)
                             .sum::<u64>();
                     if path_attempts == 0 && !report.chain_poisoned {
                         continue;
@@ -521,30 +521,30 @@ impl RigWerkApp {
                         ));
                     });
                     let views = self.engine.plugin_views(info.slot);
-                    if no_insert_ran(report) {
+                    if no_effect_ran(report) {
                         ui.horizontal(|ui| {
                             ui.add_space(16.0);
-                            ui.label(mono(NO_INSERT_TRIED, MUTED, 9.5));
+                            ui.label(mono(NO_EFFECT_TRIED, MUTED, 9.5));
                         });
                     }
-                    for (index, insert) in report.inserts.iter().enumerate() {
-                        if insert.attempts == 0 {
+                    for (index, effect) in report.effects.iter().enumerate() {
+                        if effect.attempts == 0 {
                             continue;
                         }
                         let name = views
                             .get(index)
                             .map(|view| view.name.clone())
-                            .unwrap_or_else(|| format!("Insert {}", index + 1));
+                            .unwrap_or_else(|| format!("Effect {}", index + 1));
                         ui.horizontal(|ui| {
                             ui.add_space(16.0);
                             ui.label(mono(
                                 format!(
                                     "{name}: {} paused of {} ({})",
-                                    insert.skipped(),
-                                    chunk_text(insert.attempts),
-                                    percent_text(insert)
+                                    effect.skipped(),
+                                    chunk_text(effect.attempts),
+                                    percent_text(effect)
                                 ),
-                                if insert.skipped() > 0 { AMBER } else { MUTED },
+                                if effect.skipped() > 0 { AMBER } else { MUTED },
                                 9.5,
                             ));
                         });

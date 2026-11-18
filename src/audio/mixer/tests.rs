@@ -7,7 +7,7 @@ use super::super::output_map::{
 };
 use super::super::record::{push_device_frame, RecordPhase, RecordSource};
 use super::super::shared::Shared;
-use super::super::types::CushionMode;
+use super::super::types::BufferMode;
 use super::{route_frame, OutputMixer, Ramp, CONTROL_RAMP_SECONDS};
 
 #[test]
@@ -71,12 +71,12 @@ fn snap_adopts_a_value_without_moving() {
     assert_eq!(ramp.next(), 0.25);
 }
 
-/// A 1:1 bridge with drift off, a deep cushion and the EQs bypassed, so a
+/// A 1:1 bridge with drift off, a deep bridge buffer and the EQs bypassed, so a
 /// rendered frame is the mix itself and not the resampler or a filter.
 fn steady_mixer(signal: (f32, f32)) -> (OutputMixer, Shared) {
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
-    shared.set_cushion(CushionMode::Manual, 100.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
     shared.set_mix(false, true, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
@@ -114,7 +114,7 @@ fn test_signal(frames: usize) -> (Vec<f32>, Vec<f32>) {
 /// Settings that exercise routing, mono, both EQs and a level ramp.
 fn busy_settings(shared: &Shared) {
     shared.set_source_rate(48_000);
-    shared.set_cushion(CushionMode::Manual, 2.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 2.0);
     shared.set_mix(false, true, false, [true, true], [true, true], false);
     shared.set_routes([[true, false, true, false], [false, true, false, true]]);
     let mut pre = EqSettings::default();
@@ -133,7 +133,7 @@ fn the_direct_path_matches_the_ring_path_at_one_clock() {
     let (left, right) = test_signal(frames * blocks);
 
     // Ring path: each block's input is pushed just before it renders, as
-    // a capture callback in the same cycle would.  The 2 ms cushion is
+    // a capture callback in the same cycle would.  The 2 ms bridge buffer is
     // below one block, so priming ends at once, nothing is purged and
     // every frame comes straight through.
     let ring_shared = Shared::new(48_000);
@@ -170,8 +170,8 @@ fn the_direct_path_matches_the_ring_path_at_one_clock() {
         ring_shared.frames.load(Ordering::Relaxed),
         direct_shared.frames.load(Ordering::Relaxed)
     );
-    assert_eq!(ring_shared.underruns.load(Ordering::Relaxed), 0);
-    assert_eq!(direct_shared.underruns.load(Ordering::Relaxed), 0);
+    assert_eq!(ring_shared.dropouts.load(Ordering::Relaxed), 0);
+    assert_eq!(direct_shared.dropouts.load(Ordering::Relaxed), 0);
     assert_eq!(
         ring_shared.out_l.load(Ordering::Relaxed),
         direct_shared.out_l.load(Ordering::Relaxed)
@@ -224,7 +224,7 @@ fn default_device_settings_write_what_the_output_always_wrote() {
             );
         }
         // Per-channel meters: channel 1 and 2 carry the master L/R peaks.
-        let meters = device_shared.clock_device.meters();
+        let meters = device_shared.clock_output.meters();
         if channels >= 2 {
             assert_eq!(
                 meters[0],
@@ -245,7 +245,7 @@ fn a_ten_channel_device_fills_every_channel_through_write_frame() {
     let (_, shared) = steady_mixer((0.5, -0.25));
     let mut mixer = OutputMixer::new(48_000, 10);
     mixer.publish_device_channels(&shared);
-    assert_eq!(shared.clock_device.channels(), 10);
+    assert_eq!(shared.clock_output.channels(), 10);
     let frames = 64;
     let mut data = vec![f32::NAN; frames * 10];
     mixer.render(&shared, frames, |index, mapped| {
@@ -257,7 +257,7 @@ fn a_ten_channel_device_fills_every_channel_through_write_frame() {
         assert_eq!(frame, expected);
     }
     // Channels 9 and 10 are past the map and get the unused value.
-    shared.clock_device.set(&OutputDeviceSettings {
+    shared.clock_output.set(&OutputDeviceSettings {
         unused: UnusedChannels::Silent,
         ..OutputDeviceSettings::default()
     });
@@ -288,7 +288,7 @@ fn the_device_map_follows_the_master_and_crossfades() {
 
     // Swap the sides at -6 dB: a crossfade, then the swapped, scaled pair.
     let gain = 10.0f32.powf(-6.0 / 20.0);
-    shared.clock_device.set(&OutputDeviceSettings {
+    shared.clock_output.set(&OutputDeviceSettings {
         level_db: -6.0,
         path_map: crate::audio::PathMapSettings::first(ChannelMap {
             left: 0b10,
@@ -446,34 +446,34 @@ fn render_blocks(mixer: &mut OutputMixer, shared: &Shared, blocks: usize) -> Vec
         .collect()
 }
 
-fn underrun_fades_out(drift: bool) {
+fn dropout_fades_out(drift: bool) {
     let (mut mixer, shared) = steady_mixer((0.8, 0.8));
     shared.set_mix(false, true, false, [true, true], [true, true], drift);
-    // 5 000 frames drain in a little under 20 blocks; the 20th runs dry
+    // 5 000 frames drain in a little under 20 blocks; the 20th has a dropout
     // part way through.
     let out = render_blocks(&mut mixer, &shared, 24);
-    assert!(shared.underruns.load(Ordering::Relaxed) >= 1);
+    assert!(shared.dropouts.load(Ordering::Relaxed) >= 1);
     assert!((out[100][0] - 0.8).abs() < 1.0e-3, "{}", out[100][0]);
     assert_eq!(out.last().unwrap()[0], 0.0, "the dropout ends in silence");
     let step = largest_step(&out);
-    assert!(step < 0.05, "underrun stepped by {step}");
+    assert!(step < 0.05, "dropout stepped by {step}");
 }
 
 #[test]
-fn an_underrun_fades_the_held_frame_to_silence() {
-    underrun_fades_out(false);
+fn a_dropout_fades_the_held_frame_to_silence() {
+    dropout_fades_out(false);
 }
 
 #[test]
-fn an_underrun_through_the_resampler_fades_too() {
-    underrun_fades_out(true);
+fn a_dropout_through_the_resampler_fades_too() {
+    dropout_fades_out(true);
 }
 
 #[test]
-fn playback_fades_back_in_after_an_underrun() {
+fn playback_fades_back_in_after_a_dropout() {
     let (mut mixer, shared) = steady_mixer((0.8, 0.8));
     let mut out = render_blocks(&mut mixer, &shared, 24);
-    assert!(shared.underruns.load(Ordering::Relaxed) >= 1);
+    assert!(shared.dropouts.load(Ordering::Relaxed) >= 1);
     let resumed_from = out.len();
     for _ in 0..6_000 {
         shared.push_frame(0.8, 0.8);
@@ -491,14 +491,14 @@ fn playback_fades_back_in_after_an_underrun() {
 }
 
 #[test]
-fn an_underrun_that_fades_out_by_the_block_end_resumes_next_block() {
+fn a_dropout_that_fades_out_by_the_block_end_resumes_next_block() {
     let (mut mixer, shared) = steady_mixer((0.8, 0.8));
-    // 5 000 frames: four 1024 blocks leave 904, so the fifth runs dry at
+    // 5 000 frames: four 1024 blocks leave 904, so the fifth has a dropout at
     // sample 904 and its 120-sample fade ends exactly at the block end.
     let _played = (0..5)
         .map(|_| render(&mut mixer, &shared, 1024))
         .collect::<Vec<_>>();
-    assert_eq!(shared.underruns.load(Ordering::Relaxed), 1);
+    assert_eq!(shared.dropouts.load(Ordering::Relaxed), 1);
     for _ in 0..6_000 {
         shared.push_frame(0.8, 0.8);
     }
@@ -515,7 +515,7 @@ fn an_underrun_that_fades_out_by_the_block_end_resumes_next_block() {
 fn a_short_priming_fades_in_from_silence() {
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
-    shared.set_cushion(CushionMode::Manual, 100.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
     shared.set_mix(false, true, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
@@ -527,7 +527,7 @@ fn a_short_priming_fades_in_from_silence() {
     // Block 1: nothing has arrived yet.
     let empty = render(&mut mixer, &shared, 64);
     assert!(empty.iter().all(|frame| frame[0] == 0.0));
-    // Block 2: the cushion is full and playback fades in from about 0.
+    // Block 2: the bridge buffer is full and playback fades in from about 0.
     for _ in 0..6_000 {
         shared.push_frame(0.8, 0.8);
     }
@@ -584,12 +584,12 @@ impl Source {
 
 /// The ring path through the resampler with drift on, every built-in
 /// stage, control changes mid-run, a device map crossfade and an
-/// underrun.  Feeds every device sample and meter into `hash`.
+/// dropout.  Feeds every device sample and meter into `hash`.
 fn golden_ring_render(hash: &mut Fnv) {
     use super::super::gate::{GateSettings, GateSlot};
     let shared = Shared::new(48_000);
     shared.set_source_rate(44_100);
-    shared.set_cushion(CushionMode::Manual, 5.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 5.0);
     shared.set_mix(false, true, false, [true, true], [true, true], true);
     shared.set_routes([[true, false, true, false], [false, true, false, true]]);
     let mut pre = EqSettings::default();
@@ -623,7 +623,7 @@ fn golden_ring_render(hash: &mut Fnv) {
                 gate.slot = GateSlot::Post;
                 shared.set_gate(gate);
             }
-            20 => shared.clock_device.set(&OutputDeviceSettings {
+            20 => shared.clock_output.set(&OutputDeviceSettings {
                 level_db: -3.0,
                 path_map: crate::audio::PathMapSettings::first(ChannelMap {
                     left: 0b1010,
@@ -656,23 +656,23 @@ fn golden_ring_render(hash: &mut Fnv) {
         hash.u32(shared.out_l.load(Ordering::Relaxed));
         hash.u32(shared.out_r.load(Ordering::Relaxed));
         hash.u32(shared.drift_ppm.load(Ordering::Relaxed));
-        for meter in shared.clock_device.meters() {
+        for meter in shared.clock_output.meters() {
             hash.f32(meter);
         }
     }
-    let underruns = shared.underruns.load(Ordering::Relaxed);
-    assert!(underruns >= 1, "the scenario must run the ring dry");
-    hash.u32(underruns as u32);
+    let dropouts = shared.dropouts.load(Ordering::Relaxed);
+    assert!(dropouts >= 1, "the scenario must count a dropout");
+    hash.u32(dropouts as u32);
     hash.u32(shared.frames.load(Ordering::Relaxed) as u32);
 }
 
-/// The PipeWire direct path with two followers, each with its own map
+/// The PipeWire direct path with two extra outputs, each with its own map
 /// and level, and control changes mid-run.
 fn golden_direct_render(hash: &mut Fnv) {
-    use super::super::shared::FollowerPlan;
+    use super::super::shared::ExtraOutputPlan;
     let shared = Shared::new(48_000);
     busy_settings(&shared);
-    let followers = [
+    let extra_outputs = [
         OutputDeviceSettings {
             level_db: -6.0,
             path_map: crate::audio::PathMapSettings::first(ChannelMap {
@@ -690,28 +690,28 @@ fn golden_direct_render(hash: &mut Fnv) {
             ..OutputDeviceSettings::default()
         },
     ];
-    let plan = FollowerPlan {
+    let plan = ExtraOutputPlan {
         count: 2,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    shared.set_followers(&followers, &plan, &[]);
-    // The duplex graph maps the followers in this mixer.
+    shared.set_extra_outputs(&extra_outputs, &plan, &[]);
+    // The duplex graph maps the extra outputs in this mixer.
     shared.direct.store(true, Ordering::Relaxed);
     let mut mixer = OutputMixer::new(48_000, 2);
     mixer.publish_device_channels(&shared);
-    mixer.publish_follower_channels(&shared);
+    mixer.publish_extra_output_channels(&shared);
     mixer.prepare(128);
     let mut source = Source::new();
     for block in 0..32 {
         match block {
             6 => store_gain(&shared, 0.5),
-            10 => shared.set_followers(
+            10 => shared.set_extra_outputs(
                 &[
                     OutputDeviceSettings {
                         level_db: -12.0,
-                        ..followers[0]
+                        ..extra_outputs[0]
                     },
-                    followers[1],
+                    extra_outputs[1],
                 ],
                 &plan,
                 &[],
@@ -734,8 +734,8 @@ fn golden_direct_render(hash: &mut Fnv) {
         });
         hash.u32(shared.out_l.load(Ordering::Relaxed));
         hash.u32(shared.out_r.load(Ordering::Relaxed));
-        for follower in &shared.followers[..2] {
-            for meter in follower.meters() {
+        for extra_output in &shared.extra_outputs[..2] {
+            for meter in extra_output.meters() {
                 hash.f32(meter);
             }
         }
@@ -763,12 +763,12 @@ fn one_path_is_bit_identical_to_the_recorded_output() {
 }
 
 #[test]
-fn a_plugin_insert_on_path_0_runs_inside_the_mixer() {
+fn a_plugin_effect_on_path_0_runs_inside_the_mixer() {
     let _main = super::super::shared::tests::claim_main_thread();
     let fake = crate::audio::clap::tests::fake_plugin_for_test;
     let (mut mixer, shared) = steady_mixer((0.5, -0.25));
     shared.paths[0].edit_chain(|chain| chain.insert_clap_for_test(fake(false)));
-    // The same insert run on its own over the same dry block.
+    // The same effect run on its own over the same dry block.
     let reference = Shared::new(48_000);
     reference.paths[0].edit_chain(|chain| chain.insert_clap_for_test(fake(false)));
     let mut left = vec![0.5f32; 64];
@@ -776,7 +776,7 @@ fn a_plugin_insert_on_path_0_runs_inside_the_mixer() {
     reference.paths[0].process_plugins(&mut left, &mut right, 64);
 
     let out = render(&mut mixer, &shared, 64);
-    assert_ne!(out[0][0], 0.5, "the insert ran");
+    assert_ne!(out[0][0], 0.5, "the effect ran");
     for (index, frame) in out.iter().enumerate() {
         assert_eq!([frame[0], frame[1]], [left[index], right[index]]);
     }
@@ -865,34 +865,34 @@ fn mono_crossfades_every_tap_to_the_average() {
 }
 
 #[test]
-fn the_ring_path_pushes_finished_frames_into_active_follower_rings() {
-    use super::super::shared::{FollowerLink, FollowerPlan};
-    use super::super::types::CushionMode;
+fn the_ring_path_pushes_finished_frames_into_active_extra_output_rings() {
+    use super::super::shared::{ExtraOutputLink, ExtraOutputPlan};
+    use super::super::types::BufferMode;
 
     let (mut mixer, shared) = steady_mixer((0.5, -0.25));
     shared.set_output(48_000, 64, crate::audio::OutputMode::Standard, "test");
-    let mut plan = FollowerPlan {
+    let mut plan = ExtraOutputPlan {
         count: 1,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    plan.slots[0] = FollowerLink {
-        device_id: "test:follower".to_owned(),
-        ..FollowerLink::default()
+    plan.slots[0] = ExtraOutputLink {
+        device_id: "test:extra-output".to_owned(),
+        ..ExtraOutputLink::default()
     };
-    shared.set_followers(
+    shared.set_extra_outputs(
         &[OutputDeviceSettings::default()],
         &plan,
-        &[(CushionMode::Manual, 10.0)],
+        &[(BufferMode::Fixed, 10.0)],
     );
-    shared.follower_bus(0).set_device_channels(2);
-    shared.follower_bus(0).reset_playback();
+    shared.extra_output_bus(0).set_device_channels(2);
+    shared.extra_output_bus(0).reset_playback();
     shared
-        .follower_ring_active(0)
+        .extra_output_ring_active(0)
         .store(true, Ordering::Relaxed);
     shared
-        .follower_bus(0)
-        .set_cushion(CushionMode::Manual, 10.0);
-    shared.follower_bus(0).set_source_rate(48_000);
+        .extra_output_bus(0)
+        .set_bridge_buffer(BufferMode::Fixed, 10.0);
+    shared.extra_output_bus(0).set_source_rate(48_000);
 
     let frames = 64;
     let mut clock = Vec::new();
@@ -900,40 +900,40 @@ fn the_ring_path_pushes_finished_frames_into_active_follower_rings() {
         clock.push([mapped.sample(0), mapped.sample(1)]);
     });
     assert_eq!(
-        shared.follower_bus(0).ring_frames(),
+        shared.extra_output_bus(0).ring_frames(),
         frames,
-        "every finished clock frame should land in the follower ring"
+        "every finished clock frame should land in the extra output ring"
     );
-    // Default maps on both: the follower carries what the clock plays.
+    // Default maps on both: the extra output carries what the clock plays.
     let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
     for expected in &clock {
-        assert!(shared.follower_bus(0).pop_frame(&mut frame));
+        assert!(shared.extra_output_bus(0).pop_frame(&mut frame));
         assert_eq!([frame[0], frame[1]], *expected);
     }
 
-    // Duplex path must not push (in-graph fan-out owns followers).
+    // Duplex path must not push (in-graph fan-out owns extra outputs).
     shared.direct.store(true, Ordering::Relaxed);
-    shared.follower_bus(0).reset_playback();
+    shared.extra_output_bus(0).reset_playback();
     let _ = render(&mut mixer, &shared, frames);
     assert_eq!(
-        shared.follower_bus(0).ring_frames(),
+        shared.extra_output_bus(0).ring_frames(),
         0,
-        "direct mode must not fill generic follower rings"
+        "direct mode must not fill generic extra output rings"
     );
 }
 
 #[test]
-fn a_generic_follower_gets_its_own_sum_of_the_paths() {
-    use super::super::shared::{FollowerLink, FollowerPlan};
-    use super::super::types::CushionMode;
+fn a_generic_extra_output_gets_its_own_sum_of_the_paths() {
+    use super::super::shared::{ExtraOutputLink, ExtraOutputPlan};
+    use super::super::types::BufferMode;
 
     let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
-    // The clock device plays path 0 only; the 4-channel follower plays
+    // The clock output plays path 0 only; the 4-channel extra output plays
     // path 0 on Out 1/2 and path 1, inverted, on Out 3/4.
     shared
-        .clock_device
+        .clock_output
         .set(&device_with(&[(1, PathMapSettings::unrouted())]));
-    let follower = device_with(&[(
+    let extra_output = device_with(&[(
         1,
         PathMapSettings {
             map: ChannelMap {
@@ -944,20 +944,20 @@ fn a_generic_follower_gets_its_own_sum_of_the_paths() {
             ..PathMapSettings::default()
         },
     )]);
-    let mut plan = FollowerPlan {
+    let mut plan = ExtraOutputPlan {
         count: 1,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    plan.slots[0] = FollowerLink {
-        device_id: "test:follower".to_owned(),
-        ..FollowerLink::default()
+    plan.slots[0] = ExtraOutputLink {
+        device_id: "test:extra-output".to_owned(),
+        ..ExtraOutputLink::default()
     };
-    shared.set_followers(&[follower], &plan, &[(CushionMode::Safe, 10.0)]);
-    let bus = shared.follower_bus(0);
+    shared.set_extra_outputs(&[extra_output], &plan, &[(BufferMode::Auto, 10.0)]);
+    let bus = shared.extra_output_bus(0);
     bus.set_device_channels(4);
     bus.reset_playback();
     shared
-        .follower_ring_active(0)
+        .extra_output_ring_active(0)
         .store(true, Ordering::Relaxed);
 
     let clock = device_frames(&mut mixer, &shared, 2, 600);
@@ -968,21 +968,24 @@ fn a_generic_follower_gets_its_own_sum_of_the_paths() {
         assert!(bus.pop_frame(&mut frame));
     }
     assert_eq!(frame[..4], [0.5, -0.25, -0.5, 0.25]);
-    // The clock side publishes the follower's meters, per channel.
-    assert_eq!(shared.followers[0].meters()[..4], [0.5, 0.25, 0.5, 0.25]);
+    // The clock side publishes the extra output's meters, per channel.
+    assert_eq!(
+        shared.extra_outputs[0].meters()[..4],
+        [0.5, 0.25, 0.5, 0.25]
+    );
 
-    // A follower whose stream stopped is not mapped: its ring stays put
+    // An extra output whose stream stopped is not mapped: its ring stays put
     // and its meters fall to 0.
     shared
-        .follower_ring_active(0)
+        .extra_output_ring_active(0)
         .store(false, Ordering::Relaxed);
     let _ = device_frames(&mut mixer, &shared, 2, 64);
     assert_eq!(bus.ring_frames(), 0);
-    assert_eq!(shared.followers[0].meters()[..4], [0.0; 4]);
+    assert_eq!(shared.extra_outputs[0].meters()[..4], [0.0; 4]);
 }
 
 /// A steady mixer with a second path in slot 1 (EQs bypassed, playing
-/// the same input) on a `channels`-channel clock device.
+/// the same input) on a `channels`-channel clock output.
 fn two_path_mixer(signal: (f32, f32), channels: usize) -> (OutputMixer, Shared) {
     use super::super::path::PathMix;
     let (_, shared) = steady_mixer(signal);
@@ -1111,7 +1114,7 @@ fn the_mixer_publishes_the_total_dsp_time_of_its_paths() {
     );
 }
 
-/// `frames` frames of the clock device, as one block.
+/// `frames` frames of the clock output, as one block.
 fn device_frames(
     mixer: &mut OutputMixer,
     shared: &Shared,
@@ -1145,7 +1148,7 @@ fn device_with(paths: &[(usize, PathMapSettings)]) -> OutputDeviceSettings {
 fn two_paths_add_up_where_their_maps_meet() {
     let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 4);
     // Path 0 on Out 1/2, path 1's L on Out 1 and its R on Out 4.
-    shared.clock_device.set(&device_with(&[(
+    shared.clock_output.set(&device_with(&[(
         1,
         PathMapSettings {
             map: ChannelMap {
@@ -1172,7 +1175,7 @@ fn two_paths_add_up_where_their_maps_meet() {
 fn level_and_polarity_apply_per_path_and_device() {
     let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
     let gain = 10.0f32.powf(-6.0 / 20.0);
-    shared.clock_device.set(&device_with(&[
+    shared.clock_output.set(&device_with(&[
         (
             0,
             PathMapSettings {
@@ -1188,28 +1191,28 @@ fn level_and_polarity_apply_per_path_and_device() {
             },
         ),
     ]));
-    // Follower 0 keeps both paths at unity, normal polarity.
-    let plan = super::super::shared::FollowerPlan {
+    // Extra output 0 keeps both paths at unity, normal polarity.
+    let plan = super::super::shared::ExtraOutputPlan {
         count: 1,
         ..Default::default()
     };
-    shared.set_followers(&[OutputDeviceSettings::default()], &plan, &[]);
-    // The duplex graph maps the followers in this mixer.
+    shared.set_extra_outputs(&[OutputDeviceSettings::default()], &plan, &[]);
+    // The duplex graph maps the extra outputs in this mixer.
     shared.direct.store(true, Ordering::Relaxed);
     let mut clock = Vec::new();
-    let mut follower = Vec::new();
+    let mut extra_output = Vec::new();
     mixer.render_direct_devices(&shared, &[0.5; 64], &[-0.25; 64], |device, _, mapped| {
         let frame = [mapped.sample(0), mapped.sample(1)];
         if device == 0 {
             clock.push(frame);
         } else {
-            follower.push(frame);
+            extra_output.push(frame);
         }
     });
     assert_eq!(clock[63], [0.5 * gain - 0.5, -0.25 * gain + 0.25]);
     let ceiling = crate::audio::safety_ceiling_linear();
-    assert_eq!(follower[63], [ceiling, -0.5 * ceiling]);
-    assert_eq!(shared.clock_device.path_gain(1), -1.0);
+    assert_eq!(extra_output[63], [ceiling, -0.5 * ceiling]);
+    assert_eq!(shared.clock_output.path_gain(1), -1.0);
 }
 
 #[test]
@@ -1217,7 +1220,7 @@ fn a_polarity_flip_ramps_through_zero_without_a_click() {
     // Two copies stay under the safety ceiling, so the ramp stays linear.
     let (mut mixer, shared) = two_path_mixer((0.4, 0.4), 2);
     let _adopted = device_frames(&mut mixer, &shared, 2, 16);
-    shared.clock_device.set(&device_with(&[(
+    shared.clock_output.set(&device_with(&[(
         1,
         PathMapSettings {
             invert: true,
@@ -1400,7 +1403,7 @@ fn a_new_path_stays_silent_until_its_plugins_open_then_fades_in() {
     assert!(shared.paths[1].chain_pending());
     let waiting = render(&mut mixer, &shared, 400);
     assert!(waiting.iter().all(|frame| *frame == [0.5, -0.25, 0.0, 0.0]));
-    // The UI thread tries to open it (here it fails, so the insert is
+    // The UI thread tries to open it (here it fails, so the effect is
     // left out): the path fades in instead of jumping.
     shared.paths[1].ensure_plugin_loaded(0);
     assert!(!shared.paths[1].chain_pending());
@@ -1446,7 +1449,7 @@ fn a_calibration_click_leaves_on_the_channels_the_clock_map_plays() {
 
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
-    shared.set_cushion(CushionMode::Manual, 100.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
     shared.set_mix(false, true, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
@@ -1455,7 +1458,7 @@ fn a_calibration_click_leaves_on_the_channels_the_clock_map_plays() {
     shared.set_eq(EqSlot::Pre, bypassed);
     shared.set_eq(EqSlot::Post, bypassed);
     // The clock map plays the mix on channels 3 and 4 (0-based), not 0/1.
-    shared.clock_device.set(&OutputDeviceSettings {
+    shared.clock_output.set(&OutputDeviceSettings {
         path_map: PathMapSettings::first(ChannelMap {
             left: 1 << 3,
             right: 1 << 4,
@@ -1507,7 +1510,7 @@ fn a_calibration_click_leaves_on_the_channels_the_clock_map_plays() {
 fn a_calibration_click_on_a_mono_output_uses_its_only_channel() {
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
-    shared.set_cushion(CushionMode::Manual, 100.0);
+    shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
     shared.set_mix(false, true, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
@@ -1650,7 +1653,7 @@ fn recording_keeps_the_limited_device_frame() {
     let rate = 48_000u32;
     shared.set_output(rate, 64, crate::audio::OutputMode::Standard, "test");
     mixer.publish_device_channels(&shared);
-    assert_eq!(shared.clock_device.channels() as usize, channels);
+    assert_eq!(shared.clock_output.channels() as usize, channels);
     let path = recording_file("limited");
     assert!(
         shared
@@ -1675,7 +1678,7 @@ fn recording_keeps_the_limited_device_frame() {
     // there, the ceiling on the frame that was pushed.
     assert_eq!(f32::from_bits(shared.out_l.load(Ordering::Relaxed)), 1.0);
     assert_eq!(f32::from_bits(shared.out_r.load(Ordering::Relaxed)), 1.0);
-    assert!(shared.clock_device.reduction_db() > 0.0);
+    assert!(shared.clock_output.reduction_db() > 0.0);
     assert!(written.iter().all(|sample| sample.abs() <= ceiling));
     assert!(written.iter().any(|sample| sample.abs() == ceiling));
     assert!(written
@@ -1689,26 +1692,31 @@ fn recording_keeps_the_limited_device_frame() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Clock pushes while a follower endpoint is armed stay out of the file.
+/// Clock pushes while an extra output endpoint is armed stay out of the file.
 #[test]
-fn recording_a_follower_source_ignores_clock_frames() {
+fn recording_a_extra_output_source_ignores_clock_frames() {
     let shared = Shared::new(48_000);
-    shared.followers[0].set_channels(2);
-    shared.follower_bus(0).set_playback_rate(48_000);
-    let path = recording_file("follower");
+    shared.extra_outputs[0].set_channels(2);
+    shared.extra_output_bus(0).set_playback_rate(48_000);
+    let path = recording_file("extra output");
     assert!(shared
         .recorder
-        .arm(path.clone(), 48_000, 2, RecordSource::Follower(0),));
+        .arm(path.clone(), 48_000, 2, RecordSource::ExtraOutput(0),));
     wait_until_recording(&shared.recorder);
 
     let clock = DeviceFrame::from_lanes(&[0.9, -0.9], 2);
-    let follower = DeviceFrame::from_lanes(&[0.25, -0.5], 2);
+    let extra_output = DeviceFrame::from_lanes(&[0.25, -0.5], 2);
     let frames = 8;
     for _ in 0..frames {
         push_device_frame(&shared.recorder, RecordSource::Clock, &clock, 2);
-        push_device_frame(&shared.recorder, RecordSource::Follower(0), &follower, 2);
-        // Another follower slot is a different endpoint.
-        push_device_frame(&shared.recorder, RecordSource::Follower(1), &clock, 2);
+        push_device_frame(
+            &shared.recorder,
+            RecordSource::ExtraOutput(0),
+            &extra_output,
+            2,
+        );
+        // Another extra output slot is a different endpoint.
+        push_device_frame(&shared.recorder, RecordSource::ExtraOutput(1), &clock, 2);
     }
 
     shared.recorder.disarm();
@@ -1777,33 +1785,33 @@ fn arm_click(shared: &Shared) {
     );
 }
 
-fn follower_plan() -> super::super::shared::FollowerPlan {
-    use super::super::shared::{FollowerLink, FollowerPlan};
-    let mut plan = FollowerPlan {
+fn extra_output_plan() -> super::super::shared::ExtraOutputPlan {
+    use super::super::shared::{ExtraOutputLink, ExtraOutputPlan};
+    let mut plan = ExtraOutputPlan {
         count: 1,
-        ..FollowerPlan::default()
+        ..ExtraOutputPlan::default()
     };
-    plan.slots[0] = FollowerLink {
-        device_id: "test:follower".to_owned(),
-        ..FollowerLink::default()
+    plan.slots[0] = ExtraOutputLink {
+        device_id: "test:extra-output".to_owned(),
+        ..ExtraOutputLink::default()
     };
     plan
 }
 
 fn direct_pair(
     clock_mask: u8,
-    follower: OutputDeviceSettings,
+    extra_output: OutputDeviceSettings,
     running: bool,
 ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     let (_, shared) = steady_mixer((0.4, -0.2));
     let mut mixer = OutputMixer::new(48_000, 4);
-    shared.clock_device.set(&OutputDeviceSettings {
+    shared.clock_output.set(&OutputDeviceSettings {
         unused: UnusedChannels::Silent,
         click_mask: clock_mask,
         ..OutputDeviceSettings::default()
     });
     shared.direct.store(true, Ordering::Relaxed);
-    shared.set_followers(&[follower], &follower_plan(), &[]);
+    shared.set_extra_outputs(&[extra_output], &extra_output_plan(), &[]);
     if running {
         arm_click(&shared);
     }
@@ -1832,13 +1840,13 @@ fn bits_of(frames: &[Vec<f32>]) -> Vec<Vec<u32>> {
 }
 
 #[test]
-fn the_clock_mask_does_not_tick_on_the_follower() {
-    let follower = OutputDeviceSettings {
+fn the_clock_mask_does_not_tick_on_the_extra_output() {
+    let extra_output = OutputDeviceSettings {
         click_mask: 0,
         ..OutputDeviceSettings::default()
     };
-    let (clock, followed) = direct_pair(0b1100, follower, true);
-    let (quiet_clock, quiet_followed) = direct_pair(0b1100, follower, false);
+    let (clock, followed) = direct_pair(0b1100, extra_output, true);
+    let (quiet_clock, quiet_followed) = direct_pair(0b1100, extra_output, false);
     assert_eq!(bits_of(&followed), bits_of(&quiet_followed));
     assert_eq!(
         bits_of(
@@ -1864,44 +1872,44 @@ fn the_clock_mask_does_not_tick_on_the_follower() {
 }
 
 #[test]
-fn the_follower_mask_ticks_there_and_not_on_the_clock() {
-    let follower = OutputDeviceSettings {
+fn the_extra_output_mask_ticks_there_and_not_on_the_clock() {
+    let extra_output = OutputDeviceSettings {
         click_mask: 0b0001,
         ..OutputDeviceSettings::default()
     };
-    let (clock, followed) = direct_pair(0, follower, true);
-    let (quiet_clock, quiet_followed) = direct_pair(0, follower, false);
+    let (clock, followed) = direct_pair(0, extra_output, true);
+    let (quiet_clock, quiet_followed) = direct_pair(0, extra_output, false);
     assert_eq!(bits_of(&clock), bits_of(&quiet_clock));
     assert!(
         followed
             .iter()
             .zip(&quiet_followed)
             .any(|(frame, quiet)| frame[0].to_bits() != quiet[0].to_bits()),
-        "the masked follower channel should carry the tick"
+        "the masked extra output channel should carry the tick"
     );
 
-    // The ring path writes the same sample into the follower frame.
+    // The ring path writes the same sample into the extra output frame.
     let run = |running: bool| {
         let (mut mixer, shared) = two_path_mixer((0.4, -0.2), 2);
-        shared.clock_device.set(&OutputDeviceSettings {
+        shared.clock_output.set(&OutputDeviceSettings {
             click_mask: 0,
             ..OutputDeviceSettings::default()
         });
-        let follower = OutputDeviceSettings {
+        let extra_output = OutputDeviceSettings {
             unused: UnusedChannels::Silent,
             click_mask: 0b0100,
             ..OutputDeviceSettings::default()
         };
-        shared.set_followers(
-            &[follower],
-            &follower_plan(),
-            &[(CushionMode::Manual, 10.0)],
+        shared.set_extra_outputs(
+            &[extra_output],
+            &extra_output_plan(),
+            &[(BufferMode::Fixed, 10.0)],
         );
-        let bus = shared.follower_bus(0);
+        let bus = shared.extra_output_bus(0);
         bus.set_device_channels(4);
         bus.reset_playback();
         shared
-            .follower_ring_active(0)
+            .extra_output_ring_active(0)
             .store(true, Ordering::Relaxed);
         if running {
             arm_click(&shared);
@@ -1937,7 +1945,7 @@ fn master_mute_and_a_path_mute_leave_the_tick() {
     let run = |master: bool, path: bool| {
         let (_, shared) = steady_mixer((0.4, -0.2));
         let mut mixer = OutputMixer::new(48_000, 4);
-        shared.clock_device.set(&tick_device);
+        shared.clock_output.set(&tick_device);
         if master {
             shared.mute.store(true, Ordering::Relaxed);
         }
@@ -1967,15 +1975,15 @@ fn master_mute_and_a_path_mute_leave_the_tick() {
 }
 
 #[test]
-fn device_mute_on_the_clock_does_not_mute_the_follower_tick() {
+fn device_mute_on_the_clock_does_not_mute_the_extra_output_tick() {
     let clock = OutputDeviceSettings {
         unused: UnusedChannels::Silent,
         click_mask: 0b0100,
         ..OutputDeviceSettings::default()
     };
-    // Channel 2 of a stereo follower is past its width, so the tick-only
+    // Channel 2 of a stereo extra output is past its width, so the tick-only
     // lane is channel 1 (bit 1), with the music kept on channel 0.
-    let follower = OutputDeviceSettings {
+    let extra_output = OutputDeviceSettings {
         path_map: PathMapSettings::first(ChannelMap {
             left: 0b0001,
             right: 0,
@@ -1986,23 +1994,23 @@ fn device_mute_on_the_clock_does_not_mute_the_follower_tick() {
     };
     let (_, shared) = steady_mixer((0.4, -0.2));
     let mut mixer = OutputMixer::new(48_000, 4);
-    shared.clock_device.set(&clock);
+    shared.clock_output.set(&clock);
     shared.direct.store(true, Ordering::Relaxed);
-    shared.set_followers(&[follower], &follower_plan(), &[]);
+    shared.set_extra_outputs(&[extra_output], &extra_output_plan(), &[]);
     arm_click(&shared);
     // Adopt the unmuted devices and start the voice.
     mixer.render_direct_devices(&shared, &[0.4; 64], &[-0.2; 64], |_, _, _| {});
-    shared.clock_device.set(&OutputDeviceSettings {
+    shared.clock_output.set(&OutputDeviceSettings {
         mute: true,
         ..clock
     });
     let mut clock_tick = Vec::new();
-    let mut follower_tick = Vec::new();
+    let mut extra_output_tick = Vec::new();
     mixer.render_direct_devices(&shared, &[0.4; 400], &[-0.2; 400], |device, _, mapped| {
         if device == 0 {
             clock_tick.push(mapped.sample(2));
         } else {
-            follower_tick.push(mapped.sample(1));
+            extra_output_tick.push(mapped.sample(1));
         }
     });
     assert!(clock_tick.len() > 289);
@@ -2017,7 +2025,7 @@ fn device_mute_on_the_clock_does_not_mute_the_follower_tick() {
         "the clock tick has ramped out"
     );
     assert!(
-        follower_tick[289..].iter().any(|sample| *sample != 0.0),
+        extra_output_tick[289..].iter().any(|sample| *sample != 0.0),
         "the other device keeps ticking"
     );
 }
@@ -2031,9 +2039,9 @@ fn an_armed_measurement_ducks_the_tick_on_every_device() {
             click_mask: 0b0001,
             ..OutputDeviceSettings::default()
         };
-        shared.clock_device.set(&masked);
+        shared.clock_output.set(&masked);
         shared.direct.store(true, Ordering::Relaxed);
-        shared.set_followers(&[masked], &follower_plan(), &[]);
+        shared.set_extra_outputs(&[masked], &extra_output_plan(), &[]);
         if running {
             arm_click(&shared);
         }
@@ -2077,7 +2085,7 @@ fn a_measurement_fades_a_sounding_tick_instead_of_cutting_it() {
     fn tick_lane(arm: bool) -> Vec<f32> {
         let (_, shared) = steady_mixer((0.25, 0.25));
         let mut mixer = OutputMixer::new(48_000, 4);
-        shared.clock_device.set(&OutputDeviceSettings {
+        shared.clock_output.set(&OutputDeviceSettings {
             unused: UnusedChannels::Silent,
             click_mask: 0b0100,
             ..OutputDeviceSettings::default()
@@ -2133,12 +2141,12 @@ fn a_measurement_fades_a_sounding_tick_instead_of_cutting_it() {
     );
 }
 
-/// A stereo follower with the music on channel 0 only, the tick on
+/// A stereo extra output with the music on channel 0 only, the tick on
 /// channel 1, and path 0 trimmed by −5 ms (240 frames at 48 kHz): a dry
-/// path would wait 240 frames there, so the tick waits in that follower's
+/// path would wait 240 frames there, so the tick waits in that extra output's
 /// click line.
-fn trimmed_tick_follower(channel_bit: u8) -> OutputDeviceSettings {
-    let mut follower = OutputDeviceSettings {
+fn trimmed_tick_extra_output(channel_bit: u8) -> OutputDeviceSettings {
+    let mut extra_output = OutputDeviceSettings {
         path_map: PathMapSettings::first(ChannelMap {
             left: 0b0001,
             right: 0,
@@ -2147,17 +2155,21 @@ fn trimmed_tick_follower(channel_bit: u8) -> OutputDeviceSettings {
         click_mask: channel_bit,
         ..OutputDeviceSettings::default()
     };
-    follower.path_map[0].trim_ms = -5.0;
-    follower
+    extra_output.path_map[0].trim_ms = -5.0;
+    extra_output
 }
 
 #[test]
 fn a_measurement_ducks_a_tick_already_waiting_in_the_alignment_delay() {
-    fn follower_tick(arm: bool) -> Vec<f32> {
+    fn extra_output_tick(arm: bool) -> Vec<f32> {
         let (_, shared) = steady_mixer((0.25, 0.25));
         let mut mixer = OutputMixer::new(48_000, 2);
         shared.direct.store(true, Ordering::Relaxed);
-        shared.set_followers(&[trimmed_tick_follower(0b0010)], &follower_plan(), &[]);
+        shared.set_extra_outputs(
+            &[trimmed_tick_extra_output(0b0010)],
+            &extra_output_plan(),
+            &[],
+        );
         arm_click(&shared);
         let mut lane = Vec::new();
         let take = |mixer: &mut OutputMixer, lane: &mut Vec<f32>| {
@@ -2178,8 +2190,8 @@ fn a_measurement_ducks_a_tick_already_waiting_in_the_alignment_delay() {
         }
         lane
     }
-    let ducked = follower_tick(true);
-    let plain = follower_tick(false);
+    let ducked = extra_output_tick(true);
+    let plain = extra_output_tick(false);
     assert!(
         plain[..241].iter().all(|sample| *sample == 0.0) && plain[241] != 0.0,
         "the tick waits the dry delay (its first sample is sin 0): {:?}",
@@ -2206,27 +2218,29 @@ fn a_measurement_ducks_a_tick_already_waiting_in_the_alignment_delay() {
 }
 
 #[test]
-fn a_follower_that_resumes_feeding_does_not_play_stale_ticks() {
-    // Follower blocks: fed or not, per block.  The click lane of the last
+fn a_extra_output_that_resumes_feeding_does_not_play_stale_ticks() {
+    // Extra output blocks: fed or not, per block.  The click lane of the last
     // block (fed in both runs) must not depend on what the first queued.
     fn last_block(first_fed: bool) -> Vec<u32> {
         let (mut mixer, shared) = two_path_mixer((0.4, -0.2), 2);
-        shared.clock_device.set(&OutputDeviceSettings {
+        shared.clock_output.set(&OutputDeviceSettings {
             click_mask: 0,
             ..OutputDeviceSettings::default()
         });
-        shared.set_followers(
-            &[trimmed_tick_follower(0b0010)],
-            &follower_plan(),
-            &[(CushionMode::Manual, 10.0)],
+        shared.set_extra_outputs(
+            &[trimmed_tick_extra_output(0b0010)],
+            &extra_output_plan(),
+            &[(BufferMode::Fixed, 10.0)],
         );
-        let bus = shared.follower_bus(0);
+        let bus = shared.extra_output_bus(0);
         bus.set_device_channels(2);
         bus.reset_playback();
         arm_click(&shared);
         let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
         let mut block = |fed: bool| {
-            shared.follower_ring_active(0).store(fed, Ordering::Relaxed);
+            shared
+                .extra_output_ring_active(0)
+                .store(fed, Ordering::Relaxed);
             let _ = device_frames(&mut mixer, &shared, 2, 64);
             let mut lane = Vec::new();
             while bus.pop_frame(&mut frame) {
@@ -2252,12 +2266,12 @@ fn a_follower_that_resumes_feeding_does_not_play_stale_ticks() {
     );
 }
 
-/// The clock device's played and click-free frames over `blocks` blocks
+/// The clock output's played and click-free frames over `blocks` blocks
 /// of 64, with the tick on channels 1 and 3 of a 4-channel device.
 fn played_and_recorded(running: bool, blocks: usize) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     let (_, shared) = steady_mixer((0.4, -0.2));
     let mut mixer = OutputMixer::new(48_000, 4);
-    shared.clock_device.set(&OutputDeviceSettings {
+    shared.clock_output.set(&OutputDeviceSettings {
         unused: UnusedChannels::Silent,
         click_mask: 0b0101,
         ..OutputDeviceSettings::default()
@@ -2326,24 +2340,24 @@ fn the_click_free_frame_takes_the_calibration_duck_but_not_its_click() {
 }
 
 #[test]
-fn a_narrow_follower_ring_gets_the_tick_free_lanes_from_the_mixer() {
+fn a_narrow_extra_output_ring_gets_the_tick_free_lanes_from_the_mixer() {
     // The clock side's own producer: each popped ring frame is the played
     // lanes, then the click-free ones.
     fn ring_frames(running: bool) -> Vec<[u32; 4]> {
         let (mut mixer, shared) = two_path_mixer((0.4, -0.2), 2);
-        shared.set_followers(
-            &[trimmed_tick_follower(0b0010)],
-            &follower_plan(),
-            &[(CushionMode::Manual, 10.0)],
+        shared.set_extra_outputs(
+            &[trimmed_tick_extra_output(0b0010)],
+            &extra_output_plan(),
+            &[(BufferMode::Fixed, 10.0)],
         );
-        let bus = shared.follower_bus(0);
+        let bus = shared.extra_output_bus(0);
         bus.set_device_channels(2);
         bus.reset_playback();
         if running {
             arm_click(&shared);
         }
         shared
-            .follower_ring_active(0)
+            .extra_output_ring_active(0)
             .store(true, Ordering::Relaxed);
         let mut frame = [0.0; crate::audio::output_map::FRAME_LANES];
         let mut out = Vec::new();
@@ -2407,7 +2421,7 @@ fn each_paths_gate_reduction_is_published_in_the_snapshot() {
 }
 
 #[test]
-fn a_paused_insert_is_republished_into_and_out_of_its_pause() {
+fn a_paused_effect_is_republished_into_and_out_of_its_pause() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };

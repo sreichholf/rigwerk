@@ -2,8 +2,8 @@ use super::{
     device_summary_row, map_summary, output_cell, preset_active, selected_device,
     shows_unused_choice, shows_unused_choice_paths, MapEdit, RoutingAction,
 };
-use crate::app::cards::Card;
 use crate::app::chain::ChainSelection;
+use crate::app::layouts::PathLayout;
 use crate::app::output_devices::OutputDeviceRow;
 use crate::app::{blank_app, Page};
 use crate::audio::{
@@ -125,12 +125,12 @@ fn the_unused_choice_shows_when_it_matters() {
 }
 
 #[test]
-fn the_selection_falls_back_to_the_clock_device() {
+fn the_selection_falls_back_to_the_clock_output() {
     assert_eq!(selected_device(0, 1), 0);
     assert_eq!(
         selected_device(3, 1),
         0,
-        "out of range falls back to the clock device"
+        "out of range falls back to the clock output"
     );
     assert_eq!(selected_device(1, 2), 1);
 }
@@ -172,10 +172,10 @@ fn an_output_cell_exposes_its_name_and_value() {
 #[test]
 fn a_device_row_reads_its_map() {
     let row = OutputDeviceRow {
-        virtual_out: false,
-        follower_index: None,
+        virtual_output: false,
+        extra_output_index: None,
         missing: false,
-        publish: false,
+        virtual_output_on: false,
         name: "Scarlett 4i4".to_owned(),
         backend: "PipeWire".to_owned(),
         channels: 4,
@@ -229,10 +229,14 @@ fn has_node(tree: &egui::accesskit::TreeUpdate, name: &str) -> bool {
 fn one_path_keeps_the_page_plain() {
     let mut app = blank_app();
     let tree = accesskit_frame(|ui| app.routing_page(ui));
-    let single = node_named(&tree, "Single path card");
+    let single = node_named(&tree, "Single path layout");
     assert_eq!(single.toggled(), Some(Toggled::True));
-    for card in ["Blend clean card", "Dual-amp card", "Dry L / Wet R card"] {
-        assert!(!node_named(&tree, card).is_disabled(), "{card}");
+    for layout in [
+        "Blend clean layout",
+        "Dual-amp layout",
+        "Dry L / Wet R layout",
+    ] {
+        assert!(!node_named(&tree, layout).is_disabled(), "{layout}");
     }
     for name in [
         "Mute Main",
@@ -250,10 +254,10 @@ fn one_path_keeps_the_page_plain() {
 #[test]
 fn several_paths_get_a_row_pair_each_and_their_own_controls() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::DryWet));
+    assert!(app.apply_layout(PathLayout::DryWet));
     let tree = accesskit_frame(|ui| app.routing_page(ui));
     assert_eq!(
-        node_named(&tree, "Dry L / Wet R card").toggled(),
+        node_named(&tree, "Dry L / Wet R layout").toggled(),
         Some(Toggled::True)
     );
     for name in [
@@ -302,14 +306,14 @@ fn path_actions_apply_after_drawing() {
     );
     app.apply_routing_action(RoutingAction::RemovePath(second));
     assert_eq!(app.path_count(), 2);
-    app.apply_routing_action(RoutingAction::ApplyCard(Card::Single));
-    assert_eq!(app.current_card(), Some(Card::Single));
+    app.apply_routing_action(RoutingAction::ApplyLayout(PathLayout::Single));
+    assert_eq!(app.current_layout(), Some(PathLayout::Single));
 }
 
 #[test]
 fn device_rows_name_their_paths_and_warn() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::DryWet));
+    assert!(app.apply_layout(PathLayout::DryWet));
     let infos = app.path_infos();
     let line = |app: &crate::app::RigWerkApp| {
         let rows = app.output_device_rows();
@@ -329,7 +333,7 @@ fn device_rows_name_their_paths_and_warn() {
 
     // Unaligned, and the second path trimmed: they arrive apart.
     app.set_device_align(0, false);
-    app.clock_device.path_map[infos[1].slot].trim_ms = 1.0;
+    app.clock_output.path_map[infos[1].slot].trim_ms = 1.0;
     let shift = line(&app);
     assert_eq!(
         shift.text, "2 paths · 1.0 ms",
@@ -338,8 +342,8 @@ fn device_rows_name_their_paths_and_warn() {
     assert_eq!(shift.color, AMBER);
 
     // Both on L/R: they add up.
-    app.clock_device.path_map[infos[0].slot].map = ChannelMap::default();
-    app.clock_device.path_map[infos[1].slot].map = ChannelMap::default();
+    app.clock_output.path_map[infos[0].slot].map = ChannelMap::default();
+    app.clock_output.path_map[infos[1].slot].map = ChannelMap::default();
     let sum = line(&app);
     assert_eq!(sum.text, "unaligned sum · comb filter");
     assert_eq!(sum.color, RED);
@@ -347,11 +351,11 @@ fn device_rows_name_their_paths_and_warn() {
     app.set_device_align(0, true);
     assert_eq!(line(&app).color, RED);
     // ... and without it the same sum lines up.
-    app.clock_device.path_map[infos[1].slot].trim_ms = 0.0;
+    app.clock_output.path_map[infos[1].slot].trim_ms = 0.0;
     assert_ne!(line(&app).color, RED);
 
     // Only the second path plays here.
-    app.clock_device.path_map[infos[0].slot].map = ChannelMap { left: 0, right: 0 };
+    app.clock_output.path_map[infos[0].slot].map = ChannelMap { left: 0, right: 0 };
     let one = line(&app);
     assert_eq!(one.text, "Path 2 · L/R");
     assert_eq!(one.dots, vec![path_colour(infos[1].colour_index)]);
@@ -373,9 +377,9 @@ fn the_unused_choice_counts_every_path() {
 #[test]
 fn sum_edits_write_their_own_slot_sanitized() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::DryWet));
+    assert!(app.apply_layout(PathLayout::DryWet));
     let second = app.path_slots()[1];
-    let before = app.clock_device.path_map[0];
+    let before = app.clock_output.path_map[0];
     app.apply_map_edit(
         0,
         MapEdit::Level {
@@ -384,7 +388,7 @@ fn sum_edits_write_their_own_slot_sanitized() {
             commit: true,
         },
     );
-    assert_eq!(app.clock_device.path_map[second].level_db, 6.0, "clamped");
+    assert_eq!(app.clock_output.path_map[second].level_db, 6.0, "clamped");
     app.apply_map_edit(
         0,
         MapEdit::Invert {
@@ -392,8 +396,8 @@ fn sum_edits_write_their_own_slot_sanitized() {
             invert: true,
         },
     );
-    assert!(app.clock_device.path_map[second].invert);
-    assert_eq!(app.clock_device.path_map[0], before, "other slot untouched");
+    assert!(app.clock_output.path_map[second].invert);
+    assert_eq!(app.clock_output.path_map[0], before, "other slot untouched");
     assert!(app
         .log
         .iter()
@@ -407,7 +411,7 @@ fn sum_edits_write_their_own_slot_sanitized() {
 #[test]
 fn a_drag_logs_only_when_it_ends() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::DryWet));
+    assert!(app.apply_layout(PathLayout::DryWet));
     let logged = app.log.len();
     for level_db in [-1.0, -2.0, -3.0] {
         app.apply_map_edit(
@@ -420,14 +424,14 @@ fn a_drag_logs_only_when_it_ends() {
         );
     }
     assert_eq!(app.log.len(), logged);
-    assert_eq!(app.clock_device.path_map[0].level_db, -3.0);
+    assert_eq!(app.clock_output.path_map[0].level_db, -3.0);
 }
 
 #[test]
 fn a_matrix_edit_makes_the_routing_custom() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::DryWet));
-    assert_eq!(app.current_card(), Some(Card::DryWet));
+    assert!(app.apply_layout(PathLayout::DryWet));
+    assert_eq!(app.current_layout(), Some(PathLayout::DryWet));
     app.apply_map_edit(
         0,
         MapEdit::Cell {
@@ -437,10 +441,10 @@ fn a_matrix_edit_makes_the_routing_custom() {
             on: true,
         },
     );
-    assert_eq!(app.current_card(), None);
-    assert_eq!(app.routing_last_card, Some(Card::DryWet));
+    assert_eq!(app.current_layout(), None);
+    assert_eq!(app.routing_last_layout, Some(PathLayout::DryWet));
     assert_eq!(
-        super::super::paths::custom_label(app.routing_last_card),
+        super::super::paths::custom_label(app.routing_last_layout),
         "Custom · edited from Dry L / Wet R"
     );
 }

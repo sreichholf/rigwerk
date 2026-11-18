@@ -7,7 +7,7 @@
 //! 3. Paths -> outputs: which device channels play each path, per output
 //!    device, and how the paths add up there ([`outputs`]).
 //!
-//! Above them the routing cards (starting points, `app::cards`) and, with
+//! Above them the routing layouts (starting points, `app::layouts`) and, with
 //! several paths, a flow strip.  Plus the Mix card (channel mode and
 //! monitoring).  With one path the page reads as before: Input -> Mix,
 //! Mix -> outputs, no per-path chrome.
@@ -376,7 +376,7 @@ impl RigWerkApp {
         let multi = infos.len() > 1;
         let mut actions = Vec::new();
 
-        self.routing_cards_row(ui, total, &mut actions);
+        self.routing_layouts_row(ui, total, &mut actions);
         if multi {
             self.routing_flow(ui, total, &infos);
         }

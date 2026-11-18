@@ -1,6 +1,6 @@
 //! A loaded plugin in its two halves: the [`PluginProcessor`] the audio
 //! thread runs inside the chain's slot ([`LoadedPlugin`]), and the
-//! [`PluginHandle`] the UI reaches through the published insert links and
+//! [`PluginHandle`] the UI reaches through the published effect links and
 //! the editor window.  Format-neutral.
 //!
 //! The UI half keeps the control views, the saved values, the state blob
@@ -135,12 +135,12 @@ pub(crate) struct LoadedPlugin {
     handle: PluginHandle,
 }
 
-/// What one insert did with one chunk.
+/// What one effect did with one chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// The plugin's output (fully wet) is in the buffers.
     Processed,
-    /// The buffers still hold the insert's input.
+    /// The buffers still hold the effect's input.
     Skipped,
     /// The plugin failed; the buffers hold its input.
     Failed,
@@ -253,12 +253,12 @@ impl LoadedPlugin {
     }
 
     /// Audio thread, one chunk of at most [`MAX_BLOCK`](super::MAX_BLOCK)
-    /// frames, in place.  Every loaded insert is brought here every chunk,
+    /// frames, in place.  Every loaded effect is brought here every chunk,
     /// so its pause handshake (start, stop, skip) is served even while it
-    /// is skipped; only `wet` runs the plugin, and a skipped insert flushes
+    /// is skipped; only `wet` runs the plugin, and a skipped effect flushes
     /// the values queued for it.  A failure is recorded in [`PluginShared`]
     /// and never allocates.  Neither format has a lock here that the UI
-    /// could hold: a restart pauses the insert instead.
+    /// could hold: a restart pauses the effect instead.
     pub(crate) fn run(
         &mut self,
         controls: &SlotControls,
@@ -276,7 +276,7 @@ impl LoadedPlugin {
         match block.action() {
             BlockAction::Process => {}
             BlockAction::Start if shared.failure().is_some() => {
-                // A failed insert is not started again.
+                // A failed effect is not started again.
                 shared.pause.start_failed();
                 return Outcome::Skipped;
             }
@@ -284,7 +284,7 @@ impl LoadedPlugin {
                 if let Err(failure) = processor.start() {
                     // Paused and not processing: later blocks skip instead
                     // of processing a plugin that never started, and the
-                    // insert shows why.
+                    // effect shows why.
                     shared.pause.start_failed();
                     shared.fail(failure);
                     return Outcome::Failed;
@@ -306,12 +306,12 @@ impl LoadedPlugin {
                 return Outcome::Skipped;
             }
         }
-        // An insert waiting for a reload has buffers or tables that may no
+        // An effect waiting for a reload has buffers or tables that may no
         // longer fit it (its ports or buses changed): it is not run, even
         // if the chain still counts it active for this block.
         let waiting = shared.reload_wanted();
         if !wet || waiting {
-            // A failed insert's buffers may no longer fit it either.
+            // A failed effect's buffers may no longer fit it either.
             if shared.failure().is_none() && !waiting {
                 processor.flush_if_queued();
             }
@@ -660,7 +660,7 @@ impl PluginHandle {
             drain_reported(clap, from_audio, ids, views);
             let reported = clap.flush_values(&native(clap));
             apply_reported(clap, ids, views, &reported);
-            // A failed insert stays paused: no new start per knob move.
+            // A failed effect stays paused: no new start per knob move.
             if shared.failure().is_none() {
                 resume_or_log(&shared.pause);
             }
@@ -689,7 +689,7 @@ impl PluginHandle {
                     .index_of(id)
                     .ok_or_else(|| "That control is no longer available.".to_owned())?;
                 // The controller has the value at once; the processor gets
-                // it with its next block (or a skipped insert's flush).
+                // it with its next block (or a skipped effect's flush).
                 if !controller.is_read_only(id) {
                     controller.set(id, value);
                     self.0.out.push(index, value);
@@ -870,7 +870,7 @@ impl PluginHandle {
     /// VST3 only lets change while inactive.  `kIoChanged` with other
     /// buses, `kReloadComponent` and a changed parameter id set ask for a
     /// reload, as the processor's buffers and tables no longer fit: the
-    /// insert stops processing and the path rebuilds it.
+    /// effect stops processing and the path rebuilds it.
     fn service_vst3(&self, ui: &mut UiSide) -> bool {
         let shared = &*self.0.shared;
         let UiSide {
@@ -971,7 +971,7 @@ impl PluginHandle {
     /// not retried until a control changes again; a deferred one (values
     /// still queued for the audio side, or a CLAP save off the main thread)
     /// stays stale so the next save retries.  Both save under the UI lock
-    /// only, so the audio callback keeps the insert.
+    /// only, so the audio callback keeps the effect.
     ///
     /// Both formats capture anyway while values are queued: the processor
     /// is owned by the audio side (in the chain's slot), so the UI cannot

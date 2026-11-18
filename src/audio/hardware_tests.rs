@@ -113,13 +113,13 @@ fn hardware_bridge() {
 
     let mut engine = AudioEngine::new(48_000);
     engine.set_master(true, false, [true, true], true);
-    // RIGWERK_CUSHION: safe (default), low, or a manual size in ms.
-    match std::env::var("RIGWERK_CUSHION").as_deref() {
-        Ok("low") => engine.set_cushion(super::CushionMode::LowLatency, 10.0),
+    // RIGWERK_BRIDGE_BUFFER: auto (default), minimum, or a fixed size in ms.
+    match std::env::var("RIGWERK_BRIDGE_BUFFER").as_deref() {
+        Ok("minimum") => engine.set_bridge_buffer(super::BufferMode::Minimum, 10.0),
         Ok(ms) if ms.parse::<f32>().is_ok() => {
-            engine.set_cushion(super::CushionMode::Manual, ms.parse().unwrap())
+            engine.set_bridge_buffer(super::BufferMode::Fixed, ms.parse().unwrap())
         }
-        _ => engine.set_cushion(super::CushionMode::Safe, 10.0),
+        _ => engine.set_bridge_buffer(super::BufferMode::Auto, 10.0),
     }
     // RIGWERK_EQ=1 runs with every band boosted, to load the EQ fully.
     if std::env::var("RIGWERK_EQ").as_deref() == Ok("1") {
@@ -166,11 +166,11 @@ fn hardware_bridge() {
         snapshot.output_mode
     );
     println!(
-        "flow:   {} frames out · ring peak {:.0}% · target {} · underruns {}",
+        "flow:   {} frames out · ring peak {:.0}% · target {} · dropouts {}",
         snapshot.frames,
         ring_seen * 100.0,
         snapshot.target_frames,
-        snapshot.underruns
+        snapshot.dropouts
     );
     engine.stop();
     // Stop is asynchronous now; the devices are not released until the

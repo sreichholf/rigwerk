@@ -1,16 +1,16 @@
 use crate::app::RigWerkApp;
 use crate::audio::EngineState;
 
-/// Input block + cushion at the input rate, plus the output step at the
+/// Input block + bridge buffer at the input rate, plus the output step at the
 /// output rate.  Same terms as `latency_ms`, with no extra fudge.
 fn bridge_ms(
     input_block: f32,
-    cushion: f32,
+    bridge_buffer: f32,
     input_rate: f32,
     output_step: f32,
     output_rate: f32,
 ) -> f32 {
-    ((input_block + cushion) / input_rate + output_step / output_rate) * 1000.0
+    ((input_block + bridge_buffer) / input_rate + output_step / output_rate) * 1000.0
 }
 
 /// An app with chosen buffer settings and an empty snapshot.  No device
@@ -110,12 +110,12 @@ fn running_latency_falls_back_until_the_device_reports() {
     let planned = bridge_ms(128.0, 256.0, 48_000.0, 64.0, 48_000.0);
     assert!(
         (ms - planned).abs() < 0.01,
-        "running latency {ms} did not fall back to the requested block and cushion ({planned})"
+        "running latency {ms} did not fall back to the requested block and bridge buffer ({planned})"
     );
 }
 
 #[test]
-fn stopped_latency_ignores_the_previous_cushion() {
+fn stopped_latency_ignores_the_previous_bridge_buffer() {
     let mut app = latency_app();
     app.buffer_size = 128;
     app.output_buffer = 256;
@@ -133,11 +133,11 @@ fn stopped_latency_ignores_the_previous_cushion() {
     let leftover = bridge_ms(128.0, 4_096.0, 48_000.0, 256.0, 48_000.0);
     assert!(
         (ms - planned).abs() < 0.01,
-        "stopped latency {ms} did not use the planned cushion ({planned})"
+        "stopped latency {ms} did not use the planned bridge buffer ({planned})"
     );
     assert!(
         (ms - leftover).abs() > 1.0,
-        "stopped latency {ms} kept the previous session's cushion"
+        "stopped latency {ms} kept the previous session's bridge buffer"
     );
 }
 

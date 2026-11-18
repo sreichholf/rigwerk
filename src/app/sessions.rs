@@ -1,18 +1,20 @@
-//! Saving, loading and deleting patches (saved device pairs).
+//! Saving, loading and deleting sessions (saved device pairs).
 
 use crate::app::devices::{
     device_restore_note, restore_device, restore_input, DeviceRestore, InputGroup,
 };
-use crate::app::settings::{cushion_from_pref, cushion_to_pref, sanitize_preset, PathPref, Preset};
+use crate::app::settings::{
+    bridge_buffer_from_pref, bridge_buffer_to_pref, sanitize_session, PathPref, Session,
+};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 impl RigWerkApp {
-    pub(crate) fn save_preset(&mut self) {
+    pub(crate) fn save_session(&mut self) {
         let input = self.active_input().clone();
         let output = self.selected_output().clone();
         let (paths, order) = self.saved_paths();
-        let (clock_device, followers) = self.saved_devices(&order);
-        let preset = Preset {
+        let (clock_output, extra_outputs) = self.saved_devices(&order);
+        let session = Session {
             name: self.session_name.trim().to_owned(),
             note: format!("{} → {}", input.backend, output.backend),
             input: input.name,
@@ -33,41 +35,41 @@ impl RigWerkApp {
             drift: self.drift,
             low_latency_output: self.low_latency_output,
             wasapi_output_mode: Some(self.wasapi_output_mode),
-            cushion_mode: cushion_to_pref(self.cushion_mode),
-            cushion_ms: self.cushion_ms,
+            bridge_buffer_mode: bridge_buffer_to_pref(self.bridge_buffer_mode),
+            bridge_buffer_ms: self.bridge_buffer_ms,
             paths,
-            clock_device,
-            followers,
+            clock_output,
+            extra_outputs,
             // The legacy mix fields are not written.
-            ..Preset::default()
+            ..Session::default()
         };
-        if preset.name.is_empty() {
-            self.push_log("Give the patch a name before saving.", LogTone::Amber);
+        if session.name.is_empty() {
+            self.push_log("Give the session a name before saving.", LogTone::Amber);
             return;
         }
         self.pending_delete = None;
-        if let Some(index) = self.preset_named(&preset.name) {
-            let name = preset.name.clone();
-            self.sessions[index] = preset;
+        if let Some(index) = self.session_named(&session.name) {
+            let name = session.name.clone();
+            self.sessions[index] = session;
             self.selected_session = Some(index);
-            self.push_log(format!("Updated patch “{name}”."), LogTone::Teal);
+            self.push_log(format!("Updated session “{name}”."), LogTone::Teal);
             return;
         }
-        let name = preset.name.clone();
-        self.sessions.insert(0, preset);
+        let name = session.name.clone();
+        self.sessions.insert(0, session);
         self.selected_session = Some(0);
-        self.push_log(format!("Saved patch “{name}”."), LogTone::Teal);
+        self.push_log(format!("Saved session “{name}”."), LogTone::Teal);
     }
 
-    /// Patches are matched by name, ignoring case and surrounding spaces.
-    pub(crate) fn preset_named(&self, name: &str) -> Option<usize> {
+    /// Sessions are matched by name, ignoring case and surrounding spaces.
+    pub(crate) fn session_named(&self, name: &str) -> Option<usize> {
         let name = name.trim();
         self.sessions
             .iter()
-            .position(|preset| preset.name.trim().eq_ignore_ascii_case(name))
+            .position(|session| session.name.trim().eq_ignore_ascii_case(name))
     }
 
-    pub(crate) fn delete_preset(&mut self, index: usize) {
+    pub(crate) fn delete_session(&mut self, index: usize) {
         self.pending_delete = None;
         if index >= self.sessions.len() {
             return;
@@ -78,11 +80,14 @@ impl RigWerkApp {
             Some(current) if current > index => Some(current - 1),
             other => other,
         };
-        self.push_log(format!("Deleted patch “{}”.", removed.name), LogTone::Muted);
+        self.push_log(
+            format!("Deleted session “{}”.", removed.name),
+            LogTone::Muted,
+        );
     }
 
-    pub(crate) fn apply_preset(&mut self, index: usize) {
-        // A patch from before paths: path 1 from its mix fields, keeping
+    pub(crate) fn apply_session(&mut self, index: usize) {
+        // A session from before paths: path 1 from its mix fields, keeping
         // what it never stored (an EQ or gate) from the first path now.
         let first = self.path_slots()[0];
         let current = self.paths[first]
@@ -94,43 +99,43 @@ impl RigWerkApp {
         };
         stored.migrate_paths(&current);
         // Same check as loading preferences: bad gains, rates and buffers
-        // are replaced here, and the stored patch keeps the safe values.
-        sanitize_preset(stored);
-        let preset = stored.clone();
-        self.session_name = preset.name.clone();
-        self.sample_rate = preset.rate;
-        self.buffer_size = preset.buffer;
-        self.output_rate = preset.output_rate;
-        self.output_buffer = if preset.output_buffer == 0 {
-            preset.buffer
+        // are replaced here, and the stored session keeps the safe values.
+        sanitize_session(stored);
+        let session = stored.clone();
+        self.session_name = session.name.clone();
+        self.sample_rate = session.rate;
+        self.buffer_size = session.buffer;
+        self.output_rate = session.output_rate;
+        self.output_buffer = if session.output_buffer == 0 {
+            session.buffer
         } else {
-            preset.output_buffer
+            session.output_buffer
         };
-        self.input_gain = preset.input_gain;
-        self.output_gain = preset.output_gain;
-        self.input_channels = preset.input_channels;
-        self.mute = preset.mute;
-        self.monitor = preset.monitor;
-        self.drift = preset.drift;
-        let mode = preset.wasapi_output_mode.unwrap_or_else(|| {
-            crate::audio::WasapiOutputMode::from_low_latency(preset.low_latency_output)
+        self.input_gain = session.input_gain;
+        self.output_gain = session.output_gain;
+        self.input_channels = session.input_channels;
+        self.mute = session.mute;
+        self.monitor = session.monitor;
+        self.drift = session.drift;
+        let mode = session.wasapi_output_mode.unwrap_or_else(|| {
+            crate::audio::WasapiOutputMode::from_low_latency(session.low_latency_output)
         });
         self.set_wasapi_output_mode(mode);
-        self.cushion_mode = cushion_from_pref(preset.cushion_mode);
-        self.cushion_ms = preset.cushion_ms;
-        // The click is not part of a patch: it stays with the physical
-        // device.  Each device the patch uses (its clock and each follower)
-        // gets the mask that device has now, as the clock or as a follower,
+        self.bridge_buffer_mode = bridge_buffer_from_pref(session.bridge_buffer_mode);
+        self.bridge_buffer_ms = session.bridge_buffer_ms;
+        // The click is not part of a session: it stays with the physical
+        // device.  Each device the session uses (its clock and each extra output)
+        // gets the mask that device has now, as the clock or as an extra output,
         // matched by id and backend; a device that is not live gets none.
-        // The patch's clock is the output it restores to, or the current
+        // The session's clock is the output it restores to, or the current
         // output when that is not found (it stays the clock).
         let current_output = self.selected_output();
         let live: Vec<(&str, &str, u8)> = std::iter::once((
             current_output.id.as_str(),
             current_output.backend.as_str(),
-            self.clock_device.click_mask,
+            self.clock_output.click_mask,
         ))
-        .chain(self.followers.iter().map(|live| {
+        .chain(self.extra_outputs.iter().map(|live| {
             (
                 live.id.as_str(),
                 live.backend.as_str(),
@@ -145,47 +150,48 @@ impl RigWerkApp {
                 })
                 .map_or(0, |&(_, _, mask)| mask)
         };
-        let patch_output = restore_device(
+        let session_output = restore_device(
             &self.inventory.outputs,
-            &preset.output_id,
-            &preset.output_backend,
-            &preset.output,
+            &session.output_id,
+            &session.output_backend,
+            &session.output,
         )
         .index()
         .and_then(|index| self.inventory.outputs.get(index))
         .unwrap_or(current_output);
-        let mut clock = preset.clock_device;
-        clock.click_mask = live_mask(&patch_output.id, &patch_output.backend);
-        let followers: Vec<_> = preset
-            .followers
+        let mut clock = session.clock_output;
+        clock.click_mask = live_mask(&session_output.id, &session_output.backend);
+        let extra_outputs: Vec<_> = session
+            .extra_outputs
             .iter()
             .cloned()
-            .map(|mut follower| {
-                follower.settings.click_mask = live_mask(&follower.id, &follower.backend);
-                follower
+            .map(|mut extra_output| {
+                extra_output.settings.click_mask =
+                    live_mask(&extra_output.id, &extra_output.backend);
+                extra_output
             })
             .collect();
-        // The device maps are in the patch's path order; installing maps
+        // The device maps are in the session's path order; installing maps
         // them onto the slots the paths land in.
-        self.install_paths(&preset.paths, clock, followers, 0);
+        self.install_paths(&session.paths, clock, extra_outputs, 0);
         self.apply_gains();
         self.engine
             .set_master(self.mute, self.monitor, self.input_channels, self.drift);
-        self.apply_cushion();
+        self.apply_bridge_buffer();
         self.selected_session = Some(index);
         self.pending_delete = None;
         let mut device_missing = false;
-        let input_label = if preset.input.is_empty() {
-            preset.input_id.as_str()
+        let input_label = if session.input.is_empty() {
+            session.input_id.as_str()
         } else {
-            preset.input.as_str()
+            session.input.as_str()
         };
         match restore_input(
             &self.inventory.asio,
             &self.inventory.inputs,
-            &preset.input_id,
-            &preset.input_backend,
-            &preset.input,
+            &session.input_id,
+            &session.input_backend,
+            &session.input,
         ) {
             Some(found) => {
                 if let Some(device_index) = found.restore.index() {
@@ -202,38 +208,38 @@ impl RigWerkApp {
                         }
                     }
                 }
-                if self.log_device_restore("Patch input", input_label, found.restore) {
+                if self.log_device_restore("Session input", input_label, found.restore) {
                     device_missing = true;
                 }
             }
             None => {
-                if self.log_device_restore("Patch input", input_label, DeviceRestore::Missing) {
+                if self.log_device_restore("Session input", input_label, DeviceRestore::Missing) {
                     device_missing = true;
                 }
             }
         }
-        let output_label = if preset.output.is_empty() {
-            preset.output_id.as_str()
+        let output_label = if session.output.is_empty() {
+            session.output_id.as_str()
         } else {
-            preset.output.as_str()
+            session.output.as_str()
         };
         let output_restore = restore_device(
             &self.inventory.outputs,
-            &preset.output_id,
-            &preset.output_backend,
-            &preset.output,
+            &session.output_id,
+            &session.output_backend,
+            &session.output,
         );
         if let Some(output_index) = output_restore.index() {
             self.output_idx = output_index;
             self.accept_output_device();
         }
-        if self.log_device_restore("Patch output", output_label, output_restore) {
+        if self.log_device_restore("Session output", output_label, output_restore) {
             device_missing = true;
         }
         // A saved device that is not connected is an error. The mix above
-        // was still applied; do not report the patch as loaded.
+        // was still applied; do not report the session as loaded.
         if !device_missing {
-            self.push_log(format!("Loaded patch “{}”.", preset.name), LogTone::Blue);
+            self.push_log(format!("Loaded session “{}”.", session.name), LogTone::Blue);
         }
     }
 

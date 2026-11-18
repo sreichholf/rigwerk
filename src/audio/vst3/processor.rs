@@ -4,7 +4,7 @@
 //! UI parameter values arrive through the transfer queue and go into the
 //! block's `inputParameterChanges`; what the plugin writes into
 //! `outputParameterChanges` goes back to the UI through the other queue,
-//! where the controller and the views get it.  A skipped insert with
+//! where the controller and the views get it.  A skipped effect with
 //! values queued flushes them with a `numSamples = 0` block, so a value set
 //! while bypassed still reaches the processor (and its state).  Values a
 //! block the plugin refused took are kept and go with the next block; only
@@ -239,7 +239,7 @@ impl Vst3Processor {
         Ok(())
     }
 
-    /// For a processing insert the chain skips (bypass, mix at 0): hands
+    /// For a processing effect the chain skips (bypass, mix at 0): hands
     /// queued UI values to a `numSamples = 0` block with no buses (the
     /// SDK's flush, `FlushParamTest`), so they reach the processor without
     /// audio.  Does nothing without new values: values an earlier refused

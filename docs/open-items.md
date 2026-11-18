@@ -5,11 +5,11 @@ plans and the code review has landed; that history is in git.
 
 ## Features
 
-- RigWerk Out is published by the PipeWire duplex node alone.  The
+- RigWerk Out, the virtual output, is played by the PipeWire duplex node alone.  The
   two-stream bridge (a mixed bridge, or the duplex fallback) does not
-  play it; its other followers play.
-- A take on a follower with more than four channels still includes the
-  metronome click: only narrower followers carry the click-free lanes
+  play it; its other extra outputs play.
+- A take on an extra output with more than four channels still includes the
+  metronome click: only narrower extra outputs carry the click-free lanes
   through their ring.
 - A VST3 editor cannot open in a Wayland session with no X server.
   RigWerk's VST3 host (`audio/vst3`) opens Linux editors as X11 windows
@@ -36,8 +36,8 @@ plans and the code review has landed; that history is in git.
 Recorded when the review fixes landed (November 2026), not re-checked
 since.
 
-- **Insert limit.**  A path holds at most 32 inserts
-  (`plugins::MAX_INSERTS`): the audio side's slot list is allocated once.
+- **Effect limit.**  A path holds at most 32 effects
+  (`plugins::MAX_EFFECTS`): the audio side's slot list is allocated once.
   Adding one more is refused with a message; a saved chain longer than
   that is cut to 32 when it is restored, with only a log line, and the
   next save keeps the 32.
@@ -64,6 +64,6 @@ since.
   minus 20 kHz (24–28 kHz for 96→48) is only partly rejected; it folds
   above the audible band.
 - **Drift.**  ±500 ppm is a hard ceiling.  The loop settles over tens of
-  seconds, so a large offset at start, or a Low-latency cushion, can
-  underrun once before it has learned the offset.  A large cushion cut
+  seconds, so a large offset at start, or a Minimum bridge buffer, can
+  have a dropout once before it has learned the offset.  A large bridge buffer cut
   pops the excess, which the resampler turns into a short crossfade.

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     SilenceInput, SilenceWatch, SILENCE_CLEAR_AFTER, SILENCE_RAISE_ALONE,
-    SILENCE_RAISE_WITH_UNDERRUNS, SILENCE_REST_RESET,
+    SILENCE_RAISE_WITH_DROPOUTS, SILENCE_REST_RESET,
 };
 
 const LOUD: f32 = 0.1; // −20 dBFS
@@ -10,13 +10,13 @@ const QUIET_SENT: f32 = 0.001; // −60 dBFS: a rest
 const HEARD: f32 = 0.01; // −40 dBFS
 const SILENT: f32 = 0.0001; // −80 dBFS
 
-fn input(sent: f32, monitor: f32, underruns: bool) -> SilenceInput {
+fn input(sent: f32, monitor: f32, dropouts: bool) -> SilenceInput {
     SilenceInput {
         armed: true,
         sent,
         monitor: Some(monitor),
         parked: false,
-        underruns,
+        dropouts,
     }
 }
 
@@ -32,7 +32,7 @@ fn feed(watch: &mut SilenceWatch, input: SilenceInput, from: Instant, span: Dura
 }
 
 #[test]
-fn loud_but_unheard_with_underruns_raises_after_the_short_hold() {
+fn loud_but_unheard_with_dropouts_raises_after_the_short_hold() {
     let mut watch = SilenceWatch::default();
     let start = Instant::now();
     watch.update(input(LOUD, SILENT, true), start);
@@ -40,7 +40,7 @@ fn loud_but_unheard_with_underruns_raises_after_the_short_hold() {
         &mut watch,
         input(LOUD, SILENT, true),
         start,
-        SILENCE_RAISE_WITH_UNDERRUNS - Duration::from_millis(100),
+        SILENCE_RAISE_WITH_DROPOUTS - Duration::from_millis(100),
     );
     assert!(!watch.silent());
     feed(
@@ -53,7 +53,7 @@ fn loud_but_unheard_with_underruns_raises_after_the_short_hold() {
 }
 
 #[test]
-fn without_underruns_it_needs_the_longer_hold() {
+fn without_dropouts_it_needs_the_longer_hold() {
     let mut watch = SilenceWatch::default();
     let start = Instant::now();
     watch.update(input(LOUD, SILENT, false), start);
@@ -61,14 +61,14 @@ fn without_underruns_it_needs_the_longer_hold() {
         &mut watch,
         input(LOUD, SILENT, false),
         start,
-        SILENCE_RAISE_WITH_UNDERRUNS + Duration::from_millis(500),
+        SILENCE_RAISE_WITH_DROPOUTS + Duration::from_millis(500),
     );
     assert!(!watch.silent());
     feed(
         &mut watch,
         input(LOUD, SILENT, false),
         now,
-        SILENCE_RAISE_ALONE - SILENCE_RAISE_WITH_UNDERRUNS,
+        SILENCE_RAISE_ALONE - SILENCE_RAISE_WITH_DROPOUTS,
     );
     assert!(watch.silent());
 }
@@ -89,7 +89,7 @@ fn a_rest_is_not_silence_and_does_not_clear_it() {
         &mut watch,
         input(LOUD, SILENT, true),
         now,
-        SILENCE_RAISE_WITH_UNDERRUNS,
+        SILENCE_RAISE_WITH_DROPOUTS,
     );
     assert!(watch.silent());
     feed(

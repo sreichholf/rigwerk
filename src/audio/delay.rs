@@ -1,6 +1,6 @@
 //! Preallocated stereo delay lines and crossfading read taps, for the
 //! latency alignment between signal paths and the dry side of a plugin
-//! insert.  A mono line carries the metronome tick through the same
+//! effect.  A mono line carries the metronome tick through the same
 //! alignment.
 //!
 //! A [`DelayLine`] is a ring of stereo frames, sized once outside the

@@ -27,13 +27,13 @@
 //!   an output period that does not line up with the graph block, or a
 //!   graph block still too large while Low latency runs (`QuantumInfo`),
 //! - an output driver with no reading while a low-latency mode is chosen,
-//! - underruns in this bridge session ([`UnderrunWatch`]): a warning that
-//!   clears after [`UNDERRUN_QUIET`] without a new one, and an error once
-//!   [`UNDERRUN_BURST`] of them fall within [`UNDERRUN_BURST_WINDOW`], held
+//! - dropouts in this bridge run ([`DropoutWatch`]): a warning that
+//!   clears after [`DROPOUT_QUIET`] without a new one, and an error once
+//!   [`DROPOUT_BURST`] of them fall within [`DROPOUT_BURST_WINDOW`], held
 //!   until the output goes quiet.
 //! - a sink that went silent under Low latency ([`SilenceWatch`]): RigWerk
 //!   sends a loud signal while PipeWire's monitor of the clock sink stays
-//!   quiet.  An error with recent underruns, since the graph is starving;
+//!   quiet.  An error with recent dropouts, since the graph is starving;
 //!   the fix is Low latency off.  Without them a warning that also names
 //!   the desktop mixer: RigWerk's meter is read before PipeWire's stream
 //!   volume, so a muted or turned-down RigWerk stream looks the same.
@@ -44,32 +44,32 @@
 //!   one with the most reduction.  It cannot be dismissed while it holds
 //!   and clears once the signal drops.  → Show on Output.
 //!
-//! Each follower's own (a generic "also playing on" device, by its slot),
+//! Each extra output's own (a device that plays the master, by its slot),
 //! placed as `OUTPUT · <name>` on the Output card, and only while the
 //! bridge runs:
-//! - a follower that failed to open, was lost, or is not among the output
-//!   devices: a warning, since the clock device and the others play on and
-//!   the follower is retried.  The button shows it in the Mixer, where it can
+//! - an extra output that failed to open, was lost, or is not among the output
+//!   devices: a warning, since the clock output and the others play on and
+//!   the extra output is retried.  The button shows it in the Mixer, where it can
 //!   be pointed at another device or removed.
-//! - underruns of its own ring (`FollowerBus::underruns`, counted since its
-//!   stream opened: a reopen starts over), one [`UnderrunWatch`] per slot
+//! - dropouts of its own ring (`ExtraOutputBus::dropouts`, counted since its
+//!   stream opened: a reopen starts over), one [`DropoutWatch`] per slot
 //!   with the clock output's rules.  The safer
-//!   step names the follower's own controls: its cushion (Safe), then the
+//!   step names the extra output's own controls: its bridge buffer (Auto), then the
 //!   output buffer its stream asks for.  Never Low latency or the WASAPI
-//!   mode: those govern the clock device only.
-//! - a drift loop pinned at [`FOLLOWER_DRIFT_LIMIT_PPM`]: its clock is
+//!   mode: those govern the clock output only.
+//! - a drift loop pinned at [`EXTRA_OUTPUT_DRIFT_LIMIT_PPM`]: its clock is
 //!   further off than the loop can follow.  A warning to Open diagnostics,
 //!   held by a [`HeldFlag`] so an integral hovering at the limit does not
 //!   flicker: raised after [`DRIFT_RAISE_AFTER`] pinned, cleared after
 //!   [`DRIFT_CLEAR_AFTER`] free.
 //!
-//! PipeWire in-graph followers have no ring of their own; the graph keeps
+//! PipeWire in-graph extra outputs have no ring of their own; the graph keeps
 //! them in step and only the missing check applies to them.
 //!
-//! A slot that holds another follower than the last tick saw (one removed,
+//! A slot that holds another extra output than the last tick saw (one removed,
 //! reordered or pointed at another device while the bridge runs) starts
 //! its watches over and drops its dismissals: they were about the old one.
-//! Its underrun watch starts at the slot's current count, which may still
+//! Its dropout watch starts at the slot's current count, which may still
 //! be the old stream's until the new one opens.
 //!
 //! The bridge's own:
@@ -83,7 +83,7 @@
 //! [`RigWerkApp::live_issues`] only reads it.  The tick keeps the issues it
 //! computed, and the strip draws those ([`RigWerkApp::issue_view`]), so
 //! they are judged once per tick, not again for each frame drawn.  The DSP
-//! latches and the underrun watches start over with each bridge start and
+//! latches and the dropout watches start over with each bridge start and
 //! stop.  A new error (a title not among the last tick's errors) expands a
 //! collapsed strip; warnings do not.
 //!
@@ -94,7 +94,7 @@
 //! - dismissed warnings, by their stable [`IssueKey`] (the kind and the
 //!   device or path slot, never the title, which carries numbers).  One
 //!   stays hidden until a tick no longer has it as a warning (it cleared,
-//!   or it became an error), or until the bridge session changes.  Errors
+//!   or it became an error), or until the bridge run changes.  Errors
 //!   cannot be dismissed: audio is breaking, so they stay until fixed.
 //!   Showing the dismissed ones again is one click.
 //! - the card a row relates to ([`IssueCard`]) rings for
@@ -104,7 +104,7 @@
 //! The cards keep the readings (DRIVER, BUFFER, MODE); none of these
 //! judgments is drawn there.  The fixes the output rows offer are the
 //! controls the cards already have: Check driver, the output buffer, Low
-//! latency, the WASAPI mode and the cushion, and a follower's own cushion
+//! latency, the WASAPI mode and the bridge buffer, and an extra output's own bridge buffer
 //! in the Mixer.
 
 use crate::app::LogTone;
@@ -116,10 +116,10 @@ pub(crate) use silence::{SilenceInput, SilenceWatch};
 use crate::app::alignment::RoutingWarningKind;
 use crate::app::output_devices::OutputDeviceRow;
 use crate::app::paths::PathInfo;
-use crate::app::settings::{cushion_from_pref, cushion_to_pref, BUFFERS};
+use crate::app::settings::{bridge_buffer_from_pref, bridge_buffer_to_pref, BUFFERS};
 use crate::app::RigWerkApp;
 use crate::audio::{
-    CushionMode, EngineState, FOLLOWER_DRIFT_LIMIT_PPM, MAX_ALIGN, MAX_FOLLOWERS,
+    BufferMode, EngineState, EXTRA_OUTPUT_DRIFT_LIMIT_PPM, MAX_ALIGN, MAX_EXTRA_OUTPUTS,
     SAFETY_CEILING_DB, SAFETY_GR_DB,
 };
 #[cfg(target_os = "linux")]
@@ -134,15 +134,15 @@ pub(crate) const DSP_WARN_CLEAR: f32 = 0.60;
 pub(crate) const DSP_ERROR_SHARE: f32 = 0.95;
 pub(crate) const DSP_ERROR_CLEAR: f32 = 0.85;
 
-/// How long the output has to play without a new underrun before its
+/// How long the output has to play without a new dropout before its
 /// issue clears.
-pub(crate) const UNDERRUN_QUIET: Duration = Duration::from_secs(10);
-/// This many underruns within [`UNDERRUN_BURST_WINDOW`] turn the warning
+pub(crate) const DROPOUT_QUIET: Duration = Duration::from_secs(10);
+/// This many dropouts within [`DROPOUT_BURST_WINDOW`] turn the warning
 /// into an error: the audio is breaking up, not clicking once.
-pub(crate) const UNDERRUN_BURST: usize = 3;
-pub(crate) const UNDERRUN_BURST_WINDOW: Duration = Duration::from_secs(5);
+pub(crate) const DROPOUT_BURST: usize = 3;
+pub(crate) const DROPOUT_BURST_WINDOW: Duration = Duration::from_secs(5);
 
-/// How long a follower's drift loop has to stay pinned before it warns,
+/// How long an extra output's drift loop has to stay pinned before it warns,
 /// and how long free before the warning clears.
 pub(crate) const DRIFT_RAISE_AFTER: Duration = Duration::from_secs(1);
 pub(crate) const DRIFT_CLEAR_AFTER: Duration = Duration::from_secs(3);
@@ -192,10 +192,10 @@ impl DspAlarm {
     }
 }
 
-/// A run of underruns that has not yet gone quiet for [`UNDERRUN_QUIET`].
+/// A run of dropouts that has not yet gone quiet for [`DROPOUT_QUIET`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UnderrunEpisode {
-    /// Underruns since the run began.
+pub(crate) struct DropoutEpisode {
+    /// Dropouts since the run began.
     pub(crate) count: u64,
     /// Time since the latest one, as of the last update.
     pub(crate) since_last: Duration,
@@ -204,21 +204,21 @@ pub(crate) struct UnderrunEpisode {
     last: Instant,
 }
 
-/// Follows the session's underrun count from frame to frame.  Time is
+/// Follows the run's dropout count from frame to frame.  Time is
 /// passed in, so the clearing and the burst rule can be tested.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct UnderrunWatch {
-    /// The session count at the last update.
+pub(crate) struct DropoutWatch {
+    /// The run count at the last update.
     seen: u64,
-    /// When the latest underruns arrived, oldest first, at most
-    /// [`UNDERRUN_BURST`] of them.
+    /// When the latest dropouts arrived, oldest first, at most
+    /// [`DROPOUT_BURST`] of them.
     recent: VecDeque<Instant>,
-    episode: Option<UnderrunEpisode>,
+    episode: Option<DropoutEpisode>,
 }
 
-impl UnderrunWatch {
-    /// Takes the session's underrun count at `now`.  A count lower than the
-    /// last one is a new session and starts over.
+impl DropoutWatch {
+    /// Takes the run's dropout count at `now`.  A count lower than the
+    /// last one is a new run and starts over.
     pub(crate) fn update(&mut self, count: u64, now: Instant) {
         if count < self.seen {
             *self = Self::default();
@@ -226,17 +226,17 @@ impl UnderrunWatch {
         let new = count - self.seen;
         self.seen = count;
         if new > 0 {
-            for _ in 0..new.min(UNDERRUN_BURST as u64) {
-                if self.recent.len() == UNDERRUN_BURST {
+            for _ in 0..new.min(DROPOUT_BURST as u64) {
+                if self.recent.len() == DROPOUT_BURST {
                     self.recent.pop_front();
                 }
                 self.recent.push_back(now);
             }
-            let burst = self.recent.len() == UNDERRUN_BURST
+            let burst = self.recent.len() == DROPOUT_BURST
                 && self.recent.front().is_some_and(|first| {
-                    now.saturating_duration_since(*first) <= UNDERRUN_BURST_WINDOW
+                    now.saturating_duration_since(*first) <= DROPOUT_BURST_WINDOW
                 });
-            let episode = self.episode.get_or_insert(UnderrunEpisode {
+            let episode = self.episode.get_or_insert(DropoutEpisode {
                 count: 0,
                 since_last: Duration::ZERO,
                 burst: false,
@@ -248,7 +248,7 @@ impl UnderrunWatch {
         }
         if let Some(episode) = &mut self.episode {
             episode.since_last = now.saturating_duration_since(episode.last);
-            if episode.since_last >= UNDERRUN_QUIET {
+            if episode.since_last >= DROPOUT_QUIET {
                 self.episode = None;
                 self.recent.clear();
             }
@@ -263,14 +263,14 @@ impl UnderrunWatch {
         }
     }
 
-    /// The current run of underruns, if the output has not gone quiet.
-    pub(crate) fn episode(&self) -> Option<&UnderrunEpisode> {
+    /// The current run of dropouts, if the output has not gone quiet.
+    pub(crate) fn episode(&self) -> Option<&DropoutEpisode> {
         self.episode.as_ref()
     }
 
-    /// The count it was last given: underruns in this bridge session, or
-    /// for a follower since its stream opened.
-    pub(crate) fn session_count(&self) -> u64 {
+    /// The count it was last given: dropouts in this bridge run, or
+    /// for an extra output since its stream opened.
+    pub(crate) fn run_count(&self) -> u64 {
         self.seen
     }
 }
@@ -379,15 +379,15 @@ pub(crate) enum IssueKey {
     #[cfg(target_os = "linux")]
     QuantumNotLow,
     Driver,
-    Underruns,
-    /// Follower slot: failed to open or lost, and being retried.
-    FollowerRetrying(usize),
-    /// Follower slot: not among the output devices.
-    FollowerNotListed(usize),
-    /// Follower slot.
-    FollowerUnderruns(usize),
-    /// Follower slot.
-    FollowerDrift(usize),
+    Dropouts,
+    /// Extra output slot: failed to open or lost, and being retried.
+    ExtraOutputRetrying(usize),
+    /// Extra output slot: not among the output devices.
+    ExtraOutputNotListed(usize),
+    /// Extra output slot.
+    ExtraOutputDropouts(usize),
+    /// Extra output slot.
+    ExtraOutputDrift(usize),
     SinkSilent,
     /// A playing device is against the safety ceiling.  One row: the device
     /// with the most reduction.
@@ -395,13 +395,13 @@ pub(crate) enum IssueKey {
 }
 
 impl IssueKey {
-    /// The follower slot the issue is about, if it is a follower's.
-    pub(crate) fn follower_slot(self) -> Option<usize> {
+    /// The extra output slot the issue is about, if it is an extra output's.
+    pub(crate) fn extra_output_slot(self) -> Option<usize> {
         match self {
-            IssueKey::FollowerRetrying(slot)
-            | IssueKey::FollowerNotListed(slot)
-            | IssueKey::FollowerUnderruns(slot)
-            | IssueKey::FollowerDrift(slot) => Some(slot),
+            IssueKey::ExtraOutputRetrying(slot)
+            | IssueKey::ExtraOutputNotListed(slot)
+            | IssueKey::ExtraOutputDropouts(slot)
+            | IssueKey::ExtraOutputDrift(slot) => Some(slot),
             _ => None,
         }
     }
@@ -474,14 +474,14 @@ impl IssueView {
 #[derive(Debug, Default)]
 pub(crate) struct IssueState {
     pub(crate) dsp: DspAlarm,
-    pub(crate) underruns: UnderrunWatch,
-    /// One watch per follower slot, on that follower's own ring.
-    pub(crate) follower_underruns: [UnderrunWatch; MAX_FOLLOWERS],
-    /// One held drift-at-limit flag per follower slot.
-    pub(crate) follower_drift: [HeldFlag; MAX_FOLLOWERS],
-    /// The follower id each slot's state is about, `None` until the first
+    pub(crate) dropouts: DropoutWatch,
+    /// One watch per extra output slot, on that extra output's own ring.
+    pub(crate) extra_output_dropouts: [DropoutWatch; MAX_EXTRA_OUTPUTS],
+    /// One held drift-at-limit flag per extra output slot.
+    pub(crate) extra_output_drift: [HeldFlag; MAX_EXTRA_OUTPUTS],
+    /// The extra output id each slot's state is about, `None` until the first
     /// tick adopts the slots as they are.
-    follower_ids: Option<[String; MAX_FOLLOWERS]>,
+    extra_output_ids: Option<[String; MAX_EXTRA_OUTPUTS]>,
     /// Whether the clock sink went silent under Low latency.
     pub(crate) silence: SilenceWatch,
     /// The alert of a bridge stopped on a disconnected device, until the
@@ -492,7 +492,7 @@ pub(crate) struct IssueState {
     seen_errors: Vec<String>,
     /// Which rows the strip lists.
     pub(crate) filter: IssueFilter,
-    /// Warnings the person dismissed, until they clear or the session ends.
+    /// Warnings the person dismissed, until they clear or the run ends.
     dismissed: Vec<IssueKey>,
     /// The card "Show on <card>" rings, until [`CARD_HIGHLIGHT_FOR`] passed.
     highlight: Option<CardHighlight>,
@@ -501,25 +501,25 @@ pub(crate) struct IssueState {
 }
 
 impl IssueState {
-    /// A bridge started or stopped: the DSP latches, the underrun count and
-    /// the dismissed warnings belong to the session that ended.
-    pub(crate) fn new_session(&mut self) {
+    /// A bridge started or stopped: the DSP latches, the dropout count and
+    /// the dismissed warnings belong to the run that ended.
+    pub(crate) fn new_run(&mut self) {
         self.dsp = DspAlarm::default();
-        self.underruns = UnderrunWatch::default();
-        self.follower_underruns = Default::default();
-        self.follower_drift = Default::default();
+        self.dropouts = DropoutWatch::default();
+        self.extra_output_dropouts = Default::default();
+        self.extra_output_drift = Default::default();
         self.silence = SilenceWatch::default();
         self.dismissed.clear();
     }
 
-    /// Follower `slot` holds another device now: its watches and its
-    /// dismissals were about the old one.  The underrun watch takes the
+    /// Extra output `slot` holds another device now: its watches and its
+    /// dismissals were about the old one.  The dropout watch takes the
     /// slot's current `count` as seen.
-    fn forget_follower(&mut self, slot: usize, count: u64) {
-        self.follower_underruns[slot] = UnderrunWatch::starting_at(count);
-        self.follower_drift[slot] = HeldFlag::default();
+    fn forget_extra_output(&mut self, slot: usize, count: u64) {
+        self.extra_output_dropouts[slot] = DropoutWatch::starting_at(count);
+        self.extra_output_drift[slot] = HeldFlag::default();
         self.dismissed
-            .retain(|key| key.follower_slot() != Some(slot));
+            .retain(|key| key.extra_output_slot() != Some(slot));
     }
 
     /// Whether `issue` is a dismissed warning.  Errors always show.
@@ -568,12 +568,12 @@ pub(crate) enum IssueAction {
     LowLatencyOff,
     /// Put the WASAPI clock output back to Shared.
     SharedOutput,
-    /// Set the input-to-output cushion to Safe.
-    SafeCushion,
-    /// Open the Mixer on follower `follower` (index into the followers).
-    ShowFollower(usize),
-    /// Set follower `follower`'s own cushion to Safe.
-    FollowerSafeCushion(usize),
+    /// Set the input-to-output bridge buffer to Auto.
+    AutoBridgeBuffer,
+    /// Open the Mixer on extra output `extra_output` (index into the extra outputs).
+    ShowExtraOutput(usize),
+    /// Set extra output `extra_output`'s own bridge buffer to Auto.
+    ExtraOutputAutoBridgeBuffer(usize),
     /// Ring the Output card.  The safety ceiling has no control of its own.
     ShowOutput,
 }
@@ -589,10 +589,10 @@ impl IssueAction {
             IssueAction::SetOutputBuffer(frames) => format!("Set buffer to {frames}"),
             IssueAction::LowLatencyOff => "Turn Low latency off".to_owned(),
             IssueAction::SharedOutput => "Use Shared output".to_owned(),
-            IssueAction::SafeCushion | IssueAction::FollowerSafeCushion(_) => {
-                "Use Safe cushion".to_owned()
+            IssueAction::AutoBridgeBuffer | IssueAction::ExtraOutputAutoBridgeBuffer(_) => {
+                "Use Auto bridge buffer".to_owned()
             }
-            IssueAction::ShowFollower(_) => "Show in Mixer".to_owned(),
+            IssueAction::ShowExtraOutput(_) => "Show in Mixer".to_owned(),
             IssueAction::ShowOutput => "Show on Output".to_owned(),
         }
     }
@@ -643,29 +643,29 @@ impl LiveIssue {
 }
 
 impl RigWerkApp {
-    /// Moves the issue state once per update tick: the underrun watches,
-    /// the follower drift holds and the DSP latches from the engine, then the dismissals, the filter and
+    /// Moves the issue state once per update tick: the dropout watches,
+    /// the extra output drift holds and the DSP latches from the engine, then the dismissals, the filter and
     /// the card highlight settle, and a collapsed strip opens for a new
     /// error.
     pub(crate) fn tick_issues(&mut self, now: Instant) {
-        self.follow_follower_slots();
+        self.follow_extra_output_slots();
         if self.engine.state == EngineState::Running {
             self.issue_state
-                .underruns
-                .update(self.snapshot.underruns, now);
+                .dropouts
+                .update(self.snapshot.dropouts, now);
             for (watch, &count) in self
                 .issue_state
-                .follower_underruns
+                .extra_output_dropouts
                 .iter_mut()
-                .zip(&self.snapshot.follower_underruns)
+                .zip(&self.snapshot.extra_output_dropouts)
             {
                 watch.update(count, now);
             }
             for (held, &pinned) in self
                 .issue_state
-                .follower_drift
+                .extra_output_drift
                 .iter_mut()
-                .zip(&self.snapshot.follower_drift_at_limit)
+                .zip(&self.snapshot.extra_output_drift_at_limit)
             {
                 held.update(pinned, now, DRIFT_RAISE_AFTER, DRIFT_CLEAR_AFTER);
             }
@@ -683,31 +683,36 @@ impl RigWerkApp {
         self.issue_state.current = issues;
     }
 
-    /// Starts a follower slot's state over when it holds another follower
+    /// Starts an extra output slot's state over when it holds another extra output
     /// than the last tick saw.
-    fn follow_follower_slots(&mut self) {
-        let id = |slot: usize| self.followers.get(slot).map_or("", |pref| pref.id.as_str());
-        let Some(ids) = &mut self.issue_state.follower_ids else {
-            self.issue_state.follower_ids = Some(std::array::from_fn(|slot| id(slot).to_owned()));
+    fn follow_extra_output_slots(&mut self) {
+        let id = |slot: usize| {
+            self.extra_outputs
+                .get(slot)
+                .map_or("", |pref| pref.id.as_str())
+        };
+        let Some(ids) = &mut self.issue_state.extra_output_ids else {
+            self.issue_state.extra_output_ids =
+                Some(std::array::from_fn(|slot| id(slot).to_owned()));
             return;
         };
-        let mut changed = [false; MAX_FOLLOWERS];
+        let mut changed = [false; MAX_EXTRA_OUTPUTS];
         for (slot, seen) in ids.iter_mut().enumerate() {
             if seen != id(slot) {
                 *seen = id(slot).to_owned();
                 changed[slot] = true;
             }
         }
-        for slot in (0..MAX_FOLLOWERS).filter(|&slot| changed[slot]) {
-            let count = self.snapshot.follower_underruns[slot];
-            self.issue_state.forget_follower(slot, count);
+        for slot in (0..MAX_EXTRA_OUTPUTS).filter(|&slot| changed[slot]) {
+            let count = self.snapshot.extra_output_dropouts[slot];
+            self.issue_state.forget_extra_output(slot, count);
         }
     }
 
     /// This tick's readings for the silence watch.  Armed while a PipeWire
     /// Low latency bridge runs (Linux only: the sink monitor and its
     /// Turn Low latency off action are PipeWire's, not WASAPI's); parked when nothing should reach the clock
-    /// device (master mute, its own mute, or no unmuted path routed to it).
+    /// output (master mute, its own mute, or no unmuted path routed to it).
     fn silence_input(&mut self, now: Instant) -> SilenceInput {
         let monitor = self.engine.sink_monitor_peak(now);
         let channels =
@@ -726,8 +731,8 @@ impl RigWerkApp {
                 && self.low_latency_output,
             sent,
             monitor,
-            parked: self.mute || !self.monitor || self.clock_device.mute || !routed,
-            underruns: self.issue_state.underruns.episode().is_some(),
+            parked: self.mute || !self.monitor || self.clock_output.mute || !routed,
+            dropouts: self.issue_state.dropouts.episode().is_some(),
         }
     }
 
@@ -793,7 +798,7 @@ impl RigWerkApp {
     }
 
     /// Hides the warning with `key` until it clears and comes back, or the
-    /// bridge session changes.  An error is not hidden.  Goes by the last
+    /// bridge run changes.  An error is not hidden.  Goes by the last
     /// tick's issues, the ones the strip shows.
     pub(crate) fn dismiss_issue(&mut self, key: IssueKey) {
         let warning = self
@@ -851,10 +856,10 @@ impl RigWerkApp {
         self.dsp_issue(&infos, &mut issues);
         self.quantum_issue(&mut issues);
         self.driver_issue(&mut issues);
-        self.underrun_issue(&mut issues);
+        self.dropout_issue(&mut issues);
         self.silence_issue(&mut issues);
         self.safety_ceiling_issue(&rows, &mut issues);
-        self.follower_issues(&rows, &mut issues);
+        self.extra_output_issues(&rows, &mut issues);
         issues.sort_by_key(|issue| issue.severity);
         issues
     }
@@ -1052,11 +1057,11 @@ impl RigWerkApp {
         );
         let detail = if infos.len() > 1 {
             format!(
-                "{shares}; {name} takes {:.2} ms. Remove an insert or raise the buffer.",
+                "{shares}; {name} takes {:.2} ms. Remove an effect or raise the buffer.",
                 most / 1e6
             )
         } else {
-            format!("{shares}. Remove an insert or raise the buffer.")
+            format!("{shares}. Remove an effect or raise the buffer.")
         };
         issues.push(LiveIssue {
             key: IssueKey::Dsp,
@@ -1137,7 +1142,7 @@ impl RigWerkApp {
                 )
             } else {
                 format!(
-                    "The output period ({period} frames) does not divide the PipeWire graph block ({quantum} frames), so the two clocks drift against each other and can xrun."
+                    "The output period ({period} frames) does not divide the PipeWire graph block ({quantum} frames), so the two clocks drift against each other and can cause a dropout."
                 )
             };
             return Some(LiveIssue {
@@ -1187,20 +1192,22 @@ impl RigWerkApp {
         });
     }
 
-    /// (f) Underruns in this bridge session: the ring ran empty and the
-    /// output played a gap.  An error while they come in a burst.
-    fn underrun_issue(&self, issues: &mut Vec<LiveIssue>) {
+    /// (f) Dropouts in this bridge run: the output played a gap.  An
+    /// error while they come in a burst.
+    fn dropout_issue(&self, issues: &mut Vec<LiveIssue>) {
         if self.engine.state != EngineState::Running {
             return;
         }
-        let watch = &self.issue_state.underruns;
+        let watch = &self.issue_state.dropouts;
         let Some(episode) = watch.episode() else {
             return;
         };
         let when = ago_text(episode.since_last);
         let action = self.safer_latency_action();
         let remedy = match action {
-            IssueAction::SafeCushion => "A Safe cushion grows after each dropout.".to_owned(),
+            IssueAction::AutoBridgeBuffer => {
+                "An Auto bridge buffer grows after each dropout.".to_owned()
+            }
             IssueAction::LowLatencyOff => {
                 "Turning Low latency off gives the output a larger block.".to_owned()
             }
@@ -1214,18 +1221,18 @@ impl RigWerkApp {
             _ => "Check the DSP load and the driver in Diagnostics.".to_owned(),
         };
         let (severity, title) = if episode.burst {
-            (IssueSeverity::Error, "Audio is dropping out on the output")
+            (IssueSeverity::Error, "Dropouts on the output")
         } else {
-            (IssueSeverity::Warning, "The output ran dry")
+            (IssueSeverity::Warning, "The output had a dropout")
         };
         issues.push(LiveIssue {
-            key: IssueKey::Underruns,
+            key: IssueKey::Dropouts,
             severity,
             title: title.to_owned(),
             detail: format!(
-                "{}, the last {when} ({} this session): the output played gaps. {remedy}",
-                underrun_text(episode.count),
-                underrun_text(watch.session_count())
+                "{}, the last {when} ({} this run): the output played gaps. {remedy}",
+                dropout_text(episode.count),
+                dropout_text(watch.run_count())
             ),
             place: format!("OUTPUT · {}", self.selected_output().name),
             card: Some(IssueCard::Output),
@@ -1235,19 +1242,19 @@ impl RigWerkApp {
 
     /// The clock sink went silent while RigWerk plays into it under Low
     /// latency.  Turning Low latency off gives the graph a larger block.
-    /// An error only with recent underruns: without them the RigWerk
+    /// An error only with recent dropouts: without them the RigWerk
     /// stream may just be muted in the desktop mixer.
     fn silence_issue(&self, issues: &mut Vec<LiveIssue>) {
         if self.engine.state != EngineState::Running || !self.issue_state.silence.silent() {
             return;
         }
         let name = self.selected_output().name.clone();
-        let (severity, title, detail) = if self.issue_state.underruns.episode().is_some() {
+        let (severity, title, detail) = if self.issue_state.dropouts.episode().is_some() {
             (
                 IssueSeverity::Error,
                 "Output went silent under low latency",
                 format!(
-                    "RigWerk sends signal to {name}, but PipeWire's monitor of that sink hears nothing, and the output ran dry. The graph block is too small for this system; turning Low latency off gives it a larger one."
+                    "RigWerk sends signal to {name}, but PipeWire's monitor of that sink hears nothing, and the output had a dropout. The graph block is too small for this system; turning Low latency off gives it a larger one."
                 ),
             )
         } else {
@@ -1271,7 +1278,7 @@ impl RigWerkApp {
     }
 
     /// A playing device held at the safety ceiling.  One warning, for the
-    /// device reducing the most.  Muted, missing and unpublished virtual
+    /// device reducing the most.  Muted, missing and switched-off virtual
     /// devices are not playing.  The row cannot be dismissed while the
     /// reduction holds; the next tick drops it once every device is under
     /// the threshold.
@@ -1281,7 +1288,7 @@ impl RigWerkApp {
         }
         let mut worst: Option<(String, f32)> = None;
         for row in rows {
-            if row.settings.mute || row.missing || (row.virtual_out && !row.publish) {
+            if row.settings.mute || row.missing || (row.virtual_output && !row.virtual_output_on) {
                 continue;
             }
             let gr = row.reduction_db;
@@ -1306,82 +1313,82 @@ impl RigWerkApp {
         });
     }
 
-    /// (g) Each follower on its own: missing, then its ring's underruns,
-    /// then its drift loop.  A missing follower plays nothing, so it gets
+    /// (g) Each extra output on its own: missing, then its ring's dropouts,
+    /// then its drift loop.  A missing extra output plays nothing, so it gets
     /// that one row only.
-    fn follower_issues(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
+    fn extra_output_issues(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
         if self.engine.state != EngineState::Running {
             return;
         }
         for row in rows {
-            let Some(slot) = row.follower_index.filter(|&slot| slot < MAX_FOLLOWERS) else {
+            let Some(slot) = row
+                .extra_output_index
+                .filter(|&slot| slot < MAX_EXTRA_OUTPUTS)
+            else {
                 continue;
             };
             let name = &row.name;
             let place = format!("OUTPUT · {name}");
-            let retrying = self.snapshot.follower_missing[slot];
+            let retrying = self.snapshot.extra_output_missing[slot];
             if retrying || row.missing {
                 issues.push(LiveIssue {
                     key: if retrying {
-                        IssueKey::FollowerRetrying(slot)
+                        IssueKey::ExtraOutputRetrying(slot)
                     } else {
-                        IssueKey::FollowerNotListed(slot)
+                        IssueKey::ExtraOutputNotListed(slot)
                     },
                     severity: IssueSeverity::Warning,
                     title: format!("{name} is not playing"),
                     detail: if retrying {
-                        "It failed to open or was disconnected. RigWerk keeps retrying it; the clock device and the other outputs play on.".to_owned()
+                        "It failed to open or was disconnected. RigWerk keeps retrying it; the clock output and the other outputs play on.".to_owned()
                     } else {
-                        "It is not among the output devices right now. The clock device and the other outputs play on.".to_owned()
+                        "It is not among the output devices right now. The clock output and the other outputs play on.".to_owned()
                     },
                     place,
                     card: Some(IssueCard::Output),
-                    action: IssueAction::ShowFollower(slot),
+                    action: IssueAction::ShowExtraOutput(slot),
                 });
                 continue;
             }
-            let watch = &self.issue_state.follower_underruns[slot];
+            let watch = &self.issue_state.extra_output_dropouts[slot];
             if let Some(episode) = watch.episode() {
-                let action = self.follower_safer_action(slot);
+                let action = self.extra_output_safer_action(slot);
                 let remedy = match action {
-                    IssueAction::FollowerSafeCushion(_) => {
-                        format!("A Safe cushion on {name} grows after each dropout.")
+                    IssueAction::ExtraOutputAutoBridgeBuffer(_) => {
+                        format!("An Auto bridge buffer on {name} grows after each dropout.")
                     }
                     IssueAction::SetOutputBuffer(frames) => format!(
-                        "Followers ask for the output buffer: {frames} samples give {name} more room."
+                        "Extra outputs ask for the output buffer: {frames} samples give {name} more room."
                     ),
-                    _ => "Check the follower and its driver in Diagnostics.".to_owned(),
+                    _ => "Check the extra output and its driver in Diagnostics.".to_owned(),
                 };
                 let (severity, title) = if episode.burst {
-                    (
-                        IssueSeverity::Error,
-                        format!("Audio is dropping out on {name}"),
-                    )
+                    (IssueSeverity::Error, format!("Dropouts on {name}"))
                 } else {
-                    (IssueSeverity::Warning, format!("{name} ran dry"))
+                    (IssueSeverity::Warning, format!("{name} had a dropout"))
                 };
                 issues.push(LiveIssue {
-                    key: IssueKey::FollowerUnderruns(slot),
+                    key: IssueKey::ExtraOutputDropouts(slot),
                     severity,
                     title,
                     detail: format!(
-                        "{}, the last {} ({} since it opened): its own ring ran empty and it played gaps. {remedy}",
-                        underrun_text(episode.count),
+                        "{}, the last {} ({} since it opened): it played gaps. {remedy}",
+                        dropout_text(episode.count),
                         ago_text(episode.since_last),
-                        underrun_text(watch.session_count())
+                        dropout_text(watch.run_count())
                     ),
                     place: place.clone(),
                     card: Some(IssueCard::Output),
                     action,
                 });
             }
-            if self.issue_state.follower_drift[slot].raised() {
+            if self.issue_state.extra_output_drift[slot].raised() {
                 issues.push(LiveIssue {
-                    key: IssueKey::FollowerDrift(slot),
+                    key: IssueKey::ExtraOutputDrift(slot),
                     severity: IssueSeverity::Warning,
                     title: format!("{name} drifts too far to follow"),
                     detail: format!(
-                        "Its drift correction is at the {FOLLOWER_DRIFT_LIMIT_PPM:.0} ppm limit, so its cushion keeps filling or emptying. The device may run at another rate than it reports."
+                        "Its drift correction is at the {EXTRA_OUTPUT_DRIFT_LIMIT_PPM:.0} ppm limit, so its bridge buffer keeps filling or emptying. The device may run at another rate than it reports."
                     ),
                     place,
                     card: Some(IssueCard::Output),
@@ -1391,16 +1398,15 @@ impl RigWerkApp {
         }
     }
 
-    /// The follower's own safer step: its cushion to Safe, then the next
+    /// The extra output's own safer step: its bridge buffer to Auto, then the next
     /// larger output buffer (its stream asks for that one).  Low latency
-    /// and the WASAPI mode only govern the clock device.
-    pub(crate) fn follower_safer_action(&self, follower: usize) -> IssueAction {
-        let safe = self
-            .followers
-            .get(follower)
-            .is_none_or(|pref| cushion_from_pref(pref.cushion_mode) == CushionMode::Safe);
+    /// and the WASAPI mode only govern the clock output.
+    pub(crate) fn extra_output_safer_action(&self, extra_output: usize) -> IssueAction {
+        let safe = self.extra_outputs.get(extra_output).is_none_or(|pref| {
+            bridge_buffer_from_pref(pref.bridge_buffer_mode) == BufferMode::Auto
+        });
         if !safe {
-            return IssueAction::FollowerSafeCushion(follower);
+            return IssueAction::ExtraOutputAutoBridgeBuffer(extra_output);
         }
         BUFFERS
             .iter()
@@ -1410,11 +1416,11 @@ impl RigWerkApp {
     }
 
     /// The control that buys the output the most safety for the least
-    /// latency: the Safe cushion, then Low latency (or REAL-style /
+    /// latency: the Auto bridge buffer, then Low latency (or REAL-style /
     /// Exclusive) off, then the next larger output buffer.
     pub(crate) fn safer_latency_action(&self) -> IssueAction {
-        if !self.snapshot.direct && self.cushion_mode != CushionMode::Safe {
-            return IssueAction::SafeCushion;
+        if !self.snapshot.direct && self.bridge_buffer_mode != BufferMode::Auto {
+            return IssueAction::AutoBridgeBuffer;
         }
         if self.selected_output().asio_clsid.is_some() {
             return IssueAction::OpenDiagnostics;
@@ -1468,46 +1474,47 @@ impl RigWerkApp {
                 self.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Shared);
                 self.push_log("WASAPI clock: Shared output.", LogTone::Muted);
             }
-            IssueAction::SafeCushion => {
-                self.cushion_mode = CushionMode::Safe;
-                self.apply_cushion();
-                self.push_log("Cushion: Safe.", LogTone::Amber);
+            IssueAction::AutoBridgeBuffer => {
+                self.bridge_buffer_mode = BufferMode::Auto;
+                self.apply_bridge_buffer();
+                self.push_log("Bridge buffer: Auto.", LogTone::Amber);
             }
-            IssueAction::ShowFollower(follower) => {
-                // Row 0 is the clock device.
-                self.chain_selected = crate::app::chain::ChainSelection::OutputDevice(follower + 1);
+            IssueAction::ShowExtraOutput(extra_output) => {
+                // Row 0 is the clock output.
+                self.chain_selected =
+                    crate::app::chain::ChainSelection::OutputDevice(extra_output + 1);
                 self.page = Page::Mixer;
             }
             IssueAction::ShowOutput => {
                 self.show_issue_card(IssueCard::Output, IssueSeverity::Warning, Instant::now());
             }
-            IssueAction::FollowerSafeCushion(follower) => {
-                let Some(pref) = self.followers.get_mut(follower) else {
+            IssueAction::ExtraOutputAutoBridgeBuffer(extra_output) => {
+                let Some(pref) = self.extra_outputs.get_mut(extra_output) else {
                     return;
                 };
-                pref.cushion_mode = cushion_to_pref(CushionMode::Safe);
+                pref.bridge_buffer_mode = bridge_buffer_to_pref(BufferMode::Auto);
                 let name = if pref.name.is_empty() {
                     pref.id.clone()
                 } else {
                     pref.name.clone()
                 };
-                self.push_followers_to_engine();
-                self.push_log(format!("{name}: cushion Safe."), LogTone::Amber);
+                self.push_extra_outputs_to_engine();
+                self.push_log(format!("{name}: Bridge buffer: Auto."), LogTone::Amber);
             }
         }
     }
 }
 
-/// "1 underrun", "3 underruns".
-fn underrun_text(count: u64) -> String {
+/// "1 dropout", "3 dropouts".
+fn dropout_text(count: u64) -> String {
     if count == 1 {
-        "1 underrun".to_owned()
+        "1 dropout".to_owned()
     } else {
-        format!("{count} underruns")
+        format!("{count} dropouts")
     }
 }
 
-/// How long ago the latest underrun was, in whole seconds.
+/// How long ago the latest dropout was, in whole seconds.
 fn ago_text(since: Duration) -> String {
     match since.as_secs() {
         0 => "just now".to_owned(),

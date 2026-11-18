@@ -228,7 +228,7 @@ impl RigWerkApp {
                 &[
                     "ASIO driver scan reads the Windows registry",
                     "ASIO can be the input, the output, or both",
-                    "WASAPI followers and VB-Cable publish sit beside the clock device",
+                    "WASAPI extra outputs and the VB-Cable virtual output sit beside the clock output",
                 ],
                 half,
                 TEAL,
@@ -239,7 +239,7 @@ impl RigWerkApp {
                 "PipeWire sources and sinks, plus direct ALSA hardware.",
                 &[
                     "Each PipeWire source and sink is its own row",
-                    "Followers and RigWerk Out join live when the clock is PipeWire",
+                    "Extra outputs and RigWerk Out join live when the clock is PipeWire",
                     "hw: and plughw: stay low-latency; the ALSA period is checked against the quantum",
                 ],
                 half,
@@ -266,7 +266,7 @@ impl RigWerkApp {
             note_card(
                 ui,
                 "WINDOWS PATH",
-                "ASIO capture with ASIO or system playback is wired end to end. Mixer can add WASAPI followers of the finished mix; Publish plays into VB-Audio Cable when it is installed (other apps capture CABLE Output). Whether one interface can play while its ASIO driver holds it depends on that driver.",
+                "ASIO capture with ASIO or system playback is wired end to end. Mixer can add WASAPI extra outputs of the finished mix; the virtual output plays into VB-Audio Cable when it is installed (other apps capture CABLE Output). Whether one interface can play while its ASIO driver holds it depends on that driver.",
                 GREEN,
                 half,
             );
