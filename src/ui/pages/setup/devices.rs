@@ -62,7 +62,7 @@ pub(crate) fn device_row(
         },
     );
     let meta = format!(
-        "{} · {} CH{}",
+        "{} · {} ch{}",
         device.backend,
         device.channels,
         if device.demo { " · Demo device" } else { "" }

@@ -4,7 +4,8 @@ use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Vec2};
 
 use crate::app::latency::output_mode_phrase;
-use crate::app::screen::{format_khz, format_ms, SetupSection};
+use crate::app::screen::{format_ms, SetupSection};
+use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
 use crate::ui::pages::setup::{hint, panel};
@@ -44,8 +45,8 @@ impl RigWerkApp {
                     let line = format!(
                         "Measured {} · {} / {} · {} / {} samples · {phrase} · {}",
                         format_ms(measured.latency_ms),
-                        format_khz(measured.input_rate),
-                        format_khz(measured.output_rate),
+                        rate_label(measured.input_rate),
+                        rate_label(measured.output_rate),
                         measured.input_buffer,
                         measured.output_step,
                         crate::app::latency::utc_stamp(measured.measured_at),

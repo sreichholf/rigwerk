@@ -6,12 +6,17 @@
 //! are Live Issues rows (`app::issues`), not this line.
 
 use eframe::egui;
-use egui::{Align, Layout, Sense};
+use egui::{Align, Color32, Layout, RichText, Sense};
 
 use crate::app::driver_check::{DriverActual, DriverTone};
 use crate::app::settings::rate_label;
-use crate::ui::theme::{DIM, GREEN, MUTED};
-use crate::ui::widgets::{micro_label, mono};
+use crate::ui::theme::{font, palette, Face, TypeRole};
+
+fn reading(text: impl Into<String>, colour: Color32) -> RichText {
+    RichText::new(text)
+        .font(font(Face::Mono, TypeRole::Secondary))
+        .color(colour)
+}
 
 /// Draws the line.  `checking` is `Some(busy)` only on the output side, where
 /// a stand-alone check is possible; the return value says the line was
@@ -26,12 +31,17 @@ pub(crate) fn driver_line(
     checking: Option<bool>,
 ) -> bool {
     let mut recheck = false;
+    let colours = palette(ui.ctx());
     ui.horizontal(|ui| {
-        ui.label(micro_label("DRIVER", DIM));
+        ui.label(
+            RichText::new("Driver")
+                .font(font(Face::Sans, TypeRole::Secondary))
+                .color(colours.text3),
+        );
         let (text, color, hover) = if let Some(actual) = actual {
             let color = match actual.tone {
-                DriverTone::Good => GREEN,
-                DriverTone::Notice => MUTED,
+                DriverTone::Good => colours.text,
+                DriverTone::Notice => colours.text2,
             };
             let mut hover = if actual.notes.is_empty() {
                 "The driver runs exactly as chosen.".to_owned()
@@ -63,14 +73,14 @@ pub(crate) fn driver_line(
             } else {
                 String::new()
             };
-            (idle.to_owned(), MUTED, hover)
+            (idle.to_owned(), colours.text2, hover)
         };
         let sense = if checking.is_some() {
             Sense::click()
         } else {
             Sense::hover()
         };
-        let response = ui.add(egui::Label::new(mono(text, color, 8.8)).sense(sense));
+        let response = ui.add(egui::Label::new(reading(text, color)).sense(sense));
         let response = if hover.is_empty() {
             response
         } else {
@@ -81,7 +91,7 @@ pub(crate) fn driver_line(
         }
         if checking == Some(true) {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(mono("checking driver…".to_owned(), MUTED, 8.0));
+                ui.label(reading("checking driver…", colours.text2));
             });
         }
     });

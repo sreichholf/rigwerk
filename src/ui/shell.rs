@@ -10,9 +10,8 @@ use std::time::Instant;
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
-use crate::app::screen::{
-    format_khz, format_ms, Drawer, SetupSection, Sheet, SHEET_MAX, SHEET_MIN,
-};
+use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MAX, SHEET_MIN};
+use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::EngineState;
 use crate::ui::drawers::issues::issue_counts;
@@ -186,93 +185,100 @@ impl RigWerkApp {
             || (self.chrome.error_title.is_some() && !self.chrome.error_dismissed)
     }
 
+    /// The status bar: readings on the left, the issue count and *Log* on
+    /// the right.  The right side is laid out first, so a long log line is
+    /// cut short instead of running under it.
     pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         let now = Instant::now();
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            let drivers = self.drivers_line();
-            let drivers_button = status_label(ui.ctx(), &drivers);
-            if ui
-                .add(drivers_button)
-                .on_hover_text("Input, then the clock output")
-                .clicked()
-            {
-                self.open_setup(SetupSection::Devices);
-            }
-            let buffers = self.buffers_line();
-            let buffers_button = status_label(ui.ctx(), &buffers);
-            if ui
-                .add(buffers_button)
-                .on_hover_text("Input buffer, then the clock output")
-                .clicked()
-            {
-                self.open_setup(SetupSection::Devices);
-            }
-            let latency = self.status_latency();
-            let latency_button = status_label(ui.ctx(), &latency);
-            let stale = self
-                .measured_latency
-                .as_ref()
-                .and_then(|measured| measured.stale_reason(&self.latency_conditions()));
-            let latency_response = ui.add(latency_button);
-            if let Some(reason) = &stale {
-                latency_response.clone().on_hover_text(reason);
-            }
-            if latency_response.clicked() {
-                self.open_setup(SetupSection::Latency);
-            }
-            let drift = format!("{:+.1} ppm", self.snapshot.drift_ppm);
-            let drift_button = status_label(ui.ctx(), &drift);
-            if ui.add(drift_button).clicked() {
-                self.open_setup(SetupSection::Clock);
-            }
-            let dropouts = dropout_line(self.snapshot.dropouts);
-            let dropout_text = status_text(ui.ctx(), &dropouts);
-            ui.label(dropout_text).on_hover_text(self.dropout_hover());
-            if let Some(load) = self.engine.total_dsp_time() {
-                let load_text =
-                    status_text(ui.ctx(), &format!("{:.0} %", load.avg_share() * 100.0));
-                ui.label(load_text);
-            }
-            if let Some(line) = self.recent_log_line(now) {
-                ui.label(
-                    RichText::new(line)
-                        .font(font(Face::Sans, TypeRole::Secondary))
-                        .color(colours.text2),
-                );
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Log ▴").clicked() {
-                    if self.chrome.sheet == Some(Sheet::Diagnostics) {
-                        self.close_sheet();
-                    } else {
-                        self.open_diagnostics();
-                    }
+        ui.spacing_mut().item_spacing.x = 14.0;
+        ui.spacing_mut().button_padding = egui::vec2(4.0, 0.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.add(status_label(ui.ctx(), "Log ▴")).clicked() {
+                if self.chrome.sheet == Some(Sheet::Diagnostics) {
+                    self.close_sheet();
+                } else {
+                    self.open_diagnostics();
                 }
-                let view = self.issue_view();
-                let count = issue_count_label(&view.visible);
-                self.note_issue_count(view.visible.len(), now);
-                let pulse = self.issue_count_pulsing(now);
-                let response = ui.add(
-                    egui::Button::new(
-                        RichText::new(count)
-                            .font(font(Face::Mono, TypeRole::Secondary))
-                            .color(if pulse {
-                                colours.accent_text
-                            } else {
-                                colours.text
-                            }),
-                    )
-                    .fill(egui::Color32::TRANSPARENT)
-                    .stroke(Stroke::NONE),
-                );
-                if response.clicked() {
-                    if self.chrome.drawer == Some(Drawer::Issues) {
-                        self.close_drawer();
-                    } else {
-                        self.open_issues();
-                    }
+            }
+            let view = self.issue_view();
+            let count = issue_count_label(&view.visible);
+            self.note_issue_count(view.visible.len(), now);
+            let pulse = self.issue_count_pulsing(now);
+            let response = ui.add(
+                egui::Button::new(
+                    RichText::new(count)
+                        .font(font(Face::Mono, TypeRole::Secondary))
+                        .color(if pulse {
+                            colours.accent_text
+                        } else {
+                            colours.text
+                        }),
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(Stroke::NONE),
+            );
+            if response.clicked() {
+                if self.chrome.drawer == Some(Drawer::Issues) {
+                    self.close_drawer();
+                } else {
+                    self.open_issues();
+                }
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let drivers = self.drivers_line();
+                let drivers_button = status_label(ui.ctx(), &drivers);
+                if ui
+                    .add(drivers_button)
+                    .on_hover_text("Input, then the clock output")
+                    .clicked()
+                {
+                    self.open_setup(SetupSection::Devices);
+                }
+                let buffers = self.buffers_line();
+                let buffers_button = status_label(ui.ctx(), &buffers);
+                if ui
+                    .add(buffers_button)
+                    .on_hover_text("Input buffer, then the clock output")
+                    .clicked()
+                {
+                    self.open_setup(SetupSection::Devices);
+                }
+                let latency = self.status_latency();
+                let latency_button = status_label(ui.ctx(), &latency);
+                let stale = self
+                    .measured_latency
+                    .as_ref()
+                    .and_then(|measured| measured.stale_reason(&self.latency_conditions()));
+                let latency_response = ui.add(latency_button);
+                if let Some(reason) = &stale {
+                    latency_response.clone().on_hover_text(reason);
+                }
+                if latency_response.clicked() {
+                    self.open_setup(SetupSection::Latency);
+                }
+                let drift = format!("{:+.1} ppm", self.snapshot.drift_ppm);
+                let drift_button = status_label(ui.ctx(), &drift);
+                if ui.add(drift_button).clicked() {
+                    self.open_setup(SetupSection::Clock);
+                }
+                let dropouts = dropout_line(self.snapshot.dropouts);
+                let dropout_text = status_text(ui.ctx(), &dropouts);
+                ui.label(dropout_text).on_hover_text(self.dropout_hover());
+                if let Some(load) = self.engine.total_dsp_time() {
+                    let load_text =
+                        status_text(ui.ctx(), &format!("{:.0} %", load.avg_share() * 100.0));
+                    ui.label(load_text);
+                }
+                if let Some(line) = self.recent_log_line(now) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(line)
+                                .font(font(Face::Sans, TypeRole::Secondary))
+                                .color(colours.text2),
+                        )
+                        .truncate(),
+                    );
                 }
             });
         });
@@ -294,9 +300,9 @@ impl RigWerkApp {
             self.sample_rate
         };
         let rates = if in_rate == out_rate {
-            format_khz(in_rate)
+            rate_label(in_rate)
         } else {
-            format!("{} → {}", format_khz(in_rate), format_khz(out_rate))
+            format!("{} → {}", rate_label(in_rate), rate_label(out_rate))
         };
         if input.backend == output.backend {
             format!("{} · {rates}", input.backend)

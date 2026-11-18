@@ -13,6 +13,7 @@
 
 use serde::Deserialize;
 
+use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
 use crate::audio::{OutputMode, MAX_ROUND_TRIP_MS};
 
@@ -214,10 +215,6 @@ pub(crate) fn display_name(name: &str, id: &str) -> String {
     } else {
         name.to_owned()
     }
-}
-
-pub(crate) fn rate_label(rate: u32) -> String {
-    format!("{:.1} kHz", rate as f32 / 1000.0)
 }
 
 /// Formats Unix seconds as `YYYY-MM-DD HH:MM UTC`, without a date crate.

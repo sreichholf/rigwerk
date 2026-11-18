@@ -23,7 +23,7 @@ fn a_device_row_exposes_its_name_and_whether_it_is_in_use() {
     });
     let node = node_named(&tree, "Analog In");
     assert_eq!(node.role(), egui::Role::RadioButton);
-    assert_eq!(node.value(), Some("PIPEWIRE · 2 CH"));
+    assert_eq!(node.value(), Some("PIPEWIRE · 2 ch"));
     assert_eq!(node.toggled(), Some(Toggled::True));
 }
 

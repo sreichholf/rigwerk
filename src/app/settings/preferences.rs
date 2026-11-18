@@ -753,8 +753,13 @@ pub(crate) fn sanitize_session(session: &mut Session) {
     session.clock_output = session.clock_output.sanitized();
     sanitize_extra_outputs(&mut session.extra_outputs);
 }
+/// A sample rate as people read it: `48 kHz`, `44.1 kHz`.
 pub(crate) fn rate_label(rate: u32) -> String {
-    format!("{:.1} kHz", rate as f32 / 1000.0)
+    if rate.is_multiple_of(1000) {
+        format!("{} kHz", rate / 1000)
+    } else {
+        format!("{:.1} kHz", rate as f32 / 1000.0)
+    }
 }
 
 pub(crate) const PREFERENCES_KEY: &str = "rigwerk-preferences";

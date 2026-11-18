@@ -13,9 +13,7 @@ use crate::app::appearance::UI_SIZE_DEFAULT;
 use crate::app::screenshot;
 use crate::app::{Page, RigWerkApp};
 use crate::ui::theme::ts;
-use crate::ui::theme::{
-    configure_style, with_alpha, BG, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
-};
+use crate::ui::theme::{configure_style, with_alpha, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT};
 
 /// Command and shift, and nothing else.  Command is Ctrl on Windows and
 /// Linux, and Command on macOS.  `matches_exact` rejects Alt; egui's
@@ -59,7 +57,8 @@ impl eframe::App for RigWerkApp {
         // Screenshots need a painted frame, so they stay on the drawing side.
         self.handle_screenshot(&ctx);
 
-        let bar = crate::ui::theme::palette(root.ctx()).bar;
+        let colours = crate::ui::theme::palette(root.ctx());
+        let bar = colours.bar;
         egui::Panel::top("rigwerk_title")
             .exact_size(52.0)
             .resizable(false)
@@ -95,7 +94,7 @@ impl eframe::App for RigWerkApp {
             .show(root, |ui| self.status_bar(ui));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin {
+            .frame(egui::Frame::new().fill(colours.bg).inner_margin(Margin {
                 left: 26,
                 right: 26,
                 top: 16,

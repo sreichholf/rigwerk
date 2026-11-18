@@ -1,7 +1,7 @@
 //! Colours and the egui style.
 //!
 //! [`DARK`] and [`LIGHT`] hold the tokens of `docs/ui-spec.md` §7.1, and
-//! [`palette`] gives the active one.  The old constants (`BG`, `TEAL`, …)
+//! [`palette`] gives the active one.  The old constants (`CARD`, `TEAL`, …)
 //! are the dark tokens and do not follow the theme, so the old pages stay
 //! dark-only until they are rewritten.
 
@@ -197,7 +197,6 @@ pub(crate) fn palette(ctx: &egui::Context) -> &'static Palette {
 }
 
 // What the old pages draw with: the dark tokens, whatever the theme.
-pub(crate) const BG: Color32 = DARK.bg;
 #[allow(
     dead_code,
     reason = "the sidebar fill stays until the classic pages go"

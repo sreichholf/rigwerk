@@ -11,7 +11,7 @@ mod help;
 mod latency;
 
 use eframe::egui;
-use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Stroke, Vec2};
+use egui::{Align, CornerRadius, Layout, Margin, RichText, Sense, Vec2};
 
 use crate::app::screen::SetupSection;
 use crate::app::RigWerkApp;
@@ -86,8 +86,7 @@ pub(super) fn panel(
     let colours = palette(ui.ctx());
     egui::Frame::new()
         .fill(colours.strip)
-        .stroke(Stroke::new(1.0, colours.line))
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(CornerRadius::same(4))
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

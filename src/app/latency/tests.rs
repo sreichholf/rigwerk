@@ -68,7 +68,7 @@ fn every_changed_condition_marks_the_measurement_stale() {
                 input_rate: 44_100,
                 ..conditions()
             },
-            "input rate changed from 48.0 kHz to 44.1 kHz",
+            "input rate changed from 48 kHz to 44.1 kHz",
         ),
         (
             "output rate",
@@ -76,7 +76,7 @@ fn every_changed_condition_marks_the_measurement_stale() {
                 output_rate: 44_100,
                 ..conditions()
             },
-            "output rate changed from 48.0 kHz to 44.1 kHz",
+            "output rate changed from 48 kHz to 44.1 kHz",
         ),
         (
             "input block",
@@ -177,7 +177,7 @@ fn the_summary_says_measured_and_names_the_stale_reason() {
         text.contains("OUT Speakers → cable → IN Focusrite USB"),
         "{text}"
     );
-    assert!(text.contains("48.0 kHz"));
+    assert!(text.contains("48 kHz"));
     assert!(text.contains("2023-11-14 22:13 UTC"));
     assert!(text.contains("stale: the output rate changed"));
 }

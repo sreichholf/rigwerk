@@ -119,15 +119,6 @@ pub(crate) fn format_ms(ms: f32) -> String {
     }
 }
 
-/// `48 kHz` or `44.1 kHz`.
-pub(crate) fn format_khz(rate: u32) -> String {
-    if rate.is_multiple_of(1000) {
-        format!("{} kHz", rate / 1000)
-    } else {
-        format!("{:.1} kHz", rate as f32 / 1000.0)
-    }
-}
-
 const LOG_LINE_FOR: Duration = Duration::from_secs(5);
 const PULSE_FOR: Duration = Duration::from_millis(700);
 /// The sheet is at least this tall, and never more than this.

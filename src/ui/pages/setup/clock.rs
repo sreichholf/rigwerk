@@ -1,16 +1,16 @@
 //! Drift, drift correction, the bridge buffer and dropouts.
 
 use eframe::egui;
-use egui::{Align, FontFamily, FontId, Layout, Rect, RichText};
+use egui::{Align, Layout, Rect, RichText};
 
 use crate::app::screen::SetupSection;
 use crate::app::settings::{BRIDGE_BUFFER_MS_MAX, BRIDGE_BUFFER_MS_MIN};
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{BufferMode, EngineState};
 use crate::ui::pages::setup::{hint, panel};
-use crate::ui::theme::ts;
-use crate::ui::theme::{palette, AMBER, DIM, TEXT};
-use crate::ui::widgets::{hinted_tab, micro_label, mono, segmented, styled_slider};
+use crate::ui::theme::palette;
+use crate::ui::theme::{font, Face, TypeRole};
+use crate::ui::widgets::{segmented, styled_slider};
 
 impl RigWerkApp {
     pub(super) fn setup_clock(&mut self, ui: &mut egui::Ui, section: Option<SetupSection>) {
@@ -124,22 +124,24 @@ fn bridge_buffer_choices() -> [(BufferMode, &'static str, &'static str); 3] {
     ]
 }
 
-/// Width of the three mode tabs on one row, including the gaps between them.
+/// Width of the three modes as one segmented control (`widgets::segmented`
+/// measures each segment as its label plus 24 pt).
 fn bridge_buffer_tab_row_width(ui: &egui::Ui) -> f32 {
-    let font = FontId::new(ts(8.2), FontFamily::Proportional);
-    let pad = ui.spacing().button_padding.x * 2.0;
-    let gap = ui.spacing().item_spacing.x;
-    let mut width = 0.0;
-    for (index, (_, label, _)) in bridge_buffer_choices().iter().enumerate() {
-        if index > 0 {
-            width += gap;
-        }
-        let text = ui
-            .painter()
-            .layout_no_wrap((*label).to_owned(), font.clone(), TEXT);
-        width += text.size().x + pad;
-    }
-    width
+    let text_font = font(Face::Sans, TypeRole::Control);
+    bridge_buffer_choices()
+        .iter()
+        .map(|(_, label, _)| {
+            ui.painter()
+                .layout_no_wrap(
+                    (*label).to_owned(),
+                    text_font.clone(),
+                    palette(ui.ctx()).text,
+                )
+                .size()
+                .x
+                + 24.0
+        })
+        .sum()
 }
 
 /// The three tabs fit the strip when this is true.  What is left of the line
@@ -148,20 +150,19 @@ fn bridge_buffer_modes_fit(ui: &egui::Ui) -> bool {
     bridge_buffer_tab_row_width(ui) <= ui.available_width()
 }
 
-/// Tabs when they fit.  A combo of the same three modes when they do not, so
-/// the last label is not clipped.
+/// A segmented control when it fits.  A combo of the same three modes when
+/// it does not, so the last label is not clipped.
 fn bridge_buffer_mode_picker(ui: &mut egui::Ui, mode: &mut BufferMode) -> Rect {
     let choices = bridge_buffer_choices();
     if bridge_buffer_modes_fit(ui) {
-        ui.horizontal(|ui| {
-            for (option, label, hint) in choices {
-                if hinted_tab(ui, label, *mode == option, AMBER, hint) {
-                    *mode = option;
-                }
-            }
-        })
-        .response
-        .rect
+        let mut index = choices
+            .iter()
+            .position(|(option, _, _)| *option == *mode)
+            .unwrap_or(0);
+        let labels = choices.map(|(_, label, _)| label);
+        let response = segmented(ui, &mut index, &labels).on_hover_text(choices[index].2);
+        *mode = choices[index].0;
+        response.rect
     } else {
         let (_, label, hint) = choices
             .iter()
@@ -172,7 +173,11 @@ fn bridge_buffer_mode_picker(ui: &mut egui::Ui, mode: &mut BufferMode) -> Rect {
         egui::ComboBox::from_id_salt("bridge_buffer_mode")
             .width(available)
             .truncate()
-            .selected_text(RichText::new(label).size(ts(8.2)).color(AMBER).strong())
+            .selected_text(
+                RichText::new(label)
+                    .font(font(Face::Sans, TypeRole::Control))
+                    .color(palette(ui.ctx()).accent_text),
+            )
             .show_ui(ui, |ui| {
                 for (option, label, hint) in choices {
                     ui.selectable_value(mode, option, label).on_hover_text(hint);
@@ -186,11 +191,20 @@ fn bridge_buffer_mode_picker(ui: &mut egui::Ui, mode: &mut BufferMode) -> Rect {
 
 /// The fixed size.  The number and the slider; the caller stores and applies it.
 fn fixed_bridge_buffer_size(ui: &mut egui::Ui, ms: &mut f32) -> egui::Response {
+    let colours = palette(ui.ctx());
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(micro_label("SIZE", DIM));
+        ui.label(
+            RichText::new("Size")
+                .font(font(Face::Sans, TypeRole::Secondary))
+                .color(colours.text3),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(mono(format!("{ms:.1} ms"), TEXT, 10.0));
+            ui.label(
+                RichText::new(format!("{ms:.1} ms"))
+                    .font(font(Face::Mono, TypeRole::Secondary))
+                    .color(colours.text),
+            );
         });
     });
     styled_slider(
@@ -199,7 +213,7 @@ fn fixed_bridge_buffer_size(ui: &mut egui::Ui, ms: &mut f32) -> egui::Response {
         BRIDGE_BUFFER_MS_MIN,
         BRIDGE_BUFFER_MS_MAX,
         0.5,
-        AMBER,
+        colours.accent,
     )
 }
 

@@ -22,7 +22,8 @@
 //! longer describes this rig.
 
 use crate::app::bridge::LatencyParts;
-use crate::app::latency::{rate_label, MeasuredLatency};
+use crate::app::latency::MeasuredLatency;
+use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
 
 /// How the measured leg and the estimated path differ, in one sentence for
