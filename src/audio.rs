@@ -76,6 +76,8 @@ mod output;
 mod output_map;
 mod path;
 mod plugins;
+#[cfg(test)]
+pub(crate) use plugins::{set_test_loader, TEST_PATH};
 mod record;
 mod resampler;
 mod ring;

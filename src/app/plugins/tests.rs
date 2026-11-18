@@ -324,6 +324,106 @@ fn favourites_keep_the_first_of_each_effect() {
 }
 
 #[test]
+fn recent_use_does_not_reorder_the_library() {
+    let alpha = listed("Alpha", "", "Delay");
+    let beta = listed("Beta", "", "Delay");
+    let library = vec![beta.clone(), alpha.clone()];
+    let recent = vec![id_of(&beta)];
+    let names = |filter| {
+        visible_effects(&library, "", filter, true, true, &[], &recent)
+            .into_iter()
+            .map(|candidate| candidate.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&EffectFilter::All), ["Alpha", "Beta"]);
+    assert_eq!(names(&EffectFilter::Recent), ["Beta"]);
+}
+
+#[test]
+fn the_format_filter_hides_the_other_format() {
+    let vst = listed("Room", "", "Reverb");
+    let mut clap = listed("Amp", "", "Amp");
+    clap.format = PluginFormat::Clap;
+    clap.path = PathBuf::from("Amp.clap");
+    let library = vec![vst, clap];
+    let names = |vst3, clap_on| {
+        visible_effects(&library, "", &EffectFilter::All, vst3, clap_on, &[], &[])
+            .into_iter()
+            .map(|candidate| candidate.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(true, false), ["Room"]);
+    assert_eq!(names(false, true), ["Amp"]);
+    assert!(names(false, false).is_empty());
+}
+
+#[test]
+fn the_browser_adds_at_the_position_and_stays_open() {
+    let _main = crate::audio::claim_main_thread();
+    let _loader = crate::audio::set_test_loader(|_pref, _rate| {
+        Ok((
+            crate::audio::clap::tests::fake_plugin_with_latency_for_test(0),
+            false,
+        ))
+    });
+    let mut app = crate::app::blank_app();
+    app.engine.restore_plugins(
+        0,
+        vec![
+            crate::audio::PluginPref {
+                name: "A".to_owned(),
+                path: "a.vst3".to_owned(),
+                ..Default::default()
+            },
+            crate::audio::PluginPref {
+                name: "C".to_owned(),
+                path: "c.vst3".to_owned(),
+                ..Default::default()
+            },
+        ],
+    );
+    let mut added = listed("B", "Rig", "Delay");
+    added.path = PathBuf::from(format!("{}b", crate::audio::TEST_PATH));
+    app.open_effect_browser(0, 1);
+    assert!(matches!(app.page, crate::app::Page::Live));
+    assert!(app.plugin_browser.open);
+    assert!(app.add_listed_effect(&added, false));
+    let names: Vec<_> = app
+        .engine
+        .plugin_views(0)
+        .iter()
+        .map(|view| view.name.clone())
+        .collect();
+    assert_eq!(names, ["A", "B", "C"]);
+    assert!(app.plugin_browser.open);
+    assert_eq!(app.plugin_browser.position, 2);
+    assert_eq!(app.plugin_browser.recent.len(), 1);
+    let notice = &app.plugin_browser.notice.as_ref().expect("notice").0;
+    assert!(notice.contains("Added B"), "{notice}");
+}
+
+#[test]
+fn a_missing_path_does_not_move_the_browser() {
+    let mut app = crate::app::blank_app();
+    app.open_effect_browser(0, 0);
+    app.plugin_browser.path = 9;
+    assert!(!app.add_listed_effect(&listed("Room", "", "Reverb"), false));
+    assert_eq!(app.plugin_browser.position, 0);
+    assert!(app.plugin_browser.recent.is_empty());
+    let notice = &app.plugin_browser.notice.as_ref().expect("notice").0;
+    assert!(notice.contains("not available"), "{notice}");
+}
+
+#[test]
+fn a_missing_file_reports_that_the_path_does_not_exist() {
+    let mut app = crate::app::blank_app();
+    app.plugin_browser.path_input = "/no/such/effect.vst3".to_owned();
+    app.add_plugin_from_path();
+    let notice = &app.plugin_browser.notice.as_ref().expect("notice").0;
+    assert!(notice.contains("does not exist"), "{notice}");
+}
+
+#[test]
 fn the_position_line_names_the_effect_before_the_gap() {
     let names = vec!["Limiter Stereo".to_owned()];
     assert_eq!(position_phrase(&names, 0), "at the start");

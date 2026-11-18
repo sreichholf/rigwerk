@@ -119,9 +119,9 @@ pub(crate) fn position_phrase(names: &[String], position: usize) -> String {
 /// The library rows the browser shows, best match first.
 ///
 /// A search matches the name, the maker, the format and the category.  A
-/// name that starts with the query ranks above one that contains it, then
-/// a favourite, then a more recently used effect.  The Recent chip keeps
-/// recent order on its own.
+/// name that starts with the query ranks above one that contains it, and
+/// a favourite ranks above the rest of that tier.  Recent use is the
+/// Recent chip, not another sort of the whole library.
 pub(crate) fn visible_effects<'a>(
     library: &'a [PluginCandidate],
     query: &str,
@@ -146,8 +146,7 @@ pub(crate) fn visible_effects<'a>(
         });
     } else {
         rows.sort_by(|left, right| {
-            rank_key(left, &query, favourites, recent)
-                .cmp(&rank_key(right, &query, favourites, recent))
+            rank_key(left, &query, favourites).cmp(&rank_key(right, &query, favourites))
         });
     }
     rows
@@ -198,25 +197,15 @@ fn match_rank(candidate: &PluginCandidate, query: &str) -> Option<u8> {
     }
 }
 
-/// Sort key: closer name match, then favourite, then more recently used, then name.
-fn rank_key(
-    candidate: &PluginCandidate,
-    query: &str,
-    favourites: &[EffectId],
-    recent: &[EffectId],
-) -> (u8, u8, usize, String) {
+/// Sort key: closer name match, then favourite, then name.
+fn rank_key(candidate: &PluginCandidate, query: &str, favourites: &[EffectId]) -> (u8, u8, String) {
     let matched = match_rank(candidate, query).unwrap_or(3);
     let favourite = if favourites.iter().any(|id| id.matches(candidate)) {
         0
     } else {
         1
     };
-    (
-        matched,
-        favourite,
-        recent_rank(candidate, recent),
-        candidate.name.to_lowercase(),
-    )
+    (matched, favourite, candidate.name.to_lowercase())
 }
 
 /// Newest recent effect first.  Missing ids sort last.

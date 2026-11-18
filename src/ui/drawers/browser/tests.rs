@@ -84,3 +84,173 @@ fn arrow_down_moves_the_chosen_effect() {
     assert_eq!(node_named(&tree, "Rover").toggled(), Some(Toggled::True));
     assert_eq!(node_named(&tree, "Amp").toggled(), Some(Toggled::False));
 }
+
+#[test]
+fn a_row_names_the_paths_that_already_use_it() {
+    let mut app = blank_app();
+    app.engine.restore_plugins(0, vec![pref("Room")]);
+    let mut room = candidate("Room", "Reverb");
+    room.path = PathBuf::from("Room.vst3");
+    app.plugin_browser.library = vec![room];
+    app.open_effect_browser(0, 1);
+    let tree = accesskit_frame(|ui| app.effect_browser(ui));
+    let value = node_named(&tree, "Room").value().unwrap_or("");
+    assert!(value.contains("in Main"), "{value}");
+}
+
+#[test]
+fn a_row_reports_a_scan_error() {
+    let mut row = candidate("Delay", "Echo");
+    row.scan_error = Some("Could not read the bundle.".to_owned());
+    let mut app = blank_app();
+    app.plugin_browser.library = vec![row];
+    app.open_effect_browser(0, 0);
+    let tree = accesskit_frame(|ui| app.effect_browser(ui));
+    let value = node_named(&tree, "Delay").value().unwrap_or("");
+    assert!(value.contains("Could not read the bundle."), "{value}");
+}
+
+#[test]
+fn the_list_only_builds_the_rows_on_screen() {
+    let rows = (0..40)
+        .map(|index| candidate(&format!("Effect {index:02}"), "Delay"))
+        .collect();
+    let mut app = blank_app();
+    app.plugin_browser.library = rows;
+    app.open_effect_browser(0, 0);
+    let tree = accesskit_frame(|ui| app.effect_browser(ui));
+    let shown = tree
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            node.label()
+                .is_some_and(|label| label.starts_with("Effect "))
+        })
+        .count();
+    assert!(shown > 0 && shown < 20, "{shown} rows were built");
+}
+
+#[test]
+fn enter_adds_the_chosen_effect_and_leaves_the_browser_open() {
+    let _main = crate::audio::claim_main_thread();
+    let _loader = crate::audio::set_test_loader(|_pref, _rate| {
+        Ok((
+            crate::audio::clap::tests::fake_plugin_with_latency_for_test(0),
+            false,
+        ))
+    });
+    let mut hall = candidate("Hall", "Reverb");
+    hall.path = PathBuf::from(format!("{}hall", crate::audio::TEST_PATH));
+    let mut room = candidate("Room", "Reverb");
+    room.path = PathBuf::from(format!("{}room", crate::audio::TEST_PATH));
+    let mut app = blank_app();
+    app.plugin_browser.library = vec![hall, room];
+    app.open_effect_browser(0, 0);
+    let ctx = egui::Context::default();
+    let _ = run_frame(&ctx, test_input(None), |ui| app.effect_browser(ui));
+    let _ = run_frame(&ctx, test_input(Some(egui::Key::ArrowDown)), |ui| {
+        app.effect_browser(ui);
+    });
+    let _ = run_frame(&ctx, test_input(Some(egui::Key::Enter)), |ui| {
+        app.effect_browser(ui);
+    });
+    let names: Vec<_> = app
+        .engine
+        .plugin_views(0)
+        .iter()
+        .map(|view| view.name.clone())
+        .collect();
+    assert_eq!(names, ["Room"]);
+    assert!(app.plugin_browser.open);
+    assert_eq!(app.plugin_browser.position, 1);
+    assert!(app.plugin_editor.is_none());
+}
+
+#[test]
+fn shift_enter_adds_and_opens_the_controls() {
+    let _main = crate::audio::claim_main_thread();
+    let _loader = crate::audio::set_test_loader(|_pref, _rate| {
+        Ok((
+            crate::audio::clap::tests::fake_plugin_with_latency_for_test(0),
+            false,
+        ))
+    });
+    let mut room = candidate("Room", "Reverb");
+    room.path = PathBuf::from(format!("{}room", crate::audio::TEST_PATH));
+    let mut app = blank_app();
+    app.plugin_browser.library = vec![room];
+    app.open_effect_browser(0, 0);
+    let ctx = egui::Context::default();
+    let _ = run_frame(&ctx, test_input(None), |ui| app.effect_browser(ui));
+    let mut input = test_input(None);
+    input.events.push(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    let _ = run_frame(&ctx, input, |ui| app.effect_browser(ui));
+    assert_eq!(app.engine.plugin_views(0).len(), 1);
+    assert!(app.plugin_browser.open);
+    assert!(app.plugin_editor.is_some());
+}
+
+#[test]
+fn the_star_toggles_a_favourite() {
+    let mut app = blank_app();
+    app.plugin_browser.library = vec![candidate("Room", "Reverb")];
+    app.open_effect_browser(0, 0);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let output = run_frame(&ctx, test_input(None), |ui| app.effect_browser(ui));
+    let tree = output.platform_output.accesskit_update.expect("tree");
+    let node = node_named(&tree, "Favourite Room");
+    let bounds = node.bounds().expect("bounds");
+    let at = egui::pos2(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    let mut click = test_input(None);
+    click.events.push(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        click.events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
+    let _ = run_frame(&ctx, click, |ui| app.effect_browser(ui));
+    assert_eq!(app.plugin_browser.favourites.len(), 1);
+    assert!(app.engine.plugin_views(0).is_empty());
+}
+
+#[test]
+fn change_moves_where_the_next_effect_is_added() {
+    let mut app = blank_app();
+    app.engine.restore_plugins(0, vec![pref("Limiter Stereo")]);
+    app.open_effect_browser(0, 1);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let output = run_frame(&ctx, test_input(None), |ui| app.effect_browser(ui));
+    let tree = output.platform_output.accesskit_update.expect("tree");
+    let node = node_named(&tree, "change");
+    let bounds = node.bounds().expect("bounds");
+    let at = egui::pos2(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    let mut click = test_input(None);
+    click.events.push(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        click.events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
+    let _ = run_frame(&ctx, click, |ui| app.effect_browser(ui));
+    assert_eq!(app.plugin_browser.position, 0);
+}
