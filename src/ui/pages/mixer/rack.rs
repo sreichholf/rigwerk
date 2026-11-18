@@ -87,7 +87,9 @@ impl RigWerkApp {
         let mut path_actions: Vec<PathAction> = Vec::new();
         let mut select: Option<ChainSelection> = None;
         let total = ui.available_width();
-        let chain_w = (total * 0.32).clamp(280.0, 340.0);
+        // Wide enough for a long insert name next to its controls; the
+        // minimum window still leaves the EQ inspector about 370 px.
+        let chain_w = (total * 0.36).clamp(400.0, 440.0);
 
         ui.horizontal(|ui| {
             ui.label(micro_label("MIXER", TEAL));
@@ -1060,7 +1062,10 @@ fn insert_row(
                     )
                     .truncate(),
                 )
-                .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));
+                .on_hover_text(match &view.error {
+                    Some(error) => format!("{}\n{error}", view.name),
+                    None => format!("{}\n{}", view.name, view.path),
+                });
                 ui.add(
                     egui::Label::new(
                         RichText::new(match view.latency_label() {
