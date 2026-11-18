@@ -24,7 +24,7 @@ use crate::ui::widgets::{
 };
 
 /// Names of [`PATH_COLOURS`], for screen readers and hover text.
-const PATH_COLOUR_NAMES: [&str; MAX_PATHS] = ["Teal", "Violet", "Amber", "Pink"];
+const PATH_COLOUR_NAMES: [&str; MAX_PATHS] = ["Blue", "Violet", "Green", "Rose"];
 
 /// Width of the "+ Path" button, kept free when the chips are sized.
 const ADD_PATH_W: f32 = 64.0;

@@ -24,8 +24,8 @@ fn contrast(foreground: Color32, background: Color32) -> f64 {
 
 #[test]
 fn dim_clears_wcag_aa_on_card_and_stays_quieter_than_muted() {
-    assert_eq!((CARD.r(), CARD.g(), CARD.b()), (16, 21, 31));
-    assert_eq!((DIM.r(), DIM.g(), DIM.b()), (116, 133, 159));
+    assert_eq!((CARD.r(), CARD.g(), CARD.b()), (0x1a, 0x19, 0x18));
+    assert_eq!((DIM.r(), DIM.g(), DIM.b()), (0x94, 0x8e, 0x83));
     assert_ne!(DIM, MUTED);
     assert_ne!(DIM, TEXT);
     assert!(DIM.r() < MUTED.r() && DIM.g() < MUTED.g() && DIM.b() < MUTED.b());
