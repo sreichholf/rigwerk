@@ -1761,6 +1761,7 @@ fn golden_preferences() -> Preferences {
         effect_recent: Vec::new(),
         sheet_height: 0.0,
         effect_double_click: crate::app::settings::EffectOpen::Editor,
+        last_click_mask: 0,
     }
 }
 
@@ -1805,4 +1806,17 @@ fn the_golden_file_loads_and_round_trips() {
     assert_eq!(back.bridge_buffer_mode, 1);
     assert_eq!(back.bridge_buffer_ms, 8.5);
     assert_eq!(back.tuner_tuning, "drop-d");
+}
+
+#[test]
+fn the_last_click_mask_is_saved_only_once_used() {
+    let unused = ron::to_string(&Preferences::default()).expect("preferences");
+    assert!(!unused.contains("last_click_mask"));
+    let used = Preferences {
+        last_click_mask: 0b1100,
+        ..Preferences::default()
+    };
+    let text = ron::to_string(&used).expect("preferences");
+    let back: Preferences = ron::from_str(&text).expect("preferences");
+    assert_eq!(back.last_click_mask, 0b1100);
 }

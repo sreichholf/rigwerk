@@ -435,3 +435,79 @@ fn the_position_line_names_the_effect_before_the_gap() {
     );
     assert_eq!(category_tag("Delay · Stereo"), "Delay");
 }
+
+fn three_effects() -> crate::app::RigWerkApp {
+    let app = crate::app::blank_app();
+    app.engine.restore_plugins(
+        0,
+        ["A", "B", "C"]
+            .into_iter()
+            .map(|name| crate::audio::PluginPref {
+                name: name.to_owned(),
+                path: format!("{name}.vst3"),
+                ..Default::default()
+            })
+            .collect(),
+    );
+    app
+}
+
+fn names(app: &crate::app::RigWerkApp) -> Vec<String> {
+    app.engine
+        .plugin_views(0)
+        .iter()
+        .map(|view| view.name.clone())
+        .collect()
+}
+
+#[test]
+fn a_dragged_effect_lands_where_it_is_dropped_and_its_sheet_follows() {
+    use crate::app::screen::Sheet;
+    let mut app = three_effects();
+    app.open_sheet(Sheet::Effect { path: 0, index: 0 });
+    app.move_effect(0, 0, 2);
+    assert_eq!(names(&app), ["B", "C", "A"]);
+    assert_eq!(app.chrome.sheet, Some(Sheet::Effect { path: 0, index: 2 }));
+    app.open_sheet(Sheet::Effect { path: 0, index: 1 });
+    app.move_effect(0, 2, -2);
+    assert_eq!(names(&app), ["A", "B", "C"]);
+    assert_eq!(
+        app.chrome.sheet,
+        Some(Sheet::Effect { path: 0, index: 2 }),
+        "the open effect slid down"
+    );
+    app.move_effect(0, 0, -1);
+    assert_eq!(names(&app), ["A", "B", "C"], "nothing above the first");
+}
+
+#[test]
+fn removing_an_effect_closes_its_sheet_and_moves_a_later_one() {
+    use crate::app::screen::Sheet;
+    let mut app = three_effects();
+    app.open_sheet(Sheet::Effect { path: 0, index: 2 });
+    app.remove_effect(0, 0);
+    assert_eq!(names(&app), ["B", "C"]);
+    assert_eq!(app.chrome.sheet, Some(Sheet::Effect { path: 0, index: 1 }));
+    app.remove_effect(0, 1);
+    assert_eq!(app.chrome.sheet, None);
+}
+
+#[test]
+fn a_double_click_opens_the_controls_when_the_preference_says_so() {
+    use crate::app::screen::Sheet;
+    let mut app = three_effects();
+    app.effect_double_click = crate::app::settings::EffectOpen::Controls;
+    app.open_effect(0, 1);
+    assert_eq!(app.chrome.sheet, Some(Sheet::Effect { path: 0, index: 1 }));
+}
+
+#[test]
+fn the_browser_opens_in_the_drawer() {
+    use crate::app::screen::Drawer;
+    let mut app = three_effects();
+    app.open_effect_browser(0, 3);
+    assert_eq!(app.chrome.drawer, Some(Drawer::Browser));
+    assert!(app.plugin_browser.open);
+    app.close_drawer();
+    assert!(!app.plugin_browser.open);
+}

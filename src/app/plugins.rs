@@ -255,7 +255,7 @@ pub(crate) struct PluginBrowser {
     pub(crate) search: String,
     pub(crate) path_input: String,
     pub(crate) notice: Option<(String, std::time::Instant)>,
-    /// The browser column is open on the Mixer.
+    /// The browser drawer is open (`Drawer::Browser`).
     pub(crate) open: bool,
     /// Path slot new effects are added to.
     pub(crate) path: usize,
@@ -552,6 +552,7 @@ impl RigWerkApp {
         let _ = self.select_path(path);
         let count = self.engine.plugin_views(self.selected_path).len();
         self.plugin_browser.open = true;
+        self.chrome.drawer = Some(crate::app::screen::Drawer::Browser);
         self.plugin_browser.path = self.selected_path;
         self.plugin_browser.position = position.min(count);
         self.plugin_browser.focus_search = true;
@@ -650,8 +651,7 @@ impl RigWerkApp {
         }
     }
 
-    /// Opens the browser for a `RIGWERK_DRAWER=browser` screenshot.  The
-    /// drawer host is not in this build, so the Mixer draws the column.
+    /// Opens the browser drawer for a `RIGWERK_DRAWER=browser` screenshot.
     /// An empty library is filled with sample rows so the column is not
     /// blank when the machine has no scanned effects.
     pub(crate) fn open_browser_for_screenshot(&mut self) {
@@ -866,6 +866,91 @@ impl RigWerkApp {
         EffectKey {
             path: self.selected_path,
             effect: index,
+        }
+    }
+
+    /// A double-click on effect `index` of path `slot`: its editor or its
+    /// controls, as the `effect_double_click` preference says.  The
+    /// controls are the effect sheet.
+    pub(crate) fn open_effect(&mut self, slot: usize, index: usize) {
+        match self.effect_double_click {
+            crate::app::settings::EffectOpen::Editor => {
+                if self.select_path(slot) {
+                    self.open_plugin_editor(index);
+                }
+            }
+            crate::app::settings::EffectOpen::Controls => {
+                self.open_sheet(crate::app::screen::Sheet::Effect { path: slot, index });
+            }
+        }
+    }
+
+    /// Moves effect `index` of path `slot` by `delta` places, the others
+    /// closing up behind it (a drag, or Alt+↑ / Alt+↓).  An open effect
+    /// sheet and the selection follow the effect.
+    pub(crate) fn move_effect(&mut self, slot: usize, index: usize, delta: isize) {
+        if !self.select_path(slot) {
+            return;
+        }
+        let count = self.engine.plugin_views(slot).len();
+        if index >= count {
+            return;
+        }
+        let target = (index as isize + delta).clamp(0, count as isize - 1) as usize;
+        if target == index {
+            return;
+        }
+        // The chain swaps neighbours, so a longer move is one step at a time.
+        let step = if target > index { 1 } else { -1 };
+        let mut at = index;
+        while at != target {
+            self.move_plugin(at, step);
+            at = (at as isize + step) as usize;
+        }
+        let follow = |at: usize| {
+            if at == index {
+                target
+            } else if index < at && at <= target {
+                at - 1
+            } else if target <= at && at < index {
+                at + 1
+            } else {
+                at
+            }
+        };
+        if let crate::app::chain::ChainSelection::Plugin(at) = self.chain_selected {
+            self.chain_selected = crate::app::chain::ChainSelection::Plugin(follow(at));
+        }
+        if let Some(crate::app::screen::Sheet::Effect { path, index: at }) = self.chrome.sheet {
+            if path == slot {
+                self.chrome.sheet = Some(crate::app::screen::Sheet::Effect {
+                    path,
+                    index: follow(at),
+                });
+            }
+        }
+    }
+
+    /// Removes effect `index` of path `slot`.  Its sheet closes; a later
+    /// effect's sheet follows it up.
+    pub(crate) fn remove_effect(&mut self, slot: usize, index: usize) {
+        if !self.select_path(slot) || index >= self.engine.plugin_views(slot).len() {
+            return;
+        }
+        self.remove_plugin(index);
+        let count = self.engine.plugin_views(slot).len();
+        self.chain_selected = self.chain_selected.after_removal(index, count);
+        if let Some(crate::app::screen::Sheet::Effect { path, index: at }) = self.chrome.sheet {
+            if path == slot {
+                self.chrome.sheet = match at.cmp(&index) {
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some(crate::app::screen::Sheet::Effect {
+                        path,
+                        index: at - 1,
+                    }),
+                    std::cmp::Ordering::Less => self.chrome.sheet,
+                };
+            }
         }
     }
 

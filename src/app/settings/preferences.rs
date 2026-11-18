@@ -180,6 +180,11 @@ pub(crate) struct Preferences {
     /// `prefer_plugin_interface` key.
     #[serde(default, skip_serializing_if = "effect_open_is_editor")]
     pub(crate) effect_double_click: EffectOpen,
+    /// The metronome channels an output had when its *Metronome* toggle
+    /// was last switched off; switching one on restores them where they
+    /// fit.  Missing on older saves, and omitted while unused (0).
+    #[serde(default, skip_serializing_if = "click_mask_unused")]
+    pub(crate) last_click_mask: u8,
 }
 
 /// What a double-click on an effect opens.  An unknown value reads as the
@@ -194,6 +199,10 @@ pub(crate) enum EffectOpen {
 
 fn effect_open_is_editor(open: &EffectOpen) -> bool {
     *open == EffectOpen::Editor
+}
+
+fn click_mask_unused(mask: &u8) -> bool {
+    *mask == 0
 }
 
 fn sheet_height_unset(height: &f32) -> bool {
@@ -270,6 +279,7 @@ impl Default for Preferences {
             effect_recent: Vec::new(),
             sheet_height: 0.0,
             effect_double_click: EffectOpen::Editor,
+            last_click_mask: 0,
         }
     }
 }
@@ -768,6 +778,7 @@ pub(crate) const PREFERENCES_KEY: &str = "rigwerk-preferences";
 /// working when pages are added or reordered.
 pub(crate) fn page_key(page: Page) -> &'static str {
     match page {
+        Page::Console => "console",
         Page::Live => "live",
         Page::Mixer => "mixer",
         Page::Tuner => "tuner",

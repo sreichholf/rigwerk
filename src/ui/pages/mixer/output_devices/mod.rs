@@ -367,7 +367,7 @@ impl RigWerkApp {
     }
 
     /// Add-output list: PipeWire / ALSA on Linux, WASAPI (+ VB-Cable) on Windows.
-    pub(super) fn add_output_inspector(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn add_output_inspector(&mut self, ui: &mut egui::Ui) {
         let clock_name = self.selected_output().name.clone();
         let pw_clock = self.pipewire_extra_outputs_enabled();
         let asio_clock = self.clock_is_asio();

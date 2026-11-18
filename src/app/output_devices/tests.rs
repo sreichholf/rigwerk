@@ -1,4 +1,6 @@
-use super::{click_channels, device_channel_count, loudest};
+use super::{
+    click_channels, default_click_mask, device_channel_count, loudest, OutputBadge, PlaysClick,
+};
 use crate::app::blank_app;
 use crate::app::devices::inventory_fingerprint;
 use crate::app::settings::ExtraOutputPref;
@@ -196,4 +198,174 @@ fn a_extra_output_reading_needs_a_running_bridge_and_a_stream() {
         app.extra_output_reading(crate::audio::MAX_EXTRA_OUTPUTS),
         None
     );
+}
+
+/// The blank app with a four-channel extra output (device 1).
+fn with_quad_output() -> crate::app::RigWerkApp {
+    let mut app = blank_app();
+    app.inventory.outputs.push(output("alsa:hw:Main", "Main"));
+    app.output_idx = 0;
+    let mut quad = output("alsa:hw:Quad", "Quad");
+    quad.channels = 4;
+    app.inventory.outputs.push(quad);
+    app.extra_outputs.push(ExtraOutputPref {
+        id: "alsa:hw:Quad".to_owned(),
+        backend: "ALSA".to_owned(),
+        name: "Quad".to_owned(),
+        ..ExtraOutputPref::default()
+    });
+    app
+}
+
+#[test]
+fn a_plays_dot_fills_an_empty_map_and_clears_a_plain_one() {
+    use crate::audio::ChannelMap;
+    let mut app = with_quad_output();
+    app.extra_outputs[0].settings.path_map[0].map = ChannelMap { left: 0, right: 0 };
+    assert!(!app.path_reaches_device(0, 1));
+    assert_eq!(app.click_plays(1, 0), PlaysClick::Applied);
+    assert_eq!(
+        app.extra_outputs[0].settings.path_map[0].map,
+        ChannelMap::default()
+    );
+    assert!(app.path_reaches_device(0, 1));
+    assert_eq!(app.click_plays(1, 0), PlaysClick::Cleared);
+    assert!(!app.path_reaches_device(0, 1));
+    assert_eq!(
+        app.click_plays(1, 3),
+        PlaysClick::Nothing,
+        "no path in slot 3"
+    );
+}
+
+#[test]
+fn a_plays_dot_never_clears_a_custom_map() {
+    use crate::app::screen::Sheet;
+    use crate::audio::ChannelMap;
+    let mut app = with_quad_output();
+    let custom = ChannelMap {
+        left: 0b0101,
+        right: 0b1010,
+    };
+    app.extra_outputs[0].settings.path_map[0].map = custom;
+    assert_eq!(app.click_plays(1, 0), PlaysClick::OpenSheet);
+    assert_eq!(app.extra_outputs[0].settings.path_map[0].map, custom);
+    app.press_plays(1, 0);
+    assert_eq!(app.chrome.sheet, Some(Sheet::Output { output: 1 }));
+    assert_eq!(app.extra_outputs[0].settings.path_map[0].map, custom);
+}
+
+#[test]
+fn a_plays_dot_ignores_bits_past_the_device() {
+    use crate::audio::ChannelMap;
+    let mut app = blank_app();
+    // Out 1/2, plus 3/4 kept from a wider device the clock output was.
+    app.clock_output.path_map[0].map = ChannelMap {
+        left: 0b0101,
+        right: 0b1010,
+    };
+    assert_eq!(app.click_plays(0, 0), PlaysClick::Cleared);
+    assert_eq!(
+        app.clock_output.path_map[0].map,
+        ChannelMap {
+            left: 0b0100,
+            right: 0b1000
+        },
+        "the hidden bits stay"
+    );
+}
+
+#[test]
+fn the_metronome_toggle_moves_only_the_click_channels() {
+    let mut app = with_quad_output();
+    let map = app.extra_outputs[0].settings.path_map;
+    assert!(!app.metronome_on(1));
+    app.toggle_metronome(1);
+    assert_eq!(
+        app.extra_outputs[0].settings.click_mask, 0b1100,
+        "3 and 4 on four channels"
+    );
+    assert!(app.metronome_on(1));
+    app.toggle_metronome(0);
+    assert_eq!(app.clock_output.click_mask, 0b0011, "1 and 2 on two");
+    // Off remembers the channels, on restores them where they fit.
+    app.extra_outputs[0].settings.click_mask = 0b0110;
+    app.toggle_metronome(1);
+    assert_eq!(app.extra_outputs[0].settings.click_mask, 0);
+    assert_eq!(app.last_click_mask, 0b0110);
+    app.toggle_metronome(1);
+    assert_eq!(app.extra_outputs[0].settings.click_mask, 0b0110);
+    app.toggle_metronome(0);
+    app.toggle_metronome(0);
+    assert_eq!(
+        app.clock_output.click_mask, 0b0011,
+        "what fits a stereo output"
+    );
+    assert_eq!(app.extra_outputs[0].settings.path_map, map, "routing stays");
+}
+
+#[test]
+fn the_metronome_falls_back_by_channel_count() {
+    assert_eq!(default_click_mask(8), 0b1100);
+    assert_eq!(default_click_mask(4), 0b1100);
+    assert_eq!(default_click_mask(2), 0b0011);
+    assert_eq!(default_click_mask(1), 0b0001);
+    // A native PipeWire output takes two click channels at most.
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        default_click_mask(click_channels("pipewire:sink", 8)),
+        0b0011
+    );
+}
+
+#[test]
+fn strips_badge_the_clock_and_the_extra_outputs() {
+    let mut app = with_quad_output();
+    assert_eq!(app.output_badge(0), OutputBadge::Clock);
+    assert_eq!(app.output_badge(1), OutputBadge::Extra);
+    app.engine.state = EngineState::Running;
+    app.snapshot.extra_output_missing[0] = true;
+    assert_eq!(app.output_badge(1), OutputBadge::Missing);
+    assert!(OutputBadge::Missing.warns());
+    app.inventory
+        .outputs
+        .retain(|device| device.id != "alsa:hw:Quad");
+    app.snapshot.extra_output_missing[0] = false;
+    assert_eq!(app.output_badge(1), OutputBadge::Missing, "not listed");
+}
+
+#[test]
+fn the_buffer_line_reads_what_the_device_opened() {
+    let mut app = with_quad_output();
+    app.low_latency_output = false;
+    app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
+    let chosen = if cfg!(target_os = "windows") {
+        "Shared"
+    } else {
+        "Standard"
+    };
+    assert_eq!(app.output_buffer_line(0), chosen);
+    app.engine.state = EngineState::Running;
+    app.snapshot.opened_output_mode = Some(crate::audio::OutputMode::LowLatency);
+    app.snapshot.output_rate = 48_000;
+    app.snapshot.output_step_frames = 128;
+    assert_eq!(app.output_buffer_line(0), "Low latency · 2.7 ms");
+    assert_eq!(app.output_buffer_line(1), "auto");
+    app.snapshot.extra_output_rates[0] = 48_000;
+    app.snapshot.extra_output_target_frames[0] = 254;
+    assert_eq!(app.output_buffer_line(1), "auto 5.3 ms");
+}
+
+#[test]
+fn output_level_and_mute_stay_in_range() {
+    let mut app = with_quad_output();
+    app.set_output_level(1, 40.0);
+    assert_eq!(
+        app.extra_outputs[0].settings.level_db,
+        crate::audio::DEVICE_LEVEL_MAX_DB
+    );
+    app.set_output_level(0, f32::NAN);
+    assert_eq!(app.clock_output.level_db, 0.0);
+    app.set_output_mute(1, true);
+    assert!(app.extra_outputs[0].settings.mute);
 }

@@ -453,21 +453,27 @@ impl RigWerkApp {
                     .show(ui, |ui| {
                         ui.set_width((width - 24.0).max(0.0));
                         ui.set_min_height(drawer.height());
+                        let drawer = self.chrome.drawer;
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Issues")
-                                    .font(font(Face::Sans, TypeRole::Title))
-                                    .color(colours.text)
-                                    .strong(),
-                            );
+                            // The browser's own header names its path.
+                            if drawer == Some(Drawer::Issues) {
+                                ui.label(
+                                    RichText::new("Issues")
+                                        .font(font(Face::Sans, TypeRole::Title))
+                                        .color(colours.text)
+                                        .strong(),
+                                );
+                            }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("×").on_hover_text("Close").clicked() {
                                     self.close_drawer();
                                 }
                             });
                         });
-                        if self.chrome.drawer == Some(Drawer::Issues) {
-                            self.issues_strip(ui, width);
+                        match drawer {
+                            Some(Drawer::Issues) => self.issues_strip(ui, width),
+                            Some(Drawer::Browser) => self.effect_browser(ui),
+                            None => {}
                         }
                     });
             });
@@ -475,6 +481,7 @@ impl RigWerkApp {
 }
 
 const CLASSIC: &[(&str, Page)] = &[
+    ("Console", Page::Console),
     ("Live", Page::Live),
     ("Mixer", Page::Mixer),
     ("Routing", Page::Routing),

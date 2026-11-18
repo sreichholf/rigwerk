@@ -48,6 +48,9 @@ use crate::audio::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
+    /// The home screen of the rewrite: Input, the paths, Master and the
+    /// outputs side by side.
+    Console,
     Live,
     Mixer,
     Tuner,
@@ -195,6 +198,8 @@ pub struct RigWerkApp {
     pub(crate) ui_size: f32,
     /// What a double-click on an effect opens.
     pub(crate) effect_double_click: settings::EffectOpen,
+    /// The click channels an output's *Metronome* toggle last switched off.
+    pub(crate) last_click_mask: u8,
     /// Sheet, drawer, session draft and the error banner.
     pub(crate) chrome: screen::Chrome,
     /// The audible flag [`Self::apply_metronome`] last pushed, so a frame
@@ -479,6 +484,7 @@ impl RigWerkApp {
             effect_favourites: self.plugin_browser.favourites.clone(),
             effect_recent: self.plugin_browser.recent.clone(),
             sheet_height: self.chrome.sheet_height,
+            last_click_mask: self.last_click_mask,
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -558,6 +564,7 @@ impl RigWerkApp {
             theme: preferences.theme,
             ui_size: preferences.ui_size,
             effect_double_click: preferences.effect_double_click,
+            last_click_mask: preferences.last_click_mask,
             chrome: screen::Chrome::at_launch(preferences.sheet_height),
             metronome_pushed: None,
             drift: preferences.drift,
@@ -827,6 +834,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         theme: appearance::ThemeChoice::System,
         ui_size: appearance::UI_SIZE_DEFAULT,
         effect_double_click: settings::EffectOpen::Editor,
+        last_click_mask: 0,
         chrome: screen::Chrome::default(),
         metronome_pushed: None,
         drift: true,

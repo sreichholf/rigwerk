@@ -114,6 +114,18 @@ impl PathInfo {
     }
 }
 
+/// The slot with the most DSP time of `(slot, average ns)`; the first of
+/// a tie.  `None` when nothing was measured.
+pub(crate) fn heaviest_path(times: &[(usize, u64)]) -> Option<usize> {
+    let mut heaviest: Option<(usize, u64)> = None;
+    for &(slot, time) in times {
+        if heaviest.is_none_or(|(_, most)| time > most) {
+            heaviest = Some((slot, time));
+        }
+    }
+    heaviest.filter(|(_, most)| *most > 0).map(|(slot, _)| slot)
+}
+
 impl RigWerkApp {
     /// The live path slots in display order.  Never empty.
     pub(crate) fn path_slots(&self) -> Vec<usize> {
@@ -508,6 +520,74 @@ impl RigWerkApp {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
             path.mix.routes = routes;
         }
+    }
+
+    /// What the *Source* button reads: the inputs feeding path `slot` and
+    /// *mono* or *stereo* (`In 1 · mono`, `In 1 + In 2 · stereo`), then
+    /// `· L only` or `· R only` while one path output is off.
+    pub(crate) fn source_label(&self, slot: usize) -> String {
+        let Some(path) = self.paths.get(slot).and_then(Option::as_ref) else {
+            return String::new();
+        };
+        let mix = &path.mix;
+        let fed = |input: usize| mix.routes[input][0] || mix.routes[input][1];
+        let inputs = match (fed(0), fed(1)) {
+            (true, true) => "In 1 + In 2",
+            (true, false) => "In 1",
+            (false, true) => "In 2",
+            (false, false) => "No input",
+        };
+        let mut label = format!("{inputs} · {}", if mix.mono { "mono" } else { "stereo" });
+        match mix.output_enabled {
+            [true, false] => label.push_str(" · L only"),
+            [false, true] => label.push_str(" · R only"),
+            [false, false] => label.push_str(" · silent"),
+            [true, true] => {}
+        }
+        label
+    }
+
+    /// One cell of path `slot`'s source grid: whether input `input` (0 is
+    /// *In 1*) feeds its `side` (0 is L).
+    pub(crate) fn set_path_source(&mut self, slot: usize, input: usize, side: usize, on: bool) {
+        if input >= 2 || side >= 2 {
+            return;
+        }
+        if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
+            path.mix.routes[input][side] = on;
+        }
+    }
+
+    /// *Remove* in a path's name menu, a two-click confirm: the first click
+    /// arms it (`false`), the second removes the path (`true` once it is
+    /// gone).  Arming another path disarms the first.
+    pub(crate) fn request_remove_path(&mut self, slot: usize) -> bool {
+        if self.chrome.remove_confirm != Some(slot) {
+            self.chrome.remove_confirm = Some(slot);
+            return false;
+        }
+        self.chrome.remove_confirm = None;
+        self.remove_path(slot)
+    }
+
+    /// The path whose strip carries the DSP marker: the one with the
+    /// largest share of the block, while the total DSP alarm is raised.
+    pub(crate) fn dsp_marker_path(&self) -> Option<usize> {
+        self.issue_state.dsp.severity()?;
+        let times: Vec<(usize, u64)> = self
+            .path_slots()
+            .into_iter()
+            .filter_map(|slot| Some((slot, u64::from(self.engine.path_dsp_time(slot)?.avg_ns))))
+            .collect();
+        heaviest_path(&times)
+    }
+
+    /// Whether a shown issue is about path `slot` (it plays nowhere).
+    pub(crate) fn path_has_issue(&self, slot: usize) -> bool {
+        self.issue_view()
+            .visible
+            .iter()
+            .any(|issue| issue.key == crate::app::issues::IssueKey::RoutedNowhere(slot))
     }
 
     /// The output devices' settings (0 = clock output, then extra outputs).

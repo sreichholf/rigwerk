@@ -84,10 +84,12 @@ impl Sheet {
     }
 }
 
-/// Right-hand drawer.  The effect browser arrives with its own step.
+/// Right-hand drawer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Drawer {
     Issues,
+    /// The effect browser (`docs/ui-spec.md` §6.3).
+    Browser,
 }
 
 /// Which part of Setup a status-bar click asked for.
@@ -138,6 +140,12 @@ pub(crate) struct Chrome {
     pub(crate) issue_seen: usize,
     pub(crate) issue_pulse: Option<Instant>,
     pub(crate) setup_section: Option<SetupSection>,
+    /// The path whose *Remove* was clicked once and waits for the second.
+    pub(crate) remove_confirm: Option<usize>,
+    /// A path the console should scroll into view (step 5).
+    pub(crate) reveal_path: Option<usize>,
+    /// The open stage should be scrolled into view in its chain.
+    pub(crate) follow_stage: bool,
 }
 
 impl Default for Chrome {
@@ -156,6 +164,9 @@ impl Default for Chrome {
             issue_seen: 0,
             issue_pulse: None,
             setup_section: None,
+            remove_confirm: None,
+            reveal_path: None,
+            follow_stage: false,
         }
     }
 }
@@ -203,6 +214,7 @@ impl RigWerkApp {
     }
 
     pub(crate) fn open_issues(&mut self) {
+        self.close_drawer();
         self.chrome.drawer = Some(Drawer::Issues);
         self.chrome.sheet = None;
     }
@@ -223,8 +235,10 @@ impl RigWerkApp {
         self.chrome.setup_section = None;
     }
 
+    /// Closes the drawer.  The effect browser closes with it.
     pub(crate) fn close_drawer(&mut self) {
         self.chrome.drawer = None;
+        self.plugin_browser.open = false;
     }
 
     pub(crate) fn close_sheet(&mut self) {
@@ -244,8 +258,12 @@ impl RigWerkApp {
         if let Some((_, stage)) = sheet.stage() {
             self.select_chain(ChainSelection::from_stage(stage));
         }
+        if let Some(path) = sheet.path() {
+            self.chrome.reveal_path = Some(path);
+        }
+        self.chrome.follow_stage = true;
         self.chrome.sheet = Some(sheet);
-        self.chrome.drawer = None;
+        self.close_drawer();
     }
 
     /// The stage sheet ‹ (`forward` false) or › opens: the stage before or
@@ -317,7 +335,7 @@ impl RigWerkApp {
             return true;
         }
         if self.chrome.drawer.is_some() {
-            self.chrome.drawer = None;
+            self.close_drawer();
             return true;
         }
         if self.chrome.sheet.is_some() {

@@ -21,8 +21,8 @@ mod slider;
     reason = "the console calls these in a later step"
 )]
 pub(crate) use chain_row::{
-    add_effect_row, bypass_all, chain_event, chain_row, effects_header, ChainEvent, ChainMark,
-    ChainRow, EffectDrag,
+    add_effect_row, bypass_all, chain_event, chain_row, dashed_rect, effects_header, ChainEvent,
+    ChainMark, ChainRow, EffectDrag, CHAIN_ROW_H,
 };
 #[allow(
     dead_code,

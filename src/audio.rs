@@ -165,6 +165,7 @@ pub use path::{
 pub(crate) use plugins::vst3_fixture;
 pub(crate) use plugins::PluginHandle;
 pub(crate) use plugins::MAX_ALIGN;
+pub(crate) use plugins::MAX_EFFECTS;
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
 pub(crate) use shared::{ExtraOutputLink, ExtraOutputPlan, SCOPE_LEN};

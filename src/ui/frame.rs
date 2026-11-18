@@ -93,23 +93,28 @@ impl eframe::App for RigWerkApp {
             )
             .show(root, |ui| self.status_bar(ui));
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(colours.bg).inner_margin(Margin {
+        // The console lays out to the window edge: 12 pt padding (spec §5.2).
+        let margin = if self.page == Page::Console {
+            Margin::same(12)
+        } else {
+            Margin {
                 left: 26,
                 right: 26,
                 top: 16,
                 bottom: 12,
-            }))
+            }
+        };
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(colours.bg).inner_margin(margin))
             .show(root, |ui| {
-                // Mixer and Plugins scroll inside their own panes and fill the
-                // remaining height, so they stay outside the page ScrollArea.
-                if matches!(self.page, Page::Mixer | Page::Plugins) {
-                    if self.page == Page::Mixer {
-                        self.mixer_page(ui);
-                    } else {
-                        self.plugins_page(ui);
-                    }
-                    return;
+                // The console, Mixer and Plugins scroll inside their own panes
+                // and fill the remaining height, so they stay outside the page
+                // ScrollArea.
+                match self.page {
+                    Page::Console => return self.console_page(ui),
+                    Page::Mixer => return self.mixer_page(ui),
+                    Page::Plugins => return self.plugins_page(ui),
+                    _ => {}
                 }
                 let mut page_scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
                 if let Some(offset) = self
@@ -125,6 +130,7 @@ impl eframe::App for RigWerkApp {
                         ui.add_space(4.0);
                     }
                     match self.page {
+                        Page::Console => self.console_page(ui),
                         Page::Live => self.live_page(ui, &ctx),
                         Page::Mixer => self.mixer_page(ui),
                         Page::Tuner => self.tuner_page(ui),
@@ -303,13 +309,14 @@ impl RigWerkApp {
         }
     }
 
-    /// Save, the tuner, Setup, and Esc for the innermost overlay.
+    /// Save, the tuner, Setup, the effect browser (Ctrl+F) and Esc for the
+    /// innermost overlay.
     /// A text field keeps the keys.  Command is Ctrl on Windows and Linux.
     pub(crate) fn handle_shell_keys(&mut self, ctx: &egui::Context) {
         if ctx.text_edit_focused() {
             return;
         }
-        let (escape, save_as, save, tuner, setup) = ctx.input_mut(|input| {
+        let (escape, save_as, save, tuner, setup, find) = ctx.input_mut(|input| {
             (
                 take_chord(input, egui::Modifiers::NONE, egui::Key::Escape),
                 take_chord(
@@ -320,8 +327,14 @@ impl RigWerkApp {
                 take_chord(input, egui::Modifiers::COMMAND, egui::Key::S),
                 take_chord(input, egui::Modifiers::COMMAND, egui::Key::T),
                 take_chord(input, egui::Modifiers::COMMAND, egui::Key::Comma),
+                take_chord(input, egui::Modifiers::COMMAND, egui::Key::F),
             )
         });
+        if find {
+            let path = self.selected_path;
+            let count = self.engine.plugin_views(path).len();
+            self.open_effect_browser(path, count);
+        }
         if save_as {
             self.chrome.session_draft = Some(crate::app::screen::SessionDraft::SaveAs(
                 self.session_name.clone(),

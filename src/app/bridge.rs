@@ -574,6 +574,39 @@ impl RigWerkApp {
         self.engine.set_gains(self.input_gain, self.output_gain);
     }
 
+    /// The input gain, clamped to its range and pushed now.
+    pub(crate) fn set_input_gain(&mut self, gain_db: f32) {
+        let gain_db = if gain_db.is_nan() { 0.0 } else { gain_db };
+        self.input_gain = gain_db.clamp(
+            crate::app::settings::INPUT_GAIN_MIN_DB,
+            crate::app::settings::INPUT_GAIN_MAX_DB,
+        );
+        self.apply_gains();
+    }
+
+    /// The master level, clamped to its range and pushed now.
+    pub(crate) fn set_master_level(&mut self, level_db: f32) {
+        let level_db = if level_db.is_nan() { 0.0 } else { level_db };
+        self.output_gain = level_db.clamp(
+            crate::app::settings::OUTPUT_GAIN_MIN_DB,
+            crate::app::settings::OUTPUT_GAIN_MAX_DB,
+        );
+        self.apply_gains();
+    }
+
+    /// *In 1* (`index` 0) or *In 2* on or off.  The frame pushes it.
+    pub(crate) fn set_input_channel(&mut self, index: usize, on: bool) {
+        if let Some(channel) = self.input_channels.get_mut(index) {
+            *channel = on;
+        }
+    }
+
+    /// Input monitoring.  Off, the master plays silence; the metronome
+    /// keeps playing.  The frame pushes it.
+    pub(crate) fn set_monitor(&mut self, on: bool) {
+        self.monitor = on;
+    }
+
     /// Whether the click plays.  The master mute leaves it ticking, but the
     /// tuner's auto-mute silences it with the rig: tuning needs quiet.
     pub(crate) fn metronome_audible(&self) -> bool {

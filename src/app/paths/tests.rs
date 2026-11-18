@@ -387,3 +387,54 @@ fn the_gate_reduction_reads_the_snapshot_only_while_the_bridge_runs() {
     assert_eq!(app.gate_reduction_db(0), 0.0);
     assert_eq!(app.gate_reduction_db(crate::audio::MAX_PATHS), 0.0);
 }
+
+#[test]
+fn the_source_button_names_the_inputs_and_the_mode() {
+    let mut app = blank_app();
+    assert_eq!(app.source_label(0), "In 1 + In 2 · stereo");
+    app.set_path_source(0, 1, 1, false);
+    app.set_path_source(0, 0, 1, true);
+    app.set_path_mono(0, true);
+    assert_eq!(app.source_label(0), "In 1 · mono");
+    app.path_mut().mix.output_enabled = [true, false];
+    assert_eq!(app.source_label(0), "In 1 · mono · L only");
+    app.path_mut().mix.output_enabled = [false, true];
+    assert_eq!(app.source_label(0), "In 1 · mono · R only");
+    app.set_path_source(0, 0, 0, false);
+    app.set_path_source(0, 0, 1, false);
+    app.set_path_source(0, 1, 0, true);
+    app.path_mut().mix.output_enabled = [true, true];
+    assert_eq!(app.source_label(0), "In 2 · mono");
+    app.set_path_source(0, 2, 0, true);
+    assert_eq!(
+        app.paths[0].as_ref().unwrap().mix.routes[1],
+        [true, false, false, false]
+    );
+    assert_eq!(app.source_label(3), "");
+}
+
+#[test]
+fn removing_a_path_takes_two_clicks() {
+    let mut app = blank_app();
+    let second = app.add_path().expect("a free slot");
+    assert!(!app.request_remove_path(second), "the first click arms it");
+    assert!(app.paths[second].is_some());
+    assert!(
+        !app.request_remove_path(0),
+        "another path disarms the first"
+    );
+    assert!(!app.request_remove_path(second));
+    assert!(app.request_remove_path(second));
+    assert!(app.paths[second].is_none());
+    assert_eq!(app.chrome.remove_confirm, None);
+}
+
+#[test]
+fn the_dsp_marker_goes_to_the_heaviest_path() {
+    use super::heaviest_path;
+    assert_eq!(heaviest_path(&[(0, 10), (2, 30), (1, 30)]), Some(2));
+    assert_eq!(heaviest_path(&[(0, 0)]), None);
+    assert_eq!(heaviest_path(&[]), None);
+    let app = blank_app();
+    assert_eq!(app.dsp_marker_path(), None, "no alarm");
+}

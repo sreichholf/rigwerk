@@ -242,3 +242,19 @@ fn a_frame_pushes_the_click_only_when_the_tuner_layer_changes() {
     app.follow_metronome_audible();
     assert!(shared_running(&app).load(Ordering::Relaxed));
 }
+
+#[test]
+fn console_levels_are_clamped_and_switches_stored() {
+    let mut app = crate::app::blank_app();
+    app.set_input_gain(100.0);
+    assert_eq!(app.input_gain, crate::app::settings::INPUT_GAIN_MAX_DB);
+    app.set_master_level(f32::NAN);
+    assert_eq!(app.output_gain, 0.0);
+    app.set_master_level(-100.0);
+    assert_eq!(app.output_gain, crate::app::settings::OUTPUT_GAIN_MIN_DB);
+    app.set_input_channel(1, false);
+    assert_eq!(app.input_channels, [true, false]);
+    app.set_input_channel(5, false);
+    app.set_monitor(false);
+    assert!(!app.monitor);
+}

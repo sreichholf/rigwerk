@@ -493,7 +493,7 @@ pub(crate) fn add_effect_row(ui: &mut egui::Ui, enabled: bool) -> egui::Response
     response
 }
 
-fn dashed_rect(painter: &egui::Painter, rect: Rect, colour: egui::Color32) {
+pub(crate) fn dashed_rect(painter: &egui::Painter, rect: Rect, colour: egui::Color32) {
     let stroke = Stroke::new(1.0, colour);
     dash_h(painter, rect.left(), rect.right(), rect.top(), stroke);
     dash_h(painter, rect.left(), rect.right(), rect.bottom(), stroke);
