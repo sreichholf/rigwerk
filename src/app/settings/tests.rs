@@ -1551,3 +1551,244 @@ fn ui_size_is_sanitized_on_load_and_an_unknown_theme_is_system() {
     assert_eq!(loaded.theme, ThemeChoice::System);
     assert_eq!(loaded.ui_size, 1.1);
 }
+
+/// One output's settings with every stored field set by hand.
+fn golden_device(level_db: f32, click_mask: u8) -> OutputDeviceSettings {
+    let mut path_map = [crate::audio::PathMapSettings::default(); crate::audio::MAX_PATHS];
+    path_map[0] = crate::audio::PathMapSettings {
+        map: ChannelMap {
+            left: 0b0101,
+            right: 0b1010,
+        },
+        level_db: -2.5,
+        invert: true,
+        trim_ms: 1.25,
+    };
+    path_map[1] = crate::audio::PathMapSettings::unrouted();
+    OutputDeviceSettings {
+        level_db,
+        mute: true,
+        unused: UnusedChannels::Silent,
+        path_map,
+        align: false,
+        click_mask,
+    }
+}
+
+fn golden_extra_output(virtual_output: bool) -> ExtraOutputPref {
+    let (id, backend, name) = if virtual_output {
+        (VIRTUAL_OUTPUT_ID, "PipeWire", VIRTUAL_OUTPUT_NAME)
+    } else {
+        ("hw:Phones", "ALSA", "Phones")
+    };
+    ExtraOutputPref {
+        id: id.to_owned(),
+        backend: backend.to_owned(),
+        name: name.to_owned(),
+        settings: golden_device(-3.0, 0b0011),
+        bridge_buffer_mode: 2,
+        bridge_buffer_ms: 12.5,
+        virtual_output,
+        virtual_output_on: virtual_output,
+    }
+}
+
+fn golden_path(name: &str) -> PathPref {
+    let mut eq = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    eq.bands[1].gain_db = -3.5;
+    eq.bands[2].on = false;
+    let mut eq_post = EqSettings::default();
+    eq_post.bands[4].q = 1.5;
+    let mut verb = plugin("C:/Plugins/Verb.clap", PluginFormat::Clap);
+    verb.state =
+        ron::from_str(r#"Some((version: 1, data: "AAEC/w==", params: [(id: 7, value: 0.25)]))"#)
+            .expect("state");
+    PathPref {
+        name: name.to_owned(),
+        colour: 2,
+        routes: [[true, false, true, false], [false, true, false, true]],
+        mono: true,
+        output_channels: [true, false],
+        eq,
+        eq_post,
+        gate: GateSettings {
+            enabled: true,
+            slot: GateSlot::Pre,
+            threshold_db: -45.0,
+            range_db: -60.0,
+            hysteresis_db: 6.0,
+            attack_ms: 2.0,
+            release_ms: 150.0,
+            hold_ms: 20.0,
+        },
+        plugins: vec![
+            PluginPref {
+                path: "/usr/lib/vst3/Amp.vst3".to_owned(),
+                format: PluginFormat::Vst3,
+                class_id: None,
+                name: "Amp".to_owned(),
+                vendor: "Vendor".to_owned(),
+                category: "Fx|Distortion".to_owned(),
+                bypass: false,
+                mix: 0.75,
+                params: Vec::new(),
+                state: None,
+            },
+            verb,
+        ],
+        chain_bypass: true,
+        level_db: -4.0,
+        mute: true,
+        solo: true,
+    }
+}
+
+fn golden_session() -> Session {
+    Session {
+        name: "Clean".to_owned(),
+        note: "ASIO → WASAPI".to_owned(),
+        input: "Focusrite USB ASIO".to_owned(),
+        input_id: "asio:focusrite".to_owned(),
+        input_backend: "ASIO".to_owned(),
+        output: "Speakers".to_owned(),
+        output_id: "wasapi:{speakers}".to_owned(),
+        output_backend: "WASAPI".to_owned(),
+        rate: 96_000,
+        buffer: 64,
+        output_rate: 48_000,
+        output_buffer: 256,
+        eq: None,
+        eq_post: None,
+        gate: None,
+        input_gain: 3.0,
+        output_gain: -6.0,
+        input_channels: [true, false],
+        output_channels: [true, true],
+        mono: false,
+        mute: true,
+        monitor: false,
+        drift: false,
+        low_latency_output: false,
+        wasapi_output_mode: Some(WasapiOutputMode::Exclusive),
+        routes: [[true, false, false, false], [false, true, false, false]],
+        bridge_buffer_mode: 2,
+        bridge_buffer_ms: 6.0,
+        plugins: Vec::new(),
+        paths: vec![golden_path("Lead")],
+        clock_output: golden_device(-1.0, 0b0100),
+        extra_outputs: vec![golden_extra_output(false)],
+    }
+}
+
+/// The preferences behind `testdata/preferences.ron`.  Every field is set
+/// by hand, none from `Default` (which differs by platform), and every
+/// optional part is present, so the saved text is the same on every build.
+fn golden_preferences() -> Preferences {
+    Preferences {
+        schema_version: PREFERENCES_SCHEMA,
+        auto_start_bridge: true,
+        sessions: vec![golden_session()],
+        session_name: "Gig".to_owned(),
+        page: "mixer".to_owned(),
+        eq_edit: 1,
+        output_tab_low_latency: true,
+        selected_session: Some(0),
+        asio_name: Some("Focusrite USB ASIO".to_owned()),
+        asio_id: "asio:focusrite".to_owned(),
+        asio_backend: "ASIO".to_owned(),
+        input_name: Some("Scarlett 2i2".to_owned()),
+        input_id: "alsa:hw:2".to_owned(),
+        input_backend: "ALSA".to_owned(),
+        output_name: Some("Speakers".to_owned()),
+        output_id: "pipewire:speakers".to_owned(),
+        output_backend: "PipeWire".to_owned(),
+        use_asio_input: false,
+        sample_rate: 96_000,
+        buffer_size: 64,
+        input_gain: 2.5,
+        output_gain: -3.0,
+        input_channels: [true, false],
+        output_channels: [true, true],
+        mono: false,
+        mute: true,
+        drift: false,
+        monitor: false,
+        low_latency_output: false,
+        wasapi_output_mode: Some(WasapiOutputMode::RealStyle),
+        routes: [[true, false, false, false], [false, true, false, false]],
+        output_rate: 48_000,
+        output_buffer: 256,
+        bridge_buffer_mode: 1,
+        bridge_buffer_ms: 8.5,
+        eq: EqSettings::default(),
+        eq_post: EqSettings::default(),
+        gate: GateSettings::default(),
+        plugins: Vec::new(),
+        paths: vec![golden_path("Clean"), golden_path("Drive")],
+        selected_path: 1,
+        clock_output: golden_device(-6.0, 0b0001),
+        extra_outputs: vec![golden_extra_output(false), golden_extra_output(true)],
+        measured_latency: Some(measured_latency()),
+        tuner_tuning: "drop-d".to_owned(),
+        tuner_reference_hz: 442.0,
+        tuner_channel: 2,
+        tuner_display: 1,
+        tuner_listen: 1,
+        tuner_auto_mute: false,
+        tuner_tolerance: 2,
+        record_folder: "/home/me/Takes".to_owned(),
+        record_click: true,
+        metronome_running: false,
+        metronome_bpm: 96.0,
+        metronome_rhythm: crate::audio::ClickRhythm::SixEight,
+        metronome_level_db: -18.0,
+        theme: ThemeChoice::Light,
+        ui_size: 1.2,
+    }
+}
+
+/// What this build saves for [`golden_preferences`], plus a final newline.
+const GOLDEN: &str = include_str!("testdata/preferences.ron");
+
+/// Pins the saved format: field names, variant names and how values are
+/// spelled.  A rename in the code keeps these bytes with `#[serde(rename)]`,
+/// so old and new builds keep reading each other's files.  Do not edit the
+/// golden file to make this pass.
+#[test]
+fn the_stored_format_matches_the_golden_file() {
+    let raw = stored(&golden_preferences());
+    assert!(
+        GOLDEN == format!("{raw}\n"),
+        "the saved preferences changed:\n{raw}"
+    );
+}
+
+#[test]
+fn the_golden_file_loads_and_round_trips() {
+    let raw = GOLDEN.strip_suffix('\n').expect("one line");
+    let read: Preferences = ron::from_str(raw).expect("golden");
+    assert_eq!(stored(&read), raw);
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    assert!(loaded.backup.is_none());
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.sessions.len(), 1);
+    assert_eq!(back.sessions[0].paths, vec![golden_path("Lead")]);
+    assert_eq!(
+        back.sessions[0].extra_outputs,
+        vec![golden_extra_output(false)]
+    );
+    assert_eq!(back.sessions[0].bridge_buffer_mode, 2);
+    assert_eq!(back.paths, vec![golden_path("Clean"), golden_path("Drive")]);
+    assert_eq!(back.clock_output, golden_device(-6.0, 0b0001));
+    assert_eq!(back.extra_outputs.len(), 2);
+    assert_eq!(back.extra_outputs[0], golden_extra_output(false));
+    assert!(back.extra_outputs[1].virtual_output && back.extra_outputs[1].virtual_output_on);
+    assert_eq!(back.measured_latency, Some(measured_latency()));
+    assert_eq!(back.bridge_buffer_mode, 1);
+    assert_eq!(back.bridge_buffer_ms, 8.5);
+    assert_eq!(back.tuner_tuning, "drop-d");
+}
