@@ -642,6 +642,14 @@ impl RigWerkApp {
         sanitize_effect_ids(&mut self.plugin_browser.recent, true);
     }
 
+    /// Puts a stand-in effect on path `slot` for a screenshot of the effect
+    /// sheet, when the chain is empty.  Screenshot runs only.
+    pub(crate) fn add_screenshot_effect(&mut self, slot: usize) {
+        if self.screenshot.is_some() && self.engine.plugin_views(slot).is_empty() {
+            let _ = self.engine.add_plugin(slot, screenshot_effect());
+        }
+    }
+
     /// Opens the browser for a `RIGWERK_DRAWER=browser` screenshot.  The
     /// drawer host is not in this build, so the Mixer draws the column.
     /// An empty library is filled with sample rows so the column is not

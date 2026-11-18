@@ -110,3 +110,59 @@ fn effect_point_follows_selected_plugin() {
     assert_eq!(ChainSelection::Plugins.plugin_effect_at(3), None);
     assert_eq!(ChainSelection::PreEq.plugin_effect_at(3), None);
 }
+
+#[test]
+fn the_chain_is_in_signal_order_with_the_gate_where_its_slot_says() {
+    use super::{chain_stages, ChainStage::*};
+    use crate::audio::GateSlot;
+    assert_eq!(
+        chain_stages(2, GateSlot::Post),
+        [PreEq, Effect(0), Effect(1), Gate, PostEq]
+    );
+    assert_eq!(
+        chain_stages(2, GateSlot::Pre),
+        [PreEq, Gate, Effect(0), Effect(1), PostEq]
+    );
+    assert_eq!(chain_stages(0, GateSlot::Post), [PreEq, Gate, PostEq]);
+}
+
+#[test]
+fn neighbours_walk_the_chain_and_stop_at_its_ends() {
+    use super::{neighbour_stage, ChainStage::*};
+    use crate::audio::GateSlot;
+    let next = |stage, gate| neighbour_stage(stage, 1, gate, true);
+    let previous = |stage, gate| neighbour_stage(stage, 1, gate, false);
+    assert_eq!(next(PreEq, GateSlot::Pre), Some(Gate));
+    assert_eq!(next(Gate, GateSlot::Pre), Some(Effect(0)));
+    assert_eq!(next(Effect(0), GateSlot::Pre), Some(PostEq));
+    assert_eq!(next(Effect(0), GateSlot::Post), Some(Gate));
+    assert_eq!(previous(PostEq, GateSlot::Post), Some(Gate));
+    assert_eq!(previous(Gate, GateSlot::Post), Some(Effect(0)));
+    assert_eq!(next(PostEq, GateSlot::Post), None);
+    assert_eq!(previous(PreEq, GateSlot::Post), None);
+    assert_eq!(next(Effect(4), GateSlot::Post), None, "not in the chain");
+}
+
+#[test]
+fn stages_switch_on_and_off_per_path() {
+    use super::ChainStage;
+    let mut app = crate::app::blank_app();
+    assert!(app.stage_on(0, ChainStage::PreEq));
+    app.set_stage_on(0, ChainStage::PreEq, false);
+    assert!(!app.paths[0].as_ref().unwrap().mix.eqs[0].enabled);
+    assert!(app.paths[0].as_ref().unwrap().mix.eqs[1].enabled);
+    app.set_stage_on(0, ChainStage::Gate, true);
+    assert!(app.stage_on(0, ChainStage::Gate));
+    app.engine.restore_plugins(
+        0,
+        vec![crate::audio::PluginPref {
+            name: "A".to_owned(),
+            path: "a.vst3".to_owned(),
+            ..Default::default()
+        }],
+    );
+    app.set_stage_on(0, ChainStage::Effect(0), false);
+    assert!(app.engine.plugin_views(0)[0].bypass);
+    assert!(!app.stage_on(0, ChainStage::Effect(0)));
+    assert!(!app.stage_on(3, ChainStage::PreEq), "no path in slot 3");
+}

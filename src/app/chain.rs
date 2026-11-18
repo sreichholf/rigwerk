@@ -1,9 +1,56 @@
-//! Which Mixer stage is selected.
+//! Which Mixer stage is selected, and the order of a path's chain.
 //!
 //! This is navigation state on [`RigWerkApp`](crate::app::RigWerkApp), not
-//! paint.  Stage colours stay in `ui`.
+//! paint.  Stage colours stay in `ui`.  [`chain_stages`] is the signal
+//! order the console draws and the sheet's ‹ › walk: the gate sits before
+//! or after the effects as its slot says.
 
-use crate::audio::EqSlot;
+use crate::audio::{EqSlot, GateSlot};
+
+/// One stage of a path's chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChainStage {
+    PreEq,
+    Gate,
+    /// The effect at this index of the path's chain.
+    Effect(usize),
+    PostEq,
+}
+
+/// A chain's stages in the order the sound passes them: *Pre EQ*, the gate
+/// when it sits before the effects, the effects, the gate when after, and
+/// *Post EQ*.
+pub(crate) fn chain_stages(effects: usize, gate: GateSlot) -> Vec<ChainStage> {
+    let mut stages = Vec::with_capacity(effects + 3);
+    stages.push(ChainStage::PreEq);
+    if gate == GateSlot::Pre {
+        stages.push(ChainStage::Gate);
+    }
+    stages.extend((0..effects).map(ChainStage::Effect));
+    if gate == GateSlot::Post {
+        stages.push(ChainStage::Gate);
+    }
+    stages.push(ChainStage::PostEq);
+    stages
+}
+
+/// The stage after `current` (`forward`) or before it.  `None` at either
+/// end, and for an effect index the chain does not have.
+pub(crate) fn neighbour_stage(
+    current: ChainStage,
+    effects: usize,
+    gate: GateSlot,
+    forward: bool,
+) -> Option<ChainStage> {
+    let stages = chain_stages(effects, gate);
+    let at = stages.iter().position(|stage| *stage == current)?;
+    if forward {
+        stages.get(at + 1).copied()
+    } else {
+        at.checked_sub(1)
+            .and_then(|before| stages.get(before).copied())
+    }
+}
 
 /// What the Mixer inspector (and Live chips) currently point at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,12 +141,72 @@ impl ChainSelection {
         }
     }
 
+    /// The selection that marks `stage` in the Mixer and on the console.
+    pub(crate) fn from_stage(stage: ChainStage) -> Self {
+        match stage {
+            ChainStage::PreEq => Self::PreEq,
+            ChainStage::Gate => Self::Gate,
+            ChainStage::Effect(index) => Self::Plugin(index),
+            ChainStage::PostEq => Self::PostEq,
+        }
+    }
+
     /// Where a newly added effect should land. `None` means append.
     pub(crate) fn plugin_effect_at(self, plugin_count: usize) -> Option<usize> {
         match self {
             Self::Plugin(index) => Some((index + 1).min(plugin_count)),
             Self::Plugins => None,
             _ => None,
+        }
+    }
+}
+
+impl crate::app::RigWerkApp {
+    /// Marks `selection` in the Mixer and on the console.  An EQ is also
+    /// remembered as the one shown last (`eq_edit`).
+    pub(crate) fn select_chain(&mut self, selection: ChainSelection) {
+        self.chain_selected = selection;
+        if let Some(slot) = selection.eq_slot() {
+            self.eq_edit = slot;
+        }
+    }
+
+    /// Whether `stage` of path `slot` is on, or bypassed.  An effect that
+    /// failed to load keeps its own switch; its row shows the failure.
+    /// `false` for a path or an effect that is not there.
+    pub(crate) fn stage_on(&self, slot: usize, stage: ChainStage) -> bool {
+        let Some(path) = self.paths.get(slot).and_then(Option::as_ref) else {
+            return false;
+        };
+        match stage {
+            ChainStage::PreEq => path.mix.eqs[0].enabled,
+            ChainStage::PostEq => path.mix.eqs[1].enabled,
+            ChainStage::Gate => path.mix.gate.enabled,
+            ChainStage::Effect(index) => self
+                .engine
+                .plugin_views(slot)
+                .get(index)
+                .is_some_and(|view| !view.bypass),
+        }
+    }
+
+    /// Switches `stage` of path `slot` on, or bypasses it.  An EQ keeps its
+    /// bands and the gate its settings; an effect keeps its latency.
+    pub(crate) fn set_stage_on(&mut self, slot: usize, stage: ChainStage, on: bool) {
+        if let ChainStage::Effect(index) = stage {
+            if self.paths.get(slot).is_some_and(Option::is_some) {
+                self.set_plugin_bypass(slot, index, !on);
+            }
+            return;
+        }
+        let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) else {
+            return;
+        };
+        match stage {
+            ChainStage::PreEq => path.mix.eqs[0].enabled = on,
+            ChainStage::PostEq => path.mix.eqs[1].enabled = on,
+            ChainStage::Gate => path.mix.gate.enabled = on,
+            ChainStage::Effect(_) => {}
         }
     }
 }

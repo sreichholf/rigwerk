@@ -1,4 +1,4 @@
-use super::format_ms;
+use super::{format_ms, Sheet};
 use crate::app::settings::rate_label;
 
 #[test]
@@ -8,4 +8,125 @@ fn times_and_rates_follow_the_scale() {
     assert_eq!(format_ms(13.4), "13 ms");
     assert_eq!(rate_label(48_000), "48 kHz");
     assert_eq!(rate_label(44_100), "44.1 kHz");
+}
+
+fn with_effects(names: &[&str]) -> crate::app::RigWerkApp {
+    let app = crate::app::blank_app();
+    app.engine.restore_plugins(
+        0,
+        names
+            .iter()
+            .map(|name| crate::audio::PluginPref {
+                name: (*name).to_owned(),
+                path: format!("{name}.vst3"),
+                ..Default::default()
+            })
+            .collect(),
+    );
+    app
+}
+
+#[test]
+fn a_stage_sheet_selects_its_path_and_marks_its_stage() {
+    use crate::app::chain::ChainSelection;
+    let mut app = with_effects(&["A"]);
+    let second = app.add_path().expect("a free slot");
+    app.select_path(0);
+    app.open_issues();
+    app.open_sheet(Sheet::Eq {
+        path: second,
+        post: true,
+    });
+    assert_eq!(app.selected_path, second);
+    assert_eq!(app.chain_selected, ChainSelection::PostEq);
+    assert_eq!(app.chrome.drawer, None, "a sheet closes the drawer");
+    app.open_sheet(Sheet::Effect { path: 0, index: 0 });
+    assert_eq!(app.selected_path, 0);
+    assert_eq!(app.chain_selected, ChainSelection::Plugin(0));
+    let before = app.chrome.sheet;
+    app.open_sheet(Sheet::Gate { path: 3 });
+    assert_eq!(app.chrome.sheet, before, "no path in slot 3");
+}
+
+#[test]
+fn previous_and_next_walk_the_chain_in_signal_order() {
+    use crate::audio::GateSlot;
+    let mut app = with_effects(&["A", "B"]);
+    app.path_mut().mix.gate.slot = GateSlot::Pre;
+    app.open_sheet(Sheet::Eq {
+        path: 0,
+        post: false,
+    });
+    assert_eq!(app.sheet_neighbour(false), None);
+    let mut seen = vec![app.chrome.sheet.unwrap()];
+    while app.step_sheet(true) {
+        seen.push(app.chrome.sheet.unwrap());
+    }
+    assert_eq!(
+        seen,
+        [
+            Sheet::Eq {
+                path: 0,
+                post: false
+            },
+            Sheet::Gate { path: 0 },
+            Sheet::Effect { path: 0, index: 0 },
+            Sheet::Effect { path: 0, index: 1 },
+            Sheet::Eq {
+                path: 0,
+                post: true
+            },
+        ]
+    );
+    app.path_mut().mix.gate.slot = GateSlot::Post;
+    assert!(app.step_sheet(false));
+    assert_eq!(app.chrome.sheet, Some(Sheet::Gate { path: 0 }));
+    app.open_sheet(Sheet::Path { path: 0 });
+    assert_eq!(app.sheet_neighbour(true), None, "only stages step");
+}
+
+#[test]
+fn a_sheet_closes_when_what_it_edits_is_gone() {
+    let mut app = with_effects(&["A"]);
+    let second = app.add_path().expect("a free slot");
+    app.open_sheet(Sheet::Path { path: second });
+    app.remove_path(second);
+    app.tidy_sheet();
+    assert_eq!(app.chrome.sheet, None);
+    app.open_sheet(Sheet::Effect { path: 0, index: 0 });
+    app.tidy_sheet();
+    assert!(app.chrome.sheet.is_some());
+    app.remove_plugin(0);
+    app.tidy_sheet();
+    assert_eq!(app.chrome.sheet, None);
+    app.chrome.sheet = Some(Sheet::Output { output: 1 });
+    app.tidy_sheet();
+    assert_eq!(app.chrome.sheet, None, "no extra output");
+    app.chrome.sheet = Some(Sheet::Output { output: 0 });
+    app.tidy_sheet();
+    assert!(app.chrome.sheet.is_some(), "the clock output stays");
+}
+
+#[test]
+fn sheet_keys_name_every_sheet() {
+    assert_eq!(
+        Sheet::from_key("eq", 2),
+        Some(Sheet::Eq {
+            path: 2,
+            post: false
+        })
+    );
+    assert_eq!(Sheet::from_key("Gate", 1), Some(Sheet::Gate { path: 1 }));
+    assert_eq!(
+        Sheet::from_key("effect", 0),
+        Some(Sheet::Effect { path: 0, index: 0 })
+    );
+    assert_eq!(Sheet::from_key("path", 0), Some(Sheet::Path { path: 0 }));
+    assert_eq!(
+        Sheet::from_key("output", 0),
+        Some(Sheet::Output { output: 0 })
+    );
+    assert_eq!(Sheet::from_key(" scope ", 0), Some(Sheet::Scope));
+    assert_eq!(Sheet::from_key("diagnostics", 0), Some(Sheet::Diagnostics));
+    assert_eq!(Sheet::from_key("mixer", 0), None);
 }

@@ -937,6 +937,25 @@ impl RigWerkApp {
         }
     }
 
+    /// Output device `device`'s map alone: what the output sheet shows
+    /// until its own body lands.
+    pub(crate) fn routing_device_panel(&mut self, ui: &mut egui::Ui, device: usize) {
+        let rows = self.output_device_rows();
+        let Some(row) = rows.get(device) else {
+            return;
+        };
+        let infos = self.path_infos();
+        let mut actions = Vec::new();
+        let mut edits = Vec::new();
+        self.routing_device_map(ui, row, device, &infos, &mut actions, &mut edits);
+        for edit in edits {
+            self.apply_map_edit(device, edit);
+        }
+        for action in actions {
+            self.apply_routing_action(action);
+        }
+    }
+
     fn routing_device_list(
         &self,
         ui: &mut egui::Ui,

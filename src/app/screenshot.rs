@@ -102,6 +102,7 @@ impl RigWerkApp {
             if let Some(stage) = super::initial_mixer_stage() {
                 self.select_chain(stage);
             }
+            self.open_sheet_for_screenshot();
             if screenshot_start() {
                 self.start_bridge();
             }

@@ -366,6 +366,7 @@ impl RigWerkApp {
     }
 
     pub(crate) fn sheet_host(&mut self, ctx: &egui::Context) {
+        self.tidy_sheet();
         if self.chrome.sheet.is_none() {
             return;
         }
@@ -403,25 +404,8 @@ impl RigWerkApp {
                             handle.0.center().y,
                             Stroke::new(2.0, colours.line2),
                         );
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Diagnostics")
-                                    .font(font(Face::Sans, TypeRole::Title))
-                                    .color(colours.text)
-                                    .strong(),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("×").on_hover_text("Close").clicked() {
-                                    self.close_sheet();
-                                }
-                            });
-                        });
-                        if self.chrome.sheet == Some(Sheet::Diagnostics) {
-                            egui::ScrollArea::vertical()
-                                .id_salt("diagnostics_sheet")
-                                .max_height((height - 64.0).max(40.0))
-                                .show(ui, |ui| self.diagnostics_page(ui));
-                        }
+                        self.sheet_header(ui);
+                        self.sheet_body(ui, (height - 64.0).max(40.0));
                     });
             });
     }
