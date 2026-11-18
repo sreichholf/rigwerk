@@ -1,8 +1,65 @@
 //! Small controls shared by several screens: cards, labels, buttons, tabs,
 //! meters, sliders and the device picker.
+//!
+//! The console kit (fader, meter, chain row, segmented control, chip, path
+//! dot, popover) follows `docs/ui-spec.md` §4.  Those modules read
+//! [`palette`] and [`font`]; the helpers below still paint the old pages.
 
+mod chain_row;
+mod chip;
+mod dot;
+mod fader;
+mod meter;
 mod path;
+mod popover;
+mod segmented;
 mod slider;
+
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the console calls these in a later step"
+)]
+pub(crate) use chain_row::{
+    add_effect_row, bypass_all, chain_event, chain_row, effects_header, ChainEvent, ChainMark,
+    ChainRow, EffectDrag,
+};
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the console calls these in a later step"
+)]
+pub(crate) use chip::chip;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the console calls these in a later step"
+)]
+pub(crate) use dot::path_dot;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the console calls these in a later step"
+)]
+pub(crate) use fader::{fader, fader_height, format_level, parse_level, FaderRange};
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the console calls these in a later step"
+)]
+pub(crate) use meter::{horizontal_meter, vertical_meter, MeterChannel};
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the console calls these in a later step"
+)]
+pub(crate) use popover::popover;
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the console calls these in a later step"
+)]
+pub(crate) use segmented::segmented;
 
 pub(crate) use path::{colour_swatch, nav_path_item, path_chip, path_level_text, path_toggle};
 pub(crate) use slider::{db_slider, row_info, show_focus_ring, styled_slider};
@@ -20,8 +77,21 @@ use crate::audio::DeviceItem;
 use crate::ui::icons::{paint_icon, Icon};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, TEAL, TEXT,
+    palette, with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, TEAL,
+    TEXT,
 };
+
+/// Accent ring on a focused control, from the active palette.
+pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(1.5, palette(ui.ctx()).accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
 
 pub(crate) fn card<R>(
     ui: &mut egui::Ui,
