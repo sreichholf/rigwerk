@@ -108,9 +108,6 @@ pub(crate) struct Preferences {
     pub(crate) paths: Vec<PathPref>,
     /// The path the Mixer and Plugins pages edit (a position in `paths`).
     pub(crate) selected_path: usize,
-    /// Open a plugin's own interface directly instead of RigWerk's control
-    /// panel, when the plugin has one that can be embedded.
-    pub(crate) prefer_plugin_interface: bool,
     /// Level, mute and channel map of the clock device (`output_id`).
     pub(crate) clock_device: OutputDeviceSettings,
     /// Extra output devices.  An entry that cannot be read is skipped.
@@ -201,7 +198,6 @@ impl Default for Preferences {
             plugins: Vec::new(),
             paths: Vec::new(),
             selected_path: 0,
-            prefer_plugin_interface: false,
             clock_device: OutputDeviceSettings::default(),
             followers: Vec::new(),
             measured_latency: None,

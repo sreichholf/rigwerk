@@ -1,7 +1,6 @@
 //! Plugins: browse installed VST3 and CLAP effects. The insert chain itself
 //! lives on the Mixer rack; this page is the library.
 
-use crate::app::LogTone;
 use eframe::egui;
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense,
@@ -442,7 +441,7 @@ impl RigWerkApp {
                             && ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("Open plugin interface")
+                                        RichText::new("Open editor")
                                             .size(ts(9.0))
                                             .color(if gui_is_open { MUTED } else { BLUE }),
                                     )
@@ -455,7 +454,7 @@ impl RigWerkApp {
                                     .min_size(Vec2::new(150.0, 26.0)),
                                 )
                                 .on_hover_text(
-                                    "Open the interface the plugin draws itself. Changes made there are saved with this insert too.",
+                                    "Open the editor the plugin draws itself. Changes made there are saved with this insert too.",
                                 )
                                 .clicked()
                         {
@@ -494,7 +493,7 @@ impl RigWerkApp {
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(if has_editor {
-                                "Use Open plugin interface above; its settings are saved with this insert."
+                                "Use Open editor above; its settings are saved with this insert."
                             } else if error.is_some() {
                                 "The effect did not load, so there is nothing to control yet."
                             } else {
@@ -701,29 +700,6 @@ impl RigWerkApp {
             );
             ui.add_space(12.0);
             ui.label(RichText::new(insert_hint).size(ts(9.5)).color(MUTED));
-            ui.add_space(12.0);
-            let mut prefer = self.prefer_plugin_interface;
-            if ui
-                .checkbox(
-                    &mut prefer,
-                    RichText::new("Prefer plugin interface")
-                        .size(ts(9.5))
-                        .color(MUTED),
-                )
-                .on_hover_text(
-                    "When an effect has its own interface that RigWerk can embed, Open plugin interface uses it instead of the host parameter panel.",
-                )
-                .changed()
-            {
-                self.prefer_plugin_interface = prefer;
-                self.push_log(
-                    if prefer {
-                        "Plugin interfaces will open directly when available."
-                    } else {
-                        "The RigWerk control panel will open first."
-                    },
-                    if prefer { LogTone::Teal } else { LogTone::Muted });
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ghost_button(ui, if scanning { "Scanning…" } else { "Rescan" }, 112.0)
                     && !scanning
@@ -820,7 +796,7 @@ impl RigWerkApp {
             ui.add_space(3.0);
             ui.label(
                 RichText::new(
-                    "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the Mixer insert chain. Edit inserts on the Mixer page — prefer each plugin's own interface when it has one.",
+                    "Standard VST3 and CLAP folders are scanned. Click a plugin to add it to the Mixer insert chain. On the Mixer page, double-click an insert to open its editor.",
                 )
                 .size(ts(9.5))
                 .color(MUTED),

@@ -40,7 +40,10 @@ pub(super) enum RackAction {
     ChainBypass(bool),
     Bypass(usize, bool),
     Mix(usize, f32),
-    Configure(usize),
+    /// The plugin's own editor, or the parameter panel when it has none.
+    Editor(usize),
+    /// RigWerk's parameter panel.
+    Parameters(usize),
     Remove(usize),
     Move(usize, isize),
     OpenPlugins,
@@ -84,7 +87,9 @@ impl RigWerkApp {
         let mut path_actions: Vec<PathAction> = Vec::new();
         let mut select: Option<ChainSelection> = None;
         let total = ui.available_width();
-        let chain_w = (total * 0.32).clamp(280.0, 340.0);
+        // Wide enough for a long insert name next to its controls; the
+        // minimum window still leaves the EQ inspector about 370 px.
+        let chain_w = (total * 0.36).clamp(400.0, 440.0);
 
         ui.horizontal(|ui| {
             ui.label(micro_label("MIXER", TEAL));
@@ -210,7 +215,8 @@ impl RigWerkApp {
                     self.set_plugin_bypass(self.selected_path, index, bypass);
                 }
                 RackAction::Mix(index, mix) => self.set_plugin_mix(index, mix),
-                RackAction::Configure(index) => self.open_plugin_editor(index),
+                RackAction::Editor(index) => self.open_plugin_editor(index),
+                RackAction::Parameters(index) => self.open_plugin_parameters(index),
                 RackAction::Remove(index) => {
                     self.remove_plugin(index);
                     self.chain_selected = self
@@ -1019,6 +1025,18 @@ fn insert_row(
                 actions.push(RackAction::Move(index, -1));
                 controls_clicked = true;
             }
+            if view.error.is_none()
+                && editor_button(ui)
+                    .on_hover_text(if view.has_editor {
+                        "Open the plugin's editor (or double-click the insert)"
+                    } else {
+                        "Open its parameters; it has no editor of its own (or double-click the insert)"
+                    })
+                    .clicked()
+            {
+                actions.push(RackAction::Editor(index));
+                controls_clicked = true;
+            }
             let bypass = view.bypass;
             if hinted_tab(
                 ui,
@@ -1044,7 +1062,10 @@ fn insert_row(
                     )
                     .truncate(),
                 )
-                .on_hover_text(view.error.clone().unwrap_or_else(|| view.path.clone()));
+                .on_hover_text(match &view.error {
+                    Some(error) => format!("{}\n{error}", view.name),
+                    None => format!("{}\n{}", view.name, view.path),
+                });
                 ui.add(
                     egui::Label::new(
                         RichText::new(match view.latency_label() {
@@ -1061,7 +1082,39 @@ fn insert_row(
             });
         });
     });
+    if row_response.double_clicked() && !controls_clicked && view.error.is_none() {
+        actions.push(RackAction::Editor(index));
+    }
     row_response.clicked() && !controls_clicked
+}
+
+/// The button that opens an insert's editor, painted as a small window
+/// (egui's default font has no icon for it).
+fn editor_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(4), with_alpha(BLUE, 30));
+    }
+    let tint = if hovered { BLUE } else { MUTED };
+    let frame = egui::Rect::from_center_size(rect.center(), Vec2::new(11.0, 9.0));
+    let stroke = Stroke::new(1.2, tint);
+    ui.painter().rect_stroke(
+        frame,
+        CornerRadius::same(2),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    let bar_y = frame.top() + 3.0;
+    ui.painter().line_segment(
+        [
+            egui::pos2(frame.left() + 1.0, bar_y),
+            egui::pos2(frame.right() - 1.0, bar_y),
+        ],
+        stroke,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The "×" that removes an insert: dim until hovered, then red, since it is
@@ -1115,7 +1168,7 @@ fn plugins_group_inspector(ui: &mut egui::Ui, views: &[PluginView], actions: &mu
     }
     ui.add_space(10.0);
     ui.label(
-        RichText::new("Select an insert row for bypass, mix, and its native interface.")
+        RichText::new("Select an insert for bypass and mix.  Double-click one to open its editor.")
             .size(ts(11.0))
             .color(MUTED),
     );
@@ -1151,15 +1204,16 @@ fn plugin_inspector(
             }
         });
     });
+    let editor = if view.has_editor {
+        "own editor"
+    } else {
+        "parameters only"
+    };
     ui.label(
         RichText::new(if view.vendor.is_empty() {
-            format!("{} · host chrome · prefer native UI", view.format.label())
+            format!("{} · {editor}", view.format.label())
         } else {
-            format!(
-                "{} · {} · host chrome · prefer native UI",
-                view.format.label(),
-                view.vendor
-            )
+            format!("{} · {} · {editor}", view.format.label(), view.vendor)
         })
         .size(ts(11.0))
         .color(DIM),
@@ -1195,29 +1249,45 @@ fn plugin_inspector(
     }
 
     ui.add_space(16.0);
-    if ui
-        .add_enabled(
-            view.error.is_none(),
-            egui::Button::new(
-                RichText::new(if view.has_editor {
-                    "Open plugin interface"
-                } else {
-                    "Open host parameters"
-                })
-                .size(ts(12.0))
-                .color(BLUE),
+    let loaded = view.error.is_none();
+    let width = ui.available_width().min(280.0);
+    if view.has_editor
+        && ui
+            .add_enabled(
+                loaded,
+                egui::Button::new(RichText::new("Open editor").size(ts(12.0)).color(BLUE))
+                    .fill(with_alpha(BLUE, 16))
+                    .stroke(Stroke::new(1.0, with_alpha(BLUE, 55)))
+                    .corner_radius(CornerRadius::same(8))
+                    .min_size(Vec2::new(width, 36.0)),
             )
+            .on_hover_text("Open the editor the plugin draws itself")
+            .clicked()
+    {
+        actions.push(RackAction::Editor(index));
+    }
+    let parameters = if view.has_editor {
+        ui.add_space(8.0);
+        egui::Button::new(RichText::new("Parameters").size(ts(11.0)).color(MUTED))
+            .fill(CARD_RAISED)
+            .stroke(Stroke::new(1.0, BORDER_SOFT))
+            .min_size(Vec2::new(width, 30.0))
+    } else {
+        egui::Button::new(RichText::new("Open parameters").size(ts(12.0)).color(BLUE))
             .fill(with_alpha(BLUE, 16))
             .stroke(Stroke::new(1.0, with_alpha(BLUE, 55)))
-            .corner_radius(CornerRadius::same(8))
-            .min_size(Vec2::new(ui.available_width().min(280.0), 36.0)),
-        )
-        .on_hover_text(
-            "Plugins are edited in their own UI when available. Host parameters are the fallback.",
-        )
+            .min_size(Vec2::new(width, 36.0))
+    };
+    if ui
+        .add_enabled(loaded, parameters.corner_radius(CornerRadius::same(8)))
+        .on_hover_text(if view.has_editor {
+            "RigWerk's list of the plugin's parameters"
+        } else {
+            "This plugin has no editor of its own; RigWerk lists its parameters"
+        })
         .clicked()
     {
-        actions.push(RackAction::Configure(index));
+        actions.push(RackAction::Parameters(index));
     }
 
     ui.add_space(10.0);
@@ -1235,11 +1305,9 @@ fn plugin_inspector(
 
     ui.add_space(14.0);
     ui.label(
-        RichText::new(
-            "The inspector stays thin for inserts on purpose — the native dialog is the editor.",
-        )
-        .size(ts(11.0))
-        .color(MUTED),
+        RichText::new("Double-click an insert in the chain to open its editor.")
+            .size(ts(11.0))
+            .color(MUTED),
     );
 }
 
