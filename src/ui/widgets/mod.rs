@@ -61,7 +61,7 @@ pub(crate) use popover::popover;
 )]
 pub(crate) use segmented::segmented;
 
-pub(crate) use path::{colour_swatch, nav_path_item, path_chip, path_level_text, path_toggle};
+pub(crate) use path::{colour_swatch, path_chip, path_level_text, path_toggle};
 pub(crate) use slider::{db_slider, row_info, show_focus_ring, styled_slider};
 
 #[cfg(test)]
@@ -212,6 +212,7 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 2.2, color);
 }
 
+#[allow(dead_code, reason = "the header pill stays until the classic pages go")]
 pub(crate) fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
@@ -304,6 +305,7 @@ pub(crate) fn arrow_button(ui: &mut egui::Ui, up: bool, color: Color32) -> egui:
     response
 }
 
+#[allow(dead_code, reason = "the sidebar row stays until the classic pages go")]
 pub(crate) fn nav_item(
     ui: &mut egui::Ui,
     icon: Icon,
@@ -675,6 +677,7 @@ pub(crate) fn small_fact(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
+#[allow(dead_code, reason = "the route line stays until the classic pages go")]
 pub(crate) fn route_summary(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
     ui.horizontal(|ui| {
         ui.label(micro_label(label, DIM));

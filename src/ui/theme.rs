@@ -198,6 +198,10 @@ pub(crate) fn palette(ctx: &egui::Context) -> &'static Palette {
 
 // What the old pages draw with: the dark tokens, whatever the theme.
 pub(crate) const BG: Color32 = DARK.bg;
+#[allow(
+    dead_code,
+    reason = "the sidebar fill stays until the classic pages go"
+)]
 pub(crate) const SIDEBAR: Color32 = DARK.bar;
 pub(crate) const CARD: Color32 = DARK.strip;
 pub(crate) const CARD_RAISED: Color32 = DARK.slot;

@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{
-    default_record_folder, folder_from_env, format_elapsed, overrun_label, record_source,
+    default_record_folder, folder_from_env, format_elapsed, lost_samples_label, record_source,
     record_source_for, recording_path, resolved_record_folder, sanitize_take_name, stamp_from_unix,
 };
 use crate::app::settings::ExtraOutputPref;
@@ -130,8 +130,8 @@ fn record_elapsed_and_overruns_are_short() {
     assert_eq!(format_elapsed(48_000, 48_000), "0:01");
     assert_eq!(format_elapsed(48_000 * 90, 48_000), "1:30");
     assert_eq!(format_elapsed(48_000 * (125 * 60 + 3), 48_000), "125:03");
-    assert_eq!(overrun_label(1), "1 overrun");
-    assert_eq!(overrun_label(3), "3 overruns");
+    assert_eq!(lost_samples_label(1), "1 lost sample");
+    assert_eq!(lost_samples_label(3), "3 lost samples");
 }
 
 struct Scratch(PathBuf);

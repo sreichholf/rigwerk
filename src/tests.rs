@@ -40,8 +40,6 @@ const PLATFORM: &[&str] = &["src/audio/linux/", "src/audio/win/"];
 /// allows a word the file no longer uses, so the list only shrinks.  Step 8
 /// empties it.
 const NOT_MIGRATED: &[(&str, &[&str])] = &[
-    // Demo device: step 4 (the shell).
-    ("src/app.rs", &["preview"]),
     // REAL-style: the output mode labels, renamed with Setup (step 3).
     // quantum and preview: step 3 (setup).
     ("src/app/bridge.rs", &["preview", "REAL-style", "quantum"]),
@@ -49,12 +47,8 @@ const NOT_MIGRATED: &[(&str, &[&str])] = &[
     ("src/app/calibration.rs", &["preview"]),
     // The output mode labels, renamed with Setup (step 3).
     ("src/app/driver_check.rs", &["REAL-style"]),
-    // quantum: the issue text, with the issues drawer (step 4).
-    ("src/app/issues.rs", &["quantum"]),
     // The output mode labels, renamed with Setup (step 3).
     ("src/app/latency.rs", &["REAL-style"]),
-    // Lost samples: step 4 (the record menu).
-    ("src/app/record.rs", &["overrun"]),
     // Demo device: step 3 (setup).
     ("src/audio/devices.rs", &["preview"]),
     // Demo device and the graph's buffer size: step 3 (setup).
@@ -63,15 +57,11 @@ const NOT_MIGRATED: &[(&str, &[&str])] = &[
     ("src/audio/output.rs", &["REAL-style"]),
     // The graph's buffer size and the mode labels: step 3 (setup).
     ("src/audio/types.rs", &["quantum", "REAL-style"]),
-    // The about text: step 4 (the shell).
-    ("src/ui/frame.rs", &["quantum", "preview"]),
     // The Devices page: step 3 (setup replaces it).
     (
         "src/ui/pages/devices.rs",
         &["preview", "endpoint", "quantum"],
     ),
-    // The Diagnostics page: step 4 (the diagnostics sheet).
-    ("src/ui/pages/diagnostics.rs", &["preview", "quantum"]),
     // The Guide page: step 3 (setup's help replaces it).
     (
         "src/ui/pages/guide.rs",
@@ -94,8 +84,6 @@ const NOT_MIGRATED: &[(&str, &[&str])] = &[
     ("src/ui/pages/mixer/output_devices/mod.rs", &["preview"]),
     // BYP: step 6 (chain rows).
     ("src/ui/pages/mixer/rack.rs", &["BYP"]),
-    // preview: step 4 (the shell).
-    ("src/ui/shell.rs", &["preview"]),
     // The demo device: step 6 (the console).
     ("src/ui/widgets/mod.rs", &["preview"]),
 ];

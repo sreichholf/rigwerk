@@ -8,13 +8,26 @@ use crate::app::settings::{
 };
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
+
+/// Saved fields a person edits, without the note or the click masks.
+fn setup_key(session: &Session) -> String {
+    let mut session = session.clone();
+    session.note.clear();
+    session.clock_output.click_mask = 0;
+    for extra in &mut session.extra_outputs {
+        extra.settings.click_mask = 0;
+    }
+    ron::ser::to_string(&session).unwrap_or_default()
+}
+
 impl RigWerkApp {
-    pub(crate) fn save_session(&mut self) {
+    /// The session `save_session` would write for the current setup.
+    pub(crate) fn capture_session(&self) -> Session {
         let input = self.active_input().clone();
         let output = self.selected_output().clone();
         let (paths, order) = self.saved_paths();
         let (clock_output, extra_outputs) = self.saved_devices(&order);
-        let session = Session {
+        Session {
             name: self.session_name.trim().to_owned(),
             note: format!("{} → {}", input.backend, output.backend),
             input: input.name,
@@ -40,9 +53,51 @@ impl RigWerkApp {
             paths,
             clock_output,
             extra_outputs,
-            // The legacy mix fields are not written.
+            // The legacy mix fields are not written.  The metronome stays a
+            // preference: applying a session does not retune it.
             ..Session::default()
+        }
+    }
+
+    /// The setup differs from the saved session of this name, or there is
+    /// no saved session with that name.  Click masks are not part of a
+    /// session, so they are left out of the comparison.
+    pub(crate) fn session_edited(&self) -> bool {
+        let Some(index) = self.session_named(&self.session_name) else {
+            return true;
         };
+        setup_key(&self.sessions[index]) != setup_key(&self.capture_session())
+    }
+
+    pub(crate) fn start_new_session(&mut self) {
+        self.session_name = "Untitled session".to_owned();
+        self.selected_session = None;
+        self.pending_delete = None;
+        self.chrome.load_confirm = None;
+        self.push_log("Started a new session.", LogTone::Muted);
+    }
+
+    pub(crate) fn rename_session(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.push_log("Give the session a name before renaming.", LogTone::Amber);
+            return;
+        }
+        if let Some(index) = self.session_named(&self.session_name) {
+            if self.session_named(name).is_some_and(|other| other != index) {
+                self.push_log(
+                    format!("A session named “{name}” is already saved."),
+                    LogTone::Amber,
+                );
+                return;
+            }
+            self.sessions[index].name = name.to_owned();
+        }
+        self.session_name = name.to_owned();
+    }
+
+    pub(crate) fn save_session(&mut self) {
+        let session = self.capture_session();
         if session.name.is_empty() {
             self.push_log("Give the session a name before saving.", LogTone::Amber);
             return;

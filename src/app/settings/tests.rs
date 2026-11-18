@@ -514,10 +514,11 @@ fn newer_layout_keeps_a_copy() {
 }
 
 #[test]
-fn the_diagnostics_page_round_trips() {
-    assert_eq!(page_key(Page::Diagnostics), "diagnostics");
-    assert!(page_from_key("diagnostics") == Page::Diagnostics);
-    assert!(page_from_key(" Diagnostics ") == Page::Diagnostics);
+fn old_session_and_diagnostics_pages_open_live() {
+    assert_eq!(page_from_key("diagnostics"), Page::Live);
+    assert_eq!(page_from_key(" Diagnostics "), Page::Live);
+    assert_eq!(page_from_key("sessions"), Page::Live);
+    assert_eq!(page_key(Page::Live), "live");
 }
 
 fn output_devices() -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
@@ -1749,6 +1750,7 @@ fn golden_preferences() -> Preferences {
         ui_size: 1.2,
         effect_favourites: Vec::new(),
         effect_recent: Vec::new(),
+        sheet_height: 0.0,
     }
 }
 

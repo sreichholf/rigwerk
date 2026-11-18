@@ -309,7 +309,7 @@ fn a_failed_quantum_change_is_one_row() {
         .note_quantum_failure("PipeWire quantum not set: test".to_owned());
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
-    assert_eq!(issues[0].title, "PipeWire did not take the quantum change");
+    assert_eq!(issues[0].title, "PipeWire did not take the buffer change");
     assert_eq!(issues[0].detail, "PipeWire quantum not set: test");
     assert_eq!(issues[0].place, "OUTPUT · Low latency");
 }
@@ -491,7 +491,7 @@ fn issues_carry_a_stable_key_and_their_card() {
     assert_eq!(quantum.show_label().as_deref(), Some("Show on Output"));
     assert_eq!(
         quantum.show_name().as_deref(),
-        Some("Show on Output: PipeWire did not take the quantum change")
+        Some("Show on Output: PipeWire did not take the buffer change")
     );
 
     app.issue_state.dropouts.update(1, Instant::now());

@@ -2,3 +2,4 @@
 //! This file only names the bodies.
 
 pub(crate) mod browser;
+pub(crate) mod issues;

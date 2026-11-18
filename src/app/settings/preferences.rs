@@ -171,6 +171,14 @@ pub(crate) struct Preferences {
     /// not written.  [`sanitize_preferences`] keeps ten.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) effect_recent: Vec<EffectId>,
+    /// Bottom sheet height in points.  0 means 40 % of the window.
+    /// Missing on older saves, and omitted while it is still the default.
+    #[serde(default, skip_serializing_if = "sheet_height_unset")]
+    pub(crate) sheet_height: f32,
+}
+
+fn sheet_height_unset(height: &f32) -> bool {
+    *height == 0.0
 }
 
 fn default_ui_size() -> f32 {
@@ -241,6 +249,7 @@ impl Default for Preferences {
             ui_size: UI_SIZE_DEFAULT,
             effect_favourites: Vec::new(),
             effect_recent: Vec::new(),
+            sheet_height: 0.0,
         }
     }
 }
@@ -646,6 +655,11 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.ui_size = sanitize_ui_size(preferences.ui_size);
     sanitize_effect_ids(&mut preferences.effect_favourites, false);
     sanitize_effect_ids(&mut preferences.effect_recent, true);
+    if !preferences.sheet_height.is_finite() || preferences.sheet_height < 0.0 {
+        preferences.sheet_height = 0.0;
+    } else if preferences.sheet_height > 0.0 {
+        preferences.sheet_height = preferences.sheet_height.clamp(300.0, 900.0);
+    }
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
     let current = preferences.paths[0].clone();
@@ -734,10 +748,8 @@ pub(crate) fn page_key(page: Page) -> &'static str {
         Page::Tuner => "tuner",
         Page::Routing => "routing",
         Page::Devices => "devices",
-        Page::Sessions => "sessions",
         Page::Plugins => "plugins",
         Page::Guide => "guide",
-        Page::Diagnostics => "diagnostics",
     }
 }
 
@@ -747,10 +759,10 @@ pub(crate) fn page_from_key(key: &str) -> Page {
         "tuner" => Page::Tuner,
         "routing" => Page::Routing,
         "devices" => Page::Devices,
-        "sessions" => Page::Sessions,
         "plugins" => Page::Plugins,
         "guide" => Page::Guide,
-        "diagnostics" => Page::Diagnostics,
+        // The old Sessions and Diagnostics pages, and the console key a
+        // newer build may have written.  Live is home until the console.
         _ => Page::Live,
     }
 }

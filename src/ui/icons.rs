@@ -7,6 +7,10 @@ use crate::ui::theme::ts;
 use crate::ui::theme::{with_alpha, BLUE, TEAL};
 
 #[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "the sidebar icons stay until the classic pages go"
+)]
 pub(crate) enum Icon {
     Wave,
     Grid,
@@ -19,6 +23,10 @@ pub(crate) enum Icon {
     Log,
 }
 
+#[allow(
+    dead_code,
+    reason = "the sidebar logo stays until the classic pages go"
+)]
 pub(crate) fn draw_logo(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
     let painter = ui.painter();

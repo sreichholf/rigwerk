@@ -134,9 +134,11 @@ opens them.
 - `src/app`: window state, startup, preferences, device selection, and
   bridge control. It does not draw. The frame shell lives in
   `ui/frame.rs`.
-- `src/ui`: egui. One module per sidebar page under `ui/pages`. Shared
-  controls live in `ui/widgets`. Colours and type scale live in
-  `ui/theme.rs`.
+- `src/ui`: egui. The title bar, status bar, banner and the sheet and
+  drawer hosts live in `ui/shell.rs`. Menus are `ui/menus`, sheets
+  `ui/sheets`, drawers `ui/drawers`. Classic pages stay under
+  `ui/pages` until each one is replaced. Shared controls live in
+  `ui/widgets`. Colours and type scale live in `ui/theme.rs`.
 - Platform code stays in `audio/linux` and `audio/win`, behind `cfg`.
   The `linux` module is also compiled for tests on other targets
   (`alsa`, `pipewire`). `duplex`, `hotplug`, and `native` stay
