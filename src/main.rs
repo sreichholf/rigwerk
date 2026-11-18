@@ -4,6 +4,9 @@ mod app;
 mod audio;
 mod ui;
 
+#[cfg(test)]
+mod tests;
+
 use std::path::PathBuf;
 
 fn parse_screenshot() -> Option<PathBuf> {
