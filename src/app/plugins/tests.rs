@@ -1,6 +1,10 @@
-use super::{candidate_from_clap, candidates_from_bundle, declared_channels};
+use super::{
+    candidate_from_clap, candidates_from_bundle, category_tag, declared_channels, position_phrase,
+    sanitize_effect_ids, visible_effects, EffectFilter, EffectId, PluginCandidate,
+};
 use crate::audio::vst3::TestBundles;
 use crate::audio::PluginFormat;
+use std::path::PathBuf;
 
 /// A module with an effect, its controller, an instrument, and an effect
 /// with neither name nor vendor.
@@ -239,4 +243,95 @@ fn an_unreadable_module_info_keeps_the_row_with_its_scan_error() {
     // A bundle with no module info at all is not an error.
     let old = dir.bundle("Old.vst3", None);
     assert_eq!(candidates_from_bundle(&old)[0].scan_error, None);
+}
+
+fn listed(name: &str, vendor: &str, category: &str) -> PluginCandidate {
+    PluginCandidate {
+        path: PathBuf::from(format!("{name}.vst3")),
+        format: PluginFormat::Vst3,
+        class_id: None,
+        name: name.to_owned(),
+        vendor: vendor.to_owned(),
+        category: category.to_owned(),
+        channels: Some(2),
+        scan_error: None,
+    }
+}
+
+fn id_of(candidate: &PluginCandidate) -> EffectId {
+    EffectId::from_candidate(candidate)
+}
+
+#[test]
+fn search_ranks_a_prefix_then_a_favourite_then_a_recent_effect() {
+    let rover = listed("Rover", "", "Delay");
+    let bedroom = listed("Bedroom", "", "Reverb");
+    let chorus = listed("Chorus", "Roland", "Modulation");
+    let amp = listed("Amp", "", "Amp");
+    let library = vec![amp.clone(), chorus.clone(), bedroom.clone(), rover.clone()];
+    let favourites = vec![id_of(&bedroom)];
+    let recent = vec![id_of(&chorus)];
+    let names: Vec<_> = visible_effects(
+        &library,
+        "ro",
+        &EffectFilter::All,
+        true,
+        true,
+        &favourites,
+        &recent,
+    )
+    .into_iter()
+    .map(|candidate| candidate.name.as_str())
+    .collect();
+    // "ro" is a prefix of Rover, inside Bedroom, and inside the maker Roland.
+    // Amp does not match.  Bedroom is a favourite, so it comes before Chorus.
+    assert_eq!(names, ["Rover", "Bedroom", "Chorus"]);
+}
+
+#[test]
+fn the_recent_list_keeps_the_latest_ten_and_drops_duplicates() {
+    let mut recent: Vec<EffectId> = (0..12)
+        .map(|index| EffectId {
+            path: format!("e{index}.vst3"),
+            format: PluginFormat::Vst3,
+            class_id: None,
+            name: format!("Effect {index}"),
+        })
+        .collect();
+    recent.push(recent[3].clone());
+    sanitize_effect_ids(&mut recent, true);
+    assert_eq!(recent.len(), 10);
+    assert_eq!(recent.last().unwrap().name, "Effect 3");
+    assert!(recent
+        .iter()
+        .all(|id| id.name != "Effect 0" && id.name != "Effect 1"));
+}
+
+#[test]
+fn favourites_keep_the_first_of_each_effect() {
+    let room = listed("Room", "", "Reverb");
+    let mut favourites = vec![id_of(&room), id_of(&room)];
+    favourites[1].name = "room".to_owned();
+    favourites.push(EffectId {
+        path: "  ".to_owned(),
+        format: PluginFormat::Clap,
+        class_id: None,
+        name: " ".to_owned(),
+    });
+    sanitize_effect_ids(&mut favourites, false);
+    assert_eq!(favourites.len(), 1);
+    assert_eq!(favourites[0].name, "Room");
+}
+
+#[test]
+fn the_position_line_names_the_effect_before_the_gap() {
+    let names = vec!["Limiter Stereo".to_owned()];
+    assert_eq!(position_phrase(&names, 0), "at the start");
+    assert_eq!(position_phrase(&names, 1), "after Limiter Stereo");
+    assert_eq!(position_phrase(&[], 0), "at the start");
+    assert_eq!(
+        position_phrase(&["Limiter Stereo".to_owned(), "Room".to_owned()], 1),
+        "after Limiter Stereo"
+    );
+    assert_eq!(category_tag("Delay · Stereo"), "Delay");
 }

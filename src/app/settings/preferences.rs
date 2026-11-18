@@ -8,6 +8,7 @@ use super::serde_util::{skip_unreadable, skip_unreadable_option};
 use super::session::Session;
 use crate::app::appearance::{sanitize_ui_size, ThemeChoice, UI_SIZE_DEFAULT};
 use crate::app::latency::MeasuredLatency;
+use crate::app::plugins::{sanitize_effect_ids, EffectId};
 use crate::app::Page;
 use crate::audio::{
     BufferMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings, PluginPref,
@@ -163,6 +164,13 @@ pub(crate) struct Preferences {
     /// [`sanitize_preferences`].  Missing on older saves → 1.0.
     #[serde(default = "default_ui_size")]
     pub(crate) ui_size: f32,
+    /// Effects the browser keeps starred.  Empty is not written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) effect_favourites: Vec<EffectId>,
+    /// The last effects added from the browser, newest last.  Empty is
+    /// not written.  [`sanitize_preferences`] keeps ten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) effect_recent: Vec<EffectId>,
 }
 
 fn default_ui_size() -> f32 {
@@ -231,6 +239,8 @@ impl Default for Preferences {
             metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
             theme: ThemeChoice::System,
             ui_size: UI_SIZE_DEFAULT,
+            effect_favourites: Vec::new(),
+            effect_recent: Vec::new(),
         }
     }
 }
@@ -634,6 +644,8 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.metronome_level_db =
         crate::audio::clamp_click_level_db(preferences.metronome_level_db);
     preferences.ui_size = sanitize_ui_size(preferences.ui_size);
+    sanitize_effect_ids(&mut preferences.effect_favourites, false);
+    sanitize_effect_ids(&mut preferences.effect_recent, true);
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
     let current = preferences.paths[0].clone();

@@ -1747,6 +1747,8 @@ fn golden_preferences() -> Preferences {
         metronome_level_db: -18.0,
         theme: ThemeChoice::Light,
         ui_size: 1.2,
+        effect_favourites: Vec::new(),
+        effect_recent: Vec::new(),
     }
 }
 

@@ -473,6 +473,8 @@ impl RigWerkApp {
             metronome_level_db: self.metronome_level_db,
             theme: self.theme,
             ui_size: self.ui_size,
+            effect_favourites: self.plugin_browser.favourites.clone(),
+            effect_recent: self.plugin_browser.recent.clone(),
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -672,6 +674,9 @@ impl RigWerkApp {
             app.select_chain(stage);
         }
         // egui restored its own memory before this; the saved preference wins.
+        // Track B: the effect browser's starred and recent effects.
+        app.plugin_browser.favourites = preferences.effect_favourites.clone();
+        app.plugin_browser.recent = preferences.effect_recent.clone();
         app.apply_appearance(&cc.egui_ctx, theme_override());
         app.apply_gains();
         app.apply_metronome();

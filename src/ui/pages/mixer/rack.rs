@@ -46,7 +46,9 @@ pub(super) enum RackAction {
     Parameters(usize),
     Remove(usize),
     Move(usize, isize),
-    OpenPlugins,
+    /// Open the effect browser, inserting at this index (the chain length
+    /// means after the last effect).
+    OpenBrowser(usize),
     OpenLive,
     Path(PathAction),
 }
@@ -121,7 +123,11 @@ impl RigWerkApp {
                     .on_hover_text("Browse the plugin library and add an effect")
                     .clicked()
                 {
-                    actions.push(RackAction::OpenPlugins);
+                    let at = self
+                        .chain_selected
+                        .plugin_effect_at(views.len())
+                        .unwrap_or(views.len());
+                    actions.push(RackAction::OpenBrowser(at));
                 }
                 ui.add_space(8.0);
                 ui.label(mono(
@@ -238,11 +244,8 @@ impl RigWerkApp {
                         }
                     }
                 }
-                RackAction::OpenPlugins => {
-                    self.plugin_effect_at = self
-                        .chain_selected
-                        .plugin_effect_at(self.engine.plugin_views(self.selected_path).len());
-                    self.page = Page::Plugins;
+                RackAction::OpenBrowser(position) => {
+                    self.open_effect_browser(self.selected_path, position);
                 }
                 RackAction::OpenLive => self.page = Page::Live,
                 RackAction::Path(action) => self.apply_path_action(action),
@@ -434,7 +437,7 @@ impl RigWerkApp {
                         )
                         .clicked()
                     {
-                        actions.push(RackAction::OpenPlugins);
+                        actions.push(RackAction::OpenBrowser(views.len()));
                     }
                 });
 
@@ -1139,7 +1142,7 @@ fn remove_button(ui: &mut egui::Ui) -> egui::Response {
 fn plugins_group_inspector(ui: &mut egui::Ui, views: &[PluginView], actions: &mut Vec<RackAction>) {
     ui.label(RichText::new("Effects").size(ts(16.0)).color(TEXT).strong());
     ui.label(
-        RichText::new("Effect group · reorder on the left · library on the Plugins page")
+        RichText::new("Effect group · reorder on the left · add one from the browser")
             .size(ts(11.0))
             .color(DIM),
     );
@@ -1164,7 +1167,7 @@ fn plugins_group_inspector(ui: &mut egui::Ui, views: &[PluginView], actions: &mu
         )
         .clicked()
     {
-        actions.push(RackAction::OpenPlugins);
+        actions.push(RackAction::OpenBrowser(views.len()));
     }
     ui.add_space(10.0);
     ui.label(

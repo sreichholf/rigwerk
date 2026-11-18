@@ -1,5 +1,7 @@
-//! Finding VST3 and CLAP bundles and adding them to the selected path's
-//! effect chain.
+//! Finding VST3 and CLAP bundles and adding them to a path's effect chain.
+//! Favourites, recent effects, where the next one is added, and how the
+//! browser ranks its rows live here.  The screen draws them; this file
+//! does not.
 
 use crate::app::LogTone;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,221 @@ use crate::app::RigWerkApp;
 use crate::audio::clap::{self, ClapCandidate};
 use crate::audio::vst3;
 use crate::audio::{PluginFormat, PluginPref};
+
+/// How many recently used effects are kept.
+const RECENT_LIMIT: usize = 10;
+
+/// One effect in the favourites or the recent list.  The path, the format,
+/// the class and the name together name it: two classes in one bundle stay
+/// distinct.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EffectId {
+    pub(crate) path: String,
+    pub(crate) format: PluginFormat,
+    #[serde(default)]
+    pub(crate) class_id: Option<String>,
+    pub(crate) name: String,
+}
+
+impl EffectId {
+    pub(crate) fn from_candidate(candidate: &PluginCandidate) -> Self {
+        Self {
+            path: candidate.path.to_string_lossy().into_owned(),
+            format: candidate.format,
+            class_id: candidate.class_id.clone(),
+            name: candidate.name.clone(),
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.format == other.format
+            && self.class_id == other.class_id
+            && self.name.eq_ignore_ascii_case(&other.name)
+    }
+
+    pub(crate) fn matches(&self, candidate: &PluginCandidate) -> bool {
+        self.same(&Self::from_candidate(candidate))
+    }
+}
+
+/// Which slice of the library the browser is showing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum EffectFilter {
+    #[default]
+    All,
+    Favourites,
+    Recent,
+    /// The first category tag the scan reported.
+    Category(String),
+}
+
+/// Drops empty ids and duplicates.  Favourites keep the first of each.
+/// Recent keeps the latest of each, and only the last [`RECENT_LIMIT`].
+pub(crate) fn sanitize_effect_ids(ids: &mut Vec<EffectId>, recent: bool) {
+    ids.retain(|id| !id.path.trim().is_empty() && !id.name.trim().is_empty());
+    let mut kept = Vec::new();
+    if recent {
+        for id in ids.drain(..).rev() {
+            if kept.iter().any(|have: &EffectId| have.same(&id)) {
+                continue;
+            }
+            kept.push(id);
+            if kept.len() == RECENT_LIMIT {
+                break;
+            }
+        }
+        kept.reverse();
+    } else {
+        for id in ids.drain(..) {
+            if !kept.iter().any(|have: &EffectId| have.same(&id)) {
+                kept.push(id);
+            }
+        }
+    }
+    *ids = kept;
+}
+
+/// The first category tag, before a `·`.  Empty when the scan gave none.
+pub(crate) fn category_tag(category: &str) -> &str {
+    category.split('·').next().unwrap_or("").trim()
+}
+
+/// Category chips after All, Favourites and Recent, in alphabetical order.
+pub(crate) fn category_tags(library: &[PluginCandidate]) -> Vec<String> {
+    let mut tags: Vec<String> = library
+        .iter()
+        .map(|candidate| category_tag(&candidate.category).to_owned())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    tags.sort_by_key(|tag| tag.to_lowercase());
+    tags.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    tags.retain(|tag| !matches!(tag.to_lowercase().as_str(), "all" | "favourites" | "recent"));
+    tags
+}
+
+/// Where the next effect goes, as the header says it.
+pub(crate) fn position_phrase(names: &[String], position: usize) -> String {
+    if names.is_empty() || position == 0 {
+        "at the start".to_owned()
+    } else {
+        let before = position.min(names.len()) - 1;
+        format!("after {}", names[before])
+    }
+}
+
+/// The library rows the browser shows, best match first.
+///
+/// A search matches the name, the maker, the format and the category.  A
+/// name that starts with the query ranks above one that contains it, then
+/// a favourite, then a more recently used effect.  The Recent chip keeps
+/// recent order on its own.
+pub(crate) fn visible_effects<'a>(
+    library: &'a [PluginCandidate],
+    query: &str,
+    filter: &EffectFilter,
+    show_vst3: bool,
+    show_clap: bool,
+    favourites: &[EffectId],
+    recent: &[EffectId],
+) -> Vec<&'a PluginCandidate> {
+    let query = query.trim().to_lowercase();
+    let mut rows: Vec<&PluginCandidate> = library
+        .iter()
+        .filter(|candidate| format_shown(candidate.format, show_vst3, show_clap))
+        .filter(|candidate| filter_shown(candidate, filter, favourites, recent))
+        .filter(|candidate| match_rank(candidate, &query).is_some())
+        .collect();
+    if matches!(filter, EffectFilter::Recent) {
+        rows.sort_by(|left, right| {
+            recent_rank(left, recent)
+                .cmp(&recent_rank(right, recent))
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+    } else {
+        rows.sort_by(|left, right| {
+            rank_key(left, &query, favourites, recent)
+                .cmp(&rank_key(right, &query, favourites, recent))
+        });
+    }
+    rows
+}
+
+fn format_shown(format: PluginFormat, show_vst3: bool, show_clap: bool) -> bool {
+    match format {
+        PluginFormat::Vst3 => show_vst3,
+        PluginFormat::Clap => show_clap,
+    }
+}
+
+fn filter_shown(
+    candidate: &PluginCandidate,
+    filter: &EffectFilter,
+    favourites: &[EffectId],
+    recent: &[EffectId],
+) -> bool {
+    match filter {
+        EffectFilter::All => true,
+        EffectFilter::Favourites => favourites.iter().any(|id| id.matches(candidate)),
+        EffectFilter::Recent => recent.iter().any(|id| id.matches(candidate)),
+        EffectFilter::Category(tag) => category_tag(&candidate.category).eq_ignore_ascii_case(tag),
+    }
+}
+
+/// `0` is a name prefix, `1` a name containing the query, `2` another
+/// field.  `None` does not match.  An empty query matches everything as `1`.
+fn match_rank(candidate: &PluginCandidate, query: &str) -> Option<u8> {
+    if query.is_empty() {
+        return Some(1);
+    }
+    let name = candidate.name.to_lowercase();
+    if name.starts_with(query) {
+        return Some(0);
+    }
+    if name.contains(query) {
+        return Some(1);
+    }
+    let format = candidate.format.label().to_lowercase();
+    if candidate.vendor.to_lowercase().contains(query)
+        || candidate.category.to_lowercase().contains(query)
+        || format.contains(query)
+    {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// Sort key: closer name match, then favourite, then more recently used, then name.
+fn rank_key(
+    candidate: &PluginCandidate,
+    query: &str,
+    favourites: &[EffectId],
+    recent: &[EffectId],
+) -> (u8, u8, usize, String) {
+    let matched = match_rank(candidate, query).unwrap_or(3);
+    let favourite = if favourites.iter().any(|id| id.matches(candidate)) {
+        0
+    } else {
+        1
+    };
+    (
+        matched,
+        favourite,
+        recent_rank(candidate, recent),
+        candidate.name.to_lowercase(),
+    )
+}
+
+/// Newest recent effect first.  Missing ids sort last.
+fn recent_rank(candidate: &PluginCandidate, recent: &[EffectId]) -> usize {
+    recent
+        .iter()
+        .rev()
+        .position(|id| id.matches(candidate))
+        .unwrap_or(usize::MAX)
+}
+
 /// One plugin a scan found.  `class_id` is set when a bundle contains more
 /// than one audio class (VST3), or holds the plugin id (CLAP), so the right
 /// one can be opened later.
@@ -25,11 +242,9 @@ pub(crate) struct PluginCandidate {
     /// The channel count the scan read without loading the binary: CLAP
     /// features or VST3 sub-categories saying "mono" or "stereo".  `None`
     /// when they say neither.
-    #[cfg_attr(not(test), allow(dead_code))] // For the effect browser's rows.
     pub(crate) channels: Option<u32>,
     /// What went wrong reading this candidate, when the scan could still
     /// list it (a VST3 `moduleinfo.json` it could not read or parse).
-    #[cfg_attr(not(test), allow(dead_code))] // For the effect browser's rows.
     pub(crate) scan_error: Option<String>,
 }
 
@@ -44,7 +259,6 @@ fn declared_channels(tags: &[String]) -> Option<u32> {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct PluginBrowser {
     pub(crate) library: Vec<PluginCandidate>,
     pub(crate) scanning: bool,
@@ -52,6 +266,50 @@ pub(crate) struct PluginBrowser {
     pub(crate) search: String,
     pub(crate) path_input: String,
     pub(crate) notice: Option<(String, std::time::Instant)>,
+    /// The browser column is open on the Mixer.
+    pub(crate) open: bool,
+    /// Path slot new effects are added to.
+    pub(crate) path: usize,
+    /// Index in that path's chain.  The length means after the last effect.
+    pub(crate) position: usize,
+    pub(crate) filter: EffectFilter,
+    pub(crate) show_vst3: bool,
+    pub(crate) show_clap: bool,
+    /// The row ↑/↓ moves and Enter adds.
+    pub(crate) chosen: usize,
+    /// The search field takes focus on the frame the browser opens.
+    pub(crate) focus_search: bool,
+    /// The chosen row should be scrolled into view.
+    pub(crate) follow: bool,
+    pub(crate) favourites: Vec<EffectId>,
+    pub(crate) recent: Vec<EffectId>,
+    /// The screenshot hook has already opened the column.
+    pub(crate) screenshot_ready: bool,
+}
+
+impl Default for PluginBrowser {
+    fn default() -> Self {
+        Self {
+            library: Vec::new(),
+            scanning: false,
+            receiver: None,
+            search: String::new(),
+            path_input: String::new(),
+            notice: None,
+            open: false,
+            path: 0,
+            position: 0,
+            filter: EffectFilter::All,
+            show_vst3: true,
+            show_clap: true,
+            chosen: 0,
+            focus_search: false,
+            follow: false,
+            favourites: Vec::new(),
+            recent: Vec::new(),
+            screenshot_ready: false,
+        }
+    }
 }
 
 impl PluginBrowser {
@@ -195,7 +453,230 @@ fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
     found
 }
 
+/// One effect the screenshot column can show when nothing was scanned.
+fn screenshot_effect() -> PluginPref {
+    PluginPref {
+        path: "Limiter.vst3".to_owned(),
+        format: PluginFormat::Vst3,
+        class_id: Some("LIMITER".to_owned()),
+        name: "Limiter Stereo".to_owned(),
+        vendor: "Rig".to_owned(),
+        category: "Dynamics".to_owned(),
+        ..PluginPref::default()
+    }
+}
+
+fn screenshot_candidate(
+    name: &str,
+    vendor: &str,
+    category: &str,
+    format: PluginFormat,
+    channels: Option<u32>,
+    class_id: Option<&str>,
+    scan_error: Option<&str>,
+) -> PluginCandidate {
+    let path = match format {
+        PluginFormat::Vst3 => format!("{name}.vst3"),
+        PluginFormat::Clap => format!("{name}.clap"),
+    };
+    PluginCandidate {
+        path: path.into(),
+        format,
+        class_id: class_id.map(str::to_owned),
+        name: name.to_owned(),
+        vendor: vendor.to_owned(),
+        category: category.to_owned(),
+        channels,
+        scan_error: scan_error.map(str::to_owned),
+    }
+}
+
+/// Sample rows for a screenshot with no scanned library.  The first matches
+/// [`screenshot_effect`], so the row can say which path already uses it.
+fn screenshot_library() -> Vec<PluginCandidate> {
+    let mut limiter = screenshot_candidate(
+        "Limiter Stereo",
+        "Rig",
+        "Dynamics",
+        PluginFormat::Vst3,
+        Some(2),
+        Some("LIMITER"),
+        None,
+    );
+    limiter.path = "Limiter.vst3".into();
+    vec![
+        limiter,
+        screenshot_candidate(
+            "Room",
+            "Rig",
+            "Reverb",
+            PluginFormat::Vst3,
+            Some(2),
+            Some("ROOM"),
+            None,
+        ),
+        screenshot_candidate(
+            "Amp",
+            "Rig",
+            "Distortion",
+            PluginFormat::Clap,
+            Some(1),
+            Some("AMP"),
+            None,
+        ),
+        screenshot_candidate(
+            "Delay",
+            "Rig",
+            "Delay",
+            PluginFormat::Vst3,
+            None,
+            None,
+            Some("Could not read the bundle."),
+        ),
+    ]
+}
+
 impl RigWerkApp {
+    /// Opens the effect browser for `path`, inserting at `position` (the
+    /// chain length means after the last effect).  The search field is
+    /// focused on the next frame.
+    pub(crate) fn open_effect_browser(&mut self, path: usize, position: usize) {
+        let _ = self.select_path(path);
+        let count = self.engine.plugin_views(self.selected_path).len();
+        self.plugin_browser.open = true;
+        self.plugin_browser.path = self.selected_path;
+        self.plugin_browser.position = position.min(count);
+        self.plugin_browser.focus_search = true;
+        self.plugin_browser.chosen = 0;
+        self.plugin_browser.follow = true;
+        self.plugin_effect_at = Some(self.plugin_browser.position).filter(|at| *at < count);
+    }
+
+    /// The next place "change" offers, wrapping from the end to the start.
+    pub(crate) fn cycle_browser_position(&mut self) {
+        let count = self.engine.plugin_views(self.plugin_browser.path).len();
+        self.plugin_browser.position = if count == 0 || self.plugin_browser.position >= count {
+            0
+        } else {
+            self.plugin_browser.position + 1
+        };
+        self.plugin_effect_at = Some(self.plugin_browser.position).filter(|at| *at < count);
+    }
+
+    /// Adds `candidate` at the browser's position.  The browser stays open
+    /// and the next add lands after this effect.  `open_editor` opens the
+    /// effect's editor (or its controls, when it has no editor).  `false`
+    /// when the path is gone or the effect could not be added.
+    pub(crate) fn add_listed_effect(
+        &mut self,
+        candidate: &PluginCandidate,
+        open_editor: bool,
+    ) -> bool {
+        let path = self.plugin_browser.path;
+        if self
+            .paths
+            .get(path)
+            .and_then(|slot| slot.as_ref())
+            .is_none()
+        {
+            self.plugin_browser.notice = Some((
+                "Could not add: that path is not available.".to_owned(),
+                std::time::Instant::now(),
+            ));
+            return false;
+        }
+        self.selected_path = path;
+        let before = self.engine.plugin_views(path).len();
+        let target = self.plugin_browser.position.min(before);
+        self.plugin_effect_at = Some(target);
+        let Some(index) = self.add_plugin_candidate(candidate) else {
+            return false;
+        };
+        self.plugin_browser.position = index + 1;
+        let count = self.engine.plugin_views(path).len();
+        self.plugin_effect_at = Some(self.plugin_browser.position).filter(|at| *at < count);
+        self.remember_recent(candidate);
+        let name = self
+            .paths
+            .get(path)
+            .and_then(|slot| slot.as_ref())
+            .map(|slot| slot.name.clone())
+            .unwrap_or_else(|| "the path".to_owned());
+        self.plugin_browser.notice = Some((
+            format!("Added {} to {name}.", candidate.name),
+            std::time::Instant::now(),
+        ));
+        self.chain_selected = crate::app::chain::ChainSelection::Plugin(index);
+        if open_editor {
+            self.open_plugin_editor(index);
+        }
+        true
+    }
+
+    pub(crate) fn toggle_favourite(&mut self, candidate: &PluginCandidate) {
+        let id = EffectId::from_candidate(candidate);
+        if let Some(index) = self
+            .plugin_browser
+            .favourites
+            .iter()
+            .position(|have| have.same(&id))
+        {
+            self.plugin_browser.favourites.remove(index);
+        } else {
+            self.plugin_browser.favourites.push(id);
+        }
+    }
+
+    fn remember_recent(&mut self, candidate: &PluginCandidate) {
+        let id = EffectId::from_candidate(candidate);
+        self.plugin_browser.recent.retain(|have| !have.same(&id));
+        self.plugin_browser.recent.push(id);
+        sanitize_effect_ids(&mut self.plugin_browser.recent, true);
+    }
+
+    /// Opens the browser for a `RIGWERK_DRAWER=browser` screenshot.  The
+    /// drawer host is not in this build, so the Mixer draws the column.
+    /// An empty library is filled with sample rows so the column is not
+    /// blank when the machine has no scanned effects.
+    pub(crate) fn open_browser_for_screenshot(&mut self) {
+        if self.screenshot.is_none() {
+            return;
+        }
+        let Ok(value) = std::env::var("RIGWERK_DRAWER") else {
+            return;
+        };
+        if value.trim() != "browser" {
+            return;
+        }
+        if !self.plugin_browser.screenshot_ready {
+            if self.path().name == "Main" {
+                let slot = self.selected_path;
+                let _ = self.rename_path(slot, "Room");
+            }
+            let slot = self.selected_path;
+            if self.engine.plugin_views(slot).is_empty() {
+                let _ = self.engine.add_plugin(slot, screenshot_effect());
+            }
+            let count = self.engine.plugin_views(slot).len();
+            self.open_effect_browser(slot, count);
+            self.plugin_browser.screenshot_ready = true;
+        }
+        if self.plugin_browser.library.is_empty() && !self.plugin_browser.scanning {
+            self.plugin_browser.library = screenshot_library();
+            if let Some(first) = self.plugin_browser.library.first() {
+                let id = EffectId::from_candidate(first);
+                if !self
+                    .plugin_browser
+                    .favourites
+                    .iter()
+                    .any(|have| have.same(&id))
+                {
+                    self.plugin_browser.favourites.push(id);
+                }
+            }
+        }
+    }
+
     pub(crate) fn begin_plugin_scan(&mut self) {
         self.plugin_browser.start_scan();
     }
@@ -234,7 +715,7 @@ impl RigWerkApp {
         }
     }
 
-    pub(crate) fn add_plugin_candidate(&mut self, candidate: &PluginCandidate) {
+    pub(crate) fn add_plugin_candidate(&mut self, candidate: &PluginCandidate) -> Option<usize> {
         let pref = PluginPref {
             path: candidate.path.to_string_lossy().into_owned(),
             format: candidate.format,
@@ -247,7 +728,7 @@ impl RigWerkApp {
             params: Vec::new(),
             state: None,
         };
-        self.install_plugin(pref);
+        self.install_plugin(pref)
     }
 
     pub(crate) fn add_plugin_from_path(&mut self) {
@@ -265,6 +746,21 @@ impl RigWerkApp {
         }
         let candidates = candidates_from_path(&path);
         if let Some(candidate) = candidates.first() {
+            if self.plugin_browser.open {
+                let extra = candidates.len().saturating_sub(1);
+                if self.add_listed_effect(&candidate.clone(), false) && extra > 0 {
+                    self.plugin_browser.notice = Some((
+                        format!(
+                            "Added {}. The bundle also contains {extra} more effect class{}.",
+                            candidate.name,
+                            if extra == 1 { "" } else { "es" }
+                        ),
+                        std::time::Instant::now(),
+                    ));
+                }
+                self.plugin_browser.path_input.clear();
+                return;
+            }
             self.add_plugin_candidate(&candidate.clone());
             if candidates.len() > 1 {
                 // A bundle with several classes: the user can pick another
@@ -307,7 +803,7 @@ impl RigWerkApp {
         self.engine.plugin_views(self.selected_path).len() > before
     }
 
-    fn install_plugin(&mut self, pref: PluginPref) {
+    fn install_plugin(&mut self, pref: PluginPref) -> Option<usize> {
         let format = pref.format;
         let effect_at = self.plugin_effect_at.take();
         let path = self.selected_path;
@@ -335,13 +831,16 @@ impl RigWerkApp {
                     format!("Plugin added to {target}."),
                     std::time::Instant::now(),
                 ));
+                Some(index)
             }
             Err(error) => {
+                self.plugin_effect_at = effect_at;
                 self.push_log(
                     format!("Could not add {} plugin: {error}", format.label()),
                     LogTone::Red,
                 );
                 self.plugin_browser.notice = Some((error, std::time::Instant::now()));
+                None
             }
         }
     }
