@@ -8,7 +8,8 @@ license = "GPL-3.0-or-later"
 readme = "README.md"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+# accesskit exposes the widget tree to screen readers (AT-SPI, UI Automation).
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"] }
 egui = "0.37"
 serde = { version = "1", features = ["derive"] }
 # The format eframe stores preferences in; used directly so a damaged saved

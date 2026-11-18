@@ -456,8 +456,8 @@ the effect browser and the issues.  Esc or a click on the scrim closes it.
   is where today's explanations go, shortened.
 - Every control has an AccessKit label matching its visible text, or
   saying what an icon does (*Mute master*).  The UI tests find controls by
-  these labels.  Screen readers need eframe's `accesskit` feature, which
-  the build does not enable today; see §13.
+  these labels, and screen readers read them: eframe's `accesskit`
+  feature is on (AT-SPI on Linux, UI Automation on Windows).
 
 ## 5. Scaling
 
@@ -986,5 +986,6 @@ what they describe, not at the end.
 4. IBM Plex over Roboto.
 5. The window minimum stays 1040 × 700 points; below the widths in §5.2
    the paths group scrolls.
-6. Turn on eframe's `accesskit` feature for screen readers (a Cargo
-   change), or keep the labels for tests only.
+
+Decided: eframe's `accesskit` feature is on, so screen readers get the
+labels from the start.
