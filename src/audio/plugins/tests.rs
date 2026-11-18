@@ -1433,3 +1433,35 @@ fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
     path.service_plugins();
     only_view(&path);
 }
+
+/// A restart pauses the insert, and its view says so until it resumes.
+#[test]
+fn an_insert_in_a_restart_reads_paused() {
+    use super::super::clap::tests::{
+        fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
+    };
+    use super::ChainRuntime;
+    let mut chain = ChainRuntime::for_test(48_000);
+    chain.insert_clap_for_test(fake_plugin_with_latency_for_test(16));
+    let mut left = vec![0.0f32; 64];
+    let mut right = vec![0.0f32; 64];
+    chain.process(&mut left, &mut right, 64);
+    let link = chain.slot_links()[0].clone();
+    let Some(handle) = link.plugin.clone() else {
+        panic!("a CLAP insert");
+    };
+    assert!(!link.view().paused);
+
+    restart_fake_with_latency_for_test(32);
+    assert!(!handle.service());
+    assert!(link.view().paused, "asked to stop");
+    chain.process(&mut left, &mut right, 64);
+    assert!(link.view().paused, "stopped");
+    handle.service();
+    assert!(!link.view().paused, "restarted and resumed");
+    chain.process(&mut left, &mut right, 64);
+    assert!(!link.view().paused);
+    drop(link);
+    drop(handle);
+    drop(chain.clear_for_test());
+}

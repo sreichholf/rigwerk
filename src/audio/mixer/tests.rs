@@ -2405,3 +2405,36 @@ fn each_paths_gate_reduction_is_published_in_the_snapshot() {
     shared.reset();
     assert_eq!(shared.snapshot().gate_reduction_db[0], 0.0);
 }
+
+#[test]
+fn a_paused_insert_is_republished_into_and_out_of_its_pause() {
+    use super::super::clap::tests::{
+        fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
+    };
+    let _main = super::super::shared::tests::claim_main_thread();
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    shared.paths[0]
+        .edit_chain(|chain| chain.insert_clap_for_test(fake_plugin_with_latency_for_test(16)));
+    render(&mut mixer, &shared, 64);
+    shared.service_plugins();
+    assert!(!shared.plugin_views()[0].paused);
+
+    restart_fake_with_latency_for_test(32);
+    let version = shared.plugin_views_version();
+    shared.service_plugins();
+    assert!(shared.plugin_views()[0].paused, "the pause was asked for");
+    assert!(shared.plugin_views_version() > version);
+    render(&mut mixer, &shared, 64);
+    shared.service_plugins();
+    let view = &shared.plugin_views()[0];
+    assert!(!view.paused, "restarted and resumed");
+    assert_eq!(view.latency, 32);
+    // Once the audio side has picked up the new latency, nothing moves:
+    // no republish.
+    render(&mut mixer, &shared, 64);
+    shared.service_plugins();
+    render(&mut mixer, &shared, 64);
+    let version = shared.plugin_views_version();
+    shared.service_plugins();
+    assert_eq!(shared.plugin_views_version(), version);
+}

@@ -239,6 +239,11 @@ pub struct PluginView {
     /// `ChainRuntime::latency_samples`); 0 when it reports none, is not
     /// loaded, or failed.  Bypassed inserts keep theirs.
     pub latency: u32,
+    /// The plugin is paused for a restart or a reactivation (see
+    /// `plugins::pause`): its blocks play dry, delayed by its latency,
+    /// until it resumes.  False for a failed insert, which shows its error
+    /// instead.
+    pub paused: bool,
 }
 
 impl PluginView {

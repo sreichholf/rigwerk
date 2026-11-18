@@ -511,12 +511,22 @@ impl PathControls {
         }
         self.flush_chain();
         let dirty = self.plugin_views_dirty.swap(false, Ordering::AcqRel);
-        if dirty || latency_changed {
+        if dirty || latency_changed || self.pause_moved(&links) {
             self.refresh_from_links();
         }
         // Dropped on this thread, in case a removal left it as the last
         // reference to a plugin.
         drop(links);
+    }
+
+    /// Whether an insert went into or out of a pause (a restart, a
+    /// reactivation) since its view was published.
+    fn pause_moved(&self, links: &[SlotLink]) -> bool {
+        let views = self.plugin_views();
+        links
+            .iter()
+            .zip(views.iter())
+            .any(|(link, view)| link.paused() != view.paused)
     }
 
     /// Rebuilds the inserts whose plugin asked for it (a layout change):

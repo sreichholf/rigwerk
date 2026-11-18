@@ -470,6 +470,16 @@ impl SlotLink {
                 .is_some_and(|plugin| plugin.failure().is_some())
     }
 
+    /// Whether the insert is paused for a restart or a reactivation, and
+    /// not failed (see [`PluginView::paused`]).  Atomics only.
+    pub(crate) fn paused(&self) -> bool {
+        !self.failed()
+            && self
+                .plugin
+                .as_ref()
+                .is_some_and(|plugin| plugin.shared().pause.in_pause())
+    }
+
     /// As [`Slot::latency_samples`].
     pub(crate) fn latency(&self) -> u32 {
         #[cfg(test)]
@@ -523,6 +533,7 @@ impl SlotLink {
             has_editor: self.plugin.as_ref().is_some_and(PluginHandle::has_editor),
             instance: self.plugin.as_ref().map(PluginHandle::instance_id),
             latency: self.latency(),
+            paused: self.paused(),
         }
     }
 

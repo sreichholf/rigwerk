@@ -568,3 +568,28 @@ fn a_forced_pause_never_overlaps_a_block() {
     assert!(pauses > 0 && blocks > 0, "{pauses} pauses, {blocks} blocks");
     eprintln!("{pauses} pauses, {ui_stops} stopped by the UI, {blocks} blocks");
 }
+
+#[test]
+fn in_pause_runs_from_the_request_to_the_resume() {
+    let pause = running();
+    assert!(!pause.in_pause());
+    pause.request();
+    assert!(pause.in_pause(), "requested");
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    assert!(pause.in_pause(), "stopping");
+    pause.stopped();
+    drop(stop);
+    assert!(pause.in_pause(), "paused");
+    assert!(pause.quiet());
+    assert!(pause.resume());
+    assert!(!pause.in_pause(), "resuming");
+    assert_eq!(block(&pause), BlockAction::Start);
+    assert!(!pause.in_pause());
+    // A new plugin waiting for its first block is not in a pause, and a
+    // forced one is.
+    let fresh = PauseHandshake::new();
+    assert!(!fresh.in_pause());
+    fresh.force();
+    assert!(fresh.in_pause());
+}

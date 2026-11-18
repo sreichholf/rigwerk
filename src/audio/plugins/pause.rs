@@ -192,6 +192,16 @@ impl PauseHandshake {
         self.state.load(Ordering::Acquire) == PAUSED
     }
 
+    /// True from a [`Self::request`] (or [`Self::force`]) until the
+    /// [`Self::resume`] that ends it: a pause is on its way or in place, so
+    /// blocks skip the plugin or soon will.
+    pub(crate) fn in_pause(&self) -> bool {
+        matches!(
+            self.state.load(Ordering::Acquire),
+            REQUESTED | STOPPING | PAUSED
+        )
+    }
+
     /// UI side: the work is done; the audio side restarts on its next
     /// block.  Before the audio side stopped, this just cancels the
     /// request.  True unless refused.
