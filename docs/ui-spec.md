@@ -969,7 +969,10 @@ Each step is one or more PRs, and each leaves every feature reachable.
 5. Effect browser.  It replaces the Plugins page; the Mixer's *+ add
    insert* opens it.
 6. Console: strips, chain rows, the stage, path and output sheets.  Live,
-   Mixer and Routing go.
+   Mixer and Routing go.  The saved theme starts to apply: until here
+   `app::appearance::drawn_theme` keeps the window dark (only
+   `RIGWERK_THEME` shows light), because the old pages paint with dark
+   constants.
 7. Tuner screen.  The old Tuner page and *Classic ▸* go.
 8. Screenshots, README, the empty allowlist, and this file removed.
 

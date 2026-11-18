@@ -178,10 +178,10 @@ pub(crate) fn log_colour(tone: crate::app::LogTone) -> Color32 {
     }
 }
 
-/// Installs the fonts and both egui styles.
+/// Installs the fonts and both egui styles.  Which one is drawn is the
+/// theme preference, which `app` puts on the context at start.
 pub(crate) fn configure_style(ctx: &egui::Context) {
     crate::ui::fonts::install(ctx);
-    ctx.set_theme(egui::ThemePreference::Dark);
     for theme in [Theme::Dark, Theme::Light] {
         ctx.set_style_of(theme, style(theme));
     }

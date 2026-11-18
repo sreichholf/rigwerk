@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::app::appearance::ThemeChoice;
 use crate::app::latency::{LoopbackKind, MeasuredLatency};
 use crate::app::Page;
 use crate::audio::{
@@ -1496,4 +1497,50 @@ fn preferences_preset_keeps_the_click_mask_and_not_the_transport() {
     assert!(!text.contains("metronome_level_db"), "{text}");
     let back: Preset = ron::from_str(&text).expect("preset");
     assert_eq!(back.clock_device.click_mask, 0b1100);
+}
+
+#[test]
+fn an_old_file_without_theme_or_size_loads_the_defaults() {
+    let loaded = load_preferences(Some(r#"(schema_version:2,session_name:"Old")"#), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    assert!(loaded.backup.is_none());
+    let old = loaded.preferences.expect("readable");
+    assert_eq!(old.theme, ThemeChoice::System);
+    assert_eq!(old.ui_size, 1.0);
+    assert_eq!(old.schema_version, PREFERENCES_SCHEMA);
+}
+
+#[test]
+fn theme_and_size_round_trip() {
+    let preferences = Preferences {
+        theme: ThemeChoice::Light,
+        ui_size: 1.3,
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let loaded = loaded.preferences.expect("readable");
+    assert_eq!(loaded.theme, ThemeChoice::Light);
+    assert_eq!(loaded.ui_size, 1.3);
+}
+
+#[test]
+fn ui_size_is_sanitized_on_load_and_an_unknown_theme_is_system() {
+    for (raw, size) in [
+        ("NaN", 1.0),
+        ("inf", 1.5),
+        ("-inf", 0.8),
+        ("0.2", 0.8),
+        ("4.0", 1.5),
+        ("1.25", 1.25),
+    ] {
+        let loaded = load_preferences(Some(&format!("(ui_size:{raw})")), BACKUP);
+        assert!(loaded.notices.is_empty(), "{raw}: {:?}", loaded.notices);
+        assert_eq!(loaded.preferences.expect("readable").ui_size, size, "{raw}");
+    }
+    let loaded = load_preferences(Some("(theme:Sepia,ui_size:1.1)"), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let loaded = loaded.preferences.expect("readable");
+    assert_eq!(loaded.theme, ThemeChoice::System);
+    assert_eq!(loaded.ui_size, 1.1);
 }

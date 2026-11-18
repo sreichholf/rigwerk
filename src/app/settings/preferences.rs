@@ -6,6 +6,7 @@ use serde::Deserialize;
 use super::path_pref::{default_path_name, sanitize_paths, PathPref};
 use super::preset::Preset;
 use super::serde_util::{skip_unreadable, skip_unreadable_option};
+use crate::app::appearance::{sanitize_ui_size, ThemeChoice, UI_SIZE_DEFAULT};
 use crate::app::latency::MeasuredLatency;
 use crate::app::Page;
 use crate::audio::{
@@ -152,6 +153,17 @@ pub(crate) struct Preferences {
     pub(crate) metronome_bpm: f32,
     pub(crate) metronome_rhythm: crate::audio::ClickRhythm,
     pub(crate) metronome_level_db: f32,
+    /// System, Dark or Light.  Missing on older saves → System.
+    #[serde(default)]
+    pub(crate) theme: ThemeChoice,
+    /// The interface size, egui's zoom factor: 0.8–1.5, clamped in
+    /// [`sanitize_preferences`].  Missing on older saves → 1.0.
+    #[serde(default = "default_ui_size")]
+    pub(crate) ui_size: f32,
+}
+
+fn default_ui_size() -> f32 {
+    UI_SIZE_DEFAULT
 }
 
 impl Default for Preferences {
@@ -214,6 +226,8 @@ impl Default for Preferences {
             metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
             metronome_rhythm: crate::audio::ClickRhythm::FourFour,
             metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
+            theme: ThemeChoice::System,
+            ui_size: UI_SIZE_DEFAULT,
         }
     }
 }
@@ -605,6 +619,7 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.metronome_bpm = crate::audio::clamp_metronome_bpm(preferences.metronome_bpm);
     preferences.metronome_level_db =
         crate::audio::clamp_click_level_db(preferences.metronome_level_db);
+    preferences.ui_size = sanitize_ui_size(preferences.ui_size);
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
     let current = preferences.paths[0].clone();

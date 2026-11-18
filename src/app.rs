@@ -1,10 +1,11 @@
 //! The RigWerk window: app state, start-up, and the logic and save the frame calls.
 //!
 //! Logic is grouped in `app/` (settings, devices, bridge control, recording,
-//! patches, screenshots, tuner).  Drawing belongs in `ui/`.  The frame shell
+//! patches, screenshots, tuner, theme and size).  Drawing belongs in `ui/`.  The frame shell
 //! (`impl eframe::App`) lives in `ui/frame.rs`; this file does not paint.
 
 pub(crate) mod alignment;
+pub(crate) mod appearance;
 pub(crate) mod bridge;
 pub(crate) mod budget;
 pub(crate) mod calibration;
@@ -82,6 +83,17 @@ pub(crate) fn initial_page() -> Page {
 fn initial_mixer_stage() -> Option<chain::ChainSelection> {
     let key = std::env::var("RIGWERK_MIXER_STAGE").ok()?;
     chain::ChainSelection::from_key(&key.to_lowercase())
+}
+
+/// Test hook for screenshots in one theme: `RIGWERK_THEME=light` (or
+/// `dark`).  It wins over the saved theme for this run and is not saved.
+fn theme_override() -> Option<appearance::ThemeChoice> {
+    let key = std::env::var("RIGWERK_THEME").ok()?;
+    match key.trim().to_lowercase().as_str() {
+        "dark" => Some(appearance::ThemeChoice::Dark),
+        "light" => Some(appearance::ThemeChoice::Light),
+        _ => None,
+    }
 }
 
 /// The page to open on launch: the one left open last time, unless a
@@ -179,6 +191,10 @@ pub struct RigWerkApp {
     pub(crate) metronome_bpm: f32,
     pub(crate) metronome_rhythm: crate::audio::ClickRhythm,
     pub(crate) metronome_level_db: f32,
+    /// The saved theme (see `app::appearance`).
+    pub(crate) theme: appearance::ThemeChoice,
+    /// The interface size, egui's zoom factor (0.8–1.5).
+    pub(crate) ui_size: f32,
     /// The audible flag [`Self::apply_metronome`] last pushed, so a frame
     /// re-pushes the click only when the tuner's auto-mute changes it.
     pub(crate) metronome_pushed: Option<bool>,
@@ -455,6 +471,8 @@ impl RigWerkApp {
             metronome_bpm: self.metronome_bpm,
             metronome_rhythm: self.metronome_rhythm,
             metronome_level_db: self.metronome_level_db,
+            theme: self.theme,
+            ui_size: self.ui_size,
             // The legacy mix fields are not written.
             ..Preferences::default()
         };
@@ -530,6 +548,9 @@ impl RigWerkApp {
             metronome_bpm: preferences.metronome_bpm,
             metronome_rhythm: preferences.metronome_rhythm,
             metronome_level_db: preferences.metronome_level_db,
+            // `ui_size` was clamped in `load_preferences`.
+            theme: preferences.theme,
+            ui_size: preferences.ui_size,
             metronome_pushed: None,
             drift: preferences.drift,
             monitor: preferences.monitor,
@@ -650,6 +671,8 @@ impl RigWerkApp {
         if let Some(stage) = initial_mixer_stage() {
             app.select_chain(stage);
         }
+        // egui restored its own memory before this; the saved preference wins.
+        app.apply_appearance(&cc.egui_ctx, theme_override());
         app.apply_gains();
         app.apply_metronome();
         app.engine.set_record_click(app.record_click);
@@ -789,6 +812,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
         metronome_rhythm: crate::audio::ClickRhythm::FourFour,
         metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
+        theme: appearance::ThemeChoice::System,
+        ui_size: appearance::UI_SIZE_DEFAULT,
         metronome_pushed: None,
         drift: true,
         monitor: true,

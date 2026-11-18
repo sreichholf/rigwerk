@@ -1,4 +1,5 @@
-//! The eframe shell: the window frame, its modals, and the panic-mute chord.
+//! The eframe shell: the window frame, its modals, the panic-mute chord and
+//! the size keys.
 //!
 //! `logic` and `save` only forward into `app`.  Their bodies stay there.
 //! Style is applied on the first pass here, so `app` does not import `ui`.
@@ -8,6 +9,7 @@ use std::sync::Once;
 use eframe::egui;
 use egui::{Align2, Margin, RichText, Vec2};
 
+use crate::app::appearance::UI_SIZE_DEFAULT;
 use crate::app::screenshot;
 use crate::app::{Page, RigWerkApp};
 use crate::ui::theme::ts;
@@ -51,6 +53,7 @@ impl eframe::App for RigWerkApp {
         // Once per frame, before any page.  A control that only exists on
         // Live or Mixer would miss the chord everywhere else.
         self.handle_panic_mute(root.ctx());
+        self.handle_size_keys(root.ctx());
 
         let ctx = root.ctx().clone();
         // Screenshots need a painted frame, so they stay on the drawing side.
@@ -287,6 +290,28 @@ impl RigWerkApp {
         });
         if pressed {
             self.mute = !self.mute;
+        }
+    }
+
+    /// Ctrl++ (or Ctrl+=) and Ctrl+− change the interface size by 10 %,
+    /// Ctrl+0 resets it to 100 %: egui's own zoom keys, which `app` turned
+    /// off so the size is RigWerk's saved preference.  Command on macOS.
+    pub(crate) fn handle_size_keys(&mut self, ctx: &egui::Context) {
+        use egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
+        let (reset, bigger, smaller) = ctx.input_mut(|input| {
+            let reset = input.consume_shortcut(&ZOOM_RESET);
+            let bigger =
+                input.consume_shortcut(&ZOOM_IN) | input.consume_shortcut(&ZOOM_IN_SECONDARY);
+            let smaller = input.consume_shortcut(&ZOOM_OUT);
+            (reset, bigger, smaller)
+        });
+        if reset {
+            self.set_ui_size(ctx, UI_SIZE_DEFAULT);
+        } else {
+            let steps = i32::from(bigger) - i32::from(smaller);
+            if steps != 0 {
+                self.step_ui_size(ctx, steps);
+            }
         }
     }
 }

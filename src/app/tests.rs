@@ -654,3 +654,66 @@ fn panic_chord_does_not_toggle_while_a_text_edit_has_focus() {
     assert!(!app.mute, "typing is not a mute");
     assert!(kept_the_key, "the text edit keeps the key");
 }
+
+/// One key press with Ctrl (Command on macOS also sets `command`).
+fn ctrl_key(key: egui::Key, shift: bool) -> egui::RawInput {
+    let mut modifiers = egui::Modifiers::COMMAND.plus(egui::Modifiers::CTRL);
+    if shift {
+        modifiers = modifiers.plus(egui::Modifiers::SHIFT);
+    }
+    let mut input = test_input(None);
+    input.events.push(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    });
+    input
+}
+
+fn press_size_key(app: &mut super::RigWerkApp, ctx: &egui::Context, input: egui::RawInput) {
+    let handle = ctx.clone();
+    let _ = run_frame(ctx, input, |_| app.handle_size_keys(&handle));
+}
+
+#[test]
+fn ctrl_plus_minus_and_zero_change_the_saved_size() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Plus, true));
+    assert_eq!(app.ui_size, 1.1, "Ctrl++ (Shift and = on most layouts)");
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Equals, false));
+    assert_eq!(app.ui_size, 1.2, "Ctrl and = is Ctrl++ without Shift");
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Minus, false));
+    assert_eq!(app.ui_size, 1.1);
+    for _ in 0..10 {
+        press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Plus, true));
+    }
+    assert_eq!(app.ui_size, 1.5, "stops at 150 %");
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Num0, false));
+    assert_eq!(app.ui_size, 1.0);
+    let _ = run_frame(&ctx, test_input(None), |_| {});
+    assert_eq!(ctx.zoom_factor(), 1.0);
+
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Minus, false));
+    let (_, saved) = save_text(&mut app);
+    assert_eq!(saved.ui_size, 0.9, "the size is saved with the preferences");
+}
+
+#[test]
+fn the_size_keys_need_ctrl() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    press_size_key(&mut app, &ctx, test_input(Some(egui::Key::Minus)));
+    assert_eq!(app.ui_size, 1.0);
+}
+
+#[test]
+fn the_theme_is_saved_with_the_preferences() {
+    let mut app = blank_app();
+    app.theme = super::appearance::ThemeChoice::Light;
+    let (raw, saved) = save_text(&mut app);
+    assert_eq!(saved.theme, super::appearance::ThemeChoice::Light);
+    assert!(raw.contains("theme:Light"), "{raw}");
+}
