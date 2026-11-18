@@ -213,6 +213,36 @@ impl RigWerkApp {
     #[allow(dead_code)]
     pub(crate) fn refresh_quantum_if_idle(&mut self) {}
 
+    /// The PipeWire graph buffer and whether the ALSA buffer fits it.
+    /// None off Linux.
+    pub(crate) fn graph_buffer_line(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            let info = self.quantum.as_ref()?;
+            if !info.available || info.quantum == 0 {
+                return Some("The PipeWire graph buffer could not be read.".to_owned());
+            }
+            let alsa = if info.alsa_period == 0 {
+                "The ALSA buffer size is not known yet.".to_owned()
+            } else if info.fits {
+                format!("The ALSA buffer of {} samples fits it.", info.alsa_period)
+            } else {
+                format!(
+                    "The ALSA buffer of {} samples does not fit it.",
+                    info.alsa_period
+                )
+            };
+            Some(format!(
+                "PipeWire graph buffer: {} samples. {alsa}",
+                info.quantum
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     /// One short line for the Live page MODE / OUTPUT footers: graph block
     /// size in samples and how long that block lasts. Backend name is already
     /// on the cards above; "quantum" is PipeWire jargon that does not help here.
@@ -423,13 +453,13 @@ impl RigWerkApp {
             // at all, is worth a word.
             if mode.contains("another app holds") {
                 notes.push(format!(
-                    "REAL-style is on, but another app holds this device at {} samples ({:.1} ms), above the driver's minimum. Close other audio apps on this device and restart the bridge.",
+                    "Shared, smallest buffer is on, but another app holds this device at {} samples ({:.1} ms), above the driver's minimum. Close other audio apps on this device and restart the bridge.",
                     frames,
                     block_ms(frames, rate)
                 ));
             } else if mode.contains("no smaller step") {
                 notes.push(format!(
-                    "This output offers only {:.1} ms steps in shared mode: that is the driver's own minimum, so no app (including the REAL tool) can go below it here while other apps share the device. For a smaller step, install Windows' in-box \"High Definition Audio Device\" driver for this output, or choose an ASIO output. The bridge still runs at this minimum instead of a larger buffer.",
+                    "This output offers only {:.1} ms steps in shared mode: that is the driver's own minimum, so nothing can go below it here while other apps share the device. For a smaller step, install Windows' in-box \"High Definition Audio Device\" driver for this output, or choose an ASIO output. The bridge still runs at this minimum instead of a larger buffer.",
                     block_ms(frames, rate)
                 ));
             }
@@ -458,8 +488,10 @@ impl RigWerkApp {
             };
             if let Some(reason) = mode.split("Exclusive refused: ").nth(1) {
                 note.push_str(&format!(" Exclusive mode was refused: {reason}."));
-            } else if let Some(reason) = mode.split("REAL-style refused: ").nth(1) {
-                note.push_str(&format!(" REAL-style could not go lower: {reason}."));
+            } else if let Some(reason) = mode.split("Shared, smallest buffer refused: ").nth(1) {
+                note.push_str(&format!(
+                    " Shared, smallest buffer could not go lower: {reason}."
+                ));
             }
             notes.push(note);
         }
@@ -929,7 +961,7 @@ fn probe_output(id: &str) -> Result<DriverActual, String> {
     let mut notes = Vec::new();
     let tone = if min >= default {
         notes.push(format!(
-            "This output's driver offers only {:.1} ms steps in shared mode — its own minimum, so REAL-style cannot go below it here. If the device is still on its vendor driver, Windows' in-box \"High Definition Audio Device\" driver often allows about 3 ms; an ASIO output can also go lower.",
+            "This output's driver offers only {:.1} ms steps in shared mode — its own minimum, so Shared, smallest buffer cannot go below it here. If the device is still on its vendor driver, Windows' in-box \"High Definition Audio Device\" driver often allows about 3 ms; an ASIO output can also go lower.",
             block_ms(min, rate)
         ));
         DriverTone::Notice

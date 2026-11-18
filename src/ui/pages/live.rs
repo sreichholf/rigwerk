@@ -5,13 +5,13 @@
 //! The record row (`live/record.rs`) sits directly under that strip.  The
 //! Issues strip (`live/issues.rs`) sits on top while there are issues,
 //! and "Show on <card>" there rings the bridge strip or the Output card.
-//! An ASIO side's Panel chip posts a request; the bridge thread opens the
-//! driver's control panel.
+//! An ASIO side's Driver panel chip posts a request; the bridge thread
+//! opens the driver's control panel.
 
 mod bridge_card;
 mod calibration;
 mod chain_strip;
-mod driver_line;
+pub(crate) mod driver_line;
 mod health;
 mod input_card;
 mod output_card;
@@ -154,11 +154,13 @@ impl RigWerkApp {
         };
         let ready = self.engine.open_asio_driver(side) == Some(clsid);
         let response = ui
-            .add_enabled_ui(ready, |ui| tab_button_sized(ui, "Panel", ready, color, 9.0))
+            .add_enabled_ui(ready, |ui| {
+                tab_button_sized(ui, "Driver panel", ready, color, 9.0)
+            })
             .inner;
         if !ready {
             let _ = response.on_disabled_hover_text(
-                "The panel is available once the bridge is running on that ASIO driver.",
+                "The driver panel is available once the bridge is running on that ASIO driver.",
             );
         } else if response
             .on_hover_text("Open this ASIO driver's control panel.")

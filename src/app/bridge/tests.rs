@@ -53,7 +53,7 @@ fn planned_output_mode_text_names_each_wasapi_choice() {
     );
     app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::RealStyle);
     assert!(
-        app.output_mode_text().contains("REAL-style"),
+        app.output_mode_text().contains("Shared, smallest buffer"),
         "{}",
         app.output_mode_text()
     );

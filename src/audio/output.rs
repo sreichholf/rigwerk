@@ -163,7 +163,7 @@ pub(crate) fn open_output(
             format!("Standard output{note} · Exclusive refused: {reason}")
         }
         Some((RefuseKind::RealStyle, reason)) => {
-            format!("Standard output{note} · REAL-style refused: {reason}")
+            format!("Standard output{note} · Shared, smallest buffer refused: {reason}")
         }
         None => format!("Standard output{note}"),
     };

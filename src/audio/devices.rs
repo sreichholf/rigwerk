@@ -427,7 +427,7 @@ fn ensure_placeholders(inventory: &mut Inventory) {
     if inventory.asio.is_empty() {
         inventory.asio.push(DeviceItem {
             id: DEMO_ASIO_ID.to_owned(),
-            name: format!("No {} input · preview", inventory.low_latency_label),
+            name: format!("No {} input", inventory.low_latency_label),
             backend: inventory.low_latency_label.clone(),
             channels: 2,
             demo: true,
@@ -438,7 +438,7 @@ fn ensure_placeholders(inventory: &mut Inventory) {
     if inventory.inputs.is_empty() {
         inventory.inputs.push(DeviceItem {
             id: DEMO_INPUT_ID.to_owned(),
-            name: "Studio microphone · preview".to_owned(),
+            name: "Studio microphone".to_owned(),
             backend: "SYSTEM".to_owned(),
             channels: 2,
             demo: true,
@@ -449,7 +449,7 @@ fn ensure_placeholders(inventory: &mut Inventory) {
     if inventory.outputs.is_empty() {
         inventory.outputs.push(DeviceItem {
             id: DEMO_OUTPUT_ID.to_owned(),
-            name: "System speakers · preview".to_owned(),
+            name: "System speakers".to_owned(),
             backend: if cfg!(target_os = "windows") {
                 "WASAPI".to_owned()
             } else if cfg!(target_os = "linux") {

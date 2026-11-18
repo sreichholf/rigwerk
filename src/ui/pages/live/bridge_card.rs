@@ -1,25 +1,20 @@
-//! The bridge strip under the Input and Output cards.  A PipeWire duplex
-//! node has no ring, so the strip is one line.  A ring shows its fill, the
-//! drift reading and the bridge buffer.  Fixed bridge buffer adds a size row.
+//! The bridge strip under the Input and Output cards.  One shared clock is
+//! a single line.  Two clocks show the fill, the drift and the bridge
+//! buffer mode.  The controls live on Setup.
 
-use crate::app::LogTone;
 use eframe::egui;
-use egui::{
-    Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText, Sense,
-    Stroke, Vec2,
-};
+use egui::{Align, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::app::issues::IssueCard;
-use crate::app::settings::{BRIDGE_BUFFER_MS_MAX, BRIDGE_BUFFER_MS_MIN};
 use crate::app::RigWerkApp;
 use crate::audio::{BufferMode, EngineState};
 use crate::ui::theme::ts;
-use crate::ui::theme::{AMBER, BORDER, CARD, DIM, GREEN, MUTED, TEXT};
-use crate::ui::widgets::{hinted_tab, micro_label, mono, styled_slider};
+use crate::ui::theme::{AMBER, BORDER, CARD, GREEN, MUTED, TEXT};
+use crate::ui::widgets::{micro_label, mono};
 
 impl RigWerkApp {
-    /// The full-width bridge strip.  Duplex is one line.  A ring keeps the
-    /// bridge buffer on the same line, and Fixed opens a size row under it.
+    /// The full-width bridge strip.  One clock is one line.  Two clocks
+    /// keep the fill, the drift and the bridge buffer mode on the same line.
     pub(crate) fn bridge_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let direct = self.engine.state == EngineState::Running && self.snapshot.direct;
         let width = ui.available_width();
@@ -43,7 +38,7 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             ui.label(micro_label("BRIDGE", AMBER));
             ui.label(
-                RichText::new("PipeWire node · no ring")
+                RichText::new("One clock: no bridge buffer needed.")
                     .size(ts(12.0))
                     .color(TEXT),
             );
@@ -57,32 +52,22 @@ impl RigWerkApp {
         let fill = self.bridge_fill(ctx);
         let percent = format!("{}%", (fill * 100.0).round() as i32);
         ui.horizontal(|ui| {
-            ui.label(micro_label("RING", AMBER));
+            ui.label(micro_label("FILL", AMBER));
             fill_bar(ui, fill);
             ui.label(mono(percent, TEXT, 11.0));
             self.drift_reading(ui);
             ui.label(mono(dropout_text(self.bridge_dropouts()), MUTED, 11.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                self.bridge_buffer_mode_row(ui);
+                ui.label(mono(
+                    bridge_mode_label(self.bridge_buffer_mode),
+                    MUTED,
+                    11.0,
+                ));
             });
         });
-        if self.bridge_buffer_mode == BufferMode::Fixed {
-            let mut ms = self.bridge_buffer_ms;
-            let response = fixed_bridge_buffer_size(ui, &mut ms);
-            if response.changed() {
-                self.bridge_buffer_ms = ms;
-                self.apply_bridge_buffer();
-            }
-            if response.drag_stopped() || (response.changed() && !response.dragged()) {
-                self.push_log(
-                    format!("Bridge buffer fixed at {:.1} ms.", self.bridge_buffer_ms),
-                    LogTone::Amber,
-                );
-            }
-        }
     }
 
-    fn bridge_fill(&self, ctx: &egui::Context) -> f32 {
+    pub(crate) fn bridge_fill(&self, ctx: &egui::Context) -> f32 {
         let fill = if self.engine.state == EngineState::Running {
             self.snapshot.ring_fill
         } else if self.engine.state == EngineState::Preview {
@@ -93,7 +78,7 @@ impl RigWerkApp {
         fill.clamp(0.0, 1.0)
     }
 
-    fn bridge_dropouts(&self) -> u64 {
+    pub(crate) fn bridge_dropouts(&self) -> u64 {
         if self.engine.state == EngineState::Running {
             self.snapshot.dropouts
         } else {
@@ -101,8 +86,7 @@ impl RigWerkApp {
         }
     }
 
-    /// The drift reading.  Click turns correction on or off.  The Signal
-    /// Routing page has the same switch.
+    /// The drift reading.  Drift correction is set on Setup.
     fn drift_reading(&mut self, ui: &mut egui::Ui) {
         let text = if !self.drift {
             "drift off".to_owned()
@@ -112,45 +96,15 @@ impl RigWerkApp {
             "drift auto".to_owned()
         };
         let color = if self.drift { GREEN } else { MUTED };
-        if ui
-            .add(
-                egui::Button::new(mono(text, color, 11.0))
-                    .frame(false)
-                    .min_size(Vec2::ZERO),
-            )
-            .on_hover_text(
-                "Drift correction keeps the two clocks from walking apart. Click to turn it on or off.",
-            )
-            .clicked()
-        {
-            self.drift = !self.drift;
-            self.push_log(
-                if self.drift {
-                    "Automatic drift correction enabled."
-                } else {
-                    "Drift correction disabled — clocks may slip."
-                },
-                if self.drift { LogTone::Green } else { LogTone::Amber });
-        }
+        ui.label(mono(text, color, 11.0));
     }
+}
 
-    fn bridge_buffer_mode_row(&mut self, ui: &mut egui::Ui) {
-        let mut mode = self.bridge_buffer_mode;
-        bridge_buffer_mode_picker(ui, &mut mode);
-        if mode != self.bridge_buffer_mode {
-            self.bridge_buffer_mode = mode;
-            self.push_log(
-                match mode {
-                    BufferMode::Auto => "Bridge buffer: Auto.".to_owned(),
-                    BufferMode::Minimum => "Bridge buffer: Minimum.".to_owned(),
-                    BufferMode::Fixed => {
-                        format!("Bridge buffer: Fixed, {:.1} ms.", self.bridge_buffer_ms)
-                    }
-                },
-                LogTone::Amber,
-            );
-            self.apply_bridge_buffer();
-        }
+fn bridge_mode_label(mode: BufferMode) -> &'static str {
+    match mode {
+        BufferMode::Auto => "Auto",
+        BufferMode::Minimum => "Minimum",
+        BufferMode::Fixed => "Fixed",
     }
 }
 
@@ -161,7 +115,7 @@ fn dropout_text(count: u64) -> String {
     }
 }
 
-/// A short fill bar for the ring line.
+/// A short fill bar.
 fn fill_bar(ui: &mut egui::Ui, fraction: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(120.0, 4.0), Sense::hover());
     let track = Color32::from_rgb(27, 34, 46);
@@ -173,106 +127,3 @@ fn fill_bar(ui: &mut egui::Ui, fraction: f32) {
     ui.painter()
         .rect_filled(filled, CornerRadius::same(2), AMBER);
 }
-
-/// Auto, Minimum, Fixed, in the order they are offered.
-fn bridge_buffer_choices() -> [(BufferMode, &'static str, &'static str); 3] {
-    [
-        (
-            BufferMode::Auto,
-            "Auto",
-            "Twice the input buffer, at least two output blocks. Grows 256 samples per dropout, shrinks 64 after 4 calm seconds.",
-        ),
-        (
-            BufferMode::Minimum,
-            "Minimum",
-            "One input block plus one output block, the least that can work. Recovers from dropouts in smaller, quicker steps.",
-        ),
-        (
-            BufferMode::Fixed,
-            "Fixed",
-            "A fixed size that never grows on its own. Lower it until dropouts start, then go one notch back up.",
-        ),
-    ]
-}
-
-/// Width of the three mode tabs on one row, including the gaps between them.
-fn bridge_buffer_tab_row_width(ui: &egui::Ui) -> f32 {
-    let font = FontId::new(ts(8.2), FontFamily::Proportional);
-    let pad = ui.spacing().button_padding.x * 2.0;
-    let gap = ui.spacing().item_spacing.x;
-    let mut width = 0.0;
-    for (index, (_, label, _)) in bridge_buffer_choices().iter().enumerate() {
-        if index > 0 {
-            width += gap;
-        }
-        let text = ui
-            .painter()
-            .layout_no_wrap((*label).to_owned(), font.clone(), TEXT);
-        width += text.size().x + pad;
-    }
-    width
-}
-
-/// The three tabs fit the strip when this is true.  What is left of the line
-/// after the readings is the width that matters.
-fn bridge_buffer_modes_fit(ui: &egui::Ui) -> bool {
-    bridge_buffer_tab_row_width(ui) <= ui.available_width()
-}
-
-/// Tabs when they fit.  A combo of the same three modes when they do not, so
-/// the last label is not clipped.
-fn bridge_buffer_mode_picker(ui: &mut egui::Ui, mode: &mut BufferMode) -> egui::Rect {
-    let choices = bridge_buffer_choices();
-    if bridge_buffer_modes_fit(ui) {
-        ui.horizontal(|ui| {
-            for (option, label, hint) in choices {
-                if hinted_tab(ui, label, *mode == option, AMBER, hint) {
-                    *mode = option;
-                }
-            }
-        })
-        .response
-        .rect
-    } else {
-        let (_, label, hint) = choices
-            .iter()
-            .find(|(option, _, _)| *option == *mode)
-            .copied()
-            .unwrap_or(choices[0]);
-        let available = ui.available_width();
-        egui::ComboBox::from_id_salt("bridge_buffer_mode")
-            .width(available)
-            .truncate()
-            .selected_text(RichText::new(label).size(ts(8.2)).color(AMBER).strong())
-            .show_ui(ui, |ui| {
-                for (option, label, hint) in choices {
-                    ui.selectable_value(mode, option, label).on_hover_text(hint);
-                }
-            })
-            .response
-            .on_hover_text(hint)
-            .rect
-    }
-}
-
-/// The fixed size.  The number and the slider; the caller stores and applies it.
-fn fixed_bridge_buffer_size(ui: &mut egui::Ui, ms: &mut f32) -> egui::Response {
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(micro_label("SIZE", DIM));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(mono(format!("{ms:.1} ms"), TEXT, 10.0));
-        });
-    });
-    styled_slider(
-        ui,
-        ms,
-        BRIDGE_BUFFER_MS_MIN,
-        BRIDGE_BUFFER_MS_MAX,
-        0.5,
-        AMBER,
-    )
-}
-
-#[cfg(test)]
-mod tests;

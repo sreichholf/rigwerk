@@ -18,7 +18,7 @@ fn an_alsa_period_that_divides_the_quantum_fits() {
 fn a_coarser_alsa_period_is_reported_as_a_collision() {
     let info = QuantumInfo::assess(true, 64, 48_000, 128);
     assert!(!info.fits);
-    assert!(info.note.contains("larger than the PipeWire quantum"));
+    assert!(info.note.contains("larger than the PipeWire graph buffer"));
 }
 
 #[test]
@@ -32,8 +32,8 @@ fn a_period_that_does_not_divide_the_quantum_is_reported() {
 fn a_large_quantum_is_marked_as_shared_not_low_latency() {
     let info = QuantumInfo::assess(true, 1024, 48_000, 64);
     assert!(!info.low_latency);
-    assert!(info.note.contains("Desktop PipeWire graph"));
-    assert!(info.note.contains("not the Clock output"));
+    assert!(info.note.contains("shared desktop size"));
+    assert!(info.note.contains("not the clock output"));
     assert!(info.note.contains("shared"));
 }
 
@@ -42,5 +42,5 @@ fn an_unreadable_quantum_says_so_instead_of_pretending() {
     let info = QuantumInfo::assess(false, 0, 0, 128);
     assert!(!info.available);
     assert!(!info.fits);
-    assert!(info.note.contains("not readable"));
+    assert!(info.note.contains("could not be read"));
 }

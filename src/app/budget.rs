@@ -207,6 +207,117 @@ impl RigWerkApp {
             stale,
         }
     }
+
+    /// The latency of the clock output: the slowest audible path routed
+    /// there, plus that output's alignment.  Setup and the title bar read
+    /// this.  [`Self::latency_budget`] stays the selected path, for the
+    /// diagnostics text.
+    pub(crate) fn heard_estimate(&self) -> HeardEstimate {
+        let parts_of_bridge = self.latency_parts();
+        let input = frames_ms(parts_of_bridge.input_block, parts_of_bridge.input_rate);
+        let bridge = frames_ms(parts_of_bridge.bridge_buffer, parts_of_bridge.input_rate);
+        let output = frames_ms(parts_of_bridge.output_step, parts_of_bridge.output_rate);
+        let after = self
+            .snapshot
+            .path_delay_ms
+            .filter(|_| parts_of_bridge.running);
+        let alignment = self.device_alignment(0);
+        let mut chosen: Option<(String, f32, f32)> = None;
+        for info in self.path_infos() {
+            if !info.audible || !self.path_reaches_device(info.slot, 0) {
+                continue;
+            }
+            let chain = info.latency_ms;
+            let arrival = alignment
+                .as_ref()
+                .and_then(|alignment| alignment.arrival_ms[info.slot])
+                .unwrap_or(chain);
+            // The same arrival means alignment has already held the faster
+            // path.  The bar then shows the path whose own chain is longer.
+            let take = match &chosen {
+                None => true,
+                Some((_, have_chain, have_arrival)) => {
+                    arrival > *have_arrival
+                        || ((arrival - *have_arrival).abs() <= 0.05 && chain > *have_chain)
+                }
+            };
+            if take {
+                chosen = Some((info.name, chain, arrival));
+            }
+        }
+        let (path, chain, align) = match chosen {
+            Some((name, chain, arrival)) => (Some(name), Some(chain), Some(arrival - chain)),
+            None => (None, Some(0.0), Some(0.0)),
+        };
+        let parts = vec![
+            HeardPart {
+                label: "In",
+                ms: Some(input),
+            },
+            HeardPart {
+                label: "Bridge buffer",
+                ms: Some(bridge),
+            },
+            HeardPart {
+                label: "Chain",
+                ms: chain,
+            },
+            HeardPart {
+                label: "Out",
+                ms: Some(output),
+            },
+            HeardPart {
+                label: "After RigWerk",
+                ms: after,
+            },
+            HeardPart {
+                label: "Alignment",
+                ms: align,
+            },
+        ];
+        let total_ms = parts.iter().filter_map(|part| part.ms).sum();
+        HeardEstimate {
+            parts,
+            total_ms,
+            path,
+        }
+    }
+
+    /// Title-bar hover: each path on the clock output, then the measurement.
+    pub(crate) fn heard_summary(&self) -> String {
+        let mut lines = Vec::new();
+        for info in self.path_infos() {
+            if !self.path_reaches_device(info.slot, 0) {
+                continue;
+            }
+            let state = if info.audible { "" } else { " · silent" };
+            lines.push(format!("{}: {:.1} ms{state}", info.name, info.latency_ms));
+        }
+        if lines.is_empty() {
+            lines.push("No path plays on the clock output.".to_owned());
+        }
+        if let Some(measured) = &self.measured_latency {
+            lines.push(format!("Measured {:.1} ms", measured.latency_ms));
+        }
+        lines.join("\n")
+    }
+}
+
+/// One part of [`HeardEstimate`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HeardPart {
+    pub(crate) label: &'static str,
+    pub(crate) ms: Option<f32>,
+}
+
+/// The clock-output estimate Setup draws as a number and a stacked bar.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HeardEstimate {
+    pub(crate) parts: Vec<HeardPart>,
+    pub(crate) total_ms: f32,
+    /// The path whose chain and alignment are in the sum.  None when no
+    /// audible path is routed to the clock output.
+    pub(crate) path: Option<String>,
 }
 
 fn planned_suffix(reported: bool) -> &'static str {

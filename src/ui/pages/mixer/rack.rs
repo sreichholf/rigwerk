@@ -418,6 +418,7 @@ impl RigWerkApp {
                                 index,
                                 view,
                                 self.chain_selected == ChainSelection::Plugin(index),
+                                self.effect_double_click,
                                 actions,
                             ) {
                                 *select = Some(ChainSelection::Plugin(index));
@@ -953,6 +954,7 @@ fn effect_row(
     index: usize,
     view: &PluginView,
     selected: bool,
+    double_click: crate::app::settings::EffectOpen,
     actions: &mut Vec<RackAction>,
 ) -> bool {
     let mut controls_clicked = false;
@@ -1086,7 +1088,10 @@ fn effect_row(
         });
     });
     if row_response.double_clicked() && !controls_clicked && view.error.is_none() {
-        actions.push(RackAction::Editor(index));
+        actions.push(match double_click {
+            crate::app::settings::EffectOpen::Controls => RackAction::Parameters(index),
+            crate::app::settings::EffectOpen::Editor => RackAction::Editor(index),
+        });
     }
     row_response.clicked() && !controls_clicked
 }

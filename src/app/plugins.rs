@@ -301,6 +301,25 @@ impl Default for PluginBrowser {
     }
 }
 
+/// The VST3 and CLAP folders a scan reads, for Setup.
+pub(crate) fn plugin_scan_folders() -> Vec<String> {
+    let mut folders = Vec::new();
+    for path in crate::audio::vst3::search_roots() {
+        push_folder(&mut folders, &path);
+    }
+    for path in crate::audio::clap::scan_roots() {
+        push_folder(&mut folders, &path);
+    }
+    folders
+}
+
+fn push_folder(folders: &mut Vec<String>, path: &std::path::Path) {
+    let text = path.display().to_string();
+    if !text.is_empty() && folders.iter().all(|have| have != &text) {
+        folders.push(text);
+    }
+}
+
 impl PluginBrowser {
     pub(crate) fn start_scan(&mut self) {
         if self.scanning {

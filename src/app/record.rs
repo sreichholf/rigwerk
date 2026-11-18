@@ -38,6 +38,14 @@ fn folder_from_env(home: Option<&OsStr>, userprofile: Option<&OsStr>) -> String 
     "recordings".to_owned()
 }
 
+impl RigWerkApp {
+    /// The recordings folder, as typed.  An empty folder becomes the
+    /// default when a take is armed and when preferences are saved.
+    pub(crate) fn set_record_folder(&mut self, folder: String) {
+        self.record_folder = folder;
+    }
+}
+
 /// An empty or blank folder becomes [`default_record_folder`].  Anything
 /// else is kept, with surrounding whitespace removed.  The directory is not
 /// created here.

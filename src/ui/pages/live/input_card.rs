@@ -1,12 +1,11 @@
 //! The input card: device, channels, input clock, gain and meters.  When
-//! the input is ASIO, a Panel chip sits with the channel chips and asks
-//! the bridge to open that driver's control panel.
+//! the input is ASIO, a Driver panel chip sits with the channel chips and
+//! asks the bridge to open that driver's control panel.
 
-use crate::app::LogTone;
 use eframe::egui;
 use egui::{Align, Layout, RichText};
 
-use crate::app::settings::{rate_label, BUFFERS, INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB, RATES};
+use crate::app::settings::{rate_label, INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB};
 use crate::app::RigWerkApp;
 use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::pages::live::driver_line::driver_line;
@@ -128,43 +127,13 @@ impl RigWerkApp {
         });
     }
 
-    /// Input side clock: the rate and buffer asked of the capture device,
-    /// laid out like the output card's own pair.
+    /// Input rate and buffer, as readings.  Setup changes them.
     pub(crate) fn clock_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(micro_label("IN CLOCK", DIM));
-            let mut rate = self.sample_rate;
-            egui::ComboBox::from_id_salt("sample_rate")
-                .width(84.0)
-                .selected_text(mono(rate_label(rate), MUTED, 9.0))
-                .show_ui(ui, |ui| {
-                    for option in RATES {
-                        ui.selectable_value(&mut rate, option, rate_label(option));
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "Input rate. A device that cannot run at it opens at its own rate and the output converts.",
-                );
-            if rate != self.sample_rate {
-                self.sample_rate = rate;
-                self.push_log(format!("Input clock set to {}.", rate_label(rate)), LogTone::Blue);
-            }
-            let mut buffer = self.buffer_size;
-            egui::ComboBox::from_id_salt("buffer_size")
-                .width(72.0)
-                .selected_text(mono(format!("{buffer} smp"), MUTED, 9.0))
-                .show_ui(ui, |ui| {
-                    for option in BUFFERS {
-                        ui.selectable_value(&mut buffer, option, format!("{option} samples"));
-                    }
-                })
-                .response
-                .on_hover_text("Input buffer: the block size asked of the input device.");
-            if buffer != self.buffer_size {
-                self.buffer_size = buffer;
-                self.push_log(format!("Input buffer set to {buffer} samples."), LogTone::Blue);
-            }
+            ui.label(micro_label("RATE", DIM));
+            ui.label(mono(rate_label(self.sample_rate), MUTED, 9.0));
+            ui.label(micro_label("BUFFER", DIM));
+            ui.label(mono(format!("{} samples", self.buffer_size), MUTED, 9.0));
         });
     }
 }

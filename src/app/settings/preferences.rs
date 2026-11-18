@@ -175,6 +175,25 @@ pub(crate) struct Preferences {
     /// Missing on older saves, and omitted while it is still the default.
     #[serde(default, skip_serializing_if = "sheet_height_unset")]
     pub(crate) sheet_height: f32,
+    /// What a double-click on an effect opens.  Missing on older saves, and
+    /// omitted while it is still the editor.  Not the dropped
+    /// `prefer_plugin_interface` key.
+    #[serde(default, skip_serializing_if = "effect_open_is_editor")]
+    pub(crate) effect_double_click: EffectOpen,
+}
+
+/// What a double-click on an effect opens.  An unknown value reads as the
+/// editor, which is also the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum EffectOpen {
+    Controls,
+    #[default]
+    #[serde(other)]
+    Editor,
+}
+
+fn effect_open_is_editor(open: &EffectOpen) -> bool {
+    *open == EffectOpen::Editor
 }
 
 fn sheet_height_unset(height: &f32) -> bool {
@@ -250,6 +269,7 @@ impl Default for Preferences {
             effect_favourites: Vec::new(),
             effect_recent: Vec::new(),
             sheet_height: 0.0,
+            effect_double_click: EffectOpen::Editor,
         }
     }
 }
@@ -747,9 +767,8 @@ pub(crate) fn page_key(page: Page) -> &'static str {
         Page::Mixer => "mixer",
         Page::Tuner => "tuner",
         Page::Routing => "routing",
-        Page::Devices => "devices",
         Page::Plugins => "plugins",
-        Page::Guide => "guide",
+        Page::Setup => "setup",
     }
 }
 
@@ -758,11 +777,11 @@ pub(crate) fn page_from_key(key: &str) -> Page {
         "mixer" => Page::Mixer,
         "tuner" => Page::Tuner,
         "routing" => Page::Routing,
-        "devices" => Page::Devices,
         "plugins" => Page::Plugins,
-        "guide" => Page::Guide,
+        "setup" | "devices" | "guide" => Page::Setup,
         // The old Sessions and Diagnostics pages, and the console key a
         // newer build may have written.  Live is home until the console.
+        // An old build reading `setup` falls back to Live the same way.
         _ => Page::Live,
     }
 }

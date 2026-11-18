@@ -13,9 +13,10 @@ pub(crate) use path_pref::{default_path_name, PathPref};
 pub(crate) use preferences::{
     bridge_buffer_from_pref, bridge_buffer_to_pref, load_preferences, page_from_key, page_key,
     preferences_backup_key, rate_label, rematch_windows_virtual_output,
-    resolved_wasapi_output_mode, sanitize_session, store_preferences, ExtraOutputPref, Preferences,
-    BRIDGE_BUFFER_MS_MAX, BRIDGE_BUFFER_MS_MIN, BUFFERS, INPUT_GAIN_MAX_DB, INPUT_GAIN_MIN_DB,
-    OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB, PREFERENCES_KEY, PREFERENCES_SCHEMA, RATES,
+    resolved_wasapi_output_mode, sanitize_session, store_preferences, EffectOpen, ExtraOutputPref,
+    Preferences, BRIDGE_BUFFER_MS_MAX, BRIDGE_BUFFER_MS_MIN, BUFFERS, INPUT_GAIN_MAX_DB,
+    INPUT_GAIN_MIN_DB, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB, PREFERENCES_KEY, PREFERENCES_SCHEMA,
+    RATES,
 };
 pub(crate) use session::{unique_sessions, Session};
 

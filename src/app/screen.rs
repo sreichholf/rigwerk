@@ -1,8 +1,7 @@
 //! Which sheet and drawer are open, and the title-bar drafts.
 //!
-//! The page (`Page`) is still one of the classic screens.  The sheet and
-//! the drawer sit over it.  Setup replaces Devices in the next step;
-//! until then *Setup* opens Devices and remembers the section.
+//! The page (`Page`) is a classic screen or Setup.  The sheet and the
+//! drawer sit over it.  *Setup* opens the Setup screen at a section.
 
 use std::time::{Duration, Instant};
 
@@ -146,11 +145,20 @@ impl RigWerkApp {
         self.chrome.sheet = None;
     }
 
-    /// Devices, until the Setup screen replaces that page.
+    /// Setup, scrolled to `section`.  Done returns to Live, which is home
+    /// until the console exists.
     pub(crate) fn open_setup(&mut self, section: SetupSection) {
         self.chrome.setup_section = Some(section);
-        self.page = crate::app::Page::Devices;
+        self.page = crate::app::Page::Setup;
         self.chrome.drawer = None;
+    }
+
+    /// Leaves Setup for the home page.
+    pub(crate) fn close_setup(&mut self) {
+        if self.page == crate::app::Page::Setup {
+            self.page = crate::app::Page::Live;
+        }
+        self.chrome.setup_section = None;
     }
 
     pub(crate) fn close_drawer(&mut self) {

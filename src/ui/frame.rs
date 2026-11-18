@@ -130,9 +130,8 @@ impl eframe::App for RigWerkApp {
                         Page::Mixer => self.mixer_page(ui),
                         Page::Tuner => self.tuner_page(ui),
                         Page::Routing => self.routing_page(ui),
-                        Page::Devices => self.devices_page(ui),
                         Page::Plugins => self.plugins_page(ui),
-                        Page::Guide => self.guide_page(ui),
+                        Page::Setup => self.setup_page(ui),
                     }
                     ui.add_space(if self.page == Page::Tuner { 2.0 } else { 18.0 });
                 });

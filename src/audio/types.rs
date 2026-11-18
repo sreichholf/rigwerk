@@ -51,43 +51,43 @@ impl QuantumInfo {
                 alsa_period,
                 low_latency: false,
                 fits: false,
-                note: "PipeWire's quantum is not readable (pw-metadata is missing or the server is not running). RigWerk still uses the ALSA period; start PipeWire to get the low-quantum path.".to_owned(),
+                note: "The PipeWire graph buffer could not be read (the desktop settings are missing or the server is not running). RigWerk still uses the ALSA buffer; start PipeWire for the low-latency path.".to_owned(),
             };
         }
         let low_latency = quantum <= PIPEWIRE_LOW_QUANTUM_MAX;
         let fits = alsa_period > 0 && alsa_period <= quantum && quantum.is_multiple_of(alsa_period);
         let note = if !low_latency {
             format!(
-                "Desktop PipeWire graph is still at {quantum} frames ({:.1} ms at the graph's {:.1} kHz) — that is the shared desktop block, not the Clock output below. RigWerk marks this route as shared; low latency asks the graph for {} frames.",
+                "The PipeWire graph buffer is still {quantum} samples ({:.1} ms at {:.1} kHz). That is the shared desktop size, not the clock output. Low latency asks the graph for {} samples.",
                 ms(quantum),
                 rate as f32 / 1000.0,
                 PIPEWIRE_LOW_QUANTUM
             )
         } else if alsa_period == 0 {
             format!(
-                "PipeWire is running at a {quantum}-frame quantum ({:.1} ms). The ALSA period is not known yet; the bridge compares them as soon as the output opens.",
+                "PipeWire is running at a {quantum}-sample buffer ({:.1} ms). The ALSA buffer size is not known yet; the bridge compares them as soon as the output opens.",
                 ms(quantum)
             )
         } else if fits {
             if alsa_period == quantum {
                 format!(
-                    "ALSA period {alsa_period} frames matches the PipeWire quantum ({quantum} frames, {:.1} ms). Low latency path.",
+                    "The ALSA buffer of {alsa_period} samples matches the PipeWire graph buffer ({quantum} samples, {:.1} ms).",
                     ms(quantum)
                 )
             } else {
                 format!(
-                    "ALSA period {alsa_period} frames fits {}× into the PipeWire quantum ({quantum} frames, {:.1} ms). Low latency path.",
+                    "The ALSA buffer of {alsa_period} samples fits {}× into the PipeWire graph buffer ({quantum} samples, {:.1} ms).",
                     quantum / alsa_period,
                     ms(quantum)
                 )
             }
         } else if alsa_period > quantum {
             format!(
-                "The ALSA period ({alsa_period} frames) is larger than the PipeWire quantum ({quantum} frames), so the coarser ALSA block sets the real latency and the small quantum is wasted. Set the output buffer to {quantum} frames or lower, or raise the quantum."
+                "The ALSA buffer ({alsa_period} samples) is larger than the PipeWire graph buffer ({quantum} samples), so the coarser ALSA buffer sets the latency. Set the output buffer to {quantum} samples or lower."
             )
         } else {
             format!(
-                "The ALSA period ({alsa_period} frames) does not divide the PipeWire quantum ({quantum} frames), so the two clocks do not line up and can cause a dropout. Pick a period that divides {quantum} (for example 32 or 64 frames)."
+                "The ALSA buffer ({alsa_period} samples) does not divide the PipeWire graph buffer ({quantum} samples), so the two clocks do not line up and can cause a dropout. Pick a buffer size that divides {quantum} (for example 32 or 64 samples)."
             )
         };
         Self {
@@ -308,7 +308,7 @@ impl WasapiOutputMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Shared => "Shared",
-            Self::RealStyle => "REAL-style",
+            Self::RealStyle => "Shared, smallest buffer",
             Self::Exclusive => "Exclusive",
         }
     }

@@ -40,42 +40,13 @@ const PLATFORM: &[&str] = &["src/audio/linux/", "src/audio/win/"];
 /// allows a word the file no longer uses, so the list only shrinks.  Step 8
 /// empties it.
 const NOT_MIGRATED: &[(&str, &[&str])] = &[
-    // REAL-style: the output mode labels, renamed with Setup (step 3).
-    // quantum and preview: step 3 (setup).
-    ("src/app/bridge.rs", &["preview", "REAL-style", "quantum"]),
-    // Demo device: step 3 (measure latency moves to setup).
-    ("src/app/calibration.rs", &["preview"]),
-    // The output mode labels, renamed with Setup (step 3).
-    ("src/app/driver_check.rs", &["REAL-style"]),
-    // The output mode labels, renamed with Setup (step 3).
+    // The stored mode key.  The label is "Shared, smallest buffer".
     ("src/app/latency.rs", &["REAL-style"]),
-    // Demo device: step 3 (setup).
-    ("src/audio/devices.rs", &["preview"]),
-    // Demo device and the graph's buffer size: step 3 (setup).
+    // Demo device and the graph's buffer size: the log lines stay until
+    // the console (step 6) stops showing them as activity.
     ("src/audio/engine.rs", &["preview", "quantum"]),
-    // The output mode labels, renamed with Setup (step 3).
-    ("src/audio/output.rs", &["REAL-style"]),
-    // The graph's buffer size and the mode labels: step 3 (setup).
-    ("src/audio/types.rs", &["quantum", "REAL-style"]),
-    // The Devices page: step 3 (setup replaces it).
-    (
-        "src/ui/pages/devices.rs",
-        &["preview", "endpoint", "quantum"],
-    ),
-    // The Guide page: step 3 (setup's help replaces it).
-    (
-        "src/ui/pages/guide.rs",
-        &["quantum", "REAL-style", "endpoint"],
-    ),
-    // REAL-style: the output mode labels, renamed with Setup (step 3).
-    ("src/ui/pages/live/health.rs", &["REAL-style"]),
     // The Live page: step 6 (the console replaces it).
     ("src/ui/pages/live/input_card.rs", &["preview"]),
-    // The output mode labels (step 3); the Live page goes in step 6.
-    (
-        "src/ui/pages/live/output_card.rs",
-        &["REAL-style", "quantum"],
-    ),
     // BYP: step 6 (the EQ sheet).
     ("src/ui/pages/mixer/eq_card.rs", &["BYP"]),
     // BYP: step 6 (the gate sheet).

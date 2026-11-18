@@ -2,19 +2,18 @@
 //! When the output is ASIO, a Panel chip sits with the channel chips and
 //! asks that output's bridge to open its driver's control panel.
 
-use crate::app::LogTone;
 use eframe::egui;
-use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
+use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
 use crate::app::devices::is_wrapper_driver;
-use crate::app::settings::{rate_label, BUFFERS, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB, RATES};
+use crate::app::settings::{rate_label, OUTPUT_GAIN_MAX_DB, OUTPUT_GAIN_MIN_DB};
 use crate::app::RigWerkApp;
 use crate::audio::{AsioPanelSide, DeviceItem, EngineState};
 use crate::ui::pages::live::driver_line::driver_line;
 use crate::ui::pages::mixer::output_devices::gain_reduction_text;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEXT,
+    with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, DIM, GREEN, MUTED, RED, TEXT,
 };
 use crate::ui::widgets::{
     channel_chip, db_slider, device_selector, ellipsize, meter_row, micro_label, mono, source_tab,
@@ -124,50 +123,13 @@ impl RigWerkApp {
             channel_chip(ui, "OUT 1", &mut enabled[0], BLUE);
             channel_chip(ui, "OUT 2", &mut enabled[1], BLUE);
             self.asio_panel_chip(ui, AsioPanelSide::Output, BLUE);
-            if self.selected_output().asio_clsid.is_some() {
-                    ui.label(
-                        RichText::new("ASIO direct")
-                            .size(ts(8.3))
-                            .color(BLUE)
-                            .strong(),
-                    )
-                    .on_hover_text(
-                        "ASIO playback uses the driver's own buffer and clock; Shared / REAL-style / Exclusive do not apply.",
-                    );
-                } else if cfg!(target_os = "windows") {
-                    self.wasapi_mode_control(ui);
-                } else {
-                    let low_latency = self.low_latency_output;
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Low latency")
-                                    .size(ts(8.3))
-                                    .color(if low_latency { AMBER } else { DIM }),
-                            )
-                            .fill(if low_latency {
-                                with_alpha(AMBER, 22)
-                            } else {
-                                Color32::TRANSPARENT
-                            })
-                            .stroke(Stroke::new(
-                                1.0,
-                                if low_latency {
-                                    with_alpha(AMBER, 60)
-                                } else {
-                                    BORDER
-                                },
-                            ))
-                            .corner_radius(CornerRadius::same(7)),
-                        )
-                        .on_hover_text(
-                            "Ask PipeWire for a 64-frame quantum and ALSA for the smallest period this output allows (at least 32 samples). The Issues strip warns when the ALSA period and the quantum do not fit, or when PipeWire falls back to its shared size.",
-                        )
-                        .clicked()
-                    {
-                        self.set_low_latency_output(!low_latency);
-                    }
-                }
+            ui.label(
+                RichText::new(crate::app::latency::output_mode_phrase(self.output_mode()))
+                    .size(ts(8.3))
+                    .color(BLUE)
+                    .strong(),
+            )
+            .on_hover_text(self.output_mode_text());
             if ui
                 .add(
                     egui::Button::new(
@@ -203,7 +165,7 @@ impl RigWerkApp {
         }
 
         ui.add_space(5.0);
-        self.output_clock_controls(ui);
+        self.output_clock_reading(ui);
         ui.add_space(3.0);
         let output_actual = self.output_actual();
         let stopped = self.engine.state != EngineState::Running;
@@ -254,14 +216,7 @@ impl RigWerkApp {
                 None if self.wants_low_latency_output() => quantum_label.unwrap_or_else(|| {
                     format!(
                         "{backend} · {}",
-                        if cfg!(target_os = "windows") {
-                            match self.wasapi_output_mode {
-                                crate::audio::WasapiOutputMode::Exclusive => "EXCLUSIVE",
-                                _ => "REAL-STYLE",
-                            }
-                        } else {
-                            "LOW LATENCY"
-                        }
+                        crate::app::latency::output_mode_phrase(self.output_mode())
                     )
                 }),
                 None => backend,
@@ -367,121 +322,18 @@ impl RigWerkApp {
         );
     }
 
-    /// Three-way WASAPI clock mode: Shared / REAL-style / Exclusive.
-    fn wasapi_mode_control(&mut self, ui: &mut egui::Ui) {
-        use crate::audio::WasapiOutputMode;
-        let mut mode = self.wasapi_output_mode;
-        let active = !matches!(mode, WasapiOutputMode::Shared);
-        let response = egui::ComboBox::from_id_salt("wasapi_output_mode")
-            .width(104.0)
-            .selected_text(
-                RichText::new(mode.label())
-                    .size(ts(8.3))
-                    .color(if active { AMBER } else { DIM }),
-            )
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut mode, WasapiOutputMode::Shared, "Shared");
-                ui.selectable_value(&mut mode, WasapiOutputMode::RealStyle, "REAL-style");
-                ui.selectable_value(&mut mode, WasapiOutputMode::Exclusive, "Exclusive");
-            })
-            .response
-            .on_hover_text(match mode {
-                WasapiOutputMode::Shared => {
-                    "Shared: normal WASAPI output with the chosen buffer. Other apps keep playing on this device."
-                }
-                WasapiOutputMode::RealStyle => {
-                    "REAL-style: run the WASAPI device at the smallest shared step its driver allows (often about 3 ms instead of 10 ms), like the REAL tool, and queue only that one step. Other apps stay audible and get the shorter step too. Some drivers only offer their 10 ms default; then RigWerk still uses that minimum and labels it in the MODE line."
-                }
-                WasapiOutputMode::Exclusive => {
-                    "Exclusive: open this WASAPI clock output alone at its smallest exclusive period — often lower than shared REAL-style. Other apps cannot play on this device while the bridge holds it. If the driver refuses, RigWerk falls back to shared output with the chosen buffer."
-                }
-            });
-        let _ = response;
-        if mode != self.wasapi_output_mode {
-            self.set_wasapi_output_mode(mode);
-            self.push_log(
-                match mode {
-                    WasapiOutputMode::Shared => "WASAPI clock: Shared output.",
-                    WasapiOutputMode::RealStyle => {
-                        "WASAPI clock: REAL-style — smallest shared driver step when allowed."
-                    }
-                    WasapiOutputMode::Exclusive => {
-                        "WASAPI clock: Exclusive — this device only; shared buffer if refused."
-                    }
-                },
-                if active {
-                    LogTone::Amber
-                } else {
-                    LogTone::Muted
-                },
-            );
-        }
-    }
-
-    /// Output side clock: its own rate (or follow the input) and buffer.
-    /// The two menus sit next to the label.
-    pub(crate) fn output_clock_controls(&mut self, ui: &mut egui::Ui) {
-        let special_wasapi = self.wants_low_latency_output();
+    /// Clock output rate and buffer, as readings.  Setup changes them.
+    fn output_clock_reading(&mut self, ui: &mut egui::Ui) {
+        let shown = if self.output_rate == 0 {
+            "Match input".to_owned()
+        } else {
+            rate_label(self.output_rate)
+        };
         ui.horizontal(|ui| {
-            ui.label(micro_label("Clock output", DIM));
-            let mut rate = self.output_rate;
-            let shown = if rate == 0 {
-                "Match input".to_owned()
-            } else {
-                rate_label(rate)
-            };
-            egui::ComboBox::from_id_salt("output_rate")
-                .width(84.0)
-                .selected_text(mono(shown, MUTED, 9.0))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut rate, 0, "Match input");
-                    for option in RATES {
-                        ui.selectable_value(&mut rate, option, rate_label(option));
-                    }
-                })
-                .response
-                .on_hover_text(if cfg!(target_os = "windows") {
-                    "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. Shared WASAPI outputs mix at the rate set in Windows."
-                } else {
-                    "Output rate. When it differs from the input, RigWerk converts with a band-limited resampler. PipeWire keeps its own graph rate; the quantum check compares the graph's frames with ALSA's period."
-                });
-            if rate != self.output_rate {
-                self.output_rate = rate;
-                self.push_log(
-                    if rate == 0 {
-                        "Output rate follows the input.".to_owned()
-                    } else {
-                        format!("Output clock set to {}.", rate_label(rate))
-                    },
-                    LogTone::Blue);
-            }
-            let mut buffer = self.output_buffer;
-            egui::ComboBox::from_id_salt("output_buffer")
-                .width(72.0)
-                .selected_text(mono(format!("{buffer} smp"), MUTED, 9.0))
-                .show_ui(ui, |ui| {
-                    for option in BUFFERS {
-                        ui.selectable_value(&mut buffer, option, format!("{option} samples"));
-                    }
-                })
-                .response
-                .on_hover_text(if special_wasapi {
-                    if cfg!(target_os = "windows")
-                        && self.wasapi_output_mode == crate::audio::WasapiOutputMode::Exclusive
-                    {
-                        "Output buffer, used if the driver refuses Exclusive mode. While Exclusive runs, the exclusive period sets the output latency."
-                    } else if cfg!(target_os = "windows") {
-                        "Output buffer, used if the driver refuses REAL-style. While REAL-style runs, the driver's smallest step sets the output latency."
-                    } else {
-                        "Output buffer, used if low-latency ALSA refuses the smallest period."
-                    }
-                } else {
-                    "Output buffer: the block size asked of the output device."
-                });
-            if buffer != self.output_buffer {
-                self.output_buffer = buffer;
-                self.push_log(format!("Output buffer set to {buffer} samples."), LogTone::Blue);
-            }
+            ui.label(micro_label("RATE", DIM));
+            ui.label(mono(shown, MUTED, 9.0));
+            ui.label(micro_label("BUFFER", DIM));
+            ui.label(mono(format!("{} samples", self.output_buffer), MUTED, 9.0));
         });
     }
 }

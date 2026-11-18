@@ -1090,7 +1090,7 @@ fn the_opened_output_mode_is_published_with_its_line_and_cleared_on_reset() {
         48_000,
         144,
         OutputMode::Shared,
-        "Standard output · REAL-style refused: no client",
+        "Standard output · Shared, smallest buffer refused: no client",
     );
     let snapshot = shared.snapshot();
     assert_eq!(snapshot.opened_output_mode, Some(OutputMode::Shared));

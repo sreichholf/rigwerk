@@ -228,12 +228,7 @@ fn dropouts_while_running_offer_a_safer_latency() {
         assert_eq!(action.label(), "Turn Low latency off");
         app.apply_issue_action(action);
         assert!(!app.low_latency_output);
-        assert!(app
-            .log
-            .last()
-            .unwrap()
-            .text
-            .starts_with("Low-latency output off"));
+        assert!(app.log.last().unwrap().text.starts_with("Low latency off"));
         assert_eq!(
             app.live_issues()[0].action,
             IssueAction::SetOutputBuffer(256)
@@ -450,11 +445,15 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
         "Scarlett 2i2 was unplugged, so the bridge was stopped."
     );
     assert_eq!(issue.action, IssueAction::OpenDevices);
-    assert_eq!(issue.action.label(), "Open Devices");
+    assert_eq!(issue.action.label(), "Open Setup");
     app.expand_on_new_error();
     assert!(!app.live_issues_collapsed, "the strip opens on it");
     app.apply_issue_action(issue.action);
-    assert!(app.page == Page::Devices);
+    assert!(app.page == Page::Setup);
+    assert_eq!(
+        app.chrome.setup_section,
+        Some(crate::app::screen::SetupSection::Devices)
+    );
     assert!(app.live_issues().len() == 1, "a click changes nothing else");
 
     app.start_bridge();

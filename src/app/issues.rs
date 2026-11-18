@@ -558,7 +558,7 @@ pub(crate) enum IssueAction {
     /// Open Signal Routing (no device in particular).
     OpenRouting,
     OpenDiagnostics,
-    /// Open the Devices page (reconnect or pick another device).
+    /// Open Setup at the devices section (reconnect or pick another device).
     OpenDevices,
     /// Run the stand-alone output driver check.
     CheckDriver,
@@ -584,7 +584,7 @@ impl IssueAction {
             IssueAction::AlignDevice(_) => "Align paths".to_owned(),
             IssueAction::ShowRouting(_) | IssueAction::OpenRouting => "Show in Routing".to_owned(),
             IssueAction::OpenDiagnostics => "Open diagnostics".to_owned(),
-            IssueAction::OpenDevices => "Open Devices".to_owned(),
+            IssueAction::OpenDevices => "Open Setup".to_owned(),
             IssueAction::CheckDriver => "Check driver".to_owned(),
             IssueAction::SetOutputBuffer(frames) => format!("Set buffer to {frames}"),
             IssueAction::LowLatencyOff => "Turn Low latency off".to_owned(),

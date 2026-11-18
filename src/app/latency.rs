@@ -321,5 +321,31 @@ pub(crate) fn output_mode_key(mode: OutputMode) -> &'static str {
     }
 }
 
+/// The mode a stored key names.  Unknown keys are not a mode.
+pub(crate) fn output_mode_from_key(key: &str) -> Option<OutputMode> {
+    Some(match key {
+        "standard" => OutputMode::Standard,
+        "low-latency" => OutputMode::LowLatency,
+        "shared" => OutputMode::Shared,
+        "real-style" => OutputMode::RealStyle,
+        "exclusive" => OutputMode::Exclusive,
+        "asio" => OutputMode::Asio,
+        _ => return None,
+    })
+}
+
+/// The output mode as Setup and the Live readings say it.  The stored key
+/// stays [`output_mode_key`].
+pub(crate) fn output_mode_phrase(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Standard => "Standard",
+        OutputMode::LowLatency => "Low latency",
+        OutputMode::Shared => crate::audio::WasapiOutputMode::Shared.label(),
+        OutputMode::RealStyle => crate::audio::WasapiOutputMode::RealStyle.label(),
+        OutputMode::Exclusive => crate::audio::WasapiOutputMode::Exclusive.label(),
+        OutputMode::Asio => "ASIO",
+    }
+}
+
 #[cfg(test)]
 mod tests;

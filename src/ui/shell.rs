@@ -50,13 +50,14 @@ impl RigWerkApp {
             self.record_control(ui);
             self.metronome_control(ui);
             self.screen_button(ui, "Tuner", self.page == Page::Tuner, Page::Tuner);
-            let setup = bar_button(ui.ctx(), "Setup", false);
-            if ui
-                .add(setup)
-                .on_hover_text("Devices, until Setup replaces that page")
-                .clicked()
-            {
-                self.open_setup(SetupSection::Devices);
+            let on_setup = self.page == Page::Setup;
+            let setup = bar_button(ui.ctx(), "Setup", on_setup);
+            if ui.add(setup).on_hover_text("Setup").clicked() {
+                if on_setup {
+                    self.close_setup();
+                } else {
+                    self.open_setup(SetupSection::Devices);
+                }
             }
             self.mute_button(ui);
             self.classic_menu(ui);
@@ -105,13 +106,13 @@ impl RigWerkApp {
 
     fn latency_readout(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
-        let ms = self.heard_latency_ms().unwrap_or_else(|| self.latency_ms());
+        let estimate = self.heard_estimate();
         ui.label(
-            RichText::new(format!("≈ {}", format_ms(ms)))
+            RichText::new(format!("≈ {}", format_ms(estimate.total_ms)))
                 .font(font(Face::Mono, TypeRole::Secondary))
                 .color(colours.text2),
         )
-        .on_hover_text(self.latency_caption());
+        .on_hover_text(self.heard_summary());
     }
 
     fn mute_button(&mut self, ui: &mut egui::Ui) {
@@ -489,8 +490,6 @@ const CLASSIC: &[(&str, Page)] = &[
     ("Routing", Page::Routing),
     ("Plugins", Page::Plugins),
     ("Tuner", Page::Tuner),
-    ("Devices", Page::Devices),
-    ("Guide", Page::Guide),
 ];
 
 fn bridge_label(state: EngineState) -> &'static str {

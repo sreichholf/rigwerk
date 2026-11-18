@@ -165,107 +165,36 @@ impl RigWerkApp {
         ui.add_space(10.0);
         let running = self.engine.state == EngineState::Running;
         let mode_text = &self.snapshot.output_mode;
+        let phrase = crate::app::latency::output_mode_phrase(self.output_mode());
+        let refused = mode_text.contains("refused");
+        let minimum = mode_text.contains("no smaller step");
         // While the bridge runs, MODE shows the live output block — not the
         // desktop PipeWire graph size (a misfit is a Live Issues row).
-        let (mode, color, hint) = if self.selected_output().asio_clsid.is_some() {
+        let (mode, color, hint) = if let Some((frames, ms)) = self.output_step().filter(|_| running)
+        {
+            let extra = if refused {
+                " · fallback"
+            } else if minimum {
+                " · driver minimum"
+            } else {
+                ""
+            };
+            let tone = if refused || minimum { AMBER } else { GREEN };
+            (
+                format!("{phrase} · {frames} smp · {ms:.1} ms{extra}"),
+                tone,
+                self.output_mode_text(),
+            )
+        } else if self.selected_output().asio_clsid.is_some() {
             (
                 "ASIO output · direct".to_owned(),
                 BLUE,
                 self.output_mode_text(),
             )
-        } else if running && mode_text.starts_with("Exclusive") {
-            let step = self
-                .output_step()
-                .map(|(frames, ms)| {
-                    format!("Exclusive · {frames} smp · {ms:.1} ms · this device only")
-                })
-                .unwrap_or_else(|| "Exclusive · this device only".to_owned());
-            (step, GREEN, self.output_mode_text())
-        } else if running && mode_text.starts_with("REAL-style") {
-            let driver_minimum = mode_text.contains("no smaller step");
-            let step = self
-                .output_step()
-                .map(|(frames, ms)| {
-                    if driver_minimum {
-                        format!("REAL · {frames} smp · {ms:.1} ms · driver minimum")
-                    } else {
-                        format!("REAL · {frames} smp · {ms:.1} ms")
-                    }
-                })
-                .unwrap_or_else(|| "REAL-style".to_owned());
-            (
-                step,
-                if driver_minimum { AMBER } else { GREEN },
-                self.output_mode_text(),
-            )
-        } else if running && mode_text.starts_with("Low latency") {
-            let step = self
-                .output_step()
-                .map(|(frames, ms)| format!("Low latency · {frames} smp · {ms:.1} ms"))
-                .unwrap_or_else(|| "Low latency".to_owned());
-            (step, GREEN, self.output_mode_text())
-        } else if running && mode_text.contains("refused") {
-            let step = self
-                .output_step()
-                .map(|(frames, ms)| format!("Fallback · {frames} smp · {ms:.1} ms"))
-                .unwrap_or_else(|| "Fallback · driver step".to_owned());
-            (step, AMBER, self.output_mode_text())
-        } else if running {
-            if let Some((frames, ms)) = self.output_step() {
-                let (label, tone) = if cfg!(target_os = "windows") {
-                    match self.wasapi_output_mode {
-                        crate::audio::WasapiOutputMode::Exclusive => {
-                            (format!("Exclusive · {frames} smp · {ms:.1} ms"), GREEN)
-                        }
-                        crate::audio::WasapiOutputMode::RealStyle => {
-                            (format!("REAL · {frames} smp · {ms:.1} ms"), GREEN)
-                        }
-                        crate::audio::WasapiOutputMode::Shared => {
-                            (format!("Shared · {frames} smp · {ms:.1} ms"), MUTED)
-                        }
-                    }
-                } else if self.low_latency_output {
-                    (format!("Low latency · {frames} smp · {ms:.1} ms"), GREEN)
-                } else {
-                    (format!("Standard · {frames} smp · {ms:.1} ms"), MUTED)
-                };
-                (label, tone, self.output_mode_text())
-            } else if let Some(summary) = self.quantum_summary() {
-                (summary, self.quantum_tone(), self.graph_block_hint())
-            } else {
-                (
-                    "Standard · output buffer".to_owned(),
-                    MUTED,
-                    self.output_mode_text(),
-                )
-            }
         } else if let Some(summary) = self.quantum_summary() {
             (summary, self.quantum_tone(), self.graph_block_hint())
-        } else if cfg!(target_os = "windows") {
-            let (label, tone) = match self.wasapi_output_mode {
-                crate::audio::WasapiOutputMode::Exclusive => {
-                    ("Exclusive · this device only".to_owned(), AMBER)
-                }
-                crate::audio::WasapiOutputMode::RealStyle => {
-                    ("REAL-style · driver's smallest step".to_owned(), AMBER)
-                }
-                crate::audio::WasapiOutputMode::Shared => {
-                    ("Shared · output buffer".to_owned(), MUTED)
-                }
-            };
-            (label, tone, self.output_mode_text())
-        } else if self.low_latency_output {
-            (
-                "Low latency · smallest ALSA period".to_owned(),
-                AMBER,
-                self.output_mode_text(),
-            )
         } else {
-            (
-                "Shared · output buffer".to_owned(),
-                MUTED,
-                self.output_mode_text(),
-            )
+            (phrase.to_owned(), MUTED, self.output_mode_text())
         };
         // Host (PipeWire / ASIO / …) is already on INPUT, OUTPUT and AUDIO PATH.
         // Keep only the OS here so MODE's timing line has room.

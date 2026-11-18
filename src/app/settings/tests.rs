@@ -521,6 +521,15 @@ fn old_session_and_diagnostics_pages_open_live() {
     assert_eq!(page_key(Page::Live), "live");
 }
 
+#[test]
+fn old_devices_and_guide_pages_open_setup() {
+    assert_eq!(page_from_key("devices"), Page::Setup);
+    assert_eq!(page_from_key(" Devices "), Page::Setup);
+    assert_eq!(page_from_key("guide"), Page::Setup);
+    assert_eq!(page_from_key("setup"), Page::Setup);
+    assert_eq!(page_key(Page::Setup), "setup");
+}
+
 fn output_devices() -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
     let clock = OutputDeviceSettings {
         level_db: -6.0,
@@ -1751,6 +1760,7 @@ fn golden_preferences() -> Preferences {
         effect_favourites: Vec::new(),
         effect_recent: Vec::new(),
         sheet_height: 0.0,
+        effect_double_click: crate::app::settings::EffectOpen::Editor,
     }
 }
 

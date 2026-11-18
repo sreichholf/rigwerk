@@ -63,7 +63,7 @@ impl RigWerkApp {
             // Preview would replace the state and clear the teardown watchdog
             // while the previous driver still owns its device.
             self.push_log(
-                "The previous bridge is still releasing its audio device. Preview starts once it has finished.",
+                "The previous bridge is still releasing its audio device. Demo starts once it has finished.",
                 LogTone::Amber);
             return;
         }
@@ -80,10 +80,7 @@ impl RigWerkApp {
         self.apply_metronome();
         if self.is_preview() {
             self.engine.start_preview();
-            self.push_log(
-                "Preview bridge active — animated, no hardware opened.",
-                LogTone::Amber,
-            );
+            self.push_log("Demo device: animated, no hardware opened.", LogTone::Amber);
             return;
         }
 
@@ -527,28 +524,28 @@ impl RigWerkApp {
             return self.snapshot.output_mode.clone();
         }
         if self.selected_output().asio_clsid.is_some() {
-            "ASIO output · driver buffer".to_owned()
+            "ASIO output · the driver's own buffer".to_owned()
         } else if cfg!(target_os = "windows") {
             match self.wasapi_output_mode {
                 audio::WasapiOutputMode::Exclusive => {
-                    "Exclusive: driver's smallest exclusive period, this device only (shared output buffer if refused)"
+                    "Exclusive: this device only, at the driver's smallest exclusive buffer (shared output if refused)"
                         .to_owned()
                 }
                 audio::WasapiOutputMode::RealStyle => {
-                    "REAL-style: the driver's smallest shared step, one step queued (normal output if refused)"
+                    "Shared, smallest buffer: the driver's smallest shared step, one step queued (shared output if refused)"
                         .to_owned()
                 }
                 audio::WasapiOutputMode::Shared => {
-                    format!("Shared output · {} smp buffer", self.output_buffer)
+                    format!("Shared · {} samples", self.output_buffer)
                 }
             }
         } else if self.low_latency_output {
             format!(
-                "Low latency: PipeWire {}-frame quantum, ALSA's smallest usable period (normal output buffer if refused)",
+                "Low latency: PipeWire {}-sample buffer, ALSA's smallest usable buffer (the output buffer if refused)",
                 audio::PIPEWIRE_LOW_QUANTUM
             )
         } else {
-            format!("Standard output · {} smp buffer", self.output_buffer)
+            format!("Standard · {} samples", self.output_buffer)
         }
     }
 
@@ -557,9 +554,9 @@ impl RigWerkApp {
         self.low_latency_output = on;
         self.push_log(
             if on {
-                "Low-latency output on: PipeWire low quantum + smallest ALSA period when allowed."
+                "Low latency on: asks PipeWire for a 64-sample buffer and ALSA for its smallest buffer."
             } else {
-                "Low-latency output off: normal output buffer, PipeWire quantum released."
+                "Low latency off: the clock output uses its buffer size."
             },
             if on { LogTone::Amber } else { LogTone::Muted },
         );

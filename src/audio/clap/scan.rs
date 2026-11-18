@@ -28,8 +28,8 @@ pub(crate) struct ClapCandidate {
     pub(crate) features: Vec<String>,
 }
 
-/// Standard CLAP locations, plus `RIGWERK_CLAP_PATH` for a custom folder.
-pub(crate) fn scan_library() -> Vec<ClapCandidate> {
+/// Standard CLAP locations, plus `CLAP_PATH` and `RIGWERK_CLAP_PATH`.
+pub(crate) fn scan_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         let mut folder = PathBuf::from(home);
@@ -60,9 +60,13 @@ pub(crate) fn scan_library() -> Vec<ClapCandidate> {
     if let Ok(extra) = std::env::var("RIGWERK_CLAP_PATH") {
         roots.extend(std::env::split_paths(&extra));
     }
+    roots
+}
 
+/// Standard CLAP locations, plus `RIGWERK_CLAP_PATH` for a custom folder.
+pub(crate) fn scan_library() -> Vec<ClapCandidate> {
     let mut bundles = Vec::new();
-    for root in roots {
+    for root in scan_roots() {
         collect_bundles(&root, 0, &mut bundles);
     }
     bundles.sort();
