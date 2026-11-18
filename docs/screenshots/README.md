@@ -3,11 +3,12 @@
 The images the [README](../../README.md) shows, and how to take them again.
 Run the commands from the repository root.
 
-`--screenshot <file>` renders a fixed 1440×1080 window and saves it. It
-always uses X11/XWayland, because Wayland ignores the requested size. The
-screenshots here all use the same `showcase` setup: two paths (Clean and
-Room) with real plugins, two extra outputs, a running bridge, and the
-metronome at 96 BPM in 4/4, clicking on the extra headphones only.
+`--screenshot <file>` renders a 1440×1080 window (or the size in
+`RIGWERK_SCREENSHOT_SIZE`) and saves it. It always uses X11/XWayland,
+because Wayland ignores the requested size. The screenshots here all use
+the same `showcase` setup: two paths (Clean and Room) with real plugins,
+two extra outputs, a running bridge, and the metronome at 96 BPM in 4/4,
+clicking on the extra headphones only.
 
 ```bash
 export RIGWERK_ROUTING_SETUP=showcase RIGWERK_SCREENSHOT_START=1
@@ -60,6 +61,7 @@ Environment variables for screenshot runs:
 | `RIGWERK_MIXER_STAGE` | `input`, `pre_eq`, `plugins`, `gate`, `post_eq`, `path` (the selected path's level, with 2+ paths), `output` (also the metronome), `device` (the clock device); applied after the setup, so it wins over the insert `showcase` selects |
 | `RIGWERK_ROUTING_SETUP` | `showcase`; `drywet`, `sum3`, `blend`, `dualamp-off` (alignment off, the red warning), `live3` (Blend plus an empty third path) |
 | `RIGWERK_SCREENSHOT_PLUGINS` | `;` list of `<path number>=<bundle>[#<effect name>]`, used by `showcase` |
+| `RIGWERK_SCREENSHOT_SIZE` | `<w>x<h>` window size in points, from `640x480` to `7680x4320` (default `1440x1080`); a blank, unparsable or out-of-range value is logged and the default used |
 | `RIGWERK_SCREENSHOT_START` | `1` starts the bridge before the capture |
 | `RIGWERK_SCROLL` | pixels to scroll the page down |
 

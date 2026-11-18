@@ -8,7 +8,55 @@ use egui::{Vec2, ViewportCommand};
 use crate::app::RigWerkApp;
 
 /// Inner size that fits Live (and side-by-side routing) without a scrollbar.
-pub(crate) const SCREENSHOT_INNER_SIZE: Vec2 = Vec2::new(1440.0, 1080.0);
+const DEFAULT_INNER_SIZE: Vec2 = Vec2::new(1440.0, 1080.0);
+
+/// The smallest and the largest size `RIGWERK_SCREENSHOT_SIZE` may ask for.
+const MIN_INNER_SIZE: Vec2 = Vec2::new(640.0, 480.0);
+const MAX_INNER_SIZE: Vec2 = Vec2::new(7680.0, 4320.0);
+
+/// Test hook for screenshots at another window size:
+/// `RIGWERK_SCREENSHOT_SIZE=<w>x<h>` sets the inner size in points.  A
+/// blank value, one that does not parse, or one out of range is logged
+/// and the default 1440×1080 is used.
+pub(crate) fn screenshot_inner_size() -> Vec2 {
+    static SIZE: std::sync::OnceLock<Vec2> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| inner_size_from(std::env::var("RIGWERK_SCREENSHOT_SIZE").ok().as_deref()))
+}
+
+/// The size `value` names.  `None` is an unset variable and stays the
+/// default.  A present value that does not parse, including a blank one,
+/// is logged and the default is used.
+fn inner_size_from(value: Option<&str>) -> Vec2 {
+    let Some(value) = value else {
+        return DEFAULT_INNER_SIZE;
+    };
+    parse_inner_size(value).unwrap_or_else(|| {
+        eprintln!(
+            "RIGWERK_SCREENSHOT_SIZE={value:?} is not <w>x<h> from {:.0}x{:.0} to {:.0}x{:.0}; using {:.0}x{:.0}.",
+            MIN_INNER_SIZE.x,
+            MIN_INNER_SIZE.y,
+            MAX_INNER_SIZE.x,
+            MAX_INNER_SIZE.y,
+            DEFAULT_INNER_SIZE.x,
+            DEFAULT_INNER_SIZE.y
+        );
+        DEFAULT_INNER_SIZE
+    })
+}
+
+/// `<w>x<h>` in whole points (`x` or `X`, spaces allowed around either
+/// number), or `None` when it does not parse or is out of range.
+fn parse_inner_size(value: &str) -> Option<Vec2> {
+    let (width, height) = value.trim().split_once(['x', 'X'])?;
+    let width: u32 = width.trim().parse().ok()?;
+    let height: u32 = height.trim().parse().ok()?;
+    let size = Vec2::new(width as f32, height as f32);
+    (size.x >= MIN_INNER_SIZE.x
+        && size.y >= MIN_INNER_SIZE.y
+        && size.x <= MAX_INNER_SIZE.x
+        && size.y <= MAX_INNER_SIZE.y)
+        .then_some(size)
+}
 
 /// Test hook for screenshots further down a page: `RIGWERK_SCROLL=<px>`
 /// scrolls the page by that much (screenshot mode only).
@@ -68,20 +116,19 @@ impl RigWerkApp {
         };
         // Re-assert size after the first frame (X11/XWayland). Wayland itself
         // ignores this; screenshot mode already forced the X11 backend.
+        let size = screenshot_inner_size();
         if self.frames == 1 {
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(SCREENSHOT_INNER_SIZE));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         }
         if self.frames >= settle && !job.requested {
             let viewport = ctx.viewport_rect();
-            if (viewport.width() - SCREENSHOT_INNER_SIZE.x).abs() > 1.0
-                || (viewport.height() - SCREENSHOT_INNER_SIZE.y).abs() > 1.0
-            {
+            if (viewport.width() - size.x).abs() > 1.0 || (viewport.height() - size.y).abs() > 1.0 {
                 eprintln!(
                     "Screenshot viewport is {:.0}x{:.0}, expected {:.0}x{:.0}. On Wayland, XWayland or Xvfb is required so the size can be fixed.",
                     viewport.width(),
                     viewport.height(),
-                    SCREENSHOT_INNER_SIZE.x,
-                    SCREENSHOT_INNER_SIZE.y
+                    size.x,
+                    size.y
                 );
                 std::process::exit(1);
             }
@@ -236,3 +283,6 @@ impl RigWerkApp {
         self.select_path(slots[1]);
     }
 }
+
+#[cfg(test)]
+mod tests;
