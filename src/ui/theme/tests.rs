@@ -1,6 +1,10 @@
-use eframe::egui::Color32;
+use eframe::egui;
+use egui::Color32;
 
-use super::{CARD, CARD_RAISED, DIM, MUTED, TEXT};
+use super::{
+    palette, Palette, AMBER, CARD, CARD_RAISED, DARK, DIM, LIGHT, MUTED, PATH_COLOURS, RED, TEAL,
+    TEXT,
+};
 
 fn channel(c: u8) -> f64 {
     let c = f64::from(c) / 255.0;
@@ -46,4 +50,109 @@ fn dim_clears_wcag_aa_on_card_and_stays_quieter_than_muted() {
 
     let previous = Color32::from_rgb(89, 102, 122);
     assert!(contrast(previous, CARD) < 4.5);
+}
+
+fn palettes() -> [(&'static str, &'static Palette); 2] {
+    [("dark", &DARK), ("light", &LIGHT)]
+}
+
+/// Every token against every surface must reach `minimum`.  Failures are
+/// collected, so one run lists them all.
+fn check_pairs(
+    theme: &str,
+    tokens: &[(&str, Color32)],
+    surfaces: &[(&str, Color32)],
+    minimum: f64,
+    failures: &mut Vec<String>,
+) {
+    for (token, colour) in tokens {
+        for (surface, background) in surfaces {
+            let ratio = contrast(*colour, *background);
+            if ratio < minimum {
+                failures.push(format!(
+                    "{theme}: {token} on {surface} is {ratio:.2}:1, below {minimum}:1"
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn text_tokens_read_on_every_text_surface() {
+    let mut failures = Vec::new();
+    for (theme, p) in palettes() {
+        let text = [
+            ("text", p.text),
+            ("text2", p.text2),
+            ("text3", p.text3),
+            ("accent_text", p.accent_text),
+            ("warn", p.warn),
+            ("error_text", p.error_text),
+        ];
+        let surfaces = [
+            ("bg", p.bg),
+            ("bar", p.bar),
+            ("strip", p.strip),
+            ("sheet", p.sheet),
+            ("slot", p.slot),
+        ];
+        check_pairs(theme, &text, &surfaces, 4.5, &mut failures);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn state_colours_stand_out_on_strips_and_slots() {
+    let mut failures = Vec::new();
+    for (theme, p) in palettes() {
+        let mut states = vec![
+            ("accent", p.accent),
+            ("led_off", p.led_off),
+            ("meter", p.meter),
+            ("meter_hot", p.meter_hot),
+            ("warn", p.warn),
+        ];
+        states.extend(
+            ["path 1", "path 2", "path 3", "path 4"]
+                .into_iter()
+                .zip(p.path),
+        );
+        let surfaces = [("strip", p.strip), ("slot", p.slot)];
+        check_pairs(theme, &states, &surfaces, 3.0, &mut failures);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn meter_hot_is_warn_and_no_two_paths_share_a_colour() {
+    for (theme, p) in palettes() {
+        assert_eq!(p.meter_hot, p.warn, "{theme}");
+        for (i, a) in p.path.iter().enumerate() {
+            for b in &p.path[i + 1..] {
+                assert_ne!(a, b, "{theme}: two paths share a colour");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_old_constants_are_the_dark_tokens() {
+    assert_eq!(TEXT, DARK.text);
+    assert_eq!(MUTED, DARK.text2);
+    assert_eq!(DIM, DARK.text3);
+    assert_eq!(CARD, DARK.strip);
+    assert_eq!(CARD_RAISED, DARK.slot);
+    assert_eq!(TEAL, DARK.accent);
+    assert_eq!(AMBER, DARK.warn);
+    assert_eq!(RED, DARK.error);
+    assert_eq!(PATH_COLOURS, DARK.path);
+}
+
+#[test]
+fn palette_follows_the_theme() {
+    let ctx = egui::Context::default();
+    ctx.set_theme(egui::Theme::Light);
+    assert_eq!(palette(&ctx), &LIGHT);
+    ctx.set_theme(egui::Theme::Dark);
+    assert_eq!(palette(&ctx), &DARK);
 }
