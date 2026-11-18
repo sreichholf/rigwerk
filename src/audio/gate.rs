@@ -175,6 +175,8 @@ pub(crate) struct NoiseGate {
     envelope: f32,
     /// Smoothed gain applied to the audio (linear).
     gain: f32,
+    /// The lowest `gain` since the last [`Self::take_reduction_db`].
+    lowest: f32,
     /// Samples left in [`GatePhase::Holding`].
     hold_left: u32,
     hold_samples: u32,
@@ -194,6 +196,7 @@ impl NoiseGate {
             phase: GatePhase::Closed,
             envelope: 0.0,
             gain: 1.0,
+            lowest: 1.0,
             hold_left: 0,
             hold_samples: 0,
             attack_coeff: 0.0,
@@ -232,6 +235,7 @@ impl NoiseGate {
             self.phase = GatePhase::Closed;
             self.envelope = 0.0;
             self.gain = 1.0;
+            self.lowest = 1.0;
             self.hold_left = 0;
         } else if !was_active {
             // Fresh enable: start closed at the floor so the first note has to
@@ -255,6 +259,14 @@ impl NoiseGate {
     #[cfg(test)]
     pub(crate) fn gain(&self) -> f32 {
         self.gain
+    }
+
+    /// The deepest gain reduction since the last call, in dB (0 when the
+    /// gate stayed open, or processed nothing), and starts the next count.
+    /// Once per block; no allocation.
+    pub(crate) fn take_reduction_db(&mut self) -> f32 {
+        let lowest = std::mem::replace(&mut self.lowest, 1.0);
+        (-20.0 * lowest.max(1.0e-6).log10()).max(0.0)
     }
 
     #[cfg(test)]
@@ -292,6 +304,7 @@ impl NoiseGate {
             self.release_coeff
         };
         self.gain = target + (self.gain - target) * coeff;
+        self.lowest = self.lowest.min(self.gain);
         (left * self.gain, right * self.gain)
     }
 

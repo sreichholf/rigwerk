@@ -1136,6 +1136,7 @@ impl Shared {
             in_r: f32::from_bits(self.in_r.load(Ordering::Relaxed)),
             out_l: f32::from_bits(self.out_l.load(Ordering::Relaxed)),
             out_r: f32::from_bits(self.out_r.load(Ordering::Relaxed)),
+            gate_reduction_db: std::array::from_fn(|slot| self.paths[slot].gate_reduction_db()),
             out_channels: self.clock_device.meters(),
             out_reduction_db: self.clock_device.reduction_db(),
             output_channels: self.clock_device.channels(),

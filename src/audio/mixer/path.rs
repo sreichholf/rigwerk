@@ -489,7 +489,7 @@ impl PathProcessor {
     }
 
     /// The rest of the path after the inserts: the POST gate and the post
-    /// EQ, in place, then the path meters.
+    /// EQ, in place, then the path meters and the gate's reduction.
     pub(super) fn finish_block(&mut self, controls: &PathControls, frames: usize) {
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
@@ -504,6 +504,7 @@ impl PathProcessor {
             peak_r = peak_r.max(out[1].abs());
         }
         controls.store_meters(peak_l, peak_r);
+        controls.store_gate_reduction(self.gate.take_reduction_db());
     }
 }
 

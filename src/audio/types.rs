@@ -2,6 +2,7 @@
 //! state, live snapshot, cushion mode and the bridge's start settings.
 
 use super::output_map::{MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS};
+use super::path::MAX_PATHS;
 
 pub const DEMO_ASIO_ID: &str = "demo:asio";
 pub const DEMO_INPUT_ID: &str = "demo:input";
@@ -158,6 +159,10 @@ pub struct Snapshot {
     pub in_r: f32,
     pub out_l: f32,
     pub out_r: f32,
+    /// Per path slot: the gate's deepest gain reduction in the last block,
+    /// dB.  0 while the gate is open or off, and for a slot no mixer runs.
+    #[cfg_attr(not(test), allow(dead_code))] // For the gate sheet's meter.
+    pub gate_reduction_db: [f32; MAX_PATHS],
     /// Block peak per clock-device channel, after its channel map, level,
     /// safety ceiling, metronome and mute.  The tick is included.  Channels
     /// the device does not have read 0.

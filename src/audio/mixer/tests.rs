@@ -2371,3 +2371,37 @@ fn a_narrow_follower_ring_gets_the_tick_free_lanes_from_the_mixer() {
         assert_eq!(quiet[2..], quiet[..2]);
     }
 }
+
+#[test]
+fn each_paths_gate_reduction_is_published_in_the_snapshot() {
+    use super::super::gate::GateSettings;
+    use super::super::path::MAX_PATHS;
+    // −60 dBFS, under the default −48 dB threshold: the gate stays closed.
+    let (mut mixer, shared) = steady_mixer((0.001, 0.001));
+    let gate = GateSettings {
+        enabled: true,
+        ..GateSettings::default()
+    };
+    shared.set_gate(gate);
+    assert_eq!(shared.snapshot().gate_reduction_db, [0.0; MAX_PATHS]);
+    render(&mut mixer, &shared, 256);
+    render(&mut mixer, &shared, 256);
+    let reduction = shared.snapshot().gate_reduction_db;
+    assert!(
+        (reduction[0] + gate.range_db).abs() < 0.5,
+        "path 0: {reduction:?}"
+    );
+    assert_eq!(reduction[1..], [0.0; MAX_PATHS - 1]);
+    shared.set_gate(GateSettings {
+        enabled: false,
+        ..gate
+    });
+    render(&mut mixer, &shared, 256);
+    assert_eq!(shared.snapshot().gate_reduction_db[0], 0.0);
+    // Closed again, then a reset: the reading starts at 0.
+    shared.set_gate(gate);
+    render(&mut mixer, &shared, 256);
+    assert!(shared.snapshot().gate_reduction_db[0] > 0.0);
+    shared.reset();
+    assert_eq!(shared.snapshot().gate_reduction_db[0], 0.0);
+}

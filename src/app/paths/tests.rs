@@ -376,3 +376,14 @@ fn set_click_channel_moves_one_bit_of_one_device() {
     assert_eq!(app.clock_device.click_mask, 0b1000_0100);
     assert_eq!(app.followers[0].settings.click_mask, 0b1000);
 }
+
+#[test]
+fn the_gate_reduction_reads_the_snapshot_only_while_the_bridge_runs() {
+    let mut app = crate::app::blank_app();
+    app.snapshot.gate_reduction_db[1] = 24.0;
+    assert_eq!(app.gate_reduction_db(1), 0.0);
+    app.engine.state = crate::audio::EngineState::Running;
+    assert_eq!(app.gate_reduction_db(1), 24.0);
+    assert_eq!(app.gate_reduction_db(0), 0.0);
+    assert_eq!(app.gate_reduction_db(crate::audio::MAX_PATHS), 0.0);
+}

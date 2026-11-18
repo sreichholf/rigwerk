@@ -344,6 +344,9 @@ pub(crate) struct PathControls {
     /// Block peaks of the path's output (`f32` bits), before the master.
     meter_l: AtomicU32,
     meter_r: AtomicU32,
+    /// The gate's deepest gain reduction in the last block, dB (`f32`
+    /// bits), 0 while it is open or off.  Written with the meters.
+    gate_reduction_db: AtomicU32,
     /// How long the mixer spends on this path's chain per block, ns
     /// (smoothed, and a decaying peak), and how long that block lasts, ns:
     /// its DSP budget.  Written by the mixer at the end of each block (see
@@ -436,6 +439,7 @@ impl PathControls {
             retired: AtomicBool::new(false),
             meter_l: AtomicU32::new(0.0f32.to_bits()),
             meter_r: AtomicU32::new(0.0f32.to_bits()),
+            gate_reduction_db: AtomicU32::new(0.0f32.to_bits()),
             dsp: DspCell::default(),
             slot_links: Mutex::new(Arc::from(Vec::new())),
             plugin_views: Mutex::new(Arc::from(Vec::new())),
@@ -729,8 +733,20 @@ impl PathControls {
         self.meter_r.store(right.to_bits(), Ordering::Relaxed);
     }
 
+    /// The gate's deepest gain reduction in the last block, in dB: 0 while
+    /// it is open or off, up to its range while it is closed.
+    pub(crate) fn gate_reduction_db(&self) -> f32 {
+        f32::from_bits(self.gate_reduction_db.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn store_gate_reduction(&self, db: f32) {
+        self.gate_reduction_db
+            .store(db.to_bits(), Ordering::Relaxed);
+    }
+
     pub(crate) fn reset_meters(&self) {
         self.store_meters(0.0, 0.0);
+        self.store_gate_reduction(0.0);
         self.store_dsp_time(DspTime::default());
     }
 

@@ -24,9 +24,9 @@ use crate::app::settings::{default_path_name, FollowerPref, PathPref};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{
-    low_bits, path_level_gain, sanitize_path_level, EqSettings, GateSettings, MapPreset,
-    OutputDeviceSettings, PathMapSettings, PathMix, PathState, UnusedChannels, MAX_OUTPUT_CHANNELS,
-    MAX_PATHS,
+    low_bits, path_level_gain, sanitize_path_level, EngineState, EqSettings, GateSettings,
+    MapPreset, OutputDeviceSettings, PathMapSettings, PathMix, PathState, UnusedChannels,
+    MAX_OUTPUT_CHANNELS, MAX_PATHS,
 };
 
 /// One live path's UI data (name, colour index) and the settings pushed to
@@ -242,6 +242,21 @@ impl RigWerkApp {
                 })
             })
             .collect()
+    }
+
+    /// Path `slot`'s gate gain reduction in dB from the live snapshot: the
+    /// deepest of the last block, 0 while the gate is open or off, and
+    /// while no bridge runs.
+    #[cfg_attr(not(test), allow(dead_code))] // For the gate sheet's meter.
+    pub(crate) fn gate_reduction_db(&self, slot: usize) -> f32 {
+        if self.engine.state != EngineState::Running {
+            return 0.0;
+        }
+        self.snapshot
+            .gate_reduction_db
+            .get(slot)
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// Whether another path fits (a slot is free in the app and the
