@@ -12,8 +12,11 @@ use egui::{Align2, Margin, RichText, Vec2};
 use crate::app::appearance::UI_SIZE_DEFAULT;
 use crate::app::screenshot;
 use crate::app::{Page, RigWerkApp};
+use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
-use crate::ui::theme::{configure_style, with_alpha, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT};
+use crate::ui::theme::{
+    configure_style, font, with_alpha, TypeRole, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
+};
 
 /// Command and shift, and nothing else.  Command is Ctrl on Windows and
 /// Linux, and Command on macOS.  `matches_exact` rejects Alt; egui's
@@ -185,10 +188,14 @@ impl eframe::App for RigWerkApp {
                     ui.add_space(8.0);
                     if ui
                         .add(
-                            egui::Button::new(RichText::new("Close").color(TEAL))
-                                .fill(with_alpha(TEAL, 14))
-                                .stroke(egui::Stroke::new(1.0, with_alpha(TEAL, 45)))
-                                .corner_radius(egui::CornerRadius::same(7)),
+                            egui::Button::new(
+                                RichText::new("Close")
+                                    .font(font(Face::Sans, TypeRole::Control))
+                                    .color(TEAL),
+                            )
+                            .fill(with_alpha(TEAL, 14))
+                            .stroke(egui::Stroke::new(1.0, with_alpha(TEAL, 45)))
+                            .corner_radius(egui::CornerRadius::same(7)),
                         )
                         .clicked()
                     {
@@ -215,7 +222,7 @@ impl eframe::App for RigWerkApp {
                 .show(&ctx, |ui| {
                     ui.label(
                         RichText::new("Finding audio devices…")
-                            .size(ts(14.0))
+                            .font(font(Face::Sans, TypeRole::Control))
                             .color(TEXT),
                     );
                     ui.add_space(8.0);
@@ -223,7 +230,7 @@ impl eframe::App for RigWerkApp {
                         RichText::new(
                             "The window is ready. Device lists fill in as soon as the scan finishes.",
                         )
-                        .size(ts(11.0))
+                        .font(font(Face::Sans, TypeRole::Secondary))
                         .color(MUTED),
                     );
                 });

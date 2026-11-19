@@ -164,6 +164,41 @@ fn the_type_scale_is_the_spec_and_ts_is_unchanged() {
 }
 
 #[test]
+fn egui_text_styles_follow_the_type_scale() {
+    use super::configure_style;
+    let ctx = egui::Context::default();
+    configure_style(&ctx);
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        let style = ctx.style_of(theme);
+        assert_eq!(
+            style.text_styles[&egui::TextStyle::Button].size,
+            type_size(TypeRole::Control),
+            "{theme:?}: bare buttons and combos must match segmented / outline controls"
+        );
+        assert_eq!(
+            style.text_styles[&egui::TextStyle::Body].size,
+            type_size(TypeRole::Body),
+            "{theme:?}"
+        );
+        assert_eq!(
+            style.text_styles[&egui::TextStyle::Small].size,
+            type_size(TypeRole::Secondary),
+            "{theme:?}"
+        );
+        assert_eq!(
+            style.text_styles[&egui::TextStyle::Heading].size,
+            type_size(TypeRole::Heading),
+            "{theme:?}"
+        );
+        assert_eq!(
+            style.text_styles[&egui::TextStyle::Monospace].size,
+            type_size(TypeRole::Secondary),
+            "{theme:?}"
+        );
+    }
+}
+
+#[test]
 fn font_names_the_bundled_family() {
     let id = font(Face::MonoMedium, TypeRole::Secondary);
     assert_eq!(id.size, 12.0);

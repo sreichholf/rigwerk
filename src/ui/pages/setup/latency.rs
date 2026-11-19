@@ -77,7 +77,14 @@ impl RigWerkApp {
                 "Measure latency…"
             };
             if ui
-                .add_enabled(!measuring, egui::Button::new(label))
+                .add_enabled(
+                    !measuring,
+                    egui::Button::new(
+                        RichText::new(label)
+                            .font(font(Face::Sans, TypeRole::Control))
+                            .color(colours.text),
+                    ),
+                )
                 .clicked()
             {
                 self.calibration.open = true;

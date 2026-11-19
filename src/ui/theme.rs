@@ -292,26 +292,29 @@ fn style(theme: Theme) -> egui::Style {
     }
     visuals.window_corner_radius = CornerRadius::same(14);
     visuals.menu_corner_radius = CornerRadius::same(10);
+    // Bare egui buttons, combos, checkboxes and sliders read these.  Match
+    // the type scale so they do not sit above the painted controls
+    // (segmented, Driver panel) that already use `font()`.
     style.text_styles = [
         (
             egui::TextStyle::Heading,
-            FontId::new(ts(27.0), FontFamily::Proportional),
+            FontId::new(type_size(TypeRole::Heading), FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Body,
-            FontId::new(ts(13.5), FontFamily::Proportional),
+            FontId::new(type_size(TypeRole::Body), FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Button,
-            FontId::new(ts(13.0), FontFamily::Proportional),
+            FontId::new(type_size(TypeRole::Control), FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Small,
-            FontId::new(ts(10.5), FontFamily::Proportional),
+            FontId::new(type_size(TypeRole::Secondary), FontFamily::Proportional),
         ),
         (
             egui::TextStyle::Monospace,
-            FontId::new(ts(11.5), FontFamily::Monospace),
+            FontId::new(type_size(TypeRole::Secondary), FontFamily::Monospace),
         ),
     ]
     .into();

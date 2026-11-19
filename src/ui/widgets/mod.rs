@@ -35,8 +35,9 @@ use egui::{
     Align, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense, Stroke, Vec2,
 };
 
+use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
-use crate::ui::theme::{palette, with_alpha, BORDER_SOFT, DIM, TEXT};
+use crate::ui::theme::{font, palette, with_alpha, TypeRole, BORDER_SOFT, DIM, TEXT};
 
 /// Accent ring on a focused control, from the active palette.
 pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
@@ -52,9 +53,8 @@ pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect
 
 pub(crate) fn micro_label(text: &str, color: Color32) -> RichText {
     RichText::new(text)
-        .size(ts(9.5))
+        .font(font(Face::Sans, TypeRole::Secondary))
         .color(color)
-        .family(FontFamily::Proportional)
         .strong()
 }
 
@@ -95,29 +95,18 @@ pub(crate) fn hinted_tab(
         .clicked()
 }
 
+/// A compact exclusive choice.  Same type size as [`segmented`] and outline
+/// buttons, so leftover calibration tabs match the rest of the chrome.
 pub(crate) fn tab_button(
     ui: &mut egui::Ui,
     label: &str,
     selected: bool,
     color: Color32,
 ) -> egui::Response {
-    tab_button_sized(ui, label, selected, color, 8.2)
-}
-
-/// A [`tab_button`] at a larger font size, for choices such as the channel
-/// mode.  The unselected state keeps a quiet outline, so an "off" choice still
-/// looks like a button instead of plain text.
-pub(crate) fn tab_button_sized(
-    ui: &mut egui::Ui,
-    label: &str,
-    selected: bool,
-    color: Color32,
-    size: f32,
-) -> egui::Response {
     ui.add(
         egui::Button::new(
             RichText::new(label)
-                .size(ts(size))
+                .font(font(Face::Sans, TypeRole::Control))
                 .color(if selected { color } else { DIM })
                 .strong(),
         )
@@ -135,7 +124,7 @@ pub(crate) fn tab_button_sized(
             },
         ))
         .corner_radius(CornerRadius::same(5))
-        .min_size(Vec2::new(0.0, 18.0)),
+        .min_size(Vec2::new(0.0, 28.0)),
     )
 }
 

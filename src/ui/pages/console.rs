@@ -645,7 +645,7 @@ fn toggle(ui: &mut egui::Ui, on: bool, label: &str, name: &str) -> egui::Respons
 /// An outline button the width of the strip, 28 pt high.
 fn strip_button(ui: &mut egui::Ui, label: &str, name: &str) -> egui::Response {
     let colours = palette(ui.ctx());
-    let text_font = font(Face::Sans, TypeRole::Body);
+    let text_font = font(Face::Sans, TypeRole::Control);
     let width = ui.available_width();
     let shown = fit_text(ui, label, &text_font, (width - 16.0).max(8.0));
     let response = ui.add(
