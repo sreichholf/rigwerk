@@ -1,6 +1,9 @@
 //! The strip fader (`docs/ui-spec.md` §4.1).
 //!
-//! The rail is 3 pt and the cap is 24 × 12 pt, with a tick at unity.
+//! The rail is 3 pt and the cap is 24 × 12 pt, with a tick at unity that
+//! shows on both sides of the cap.  Every fader shares one taper: unity
+//! sits at three quarters of the travel whatever the strip's range, so
+//! caps at 0.0 line up across the console.
 //! Dragging moves 0.1 dB per point while the level is within 12 dB of
 //! unity, and 0.5 dB per point further away.  Shift drags at 0.01 dB per
 //! point.  A double-click on the rail sets 0.0, a double-click on the
@@ -26,6 +29,8 @@ const READOUT_H: f32 = 16.0;
 const RAIL_W: f32 = 3.0;
 const CAP_W: f32 = 24.0;
 const CAP_H: f32 = 12.0;
+/// Wider than the cap, so the tick shows beside a cap parked at unity.
+const UNITY_TICK_HALF_W: f32 = CAP_W * 0.5 + 4.0;
 /// Drag rate at and near unity, dB per point.
 const NEAR_DB_PER_PT: f32 = 0.1;
 /// Drag rate once the level is more than 12 dB from unity.
@@ -380,16 +385,67 @@ fn snap(db: f32, step: f32) -> f32 {
     (db / step).round() * step
 }
 
+/// Where unity sits on every fader whose range spans it, as a fraction of
+/// the travel from the bottom.
+const UNITY_TRAVEL: f32 = 0.75;
+/// Bend of the taper below unity.  Higher gives more travel near unity
+/// and less near the floor.
+const TAPER_BEND: f32 = 3.0;
+
+/// The fraction of the travel, 0 at the bottom, that `db` sits at.  A range
+/// that spans unity puts it at [`UNITY_TRAVEL`] whatever the range: above
+/// it the travel is linear to `max`, below it bends toward `min`.  A range
+/// that does not span unity is linear.
+pub(super) fn travel_at_db(db: f32, min: f32, max: f32) -> f32 {
+    let db = db.clamp(min, max);
+    if max > 0.0 && min < 0.0 {
+        if db >= 0.0 {
+            UNITY_TRAVEL + (1.0 - UNITY_TRAVEL) * db / max
+        } else {
+            UNITY_TRAVEL * (1.0 - bend(db / min))
+        }
+    } else if max <= 0.0 && min < 0.0 {
+        1.0 - bend((db - max) / (min - max))
+    } else {
+        let span = (max - min).max(f32::EPSILON);
+        (db - min) / span
+    }
+}
+
+/// The inverse of [`travel_at_db`].
+pub(super) fn db_at_travel(travel: f32, min: f32, max: f32) -> f32 {
+    let travel = travel.clamp(0.0, 1.0);
+    let db = if max > 0.0 && min < 0.0 {
+        if travel >= UNITY_TRAVEL {
+            (travel - UNITY_TRAVEL) / (1.0 - UNITY_TRAVEL) * max
+        } else {
+            unbend(1.0 - travel / UNITY_TRAVEL) * min
+        }
+    } else if max <= 0.0 && min < 0.0 {
+        max + unbend(1.0 - travel) * (min - max)
+    } else {
+        min + travel * (max - min)
+    };
+    db.clamp(min, max)
+}
+
+/// 0 → 0 and 1 → 1, steep at 0.  `x` is how far below the top of the
+/// tapered part the level is, as a fraction of its depth.
+fn bend(x: f32) -> f32 {
+    (1.0 + TAPER_BEND * x.clamp(0.0, 1.0)).ln() / (1.0 + TAPER_BEND).ln()
+}
+
+fn unbend(y: f32) -> f32 {
+    ((1.0 + TAPER_BEND).powf(y.clamp(0.0, 1.0)) - 1.0) / TAPER_BEND
+}
+
 fn db_at_y(y: f32, rail: Rect, min: f32, max: f32) -> f32 {
-    let span = (max - min).max(f32::EPSILON);
-    let t = ((rail.bottom() - y) / rail.height().max(1.0)).clamp(0.0, 1.0);
-    min + t * span
+    let t = (rail.bottom() - y) / rail.height().max(1.0);
+    db_at_travel(t, min, max)
 }
 
 fn y_at_db(db: f32, rail: Rect, min: f32, max: f32) -> f32 {
-    let span = (max - min).max(f32::EPSILON);
-    let t = ((db - min) / span).clamp(0.0, 1.0);
-    rail.bottom() - t * rail.height()
+    rail.bottom() - travel_at_db(db, min, max) * rail.height()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -419,7 +475,7 @@ fn paint(
     if min <= 0.0 && max >= 0.0 {
         let unity = y_at_db(0.0, rail, min, max);
         painter.hline(
-            (rail.center().x - 7.0)..=(rail.center().x + 7.0),
+            (rail.center().x - UNITY_TICK_HALF_W)..=(rail.center().x + UNITY_TICK_HALF_W),
             unity,
             Stroke::new(1.5, colours.text),
         );

@@ -1,5 +1,6 @@
 use super::{
-    drag_delta_db, fader, fader_height, format_level, parse_level, scroll_delta_db, FaderRange,
+    db_at_travel, drag_delta_db, fader, fader_height, format_level, parse_level, scroll_delta_db,
+    travel_at_db, FaderRange,
 };
 use crate::ui::widgets::{node_named, run_frame, test_input};
 use eframe::egui;
@@ -22,6 +23,35 @@ fn height_is_thirty_percent_clamped() {
     assert_eq!(fader_height(500.0), 150.0);
     assert_eq!(fader_height(1_000.0), 300.0);
     assert_eq!(fader_height(2_000.0), 300.0);
+}
+
+#[test]
+fn unity_sits_at_the_same_height_on_every_range() {
+    for (min, max) in [(-24.0, 18.0), (-60.0, 6.0), (-36.0, 6.0)] {
+        near(travel_at_db(0.0, min, max), 0.75);
+        near(travel_at_db(min, min, max), 0.0);
+        near(travel_at_db(max, min, max), 1.0);
+    }
+}
+
+#[test]
+fn the_taper_gives_more_travel_near_unity() {
+    let near_unity = travel_at_db(0.0, -60.0, 6.0) - travel_at_db(-6.0, -60.0, 6.0);
+    let near_floor = travel_at_db(-54.0, -60.0, 6.0) - travel_at_db(-60.0, -60.0, 6.0);
+    assert!(
+        near_unity > 2.0 * near_floor,
+        "{near_unity} vs {near_floor}"
+    );
+}
+
+#[test]
+fn travel_and_level_invert_each_other() {
+    for (min, max) in [(-24.0, 18.0), (-60.0, 6.0), (-36.0, 0.0), (0.0, 12.0)] {
+        for step in 0..=20 {
+            let db = min + (max - min) * step as f32 / 20.0;
+            near(db_at_travel(travel_at_db(db, min, max), min, max), db);
+        }
+    }
 }
 
 #[test]
