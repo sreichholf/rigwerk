@@ -6,7 +6,7 @@
 use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Vec2};
 
-use super::{level_block, menu_entry, strip_button, strip_parts, LevelBlock, StripLayout};
+use super::{level_block, menu_entry, strip_parts, LevelBlock, StripLayout};
 use crate::app::screen::{format_ms, Sheet};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
@@ -14,7 +14,8 @@ use crate::audio::{PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{
-    chip, fit_text, horizontal_meter, popover, row_info, segmented, FaderRange,
+    chip, fit_text, horizontal_meter, popover, row_info, segmented, FaderRange, OutlineButton,
+    TextField,
 };
 
 /// The path colours by saved index, as the menu names them.
@@ -54,7 +55,10 @@ impl RigWerkApp {
         }
 
         let source = self.source_label(slot);
-        let button = strip_button(&mut top, &source, "Source")
+        let button = OutlineButton::new(&source)
+            .name("Source")
+            .full_width()
+            .show(&mut top)
             .on_hover_text("Which input channels feed this path, and stereo or mono");
         popover(&mut top, &button, |ui| self.source_popover(ui, slot));
 
@@ -180,19 +184,11 @@ impl RigWerkApp {
         let mut draft: String = ui
             .data(|data| data.get_temp(draft_id))
             .unwrap_or_else(|| name.to_owned());
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut draft)
-                .desired_width(180.0)
-                .hint_text("Path name"),
-        );
-        row_info(
-            &field,
-            egui::Role::TextInput,
-            true,
-            "Rename",
-            None,
-            Some(draft.clone()),
-        );
+        let field = TextField::new(&mut draft, "Rename")
+            .hint("Path name")
+            .width(180.0)
+            .report_value()
+            .show(ui);
         let commit = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if commit || menu_entry(ui, "Rename") {
             if self.rename_path(slot, &draft) {

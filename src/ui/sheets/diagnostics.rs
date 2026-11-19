@@ -19,7 +19,7 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::status_dot;
 
-use super::sheet_button;
+use crate::ui::widgets::OutlineButton;
 
 /// One path's DSP line: "0.21 ms avg · 0.40 ms peak of 10.7 ms · 2% / 4%",
 /// or why there is none.
@@ -431,9 +431,7 @@ impl RigWerkApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let measuring = self.calibration.is_measuring();
                         let blocker = self.calibration_blocker();
-                        if sheet_button(ui, "Measure loopback…", "Measure loopback…", true)
-                            .clicked()
-                        {
+                        if OutlineButton::new("Measure loopback…").show(ui).clicked() {
                             self.calibration.open = true;
                         }
                         if measuring {
@@ -659,7 +657,7 @@ impl RigWerkApp {
                     ui.label(sans(COUNTS_CAPTION, colours.text3, TypeRole::Secondary));
                 }
                 ui.add_space(6.0);
-                if sheet_button(ui, "Reset all", "Reset all", true).clicked() {
+                if OutlineButton::new("Reset all").show(ui).clicked() {
                     self.engine.reset_plugin_lock_counters();
                     self.push_log("Plugin block counters reset.", LogTone::Teal);
                 }
@@ -684,12 +682,12 @@ impl RigWerkApp {
         if tab == crate::app::screen::DiagnosticsTab::Log {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if sheet_button(ui, "Copy", "Copy", true).clicked() {
+                if OutlineButton::new("Copy").show(ui).clicked() {
                     let report = self.diagnostics_text();
                     ui.ctx().copy_text(report);
                     self.push_log("Diagnostics copied to the clipboard.", LogTone::Teal);
                 }
-                if sheet_button(ui, "Export", "Export", true).clicked() {
+                if OutlineButton::new("Export").show(ui).clicked() {
                     let path = diagnostics_export_path();
                     match self.write_diagnostics(&path) {
                         Ok(()) => self.push_log(

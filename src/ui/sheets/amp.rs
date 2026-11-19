@@ -7,13 +7,13 @@
 //! page calls [`RigWerkApp`] methods; it does not touch the engine.
 
 use eframe::egui;
-use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
+use egui::{Align, Layout, RichText, Vec2};
 
 use crate::app::RigWerkApp;
 use crate::audio::{AmpSlot, AMP_MAX_TRIM_DB, AMP_MIN_TRIM_DB};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{row_info, segmented};
+use crate::ui::widgets::{row_info, segmented, OutlineButton, TextField, CONTROL_H};
 
 const LABEL_W: f32 = 96.0;
 const VALUE_W: f32 = 72.0;
@@ -87,50 +87,38 @@ impl RigWerkApp {
         let mut paste_clicked = false;
         let mut browse_clicked = false;
         let mut changed = false;
+        // The buttons on the right, the field fills the rest of the row.
         ui.horizontal(|ui| {
+            ui.set_min_height(CONTROL_H);
             ui.spacing_mut().item_spacing.x = 8.0;
-            // The theme's button padding is taller than this row, so the
-            // buttons overflow and sit off the field.  One shared height.
-            ui.spacing_mut().button_padding.y = 4.0;
-            let control =
-                ui.fonts_mut(|fonts| fonts.row_height(&font(Face::Sans, TypeRole::Control)));
-            let body = ui.fonts_mut(|fonts| fonts.row_height(&font(Face::Sans, TypeRole::Body)));
-            let row_h = control.max(body) + 12.0;
-            let paste_w = 80.0;
-            let browse_w = 96.0;
-            let edit_w = (ui.available_width() - paste_w - browse_w - 16.0).max(80.0);
-            let response = ui
-                .add(
-                    egui::TextEdit::singleline(&mut folder)
-                        .id(edit_id)
-                        .hint_text("Path to a folder")
-                        .desired_width(edit_w)
-                        .min_size(Vec2::new(edit_w, row_h))
-                        .margin(egui::Margin::symmetric(8, 4))
-                        .font(font(Face::Sans, TypeRole::Body)),
-                )
-                .on_hover_text("Type a path, or press Ctrl+V. A copied folder works too.");
-            response.context_menu(|ui| {
-                if ui.button("Paste").clicked() {
-                    paste_clicked = true;
-                    ui.close();
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if OutlineButton::new("Browse")
+                    .show(ui)
+                    .on_hover_text("Open a folder window.")
+                    .clicked()
+                {
+                    browse_clicked = true;
                 }
+                if OutlineButton::new("Paste")
+                    .show(ui)
+                    .on_hover_text("Paste a path, or a folder copied in Explorer.")
+                    .clicked()
+                {
+                    paste_clicked = true;
+                }
+                let response = TextField::new(&mut folder, "Models folder")
+                    .hint("Path to a folder")
+                    .id(edit_id)
+                    .show(ui)
+                    .on_hover_text("Type a path, or press Ctrl+V. A copied folder works too.");
+                response.context_menu(|ui| {
+                    if ui.button("Paste").clicked() {
+                        paste_clicked = true;
+                        ui.close();
+                    }
+                });
+                changed = response.changed();
             });
-            if folder_button(
-                ui,
-                "Paste",
-                paste_w,
-                row_h,
-                "Paste a path, or a folder copied in Explorer.",
-            )
-            .clicked()
-            {
-                paste_clicked = true;
-            }
-            if folder_button(ui, "Browse", browse_w, row_h, "Open a folder window.").clicked() {
-                browse_clicked = true;
-            }
-            changed = response.changed();
         });
         if changed {
             self.apply_typed_amp_folder(&previous, folder);
@@ -336,29 +324,6 @@ fn slider_row(
             );
         },
     );
-}
-
-fn folder_button(
-    ui: &mut egui::Ui,
-    label: &str,
-    width: f32,
-    height: f32,
-    hint: &str,
-) -> egui::Response {
-    let colours = palette(ui.ctx());
-    let response = ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .font(font(Face::Sans, TypeRole::Control))
-                .color(colours.text),
-        )
-        .min_size(Vec2::new(width, height))
-        .fill(colours.slot)
-        .stroke(Stroke::new(1.0, colours.line2))
-        .corner_radius(CornerRadius::same(4)),
-    );
-    row_info(&response, egui::Role::Button, true, label, None, None);
-    response.on_hover_text(hint)
 }
 
 /// Ctrl+V, or a paste egui already turned into text.

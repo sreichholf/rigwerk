@@ -14,7 +14,7 @@ use crate::app::plugins::{
 use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{chip, palette_focus, row_info};
+use crate::ui::widgets::{chip, palette_focus, row_info, OutlineButton, TextField};
 
 const ROW_H: f32 = 52.0;
 const NOTICE_SECS: u64 = 8;
@@ -183,13 +183,7 @@ fn header(ui: &mut egui::Ui, path_name: &str, phrase: &str, change: &mut bool) {
 }
 
 fn search_field(ui: &mut egui::Ui, search: &mut String, focus: bool) -> egui::Response {
-    let response = ui.add(
-        egui::TextEdit::singleline(search)
-            .hint_text("Search")
-            .desired_width(f32::INFINITY)
-            .font(font(Face::Sans, TypeRole::Body)),
-    );
-    row_info(&response, egui::Role::TextInput, true, "Search", None, None);
+    let response = TextField::new(search, "Search").hint("Search").show(ui);
     if focus {
         response.request_focus();
     }
@@ -604,33 +598,22 @@ fn footer(
     );
     ui.horizontal(|ui| {
         let mut path = app.plugin_browser.path_input.clone();
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut path)
-                .id(path_id)
-                .hint_text("Path to a .vst3 or .clap file")
-                .desired_width((ui.available_width() - 150.0).max(80.0))
-                .font(font(Face::Sans, TypeRole::Body)),
-        );
-        row_info(
-            &field,
-            egui::Role::TextInput,
-            true,
-            "Add from path",
-            None,
-            None,
-        );
+        let field = TextField::new(&mut path, "Add from path")
+            .hint("Path to a .vst3 or .clap file")
+            .id(path_id)
+            .width((ui.available_width() - 150.0).max(80.0))
+            .show(ui);
         app.plugin_browser.path_input = path;
         if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
             *add_path = true;
         }
-        if text_button(ui, "Add").clicked() {
+        if OutlineButton::new("Add").show(ui).clicked() {
             *add_path = true;
         }
         let scanning = app.plugin_browser.scanning;
         let label = if scanning { "Scanning…" } else { "Rescan" };
-        let response = text_button(ui, label);
-        row_info(&response, egui::Role::Button, !scanning, label, None, None);
-        if response.clicked() && !scanning {
+        let response = OutlineButton::new(label).enabled(!scanning).show(ui);
+        if response.clicked() {
             *rescan = true;
         }
     });
@@ -638,17 +621,3 @@ fn footer(
 
 #[cfg(test)]
 mod tests;
-
-fn text_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let colours = palette(ui.ctx());
-    ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .font(font(Face::Sans, TypeRole::Control))
-                .color(colours.text),
-        )
-        .fill(colours.slot)
-        .stroke(Stroke::new(1.0, colours.line2))
-        .corner_radius(CornerRadius::same(4)),
-    )
-}

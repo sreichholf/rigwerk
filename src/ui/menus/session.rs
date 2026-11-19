@@ -11,7 +11,7 @@ use crate::app::screen::format_ms;
 use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
 use crate::ui::theme::{font, palette, with_alpha, Face, TypeRole};
-use crate::ui::widgets::{fit_text, palette_focus, row_info};
+use crate::ui::widgets::{fit_text, palette_focus, row_info, OutlineButton, TextField};
 
 /// Allocated height of one row, including the gap under it.
 pub(crate) const SESSION_ROW_H: f32 = 72.0;
@@ -390,13 +390,15 @@ impl RigWerkApp {
     fn session_menu(&mut self, ui: &mut egui::Ui) -> Option<(usize, SessionAction)> {
         menu_corners(ui);
         ui.horizontal_wrapped(|ui| {
-            if outline_button(ui, "Save")
+            if OutlineButton::new("Save")
+                .show(ui)
                 .on_hover_text("Update the saved session of this name, or add it.")
                 .clicked()
             {
                 self.save_session();
             }
-            if outline_button(ui, "Save as new session")
+            if OutlineButton::new("Save as new session")
+                .show(ui)
                 .on_hover_text("Add the setup as another session.")
                 .clicked()
             {
@@ -404,7 +406,8 @@ impl RigWerkApp {
                     self.session_name.clone(),
                 ));
             }
-            if outline_button(ui, "Rename")
+            if OutlineButton::new("Rename")
+                .show(ui)
                 .on_hover_text("Rename the saved session and the current name.")
                 .clicked()
             {
@@ -412,7 +415,8 @@ impl RigWerkApp {
                     self.session_name.clone(),
                 ));
             }
-            if outline_button(ui, "Start new session")
+            if OutlineButton::new("Start new session")
+                .show(ui)
                 .on_hover_text("Name this setup Untitled session. Nothing else changes.")
                 .clicked()
             {
@@ -424,12 +428,10 @@ impl RigWerkApp {
                 crate::app::screen::SessionDraft::SaveAs(text)
                 | crate::app::screen::SessionDraft::Rename(text) => text.clone(),
             };
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut text)
-                    .hint_text("Session name")
-                    .desired_width(280.0)
-                    .font(font(Face::Sans, TypeRole::Body)),
-            );
+            let response = TextField::new(&mut text, "Session name")
+                .hint("Session name")
+                .width(280.0)
+                .show(ui);
             if self.chrome.open_session_menu {
                 response.request_focus();
                 self.chrome.open_session_menu = false;
@@ -580,41 +582,16 @@ fn menu_corners(ui: &mut egui::Ui) {
     }
 }
 
-fn outline_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let colours = palette(ui.ctx());
-    ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .font(font(Face::Sans, TypeRole::Control))
-                .color(colours.text),
-        )
-        .fill(egui::Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, colours.line2))
-        .corner_radius(CornerRadius::same(4))
-        .min_size(Vec2::new(0.0, 32.0)),
-    )
-}
-
 fn session_filter(ui: &mut egui::Ui) -> String {
     let id = egui::Id::unique("session-menu-filter");
     let mut text = ui
         .ctx()
         .data(|data| data.get_temp::<String>(id))
         .unwrap_or_default();
-    let response = ui.add(
-        egui::TextEdit::singleline(&mut text)
-            .hint_text("Filter")
-            .desired_width(f32::INFINITY)
-            .font(font(Face::Sans, TypeRole::Body)),
-    );
-    row_info(
-        &response,
-        egui::Role::TextInput,
-        ui.is_enabled(),
-        "Filter",
-        None,
-        Some(text.clone()),
-    );
+    TextField::new(&mut text, "Filter")
+        .hint("Filter")
+        .report_value()
+        .show(ui);
     ui.ctx().data_mut(|data| data.insert_temp(id, text.clone()));
     text
 }

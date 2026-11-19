@@ -15,16 +15,13 @@ pub(crate) mod path;
 pub(crate) mod scope;
 
 use eframe::egui;
-use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
+use egui::{Align, Layout, RichText, Vec2};
 
 use crate::app::screen::Sheet;
 use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{row_info, segmented};
-
-/// Buttons inside a sheet are 28 pt high (§4.5).
-const SHEET_BUTTON_H: f32 = 28.0;
+use crate::ui::widgets::{row_info, segmented, OutlineButton, CONTROL_H};
 
 impl RigWerkApp {
     /// The open sheet's title, without the path: *Pre EQ*, an effect's
@@ -70,7 +67,7 @@ impl RigWerkApp {
         let mut close = false;
         let mut stage_on = None;
         ui.horizontal(|ui| {
-            ui.set_min_height(SHEET_BUTTON_H);
+            ui.set_min_height(CONTROL_H);
             ui.spacing_mut().item_spacing.x = 8.0;
             if let Some((colour, name)) = &path {
                 let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
@@ -105,14 +102,31 @@ impl RigWerkApp {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if sheet_button(ui, "×", "Close", true).clicked() {
+                if OutlineButton::new("×")
+                    .name("Close")
+                    .show(ui)
+                    .on_hover_text("Close")
+                    .clicked()
+                {
                     close = true;
                 }
                 if sheet.stage().is_some() {
-                    if sheet_button(ui, "›", "Next stage", next.is_some()).clicked() {
+                    if OutlineButton::new("›")
+                        .name("Next stage")
+                        .enabled(next.is_some())
+                        .show(ui)
+                        .on_hover_text("Next stage")
+                        .clicked()
+                    {
                         step = Some(true);
                     }
-                    if sheet_button(ui, "‹", "Previous stage", previous.is_some()).clicked() {
+                    if OutlineButton::new("‹")
+                        .name("Previous stage")
+                        .enabled(previous.is_some())
+                        .show(ui)
+                        .on_hover_text("Previous stage")
+                        .clicked()
+                    {
                         step = Some(false);
                     }
                 }
@@ -153,24 +167,6 @@ impl RigWerkApp {
                 Sheet::Scope => self.scope_sheet(ui),
             });
     }
-}
-
-/// An outline button 28 pt high.  `name` is what it does, for screen
-/// readers and hover, when the label is a glyph.
-fn sheet_button(ui: &mut egui::Ui, label: &str, name: &str, enabled: bool) -> egui::Response {
-    let colours = palette(ui.ctx());
-    let button = egui::Button::new(
-        RichText::new(label)
-            .font(font(Face::Sans, TypeRole::Control))
-            .color(if enabled { colours.text } else { colours.text3 }),
-    )
-    .fill(colours.slot)
-    .stroke(Stroke::new(1.0, colours.line2))
-    .corner_radius(CornerRadius::same(4))
-    .min_size(Vec2::new(SHEET_BUTTON_H, SHEET_BUTTON_H));
-    let response = ui.add_enabled(enabled, button);
-    row_info(&response, egui::Role::Button, enabled, name, None, None);
-    response.on_hover_text(name)
 }
 
 #[cfg(test)]

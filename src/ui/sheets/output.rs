@@ -27,7 +27,7 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{chip, horizontal_meter, row_info, segmented};
 
-use super::sheet_button;
+use crate::ui::widgets::OutlineButton;
 
 const ROW_H: f32 = 28.0;
 const VALUE_W: f32 = 80.0;
@@ -80,7 +80,8 @@ impl RigWerkApp {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if row.extra_output_index.is_some()
-                    && sheet_button(ui, "Remove", "Remove", true)
+                    && OutlineButton::new("Remove")
+                        .show(ui)
                         .on_hover_text(
                             "Removes the output from the session. The others keep playing.",
                         )
@@ -484,7 +485,8 @@ impl RigWerkApp {
             });
         }
         if channels >= 4
-            && sheet_button(ui, "Metronome on 3/4", "Metronome on 3/4", true)
+            && OutlineButton::new("Metronome on 3/4")
+                .show(ui)
                 .on_hover_text("Music on 1 and 2, the click alone on 3 and 4")
                 .clicked()
         {
