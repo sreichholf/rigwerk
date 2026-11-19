@@ -179,6 +179,8 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 #[cfg(target_os = "linux")]
+// musl 1.2 deprecates the `time_t` alias; `localtime_r` still takes it.
+#[allow(deprecated)]
 fn local_stamp() -> Option<String> {
     let Ok(secs) = libc::time_t::try_from(unix_now()) else {
         return None;
