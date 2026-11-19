@@ -21,9 +21,9 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{row_info, segmented};
+use crate::ui::widgets::{row_info, segmented, CONTROL_H};
 
-use super::sheet_button;
+use crate::ui::widgets::OutlineButton;
 
 const LABEL_W: f32 = 96.0;
 const VALUE_W: f32 = 72.0;
@@ -196,14 +196,15 @@ impl RigWerkApp {
         let mut reset = false;
 
         ui.horizontal(|ui| {
-            ui.set_min_height(super::SHEET_BUTTON_H);
+            ui.set_min_height(CONTROL_H);
             ui.label(
                 RichText::new(SUMMARY)
                     .font(font(Face::Sans, TypeRole::Secondary))
                     .color(colours.text3),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if sheet_button(ui, "Reset", "Reset", true)
+                if OutlineButton::new("Reset")
+                    .show(ui)
                     .on_hover_text(RESET_HINT)
                     .clicked()
                 {

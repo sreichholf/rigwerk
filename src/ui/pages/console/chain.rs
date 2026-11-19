@@ -1,6 +1,6 @@
 //! A path's chain on its strip (spec §4.2, §5.3): *Pre EQ*, the gate when
-//! it sits before the effects, the effects group, the gate when after, and
-//! *Post EQ*.
+//! it sits before the effects, the amp when it does, the effects group,
+//! the amp when after, the gate when after, and *Post EQ*.
 //!
 //! The built-in rows stay pinned; only the effects group scrolls, on its
 //! own for each path so the faders stay on one line.  On overflow it shows
@@ -15,7 +15,7 @@ use super::DensityStep;
 use crate::app::chain::ChainStage;
 use crate::app::screen::{format_ms, Sheet};
 use crate::app::RigWerkApp;
-use crate::audio::{GateSlot, MAX_EFFECTS};
+use crate::audio::{AmpSlot, GateSlot, MAX_EFFECTS};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{
@@ -63,7 +63,22 @@ impl RigWerkApp {
         height: f32,
         step: DensityStep,
     ) {
-        let Some(mix) = self.paths[slot].as_ref().map(|path| path.mix) else {
+        // The amp row shows its capture across the row, like an effect
+        // shows its plugin; with none chosen it reads "Amp" and "Off".
+        let Some((mix, amp_shown, amp_mark, amp_failed, amp_reason)) =
+            self.paths[slot].as_ref().map(|path| {
+                let none = path.amp_model.trim().is_empty();
+                let shown = (!none && !path.amp_name.is_empty()).then(|| path.amp_name.clone());
+                let mark = if none { "Off" } else { "" };
+                (
+                    path.mix,
+                    shown,
+                    mark,
+                    path.amp_error.is_some(),
+                    path.amp_error.clone(),
+                )
+            })
+        else {
             return;
         };
         let rate = match self.snapshot.output_rate {
@@ -82,7 +97,10 @@ impl RigWerkApp {
             slot,
             ChainStage::PreEq,
             "Pre EQ",
+            None,
             ChainMark::Eq(&mix.eqs[0]),
+            false,
+            None,
             show_curve,
             rate,
         );
@@ -92,7 +110,24 @@ impl RigWerkApp {
                 slot,
                 ChainStage::Gate,
                 "Gate",
+                None,
                 ChainMark::Threshold(&gate_text),
+                false,
+                None,
+                show_curve,
+                rate,
+            );
+        }
+        if mix.amp.slot == AmpSlot::Pre {
+            self.builtin_row(
+                ui,
+                slot,
+                ChainStage::Amp,
+                "Amp",
+                amp_shown.as_deref(),
+                ChainMark::Label(amp_mark),
+                amp_failed,
+                amp_reason.as_deref(),
                 show_curve,
                 rate,
             );
@@ -109,10 +144,12 @@ impl RigWerkApp {
             self.set_chain_bypass(bypassed);
         }
 
-        // What stays below the group: + Add effect, the gate after the
-        // effects, Post EQ.
+        // What stays below the group: + Add effect, the amp after the
+        // effects, the gate after the effects, Post EQ.
         let gap = ui.spacing().item_spacing.y;
-        let tail_rows = 2.0 + f32::from(u8::from(mix.gate.slot == GateSlot::Post));
+        let tail_rows = 2.0
+            + f32::from(u8::from(mix.amp.slot == AmpSlot::Post))
+            + f32::from(u8::from(mix.gate.slot == GateSlot::Post));
         let used = ui.cursor().top() - top;
         let group = (height - used - gap - tail_rows * (CHAIN_ROW_H + gap)).max(ROW_PITCH);
         self.effect_rows(ui, slot, group, show_curve, rate, open);
@@ -121,13 +158,30 @@ impl RigWerkApp {
         if add.clicked() {
             self.open_effect_browser(slot, count);
         }
+        if mix.amp.slot == AmpSlot::Post {
+            self.builtin_row(
+                ui,
+                slot,
+                ChainStage::Amp,
+                "Amp",
+                amp_shown.as_deref(),
+                ChainMark::Label(amp_mark),
+                amp_failed,
+                amp_reason.as_deref(),
+                show_curve,
+                rate,
+            );
+        }
         if mix.gate.slot == GateSlot::Post {
             self.builtin_row(
                 ui,
                 slot,
                 ChainStage::Gate,
                 "Gate",
+                None,
                 ChainMark::Threshold(&gate_text),
+                false,
+                None,
                 show_curve,
                 rate,
             );
@@ -137,13 +191,16 @@ impl RigWerkApp {
             slot,
             ChainStage::PostEq,
             "Post EQ",
+            None,
             ChainMark::Eq(&mix.eqs[1]),
+            false,
+            None,
             show_curve,
             rate,
         );
     }
 
-    /// One pinned row: an EQ or the gate.
+    /// One pinned row: an EQ, the gate, or the amp.
     #[allow(clippy::too_many_arguments)]
     fn builtin_row(
         &mut self,
@@ -151,7 +208,10 @@ impl RigWerkApp {
         slot: usize,
         stage: ChainStage,
         name: &str,
+        shown: Option<&str>,
         mark: ChainMark<'_>,
+        failed: bool,
+        fail_reason: Option<&str>,
         show_curve: bool,
         rate: u32,
     ) {
@@ -161,11 +221,12 @@ impl RigWerkApp {
             ui,
             &ChainRow {
                 name,
+                shown,
                 index: 0,
                 on,
                 selected,
-                failed: false,
-                fail_reason: None,
+                failed,
+                fail_reason,
                 paused: false,
                 mark,
                 show_curve,
@@ -232,6 +293,7 @@ impl RigWerkApp {
                             ui,
                             &ChainRow {
                                 name: &view.name,
+                                shown: None,
                                 index,
                                 on: !view.bypass,
                                 selected: open == Some(Sheet::Effect { path: slot, index }),

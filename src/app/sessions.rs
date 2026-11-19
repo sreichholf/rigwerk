@@ -146,7 +146,15 @@ impl RigWerkApp {
         let first = self.path_slots()[0];
         let current = self.paths[first]
             .as_ref()
-            .map(|path| PathPref::from_mix(path.name.clone(), path.colour, &path.mix, Vec::new()))
+            .map(|path| {
+                PathPref::from_mix(
+                    path.name.clone(),
+                    path.colour,
+                    &path.mix,
+                    &path.amp_model,
+                    Vec::new(),
+                )
+            })
             .unwrap_or_default();
         let Some(stored) = self.sessions.get_mut(index) else {
             return;

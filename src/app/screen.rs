@@ -22,6 +22,9 @@ pub(crate) enum Sheet {
     Gate {
         path: usize,
     },
+    Amp {
+        path: usize,
+    },
     /// The effect at `index` of the path's chain.
     Effect {
         path: usize,
@@ -44,6 +47,7 @@ impl Sheet {
         match stage {
             ChainStage::PreEq => Self::Eq { path, post: false },
             ChainStage::Gate => Self::Gate { path },
+            ChainStage::Amp => Self::Amp { path },
             ChainStage::Effect(index) => Self::Effect { path, index },
             ChainStage::PostEq => Self::Eq { path, post: true },
         }
@@ -55,6 +59,7 @@ impl Sheet {
             Self::Eq { path, post: false } => Some((path, ChainStage::PreEq)),
             Self::Eq { path, post: true } => Some((path, ChainStage::PostEq)),
             Self::Gate { path } => Some((path, ChainStage::Gate)),
+            Self::Amp { path } => Some((path, ChainStage::Amp)),
             Self::Effect { path, index } => Some((path, ChainStage::Effect(index))),
             _ => None,
         }
@@ -75,6 +80,7 @@ impl Sheet {
         Some(match key.trim().to_lowercase().as_str() {
             "eq" => Self::Eq { path, post: false },
             "gate" => Self::Gate { path },
+            "amp" => Self::Amp { path },
             "effect" => Self::Effect { path, index: 0 },
             "path" => Self::Path { path },
             "output" => Self::Output { output: 0 },
@@ -268,6 +274,9 @@ impl RigWerkApp {
         if let Some((_, stage)) = sheet.stage() {
             self.select_chain(ChainSelection::from_stage(stage));
         }
+        if matches!(sheet, Sheet::Amp { .. }) {
+            self.amp_rescan = true;
+        }
         if let Some(path) = sheet.path() {
             self.chrome.reveal_path = Some(path);
         }
@@ -283,7 +292,7 @@ impl RigWerkApp {
         let (path, stage) = self.chrome.sheet?.stage()?;
         let mix = &self.paths.get(path)?.as_ref()?.mix;
         let effects = self.engine.plugin_views(path).len();
-        neighbour_stage(stage, effects, mix.gate.slot, forward)
+        neighbour_stage(stage, effects, mix.gate.slot, mix.amp.slot, forward)
             .map(|next| Sheet::for_stage(path, next))
     }
 

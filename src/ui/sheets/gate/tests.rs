@@ -113,7 +113,10 @@ fn the_position_moves_the_gate_and_its_chain_row() {
     click(&ctx, &mut app, centre(&tree, "Before effects"));
 
     assert_eq!(gate(&app).slot, GateSlot::Pre);
-    assert_eq!(chain_stages(1, gate(&app).slot)[1], ChainStage::Gate);
+    assert_eq!(
+        chain_stages(1, gate(&app).slot, crate::audio::AmpSlot::Pre)[1],
+        ChainStage::Gate
+    );
     let tree = frame(&ctx, &mut app, Vec::new());
     assert_eq!(
         node_named(&tree, "Before effects").toggled(),

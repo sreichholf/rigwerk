@@ -205,6 +205,16 @@ fn gate_round_trips_in_preferences_and_sessions() {
 }
 
 #[test]
+fn amp_missing_from_an_old_path_uses_defaults() {
+    let pref: PathPref = ron::from_str(r#"(name:"Main",level_db:-3.0)"#).expect("old path");
+    assert_eq!(pref.amp, crate::audio::AmpSettings::default());
+    assert!(pref.amp.model_path.is_empty());
+    assert!(!pref.amp.enabled);
+    assert_eq!(pref.amp.slot, crate::audio::AmpSlot::Pre);
+    assert_eq!(pref.level_db, -3.0);
+}
+
+#[test]
 fn gate_missing_from_old_saves_uses_defaults() {
     let raw = r#"(auto_start_bridge:false,session_name:"Old",sample_rate:48000)"#;
     let loaded = load_preferences(Some(raw), BACKUP);
@@ -1659,6 +1669,7 @@ fn golden_path(name: &str) -> PathPref {
             verb,
         ],
         chain_bypass: true,
+        amp: crate::audio::AmpSettings::default(),
         level_db: -4.0,
         mute: true,
         solo: true,
@@ -1757,6 +1768,7 @@ fn golden_preferences() -> Preferences {
         tuner_auto_mute: false,
         tuner_tolerance: 2,
         record_folder: "/home/me/Takes".to_owned(),
+        amp_folder: String::new(),
         record_click: true,
         metronome_running: false,
         metronome_bpm: 96.0,

@@ -10,8 +10,8 @@
 //! play lives here too ([`super::record`]): the callbacks only push, and
 //! the writer runs off the audio thread.
 //!
-//! Everything a path owns (routing, mono, channel enable, EQs, gate, plugin
-//! chain, level, mute, solo) lives in [`PathControls`], one per path slot in
+//! Everything a path owns (routing, mono, channel enable, EQs, gate, amp,
+//! plugin chain, level, mute, solo) lives in [`PathControls`], one per path slot in
 //! [`Shared::paths`].  Paths are added, duplicated and removed here, live
 //! (see the `path` module docs).  The older accessors (`set_eq`, `set_mix`,
 //! ...) act on path 0 and are kept for tests.
@@ -25,6 +25,7 @@ use std::time::Duration;
 /// Sentinel for [`Shared::path_delay_ns`]: no PipeWire path delay sampled yet.
 const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
 
+use super::amp::AmpPark;
 #[cfg(test)]
 use super::eq::{EqSettings, EqSlot};
 use super::extra_output::ExtraOutputBus;
@@ -205,10 +206,17 @@ pub(crate) struct Shared {
     /// starts the writer, which keeps its own `Arc` so it can finish after
     /// this run is dropped.
     pub(crate) recorder: Arc<Recorder>,
+    /// Models the audio side has released.  The engine keeps a clone so a
+    /// bridge-thread drop of this run does not destroy them.
+    amp_park: Arc<AmpPark>,
 }
 
 impl Shared {
     pub(crate) fn new(sample_rate: u32) -> Self {
+        Self::with_park(sample_rate, AmpPark::new())
+    }
+
+    pub(crate) fn with_park(sample_rate: u32, amp_park: Arc<AmpPark>) -> Self {
         let capacity_frames = (sample_rate as usize * 2).max(4096);
         let shared = Self {
             ring: (0..capacity_frames * 2)
@@ -273,14 +281,21 @@ impl Shared {
             output_mode: Mutex::new(String::new()),
             opened_output_mode: AtomicU8::new(0),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
-            paths: std::array::from_fn(|_| PathControls::new(sample_rate)),
+            paths: std::array::from_fn(|_| {
+                PathControls::with_park(sample_rate, Arc::clone(&amp_park))
+            }),
             total_dsp: DspCell::default(),
             calibration: Calibration::new(),
             asio_panel: AsioPanelRequests::new(),
             recorder: Arc::new(Recorder::new()),
+            amp_park,
         };
         shared.paths[0].set_state(PathState::Active);
         shared
+    }
+
+    pub(crate) fn amp_park(&self) -> &Arc<AmpPark> {
+        &self.amp_park
     }
 
     /// Copies the settings that outlive one bridge start into this fresh

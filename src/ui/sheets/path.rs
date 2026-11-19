@@ -16,9 +16,9 @@ use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{chip, row_info, segmented};
+use crate::ui::widgets::{chip, row_info, segmented, TextField};
 
-use super::sheet_button;
+use crate::ui::widgets::OutlineButton;
 
 const ROW_H: f32 = 28.0;
 const VALUE_W: f32 = 80.0;
@@ -79,19 +79,11 @@ impl RigWerkApp {
                 |ui| {
                     ui.set_width(column_w);
                     heading(ui, "Name", colours);
-                    let field = ui.add(
-                        egui::TextEdit::singleline(&mut draft)
-                            .desired_width(column_w.min(320.0))
-                            .hint_text("Path name"),
-                    );
-                    row_info(
-                        &field,
-                        egui::Role::TextInput,
-                        true,
-                        "Name",
-                        None,
-                        Some(draft.clone()),
-                    );
+                    let field = TextField::new(&mut draft, "Name")
+                        .hint("Path name")
+                        .width(column_w.min(320.0))
+                        .report_value()
+                        .show(ui);
                     if (field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
                         || changed_and_enter(ui, &field)
                     {
@@ -205,7 +197,9 @@ impl RigWerkApp {
                     }
                     ui.add_space(12.0);
                     let can_add = self.add_path_blocker().is_none();
-                    if sheet_button(ui, "Duplicate (muted)", "Duplicate (muted)", can_add)
+                    if OutlineButton::new("Duplicate (muted)")
+                        .enabled(can_add)
+                        .show(ui)
                         .on_hover_text("A full copy of this chain and its routing, added muted")
                         .clicked()
                     {
@@ -220,7 +214,9 @@ impl RigWerkApp {
                             custom_label(self.routing_last_layout)
                         ),
                     };
-                    let apply = sheet_button(ui, &caption, "Apply layout", true)
+                    let apply = OutlineButton::new(&caption)
+                        .name("Apply layout")
+                        .show(ui)
                         .on_hover_text("Set up paths and routing from a starting point");
                     let mut layout = None;
                     egui::Popup::menu(&apply)

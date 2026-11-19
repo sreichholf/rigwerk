@@ -642,29 +642,5 @@ fn toggle(ui: &mut egui::Ui, on: bool, label: &str, name: &str) -> egui::Respons
     response.on_hover_text(name)
 }
 
-/// An outline button the width of the strip, 28 pt high.
-fn strip_button(ui: &mut egui::Ui, label: &str, name: &str) -> egui::Response {
-    let colours = palette(ui.ctx());
-    let text_font = font(Face::Sans, TypeRole::Control);
-    let width = ui.available_width();
-    let shown = fit_text(ui, label, &text_font, (width - 16.0).max(8.0));
-    let response = ui.add(
-        egui::Button::new(RichText::new(shown).font(text_font).color(colours.text))
-            .fill(colours.slot)
-            .stroke(Stroke::new(1.0, colours.line2))
-            .corner_radius(CornerRadius::same(4))
-            .min_size(Vec2::new(width, 28.0)),
-    );
-    row_info(
-        &response,
-        egui::Role::Button,
-        ui.is_enabled(),
-        name,
-        None,
-        Some(label.to_owned()),
-    );
-    response
-}
-
 #[cfg(test)]
 mod tests;

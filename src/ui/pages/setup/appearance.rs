@@ -9,7 +9,7 @@ use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
 use crate::ui::pages::setup::{hint, panel};
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::segmented;
+use crate::ui::widgets::{segmented, TextField};
 
 impl RigWerkApp {
     pub(super) fn setup_start(&mut self, ui: &mut egui::Ui) {
@@ -113,7 +113,10 @@ impl RigWerkApp {
             hint(ui, "Folder");
             ui.add_space(4.0);
             let mut folder = self.record_folder.clone();
-            if ui.text_edit_singleline(&mut folder).changed() {
+            if TextField::new(&mut folder, "Recordings folder")
+                .show(ui)
+                .changed()
+            {
                 self.set_record_folder(folder);
             }
         });

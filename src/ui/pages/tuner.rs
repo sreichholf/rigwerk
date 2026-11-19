@@ -20,7 +20,7 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{chip, row_info, segmented};
+use crate::ui::widgets::{chip, row_info, segmented, OutlineButton};
 
 /// The settings the page was drawn with.  Copying them lets the frame stay
 /// borrowed while the bar collects edits for after the draw.
@@ -641,30 +641,12 @@ fn bottom_bar(
                 });
                 group(ui, "A4", colours, |ui| {
                     let step = |ui: &mut egui::Ui, label: &str| {
-                        let response = ui.add(
-                            egui::Button::new(
-                                RichText::new(label)
-                                    .font(font(Face::SansMedium, TypeRole::Control))
-                                    .color(colours.text),
-                            )
-                            .fill(colours.slot)
-                            .stroke(Stroke::new(1.0, colours.line2))
-                            .corner_radius(CornerRadius::same(4))
-                            .min_size(Vec2::splat(28.0)),
-                        );
-                        row_info(
-                            &response,
-                            egui::Role::Button,
-                            true,
-                            if label == "−" {
-                                "Lower A4"
-                            } else {
-                                "Raise A4"
-                            },
-                            None,
-                            None,
-                        );
-                        response.clicked()
+                        let name = if label == "−" {
+                            "Lower A4"
+                        } else {
+                            "Raise A4"
+                        };
+                        OutlineButton::new(label).name(name).show(ui).clicked()
                     };
                     if step(ui, "−") {
                         actions.reference_hz = Some(

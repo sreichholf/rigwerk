@@ -14,6 +14,7 @@ use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::theme::{font, palette, Face, TypeRole};
+use crate::ui::widgets::OutlineButton;
 
 const DRAWER_W: f32 = 460.0;
 /// How far the sheet's resize handle reaches, above the edge and inside it.
@@ -31,20 +32,8 @@ impl RigWerkApp {
         let Some(clsid) = clsid else {
             return;
         };
-        let colours = palette(ui.ctx());
         let ready = self.engine.open_asio_driver(side) == Some(clsid);
-        let response = ui.add_enabled(
-            ready,
-            egui::Button::new(
-                RichText::new("Driver panel")
-                    .font(font(Face::Sans, TypeRole::Control))
-                    .color(if ready { colours.text } else { colours.text3 }),
-            )
-            .fill(colours.slot)
-            .stroke(Stroke::new(1.0, colours.line2))
-            .corner_radius(CornerRadius::same(4))
-            .min_size(Vec2::new(32.0, 28.0)),
-        );
+        let response = OutlineButton::new("Driver panel").enabled(ready).show(ui);
         if !ready {
             let _ = response.on_disabled_hover_text(
                 "The driver panel is available once the bridge is running on that ASIO driver.",

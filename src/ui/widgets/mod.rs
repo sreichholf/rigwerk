@@ -1,10 +1,14 @@
 //! Small controls shared by several screens: labels, buttons, tabs,
 //! meters and sliders.
 //!
+//! The outline button and the text field are the plain action button and
+//! the one-line input everywhere; they share one height so they line up.
+//!
 //! The console kit (fader, meter, chain row, segmented control, chip, path
 //! dot, popover) follows `docs/ui-spec.md` §4.  Those modules read
 //! [`palette`] and [`font`]; the helpers below are shared by every screen.
 
+mod button;
 mod chain_row;
 mod chip;
 mod dot;
@@ -13,7 +17,9 @@ mod meter;
 mod popover;
 mod segmented;
 mod slider;
+mod text_field;
 
+pub(crate) use button::{OutlineButton, CONTROL_H};
 pub(crate) use chain_row::{
     add_effect_row, chain_event, chain_row, dashed_rect, effects_header, ChainEvent, ChainMark,
     ChainRow, EffectDrag, CHAIN_ROW_H,
@@ -26,6 +32,7 @@ pub(crate) use popover::popover;
 pub(crate) use segmented::segmented;
 
 pub(crate) use slider::{row_info, styled_slider};
+pub(crate) use text_field::TextField;
 
 #[cfg(test)]
 pub(crate) use slider::nudge_slider;

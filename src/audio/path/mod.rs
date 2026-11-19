@@ -41,7 +41,7 @@
 //! an effect's dry/wet mix delays its dry side (see `ChainRuntime::process`).
 //! A path-level chain bypass skips every effect the same way, and the total
 //! still counts.  The mixer lines the paths up per device with it (`output_map`,
-//! "Alignment").
+//! "Alignment").  The built-in amp adds no latency.
 //!
 //! The plugin-chain side of [`PathControls`] (edits, publish, controls,
 //! servicing, state) is in `plugins`, with how a chain is handed between
@@ -52,6 +52,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use std::time::Instant;
 
+use super::amp::{AmpCommand, AmpControls, AmpPark, PreparedAmp};
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::output_map::level_gain;
@@ -93,9 +94,10 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
 }
 
 /// The settings of one path the UI owns and pushes: input routing, mono,
-/// channel enable, the two EQs, the gate, the path level, mute and solo,
-/// and the effect-chain bypass.  The plugin chain is kept in the engine
-/// ([`PathControls`]).
+/// channel enable, the two EQs, the gate, the amp, the path level, mute
+/// and solo, and the effect-chain bypass.  The plugin chain and the amp
+/// capture live in the engine ([`PathControls`]); the capture's path is
+/// not copied onto the audio thread.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathMix {
     /// The 2 × 4 input routing (input × tap).  Only taps 1/2 (the path's
@@ -107,6 +109,8 @@ pub struct PathMix {
     /// The EQs before and after the effects, indexed by [`EqSlot`].
     pub eqs: [EqSettings; 2],
     pub gate: GateSettings,
+    /// Built-in amp.  The `.nam` path is not here: this stays [`Copy`].
+    pub amp: AmpControls,
     /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
     pub level_db: f32,
     pub mute: bool,
@@ -124,6 +128,7 @@ impl Default for PathMix {
             output_enabled: [true, true],
             eqs: [EqSettings::default(), EqSettings::default()],
             gate: GateSettings::default(),
+            amp: AmpControls::default(),
             level_db: 0.0,
             mute: false,
             solo: false,
@@ -138,6 +143,7 @@ impl PathMix {
         Self {
             eqs: self.eqs.map(EqSettings::sanitized),
             gate: self.gate.sanitized(),
+            amp: self.amp.sanitized(),
             level_db: sanitize_path_level(self.level_db),
             ..self
         }
@@ -410,10 +416,28 @@ pub(crate) struct PathControls {
     /// Built-in noise gate (PRE or POST effects).
     gate: Mutex<GateSettings>,
     gate_version: AtomicU64,
+    /// Built-in amp controls.  The callback copies them with `try_lock`.
+    /// The capture itself is [`pending_amp`], never this lock.
+    amp: Mutex<AmpControls>,
+    amp_version: AtomicU64,
+    /// A model the UI has prepared, waiting for the next block.  The
+    /// callback only `try_lock`s this.  Dropping a replaced model happens
+    /// on the UI thread, in [`Self::queue_amp`].
+    pending_amp: Mutex<Option<AmpCommand>>,
+    /// Where a model the audio side has let go of waits to be dropped.
+    /// Shared with the engine so a bridge-thread drop can park it.
+    amp_park: Arc<AmpPark>,
 }
 
 impl PathControls {
+    /// A path with its own park.  Tests that never queue a model use this;
+    /// a run shares one park via [`Self::with_park`].
+    #[cfg(test)]
     pub(crate) fn new(sample_rate: u32) -> Self {
+        Self::with_park(sample_rate, AmpPark::new())
+    }
+
+    pub(crate) fn with_park(sample_rate: u32, amp_park: Arc<AmpPark>) -> Self {
         let chain_bypass = Arc::new(AtomicBool::new(false));
         let chain = ChainModel::new(sample_rate, Arc::clone(&chain_bypass));
         Self {
@@ -463,6 +487,10 @@ impl PathControls {
             eq_version: [AtomicU64::new(1), AtomicU64::new(1)],
             gate: Mutex::new(GateSettings::default()),
             gate_version: AtomicU64::new(1),
+            amp: Mutex::new(AmpControls::default()),
+            amp_version: AtomicU64::new(1),
+            pending_amp: Mutex::new(None),
+            amp_park,
         }
     }
 
@@ -499,6 +527,12 @@ impl PathControls {
         {
             let settings = previous.gate.lock().unwrap_or_else(PoisonError::into_inner);
             self.set_gate(*settings);
+        }
+        {
+            // The numeric amp controls move.  The live model stays with the
+            // run that loaded it; the UI installs it again from the saved path.
+            let settings = previous.amp.lock().unwrap_or_else(PoisonError::into_inner);
+            self.set_amp(*settings);
         }
         // Only an active path carries its chain over; a removed one starts
         // the new run empty.  Capture the old instances' state on this
@@ -619,6 +653,7 @@ impl PathControls {
             self.set_eq(slot, mix.eqs[slot.index()]);
         }
         self.set_gate(mix.gate);
+        self.set_amp(mix.amp);
         self.set_level_db(mix.level_db);
         self.set_mute(mix.mute);
         self.set_solo(mix.solo);
@@ -647,6 +682,7 @@ impl PathControls {
             ],
             eqs: [eq(EqSlot::Pre), eq(EqSlot::Post)],
             gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
+            amp: *self.amp.lock().unwrap_or_else(PoisonError::into_inner),
             level_db: self.level_db(),
             mute: self.muted(),
             solo: self.soloed(),
@@ -799,5 +835,85 @@ impl PathControls {
 
     pub(crate) fn try_gate(&self) -> Option<GateSettings> {
         self.gate.try_lock().ok().map(|settings| *settings)
+    }
+
+    /// Applies new amp controls.  Does not parse or build a model.
+    pub(crate) fn set_amp(&self, settings: AmpControls) {
+        let settings = settings.sanitized();
+        if let Ok(mut current) = self.amp.lock() {
+            if *current != settings {
+                *current = settings;
+                self.amp_version.fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
+    pub(crate) fn amp_version(&self) -> u64 {
+        self.amp_version.load(Ordering::Acquire)
+    }
+
+    /// The current controls, or `None` if the UI holds the lock right now.
+    pub(crate) fn try_amp(&self) -> Option<AmpControls> {
+        self.amp.try_lock().ok().map(|settings| *settings)
+    }
+
+    pub(crate) fn amp_park(&self) -> &Arc<AmpPark> {
+        &self.amp_park
+    }
+
+    /// Queues a prewarmed model for the next block.  A model still waiting
+    /// is dropped here, on the UI thread.  The same path at the same rate
+    /// is the caller's to skip; this always replaces.
+    pub(crate) fn queue_amp(&self, prepared: PreparedAmp) {
+        let mut slot = self
+            .pending_amp
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(AmpCommand::Install(old)) = slot.replace(AmpCommand::Install(prepared)) {
+            drop(old);
+        }
+    }
+
+    /// Asks the next block to drop the live model out of the processor.
+    /// A model still waiting is dropped here, on the UI thread.
+    pub(crate) fn clear_amp(&self) {
+        let mut slot = self
+            .pending_amp
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(AmpCommand::Install(old)) = slot.replace(AmpCommand::Clear) {
+            drop(old);
+        }
+    }
+
+    /// The queued command, if the UI is not holding it.  The callback puts
+    /// a command back when it cannot park the model it would replace.
+    pub(crate) fn pending_amp_mut(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<AmpCommand>>, ()> {
+        match self.pending_amp.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(poison)) => Ok(poison.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Err(()),
+        }
+    }
+}
+
+impl Drop for PathControls {
+    fn drop(&mut self) {
+        // `Shared`'s last `Arc` can drop on the `rigwerk-bridge` thread:
+        // `replace_run` drops the engine's clone while the bridge still
+        // holds one, and `run_bridge` drops that one after the callback
+        // has stopped.  A model still queued must not be destroyed there.
+        // `get_mut` does not lock; this is the last reference to the
+        // controls.  The park outlives the run (the engine holds it), and
+        // the UI thread is what later drops the model.
+        let pending = self
+            .pending_amp
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(AmpCommand::Install(prepared)) = pending.take() {
+            self.amp_park.retire(prepared.model);
+        }
     }
 }

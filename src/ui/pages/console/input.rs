@@ -12,7 +12,7 @@ use crate::app::RigWerkApp;
 use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{chip, fit_text, horizontal_meter, row_info, FaderRange};
+use crate::ui::widgets::{chip, fit_text, horizontal_meter, row_info, FaderRange, OutlineButton};
 
 const SCOPE_H: f32 = 56.0;
 
@@ -152,11 +152,10 @@ impl RigWerkApp {
             return;
         };
         let ready = self.engine.open_asio_driver(AsioPanelSide::Input) == Some(clsid);
-        let response = ui
-            .add_enabled_ui(ready, |ui| {
-                super::strip_button(ui, "Driver panel", "Driver panel")
-            })
-            .inner;
+        let response = OutlineButton::new("Driver panel")
+            .enabled(ready)
+            .full_width()
+            .show(ui);
         if !ready {
             let _ = response
                 .on_disabled_hover_text("Available once the bridge runs on this ASIO driver");

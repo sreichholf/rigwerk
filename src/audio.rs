@@ -46,6 +46,8 @@
 //!   pushes; a writer thread owns the disk.
 //! - `eq`: the built-in 5-band EQs before and after the plugin effects.
 //! - `gate`: the built-in noise gate (PRE or POST effects).
+//! - `amp`: the built-in Neural Amp Modeler stage (before or after the
+//!   effects).  The callback never builds or drops a model.
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute, safety ceiling and channel map.
 //! - `limiter`: the per-device sample-peak ceiling after the device level.
@@ -53,6 +55,7 @@
 //! - `denormal`: flush-to-zero for the audio callbacks.
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
 
+pub(crate) mod amp;
 mod asio_panel;
 mod bridge;
 mod calibration;
@@ -100,6 +103,7 @@ pub use win::wasapi::probe as probe_output_driver;
 #[cfg(test)]
 mod hardware_tests;
 
+pub use amp::{AmpControls, AmpSettings, AmpSlot, AMP_MAX_TRIM_DB, AMP_MIN_TRIM_DB};
 pub(crate) use asio_panel::AsioPanelSide;
 pub(crate) use calibration::{
     analyze_channels, click_waveform, round_trip_ms, CalibrationFailure, CalibrationState,

@@ -19,9 +19,9 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
-use crate::ui::widgets::{chip, row_info};
+use crate::ui::widgets::{chip, row_info, CONTROL_H};
 
-use super::sheet_button;
+use crate::ui::widgets::OutlineButton;
 
 const CURVE_MIN_HZ: f32 = 20.0;
 const CURVE_MAX_HZ: f32 = 20_000.0;
@@ -267,7 +267,7 @@ impl RigWerkApp {
             rate,
             ids,
         };
-        let top = super::SHEET_BUTTON_H + 8.0;
+        let top = CONTROL_H + 8.0;
         if width >= table_width() + 16.0 + MIN_CURVE_W {
             // The curve takes the body's full height; *Flat* sits over the
             // table.
@@ -322,7 +322,7 @@ impl Edit<'_> {
     fn top_row(&mut self, ui: &mut egui::Ui, slot: EqSlot) {
         let colours = palette(ui.ctx());
         ui.horizontal(|ui| {
-            ui.set_min_height(super::SHEET_BUTTON_H);
+            ui.set_min_height(CONTROL_H);
             ui.label(
                 RichText::new("5 bands · no added latency")
                     .font(font(Face::Sans, TypeRole::Secondary))
@@ -330,7 +330,8 @@ impl Edit<'_> {
             )
             .on_hover_text(slot_hint(slot));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if sheet_button(ui, "Flat", "Flat", true)
+                if OutlineButton::new("Flat")
+                    .show(ui)
                     .on_hover_text("Reset every band to its default, 0 dB.")
                     .clicked()
                 {

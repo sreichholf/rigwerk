@@ -16,9 +16,9 @@ use crate::app::RigWerkApp;
 use crate::audio::PluginParamView;
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::row_info;
+use crate::ui::widgets::{row_info, TextField, CONTROL_H};
 
-use super::sheet_button;
+use crate::ui::widgets::OutlineButton;
 
 const LABEL_W: f32 = 220.0;
 const VALUE_W: f32 = 92.0;
@@ -95,7 +95,7 @@ impl RigWerkApp {
         let mut changes: Vec<(u32, f64)> = Vec::new();
 
         ui.horizontal(|ui| {
-            ui.set_min_height(super::SHEET_BUTTON_H);
+            ui.set_min_height(CONTROL_H);
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.label(
                 RichText::new(format!("{format} · {vendor} · {category}"))
@@ -103,25 +103,25 @@ impl RigWerkApp {
                     .color(colours.text3),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if sheet_button(ui, "Remove", "Remove", true)
+                if OutlineButton::new("Remove")
+                    .show(ui)
                     .on_hover_text(REMOVE_HINT)
                     .clicked()
                 {
                     remove = true;
                 }
-                if sheet_button(
-                    ui,
-                    "Reset to defaults",
-                    "Reset to defaults",
-                    !parameters.is_empty(),
-                )
-                .on_hover_text(RESET_HINT)
-                .clicked()
+                if OutlineButton::new("Reset to defaults")
+                    .enabled(!parameters.is_empty())
+                    .show(ui)
+                    .on_hover_text(RESET_HINT)
+                    .clicked()
                 {
                     reset = true;
                 }
                 let label = if has_editor { "Editor" } else { "Controls" };
-                if sheet_button(ui, label, label, error.is_none() && has_editor)
+                if OutlineButton::new(label)
+                    .enabled(error.is_none() && has_editor)
+                    .show(ui)
                     .on_hover_text(if has_editor {
                         "Open the editor the plugin draws itself"
                     } else {
@@ -292,12 +292,10 @@ fn controls_header(ui: &mut egui::Ui, count: usize, filter: &mut String, colours
         );
         if count >= 8 {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_sized(
-                    [220.0, 24.0],
-                    egui::TextEdit::singleline(filter)
-                        .hint_text("Find a control…")
-                        .text_color(colours.text),
-                );
+                TextField::new(filter, "Find a control")
+                    .hint("Find a control…")
+                    .width(220.0)
+                    .show(ui);
             });
         }
     });

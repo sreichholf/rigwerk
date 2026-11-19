@@ -15,7 +15,7 @@ use crate::ui::fonts::Face;
 use crate::ui::pages::setup::driver_line::driver_line;
 use crate::ui::pages::setup::{hint, panel};
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{fit_text, palette_focus, row_info, segmented};
+use crate::ui::widgets::{fit_text, palette_focus, row_info, segmented, TextField};
 
 /// Allocated height of one row, including the gap under it.
 pub(crate) const DEVICE_ROW_H: f32 = 30.0;
@@ -213,21 +213,11 @@ pub(crate) fn device_row(
 }
 
 fn device_search(ui: &mut egui::Ui, filter: &mut String, id_salt: &str) {
-    let response = ui.add(
-        egui::TextEdit::singleline(filter)
-            .id_salt(id_salt)
-            .hint_text("Search")
-            .desired_width(f32::INFINITY)
-            .font(font(Face::Sans, TypeRole::Body)),
-    );
-    row_info(
-        &response,
-        egui::Role::TextInput,
-        ui.is_enabled(),
-        "Search",
-        None,
-        None,
-    );
+    let id = ui.make_persistent_id(id_salt);
+    TextField::new(filter, "Search")
+        .hint("Search")
+        .id(id)
+        .show(ui);
 }
 
 fn device_group_heading(ui: &mut egui::Ui, heading: &str) {

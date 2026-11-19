@@ -9,6 +9,7 @@ use eframe::egui::{self, accesskit::Toggled};
 fn row<'a>(name: &'a str, mark: ChainMark<'a>) -> ChainRow<'a> {
     ChainRow {
         name,
+        shown: None,
         index: 2,
         on: true,
         selected: false,
@@ -261,4 +262,67 @@ fn ctrl_enter_opens_the_focused_effect_editor() {
         event = chain_event(&response);
     });
     assert_ne!(event, Some(ChainEvent::Editor));
+}
+
+#[test]
+fn a_long_label_is_shortened_and_does_not_cover_the_name() {
+    let ctx = egui::Context::default();
+    let long = "STEREO DIRT 2 Gain2 BAL O808 CAB";
+    let output = run_frame(&ctx, test_input(None), |ui| {
+        ui.allocate_ui(egui::vec2(200.0, 40.0), |ui| {
+            chain_row(ui, &row("Amp", ChainMark::Label(long)));
+        });
+    });
+    let mut texts = Vec::new();
+    for clipped in &output.shapes {
+        if let egui::Shape::Text(text) = &clipped.shape {
+            let rect = text.galley.rect.translate(text.pos.to_vec2());
+            texts.push((text.galley.text().to_owned(), rect));
+        }
+    }
+    let (_, name) = texts
+        .iter()
+        .find(|(text, _)| text == "Amp")
+        .expect("the name is drawn whole");
+    let (mark, mark_rect) = texts
+        .iter()
+        .find(|(text, _)| text.ends_with('…'))
+        .expect("the label is shortened");
+    assert!(long.starts_with(mark.trim_end_matches('…')));
+    assert!(
+        mark_rect.left() >= name.right(),
+        "{mark_rect:?} over {name:?}"
+    );
+}
+
+#[test]
+fn a_shown_text_takes_the_name_place_and_keeps_the_name_for_readers() {
+    let long = "STEREO DIRT 2 Gain2 BAL O808 CAB";
+    let mut amp = row("Amp", ChainMark::Label(""));
+    amp.shown = Some(long);
+    let ctx = egui::Context::default();
+    let output = run_frame(&ctx, test_input(None), |ui| {
+        ui.allocate_ui(egui::vec2(200.0, 40.0), |ui| {
+            chain_row(ui, &amp);
+        });
+    });
+    let texts: Vec<String> = output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(!texts.iter().any(|text| text == "Amp"), "{texts:?}");
+    let drawn = texts
+        .iter()
+        .find(|text| text.starts_with("STEREO"))
+        .expect("the capture is drawn");
+    assert!(drawn.len() > "STEREO DIRT".len(), "uses the row: {drawn}");
+
+    let tree = accesskit_frame(|ui| {
+        chain_row(ui, &amp);
+    });
+    assert_eq!(node_named(&tree, "Amp").description(), Some(long));
 }
