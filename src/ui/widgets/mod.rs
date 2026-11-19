@@ -25,19 +25,18 @@ pub(crate) use meter::{horizontal_meter, vertical_meter, MeterChannel};
 pub(crate) use popover::popover;
 pub(crate) use segmented::segmented;
 
-pub(crate) use slider::{row_info, show_focus_ring, styled_slider};
+pub(crate) use slider::{row_info, styled_slider};
 
 #[cfg(test)]
 pub(crate) use slider::nudge_slider;
 
 use eframe::egui;
 use egui::{
-    Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText, Sense,
-    Stroke, Vec2,
+    Align, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense, Stroke, Vec2,
 };
 
 use crate::ui::theme::ts;
-use crate::ui::theme::{palette, with_alpha, BORDER_SOFT, CARD_RAISED, DIM, MUTED, TEXT};
+use crate::ui::theme::{palette, with_alpha, BORDER_SOFT, DIM, TEXT};
 
 /// Accent ring on a focused control, from the active palette.
 pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
@@ -49,21 +48,6 @@ pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect
             egui::StrokeKind::Inside,
         );
     }
-}
-
-pub(crate) fn card<R>(
-    ui: &mut egui::Ui,
-    fill: Color32,
-    border: Color32,
-    inner: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(Stroke::new(1.0, border))
-        .corner_radius(CornerRadius::same(13))
-        .inner_margin(Margin::same(15))
-        .show(ui, inner)
-        .inner
 }
 
 pub(crate) fn micro_label(text: &str, color: Color32) -> RichText {
@@ -113,11 +97,6 @@ pub(crate) fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     );
 }
 
-pub(crate) fn horizontal_line(ui: &mut egui::Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().rect_filled(rect, 0, color);
-}
-
 pub(crate) fn ellipsize(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_owned()
@@ -126,17 +105,6 @@ pub(crate) fn ellipsize(text: &str, max: usize) -> String {
         output.push('…');
         output
     }
-}
-
-pub(crate) fn ghost_button(ui: &mut egui::Ui, label: &str, width: f32) -> bool {
-    ui.add_sized(
-        [width, 32.0],
-        egui::Button::new(RichText::new(label).size(ts(12.0)).color(MUTED))
-            .fill(CARD_RAISED)
-            .stroke(Stroke::new(1.0, BORDER_SOFT))
-            .corner_radius(CornerRadius::same(8)),
-    )
-    .clicked()
 }
 
 /// A [`tab_button`] that explains itself on hover.

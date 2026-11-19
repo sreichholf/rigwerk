@@ -3,7 +3,7 @@
 //! chunks the audio thread could not run a path's chain (it did not hold
 //! the chain's runtime), and the chunks it found an effect paused.
 //!
-//! The header pill still follows the engine state. This page shows the
+//! The header pill still follows the engine state.  This page shows the
 //! bridge's own status string beside that, and keeps scan notes and quantum
 //! failures that the live status line replaces.
 
@@ -11,15 +11,15 @@ use crate::app::LogTone;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use egui::RichText;
+use egui::{Color32, CornerRadius, RichText, Stroke};
 
 use crate::app::{RigWerkApp, ACTIVITY_LOG_CAP};
 use crate::audio::EngineState;
-use crate::ui::theme::ts;
-use crate::ui::theme::{
-    log_colour, path_colour, AMBER, BORDER, CARD, DIM, GREEN, MUTED, RED, TEAL, TEXT,
-};
-use crate::ui::widgets::{card, ghost_button, micro_label, mono, status_dot};
+use crate::ui::fonts::Face;
+use crate::ui::theme::{font, palette, Palette, TypeRole};
+use crate::ui::widgets::status_dot;
+
+use super::sheet_button;
 
 /// One path's DSP line: "0.21 ms avg · 0.40 ms peak of 10.7 ms · 2% / 4%",
 /// or why there is none.
@@ -99,24 +99,81 @@ fn chain_lock_text(report: &crate::audio::PluginLockReport) -> String {
     }
 }
 
+/// The log dot on the active palette.
+fn log_mark(colours: &Palette, tone: LogTone) -> Color32 {
+    match tone {
+        LogTone::Muted => colours.text2,
+        LogTone::Blue => colours.meter,
+        LogTone::Amber => colours.warn,
+        LogTone::Teal => colours.accent,
+        LogTone::Green => colours.path[2],
+        LogTone::Red => colours.error,
+    }
+}
+
+/// A path's saved colour on the active palette.
+fn path_mark(colours: &Palette, index: u8) -> Color32 {
+    colours.path[index as usize % colours.path.len()]
+}
+
+fn sans(text: impl Into<String>, colour: Color32, role: TypeRole) -> RichText {
+    RichText::new(text)
+        .font(font(Face::Sans, role))
+        .color(colour)
+}
+
+fn mono_line(text: impl Into<String>, colour: Color32, role: TypeRole) -> RichText {
+    RichText::new(text)
+        .font(font(Face::Mono, role))
+        .color(colour)
+}
+
+fn kicker(text: &str, colours: &Palette) -> RichText {
+    RichText::new(text)
+        .font(font(Face::SansSemibold, TypeRole::GridHeader))
+        .color(colours.text3)
+}
+
+/// A group on the sheet: strip fill, a line, 4 pt corners.
+fn group(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui)) {
+    let colours = palette(ui.ctx());
+    egui::Frame::new()
+        .fill(colours.strip)
+        .stroke(Stroke::new(1.0, colours.line))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            // 12 pt margin and a 1 pt stroke on each side.
+            ui.set_width((width - 26.0).max(0.0));
+            body(ui);
+        });
+}
+
 /// One latency-budget line: part, value, where the number comes from, and
 /// what it covers.
 fn budget_row(
     ui: &mut egui::Ui,
     label: &str,
     value: &str,
-    value_color: egui::Color32,
+    value_color: Color32,
     source: &str,
     detail: &str,
 ) {
+    let colours = palette(ui.ctx());
     ui.horizontal_top(|ui| {
-        ui.add_sized([150.0, 14.0], egui::Label::new(mono(label, TEXT, 8.8)));
         ui.add_sized(
-            [86.0, 14.0],
-            egui::Label::new(mono(value, value_color, 9.5)),
+            [150.0, 16.0],
+            egui::Label::new(mono_line(label, colours.text, TypeRole::GridHeader)),
         );
-        ui.add_sized([64.0, 14.0], egui::Label::new(mono(source, DIM, 8.0)));
-        ui.add(egui::Label::new(RichText::new(detail).size(ts(9.5)).color(DIM)).wrap());
+        ui.add_sized(
+            [86.0, 16.0],
+            egui::Label::new(mono_line(value, value_color, TypeRole::GridHeader)),
+        );
+        ui.add_sized(
+            [80.0, 16.0],
+            egui::Label::new(mono_line(source, colours.text3, TypeRole::GridHeader)),
+        );
+        ui.add(egui::Label::new(sans(detail, colours.text3, TypeRole::GridHeader)).wrap());
     });
 }
 
@@ -280,6 +337,7 @@ impl RigWerkApp {
 
     fn diagnostics_tabs(&mut self, ui: &mut egui::Ui) {
         use crate::app::screen::DiagnosticsTab;
+        let colours = palette(ui.ctx());
         let current = self.chrome.diagnostics_tab;
         ui.horizontal_wrapped(|ui| {
             for (label, tab) in [
@@ -289,7 +347,17 @@ impl RigWerkApp {
                 ("Scan", DiagnosticsTab::Scan),
                 ("Status", DiagnosticsTab::Status),
             ] {
-                if ui.selectable_label(current == tab, label).clicked() {
+                let selected = current == tab;
+                let text = sans(
+                    label,
+                    if selected {
+                        colours.accent
+                    } else {
+                        colours.text2
+                    },
+                    TypeRole::Control,
+                );
+                if ui.selectable_label(selected, text).clicked() {
                     self.chrome.diagnostics_tab = tab;
                 }
             }
@@ -299,87 +367,93 @@ impl RigWerkApp {
 
     pub(crate) fn diagnostics_page(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width();
+        let colours = *palette(ui.ctx());
         self.diagnostics_tabs(ui);
         let tab = self.chrome.diagnostics_tab;
         if tab == crate::app::screen::DiagnosticsTab::Status {
-            card(ui, CARD, BORDER, |ui| {
-                ui.set_width(width - 32.0);
-                ui.label(micro_label("BRIDGE", DIM));
+            group(ui, width, |ui| {
+                ui.label(kicker("BRIDGE", &colours));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(mono("ENGINE", DIM, 9.0));
-                    ui.label(
-                        RichText::new(engine_state_label(self.engine.state))
-                            .size(ts(12.0))
-                            .color(TEXT),
-                    );
+                    ui.label(mono_line("ENGINE", colours.text3, TypeRole::GridHeader));
+                    ui.label(sans(
+                        engine_state_label(self.engine.state),
+                        colours.text,
+                        TypeRole::Control,
+                    ));
                 });
                 ui.horizontal(|ui| {
-                    ui.label(mono("STATUS", DIM, 9.0));
+                    ui.label(mono_line("STATUS", colours.text3, TypeRole::GridHeader));
                     ui.add(
-                        egui::Label::new(
-                            RichText::new(self.bridge_status_line())
-                                .size(ts(12.0))
-                                .color(TEXT),
-                        )
+                        egui::Label::new(sans(
+                            self.bridge_status_line(),
+                            colours.text,
+                            TypeRole::Control,
+                        ))
                         .wrap(),
                     );
                 });
                 if let Some(error) = self.visible_error() {
                     ui.horizontal(|ui| {
-                        ui.label(mono("ERROR", DIM, 9.0));
+                        ui.label(mono_line("ERROR", colours.text3, TypeRole::GridHeader));
                         ui.add(
-                            egui::Label::new(
-                                RichText::new(format!("Bridge error: {error}"))
-                                    .size(ts(11.5))
-                                    .color(RED),
-                            )
+                            egui::Label::new(sans(
+                                format!("Bridge error: {error}"),
+                                colours.error_text,
+                                TypeRole::Control,
+                            ))
                             .wrap(),
                         );
                     });
                 }
                 let quantum = self.engine.quantum_note().map(str::to_owned);
                 let (quantum_text, quantum_color) = match quantum.as_deref() {
-                    Some(note) => (note, AMBER),
-                    None => ("No restore problem.", MUTED),
+                    Some(note) => (note, colours.warn),
+                    None => ("No restore problem.", colours.text2),
                 };
                 ui.horizontal(|ui| {
-                    ui.label(mono("GRAPH", DIM, 9.0));
+                    ui.label(mono_line("GRAPH", colours.text3, TypeRole::GridHeader));
                     ui.add(
-                        egui::Label::new(
-                            RichText::new(quantum_text)
-                                .size(ts(11.5))
-                                .color(quantum_color),
-                        )
-                        .wrap(),
+                        egui::Label::new(sans(quantum_text, quantum_color, TypeRole::Control))
+                            .wrap(),
                     );
                 });
             });
         }
         if tab == crate::app::screen::DiagnosticsTab::Latency {
             ui.add_space(10.0);
-            card(ui, CARD, BORDER, |ui| {
-                ui.set_width(width - 32.0);
+            group(ui, width, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(micro_label(
+                    ui.label(kicker(
                         "LATENCY BUDGET · ESTIMATE AND MEASUREMENT",
-                        DIM,
+                        &colours,
                     ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let measuring = self.calibration.is_measuring();
                         let blocker = self.calibration_blocker();
-                        if ghost_button(ui, "Measure loopback…", 168.0) {
+                        if sheet_button(ui, "Measure loopback…", "Measure loopback…", true)
+                            .clicked()
+                        {
                             self.calibration.open = true;
                         }
                         if measuring {
-                            ui.label(mono("measuring", AMBER, 8.5)).on_hover_text(
-                                "The clock output is muted while the click is captured.",
-                            );
+                            ui.label(mono_line("measuring", colours.warn, TypeRole::GridHeader))
+                                .on_hover_text(
+                                    "The clock output is muted while the click is captured.",
+                                );
                         } else if let Some(reason) = blocker {
-                            ui.label(mono("bridge needed", DIM, 8.5))
-                                .on_hover_text(reason);
+                            ui.label(mono_line(
+                                "bridge needed",
+                                colours.text3,
+                                TypeRole::GridHeader,
+                            ))
+                            .on_hover_text(reason);
                         } else {
-                            ui.label(mono("loopback ready", GREEN, 8.5));
+                            ui.label(mono_line(
+                                "loopback ready",
+                                colours.path[2],
+                                TypeRole::GridHeader,
+                            ));
                         }
                     });
                 });
@@ -391,8 +465,8 @@ impl RigWerkApp {
                         part.label,
                         &part.value_text(),
                         match part.source {
-                            crate::app::budget::LatencySource::Measured => TEAL,
-                            _ => MUTED,
+                            crate::app::budget::LatencySource::Measured => colours.accent,
+                            _ => colours.text2,
                         },
                         part.source.label(),
                         &part.detail,
@@ -400,102 +474,104 @@ impl RigWerkApp {
                 }
                 ui.add_space(3.0);
                 budget_row(
-                ui,
-                "= ESTIMATED PATH",
-                &format!("{:.1} ms", budget.estimate_ms),
-                AMBER,
-                "estimated",
-                budget.estimate_gap.as_deref().unwrap_or(
-                    "Input block + bridge buffer + plugin chain + output step + after-node delay, at the rates they run at. The Live US readout is the bridge alone, so it differs from this by the chain and the after-node delay; alignment trims are not included.",
-                ),
-            );
+                    ui,
+                    "= ESTIMATED PATH",
+                    &format!("{:.1} ms", budget.estimate_ms),
+                    colours.warn,
+                    "estimated",
+                    budget.estimate_gap.as_deref().unwrap_or(
+                        "Input block + bridge buffer + plugin chain + output step + after-node delay, at the rates they run at. The Live US readout is the bridge alone, so it differs from this by the chain and the after-node delay; alignment trims are not included.",
+                    ),
+                );
                 ui.add_space(3.0);
                 match &budget.measured {
-                Some(measured) => budget_row(
-                    ui,
-                    "MEASURED LOOPBACK",
-                    &format!("{:.1} ms", measured.latency_ms),
-                    if budget.stale.is_some() { AMBER } else { TEAL },
-                    "measured",
-                    &measured.summary(budget.stale.as_deref()),
-                ),
-                None => budget_row(
-                    ui,
-                    "MEASURED LOOPBACK",
-                    "not measured",
-                    MUTED,
-                    "—",
-                    "Measure on Live with a cable or microphone loopback. The estimate above is not a measurement.",
-                ),
-            }
+                    Some(measured) => budget_row(
+                        ui,
+                        "MEASURED LOOPBACK",
+                        &format!("{:.1} ms", measured.latency_ms),
+                        if budget.stale.is_some() {
+                            colours.warn
+                        } else {
+                            colours.accent
+                        },
+                        "measured",
+                        &measured.summary(budget.stale.as_deref()),
+                    ),
+                    None => budget_row(
+                        ui,
+                        "MEASURED LOOPBACK",
+                        "not measured",
+                        colours.text2,
+                        "—",
+                        "Measure on Live with a cable or microphone loopback. The estimate above is not a measurement.",
+                    ),
+                }
                 ui.add_space(4.0);
                 ui.add(
-                    egui::Label::new(
-                        RichText::new(crate::app::budget::LEGS_NOTE)
-                            .size(ts(10.0))
-                            .color(DIM),
-                    )
+                    egui::Label::new(sans(
+                        crate::app::budget::LEGS_NOTE,
+                        colours.text3,
+                        TypeRole::Secondary,
+                    ))
                     .wrap(),
                 );
                 ui.add_space(2.0);
-                ui.label(
-                RichText::new(
+                ui.label(sans(
                     "Reported means the driver, graph or a plugin said so; planned is the size asked for before the driver has opened; setting is RigWerk's own bridge buffer; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
-                )
-                .size(ts(10.0))
-                .color(DIM),
-            );
+                    colours.text3,
+                    TypeRole::Secondary,
+                ));
             });
         }
         if tab == crate::app::screen::DiagnosticsTab::Performance {
             ui.add_space(10.0);
-            card(ui, CARD, BORDER, |ui| {
-                ui.set_width(width - 32.0);
-                ui.label(micro_label("SIGNAL PATHS · DSP TIME", DIM));
+            group(ui, width, |ui| {
+                ui.label(kicker("SIGNAL PATHS · DSP TIME", &colours));
                 ui.add_space(6.0);
                 egui::Grid::new("diagnostics_paths")
                     .num_columns(3)
                     .spacing([18.0, 4.0])
                     .show(ui, |ui| {
                         for header in ["PATH", "CHAIN LATENCY", "DSP PER BLOCK · AVG / PEAK"] {
-                            ui.label(mono(header, DIM, 8.5));
+                            ui.label(mono_line(header, colours.text3, TypeRole::GridHeader));
                         }
                         ui.end_row();
                         for (info, dsp) in self.path_dsp_lines() {
                             ui.horizontal(|ui| {
-                                status_dot(ui, path_colour(info.colour_index));
-                                ui.label(RichText::new(&info.name).size(ts(11.0)).color(TEXT));
+                                status_dot(ui, path_mark(&colours, info.colour_index));
+                                ui.label(sans(&info.name, colours.text, TypeRole::Body));
                             });
-                            ui.label(mono(format!("{:.1} ms", info.latency_ms), MUTED, 9.5));
+                            ui.label(mono_line(
+                                format!("{:.1} ms", info.latency_ms),
+                                colours.text2,
+                                TypeRole::GridHeader,
+                            ));
                             let time = self.engine.path_dsp_time(info.slot).unwrap_or_default();
                             let color = if time.peak_share() >= crate::app::issues::DSP_ERROR_SHARE
                             {
-                                RED
+                                colours.error_text
                             } else if time.avg_share() >= crate::app::issues::DSP_WARN_SHARE {
-                                AMBER
+                                colours.warn
                             } else {
-                                MUTED
+                                colours.text2
                             };
-                            ui.label(mono(dsp, color, 9.5));
+                            ui.label(mono_line(dsp, color, TypeRole::GridHeader));
                             ui.end_row();
                         }
                     });
                 ui.add_space(4.0);
-                ui.label(
-                RichText::new(
+                ui.label(sans(
                     "Time the mixer spends on each path's chain per block (routing, EQs, gate, effects), smoothed and as a peak that decays over about two seconds, against the block's length: the graph buffer on the PipeWire duplex path, the output block otherwise.",
-                )
-                .size(ts(10.0))
-                .color(DIM),
-            );
+                    colours.text3,
+                    TypeRole::Secondary,
+                ));
             });
 
             ui.add_space(10.0);
-            card(ui, CARD, BORDER, |ui| {
-                ui.set_width(width - 32.0);
-                ui.label(micro_label(
+            group(ui, width, |ui| {
+                ui.label(kicker(
                     "PLUGIN BLOCKS · SKIPPED OR PAUSED / ATTEMPTED",
-                    DIM,
+                    &colours,
                 ));
                 ui.add_space(6.0);
                 let reports: Vec<_> = self
@@ -513,11 +589,7 @@ impl RigWerkApp {
                         || report.effects.iter().any(|effect| effect.attempts > 0)
                 });
                 if !any_attempts {
-                    ui.label(
-                        RichText::new("No plugin blocks yet.")
-                            .size(ts(11.0))
-                            .color(MUTED),
-                    );
+                    ui.label(sans("No plugin blocks yet.", colours.text2, TypeRole::Body));
                 } else {
                     for (info, report) in &reports {
                         let path_attempts = report.chain.attempts
@@ -530,26 +602,30 @@ impl RigWerkApp {
                             continue;
                         }
                         ui.horizontal(|ui| {
-                            status_dot(ui, path_colour(info.colour_index));
-                            ui.label(RichText::new(&info.name).size(ts(11.0)).color(TEXT));
+                            status_dot(ui, path_mark(&colours, info.colour_index));
+                            ui.label(sans(&info.name, colours.text, TypeRole::Body));
                         });
                         ui.horizontal(|ui| {
                             ui.add_space(16.0);
-                            ui.label(mono(
+                            ui.label(mono_line(
                                 chain_lock_text(report),
                                 if report.chain_poisoned || report.chain.skipped() > 0 {
-                                    AMBER
+                                    colours.warn
                                 } else {
-                                    MUTED
+                                    colours.text2
                                 },
-                                9.5,
+                                TypeRole::GridHeader,
                             ));
                         });
                         let views = self.engine.plugin_views(info.slot);
                         if no_effect_ran(report) {
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
-                                ui.label(mono(NO_EFFECT_TRIED, MUTED, 9.5));
+                                ui.label(mono_line(
+                                    NO_EFFECT_TRIED,
+                                    colours.text2,
+                                    TypeRole::GridHeader,
+                                ));
                             });
                         }
                         for (index, effect) in report.effects.iter().enumerate() {
@@ -562,24 +638,28 @@ impl RigWerkApp {
                                 .unwrap_or_else(|| format!("Effect {}", index + 1));
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
-                                ui.label(mono(
+                                ui.label(mono_line(
                                     format!(
                                         "{name}: {} paused of {} ({})",
                                         effect.skipped(),
                                         chunk_text(effect.attempts),
                                         percent_text(effect)
                                     ),
-                                    if effect.skipped() > 0 { AMBER } else { MUTED },
-                                    9.5,
+                                    if effect.skipped() > 0 {
+                                        colours.warn
+                                    } else {
+                                        colours.text2
+                                    },
+                                    TypeRole::GridHeader,
                                 ));
                             });
                         }
                     }
                     ui.add_space(6.0);
-                    ui.label(RichText::new(COUNTS_CAPTION).size(ts(10.0)).color(DIM));
+                    ui.label(sans(COUNTS_CAPTION, colours.text3, TypeRole::Secondary));
                 }
                 ui.add_space(6.0);
-                if ghost_button(ui, "Reset all", 120.0) {
+                if sheet_button(ui, "Reset all", "Reset all", true).clicked() {
                     self.engine.reset_plugin_lock_counters();
                     self.push_log("Plugin block counters reset.", LogTone::Teal);
                 }
@@ -587,17 +667,15 @@ impl RigWerkApp {
         }
         if tab == crate::app::screen::DiagnosticsTab::Scan {
             ui.add_space(10.0);
-            card(ui, CARD, BORDER, |ui| {
-                ui.set_width(width - 32.0);
-                ui.label(micro_label("SCAN NOTES", DIM));
+            group(ui, width, |ui| {
+                ui.label(kicker("SCAN NOTES", &colours));
                 ui.add_space(6.0);
                 if self.inventory.notes.is_empty() {
-                    ui.label(RichText::new("No scan notes.").size(ts(11.0)).color(MUTED));
+                    ui.label(sans("No scan notes.", colours.text2, TypeRole::Body));
                 } else {
                     for note in &self.inventory.notes {
                         ui.add(
-                            egui::Label::new(RichText::new(note).size(ts(11.5)).color(AMBER))
-                                .wrap(),
+                            egui::Label::new(sans(note, colours.warn, TypeRole::Control)).wrap(),
                         );
                     }
                 }
@@ -606,12 +684,12 @@ impl RigWerkApp {
         if tab == crate::app::screen::DiagnosticsTab::Log {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ghost_button(ui, "Copy", 120.0) {
+                if sheet_button(ui, "Copy", "Copy", true).clicked() {
                     let report = self.diagnostics_text();
                     ui.ctx().copy_text(report);
                     self.push_log("Diagnostics copied to the clipboard.", LogTone::Teal);
                 }
-                if ghost_button(ui, "Export", 120.0) {
+                if sheet_button(ui, "Export", "Export", true).clicked() {
                     let path = diagnostics_export_path();
                     match self.write_diagnostics(&path) {
                         Ok(()) => self.push_log(
@@ -621,39 +699,32 @@ impl RigWerkApp {
                         Err(error) => self.push_log(error, LogTone::Red),
                     }
                 }
-                ui.label(mono(
+                ui.label(mono_line(
                     format!("{} / {ACTIVITY_LOG_CAP}", self.log.len()),
-                    DIM,
-                    10.0,
+                    colours.text3,
+                    TypeRole::Secondary,
                 ));
             });
-            ui.label(
-                RichText::new("Newest first. Copy and export list the log oldest first.")
-                    .size(ts(10.0))
-                    .color(DIM),
-            );
+            ui.label(sans(
+                "Newest first. Copy and export list the log oldest first.",
+                colours.text3,
+                TypeRole::Secondary,
+            ));
 
             ui.add_space(10.0);
-            card(ui, CARD, BORDER, |ui| {
-                ui.set_width(width - 32.0);
-                ui.label(micro_label("ACTIVITY", DIM));
+            group(ui, width, |ui| {
+                ui.label(kicker("ACTIVITY", &colours));
                 ui.add_space(6.0);
                 if self.log.is_empty() {
-                    ui.label(
-                        RichText::new("No activity yet.")
-                            .size(ts(11.0))
-                            .color(MUTED),
-                    );
+                    ui.label(sans("No activity yet.", colours.text2, TypeRole::Body));
                 } else {
                     for entry in self.log.iter().rev() {
                         ui.horizontal(|ui| {
-                            ui.label(mono(&entry.at, DIM, 9.0));
-                            status_dot(ui, log_colour(entry.tone));
+                            ui.label(mono_line(&entry.at, colours.text3, TypeRole::GridHeader));
+                            status_dot(ui, log_mark(&colours, entry.tone));
                             ui.add(
-                                egui::Label::new(
-                                    RichText::new(&entry.text).size(ts(11.0)).color(MUTED),
-                                )
-                                .wrap(),
+                                egui::Label::new(sans(&entry.text, colours.text2, TypeRole::Body))
+                                    .wrap(),
                             );
                         });
                     }
