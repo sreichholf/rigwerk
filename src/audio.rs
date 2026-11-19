@@ -175,9 +175,9 @@ pub(crate) use tuner::{
 };
 #[cfg(test)]
 pub(crate) use tuner::{tuning_by_id, TunerReading};
-#[cfg(target_os = "linux")]
-pub use types::QuantumInfo;
 pub use types::{
     BufferMode, DeviceItem, EngineState, Inventory, OutputMode, Snapshot, StartConfig,
-    WasapiOutputMode, PIPEWIRE_LOW_QUANTUM,
+    WasapiOutputMode,
 };
+#[cfg(target_os = "linux")]
+pub use types::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
