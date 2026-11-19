@@ -1,4 +1,4 @@
-//! Small controls shared by several screens: cards, labels, buttons, tabs,
+//! Small controls shared by several screens: labels, buttons, tabs,
 //! meters and sliders.
 //!
 //! The console kit (fader, meter, chain row, segmented control, chip, path
@@ -70,31 +70,6 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter()
         .circle_filled(rect.center(), 4.0, with_alpha(color, 60));
     ui.painter().circle_filled(rect.center(), 2.2, color);
-}
-
-#[allow(dead_code, reason = "the header pill stays until the classic pages go")]
-pub(crate) fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        FontId::new(ts(10.0), FontFamily::Proportional),
-        color,
-    );
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(galley.size().x + 30.0, 25.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(12), with_alpha(color, 22));
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(12),
-        Stroke::new(1.0, with_alpha(color, 55)),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter()
-        .circle_filled(egui::pos2(rect.left() + 12.0, rect.center().y), 3.2, color);
-    ui.painter().galley(
-        egui::pos2(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0),
-        galley,
-        color,
-    );
 }
 
 pub(crate) fn ellipsize(text: &str, max: usize) -> String {
@@ -188,20 +163,6 @@ pub(crate) fn progress_line(
     );
     ui.painter()
         .rect_filled(filled, CornerRadius::same(2), with_alpha(color, 220));
-}
-
-#[allow(dead_code, reason = "the route line stays until the classic pages go")]
-pub(crate) fn route_summary(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
-    ui.horizontal(|ui| {
-        ui.label(micro_label(label, DIM));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(ellipsize(value, 28))
-                    .size(ts(9.5))
-                    .color(color),
-            );
-        });
-    });
 }
 
 /// `text` shortened with "…" until it fits `max_width` in `font`.

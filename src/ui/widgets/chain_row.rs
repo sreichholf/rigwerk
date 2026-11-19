@@ -44,9 +44,7 @@ pub(crate) enum ChainEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EffectDrag(pub usize);
 
-/// The mark at the right of a row.  The console constructs these in a
-/// later step.
-#[allow(dead_code)]
+/// The mark at the right of a row.
 pub(crate) enum ChainMark<'a> {
     /// Mini EQ curve, hidden when the row's `show_curve` is false.
     Eq(&'a EqSettings),

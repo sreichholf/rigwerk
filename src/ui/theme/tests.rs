@@ -160,7 +160,7 @@ fn the_type_scale_is_the_spec_and_ts_is_unchanged() {
     for (role, size) in scale {
         assert_eq!(type_size(role), size, "{role:?}");
     }
-    assert_eq!(ts(10.0), 12.0, "the old pages keep their sizes");
+    assert_eq!(ts(10.0), 12.0, "ts() still applies the reading scale");
 }
 
 #[test]

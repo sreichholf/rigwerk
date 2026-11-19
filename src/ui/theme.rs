@@ -2,8 +2,8 @@
 //!
 //! [`DARK`] and [`LIGHT`] hold the tokens of `docs/ui-spec.md` §7.1, and
 //! [`palette`] gives the active one.  The old constants (`CARD`, `TEAL`, …)
-//! are the dark tokens and do not follow the theme, so the old pages stay
-//! dark-only until they are rewritten.
+//! are the dark tokens.  Calibration and the tab helpers still use them, so
+//! those controls stay on the dark tokens in the light theme.
 
 use eframe::egui;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Theme, Vec2};

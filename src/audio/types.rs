@@ -173,7 +173,7 @@ pub struct Snapshot {
     /// The clock output's real channel count (0 until its first block).
     pub output_channels: u32,
     /// How many extra outputs the engine currently maps (≤ [`MAX_EXTRA_OUTPUTS`]).
-    #[allow(dead_code)] // Exposed for Live / Mixer extra output summaries.
+    #[allow(dead_code)] // Published on the snapshot. The strips do not read the count.
     pub extra_output_count: usize,
     /// Block peak per extra output channel, after that extra output's map, level,
     /// safety ceiling, metronome and mute.  The tick is included.

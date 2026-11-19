@@ -75,7 +75,6 @@ impl RigWerkApp {
         ctx.set_zoom_factor(self.ui_size);
     }
 
-    #[allow(dead_code, reason = "Setup's Appearance section will call it")]
     pub(crate) fn set_theme(&mut self, ctx: &egui::Context, theme: ThemeChoice) {
         self.theme = theme;
         ctx.set_theme(drawn_theme(theme, None).preference());
