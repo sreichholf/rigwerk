@@ -567,12 +567,10 @@ impl RigWerkApp {
         heaviest_path(&times)
     }
 
-    /// Whether a shown issue is about path `slot` (it plays nowhere).
+    /// Whether a shown issue is anchored to path `slot`, or to a stage on it.
     pub(crate) fn path_has_issue(&self, slot: usize) -> bool {
-        self.issue_view()
-            .visible
-            .iter()
-            .any(|issue| issue.key == crate::app::issues::IssueKey::RoutedNowhere(slot))
+        self.anchor_severity(crate::app::issues::Anchor::Path(slot))
+            .is_some()
     }
 
     /// The output devices' settings (0 = clock output, then extra outputs).

@@ -33,13 +33,13 @@ use crate::ui::widgets::{
 
 use density::{density, DensityStep};
 
-/// The issue marker: a ring around the strip an issue's *Show* selected.
-fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issues::IssueCard)]) {
+/// A ring around each strip a visible issue is anchored to, for as long
+/// as that issue is visible.
+fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issues::Anchor)]) {
     use crate::app::issues::IssueSeverity;
-    let now = std::time::Instant::now();
     let colours = palette(ui.ctx());
-    for (rect, card) in rects {
-        let Some((severity, strength)) = app.card_highlight(*card, now) else {
+    for (rect, anchor) in rects {
+        let Some(severity) = app.anchor_severity(*anchor) else {
             continue;
         };
         let colour = match severity {
@@ -48,8 +48,8 @@ fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issu
         };
         ui.painter().rect_stroke(
             rect.expand(1.5),
-            CornerRadius::same(5),
-            Stroke::new(2.0, colour.gamma_multiply(strength)),
+            CornerRadius::same(4),
+            Stroke::new(2.0, colour),
             egui::StrokeKind::Inside,
         );
     }
@@ -223,12 +223,14 @@ impl RigWerkApp {
 
         self.chrome.follow_stage = false;
         let mut rings = vec![
-            (input_rect, crate::app::issues::IssueCard::Bridge),
-            (master_rect, crate::app::issues::IssueCard::Output),
+            (input_rect, crate::app::issues::Anchor::Input),
+            (master_rect, crate::app::issues::Anchor::Master),
         ];
-        if let Some(first) = strip_rects(outputs_left, top, outputs, widths.output, strip_h).first()
+        for (device, rect) in strip_rects(outputs_left, top, outputs, widths.output, strip_h)
+            .into_iter()
+            .enumerate()
         {
-            rings.push((*first, crate::app::issues::IssueCard::Output));
+            rings.push((rect, crate::app::issues::Anchor::Output(device)));
         }
         issue_rings(self, ui, &rings);
         ui.allocate_rect(full, Sense::hover());
@@ -403,9 +405,6 @@ fn add_column(ui: &mut egui::Ui, rect: Rect, blocked: Option<&str>, name: &str) 
             colours.text3
         },
     );
-    if blocked.is_none() && response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     response = match blocked {
         Some(reason) => response.on_hover_text(reason),
         None => response.on_hover_text(name),
@@ -631,9 +630,6 @@ fn toggle(ui: &mut egui::Ui, on: bool, label: &str, name: &str) -> egui::Respons
         font(Face::SansMedium, TypeRole::Body),
         ink,
     );
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     row_info(
         &response,
         egui::Role::Button,

@@ -13,7 +13,6 @@ use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MAX, SHEE
 use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{AsioPanelSide, EngineState};
-use crate::ui::drawers::issues::issue_counts;
 use crate::ui::theme::{font, palette, Face, TypeRole};
 
 const TITLE_H: f32 = 52.0;
@@ -550,9 +549,28 @@ fn dropout_line(count: u64) -> String {
 
 fn issue_count_label(issues: &[crate::app::issues::LiveIssue]) -> String {
     if issues.is_empty() {
-        "No issues".to_owned()
-    } else {
-        issue_counts(issues)
+        return "No issues".to_owned();
+    }
+    let errors = issues
+        .iter()
+        .filter(|issue| issue.severity == crate::app::issues::IssueSeverity::Error)
+        .count();
+    let warnings = issues.len() - errors;
+    let plural = |count: usize, word: &str| {
+        if count == 1 {
+            format!("1 {word}")
+        } else {
+            format!("{count} {word}s")
+        }
+    };
+    match (errors, warnings) {
+        (0, warnings) => plural(warnings, "warning"),
+        (errors, 0) => plural(errors, "error"),
+        (errors, warnings) => format!(
+            "{} · {}",
+            plural(errors, "error"),
+            plural(warnings, "warning")
+        ),
     }
 }
 

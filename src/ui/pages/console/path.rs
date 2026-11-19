@@ -145,12 +145,15 @@ impl RigWerkApp {
     /// The name, the issue marker after it, and the name's menu.
     fn path_name(&mut self, ui: &mut egui::Ui, slot: usize, name: &str) {
         let colours = palette(ui.ctx());
-        let issue = self.path_has_issue(slot);
+        let issue = self
+            .path_has_issue(slot)
+            .then(|| self.anchor_severity(crate::app::issues::Anchor::Path(slot)))
+            .flatten();
         let response = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let name_font = font(Face::SansMedium, TypeRole::Control);
-                let room = ui.available_width() - if issue { 20.0 } else { 0.0 };
+                let room = ui.available_width() - if issue.is_some() { 20.0 } else { 0.0 };
                 let shown = fit_text(ui, name, &name_font, room.max(8.0));
                 let response = ui
                     .add(
@@ -159,13 +162,8 @@ impl RigWerkApp {
                     )
                     .on_hover_text(format!("{name}: rename, colour, duplicate, remove"));
                 row_info(&response, egui::Role::Button, true, name, None, None);
-                if issue {
-                    ui.label(
-                        RichText::new("▲")
-                            .font(font(Face::Sans, TypeRole::Secondary))
-                            .color(colours.warn),
-                    )
-                    .on_hover_text("Plays nowhere: no output plays this path");
+                if let Some(severity) = issue {
+                    issue_marker(ui, severity, "This path has an issue");
                 }
                 response
             })
@@ -317,4 +315,19 @@ impl RigWerkApp {
             self.set_path_mono(slot, mode == 1);
         }
     }
+}
+
+/// The small mark a visible issue leaves on a strip.
+fn issue_marker(ui: &mut egui::Ui, severity: crate::app::issues::IssueSeverity, hover: &str) {
+    let colours = palette(ui.ctx());
+    let colour = match severity {
+        crate::app::issues::IssueSeverity::Error => colours.error,
+        crate::app::issues::IssueSeverity::Warning => colours.warn,
+    };
+    ui.label(
+        RichText::new("▲")
+            .font(font(Face::Sans, TypeRole::Secondary))
+            .color(colour),
+    )
+    .on_hover_text(hover);
 }

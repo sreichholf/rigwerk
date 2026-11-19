@@ -234,8 +234,6 @@ pub struct RigWerkApp {
     pub(crate) routing_preset_path: Option<usize>,
     /// The routing layout applied last, for "Custom · edited from <layout>".
     pub(crate) routing_last_layout: Option<crate::app::layouts::PathLayout>,
-    /// The issues drawer shows only its header (not persisted).
-    pub(crate) live_issues_collapsed: bool,
     /// What the issues keep between frames (the DSP hysteresis, the
     /// session's dropouts, a lost device and the errors already shown).
     /// Moved once per tick by `tick_issues`.
@@ -598,7 +596,6 @@ impl RigWerkApp {
             routing_device: 0,
             routing_preset_path: None,
             routing_last_layout: None,
-            live_issues_collapsed: false,
             issue_state: Default::default(),
             plugin_effect_at: None,
             meter_in_l: 0.0,
@@ -840,7 +837,6 @@ pub(crate) fn blank_app() -> RigWerkApp {
         routing_device: 0,
         routing_preset_path: None,
         routing_last_layout: None,
-        live_issues_collapsed: false,
         issue_state: Default::default(),
         plugin_effect_at: None,
         meter_in_l: 0.0,

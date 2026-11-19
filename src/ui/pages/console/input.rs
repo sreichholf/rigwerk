@@ -23,17 +23,28 @@ impl RigWerkApp {
         let device = self.active_input().clone();
 
         let name_font = font(Face::SansMedium, TypeRole::Control);
-        let shown = fit_text(&top, &device.name, &name_font, top.available_width());
+        let marked = self.anchor_severity(crate::app::issues::Anchor::Input);
         let name = top
-            .add(
-                egui::Button::new(
-                    egui::RichText::new(shown)
-                        .font(name_font)
-                        .color(colours.text),
-                )
-                .frame(false),
-            )
-            .on_hover_text(format!("{}: open Setup › Devices", device.name));
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let room = ui.available_width() - if marked.is_some() { 18.0 } else { 0.0 };
+                let shown = fit_text(ui, &device.name, &name_font, room.max(8.0));
+                let name = ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(shown)
+                                .font(name_font.clone())
+                                .color(colours.text),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text(format!("{}: open Setup › Devices", device.name));
+                if let Some(severity) = marked {
+                    issue_marker(ui, severity, "The input has an issue");
+                }
+                name
+            })
+            .inner;
         row_info(
             &name,
             egui::Role::Button,
@@ -137,9 +148,6 @@ impl RigWerkApp {
                 .collect();
             painter.add(egui::Shape::line(points, Stroke::new(1.0, colour)));
         }
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
         row_info(&response, egui::Role::Button, true, "Scope", None, None);
         response.on_hover_text("Scope: input and output, the peaks and the sample count")
     }
@@ -166,4 +174,18 @@ impl RigWerkApp {
             self.engine.request_asio_panel(AsioPanelSide::Input);
         }
     }
+}
+
+fn issue_marker(ui: &mut egui::Ui, severity: crate::app::issues::IssueSeverity, hover: &str) {
+    let colours = palette(ui.ctx());
+    let colour = match severity {
+        crate::app::issues::IssueSeverity::Error => colours.error,
+        crate::app::issues::IssueSeverity::Warning => colours.warn,
+    };
+    ui.label(
+        egui::RichText::new("▲")
+            .font(font(Face::Sans, TypeRole::Secondary))
+            .color(colour),
+    )
+    .on_hover_text(hover);
 }

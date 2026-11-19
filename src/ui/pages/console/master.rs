@@ -15,7 +15,18 @@ impl RigWerkApp {
     pub(super) fn master_strip(&mut self, ui: &mut egui::Ui, rect: Rect, layout: StripLayout) {
         let colours = palette(ui.ctx());
         let (_, mut top, mut bottom) = strip_parts(ui, rect, layout, Sense::hover());
-        strip_name(&mut top, "Master", colours.text);
+        let marked = self.anchor_severity(crate::app::issues::Anchor::Master);
+        top.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let reserve = if marked.is_some() { 18.0 } else { 0.0 };
+            ui.scope(|ui| {
+                ui.set_max_width((ui.available_width() - reserve).max(8.0));
+                strip_name(ui, "Master", colours.text);
+            });
+            if let Some(severity) = marked {
+                issue_marker(ui, severity, "The master has an issue");
+            }
+        });
         if !self.monitor {
             top.label(
                 RichText::new("Monitor off")
@@ -56,4 +67,18 @@ impl RigWerkApp {
             self.mute = !self.mute;
         }
     }
+}
+
+fn issue_marker(ui: &mut egui::Ui, severity: crate::app::issues::IssueSeverity, hover: &str) {
+    let colours = palette(ui.ctx());
+    let colour = match severity {
+        crate::app::issues::IssueSeverity::Error => colours.error,
+        crate::app::issues::IssueSeverity::Warning => colours.warn,
+    };
+    ui.label(
+        RichText::new("▲")
+            .font(font(Face::Sans, TypeRole::Secondary))
+            .color(colour),
+    )
+    .on_hover_text(hover);
 }

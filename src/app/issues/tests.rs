@@ -4,9 +4,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use super::silence::{SILENCE_RAISE_ALONE, SILENCE_RAISE_WITH_DROPOUTS};
 use super::{
-    highlight_strength, DropoutWatch, DspAlarm, HeldFlag, IssueAction, IssueCard, IssueFilter,
-    IssueKey, IssueSeverity, CARD_HIGHLIGHT_FOR, DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER,
-    DROPOUT_BURST_WINDOW, DROPOUT_QUIET,
+    Anchor, DropoutWatch, DspAlarm, HeldFlag, IssueAction, IssueFilter, IssueKey, IssueSeverity,
+    DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER, DROPOUT_BURST_WINDOW, DROPOUT_QUIET,
 };
 use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
 use crate::app::layouts::PathLayout;
@@ -256,13 +255,17 @@ fn a_period_that_does_not_fit_the_graph_block_sets_the_buffer() {
     app.output_buffer = 128;
     let issue = app
         .quantum_info_issue(&crate::audio::QuantumInfo::assess(true, 64, 48_000, 128))
-        .expect("128 frames do not fit a 64-frame block");
+        .expect("128 samples do not fit a 64-sample buffer");
     assert_eq!(issue.severity, IssueSeverity::Warning);
-    assert_eq!(issue.title, "Graph block and output period do not line up");
+    assert_eq!(issue.title, "The buffer sizes do not line up");
+    assert_eq!(
+        issue.anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Clock)
+    );
     assert_eq!(issue.action, IssueAction::SetOutputBuffer(64));
     assert_eq!(
         issue.action_name(),
-        "Set buffer to 64: Graph block and output period do not line up"
+        "Set buffer to 64: The buffer sizes do not line up"
     );
     app.apply_issue_action(issue.action);
     assert_eq!(app.output_buffer, 64);
@@ -289,7 +292,10 @@ fn a_large_graph_block_matters_only_under_low_latency_while_running() {
     assert!(app.quantum_info_issue(&idle).is_none(), "not running yet");
     app.engine.state = EngineState::Running;
     let issue = app.quantum_info_issue(&idle).expect("low latency is on");
-    assert_eq!(issue.title, "Low latency is on, but the graph block is not");
+    assert_eq!(
+        issue.title,
+        "Low latency is on, but the graph buffer is not"
+    );
     assert_eq!(issue.action, IssueAction::OpenDiagnostics);
     app.low_latency_output = false;
     assert!(
@@ -308,7 +314,11 @@ fn a_failed_quantum_change_is_one_row() {
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert_eq!(issues[0].title, "PipeWire did not take the buffer change");
     assert_eq!(issues[0].detail, "PipeWire quantum not set: test");
-    assert_eq!(issues[0].place, "OUTPUT · Low latency");
+    assert_eq!(issues[0].place, "Setup");
+    assert_eq!(
+        issues[0].anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Clock)
+    );
 }
 
 #[test]
@@ -322,7 +332,11 @@ fn an_unchecked_low_latency_driver_warns_until_it_has_a_reading() {
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert_eq!(issues[0].title, "Output driver not checked yet");
-    assert_eq!(issues[0].place, "OUTPUT · Driver");
+    assert_eq!(issues[0].place, "Setup");
+    assert_eq!(
+        issues[0].anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Devices)
+    );
     assert_eq!(issues[0].action, IssueAction::CheckDriver);
     assert_eq!(issues[0].action.label(), "Check driver");
 
@@ -363,7 +377,8 @@ fn reading_the_issues_does_not_move_the_dsp_latches() {
     for _ in 0..3 {
         let issues = app.live_issues();
         assert_eq!(issues.len(), 1, "{issues:?}");
-        assert_eq!(issues[0].title, "The chain overloads the output block");
+        assert_eq!(issues[0].title, "The chain overloads the output buffer");
+        assert_eq!(issues[0].anchor, Anchor::Path(app.path_slots()[0]));
         assert_eq!(issues[0].severity, IssueSeverity::Warning);
     }
     assert!(app.issue_state.dsp.warning, "only a tick moves the latch");
@@ -390,33 +405,38 @@ fn a_bridge_start_or_stop_clears_the_dsp_latches_and_dropouts() {
 }
 
 #[test]
-fn a_new_error_expands_a_collapsed_strip_and_a_warning_does_not() {
+fn a_new_error_sets_the_banner_and_a_warning_does_not() {
     let mut app = blank_app();
     let added = app.add_path().expect("a free slot");
     app.set_path_mute(added, false);
-    app.live_issues_collapsed = true;
     app.expand_on_new_error();
-    assert!(app.live_issues_collapsed, "a warning leaves it collapsed");
+    assert!(
+        app.chrome.error_title.is_none(),
+        "a warning leaves the banner"
+    );
 
     app.issue_state.dsp = DspAlarm {
         warning: true,
         error: true,
     };
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed, "a new error opens it");
-    app.live_issues_collapsed = true;
+    assert_eq!(
+        app.chrome.error_title.as_deref(),
+        Some("Paths overload the output buffer")
+    );
+    app.chrome.error_dismissed = true;
     app.expand_on_new_error();
     assert!(
-        app.live_issues_collapsed,
-        "the same error, collapsed on purpose, stays collapsed"
+        app.chrome.error_dismissed,
+        "the same error does not raise the banner again"
     );
 
     app.issue_state.dsp.error = false;
     app.expand_on_new_error();
-    assert!(app.live_issues_collapsed);
+    assert!(app.chrome.error_title.is_none());
     app.issue_state.dsp.error = true;
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed, "it came back: new again");
+    assert!(app.chrome.error_title.is_some(), "it came back: new again");
 }
 
 #[test]
@@ -426,7 +446,6 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
         warning: true,
         error: false,
     };
-    app.live_issues_collapsed = true;
     app.alert_lost_device("Scarlett 2i2 was unplugged, so the bridge was stopped.".to_owned());
     assert_eq!(app.issue_state.dsp, DspAlarm::default(), "the run ended");
     assert!(
@@ -434,7 +453,7 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
         "the alert window is the hard stop; no second copy behind it"
     );
     app.expand_on_new_error();
-    assert!(app.live_issues_collapsed);
+    assert!(app.chrome.error_title.is_none());
 
     app.device_alert = None;
     let issues = app.live_issues();
@@ -448,8 +467,16 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
     );
     assert_eq!(issue.action, IssueAction::OpenDevices);
     assert_eq!(issue.action.label(), "Open Setup");
+    assert_eq!(issue.place, "Setup");
+    assert_eq!(
+        issue.anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Devices)
+    );
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed, "the strip opens on it");
+    assert_eq!(
+        app.chrome.error_title.as_deref(),
+        Some("The bridge stopped: a device was disconnected")
+    );
     app.apply_issue_action(issue.action);
     assert!(app.page == Page::Setup);
     assert_eq!(
@@ -474,12 +501,14 @@ fn with_unrouted_path() -> (RigWerkApp, usize) {
 }
 
 #[test]
-fn issues_carry_a_stable_key_and_their_card() {
+fn issues_carry_a_stable_key_and_their_anchor() {
     let (mut app, added) = with_unrouted_path();
     let issue = &app.live_issues()[0];
     assert_eq!(issue.key, IssueKey::RoutedNowhere(added));
-    assert_eq!(issue.card, None, "routing rows point to another page");
-    assert_eq!(issue.show_label(), None);
+    assert_eq!(issue.anchor, Anchor::Path(added));
+    assert_eq!(issue.place, "Path 2");
+    assert_eq!(issue.show_label(), "Show");
+    assert_eq!(issue.show_name(), "Show: Path 2 is routed nowhere");
 
     app.engine
         .note_quantum_failure("PipeWire quantum not set: test".to_owned());
@@ -487,12 +516,15 @@ fn issues_carry_a_stable_key_and_their_card() {
         .live_issues()
         .into_iter()
         .find(|issue| issue.key == IssueKey::QuantumNotTaken)
-        .expect("the quantum row");
-    assert_eq!(quantum.card, Some(IssueCard::Output));
-    assert_eq!(quantum.show_label().as_deref(), Some("Show on Output"));
+        .expect("the buffer-change row");
     assert_eq!(
-        quantum.show_name().as_deref(),
-        Some("Show on Output: PipeWire did not take the buffer change")
+        quantum.anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Clock)
+    );
+    assert_eq!(quantum.show_label(), "Show");
+    assert_eq!(
+        quantum.show_name(),
+        "Show: PipeWire did not take the buffer change"
     );
 
     app.issue_state.dropouts.update(1, Instant::now());
@@ -515,7 +547,7 @@ fn issues_carry_a_stable_key_and_their_card() {
 }
 
 #[test]
-fn a_filter_lists_its_rows_and_opens_the_strip() {
+fn a_filter_lists_its_rows() {
     let (mut app, _) = with_unrouted_path();
     app.issue_state.dsp = DspAlarm {
         warning: true,
@@ -526,12 +558,7 @@ fn a_filter_lists_its_rows_and_opens_the_strip() {
     assert_eq!(view.count(IssueFilter::All), 2);
     assert_eq!(view.count(IssueFilter::Warnings), 1);
     assert_eq!(view.count(IssueFilter::Errors), 1);
-    app.live_issues_collapsed = true;
     app.set_issue_filter(IssueFilter::Errors);
-    assert!(
-        !app.live_issues_collapsed,
-        "choosing a filter opens the strip"
-    );
     let rows: Vec<_> = app
         .issue_view()
         .filtered(IssueFilter::Errors)
@@ -559,10 +586,8 @@ fn the_filter_falls_back_to_all_when_nothing_is_left_or_an_error_is_new() {
 
     app.set_path_mute(added, false);
     app.set_issue_filter(IssueFilter::Warnings);
-    app.live_issues_collapsed = true;
     app.issue_state.dsp.error = true;
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed);
     assert_eq!(
         app.issue_state.filter,
         IssueFilter::All,
@@ -595,11 +620,6 @@ fn a_dismissed_warning_stays_hidden_until_it_clears_and_comes_back() {
     app.dismiss_issue(key);
     app.restore_dismissed_issues();
     assert_eq!(app.issue_view().visible.len(), 1, "shown again on request");
-
-    app.dismiss_issue(key);
-    app.live_issues_collapsed = true;
-    app.restore_dismissed_issues();
-    assert!(!app.live_issues_collapsed, "shown in an open strip");
 
     app.dismiss_issue(key);
     app.stop_bridge();
@@ -637,7 +657,6 @@ fn dismissing_one_quantum_problem_does_not_hide_another() {
 #[test]
 fn an_error_is_not_dismissed_and_a_dismissed_warning_that_turns_error_shows() {
     let mut app = blank_app();
-    let now = Instant::now();
     app.issue_state.dsp = DspAlarm {
         warning: true,
         error: false,
@@ -654,7 +673,7 @@ fn an_error_is_not_dismissed_and_a_dismissed_warning_that_turns_error_shows() {
     let view = app.issue_view();
     assert_eq!(view.visible.len(), 1, "an error always shows");
     assert_eq!(view.hidden, 0);
-    app.issue_state.settle(&issues, now);
+    app.issue_state.settle(&issues);
     app.dismiss_issue(IssueKey::Dsp);
     app.issue_state.dsp.error = false;
     app.refresh_issues();
@@ -666,28 +685,55 @@ fn an_error_is_not_dismissed_and_a_dismissed_warning_that_turns_error_shows() {
 }
 
 #[test]
-fn show_on_a_card_rings_it_for_a_moment() {
+fn show_selects_the_anchor_and_closes_the_drawer() {
     let mut app = blank_app();
-    let now = Instant::now();
-    assert_eq!(app.card_highlight(IssueCard::Output, now), None);
-    app.show_issue_card(IssueCard::Output, IssueSeverity::Warning, now);
+    app.chrome.drawer = Some(crate::app::screen::Drawer::Issues);
+    app.show_issue(Anchor::Input);
+    assert_eq!(app.page, Page::Console);
+    assert!(app.chrome.sheet.is_none());
+    assert!(app.chrome.drawer.is_none());
+
+    app.show_issue(Anchor::Master);
+    assert_eq!(app.page, Page::Console);
+    assert!(app.chrome.sheet.is_none());
+
+    let slot = app.path_slots()[0];
+    app.show_issue(Anchor::Path(slot));
+    assert_eq!(app.page, Page::Console);
+    assert_eq!(app.selected_path, slot);
     assert_eq!(
-        app.card_highlight(IssueCard::Output, now),
-        Some((IssueSeverity::Warning, 1.0))
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Path { path: slot })
     );
-    assert_eq!(app.card_highlight(IssueCard::Bridge, now), None);
-    let half = app
-        .card_highlight(IssueCard::Output, now + CARD_HIGHLIGHT_FOR / 2)
-        .expect("still ringing")
-        .1;
-    assert!(half > 0.0 && half < 1.0, "{half}");
+    assert_eq!(app.chrome.reveal_path, Some(slot));
+
+    app.show_issue(Anchor::Stage {
+        path: slot,
+        stage: crate::app::chain::ChainStage::Gate,
+    });
     assert_eq!(
-        app.card_highlight(IssueCard::Output, now + CARD_HIGHLIGHT_FOR),
-        None
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Gate { path: slot })
     );
-    assert_eq!(highlight_strength(CARD_HIGHLIGHT_FOR * 2), 0.0);
-    app.tick_issues(now + CARD_HIGHLIGHT_FOR);
-    assert!(app.issue_state.highlight.is_none(), "the tick forgets it");
+    assert!(app.chrome.follow_stage);
+    assert_eq!(app.chrome.reveal_path, Some(slot));
+    assert_eq!(app.selected_path, slot);
+
+    app.show_issue(Anchor::Output(1));
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 1 })
+    );
+    assert_eq!(app.page, Page::Console);
+
+    app.chrome.drawer = Some(crate::app::screen::Drawer::Issues);
+    app.show_issue(Anchor::Setup(crate::app::screen::SetupSection::Clock));
+    assert_eq!(app.page, Page::Setup);
+    assert_eq!(
+        app.chrome.setup_section,
+        Some(crate::app::screen::SetupSection::Clock)
+    );
+    assert!(app.chrome.drawer.is_none());
 }
 
 /// A running bridge with one generic extra output, "USB Headphones", in the
@@ -726,8 +772,8 @@ fn a_extra_output_being_retried_is_a_warning_that_shows_it_in_the_mixer() {
     assert_eq!(issue.severity, IssueSeverity::Warning, "the clock plays on");
     assert_eq!(issue.title, "USB Headphones is not playing");
     assert!(issue.detail.contains("retrying"), "{}", issue.detail);
-    assert_eq!(issue.place, "OUTPUT · USB Headphones");
-    assert_eq!(issue.card, Some(IssueCard::Output));
+    assert_eq!(issue.place, "USB Headphones");
+    assert_eq!(issue.anchor, Anchor::Output(1));
     assert_eq!(issue.action, IssueAction::ShowExtraOutput(0));
     assert_eq!(issue.action.label(), "Show output");
     app.apply_issue_action(issue.action);
@@ -775,7 +821,8 @@ fn extra_output_dropouts_offer_its_own_bridge_buffer_then_the_buffer() {
         "{}",
         issue.detail
     );
-    assert_eq!(issue.place, "OUTPUT · USB Headphones");
+    assert_eq!(issue.place, "USB Headphones");
+    assert_eq!(issue.anchor, Anchor::Output(1));
     assert_eq!(issue.action, IssueAction::ExtraOutputAutoBridgeBuffer(0));
     assert_eq!(issue.action.label(), "Use Auto bridge buffer");
 
@@ -851,7 +898,8 @@ fn a_pinned_extra_output_drift_loop_is_a_warning() {
     assert_eq!(issue.severity, IssueSeverity::Warning);
     assert_eq!(issue.title, "USB Headphones drifts too far to follow");
     assert!(issue.detail.contains("500 ppm limit"), "{}", issue.detail);
-    assert_eq!(issue.place, "OUTPUT · USB Headphones");
+    assert_eq!(issue.place, "USB Headphones");
+    assert_eq!(issue.anchor, Anchor::Output(1));
     assert_eq!(issue.action, IssueAction::OpenDiagnostics);
 }
 
@@ -999,7 +1047,6 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_dropouts() {
     // Without dropouts the RigWerk stream may just be muted in the
     // desktop mixer: a warning that says so, and the strip stays shut.
     app.engine.set_test_sink_peak(Some(0.0));
-    app.live_issues_collapsed = true;
     let now = tick_for(&mut app, now, SILENCE_RAISE_ALONE);
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
@@ -1008,11 +1055,12 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_dropouts() {
     assert_eq!(issue.severity, IssueSeverity::Warning);
     assert_eq!(issue.title, "Output may be silent under low latency");
     assert!(issue.detail.contains("desktop mixer"), "{}", issue.detail);
-    assert_eq!(issue.card, Some(IssueCard::Output));
+    assert_eq!(issue.anchor, Anchor::Output(0));
+    assert_eq!(issue.place, "Clock output");
     assert_eq!(issue.action, IssueAction::LowLatencyOff);
     assert!(
-        app.live_issues_collapsed,
-        "a warning does not open the strip"
+        app.chrome.error_title.is_none(),
+        "a warning does not raise the banner"
     );
 
     app.mute = true;
@@ -1037,7 +1085,10 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_dropouts() {
     assert_eq!(issue.severity, IssueSeverity::Error);
     assert_eq!(issue.title, "Output went silent under low latency");
     assert!(issue.detail.contains("had a dropout"), "{}", issue.detail);
-    assert!(!app.live_issues_collapsed, "a new error opens the strip");
+    assert!(
+        app.chrome.error_title.is_some(),
+        "a new error raises the banner"
+    );
 
     app.engine.set_test_sink_peak(Some(0.05));
     tick_for(&mut app, now, Duration::from_secs(1));
@@ -1093,8 +1144,9 @@ fn a_device_against_the_ceiling_warns_until_the_signal_drops() {
         .expect("the ceiling row");
     assert_eq!(issue.title, "Headphones is against the safety ceiling");
     assert_eq!(issue.detail, "−1.0 dB · 3.2 dB reduction.");
-    assert_eq!(issue.card, Some(IssueCard::Output));
-    assert_eq!(issue.action, IssueAction::ShowOutput);
+    assert_eq!(issue.anchor, Anchor::Output(1));
+    assert_eq!(issue.place, "Headphones");
+    assert_eq!(issue.action, IssueAction::ShowOutput(1));
     assert!(!issue.dismissable());
     app.dismiss_issue(IssueKey::SafetyCeiling);
     assert!(
@@ -1107,10 +1159,11 @@ fn a_device_against_the_ceiling_warns_until_the_signal_drops() {
         .visible
         .iter()
         .any(|issue| issue.key == IssueKey::SafetyCeiling));
-    app.apply_issue_action(IssueAction::ShowOutput);
-    assert!(app
-        .card_highlight(IssueCard::Output, Instant::now())
-        .is_some());
+    app.apply_issue_action(IssueAction::ShowOutput(1));
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 1 })
+    );
 
     app.snapshot.out_reduction_db = 0.0;
     app.snapshot.extra_output_reduction_db = [0.0; crate::audio::MAX_EXTRA_OUTPUTS];

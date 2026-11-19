@@ -42,16 +42,21 @@ impl RigWerkApp {
         let detail = format!("{} · {} ch", row.backend, row.channels);
         let buffer = self.output_buffer_line(device);
 
+        let marked = self.anchor_severity(crate::app::issues::Anchor::Output(device));
         top.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             if mini {
                 badge_icon(ui, badge);
             }
-            strip_name(ui, &row.name, colours.text).on_hover_text(format!(
-                "{} · {} · {detail} · {buffer}",
-                row.name,
-                badge.label()
-            ));
+            let reserve = if marked.is_some() { 18.0 } else { 0.0 };
+            let hover = format!("{} · {} · {detail} · {buffer}", row.name, badge.label());
+            ui.scope(|ui| {
+                ui.set_max_width((ui.available_width() - reserve).max(8.0));
+                strip_name(ui, &row.name, colours.text).on_hover_text(hover);
+            });
+            if let Some(severity) = marked {
+                issue_marker(ui, severity, "This output has an issue");
+            }
         });
         if !mini {
             badge_chip(&mut top, badge);
@@ -276,9 +281,6 @@ fn metronome_toggle(ui: &mut egui::Ui, on: bool, mini: bool) -> egui::Response {
             ink,
         );
     }
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     row_info(
         &response,
         egui::Role::Button,
@@ -321,4 +323,18 @@ fn limiter_bar(ui: &mut egui::Ui, reduction_db: f32) {
         Some(value.clone()),
     );
     let _ = response.on_hover_text(format!("Limiter reduction: {value}"));
+}
+
+fn issue_marker(ui: &mut egui::Ui, severity: crate::app::issues::IssueSeverity, hover: &str) {
+    let colours = palette(ui.ctx());
+    let colour = match severity {
+        crate::app::issues::IssueSeverity::Error => colours.error,
+        crate::app::issues::IssueSeverity::Warning => colours.warn,
+    };
+    ui.label(
+        RichText::new("▲")
+            .font(font(Face::Sans, TypeRole::Secondary))
+            .color(colour),
+    )
+    .on_hover_text(hover);
 }
