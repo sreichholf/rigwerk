@@ -233,8 +233,27 @@ impl RigWerkApp {
         if let Some(drive) = self.duplicate_path(room) {
             self.rename_path(drive, "Drive");
             self.set_path_mute(drive, false);
+            // Ten copies of the room's own effect, bypassed, so the chain
+            // scrolls without ten reverbs running at once.
+            let template =
+                self.engine
+                    .plugin_views(room)
+                    .first()
+                    .map(|view| crate::audio::PluginPref {
+                        path: view.path.clone(),
+                        format: view.format,
+                        class_id: view.class_id.clone(),
+                        name: view.name.clone(),
+                        bypass: true,
+                        ..crate::audio::PluginPref::default()
+                    });
             for _ in 0..10 {
-                self.add_screenshot_effect_always(drive);
+                match &template {
+                    Some(template) => {
+                        let _ = self.engine.add_plugin(drive, template.clone());
+                    }
+                    None => self.add_screenshot_effect_always(drive),
+                }
             }
         }
         if let Some(stream) = self.add_path() {

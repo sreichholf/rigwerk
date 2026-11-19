@@ -33,6 +33,8 @@ The console is the home screen. The signal runs left to right — input,
 paths, master, outputs — and every strip ends in a meter and a fader, so
 levels line up across the screen.
 
+![The console](docs/screenshots/console.png)
+
 **Title bar.** The session menu, bridge start and stop, the estimated
 latency, Rec, the metronome, Tuner, Setup and Mute. The dot beside the
 bridge reads *Stopped*, *Starting…*, *Running*, *Demo*, *Stopping…* or
@@ -57,6 +59,8 @@ where they are. The path name menu renames a path, sets its colour,
 duplicates it (muted) and removes it; path outputs (L, R) are in the path
 sheet.
 
+![Four paths](docs/screenshots/console-4-paths.png)
+
 **Master.** One level and one mute for the sum of all paths.
 
 **Outputs.** The clock output first, then the extra outputs. An output
@@ -69,6 +73,8 @@ that fails stays silent and is retried; the clock output keeps playing.
 At the 1040 × 700 minimum the strips get denser, and the paths group
 scrolls sideways when not all four fit. Everything a narrow step hides
 stays in that item's sheet.
+
+![The console at the minimum size](docs/screenshots/console-1040x700.png)
 
 **Status bar.** Drivers and rates, buffer sizes, the estimated and the
 measured latency, drift, dropouts, total DSP load, and the newest log line
@@ -124,6 +130,10 @@ shows a thin meter.
 - **Scope** shows input and output overlaid, with the peaks and the sample
   count.
 
+![The EQ sheet](docs/screenshots/eq-sheet.png)
+
+![The output sheet](docs/screenshots/output-sheet.png)
+
 The effects group opens the **effect browser** from its dashed *+ Add
 effect* row, or from an empty chain, and the browser lists VST3 and CLAP
 plugins found in the standard folders (and in `CLAP_PATH` or
@@ -133,6 +143,8 @@ then favourites and recently used effects. ↑/↓ chooses, Enter adds,
 Shift+Enter adds and opens the editor. *Add from path* and *Rescan* are in
 the footer. Adding, removing or reordering effects does not stall the
 audio.
+
+![The effect browser](docs/screenshots/browser.png)
 
 The **issues drawer** opens from the status bar count. Each row says what
 is wrong, what to do and where: *Show* closes the drawer and selects the
@@ -173,15 +185,14 @@ display (needle or strobe).
 *Mute while tuning* silences the outputs and the metronome while the tuner
 is open. Without a running bridge the tuner asks you to start it.
 
-![Tuner](docs/screenshots/tuner.png)
-
-*The tuner in the previous layout; the new set is being retaken (see
-[docs/screenshots](docs/screenshots/README.md)).*
+![The tuner](docs/screenshots/tuner.png)
 
 ## Setup
 
 Setup is one scrolling screen: **Ctrl+,** or *Setup*. *Done* returns to
 the console.
+
+![Setup](docs/screenshots/setup.png)
 
 On the left are the devices. **Input** lists direct drivers (ASIO,
 PipeWire, ALSA `hw:`) and system ones (WASAPI, DirectSound, MME,
@@ -211,6 +222,8 @@ On the right:
 - **Recordings**: the folder takes are written to.
 - **Help**: the setup guide for this platform, as collapsible sections,
   and *About*.
+
+![The console in the light theme](docs/screenshots/console-light.png)
 
 ## Sessions and recordings
 

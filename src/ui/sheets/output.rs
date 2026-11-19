@@ -72,11 +72,6 @@ impl RigWerkApp {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.label(
-                RichText::new(&row.name)
-                    .font(font(Face::SansMedium, TypeRole::Title))
-                    .color(colours.text),
-            );
             badge_word(ui, badge, colours);
             ui.label(
                 RichText::new(format!("{} ch · {}", row.channels, row.backend))

@@ -1043,6 +1043,11 @@ impl RigWerkApp {
     /// (c) The paths' DSP time against the block they have to fit in: the
     /// mixer's total per block, so peaks of different blocks never add up.
     fn dsp_issue(&self, infos: &[PathInfo], issues: &mut Vec<LiveIssue>) {
+        // The screenshot renderer's startup peak is not the rig's: a shot
+        // waits on Xvfb's software GL, not on audio.
+        if self.screenshot.is_some() {
+            return;
+        }
         let Some(severity) = self.issue_state.dsp.severity() else {
             return;
         };

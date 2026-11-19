@@ -673,14 +673,7 @@ impl RigWerkApp {
             return;
         }
         if !self.plugin_browser.screenshot_ready {
-            if self.path().name == "Main" {
-                let slot = self.selected_path;
-                let _ = self.rename_path(slot, "Room");
-            }
             let slot = self.selected_path;
-            if self.engine.plugin_views(slot).is_empty() {
-                let _ = self.engine.add_plugin(slot, screenshot_effect());
-            }
             let count = self.engine.plugin_views(slot).len();
             self.open_effect_browser(slot, count);
             self.plugin_browser.screenshot_ready = true;
