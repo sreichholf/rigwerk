@@ -80,26 +80,49 @@ fn output_device_selection_falls_back_to_the_master() {
 #[test]
 fn the_chain_is_in_signal_order_with_the_gate_where_its_slot_says() {
     use super::{chain_stages, ChainStage::*};
-    use crate::audio::GateSlot;
+    use crate::audio::{AmpSlot, GateSlot};
     assert_eq!(
-        chain_stages(2, GateSlot::Post),
-        [PreEq, Effect(0), Effect(1), Gate, PostEq]
+        chain_stages(2, GateSlot::Post, AmpSlot::Pre),
+        [PreEq, Amp, Effect(0), Effect(1), Gate, PostEq]
     );
     assert_eq!(
-        chain_stages(2, GateSlot::Pre),
-        [PreEq, Gate, Effect(0), Effect(1), PostEq]
+        chain_stages(2, GateSlot::Pre, AmpSlot::Pre),
+        [PreEq, Gate, Amp, Effect(0), Effect(1), PostEq]
     );
-    assert_eq!(chain_stages(0, GateSlot::Post), [PreEq, Gate, PostEq]);
+    assert_eq!(
+        chain_stages(0, GateSlot::Post, AmpSlot::Pre),
+        [PreEq, Amp, Gate, PostEq]
+    );
+}
+
+#[test]
+fn the_amp_sits_before_effects_by_default_and_after_when_post() {
+    use super::{chain_stages, ChainStage::*};
+    use crate::audio::{AmpSlot, GateSlot};
+    assert_eq!(AmpSlot::default(), AmpSlot::Pre);
+    assert_eq!(
+        chain_stages(1, GateSlot::Post, AmpSlot::Pre),
+        [PreEq, Amp, Effect(0), Gate, PostEq]
+    );
+    assert_eq!(
+        chain_stages(1, GateSlot::Post, AmpSlot::Post),
+        [PreEq, Effect(0), Amp, Gate, PostEq]
+    );
+    assert_eq!(
+        chain_stages(1, GateSlot::Pre, AmpSlot::Post),
+        [PreEq, Gate, Effect(0), Amp, PostEq]
+    );
 }
 
 #[test]
 fn neighbours_walk_the_chain_and_stop_at_its_ends() {
     use super::{neighbour_stage, ChainStage::*};
-    use crate::audio::GateSlot;
-    let next = |stage, gate| neighbour_stage(stage, 1, gate, true);
-    let previous = |stage, gate| neighbour_stage(stage, 1, gate, false);
+    use crate::audio::{AmpSlot, GateSlot};
+    let next = |stage, gate| neighbour_stage(stage, 1, gate, AmpSlot::Pre, true);
+    let previous = |stage, gate| neighbour_stage(stage, 1, gate, AmpSlot::Pre, false);
     assert_eq!(next(PreEq, GateSlot::Pre), Some(Gate));
-    assert_eq!(next(Gate, GateSlot::Pre), Some(Effect(0)));
+    assert_eq!(next(Gate, GateSlot::Pre), Some(Amp));
+    assert_eq!(next(Amp, GateSlot::Pre), Some(Effect(0)));
     assert_eq!(next(Effect(0), GateSlot::Pre), Some(PostEq));
     assert_eq!(next(Effect(0), GateSlot::Post), Some(Gate));
     assert_eq!(previous(PostEq, GateSlot::Post), Some(Gate));

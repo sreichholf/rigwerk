@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::amp::{AmpPark, PreparedAmp};
 use super::asio_panel::AsioPanelSide;
 use super::bridge::run_bridge;
 use super::calibration::CalibrationState;
@@ -95,12 +96,22 @@ pub struct AudioEngine {
     /// A sink monitor reading tests can set in place of a live one.
     #[cfg(test)]
     test_sink_peak: Option<f32>,
+    /// Park for every run this engine starts.  Outlives a bridge thread so
+    /// that thread can hand models back without dropping them.
+    amp_park: Arc<AmpPark>,
+    /// Bumped in [`Self::replace_run`].  The UI reinstalls captures when it
+    /// changes, because a new run does not inherit a live model.
+    run_id: u64,
 }
 
 impl AudioEngine {
     pub fn new(sample_rate: u32) -> Self {
+        let shared = Shared::new(sample_rate);
+        let amp_park = Arc::clone(shared.amp_park());
         Self {
-            shared: Arc::new(Shared::new(sample_rate)),
+            shared: Arc::new(shared),
+            amp_park,
+            run_id: 1,
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
             lingering: Vec::new(),
@@ -336,9 +347,37 @@ impl AudioEngine {
     }
 
     /// Every path slot's chain latency in samples (0 for unused slots), as
-    /// the alignment counts it.
+    /// the alignment counts it.  The amp adds none.
     pub fn path_latencies(&self) -> [u32; MAX_PATHS] {
         std::array::from_fn(|slot| self.shared.path(slot).latency_samples())
+    }
+
+    /// The rate the open output is running at, or 0 until it has opened.
+    pub(crate) fn opened_output_rate(&self) -> u32 {
+        self.shared.output_rate.load(Ordering::Relaxed)
+    }
+
+    /// Identifies the run the UI is installing captures into.
+    pub(crate) fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    pub(crate) fn path_generation(&self, slot: usize) -> u64 {
+        self.shared.path(slot).generation()
+    }
+
+    /// Queues a prewarmed model.  UI thread only.
+    pub(crate) fn queue_amp(&self, slot: usize, prepared: PreparedAmp) {
+        if slot < MAX_PATHS {
+            self.shared.path(slot).queue_amp(prepared);
+        }
+    }
+
+    /// Asks the next block to take the live model out.  UI thread only.
+    pub(crate) fn clear_amp(&self, slot: usize) {
+        if slot < MAX_PATHS {
+            self.shared.path(slot).clear_amp();
+        }
     }
 
     /// Output device `device`'s alignment (0 = clock output, then the
@@ -822,9 +861,14 @@ impl AudioEngine {
     fn replace_run(&mut self) {
         // The old writer finishes on the Arc it kept at arm.  Shared::new
         // below builds a fresh recorder for the run that replaces it.
+        // The live amp model does not move: the UI installs it again from
+        // the saved path, which it notices because `run_id` changed.
+        // Models already parked are dropped here, on the UI thread.
         self.disarm_recording();
+        self.run_id = self.run_id.wrapping_add(1);
+        self.amp_park.flush();
         let previous = Arc::clone(&self.shared);
-        let mut run = Shared::new(self.sample_rate);
+        let mut run = Shared::with_park(self.sample_rate, Arc::clone(&self.amp_park));
         run.adopt_settings_from(&previous);
         self.shared = Arc::new(run);
         drop(previous);
@@ -1188,13 +1232,28 @@ impl Drop for AudioEngine {
         // Shutdown is the one place a short wait is worth it: the process is
         // going away and a detached driver thread must not outlive it.
         let deadline = Instant::now() + DROP_STOP_WAIT;
+        let mut alive = false;
         for handle in self.lingering.drain(..) {
             while !handle.is_finished() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(10));
             }
             if handle.is_finished() {
                 let _ = handle.join();
+            } else {
+                alive = true;
             }
+        }
+        if alive {
+            // A bridge that is still tearing down will drop its mixer on
+            // that thread.  That drop parks models; it must not be the
+            // last owner of the park, or the models would be destroyed
+            // there.  This clone is never dropped.
+            std::mem::forget(Arc::clone(&self.amp_park));
+        } else {
+            // Every bridge has joined, so the models they parked are the
+            // only ones left, and this is the UI thread (or process exit
+            // on it).
+            self.amp_park.flush();
         }
     }
 }

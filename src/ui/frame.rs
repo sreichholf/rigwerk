@@ -42,8 +42,9 @@ impl eframe::App for RigWerkApp {
         self.run_logic(ctx);
     }
 
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
         ensure_style(root.ctx());
+        self.remember_native_window(frame);
         // eframe builds this root before `logic`, copying `global_style`
         // into an `Arc`.  `configure_style` then copy-on-writes the context,
         // and `logic` may already have fired the `Once`, so the root would

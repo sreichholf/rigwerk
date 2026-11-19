@@ -121,6 +121,11 @@ impl RigWerkApp {
         #[cfg(target_os = "linux")]
         self.refresh_quantum_check(true);
         self.engine.start(config);
+        // The new run did not inherit the live model.  Install it again
+        // from the saved path before the first callback, if the device
+        // rate is already known; a rate that arrives later is picked up
+        // by `sync_amp_models` after `service_plugins`.
+        self.sync_amp_models();
     }
 
     pub(crate) fn stop_bridge(&mut self) {

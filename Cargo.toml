@@ -30,6 +30,13 @@ serde_json = "1"
 # the .clap bundles at runtime without a build-time SDK.
 clap-sys = "0.5"
 libloading = "0.8"
+nam-rs = "0.4"
+# Native folder window for the amp captures.
+rfd = "0.18"
+# Clipboard text, and a folder copied from Explorer (not plain text).
+arboard = "3.7"
+# Parent that folder window on this process's viewport.
+raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 # `realtime` registers cpal's own WASAPI stream threads with MMCSS "Audio"
@@ -72,3 +79,8 @@ pipewire = { version = "0.10", features = ["v0_3_50"] }
 [profile.release]
 opt-level = 2
 
+
+# The amp model runs far slower than real time unoptimised, so a debug
+# build optimises nam-rs alone.
+[profile.dev.package.nam-rs]
+opt-level = 3

@@ -19,6 +19,7 @@
 //! A removed path keeps its device entries while it fades out, so it fades
 //! where it played; the next path in that slot overwrites them.
 
+use crate::app::amp::AmpInstall;
 use crate::app::chain::ChainSelection;
 use crate::app::settings::{default_path_name, ExtraOutputPref, PathPref};
 use crate::app::LogTone;
@@ -37,6 +38,21 @@ pub(crate) struct SignalPath {
     /// Index into the path palette.  The colour is chosen when a row is drawn.
     pub(crate) colour: u8,
     pub(crate) mix: PathMix,
+    /// The `.nam` capture.  Empty means the stage has no model.
+    pub(crate) amp_model: String,
+    /// Display name of the loaded capture, or a stem when the load failed.
+    pub(crate) amp_name: String,
+    /// Why the last load failed.  The path string is kept.
+    pub(crate) amp_error: Option<String>,
+    /// Width thresholds of a slimmable capture, empty otherwise.  The width
+    /// dial shows when there are some.
+    pub(crate) amp_slim_steps: Vec<f32>,
+    /// The file parsed and its sample rate is not the path's rate.
+    pub(crate) amp_mismatch: bool,
+    /// The file's sample rate, when one was declared.  0 if unknown.
+    pub(crate) amp_file_rate: u32,
+    /// The last install attempt.  A matching stamp is not rebuilt.
+    pub(crate) amp_install: AmpInstall,
 }
 
 impl SignalPath {
@@ -45,11 +61,24 @@ impl SignalPath {
             name: pref.name.clone(),
             colour: pref.colour % MAX_PATHS as u8,
             mix: pref.mix(),
+            amp_model: pref.amp.model_path.clone(),
+            amp_name: String::new(),
+            amp_error: None,
+            amp_slim_steps: Vec::new(),
+            amp_mismatch: false,
+            amp_file_rate: 0,
+            amp_install: AmpInstall::default(),
         }
     }
 
     fn to_pref(&self, plugins: Vec<crate::audio::PluginPref>) -> PathPref {
-        PathPref::from_mix(self.name.clone(), self.colour, &self.mix, plugins)
+        PathPref::from_mix(
+            self.name.clone(),
+            self.colour,
+            &self.mix,
+            &self.amp_model,
+            plugins,
+        )
     }
 }
 
@@ -59,6 +88,13 @@ impl Default for SignalPath {
             name: default_path_name(0),
             colour: 0,
             mix: PathMix::default(),
+            amp_model: String::new(),
+            amp_name: String::new(),
+            amp_error: None,
+            amp_slim_steps: Vec::new(),
+            amp_mismatch: false,
+            amp_file_rate: 0,
+            amp_install: AmpInstall::default(),
         }
     }
 }
@@ -214,6 +250,7 @@ impl RigWerkApp {
                 let builtins = [
                     mix.eqs[0].is_active(),
                     mix.gate.enabled,
+                    mix.amp.enabled,
                     mix.eqs[1].is_active(),
                 ]
                 .into_iter()
@@ -335,6 +372,7 @@ impl RigWerkApp {
             name: self.new_path_name(),
             colour: self.free_colour(),
             mix: self.engine.path_mix(slot),
+            ..SignalPath::default()
         };
         self.paths[slot] = Some(path);
         self.path_order.retain(|&other| other != slot);
@@ -372,6 +410,10 @@ impl RigWerkApp {
                 solo: false,
                 ..original.mix
             },
+            // The copy loads its own model.  Generations count per slot,
+            // so the source's stamp could match the new slot.
+            amp_install: AmpInstall::default(),
+            ..original
         };
         self.paths[slot] = Some(path);
         self.path_order.retain(|&other| other != slot);
@@ -440,6 +482,12 @@ impl RigWerkApp {
     /// The edited path's gate.
     pub(crate) fn set_path_gate(&mut self, gate: GateSettings) {
         self.path_mut().mix.gate = gate;
+    }
+
+    /// The edited path's amp controls.  Does not load a capture.
+    pub(crate) fn set_path_amp(&mut self, amp: crate::audio::AmpControls) {
+        self.path_mut().mix.amp = amp.sanitized();
+        self.push_paths_to_engine();
     }
 
     /// Mono sum for one path slot.
@@ -795,6 +843,7 @@ impl RigWerkApp {
         }
         self.push_paths_to_engine();
         self.push_devices_to_engine();
+        self.sync_amp_models();
     }
 
     /// The live paths as they should be saved (fresh plugin state), and

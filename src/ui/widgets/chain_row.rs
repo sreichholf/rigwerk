@@ -45,6 +45,7 @@ pub(crate) enum ChainEvent {
 pub(crate) struct EffectDrag(pub usize);
 
 /// The mark at the right of a row.
+#[derive(Clone, Copy)]
 pub(crate) enum ChainMark<'a> {
     /// Mini EQ curve, hidden when the row's `show_curve` is false.
     Eq(&'a EqSettings),
@@ -52,11 +53,19 @@ pub(crate) enum ChainMark<'a> {
     Threshold(&'a str),
     /// Effect latency, already formatted.  An empty string draws nothing.
     Latency(&'a str),
+    /// A built-in row's text, drawn like the threshold.  Not an effect:
+    /// the row does not drag.
+    Label(&'a str),
 }
 
 /// What one row shows.  The strings are borrowed for the frame.
 pub(crate) struct ChainRow<'a> {
+    /// What screen readers call the row, and what it shows unless `shown`
+    /// says otherwise.
     pub name: &'a str,
+    /// Text drawn in place of the name: the amp row shows its capture.
+    /// Screen readers get it as the description, and hover shows it whole.
+    pub shown: Option<&'a str>,
     pub index: usize,
     pub on: bool,
     pub selected: bool,
@@ -168,6 +177,14 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         Some(!row.on),
         None,
     );
+    if let (Some(shown), false) = (row.shown, row.failed) {
+        // The text may be shortened; the whole of it is on hover.
+        response = response.on_hover_text(shown);
+        let shown = shown.to_owned();
+        ui.ctx().accesskit_node_builder(response.id, |builder| {
+            builder.set_description(shown);
+        });
+    }
     if let Some(reason) = row.fail_reason.filter(|_| row.failed) {
         response = response.on_hover_text(reason);
         let reason = reason.to_owned();
@@ -309,7 +326,12 @@ fn paint(ui: &egui::Ui, row: &ChainRow<'_>, rect: Rect, led: Rect) {
     let name_font = font(Face::Sans, TypeRole::Body);
     let mark_w = mark_width(ui, row);
     let name_right = rect.right() - 8.0 - mark_w - if row.paused { 14.0 } else { 0.0 };
-    let name = super::fit_text(ui, row.name, &name_font, (name_right - x).max(8.0));
+    let name = super::fit_text(
+        ui,
+        row.shown.unwrap_or(row.name),
+        &name_font,
+        (name_right - x).max(8.0),
+    );
     painter.text(
         egui::pos2(x, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -327,12 +349,25 @@ fn paint(ui: &egui::Ui, row: &ChainRow<'_>, rect: Rect, led: Rect) {
     paint_mark(ui, row, rect, colours);
 }
 
-fn mark_width(ui: &egui::Ui, row: &ChainRow<'_>) -> f32 {
+/// The widest a text mark gets.  A longer one is shortened with "…".
+const MARK_MAX_W: f32 = 96.0;
+
+/// The text mark as drawn, before it is fitted: a failed row says so.
+fn mark_text<'a>(row: &ChainRow<'a>) -> Option<&'a str> {
     match row.mark {
-        ChainMark::Eq(_) if row.show_curve => 44.0,
-        ChainMark::Threshold(text) | ChainMark::Latency(text) if !text.is_empty() => {
-            measure(ui, text).min(96.0)
+        ChainMark::Threshold(text) | ChainMark::Latency(text) | ChainMark::Label(text)
+            if !text.is_empty() =>
+        {
+            Some(if row.failed { "Didn't load" } else { text })
         }
+        _ => None,
+    }
+}
+
+fn mark_width(ui: &egui::Ui, row: &ChainRow<'_>) -> f32 {
+    match (row.mark, mark_text(row)) {
+        (ChainMark::Eq(_), _) if row.show_curve => 44.0,
+        (_, Some(text)) => measure(ui, text).min(MARK_MAX_W),
         _ => 0.0,
     }
 }
@@ -363,8 +398,17 @@ fn paint_mark(ui: &egui::Ui, row: &ChainRow<'_>, rect: Rect, colours: &crate::ui
                 Stroke::new(1.0, ink),
             ));
         }
-        ChainMark::Threshold(text) | ChainMark::Latency(text) if !text.is_empty() => {
-            let shown = if row.failed { "Didn't load" } else { text };
+        ChainMark::Threshold(_) | ChainMark::Latency(_) | ChainMark::Label(_)
+            if mark_text(row).is_some() =>
+        {
+            let mark_font = font(Face::Mono, TypeRole::Secondary);
+            // `measure` pads by 4: the text gets what is left of the width.
+            let shown = super::fit_text(
+                ui,
+                mark_text(row).unwrap_or_default(),
+                &mark_font,
+                mark_width(ui, row) - 4.0,
+            );
             let colour = if row.failed {
                 colours.error_text
             } else {
@@ -374,11 +418,14 @@ fn paint_mark(ui: &egui::Ui, row: &ChainRow<'_>, rect: Rect, colours: &crate::ui
                 egui::pos2(rect.right() - 8.0, rect.center().y),
                 egui::Align2::RIGHT_CENTER,
                 shown,
-                font(Face::Mono, TypeRole::Secondary),
+                mark_font,
                 colour,
             );
         }
-        ChainMark::Eq(_) | ChainMark::Threshold(_) | ChainMark::Latency(_) => {}
+        ChainMark::Eq(_)
+        | ChainMark::Threshold(_)
+        | ChainMark::Latency(_)
+        | ChainMark::Label(_) => {}
     }
 }
 

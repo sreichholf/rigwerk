@@ -466,3 +466,26 @@ fn a_path_colour_is_stored_and_the_level_and_solo_are_independent() {
         .unwrap();
     assert!(!info.audible);
 }
+
+#[test]
+fn a_duplicated_path_loads_its_own_amp_model() {
+    let mut app = blank_app();
+    let source = app.add_path().expect("a free slot");
+    app.set_path_amp_model(source, "/nonexistent/cab.nam".to_owned());
+    let copy = app.duplicate_path(source).expect("a free slot");
+    // Both slots went live once: their generations match, so the source's
+    // stamp would match the copy too.
+    assert_eq!(
+        app.engine.path_generation(source),
+        app.engine.path_generation(copy)
+    );
+    let path = app.paths[copy].as_ref().unwrap();
+    assert_eq!(path.amp_model, "/nonexistent/cab.nam");
+    assert_eq!(path.amp_install, crate::app::amp::AmpInstall::default());
+    app.sync_amp_models();
+    let path = app.paths[copy].as_ref().unwrap();
+    assert_eq!(
+        path.amp_install.path, "/nonexistent/cab.nam",
+        "loaded again"
+    );
+}

@@ -2,31 +2,38 @@
 //!
 //! This is navigation state on [`RigWerkApp`](crate::app::RigWerkApp), not
 //! paint.  Stage colours stay in `ui`.  [`chain_stages`] is the signal
-//! order the console draws and the sheet's ‹ › walk: the gate sits before
-//! or after the effects as its slot says.
+//! order the console draws and the sheet's ‹ › walk: the gate and the amp
+//! each sit before or after the effects as their slots say.
 
-use crate::audio::{EqSlot, GateSlot};
+use crate::audio::{AmpSlot, EqSlot, GateSlot};
 
 /// One stage of a path's chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChainStage {
     PreEq,
     Gate,
+    Amp,
     /// The effect at this index of the path's chain.
     Effect(usize),
     PostEq,
 }
 
 /// A chain's stages in the order the sound passes them: *Pre EQ*, the gate
-/// when it sits before the effects, the effects, the gate when after, and
-/// *Post EQ*.
-pub(crate) fn chain_stages(effects: usize, gate: GateSlot) -> Vec<ChainStage> {
-    let mut stages = Vec::with_capacity(effects + 3);
+/// when it sits before the effects, the amp when it does, the effects, the
+/// amp when after, the gate when after, and *Post EQ*.
+pub(crate) fn chain_stages(effects: usize, gate: GateSlot, amp: AmpSlot) -> Vec<ChainStage> {
+    let mut stages = Vec::with_capacity(effects + 4);
     stages.push(ChainStage::PreEq);
     if gate == GateSlot::Pre {
         stages.push(ChainStage::Gate);
     }
+    if amp == AmpSlot::Pre {
+        stages.push(ChainStage::Amp);
+    }
     stages.extend((0..effects).map(ChainStage::Effect));
+    if amp == AmpSlot::Post {
+        stages.push(ChainStage::Amp);
+    }
     if gate == GateSlot::Post {
         stages.push(ChainStage::Gate);
     }
@@ -40,9 +47,10 @@ pub(crate) fn neighbour_stage(
     current: ChainStage,
     effects: usize,
     gate: GateSlot,
+    amp: AmpSlot,
     forward: bool,
 ) -> Option<ChainStage> {
-    let stages = chain_stages(effects, gate);
+    let stages = chain_stages(effects, gate, amp);
     let at = stages.iter().position(|stage| *stage == current)?;
     if forward {
         stages.get(at + 1).copied()
@@ -60,6 +68,7 @@ pub(crate) enum ChainSelection {
     Plugins,
     Plugin(usize),
     Gate,
+    Amp,
     PostEq,
     /// The master stage: master level and mute, and the device list.
     Output,
@@ -116,6 +125,7 @@ impl ChainSelection {
         match stage {
             ChainStage::PreEq => Self::PreEq,
             ChainStage::Gate => Self::Gate,
+            ChainStage::Amp => Self::Amp,
             ChainStage::Effect(index) => Self::Plugin(index),
             ChainStage::PostEq => Self::PostEq,
         }
@@ -143,6 +153,7 @@ impl crate::app::RigWerkApp {
             ChainStage::PreEq => path.mix.eqs[0].enabled,
             ChainStage::PostEq => path.mix.eqs[1].enabled,
             ChainStage::Gate => path.mix.gate.enabled,
+            ChainStage::Amp => path.mix.amp.enabled,
             ChainStage::Effect(index) => self
                 .engine
                 .plugin_views(slot)
@@ -167,6 +178,7 @@ impl crate::app::RigWerkApp {
             ChainStage::PreEq => path.mix.eqs[0].enabled = on,
             ChainStage::PostEq => path.mix.eqs[1].enabled = on,
             ChainStage::Gate => path.mix.gate.enabled = on,
+            ChainStage::Amp => path.mix.amp.enabled = on,
             ChainStage::Effect(_) => {}
         }
     }

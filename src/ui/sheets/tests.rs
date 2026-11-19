@@ -31,6 +31,8 @@ fn sheet_titles_name_the_item() {
     });
     assert_eq!(app.sheet_title(app.chrome.sheet.unwrap()), "Pre EQ");
     assert!(app.step_sheet(true));
+    assert_eq!(app.sheet_title(app.chrome.sheet.unwrap()), "Amp");
+    assert!(app.step_sheet(true));
     assert_eq!(app.sheet_title(app.chrome.sheet.unwrap()), "Gate");
     assert_eq!(app.sheet_title(Sheet::Scope), "Scope");
     assert_eq!(app.sheet_title(Sheet::Path { path: 0 }), "Path");

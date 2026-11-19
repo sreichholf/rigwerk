@@ -5,6 +5,7 @@
 //! draws the header (the path dot and name, `/`, the item, *On* /
 //! *Bypass* for a stage, ‹ › through the chain, ×) and picks the body.
 
+pub(crate) mod amp;
 pub(crate) mod diagnostics;
 pub(crate) mod effect;
 pub(crate) mod eq;
@@ -35,6 +36,7 @@ impl RigWerkApp {
             Sheet::Eq { post: false, .. } => "Pre EQ".to_owned(),
             Sheet::Eq { post: true, .. } => "Post EQ".to_owned(),
             Sheet::Gate { .. } => "Gate".to_owned(),
+            Sheet::Amp { .. } => "Amp".to_owned(),
             Sheet::Path { .. } => "Path".to_owned(),
             Sheet::Effect { path, index } => self
                 .engine
@@ -144,6 +146,7 @@ impl RigWerkApp {
                 Sheet::Diagnostics => self.diagnostics_page(ui),
                 Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
                 Sheet::Gate { path } => self.gate_sheet(ui, path),
+                Sheet::Amp { path } => self.amp_sheet(ui, path),
                 Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
                 Sheet::Path { path } => self.path_sheet(ui, path),
                 Sheet::Output { output } => self.output_sheet(ui, output),

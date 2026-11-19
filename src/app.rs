@@ -5,6 +5,7 @@
 //! (`impl eframe::App`) lives in `ui/frame.rs`; this file does not paint.
 
 pub(crate) mod alignment;
+pub(crate) mod amp;
 pub(crate) mod appearance;
 pub(crate) mod bridge;
 pub(crate) mod budget;
@@ -272,6 +273,16 @@ pub struct RigWerkApp {
     /// Directory takes are written into.  Empty is replaced on load; the
     /// writer creates it.
     pub(crate) record_folder: String,
+    /// Folder of `.nam` captures.  Empty until the amp sheet sets one.
+    pub(crate) amp_folder: String,
+    /// The last scan of [`Self::amp_folder`].  Not refreshed every frame.
+    pub(crate) amp_catalog: amp::AmpCatalog,
+    /// The amp sheet opened, or the folder changed: scan before drawing.
+    pub(crate) amp_rescan: bool,
+    /// Viewport the amp folder window is parented to.  Set each frame.
+    pub(crate) native_window: Option<amp::NativeWindow>,
+    /// Ctrl+V was down last frame, so a held chord pastes the models folder once.
+    pub(crate) amp_paste_down: bool,
     /// "Record the click": takes carry the metronome and calibration click.
     pub(crate) record_click: bool,
     pub(crate) sessions: Vec<Session>,
@@ -370,6 +381,7 @@ impl RigWerkApp {
         self.watch_devices();
         self.poll_plugin_scan();
         self.engine.service_plugins();
+        self.sync_amp_models();
         self.ui_scale = ctx.pixels_per_point();
         self.poll_plugin_gui();
         self.sync_bridge_config();
@@ -457,6 +469,7 @@ impl RigWerkApp {
             tuner_auto_mute: self.tuner.auto_mute,
             tuner_tolerance: self.tuner.tolerance.to_u8(),
             record_folder: self.record_folder.clone(),
+            amp_folder: self.amp_folder.clone(),
             record_click: self.record_click,
             metronome_bpm: self.metronome_bpm,
             metronome_rhythm: self.metronome_rhythm,
@@ -616,6 +629,11 @@ impl RigWerkApp {
             quantum: None,
             session_name: preferences.session_name.clone(),
             record_folder: preferences.record_folder.clone(),
+            amp_folder: preferences.amp_folder.clone(),
+            amp_catalog: amp::AmpCatalog::default(),
+            amp_rescan: true,
+            native_window: None,
+            amp_paste_down: false,
             record_click: preferences.record_click,
             sessions,
             selected_session,
@@ -856,6 +874,11 @@ pub(crate) fn blank_app() -> RigWerkApp {
         quantum: None,
         session_name: "My guitar rig".to_owned(),
         record_folder: String::new(),
+        amp_folder: String::new(),
+        amp_catalog: amp::AmpCatalog::default(),
+        amp_rescan: false,
+        native_window: None,
+        amp_paste_down: false,
         record_click: false,
         sessions: Vec::new(),
         selected_session: None,
