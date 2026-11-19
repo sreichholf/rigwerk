@@ -8,9 +8,8 @@ use egui::{
 };
 
 use crate::app::RigWerkApp;
-use crate::audio::{
-    BandKind, EngineState, EqSettings, EqSlot, EQ_BANDS, EQ_MAX_GAIN_DB, EQ_MAX_Q, EQ_MIN_Q,
-};
+use crate::audio::{EngineState, EqSettings, EqSlot, EQ_BANDS, EQ_MAX_GAIN_DB, EQ_MAX_Q, EQ_MIN_Q};
+use crate::ui::sheets::eq::{band_hint, hz_label, q_hint, slot_hint, slot_title};
 use crate::ui::theme::ts;
 use crate::ui::theme::{
     with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, RED, TEAL,
@@ -24,14 +23,6 @@ const CURVE_MIN_HZ: f32 = 20.0;
 const CURVE_MAX_HZ: f32 = 20_000.0;
 const READOUT_W: f32 = 58.0;
 const LABEL_W: f32 = 42.0;
-
-fn hz_label(hz: f32) -> String {
-    if hz >= 1_000.0 {
-        format!("{:.1} kHz", hz / 1_000.0)
-    } else {
-        format!("{hz:.0} Hz")
-    }
-}
 
 /// Hertz after one move of the log-frequency slider.
 fn hz_from_log_slider(previous_hz: f32, position: f32, min_hz: f32, max_hz: f32) -> f32 {
@@ -113,60 +104,52 @@ impl RigWerkApp {
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.set_width(panel_w - 16.0);
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(spec.name)
-                                        .size(ts(11.0))
-                                        .color(if live { color } else { DIM })
-                                        .strong(),
-                                )
-                                .on_hover_text(format!(
-                                    "{} {}",
-                                    match spec.kind {
-                                        BandKind::LowShelf => "Low shelf.",
-                                        BandKind::HighShelf => "High shelf.",
-                                        BandKind::Bell => "Bell.",
-                                    },
-                                    spec.role
-                                ));
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if hinted_tab(
-                                        ui,
-                                        if band.on { "ON" } else { "OFF" },
-                                        band.on,
-                                        color,
-                                        "Switch this band on or off.",
-                                    ) {
-                                        band.on = !band.on;
-                                    }
-                                });
-                            });
-                            ui.add_space(2.0);
-                            band_slider_row(
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(spec.name)
+                                .size(ts(11.0))
+                                .color(if live { color } else { DIM })
+                                .strong(),
+                        )
+                        .on_hover_text(band_hint(index));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if hinted_tab(
                                 ui,
-                                "GAIN",
+                                if band.on { "ON" } else { "OFF" },
+                                band.on,
                                 color,
-                                |ui, band| {
-                                    let gain = reserved_slider(
-                                        ui,
-                                        &mut band.gain_db,
-                                        -EQ_MAX_GAIN_DB,
-                                        EQ_MAX_GAIN_DB,
-                                        0.1,
-                                        color,
-                                        format!("{} gain", spec.name),
-                                    )
-                                    .on_hover_text(
-                                        "Boost or cut, ±12 dB in 0.1 dB steps. Double-click for 0 dB.",
-                                    );
-                                    if gain.double_clicked() {
-                                        band.gain_db = 0.0;
-                                    }
-                                    format!("{:+.1} dB", band.gain_db)
-                                },
-                                band,
-                                live,
+                                "Switch this band on or off.",
+                            ) {
+                                band.on = !band.on;
+                            }
+                        });
+                    });
+                    ui.add_space(2.0);
+                    band_slider_row(
+                        ui,
+                        "GAIN",
+                        color,
+                        |ui, band| {
+                            let gain = reserved_slider(
+                                ui,
+                                &mut band.gain_db,
+                                -EQ_MAX_GAIN_DB,
+                                EQ_MAX_GAIN_DB,
+                                0.1,
+                                color,
+                                format!("{} gain", spec.name),
+                            )
+                            .on_hover_text(
+                                "Boost or cut, ±12 dB in 0.1 dB steps. Double-click for 0 dB.",
                             );
+                            if gain.double_clicked() {
+                                band.gain_db = 0.0;
+                            }
+                            format!("{:+.1} dB", band.gain_db)
+                        },
+                        band,
+                        live,
+                    );
                     band_slider_row(
                         ui,
                         "FREQ",
@@ -189,12 +172,8 @@ impl RigWerkApp {
                                 hz_label(spec.default_hz)
                             ));
                             if freq.changed() {
-                                band.hz = hz_from_log_slider(
-                                    band.hz,
-                                    position,
-                                    spec.min_hz,
-                                    spec.max_hz,
-                                );
+                                band.hz =
+                                    hz_from_log_slider(band.hz, position, spec.min_hz, spec.max_hz);
                             }
                             if freq.double_clicked() {
                                 band.hz = spec.default_hz;
@@ -218,16 +197,11 @@ impl RigWerkApp {
                                 color,
                                 format!("{} width", spec.name),
                             )
-                            .on_hover_text(match spec.kind {
-                                BandKind::Bell => format!(
-                                    "Width: low Q is broad and musical, high Q is narrow for taming one spot. Double-click for Q {:.1}.",
-                                    spec.default_q
-                                ),
-                                BandKind::LowShelf | BandKind::HighShelf => format!(
-                                    "Shelf width: low Q is a gentle slope, high Q is steeper with a resonant bump before the corner and a dip after it. Double-click for Q {:.1}.",
-                                    spec.default_q
-                                ),
-                            });
+                            .on_hover_text(format!(
+                                "{} Double-click for Q {:.1}.",
+                                q_hint(spec.kind),
+                                spec.default_q
+                            ));
                             if width.double_clicked() {
                                 band.q = spec.default_q;
                             }
@@ -310,24 +284,6 @@ fn reserved_slider(
     name: String,
 ) -> egui::Response {
     styled_slider(ui, value, min, max, step, (color, name))
-}
-
-pub(crate) fn slot_title(slot: EqSlot) -> &'static str {
-    match slot {
-        EqSlot::Pre => "Pre EQ",
-        EqSlot::Post => "Post EQ",
-    }
-}
-
-pub(crate) fn slot_hint(slot: EqSlot) -> &'static str {
-    match slot {
-        EqSlot::Pre => {
-            "Before the plugin effects: shapes what the plugins receive, e.g. tighten the low end before an amp sim."
-        }
-        EqSlot::Post => {
-            "After the plugin effects: shapes what the plugins produce, e.g. tame fizz after an amp sim."
-        }
-    }
 }
 
 /// The combined response from 20 Hz to 20 kHz, ±12 dB, with a dot per band.

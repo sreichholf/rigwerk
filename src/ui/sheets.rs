@@ -9,13 +9,13 @@
 //! `// Until <name>_sheet lands`.
 
 pub(crate) mod diagnostics;
+pub(crate) mod eq;
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
 
 use crate::app::screen::Sheet;
 use crate::app::RigWerkApp;
-use crate::audio::EqSlot;
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{row_info, segmented};
@@ -143,8 +143,7 @@ impl RigWerkApp {
                 let width = ui.available_width();
                 match sheet {
                     Sheet::Diagnostics => self.diagnostics_page(ui),
-                    // Until eq_sheet lands
-                    Sheet::Eq { post, .. } => self.eq_inspector(ui, eq_slot(post)),
+                    Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
                     // Until gate_sheet lands
                     Sheet::Gate { .. } => self.gate_inspector(ui),
                     // Until effect_sheet lands
@@ -176,14 +175,6 @@ impl RigWerkApp {
                 |ui| self.routing_device_panel(ui, output),
             );
         });
-    }
-}
-
-fn eq_slot(post: bool) -> EqSlot {
-    if post {
-        EqSlot::Post
-    } else {
-        EqSlot::Pre
     }
 }
 
