@@ -734,13 +734,11 @@ fn bottom_bar(
                     }
                 });
                 group(ui, "Display", colours, |ui| {
-                    let mut choice = usize::from(view.display == TunerDisplay::Needle);
+                    // `TunerDisplay` stores Strobe first.  The control lists
+                    // Needle first, so the index is not the enum's order.
+                    let mut choice = display_choice(view.display);
                     if segmented(ui, &mut choice, &["Needle", "Strobe"]).changed() {
-                        actions.display = Some(if choice == 0 {
-                            TunerDisplay::Needle
-                        } else {
-                            TunerDisplay::Strobe
-                        });
+                        actions.display = Some(display_from_choice(choice));
                     }
                 });
                 if !active {
@@ -752,6 +750,22 @@ fn bottom_bar(
                 }
             });
         });
+}
+
+/// Index into the Display control, `["Needle", "Strobe"]`.
+fn display_choice(display: TunerDisplay) -> usize {
+    match display {
+        TunerDisplay::Needle => 0,
+        TunerDisplay::Strobe => 1,
+    }
+}
+
+fn display_from_choice(choice: usize) -> TunerDisplay {
+    if choice == 0 {
+        TunerDisplay::Needle
+    } else {
+        TunerDisplay::Strobe
+    }
 }
 
 fn group(ui: &mut egui::Ui, label: &str, colours: &Palette, add: impl FnOnce(&mut egui::Ui)) {
