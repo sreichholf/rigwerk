@@ -29,7 +29,7 @@ fn delayed(n: usize, by: usize) -> f32 {
 /// of `latency` frames, both on every device; `extra_outputs` stereo extra outputs.
 fn aligned_mixer(latency: u32, extra_outputs: usize) -> (OutputMixer, Shared) {
     let shared = Shared::new(RATE);
-    shared.set_master(false, true, [true, true], false);
+    shared.set_master(false, [true, true], false);
     // The duplex graph: it plays the extra outputs in-graph.
     shared
         .direct

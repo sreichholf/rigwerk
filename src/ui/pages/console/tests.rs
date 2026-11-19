@@ -38,7 +38,6 @@ fn every_strip_names_its_controls() {
         "In 1",
         "In 2",
         "Scope",
-        "Monitor",
         "Input gain level",
         "Source",
         "Pre EQ",

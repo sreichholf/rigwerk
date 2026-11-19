@@ -149,15 +149,13 @@ impl RigWerkApp {
     }
 
     fn mute_button(&mut self, ui: &mut egui::Ui) {
-        let (label, on) = if !self.monitor {
-            ("Monitor off", true)
-        } else if self.mute {
+        let (label, on) = if self.mute {
             ("Muted", true)
         } else {
             ("Mute", false)
         };
         let mute = bar_button(ui.ctx(), label, on);
-        if ui.add(mute).on_hover_text("Mute the master").clicked() && self.monitor {
+        if ui.add(mute).on_hover_text("Mute the master").clicked() {
             self.mute = !self.mute;
         }
     }

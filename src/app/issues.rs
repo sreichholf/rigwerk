@@ -703,7 +703,7 @@ impl RigWerkApp {
                 && self.low_latency_output,
             sent,
             monitor,
-            parked: self.mute || !self.monitor || self.clock_output.mute || !routed,
+            parked: self.mute || self.clock_output.mute || !routed,
             dropouts: self.issue_state.dropouts.episode().is_some(),
         }
     }

@@ -112,7 +112,7 @@ fn hardware_bridge() {
     println!("output: {} [{}]", output.name, output.backend);
 
     let mut engine = AudioEngine::new(48_000);
-    engine.set_master(true, false, [true, true], true);
+    engine.set_master(true, [true, true], true);
     // RIGWERK_BRIDGE_BUFFER: auto (default), minimum, or a fixed size in ms.
     match std::env::var("RIGWERK_BRIDGE_BUFFER").as_deref() {
         Ok("minimum") => engine.set_bridge_buffer(super::BufferMode::Minimum, 10.0),

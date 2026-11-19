@@ -84,8 +84,8 @@ impl Ramp {
 
 /// The per-sample control ramps at the front of one path.  Routing is
 /// linear, so a route change is eight gains moving between 0 and 1; channel
-/// enable and mono work the same way.  Mute, monitor and the master level
-/// are one ramp after the paths, on the mixer itself.
+/// enable and mono work the same way.  Mute and the master level are one
+/// ramp after the paths, on the mixer itself.
 pub(super) struct PathRamps {
     route: [[Ramp; 4]; 2],
     output_enabled: [Ramp; 2],

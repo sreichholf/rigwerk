@@ -58,7 +58,6 @@ pub(crate) struct Session {
     pub(crate) mono: bool,
     /// The master mute.
     pub(crate) mute: bool,
-    pub(crate) monitor: bool,
     pub(crate) drift: bool,
     /// Linux low-latency / legacy Windows REAL-style switch.
     pub(crate) low_latency_output: bool,
@@ -125,7 +124,6 @@ impl Default for Session {
             output_channels: [true, true],
             mono: false,
             mute: false,
-            monitor: true,
             drift: true,
             low_latency_output: true,
             wasapi_output_mode: Some(WasapiOutputMode::RealStyle),

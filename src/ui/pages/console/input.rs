@@ -1,6 +1,6 @@
 //! The input strip: the device (a click opens Setup › Devices), *In 1* /
-//! *In 2*, the scope (a click opens the scope sheet), *Monitor*, *Driver
-//! panel* for an ASIO input, and the input gain over the stereo meter.
+//! *In 2*, the scope (a click opens the scope sheet), *Driver panel* for
+//! an ASIO input, and the input gain over the stereo meter.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};
@@ -83,13 +83,6 @@ impl RigWerkApp {
             self.open_sheet(Sheet::Scope);
         }
 
-        let mut monitor = self.monitor;
-        let response = chip(&mut top, &mut monitor, "Monitor").on_hover_text(
-            "Input monitoring.  Off, the master plays silence; the metronome keeps playing.",
-        );
-        if response.changed() {
-            self.set_monitor(monitor);
-        }
         self.input_driver_panel(&mut top);
 
         let mut events = level_block(
