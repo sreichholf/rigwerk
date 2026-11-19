@@ -178,16 +178,16 @@ impl RigWerkApp {
                     .color(colours.error_text),
             );
             if device.is_some() {
-                if ui.button("Rescan").clicked() {
+                if banner_button(ui, "Rescan").clicked() {
                     self.rescan();
                 }
-                if ui.button("Open Setup").clicked() {
+                if banner_button(ui, "Open Setup").clicked() {
                     self.open_setup(SetupSection::Devices);
                 }
-                if ui.button("Dismiss").clicked() {
+                if banner_button(ui, "Dismiss").clicked() {
                     self.device_alert = None;
                 }
-            } else if ui.button("Dismiss").clicked() {
+            } else if banner_button(ui, "Dismiss").clicked() {
                 self.dismiss_error_banner();
             }
         });
@@ -506,7 +506,7 @@ impl RigWerkApp {
                                 );
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.button("×").on_hover_text("Close").clicked() {
+                                if banner_button(ui, "×").on_hover_text("Close").clicked() {
                                     self.close_drawer();
                                 }
                             });
@@ -519,6 +519,15 @@ impl RigWerkApp {
                     });
             });
     }
+}
+
+fn banner_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let colours = palette(ui.ctx());
+    ui.button(
+        RichText::new(label)
+            .font(font(Face::Sans, TypeRole::Control))
+            .color(colours.text),
+    )
 }
 
 fn bar_button<'a>(ctx: &egui::Context, label: &'a str, on: bool) -> egui::Button<'a> {

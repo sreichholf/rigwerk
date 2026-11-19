@@ -1,19 +1,28 @@
 //! Start, theme, size, effects and the recordings folder.
 
 use eframe::egui;
+use egui::RichText;
 
 use crate::app::appearance::ThemeChoice;
 use crate::app::settings::EffectOpen;
 use crate::app::RigWerkApp;
+use crate::ui::fonts::Face;
 use crate::ui::pages::setup::{hint, panel};
+use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::segmented;
 
 impl RigWerkApp {
     pub(super) fn setup_start(&mut self, ui: &mut egui::Ui) {
         panel(ui, "Start", None, None, |ui| {
+            let colours = palette(ui.ctx());
             let mut start = self.auto_start_bridge;
             if ui
-                .checkbox(&mut start, "Start the bridge when RigWerk opens")
+                .checkbox(
+                    &mut start,
+                    RichText::new("Start the bridge when RigWerk opens")
+                        .font(font(Face::Sans, TypeRole::Body))
+                        .color(colours.text),
+                )
                 .changed()
             {
                 self.auto_start_bridge = start;
@@ -76,6 +85,7 @@ impl RigWerkApp {
                 hint(ui, &folder);
             }
             ui.add_space(6.0);
+            let colours = palette(ui.ctx());
             let scanning = self.plugin_browser.scanning;
             let label = if scanning {
                 "Scanning…"
@@ -83,7 +93,14 @@ impl RigWerkApp {
                 "Rescan plugins"
             };
             if ui
-                .add_enabled(!scanning, egui::Button::new(label))
+                .add_enabled(
+                    !scanning,
+                    egui::Button::new(
+                        RichText::new(label)
+                            .font(font(Face::Sans, TypeRole::Control))
+                            .color(colours.text),
+                    ),
+                )
                 .clicked()
             {
                 self.begin_plugin_scan();

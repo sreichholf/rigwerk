@@ -15,8 +15,11 @@ use egui::{
 use crate::app::calibration::CalibrationPhase;
 use crate::app::latency::{utc_stamp, LoopbackKind};
 use crate::app::RigWerkApp;
+use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
-use crate::ui::theme::{with_alpha, AMBER, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT};
+use crate::ui::theme::{
+    font, with_alpha, TypeRole, AMBER, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
+};
 use crate::ui::widgets::{micro_label, mono, progress_line};
 
 impl RigWerkApp {
@@ -374,21 +377,29 @@ fn condition_row(ui: &mut egui::Ui, label: &str, value: &str) {
 
 fn small_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
     ui.add(
-        egui::Button::new(RichText::new(label).size(ts(9.5)).color(color))
-            .fill(with_alpha(color, 14))
-            .stroke(Stroke::new(1.0, with_alpha(color, 45)))
-            .corner_radius(CornerRadius::same(7)),
+        egui::Button::new(
+            RichText::new(label)
+                .font(font(Face::Sans, TypeRole::Control))
+                .color(color),
+        )
+        .fill(with_alpha(color, 14))
+        .stroke(Stroke::new(1.0, with_alpha(color, 45)))
+        .corner_radius(CornerRadius::same(7)),
     )
     .clicked()
 }
 
 fn panel_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
     ui.add(
-        egui::Button::new(RichText::new(label).size(ts(11.0)).color(color))
-            .fill(with_alpha(color, 14))
-            .stroke(Stroke::new(1.0, with_alpha(color, 45)))
-            .corner_radius(CornerRadius::same(8))
-            .min_size(Vec2::new(110.0, 30.0)),
+        egui::Button::new(
+            RichText::new(label)
+                .font(font(Face::Sans, TypeRole::Control))
+                .color(color),
+        )
+        .fill(with_alpha(color, 14))
+        .stroke(Stroke::new(1.0, with_alpha(color, 45)))
+        .corner_radius(CornerRadius::same(8))
+        .min_size(Vec2::new(110.0, 30.0)),
     )
     .clicked()
 }

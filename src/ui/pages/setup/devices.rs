@@ -251,7 +251,14 @@ impl RigWerkApp {
                 let busy = self.driver_probe_job.is_some();
                 let label = if busy { "Checking…" } else { "Check driver" };
                 if ui
-                        .add_enabled(!busy, egui::Button::new(label))
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(
+                                RichText::new(label)
+                                    .font(font(Face::Sans, TypeRole::Control))
+                                    .color(colours.text),
+                            ),
+                        )
                         .on_hover_text(
                             "Ask the sound system which rate and buffer this clock output allows. It opens no audio.",
                         )
@@ -265,7 +272,11 @@ impl RigWerkApp {
         });
 
         if ui
-            .button("Rescan devices")
+            .button(
+                RichText::new("Rescan devices")
+                    .font(font(Face::Sans, TypeRole::Control))
+                    .color(colours.text),
+            )
             .on_hover_text("Look for inputs and outputs again")
             .clicked()
         {
@@ -287,11 +298,16 @@ impl RigWerkApp {
     }
 
     fn input_rate_and_buffer(&mut self, ui: &mut egui::Ui) {
+        let colours = palette(ui.ctx());
         ui.horizontal(|ui| {
             hint(ui, "Rate");
             let mut rate = self.sample_rate;
             egui::ComboBox::from_id_salt("setup_input_rate")
-                .selected_text(rate_label(rate))
+                .selected_text(
+                    RichText::new(rate_label(rate))
+                        .font(font(Face::Sans, TypeRole::Control))
+                        .color(colours.text),
+                )
                 .show_ui(ui, |ui| {
                     for option in RATES {
                         ui.selectable_value(&mut rate, option, rate_label(option));
@@ -308,7 +324,11 @@ impl RigWerkApp {
             hint(ui, "Buffer size");
             let mut buffer = self.buffer_size;
             egui::ComboBox::from_id_salt("setup_input_buffer")
-                .selected_text(format!("{buffer} samples"))
+                .selected_text(
+                    RichText::new(format!("{buffer} samples"))
+                        .font(font(Face::Sans, TypeRole::Control))
+                        .color(colours.text),
+                )
                 .show_ui(ui, |ui| {
                     for option in BUFFERS {
                         ui.selectable_value(&mut buffer, option, format!("{option} samples"));
@@ -325,6 +345,7 @@ impl RigWerkApp {
     }
 
     fn output_rate_and_buffer(&mut self, ui: &mut egui::Ui) {
+        let colours = palette(ui.ctx());
         ui.horizontal(|ui| {
             hint(ui, "Rate");
             let mut rate = self.output_rate;
@@ -334,7 +355,11 @@ impl RigWerkApp {
                 rate_label(rate)
             };
             egui::ComboBox::from_id_salt("setup_output_rate")
-                .selected_text(shown)
+                .selected_text(
+                    RichText::new(shown)
+                        .font(font(Face::Sans, TypeRole::Control))
+                        .color(colours.text),
+                )
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut rate, 0, "Match input");
                     for option in RATES {
@@ -360,7 +385,11 @@ impl RigWerkApp {
             hint(ui, "Buffer size");
             let mut buffer = self.output_buffer;
             egui::ComboBox::from_id_salt("setup_output_buffer")
-                .selected_text(format!("{buffer} samples"))
+                .selected_text(
+                    RichText::new(format!("{buffer} samples"))
+                        .font(font(Face::Sans, TypeRole::Control))
+                        .color(colours.text),
+                )
                 .show_ui(ui, |ui| {
                     for option in BUFFERS {
                         ui.selectable_value(&mut buffer, option, format!("{option} samples"));

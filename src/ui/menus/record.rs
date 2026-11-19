@@ -108,7 +108,14 @@ impl RigWerkApp {
                     .font(font(Face::Mono, TypeRole::Secondary))
                     .color(colours.text2),
             );
-            if ui.button("Copy path").clicked() {
+            if ui
+                .button(
+                    RichText::new("Copy path")
+                        .font(font(Face::Sans, TypeRole::Control))
+                        .color(colours.text),
+                )
+                .clicked()
+            {
                 ui.ctx().copy_text(path.clone());
             }
         }
