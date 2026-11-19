@@ -30,8 +30,8 @@ pub(crate) fn device_list_scroll_height(rows: usize) -> Option<f32> {
 }
 
 /// Case-insensitive match on the device label or backend.  A blank filter
-/// matches all.  With no `*`, the filter is a substring; with `*`, it is a
-/// glob over any character sequence.
+/// matches all.  With no `*`, the filter is a substring; with `*`, it is an
+/// unanchored glob (`gp*5` matches `Valeton GP-5 USB`).
 pub(crate) fn device_matches_filter(label: &str, backend: &str, filter: &str) -> bool {
     let filter = filter.trim();
     if filter.is_empty() {
@@ -44,11 +44,22 @@ pub(crate) fn device_matches_filter(label: &str, backend: &str, filter: &str) ->
 }
 
 fn text_matches(haystack: &str, filter: &str) -> bool {
-    if filter.contains('*') {
-        glob_match(haystack, filter)
-    } else {
-        haystack.contains(filter)
+    if !filter.contains('*') {
+        return haystack.contains(filter);
     }
+    // Unanchored: `gp*5` matches inside a longer name the same way a
+    // substring would.  Leading or trailing `*` from the user stay as-is.
+    let pattern = if filter.starts_with('*') {
+        filter.to_owned()
+    } else {
+        format!("*{filter}")
+    };
+    let pattern = if pattern.ends_with('*') {
+        pattern
+    } else {
+        format!("{pattern}*")
+    };
+    glob_match(haystack, &pattern)
 }
 
 fn glob_match(haystack: &str, pattern: &str) -> bool {
@@ -213,7 +224,7 @@ fn device_group_heading(ui: &mut egui::Ui, heading: &str) {
     ui.add_space(2.0);
 }
 
-fn filter_group<'a>(
+pub(crate) fn filter_group<'a>(
     devices: &'a [(usize, DeviceItem)],
     peers: &[DeviceItem],
     skip_index: usize,

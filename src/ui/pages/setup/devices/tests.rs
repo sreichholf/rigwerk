@@ -1,5 +1,6 @@
 use super::{
-    device_list_scroll_height, device_matches_filter, device_row, DEVICE_ROW_H, DEVICE_SCROLL_AFTER,
+    device_list_scroll_height, device_matches_filter, device_row, filter_group, DEVICE_ROW_H,
+    DEVICE_SCROLL_AFTER,
 };
 use crate::audio::DeviceItem;
 use crate::ui::theme::TEAL;
@@ -69,6 +70,7 @@ fn device_matches_filter_checks_backend() {
 #[test]
 fn device_matches_filter_supports_star_wildcards() {
     assert!(device_matches_filter("Valeton GP-5 USB", "ASIO", "val*usb"));
+    assert!(device_matches_filter("Valeton GP-5 USB", "ASIO", "gp*5"));
     assert!(device_matches_filter("Valeton GP-5 USB", "ASIO", "*gp-5*"));
     assert!(device_matches_filter(
         "Valeton GP-5 USB",
@@ -110,4 +112,17 @@ fn device_list_scroll_height_is_none_until_past_the_cap() {
 #[test]
 fn device_matches_filter_does_not_keep_a_hidden_selected_name() {
     assert!(!device_matches_filter("Analog In", "PIPEWIRE", "scarlett"));
+}
+
+#[test]
+fn filter_group_skips_the_pinned_index_and_applies_search() {
+    let devices = vec![
+        (0, item("Valeton")),
+        (1, item("Scarlett")),
+        (2, item("Analog In")),
+    ];
+    let peers: Vec<_> = devices.iter().map(|(_, device)| device.clone()).collect();
+    let shown = filter_group(&devices, &peers, 0, "a");
+    let indices: Vec<_> = shown.iter().map(|(index, _)| *index).collect();
+    assert_eq!(indices, vec![1, 2]);
 }
