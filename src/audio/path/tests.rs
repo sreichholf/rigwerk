@@ -2,11 +2,11 @@ use super::PathControls;
 use crate::audio::LockStats;
 
 #[test]
-fn a_path_with_no_inserts_does_not_count_a_chain_attempt() {
+fn a_path_with_no_effects_does_not_count_a_chain_attempt() {
     let path = PathControls::new(48_000);
     let mut left = vec![0.0f32; 64];
     let mut right = vec![0.0f32; 64];
-    // No active insert and no latency: the lock-free early return does no
+    // No active effect and no latency: the lock-free early return does no
     // work, so it is not an attempt.
     assert!(path.process_plugins(&mut left, &mut right, 64));
     assert_eq!(path.plugin_lock_report().chain, LockStats::default());
@@ -48,11 +48,11 @@ fn a_missed_chain_is_counted_as_one_attempt_and_one_skip() {
         }
     );
     assert_eq!(report.chain.share(), 1.0);
-    // The inserts never ran, so their own counters stay at zero.
+    // The effects never ran, so their own counters stay at zero.
     assert_eq!(
-        report.inserts,
+        report.effects,
         vec![LockStats::default()],
-        "an insert counted a chunk it was kept out of"
+        "an effect counted a chunk it was kept out of"
     );
     drop(guard);
     // The next chunk finds the runtime parked: one more attempt, no new skip.
@@ -67,7 +67,7 @@ fn a_missed_chain_is_counted_as_one_attempt_and_one_skip() {
     path.reset_plugin_lock_counters();
     let report = path.plugin_lock_report();
     assert_eq!(report.chain, LockStats::default());
-    assert_eq!(report.inserts, vec![LockStats::default()]);
+    assert_eq!(report.effects, vec![LockStats::default()]);
     // Release the slot here: a slot left on the deferred-drop queue flaked
     // the parallel suite.
     path.edit_chain(|chain| chain.restore(Vec::new()));
@@ -148,8 +148,8 @@ fn chain_bypass_skips_the_callback_and_leaves_stored_bypass_alone() {
     assert_eq!(right[25], 1.0);
     assert_eq!(path.latency_samples(), 24);
     let report = path.plugin_lock_report();
-    assert_eq!(report.inserts[0], LockStats::default());
-    assert_eq!(report.inserts[1], LockStats::default());
+    assert_eq!(report.effects[0], LockStats::default());
+    assert_eq!(report.effects[1], LockStats::default());
     let saved = path.plugin_prefs();
     assert!(!saved[0].bypass);
     assert!(saved[1].bypass);
@@ -163,14 +163,14 @@ fn chain_bypass_skips_the_callback_and_leaves_stored_bypass_alone() {
     assert!(path.process_plugins(&mut left, &mut right, 64));
     let report = path.plugin_lock_report();
     assert_eq!(
-        report.inserts[0],
+        report.effects[0],
         LockStats {
             attempts: 1,
             skips: 0,
         },
-        "the insert processes again"
+        "the effect processes again"
     );
-    assert_eq!(report.inserts[1], LockStats::default());
+    assert_eq!(report.effects[1], LockStats::default());
     let saved = path.plugin_prefs();
     assert!(!saved[0].bypass);
     assert!(saved[1].bypass);

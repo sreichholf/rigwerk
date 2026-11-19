@@ -14,13 +14,13 @@
 //!
 //! Both reach the plugin through its [`PluginHandle`] (the UI-only lock the
 //! audio thread never takes), so an editor at work never makes the audio
-//! callback skip the insert.
+//! callback skip the effect.
 
 use crate::app::LogTone;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::app::paths::InsertKey;
+use crate::app::paths::EffectKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{
     ClapInstance, GuiVisibility, HostState, ParentWindow, ResizeHints, WindowApi,
@@ -29,8 +29,8 @@ use crate::audio::vst3::Vst3Editor;
 use crate::audio::{PluginHandle, PluginView};
 
 pub(crate) struct PluginGuiWindow {
-    /// The insert this editor belongs to: its path and its position there.
-    pub(crate) key: InsertKey,
+    /// The effect this editor belongs to: its path and its position there.
+    pub(crate) key: EffectKey,
     /// The plugin's path and class, so a rebuilt instance of the same
     /// plugin at this key (a layout reload) gets its editor back.
     plugin: (String, Option<String>),
@@ -47,12 +47,12 @@ enum GuiKind {
 
 impl PluginGuiWindow {
     /// The identity of the instance this editor belongs to, as the published
-    /// insert views report it.
+    /// effect views report it.
     fn instance_id(&self) -> usize {
         self.handle.instance_id()
     }
 
-    /// Whether the insert at this editor's key still holds its instance.
+    /// Whether the effect at this editor's key still holds its instance.
     /// Read from the published views, so polling an open editor every frame
     /// never waits for a chain edit.
     fn matches(&self, view: Option<&PluginView>) -> bool {
@@ -72,12 +72,12 @@ impl PluginGuiWindow {
 }
 
 impl RigWerkApp {
-    /// Opens the plugin's own interface for one insert, replacing any editor
+    /// Opens the plugin's own interface for one effect, replacing any editor
     /// that is already open.  Returns whether a window could be opened.
-    pub(crate) fn open_plugin_gui(&mut self, key: InsertKey) -> bool {
-        let InsertKey {
+    pub(crate) fn open_plugin_gui(&mut self, key: EffectKey) -> bool {
+        let EffectKey {
             path,
-            insert: index,
+            effect: index,
         } = key;
         self.engine.ensure_plugin_loaded(path, index);
         // Dropping the old window detaches its editor before the new one opens.
@@ -97,7 +97,7 @@ impl RigWerkApp {
         let plugin = view
             .map(|view| (view.path.clone(), view.class_id.clone()))
             .unwrap_or_default();
-        // With several paths the window title says whose insert it is.
+        // With several paths the window title says whose effect it is.
         let name = match self.paths.get(path).and_then(Option::as_ref) {
             Some(owner) if self.path_count() > 1 => format!("{name} · {}", owner.name),
             _ => name,
@@ -149,31 +149,25 @@ impl RigWerkApp {
         self.plugin_browser.notice = Some((message, Instant::now()));
     }
 
-    /// Closes the plugin's window, if one is open.  Dropping it detaches the
-    /// editor from its native window first, so nothing outlives the window.
-    pub(crate) fn close_plugin_gui(&mut self) {
-        self.finish_plugin_gui();
-    }
-
     /// Drops the editor after a last full sync, so whatever it changed
-    /// without reporting it reaches the saved insert and its state blob.
+    /// without reporting it reaches the saved effect and its state blob.
     /// The service frames already follow its edits and reported values.
     pub(crate) fn finish_plugin_gui(&mut self) {
         if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
-            self.engine.finish_plugin_editor(key.path, key.insert);
+            self.engine.finish_plugin_editor(key.path, key.effect);
         }
         self.plugin_gui = None;
     }
 
     /// Copies the open editor's current controls into the engine with a full
     /// read, without closing the editor.  Used before a save and before a
-    /// bridge starts: the save or the new session is built from the
-    /// insert's saved values and state blob, not from the open editor.  The
-    /// full sync marks the insert's saved state stale, so a later save
+    /// bridge starts: the save or the new run is built from the
+    /// effect's saved values and state blob, not from the open editor.  The
+    /// full sync marks the effect's saved state stale, so a later save
     /// captures it again.
     pub(crate) fn sync_plugin_editor(&self) {
         if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
-            self.engine.sync_plugin_parameters(key.path, key.insert);
+            self.engine.sync_plugin_parameters(key.path, key.effect);
         }
     }
 
@@ -181,7 +175,7 @@ impl RigWerkApp {
     /// resize, a scale change, and the editor's own size requests.  The
     /// plugin's main-thread work (edits, restarts, a VST3 editor's run
     /// loop, CLAP callbacks) is the engine's `service_plugins`, which the
-    /// frame runs too.  An editor whose insert went away is dropped; one
+    /// frame runs too.  An editor whose effect went away is dropped; one
     /// whose plugin was rebuilt in place (a layout reload) opens again on
     /// the new instance.
     pub(crate) fn poll_plugin_gui(&mut self) {
@@ -198,7 +192,7 @@ impl RigWerkApp {
                 GuiKind::Vst3 { window } => window.service(app_scale),
                 GuiKind::Clap { window } => window.service(app_scale),
             };
-            let view = views.get(key.insert);
+            let view = views.get(key.effect);
             (dismissed, gui.matches(view), gui.rebuilt(view))
         };
         if dismissed && same_plugin {

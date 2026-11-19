@@ -4,6 +4,9 @@ mod app;
 mod audio;
 mod ui;
 
+#[cfg(test)]
+mod tests;
+
 use std::path::PathBuf;
 
 fn parse_screenshot() -> Option<PathBuf> {
@@ -127,7 +130,7 @@ fn main() -> eframe::Result<()> {
         }
     }
     let size = if screenshot_mode {
-        app::screenshot::SCREENSHOT_INNER_SIZE
+        app::screenshot::screenshot_inner_size()
     } else {
         eframe::egui::vec2(1240.0, 820.0)
     };

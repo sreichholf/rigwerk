@@ -1,4 +1,4 @@
-//! VST3 and CLAP insert chains, one per signal path.
+//! VST3 and CLAP effect chains, one per signal path.
 //!
 //! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`] or
 //! the CLAP host in [`super::clap`]; each path's chain lives on that path in
@@ -7,7 +7,7 @@
 //!
 //! Each loaded plugin is split in two (`handle`): the processor the chain's
 //! slot runs on the audio thread, and the [`PluginHandle`] the UI reaches
-//! through the published insert links.  The handle keeps the views, the
+//! through the published effect links.  The handle keeps the views, the
 //! saved values and the state blob behind its own UI-only lock.
 //!
 //! Each chain is split the same way: the runtime the audio thread owns
@@ -34,7 +34,7 @@ mod tests;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The largest latency, in frames, one insert may report: the size the
+/// The largest latency, in frames, one effect may report: the size the
 /// alignment delay lines are built for (about 170 ms at 192 kHz).  A larger
 /// report is clamped, so a broken value cannot blow up the alignment.
 pub(crate) const MAX_ALIGN: u32 = 1 << 15;
@@ -57,7 +57,7 @@ pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
 #[cfg(test)]
 pub(crate) use chain::ChainRuntime;
-pub(crate) use chain::{ChainHome, ChainLease, MAX_INSERTS};
+pub(crate) use chain::{ChainHome, ChainLease, MAX_EFFECTS};
 pub(crate) use handle::PluginHandle;
 #[cfg(test)]
 pub(crate) use handle::{LoadedPlugin, Outcome, Saved};

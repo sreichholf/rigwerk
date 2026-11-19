@@ -7,7 +7,7 @@
 //! summary (the added latency on the Output chip) and Live Issues.
 //!
 //! Alignment lines up the paths on one device.  It does not line devices
-//! up with each other: a follower's cushion and every device's own buffer
+//! up with each other: an extra output's bridge buffer and every device's own buffer
 //! still differ.
 //!
 //! Warnings: two paths that sound on one channel of a device and arrive on
@@ -61,30 +61,6 @@ pub(crate) struct DeviceAlignment {
 }
 
 impl DeviceAlignment {
-    /// How far apart the earliest and the latest path arrive here, ms (0
-    /// with fewer than two paths).
-    pub(crate) fn spread_ms(&self) -> f32 {
-        let mut arrivals = self.arrival_ms.iter().flatten();
-        let Some(&first) = arrivals.next() else {
-            return 0.0;
-        };
-        let (min, max) = arrivals.fold((first, first), |(min, max), &arrival| {
-            (min.min(arrival), max.max(arrival))
-        });
-        max - min
-    }
-
-    /// How far apart the earliest and the latest path arrive here, frames.
-    pub(crate) fn spread_frames(&self) -> u32 {
-        let arrivals = self.arrival_frames.iter().flatten();
-        let max = arrivals.clone().max();
-        let min = arrivals.min();
-        match (min, max) {
-            (Some(min), Some(max)) => max - min,
-            _ => 0,
-        }
-    }
-
     /// How many paths the device plays.
     pub(crate) fn path_count(&self) -> usize {
         self.per_path.iter().flatten().count()
@@ -111,7 +87,7 @@ impl DeviceAlignment {
 
 impl RigWerkApp {
     /// What the alignment does on output device `device` (0 = clock
-    /// device, then followers).  From the running mixer when it has
+    /// output, then extra outputs).  From the running mixer when it has
     /// published one with the same switch (the engine only reports while a
     /// bridge runs and the device is fed), else worked out from the
     /// settings, the paths' chain latency and the plugin chains' rate.
@@ -130,18 +106,6 @@ impl RigWerkApp {
             self.engine.plugin_rate().max(1),
         );
         Some(DeviceAlignment::from_report(&report, false))
-    }
-
-    /// The most the alignment (and the trims) add on any output device, ms:
-    /// what the Live Output chip shows.  0 with one path.
-    pub(crate) fn added_alignment_ms(&self) -> f32 {
-        if self.path_count() < 2 {
-            return 0.0;
-        }
-        (0..self.device_settings().len())
-            .filter_map(|device| self.device_alignment(device))
-            .map(|alignment| alignment.added_ms)
-            .fold(0.0, f32::max)
     }
 
     /// Output device `device`'s align switch.
@@ -183,7 +147,7 @@ pub(crate) struct RoutingWarning {
 
 impl RigWerkApp {
     /// What the Signal Routing page should warn about on output device
-    /// `device` (0 = clock device, then followers).  Every live path counts,
+    /// `device` (0 = clock output, then extra outputs).  Every live path counts,
     /// muted or not: the routing decides, as for alignment.  Only paths
     /// that arrive on different frames (chain latency, alignment and trim)
     /// warn: `Sum` when they add up on one channel (also on an aligned

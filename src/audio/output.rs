@@ -15,6 +15,7 @@ use super::output_map::DeviceFrame;
 use super::record::{push_device_frame, RecordSource};
 use super::shared::Shared;
 use super::thread_priority::PromoteOnce;
+use super::types::OutputMode;
 #[cfg(target_os = "windows")]
 use super::win::wasapi;
 
@@ -46,7 +47,7 @@ pub(crate) enum OutputStream {
 
 /// Opens the playback side.
 ///
-/// On Windows, `exclusive` tries WASAPI exclusive mode first (clock device
+/// On Windows, `exclusive` tries WASAPI exclusive mode first (clock output
 /// only).  On refuse it falls back to shared cpal with `buffer_frames` — not
 /// REAL-style.  `real_style` opens IAudioClient3 at the driver's smallest
 /// shared engine step; on refuse it also falls back to shared cpal.
@@ -70,7 +71,12 @@ pub(crate) fn open_output(
         if id.host() == cpal::HostId::Wasapi {
             match wasapi::open_exclusive(id.id(), sample_rate, Arc::clone(shared)) {
                 Ok((stream, info)) => {
-                    shared.set_output(info.rate, info.step_frames, info.describe(sample_rate));
+                    shared.set_output(
+                        info.rate,
+                        info.step_frames,
+                        OutputMode::Exclusive,
+                        info.describe(sample_rate),
+                    );
                     return Ok(OpenedOutput {
                         _stream: OutputStream::Exclusive(stream),
                         rate: info.rate,
@@ -89,7 +95,12 @@ pub(crate) fn open_output(
         if id.host() == cpal::HostId::Wasapi {
             match wasapi::open(id.id(), sample_rate, Arc::clone(shared)) {
                 Ok((stream, info)) => {
-                    shared.set_output(info.rate, info.step_frames, info.describe(sample_rate));
+                    shared.set_output(
+                        info.rate,
+                        info.step_frames,
+                        OutputMode::RealStyle,
+                        info.describe(sample_rate),
+                    );
                     return Ok(OpenedOutput {
                         _stream: OutputStream::Real(stream),
                         rate: info.rate,
@@ -125,6 +136,19 @@ pub(crate) fn open_output(
     };
     #[cfg(not(target_os = "linux"))]
     let requested = clamp_output_buffer(&config, buffer_frames);
+    // What runs: a refused fixed buffer is the plain stream, whatever was
+    // asked for, and so is a refused Windows attempt.
+    #[cfg(target_os = "linux")]
+    let (asked, plain) = (
+        if real_style {
+            OutputMode::LowLatency
+        } else {
+            OutputMode::Standard
+        },
+        OutputMode::Standard,
+    );
+    #[cfg(not(target_os = "linux"))]
+    let (asked, plain) = (OutputMode::Shared, OutputMode::Shared);
     #[cfg(target_os = "linux")]
     let mode = |note: &str| {
         if real_style {
@@ -139,7 +163,7 @@ pub(crate) fn open_output(
             format!("Standard output{note} · Exclusive refused: {reason}")
         }
         Some((RefuseKind::RealStyle, reason)) => {
-            format!("Standard output{note} · REAL-style refused: {reason}")
+            format!("Standard output{note} · Shared, smallest buffer refused: {reason}")
         }
         None => format!("Standard output{note}"),
     };
@@ -151,13 +175,18 @@ pub(crate) fn open_output(
         Some(requested),
     ) {
         Ok(stream) => {
-            shared.set_output(rate, requested as u32, mode(""));
+            shared.set_output(rate, requested as u32, asked, mode(""));
             stream
         }
         Err(error) => {
             // A host or driver that cannot give us a fixed small buffer still
             // gets to play; the buffer request simply does not apply.
-            shared.set_output(rate, 0, mode(" · fixed buffer refused, driver default"));
+            shared.set_output(
+                rate,
+                0,
+                plain,
+                mode(" · fixed buffer refused, driver default"),
+            );
             make_output_stream(&device, config, channels, Arc::clone(shared), None).map_err(
                 |fallback| {
                     explain_output_error(format!("{error}; fallback failed too: {fallback}"))

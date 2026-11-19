@@ -256,3 +256,38 @@ fn detector_constants_are_sensible() {
     assert!(DETECTOR_ATTACK_MS < DETECTOR_RELEASE_MS);
     assert!(DETECTOR_ATTACK_MS <= 1.0);
 }
+
+#[test]
+fn the_reduction_is_the_deepest_gain_since_it_was_last_taken() {
+    let mut gate = loud_gate();
+    // Closed in silence: the full range.
+    run(&mut gate, 0.0, RATE as usize / 10);
+    let closed = gate.take_reduction_db();
+    assert!((closed - 60.0).abs() < 0.1, "closed {closed}");
+    // The first loud block counts the deep gain it opened from (one
+    // attack step above the floor).
+    run(&mut gate, 0.25, RATE as usize / 50);
+    let opening = gate.take_reduction_db();
+    assert!(opening > 20.0 && opening < closed, "opening {opening}");
+    // Open the whole block: next to nothing.
+    run(&mut gate, 0.25, RATE as usize / 50);
+    let open = gate.take_reduction_db();
+    assert!((0.0..0.5).contains(&open), "open {open}");
+    // Nothing processed since the last take.
+    assert_eq!(gate.take_reduction_db(), 0.0);
+}
+
+#[test]
+fn a_disabled_gate_reduces_nothing() {
+    let mut gate = loud_gate();
+    run(&mut gate, 0.0, RATE as usize / 10);
+    gate.update(
+        GateSettings {
+            enabled: false,
+            ..gate.settings()
+        },
+        RATE,
+    );
+    run(&mut gate, 0.0, RATE as usize / 10);
+    assert_eq!(gate.take_reduction_db(), 0.0);
+}

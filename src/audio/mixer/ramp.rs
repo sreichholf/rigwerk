@@ -1,9 +1,9 @@
-//! Per-sample control ramps and underrun fade helpers for the output mixer.
+//! Per-sample control ramps and dropout fade helpers for the output mixer.
 
 use super::route_frame;
 
-/// How long an underrun takes to fade the held frame to silence, and how long
-/// playback takes to fade back in once the cushion has refilled.  Long enough
+/// How long a dropout takes to fade the held frame to silence, and how long
+/// playback takes to fade back in once the bridge buffer has refilled.  Long enough
 /// that neither edge clicks, short enough not to smear the note around it.
 pub(crate) const DROPOUT_FADE_SECONDS: f32 = 0.0025;
 
@@ -156,7 +156,7 @@ impl PathRamps {
     }
 }
 
-/// One step of the underrun fade-out, snapping to 0 instead of stopping a
+/// One step of the dropout fade-out, snapping to 0 instead of stopping a
 /// rounding error above it.
 pub(crate) fn fade_down(gain: f32, step: f32) -> f32 {
     let next = gain - step;

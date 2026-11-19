@@ -20,13 +20,13 @@
 //! where it played; the next path in that slot overwrites them.
 
 use crate::app::chain::ChainSelection;
-use crate::app::settings::{default_path_name, FollowerPref, PathPref};
+use crate::app::settings::{default_path_name, ExtraOutputPref, PathPref};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{
-    low_bits, path_level_gain, sanitize_path_level, EqSettings, GateSettings, MapPreset,
-    OutputDeviceSettings, PathMapSettings, PathMix, PathState, UnusedChannels, MAX_OUTPUT_CHANNELS,
-    MAX_PATHS,
+    low_bits, path_level_gain, sanitize_path_level, EngineState, EqSettings, GateSettings,
+    MapPreset, OutputDeviceSettings, PathMapSettings, PathMix, PathState, UnusedChannels,
+    MAX_OUTPUT_CHANNELS, MAX_PATHS,
 };
 
 /// One live path's UI data (name, colour index) and the settings pushed to
@@ -63,12 +63,12 @@ impl Default for SignalPath {
     }
 }
 
-/// One plugin insert of one path: what plugin editors and GUI windows are
+/// One plugin effect of one path: what plugin editors and GUI windows are
 /// keyed by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct InsertKey {
+pub(crate) struct EffectKey {
     pub(crate) path: usize,
-    pub(crate) insert: usize,
+    pub(crate) effect: usize,
 }
 
 /// What the UI shows for one live path (sidebar entry, path chips, cards).
@@ -78,10 +78,10 @@ pub(crate) struct PathInfo {
     pub(crate) name: String,
     /// Index into the path palette.
     pub(crate) colour_index: u8,
-    /// Built-in stages that are on (pre EQ, gate, post EQ) plus inserts.
+    /// Built-in stages that are on (pre EQ, gate, post EQ) plus effects.
     pub(crate) stages: usize,
-    /// Plugin inserts on the path.
-    pub(crate) inserts: usize,
+    /// Plugin effects on the path.
+    pub(crate) effects: usize,
     /// Plugin latency of the chain, samples and ms at the running rate.
     pub(crate) latency_samples: u32,
     pub(crate) latency_ms: f32,
@@ -98,20 +98,16 @@ pub(crate) struct PathInfo {
     pub(crate) selected: bool,
 }
 
-impl PathInfo {
-    /// "3 stages · 1.3 ms" (plus " · muted"), the sidebar sub-line.
-    pub(crate) fn summary(&self) -> String {
-        let stages = if self.stages == 1 {
-            "1 stage".to_owned()
-        } else {
-            format!("{} stages", self.stages)
-        };
-        let mut text = format!("{stages} · {:.1} ms", self.latency_ms);
-        if self.mute {
-            text.push_str(" · muted");
+/// The slot with the most DSP time of `(slot, average ns)`; the first of
+/// a tie.  `None` when nothing was measured.
+pub(crate) fn heaviest_path(times: &[(usize, u64)]) -> Option<usize> {
+    let mut heaviest: Option<(usize, u64)> = None;
+    for &(slot, time) in times {
+        if heaviest.is_none_or(|(_, most)| time > most) {
+            heaviest = Some((slot, time));
         }
-        text
     }
+    heaviest.filter(|(_, most)| *most > 0).map(|(slot, _)| slot)
 }
 
 impl RigWerkApp {
@@ -182,14 +178,14 @@ impl RigWerkApp {
     }
 
     /// Makes `slot` the path the Mixer and Plugins pages edit.  The Mixer's
-    /// insert selection and the next insert position belong to a path, so
+    /// effect selection and the next effect position belong to a path, so
     /// they are reset when the path changes.
     pub(crate) fn select_path(&mut self, slot: usize) -> bool {
         if !self.paths.get(slot).is_some_and(Option::is_some) {
             return false;
         }
         if slot != self.selected_path {
-            self.plugin_insert_at = None;
+            self.plugin_effect_at = None;
             if let ChainSelection::Plugin(index) = self.chain_selected {
                 if index >= self.engine.plugin_views(slot).len() {
                     self.chain_selected = ChainSelection::Plugins;
@@ -213,7 +209,7 @@ impl RigWerkApp {
             .into_iter()
             .filter_map(|slot| {
                 let path = self.paths[slot].as_ref()?;
-                let inserts = self.engine.plugin_views(slot).len();
+                let effects = self.engine.plugin_views(slot).len();
                 let mix = &path.mix;
                 let builtins = [
                     mix.eqs[0].is_active(),
@@ -228,8 +224,8 @@ impl RigWerkApp {
                     slot,
                     name: path.name.clone(),
                     colour_index: path.colour,
-                    stages: builtins + inserts,
-                    inserts,
+                    stages: builtins + effects,
+                    effects,
                     latency_samples,
                     latency_ms: latency_samples as f32 * 1000.0 / rate as f32,
                     level_db: mix.level_db,
@@ -244,12 +240,38 @@ impl RigWerkApp {
             .collect()
     }
 
+    /// Path `slot`'s gate gain reduction in dB from the live snapshot: the
+    /// deepest of the last block, 0 while the gate is open or off, and
+    /// while no bridge runs.
+    #[cfg_attr(not(test), allow(dead_code))] // For the gate sheet's meter.
+    pub(crate) fn gate_reduction_db(&self, slot: usize) -> f32 {
+        if self.engine.state != EngineState::Running {
+            return 0.0;
+        }
+        self.snapshot
+            .gate_reduction_db
+            .get(slot)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
     /// Whether another path fits (a slot is free in the app and the
     /// engine has finished any fade-out there).
     pub(crate) fn can_add_path(&self) -> bool {
         (0..MAX_PATHS).any(|slot| {
             self.paths[slot].is_none() && self.engine.path_state(slot) == PathState::Inactive
         })
+    }
+
+    /// Why another path does not fit, or `None` while one does.
+    pub(crate) fn add_path_blocker(&self) -> Option<&'static str> {
+        if self.can_add_path() {
+            None
+        } else if self.path_count() >= MAX_PATHS {
+            Some("Four paths is the most RigWerk runs.")
+        } else {
+            Some("A removed path is still fading out. Try again in a moment.")
+        }
     }
 
     /// The first palette colour no live path uses.
@@ -338,7 +360,7 @@ impl RigWerkApp {
         if let Some(key) = self.plugin_gui.as_ref().map(|gui| gui.key) {
             if key.path == source {
                 // What the plugin's own window changed since its last sync.
-                self.engine.finish_plugin_editor(key.path, key.insert);
+                self.engine.finish_plugin_editor(key.path, key.effect);
             }
         }
         let slot = self.engine.duplicate_path(source)?;
@@ -420,11 +442,6 @@ impl RigWerkApp {
         self.path_mut().mix.gate = gate;
     }
 
-    /// One cell of the edited path's input matrix.
-    pub(crate) fn set_path_route(&mut self, input: usize, side: usize, on: bool) {
-        self.path_mut().mix.routes[input][side] = on;
-    }
-
     /// Mono sum for one path slot.
     pub(crate) fn set_path_mono(&mut self, slot: usize, mono: bool) {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
@@ -432,17 +449,12 @@ impl RigWerkApp {
         }
     }
 
-    /// Mono sum for the edited path.
-    pub(crate) fn set_edited_mono(&mut self, mono: bool) {
-        self.path_mut().mix.mono = mono;
-    }
-
     /// The edited path's output-channel enables.
     pub(crate) fn set_path_output_enabled(&mut self, enabled: [bool; 2]) {
         self.path_mut().mix.output_enabled = enabled;
     }
 
-    /// Skips every insert on the selected path.  Each insert's own bypass
+    /// Skips every effect on the selected path.  Each effect's own bypass
     /// is left as it is.  Pushed now, so the audio thread sees it before
     /// the next frame.
     pub(crate) fn set_chain_bypass(&mut self, bypass: bool) {
@@ -495,20 +507,90 @@ impl RigWerkApp {
         }
     }
 
-    /// The output devices' settings (0 = clock device, then followers).
+    /// What the *Source* button reads: the inputs feeding path `slot` and
+    /// *mono* or *stereo* (`In 1 · mono`, `In 1 + In 2 · stereo`), then
+    /// `· L only` or `· R only` while one path output is off.
+    pub(crate) fn source_label(&self, slot: usize) -> String {
+        let Some(path) = self.paths.get(slot).and_then(Option::as_ref) else {
+            return String::new();
+        };
+        let mix = &path.mix;
+        let fed = |input: usize| mix.routes[input][0] || mix.routes[input][1];
+        let inputs = match (fed(0), fed(1)) {
+            (true, true) => "In 1 + In 2",
+            (true, false) => "In 1",
+            (false, true) => "In 2",
+            (false, false) => "No input",
+        };
+        let mut label = format!("{inputs} · {}", if mix.mono { "mono" } else { "stereo" });
+        match mix.output_enabled {
+            [true, false] => label.push_str(" · L only"),
+            [false, true] => label.push_str(" · R only"),
+            [false, false] => label.push_str(" · silent"),
+            [true, true] => {}
+        }
+        label
+    }
+
+    /// One cell of path `slot`'s source grid: whether input `input` (0 is
+    /// *In 1*) feeds its `side` (0 is L).
+    pub(crate) fn set_path_source(&mut self, slot: usize, input: usize, side: usize, on: bool) {
+        if input >= 2 || side >= 2 {
+            return;
+        }
+        if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
+            path.mix.routes[input][side] = on;
+        }
+    }
+
+    /// *Remove* in a path's name menu, a two-click confirm: the first click
+    /// arms it (`false`), the second removes the path (`true` once it is
+    /// gone).  Arming another path disarms the first.
+    pub(crate) fn request_remove_path(&mut self, slot: usize) -> bool {
+        if self.chrome.remove_confirm != Some(slot) {
+            self.chrome.remove_confirm = Some(slot);
+            return false;
+        }
+        self.chrome.remove_confirm = None;
+        self.remove_path(slot)
+    }
+
+    /// The path whose strip carries the DSP marker: the one with the
+    /// largest share of the block, while the total DSP alarm is raised.
+    pub(crate) fn dsp_marker_path(&self) -> Option<usize> {
+        self.issue_state.dsp.severity()?;
+        let times: Vec<(usize, u64)> = self
+            .path_slots()
+            .into_iter()
+            .filter_map(|slot| Some((slot, u64::from(self.engine.path_dsp_time(slot)?.avg_ns))))
+            .collect();
+        heaviest_path(&times)
+    }
+
+    /// Whether a shown issue is anchored to path `slot`, or to a stage on it.
+    pub(crate) fn path_has_issue(&self, slot: usize) -> bool {
+        self.anchor_severity(crate::app::issues::Anchor::Path(slot))
+            .is_some()
+    }
+
+    /// The output devices' settings (0 = clock output, then extra outputs).
     pub(crate) fn device_settings(&self) -> Vec<&OutputDeviceSettings> {
-        std::iter::once(&self.clock_device)
-            .chain(self.followers.iter().map(|follower| &follower.settings))
+        std::iter::once(&self.clock_output)
+            .chain(
+                self.extra_outputs
+                    .iter()
+                    .map(|extra_output| &extra_output.settings),
+            )
             .collect()
     }
 
     pub(super) fn device_settings_mut(
         &mut self,
     ) -> impl Iterator<Item = &mut OutputDeviceSettings> {
-        std::iter::once(&mut self.clock_device).chain(
-            self.followers
+        std::iter::once(&mut self.clock_output).chain(
+            self.extra_outputs
                 .iter_mut()
-                .map(|follower| &mut follower.settings),
+                .map(|extra_output| &mut extra_output.settings),
         )
     }
 
@@ -520,7 +602,7 @@ impl RigWerkApp {
     }
 
     /// Whether path `slot`'s own map reaches some channel of output device
-    /// `device` (0 = clock device, then followers).  The mono copy on
+    /// `device` (0 = clock output, then extra outputs).  The mono copy on
     /// unreached channels does not count.
     pub(crate) fn path_reaches_device(&self, slot: usize, device: usize) -> bool {
         if slot >= MAX_PATHS || self.paths[slot].is_none() {
@@ -533,14 +615,14 @@ impl RigWerkApp {
     }
 
     /// Path `slot`'s map, level, polarity and trim on output device
-    /// `device` (0 = clock device, then followers).
+    /// `device` (0 = clock output, then extra outputs).
     pub(crate) fn device_path_map(&self, device: usize, slot: usize) -> Option<PathMapSettings> {
         let settings = self.device_settings().get(device).copied()?;
         settings.path_map.get(slot).copied()
     }
 
     /// Puts music on channels 1 and 2 and the click alone on 3 and 4 of
-    /// output device `device` (0 = clock, then followers).  An unrouted
+    /// output device `device` (0 = clock, then extra outputs).  An unrouted
     /// path stays unrouted.  Level, mute, alignment, trims and polarity
     /// stay.  Bits of the click mask at or past the device width stay too.
     pub(crate) fn apply_click_pair(&mut self, device: usize) {
@@ -563,7 +645,7 @@ impl RigWerkApp {
     }
 
     /// Puts the click on channel `channel` of output device `device` (0 =
-    /// clock, then followers), or takes it off.  Only that bit of the click
+    /// clock, then extra outputs), or takes it off.  Only that bit of the click
     /// mask moves; routing is unchanged.  The frame pushes it with the
     /// device settings.
     pub(crate) fn set_click_channel(&mut self, device: usize, channel: usize, on: bool) {
@@ -582,7 +664,7 @@ impl RigWerkApp {
     }
 
     /// Sets path `slot`'s map, level, polarity and trim on output device
-    /// `device` (0 = clock device, then followers).  Live, crossfaded.
+    /// `device` (0 = clock output, then extra outputs).  Live, crossfaded.
     pub(crate) fn set_device_path_map(
         &mut self,
         device: usize,
@@ -606,14 +688,14 @@ impl RigWerkApp {
         }
     }
 
-    /// Pushes the clock device and the followers to the engine.
+    /// Pushes the clock output and the extra outputs to the engine.
     pub(crate) fn push_devices_to_engine(&mut self) {
-        self.engine.set_clock_device(&self.clock_device);
-        self.push_followers_to_engine();
+        self.engine.set_clock_output(&self.clock_output);
+        self.push_extra_outputs_to_engine();
     }
 
-    /// Replaces every path with `prefs` (a loaded session or patch) and the
-    /// output devices with `clock` and `followers`, whose `path_map` is in
+    /// Replaces every path with `prefs` (a loaded session) and the
+    /// output devices with `clock` and `extra_outputs`, whose `path_map` is in
     /// the order of `prefs`.  The paths reuse the live slots first, in
     /// display order (so a live path just changes its settings, with the
     /// usual ramps), then free slots.  Live paths left over are removed with
@@ -624,7 +706,7 @@ impl RigWerkApp {
         &mut self,
         prefs: &[PathPref],
         clock: OutputDeviceSettings,
-        followers: Vec<FollowerPref>,
+        extra_outputs: Vec<ExtraOutputPref>,
         selected: usize,
     ) {
         let prefs: Vec<PathPref> = if prefs.is_empty() {
@@ -636,7 +718,7 @@ impl RigWerkApp {
         self.finish_plugin_gui();
         self.plugin_editor = None;
         self.plugin_param_filter.clear();
-        self.plugin_insert_at = None;
+        self.plugin_effect_at = None;
 
         // Live in the app, then live only in the engine (a fresh start),
         // then free, then still fading out.
@@ -675,18 +757,18 @@ impl RigWerkApp {
             }
             out
         };
-        let old_followers: Vec<OutputDeviceSettings> = self
-            .followers
+        let old_extra_outputs: Vec<OutputDeviceSettings> = self
+            .extra_outputs
             .iter()
-            .map(|follower| follower.settings)
+            .map(|extra_output| extra_output.settings)
             .collect();
-        self.clock_device = remap(&clock, Some(&self.clock_device));
-        self.followers = followers
+        self.clock_output = remap(&clock, Some(&self.clock_output));
+        self.extra_outputs = extra_outputs
             .into_iter()
             .enumerate()
-            .map(|(index, follower)| FollowerPref {
-                settings: remap(&follower.settings, old_followers.get(index)),
-                ..follower
+            .map(|(index, extra_output)| ExtraOutputPref {
+                settings: remap(&extra_output.settings, old_extra_outputs.get(index)),
+                ..extra_output
             })
             .collect();
 
@@ -719,7 +801,7 @@ impl RigWerkApp {
     /// the slot order they are saved in (the display order).
     ///
     /// The open editor is read in full first: a plugin may change a value
-    /// without reporting it, and the save lists the inserts from what that
+    /// without reporting it, and the save lists the effects from what that
     /// read stored.  No editor open makes this a no-op.
     pub(crate) fn saved_paths(&self) -> (Vec<PathPref>, Vec<usize>) {
         self.sync_plugin_editor();
@@ -740,22 +822,22 @@ impl RigWerkApp {
         order.iter().position(|&slot| slot == selected).unwrap_or(0)
     }
 
-    /// The clock device and the followers with `path_map` compacted to the
+    /// The clock output and the extra outputs with `path_map` compacted to the
     /// saved path order.
     pub(crate) fn saved_devices(
         &self,
         order: &[usize],
-    ) -> (OutputDeviceSettings, Vec<FollowerPref>) {
-        let clock = self.clock_device.with_path_order(order);
-        let followers = self
-            .followers
+    ) -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
+        let clock = self.clock_output.with_path_order(order);
+        let extra_outputs = self
+            .extra_outputs
             .iter()
-            .map(|follower| FollowerPref {
-                settings: follower.settings.with_path_order(order),
-                ..follower.clone()
+            .map(|extra_output| ExtraOutputPref {
+                settings: extra_output.settings.with_path_order(order),
+                ..extra_output.clone()
             })
             .collect();
-        (clock, followers)
+        (clock, extra_outputs)
     }
 }
 

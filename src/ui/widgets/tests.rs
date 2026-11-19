@@ -1,7 +1,6 @@
-use super::{db_slider, nav_item, node_named, nudge_slider, run_frame, styled_slider, test_input};
-use crate::ui::icons::Icon;
+use super::{node_named, nudge_slider, run_frame, styled_slider, test_input};
 use crate::ui::theme::TEAL;
-use eframe::egui::{self, accesskit::Toggled};
+use eframe::egui;
 
 fn near(actual: f32, expected: f32) {
     assert!((actual - expected).abs() < 1.0e-4, "{actual} != {expected}");
@@ -18,26 +17,15 @@ fn arrow_steps_follow_the_slider_step_and_stay_inside_the_range() {
 }
 
 #[test]
-fn nav_row_exposes_its_name_and_selected_value() {
-    let tree = super::accesskit_frame(|ui| {
-        assert!(!nav_item(ui, Icon::Wave, "Live", "Bridge", true));
-    });
-    let node = node_named(&tree, "Live");
-    assert_eq!(node.role(), egui::Role::Button);
-    assert_eq!(node.value(), Some("Bridge"));
-    assert_eq!(node.toggled(), Some(Toggled::True));
-}
-
-#[test]
-fn gain_slider_exposes_a_name_and_decibel_value() {
+fn slider_exposes_a_name_and_numeric_value() {
     let mut value = -3.0f32;
     let tree = super::accesskit_frame(|ui| {
-        assert!(!db_slider(ui, &mut value, -12.0, 12.0, TEAL));
+        assert!(!styled_slider(ui, &mut value, -12.0, 12.0, 0.1, (TEAL, "Gain")).changed());
     });
     let node = node_named(&tree, "Gain");
     assert_eq!(node.role(), egui::Role::Slider);
     assert_eq!(node.numeric_value(), Some(-3.0));
-    assert_eq!(node.value(), Some("-3.0 dB"));
+    assert_eq!(node.value(), Some("-3.0"));
     assert_eq!(node.min_numeric_value(), Some(-12.0));
     assert_eq!(node.max_numeric_value(), Some(12.0));
 }

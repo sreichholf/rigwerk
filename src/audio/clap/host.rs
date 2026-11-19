@@ -163,7 +163,7 @@ pub(crate) struct HostState {
     /// plugin that is not processing is flushed by the main-thread service.
     pub(super) flush_requested: AtomicBool,
     /// Set once the port buffers are built: from then on a rescan that
-    /// changes the ports stops the insert (see `host_audio_ports_rescan`).
+    /// changes the ports stops the effect (see `host_audio_ports_rescan`).
     pub(super) ports_fixed: AtomicBool,
     pub(super) gui_closed: AtomicBool,
     pub(super) gui_resize: AtomicU64,
@@ -522,7 +522,7 @@ pub(super) static HOST_AUDIO_PORTS: clap_host_audio_ports = clap_host_audio_port
 
 /// Every rescan flag is "supported" in the only way RigWerk can: the buffers
 /// are fixed once the plugin is active.  A request that changes the port
-/// layout or channel counts stops the insert until it is loaded again (see
+/// layout or channel counts stops the effect until it is loaded again (see
 /// `process`); requests about names, port type, or in-place pairing are
 /// absorbed without touching the buffers.
 pub(super) unsafe extern "C" fn host_audio_ports_flag_supported(
@@ -534,7 +534,7 @@ pub(super) unsafe extern "C" fn host_audio_ports_flag_supported(
 
 /// Asks for a reload when the change would make the port buffers wrong.
 /// Only a flag is set, so nothing is reallocated under the audio thread;
-/// the path rebuilds the insert with the new ports.  Before
+/// the path rebuilds the effect with the new ports.  Before
 /// the buffers are built (during load) a rescan is harmless: the ports are
 /// read after it.
 pub(super) unsafe extern "C" fn host_audio_ports_rescan(host: *const clap_host, flags: u32) {

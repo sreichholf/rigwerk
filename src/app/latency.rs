@@ -13,8 +13,9 @@
 
 use serde::Deserialize;
 
+use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
-use crate::audio::MAX_ROUND_TRIP_MS;
+use crate::audio::{OutputMode, MAX_ROUND_TRIP_MS};
 
 /// How the person closed the loop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
@@ -216,10 +217,6 @@ pub(crate) fn display_name(name: &str, id: &str) -> String {
     }
 }
 
-pub(crate) fn rate_label(rate: u32) -> String {
-    format!("{:.1} kHz", rate as f32 / 1000.0)
-}
-
 /// Formats Unix seconds as `YYYY-MM-DD HH:MM UTC`, without a date crate.
 /// The civil-date arithmetic is Howard Hinnant's `civil_from_days`.
 pub(crate) fn utc_stamp(unix_secs: u64) -> String {
@@ -270,69 +267,81 @@ impl RigWerkApp {
     /// for: a refused exclusive or low-latency open is the fallback.  The
     /// long status line stays display-only.
     pub(crate) fn output_mode_key(&self) -> &'static str {
+        output_mode_key(self.output_mode())
+    }
+
+    /// The mode the clock output runs in: the one the driver published while
+    /// the bridge runs, otherwise the one the settings ask for.
+    pub(crate) fn output_mode(&self) -> OutputMode {
         if self.engine.state == crate::audio::EngineState::Running {
-            if let Some(opened) = opened_output_mode_key(&self.snapshot.output_mode) {
+            if let Some(opened) = self.snapshot.opened_output_mode {
                 return opened;
             }
         }
-        self.requested_output_mode_key()
+        self.requested_output_mode()
     }
 
     /// The mode the settings ask for, used before the driver has published
     /// what it opened and while the bridge is stopped.
-    fn requested_output_mode_key(&self) -> &'static str {
+    fn requested_output_mode(&self) -> OutputMode {
         if self.selected_output().asio_clsid.is_some() {
-            return "asio";
+            return OutputMode::Asio;
         }
         let (real_style, exclusive) = self.output_start_flags();
         if cfg!(target_os = "windows") {
             if exclusive {
-                "exclusive"
+                OutputMode::Exclusive
             } else if real_style {
-                "real-style"
+                OutputMode::RealStyle
             } else {
-                "shared"
+                OutputMode::Shared
             }
         } else if real_style {
-            "low-latency"
+            OutputMode::LowLatency
         } else {
-            "standard"
+            OutputMode::Standard
         }
     }
 }
 
-/// The comparison token for a mode string the driver published.  `None`
-/// when nothing has been published yet.  A line that says the attempt was
-/// refused names the fallback that is actually running, not the request.
-fn opened_output_mode_key(mode: &str) -> Option<&'static str> {
-    opened_output_mode_key_on(mode, cfg!(target_os = "windows"))
+/// The comparison token stored in [`MeasuredLatency::output_mode`].  Saved
+/// measurements hold these strings, so a token never changes, even when the
+/// mode's label does.
+pub(crate) fn output_mode_key(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Standard => "standard",
+        OutputMode::LowLatency => "low-latency",
+        OutputMode::Shared => "shared",
+        OutputMode::RealStyle => "real-style",
+        OutputMode::Exclusive => "exclusive",
+        OutputMode::Asio => "asio",
+    }
 }
 
-pub(crate) fn opened_output_mode_key_on(mode: &str, windows: bool) -> Option<&'static str> {
-    let mode = mode.trim();
-    if mode.is_empty() {
-        return None;
+/// The mode a stored key names.  Unknown keys are not a mode.
+pub(crate) fn output_mode_from_key(key: &str) -> Option<OutputMode> {
+    Some(match key {
+        "standard" => OutputMode::Standard,
+        "low-latency" => OutputMode::LowLatency,
+        "shared" => OutputMode::Shared,
+        "real-style" => OutputMode::RealStyle,
+        "exclusive" => OutputMode::Exclusive,
+        "asio" => OutputMode::Asio,
+        _ => return None,
+    })
+}
+
+/// The output mode as Setup and the Live readings say it.  The stored key
+/// stays [`output_mode_key`].
+pub(crate) fn output_mode_phrase(mode: OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Standard => "Standard",
+        OutputMode::LowLatency => "Low latency",
+        OutputMode::Shared => crate::audio::WasapiOutputMode::Shared.label(),
+        OutputMode::RealStyle => crate::audio::WasapiOutputMode::RealStyle.label(),
+        OutputMode::Exclusive => crate::audio::WasapiOutputMode::Exclusive.label(),
+        OutputMode::Asio => "ASIO",
     }
-    let fallback = if windows { "shared" } else { "standard" };
-    if mode.contains("refused") {
-        return Some(fallback);
-    }
-    if mode.starts_with("ASIO") {
-        return Some("asio");
-    }
-    if mode.starts_with("Exclusive") {
-        return Some("exclusive");
-    }
-    if mode.starts_with("REAL") {
-        return Some("real-style");
-    }
-    if mode.starts_with("Low latency") {
-        return Some("low-latency");
-    }
-    if mode.starts_with("Shared") || mode.starts_with("Standard") || mode.starts_with("PipeWire") {
-        return Some(fallback);
-    }
-    None
 }
 
 #[cfg(test)]

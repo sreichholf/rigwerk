@@ -29,7 +29,7 @@ fn restore_prefers_id_over_a_renamed_display() {
     let asio = restore_device(&outputs, "asio-out:abc", "ASIO", "Speakers");
     assert_eq!(asio, DeviceRestore::ById(1));
 
-    // Preset input: the saved id is the system device, even though the
+    // Session input: the saved id is the system device, even though the
     // low-latency list is searched first and still shows the old name.
     let low_latency = vec![item("asio:abc", "Focusrite", "ASIO")];
     let system = vec![item("wasapi:{mic}", "Focusrite USB", "WASAPI")];

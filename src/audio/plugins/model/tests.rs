@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::super::chain::MAX_INSERTS;
+use super::super::chain::MAX_EFFECTS;
 use super::super::pref::PluginPref;
 use super::super::slot::Slot;
 use super::ChainModel;
@@ -12,7 +12,7 @@ fn model() -> ChainModel {
 
 fn pref(index: usize) -> PluginPref {
     PluginPref {
-        name: format!("insert {index}"),
+        name: format!("effect {index}"),
         ..PluginPref::default()
     }
 }
@@ -26,13 +26,13 @@ fn a_rate_of_zero_is_48_khz() {
 }
 
 #[test]
-fn a_restore_keeps_at_most_max_inserts() {
+fn a_restore_keeps_at_most_max_effects() {
     let mut model = model();
-    model.restore((0..MAX_INSERTS + 3).map(pref).collect());
-    assert_eq!(model.links().len(), MAX_INSERTS);
+    model.restore((0..MAX_EFFECTS + 3).map(pref).collect());
+    assert_eq!(model.links().len(), MAX_EFFECTS);
     assert_eq!(
-        model.links()[MAX_INSERTS - 1].base.name,
-        format!("insert {}", MAX_INSERTS - 1)
+        model.links()[MAX_EFFECTS - 1].base.name,
+        format!("effect {}", MAX_EFFECTS - 1)
     );
     assert!(model.is_full());
     drop(model.flush());
@@ -41,14 +41,14 @@ fn a_restore_keeps_at_most_max_inserts() {
 #[test]
 fn a_full_chain_hands_the_slot_back() {
     let mut model = model();
-    model.restore((0..MAX_INSERTS).map(pref).collect());
+    model.restore((0..MAX_EFFECTS).map(pref).collect());
     let Err(slot) = model.push(Slot::empty(pref(99))) else {
-        panic!("a full chain took another insert");
+        panic!("a full chain took another effect");
     };
-    assert_eq!(slot.pref.name, "insert 99");
+    assert_eq!(slot.pref.name, "effect 99");
     model.remove(0);
     assert!(model.push(Slot::empty(pref(99))).is_ok());
-    assert_eq!(model.links().len(), MAX_INSERTS);
+    assert_eq!(model.links().len(), MAX_EFFECTS);
     drop(model.flush());
 }
 
@@ -64,14 +64,14 @@ fn a_move_is_clamped_to_the_chain() {
         .iter()
         .map(|link| link.base.name.as_str())
         .collect();
-    assert_eq!(names, ["insert 0", "insert 1", "insert 2"]);
+    assert_eq!(names, ["effect 0", "effect 1", "effect 2"]);
     model.move_slot(2, -1);
     let names: Vec<&str> = model
         .links()
         .iter()
         .map(|link| link.base.name.as_str())
         .collect();
-    assert_eq!(names, ["insert 0", "insert 2", "insert 1"]);
+    assert_eq!(names, ["effect 0", "effect 2", "effect 1"]);
     drop(model.flush());
 }
 

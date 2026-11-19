@@ -6,8 +6,8 @@ use eframe::App;
 
 use crate::ui::widgets::{run_frame, test_input};
 
-use super::settings::FollowerPref;
-use super::settings::{load_preferences, Preferences, Preset, PREFERENCES_KEY};
+use super::settings::ExtraOutputPref;
+use super::settings::{load_preferences, Preferences, Session, PREFERENCES_KEY};
 use super::startup::{restore_saved_devices, StartupGate};
 use super::{blank_app, repaint_interval, ACTIVE_REPAINT, IDLE_REPAINT};
 use crate::audio::{
@@ -149,7 +149,7 @@ fn record_the_click_reaches_the_engine_and_the_save() {
 #[test]
 fn save_writes_the_output_devices() {
     let mut app = blank_app();
-    app.clock_device = OutputDeviceSettings {
+    app.clock_output = OutputDeviceSettings {
         level_db: -9.0,
         mute: true,
         path_map: crate::audio::PathMapSettings::first(ChannelMap {
@@ -160,16 +160,16 @@ fn save_writes_the_output_devices() {
         align: false,
         click_mask: 0,
     };
-    app.followers = vec![FollowerPref {
+    app.extra_outputs = vec![ExtraOutputPref {
         id: "hw:Phones".to_owned(),
         backend: "ALSA".to_owned(),
         name: "Phones".to_owned(),
-        cushion_mode: 1,
-        ..FollowerPref::default()
+        bridge_buffer_mode: 1,
+        ..ExtraOutputPref::default()
     }];
     let (_, saved) = save_text(&mut app);
-    assert_eq!(saved.clock_device, app.clock_device);
-    assert_eq!(saved.followers, app.followers);
+    assert_eq!(saved.clock_output, app.clock_output);
+    assert_eq!(saved.extra_outputs, app.extra_outputs);
 }
 
 #[test]
@@ -346,10 +346,10 @@ fn an_explicit_output_pick_replaces_the_held_identity() {
 }
 
 #[test]
-fn a_preset_that_finds_the_output_may_be_saved() {
+fn a_session_that_finds_the_output_may_be_saved() {
     let mut app = absent_studio();
     assert!(app.output_held.is_some());
-    app.sessions.push(Preset {
+    app.sessions.push(Session {
         name: "Phones".to_owned(),
         input: "Other interface".to_owned(),
         input_id: "asio:other".to_owned(),
@@ -357,9 +357,9 @@ fn a_preset_that_finds_the_output_may_be_saved() {
         output: "Headphones".to_owned(),
         output_id: "phones".to_owned(),
         output_backend: "WASAPI".to_owned(),
-        ..Preset::default()
+        ..Session::default()
     });
-    app.apply_preset(0);
+    app.apply_session(0);
     assert!(app.output_held.is_none());
     assert!(app.asio_held.is_none());
     assert_eq!(app.selected_output().id, "phones");
@@ -371,9 +371,9 @@ fn a_preset_that_finds_the_output_may_be_saved() {
 }
 
 #[test]
-fn a_preset_that_misses_the_device_keeps_the_stored_id() {
+fn a_session_that_misses_the_device_keeps_the_stored_id() {
     let mut app = absent_studio();
-    app.sessions.push(Preset {
+    app.sessions.push(Session {
         name: "Gone".to_owned(),
         input: "Missing interface".to_owned(),
         input_id: "asio:missing".to_owned(),
@@ -381,9 +381,9 @@ fn a_preset_that_misses_the_device_keeps_the_stored_id() {
         output: "Missing monitors".to_owned(),
         output_id: "asio-out:nope".to_owned(),
         output_backend: "ASIO".to_owned(),
-        ..Preset::default()
+        ..Session::default()
     });
-    app.apply_preset(0);
+    app.apply_session(0);
     assert_eq!(
         app.output_held.as_ref().map(|held| held.id.as_str()),
         Some("asio-out:studio")
@@ -653,4 +653,95 @@ fn panic_chord_does_not_toggle_while_a_text_edit_has_focus() {
     });
     assert!(!app.mute, "typing is not a mute");
     assert!(kept_the_key, "the text edit keeps the key");
+}
+
+/// One key press with Ctrl (Command on macOS also sets `command`).
+fn ctrl_key(key: egui::Key, shift: bool) -> egui::RawInput {
+    let mut modifiers = egui::Modifiers::COMMAND.plus(egui::Modifiers::CTRL);
+    if shift {
+        modifiers = modifiers.plus(egui::Modifiers::SHIFT);
+    }
+    let mut input = test_input(None);
+    input.events.push(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    });
+    input
+}
+
+fn press_size_key(app: &mut super::RigWerkApp, ctx: &egui::Context, input: egui::RawInput) {
+    let handle = ctx.clone();
+    let _ = run_frame(ctx, input, |_| app.handle_size_keys(&handle));
+}
+
+#[test]
+fn ctrl_plus_minus_and_zero_change_the_saved_size() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Plus, true));
+    assert_eq!(app.ui_size, 1.1, "Ctrl++ (Shift and = on most layouts)");
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Equals, false));
+    assert_eq!(app.ui_size, 1.2, "Ctrl and = is Ctrl++ without Shift");
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Minus, false));
+    assert_eq!(app.ui_size, 1.1);
+    for _ in 0..10 {
+        press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Plus, true));
+    }
+    assert_eq!(app.ui_size, 1.5, "stops at 150 %");
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Num0, false));
+    assert_eq!(app.ui_size, 1.0);
+    let _ = run_frame(&ctx, test_input(None), |_| {});
+    assert_eq!(ctx.zoom_factor(), 1.0);
+
+    press_size_key(&mut app, &ctx, ctrl_key(egui::Key::Minus, false));
+    let (_, saved) = save_text(&mut app);
+    assert_eq!(saved.ui_size, 0.9, "the size is saved with the preferences");
+}
+
+#[test]
+fn the_size_keys_need_ctrl() {
+    let mut app = blank_app();
+    let ctx = egui::Context::default();
+    press_size_key(&mut app, &ctx, test_input(Some(egui::Key::Minus)));
+    assert_eq!(app.ui_size, 1.0);
+}
+
+#[test]
+fn the_theme_is_saved_with_the_preferences() {
+    let mut app = blank_app();
+    app.theme = super::appearance::ThemeChoice::Light;
+    let (raw, saved) = save_text(&mut app);
+    assert_eq!(saved.theme, super::appearance::ThemeChoice::Light);
+    assert!(raw.contains("theme:Light"), "{raw}");
+}
+
+#[test]
+fn a_run_opens_the_console_unless_it_names_another_page() {
+    use super::{page_for_run, Page};
+    assert_eq!(page_for_run("console"), Page::Console);
+    assert_eq!(page_for_run(""), Page::Console);
+    assert_eq!(page_for_run("sessions"), Page::Console);
+    assert_eq!(page_for_run("diagnostics"), Page::Console);
+    assert_eq!(page_for_run(" Tuner "), Page::Tuner);
+    assert_eq!(page_for_run("devices"), Page::Setup);
+    // The old page names open the console, which replaced them.
+    for key in ["live", "mixer", "routing", "plugins"] {
+        assert_eq!(page_for_run(key), Page::Console, "{key}");
+    }
+}
+
+#[test]
+fn setup_and_the_tuner_return_to_the_console() {
+    use super::Page;
+    use crate::app::screen::SetupSection;
+    let mut app = blank_app();
+    app.open_setup(SetupSection::Clock);
+    app.close_setup();
+    assert_eq!(app.page, Page::Console);
+    app.page = Page::Tuner;
+    assert!(app.close_innermost());
+    assert_eq!(app.page, Page::Console);
 }

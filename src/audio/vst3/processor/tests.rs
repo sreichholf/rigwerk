@@ -189,7 +189,7 @@ fn ui_values_reach_the_block_and_output_changes_reach_the_ui_transfer() {
 }
 
 #[test]
-fn a_skipped_insert_flushes_queued_values_with_an_empty_block() {
+fn a_skipped_effect_flushes_queued_values_with_an_empty_block() {
     let mut rig = rig(kResultOk);
     // Nothing queued: no call.
     rig.processor.flush_if_queued();

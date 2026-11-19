@@ -77,7 +77,7 @@ impl RigWerkApp {
     pub(crate) fn calibration_blocker(&self) -> Option<String> {
         if self.is_preview() {
             return Some(
-                "Preview opens no audio hardware, so there is no loop to measure.".to_owned(),
+                "A demo device opens no audio hardware, so there is no loop to measure.".to_owned(),
             );
         }
         if self.engine.state != EngineState::Running {

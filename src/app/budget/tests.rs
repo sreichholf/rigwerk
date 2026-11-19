@@ -51,7 +51,7 @@ fn the_budget_adds_the_reported_parts_and_labels_their_origin() {
         labels,
         vec![
             "INPUT BLOCK",
-            "BRIDGE CUSHION",
+            "BRIDGE BUFFER",
             "PLUGIN CHAIN",
             "OUTPUT STEP",
             "AFTER PLAYBACK NODE"
@@ -92,7 +92,7 @@ fn a_stopped_budget_labels_planned_buffers_and_leaves_out_the_unknown_part() {
     };
     assert_eq!(source("INPUT BLOCK"), LatencySource::Planned);
     assert_eq!(source("OUTPUT STEP"), LatencySource::Planned);
-    assert_eq!(source("BRIDGE CUSHION"), LatencySource::Setting);
+    assert_eq!(source("BRIDGE BUFFER"), LatencySource::Setting);
     assert!(budget
         .parts
         .iter()
@@ -137,6 +137,56 @@ fn the_budget_compares_a_fresh_measurement_with_the_estimate() {
     assert!(text.contains("Measured loopback: 40.0 ms"));
     assert!(text.contains("OUT Speakers → cable → IN Focusrite USB"));
     assert!(!text.contains("minus estimate"), "{text}");
+}
+
+#[test]
+fn heard_estimate_uses_the_slowest_audible_path_on_the_clock_output() {
+    let mut app = blank_app();
+    app.sample_rate = 48_000;
+    app.buffer_size = 128;
+    app.output_buffer = 128;
+    app.output_rate = 48_000;
+    app.engine.screenshot_path_latency(0, 480);
+    let slow = app.add_path().expect("a second path");
+    app.set_path_mute(slow, false);
+    app.clock_output.path_map[slow] = app.clock_output.path_map[0];
+    app.engine.screenshot_path_latency(slow, 960);
+    app.select_path(0);
+
+    let heard = app.heard_estimate();
+    let chain = heard
+        .parts
+        .iter()
+        .find(|part| part.label == "Chain")
+        .and_then(|part| part.ms)
+        .expect("chain");
+    // 960 samples at 48 kHz, not the selected path's 480.
+    assert!((chain - 20.0).abs() < 0.05, "chain {chain}");
+    assert_eq!(
+        heard.path.as_deref(),
+        Some(app.paths[slow].as_ref().unwrap().name.as_str())
+    );
+    let selected = app
+        .latency_budget()
+        .parts
+        .into_iter()
+        .find(|part| part.label == "PLUGIN CHAIN")
+        .and_then(|part| part.ms)
+        .expect("selected chain");
+    assert!((selected - 10.0).abs() < 0.05, "selected {selected}");
+
+    app.set_path_mute(slow, true);
+    let heard = app.heard_estimate();
+    let chain = heard
+        .parts
+        .iter()
+        .find(|part| part.label == "Chain")
+        .and_then(|part| part.ms)
+        .expect("chain");
+    assert!(
+        (chain - 10.0).abs() < 0.05,
+        "a muted path is not the one you hear: {chain}"
+    );
 }
 
 #[test]

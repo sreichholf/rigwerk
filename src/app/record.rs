@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::app::settings::FollowerPref;
+use crate::app::settings::ExtraOutputPref;
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{is_vb_cable_render, EngineState, RecordPhase, RecordSource};
 
@@ -36,6 +36,14 @@ fn folder_from_env(home: Option<&OsStr>, userprofile: Option<&OsStr>) -> String 
         }
     }
     "recordings".to_owned()
+}
+
+impl RigWerkApp {
+    /// The recordings folder, as typed.  An empty folder becomes the
+    /// default when a take is armed and when preferences are saved.
+    pub(crate) fn set_record_folder(&mut self, folder: String) {
+        self.record_folder = folder;
+    }
 }
 
 /// An empty or blank folder becomes [`default_record_folder`].  Anything
@@ -91,35 +99,38 @@ pub(crate) fn format_elapsed(frames: u64, rate: u32) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// A short overrun count.  `1 overrun`, otherwise `N overruns`.
-pub(crate) fn overrun_label(count: u64) -> String {
+/// A short lost-sample count.  `1 lost sample`, otherwise `N lost samples`.
+pub(crate) fn lost_samples_label(count: u64) -> String {
     match count {
-        1 => "1 overrun".to_owned(),
-        n => format!("{n} overruns"),
+        1 => "1 lost sample".to_owned(),
+        n => format!("{n} lost samples"),
     }
 }
 
 /// The endpoint the take should capture.
 ///
-/// On Windows the publish follower is the virtual cable, and its saved name
+/// On Windows the virtual output is the virtual cable, and its saved name
 /// is "RigWerk Out", not "CABLE Input".  A cable added as an ordinary
-/// follower is still matched by name.  Every other case is the clock output.
-pub(crate) fn record_source(followers: &[FollowerPref]) -> RecordSource {
-    record_source_for(cfg!(target_os = "windows"), followers)
+/// extra output is still matched by name.  Every other case is the clock output.
+pub(crate) fn record_source(extra_outputs: &[ExtraOutputPref]) -> RecordSource {
+    record_source_for(cfg!(target_os = "windows"), extra_outputs)
 }
 
-fn record_source_for(windows: bool, followers: &[FollowerPref]) -> RecordSource {
+fn record_source_for(windows: bool, extra_outputs: &[ExtraOutputPref]) -> RecordSource {
     if !windows {
         return RecordSource::Clock;
     }
-    if let Some(index) = followers.iter().position(|follower| follower.virtual_out) {
-        return RecordSource::Follower(index);
-    }
-    match followers
+    if let Some(index) = extra_outputs
         .iter()
-        .position(|follower| is_vb_cable_render(&follower.name))
+        .position(|extra_output| extra_output.virtual_output)
     {
-        Some(index) => RecordSource::Follower(index),
+        return RecordSource::ExtraOutput(index);
+    }
+    match extra_outputs
+        .iter()
+        .position(|extra_output| is_vb_cable_render(&extra_output.name))
+    {
+        Some(index) => RecordSource::ExtraOutput(index),
         None => RecordSource::Clock,
     }
 }
@@ -168,6 +179,8 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 #[cfg(target_os = "linux")]
+// musl 1.2 deprecates the `time_t` alias; `localtime_r` still takes it.
+#[allow(deprecated)]
 fn local_stamp() -> Option<String> {
     let Ok(secs) = libc::time_t::try_from(unix_now()) else {
         return None;
@@ -258,8 +271,8 @@ impl RigWerkApp {
         }
         let folder = resolved_record_folder(&self.record_folder);
         let path = recording_path(Path::new(&folder), &self.session_name, &take_stamp());
-        let source = record_source(&self.followers);
-        // A publish follower that has not opened (no cable, or publish off)
+        let source = record_source(&self.extra_outputs);
+        // A virtual output that has not opened (no cable, or switched off)
         // has no rate yet.  The main output is then what is actually playing.
         let armed = self.engine.arm_recording(path.clone(), source)
             || (!matches!(source, RecordSource::Clock)

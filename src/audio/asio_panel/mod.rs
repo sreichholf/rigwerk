@@ -15,7 +15,7 @@ pub(crate) enum AsioPanelSide {
     Output,
 }
 
-/// Flags the UI sets and the bridge clears.  One per session, on the shared
+/// Flags the UI sets and the bridge clears.  One per run, on the shared
 /// state both sides already hold.
 pub(crate) struct AsioPanelRequests {
     input: AtomicBool,

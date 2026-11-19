@@ -1,6 +1,6 @@
 //! One signal path's controls, as the UI writes them and the audio
 //! callback reads them: input routing, mono, channel enable, the two
-//! built-in EQs, the gate, the plugin insert chain and the path meters.
+//! built-in EQs, the gate, the plugin effect chain and the path meters.
 //!
 //! [`Shared`](super::shared::Shared) holds [`MAX_PATHS`] of these as fixed
 //! slots, all preallocated, so adding a path never allocates in a callback.
@@ -37,9 +37,9 @@
 //!
 //! [`PathControls::latency_samples`] is the chain's total plugin latency,
 //! and the chain really delays by exactly that much at all times: an
-//! insert skipped for a block plays its input delayed by its latency, and
-//! an insert's dry/wet mix delays its dry side (see `ChainRuntime::process`).
-//! A path-level chain bypass skips every insert the same way, and the total
+//! effect skipped for a block plays its input delayed by its latency, and
+//! an effect's dry/wet mix delays its dry side (see `ChainRuntime::process`).
+//! A path-level chain bypass skips every effect the same way, and the total
 //! still counts.  The mixer lines the paths up per device with it (`output_map`,
 //! "Alignment").
 //!
@@ -94,7 +94,7 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
 
 /// The settings of one path the UI owns and pushes: input routing, mono,
 /// channel enable, the two EQs, the gate, the path level, mute and solo,
-/// and the insert-chain bypass.  The plugin chain is kept in the engine
+/// and the effect-chain bypass.  The plugin chain is kept in the engine
 /// ([`PathControls`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathMix {
@@ -104,14 +104,14 @@ pub struct PathMix {
     pub mono: bool,
     /// Channel enable for the path's L and R.
     pub output_enabled: [bool; 2],
-    /// The EQs before and after the inserts, indexed by [`EqSlot`].
+    /// The EQs before and after the effects, indexed by [`EqSlot`].
     pub eqs: [EqSettings; 2],
     pub gate: GateSettings,
     /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
     pub level_db: f32,
     pub mute: bool,
     pub solo: bool,
-    /// Skips every insert's processing without changing each insert's own
+    /// Skips every effect's processing without changing each effect's own
     /// bypass.  Latency stays counted.
     pub chain_bypass: bool,
 }
@@ -179,7 +179,7 @@ pub(crate) struct LiveSlots {
 }
 
 impl LiveSlots {
-    /// Just slot 0: the one path every session has had so far.
+    /// Just slot 0: the one path every run has had so far.
     #[cfg(test)]
     pub(crate) fn main() -> Self {
         Self {
@@ -254,8 +254,8 @@ impl DspTime {
 
 /// How often the audio thread tried one piece of plugin work and how often
 /// it skipped it for that chunk.  For the chain a skip is a busy chain
-/// lock; for an insert it is a pause (a restart, a stopped or failed
-/// start), since no insert has a lock the UI could hold.  Measurement only:
+/// lock; for an effect it is a pause (a restart, a stopped or failed
+/// start), since no effect has a lock the UI could hold.  Measurement only:
 /// the audio thread writes these relaxedly and never reads them back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LockStats {
@@ -281,13 +281,13 @@ impl LockStats {
 }
 
 /// One path's plugin counters: the chunks the chain missed and each
-/// insert's pauses.
+/// effect's pauses.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PluginLockReport {
     pub chain: LockStats,
-    pub inserts: Vec<LockStats>,
+    pub effects: Vec<LockStats>,
     /// A chain edit panicked, so the chain is unused for the rest of the
-    /// session (see `PathControls::chain_poisoned`).  The skip counters then
+    /// run (see `PathControls::chain_poisoned`).  The skip counters then
     /// describe nothing, and Diagnostics says so instead of showing a rate.
     pub chain_poisoned: bool,
 }
@@ -344,12 +344,15 @@ pub(crate) struct PathControls {
     /// Block peaks of the path's output (`f32` bits), before the master.
     meter_l: AtomicU32,
     meter_r: AtomicU32,
+    /// The gate's deepest gain reduction in the last block, dB (`f32`
+    /// bits), 0 while it is open or off.  Written with the meters.
+    gate_reduction_db: AtomicU32,
     /// How long the mixer spends on this path's chain per block, ns
     /// (smoothed, and a decaying peak), and how long that block lasts, ns:
     /// its DSP budget.  Written by the mixer at the end of each block (see
     /// `mixer::PathProcessor::publish_dsp`), read by Diagnostics and Live.
     dsp: DspCell,
-    /// Each insert's mix, bypass and plugin handle, published with the
+    /// Each effect's mix, bypass and plugin handle, published with the
     /// views, so the UI sets mix, bypass and plugin controls, services the
     /// plugins, captures their state and saves them without the model lock
     /// (see `plugins`, "Chain handover").
@@ -359,19 +362,19 @@ pub(crate) struct PathControls {
     /// to the deferred queue, and the main thread's drain is always the
     /// last owner.
     pub(super) slot_links: Mutex<Arc<[SlotLink]>>,
-    /// The insert views the UI draws.  Republished by every chain edit, and
+    /// The effect views the UI draws.  Republished by every chain edit, and
     /// read without the model lock.  The audio thread never takes this lock,
     /// so only UI-side readers and writers contend on it, for an `Arc`
     /// clone.
     plugin_views: Mutex<Arc<[PluginView]>>,
     plugin_views_version: AtomicU64,
-    /// Set by the audio thread when an insert fails or the chain latency
+    /// Set by the audio thread when an effect fails or the chain latency
     /// moved; the UI thread rebuilds the views from the links in
     /// `service_plugins`, so the audio thread never builds them.
     plugin_views_dirty: AtomicBool,
     chain_rate: AtomicU32,
     chain_unopened: AtomicBool,
-    /// The insert chain as the UI edits it, and the only sender of its
+    /// The effect chain as the UI edits it, and the only sender of its
     /// commands (see `plugins`, "Chain handover").  A UI-only lock: the
     /// audio thread never takes it.
     pub(super) chain: Mutex<ChainModel>,
@@ -381,12 +384,12 @@ pub(crate) struct PathControls {
     /// stores it at the start of every block; a chain edit stores the total
     /// of its links.
     latency: AtomicU32,
-    /// Path-level insert bypass.  The runtime loads it every block; the UI
+    /// Path-level effect bypass.  The runtime loads it every block; the UI
     /// stores it.  It does not write each slot's bypass.
     chain_bypass: Arc<AtomicBool>,
     plugin_active: AtomicUsize,
     /// The UI wants the next block to enter the chain even with nothing
-    /// active (a bypass cleared, a value queued for a bypassed insert).
+    /// active (a bypass cleared, a value queued for a bypassed effect).
     /// Its own flag, taken by the audio thread, so the audio thread's
     /// recount of `plugin_active` cannot overwrite a wake.
     plugin_wake: AtomicBool,
@@ -397,14 +400,14 @@ pub(crate) struct PathControls {
     chain_attempts: AtomicU64,
     chain_skips: AtomicU64,
     /// Set when a chain edit panicked: the model may no longer match the
-    /// runtime, so the chain stays unused for the rest of the session.  It
+    /// runtime, so the chain stays unused for the rest of the run.  It
     /// is not contention and never clears.
     chain_poisoned: AtomicBool,
-    /// The two built-in EQs (pre and post inserts).  Each version counter
+    /// The two built-in EQs (pre and post effects).  Each version counter
     /// lets the audio callback notice a change without taking the lock.
     eq: [Mutex<EqSettings>; 2],
     eq_version: [AtomicU64; 2],
-    /// Built-in noise gate (PRE or POST inserts).
+    /// Built-in noise gate (PRE or POST effects).
     gate: Mutex<GateSettings>,
     gate_version: AtomicU64,
 }
@@ -436,6 +439,7 @@ impl PathControls {
             retired: AtomicBool::new(false),
             meter_l: AtomicU32::new(0.0f32.to_bits()),
             meter_r: AtomicU32::new(0.0f32.to_bits()),
+            gate_reduction_db: AtomicU32::new(0.0f32.to_bits()),
             dsp: DspCell::default(),
             slot_links: Mutex::new(Arc::from(Vec::new())),
             plugin_views: Mutex::new(Arc::from(Vec::new())),
@@ -462,8 +466,8 @@ impl PathControls {
         }
     }
 
-    /// Copies a previous session's settings for this path.  Live plugin
-    /// instances belong to the session that opened them; only the saved
+    /// Copies a previous run's settings for this path.  Live plugin
+    /// instances belong to the run that opened them; only the saved
     /// preferences move, and the chain rebuilds from them.  Call it from the
     /// UI thread.
     pub(crate) fn adopt_settings_from(&self, previous: &PathControls) {
@@ -481,7 +485,7 @@ impl PathControls {
         copy_bool(&self.mute, &previous.mute);
         copy_bool(&self.solo, &previous.solo);
         self.set_chain_bypass(previous.chain_bypassed());
-        // A fade-out does not outlive its session.
+        // A fade-out does not outlive its run.
         self.set_state(match previous.state() {
             PathState::Active => PathState::Active,
             PathState::Inactive | PathState::FadingOut => PathState::Inactive,
@@ -497,7 +501,7 @@ impl PathControls {
             self.set_gate(*settings);
         }
         // Only an active path carries its chain over; a removed one starts
-        // the new session empty.  Capture the old instances' state on this
+        // the new run empty.  Capture the old instances' state on this
         // (UI) thread first, so the rebuilt chain reopens with what the
         // person set since the last save.
         if previous.state() == PathState::Active {
@@ -581,7 +585,7 @@ impl PathControls {
         }
     }
 
-    /// Whether some insert was restored but not opened yet (lock-free).
+    /// Whether some effect was restored but not opened yet (lock-free).
     /// The mixer keeps such a path silent until the UI thread opens it.
     pub(crate) fn chain_pending(&self) -> bool {
         self.chain_unopened.load(Ordering::Relaxed)
@@ -682,7 +686,7 @@ impl PathControls {
         self.solo.load(Ordering::Relaxed)
     }
 
-    /// Skips every insert's processing.  The audio thread reads the same
+    /// Skips every effect's processing.  The audio thread reads the same
     /// atomic inside the chain.  Each slot's own bypass is not written.
     pub(crate) fn set_chain_bypass(&self, bypass: bool) {
         self.chain_bypass.store(bypass, Ordering::Relaxed);
@@ -729,8 +733,20 @@ impl PathControls {
         self.meter_r.store(right.to_bits(), Ordering::Relaxed);
     }
 
+    /// The gate's deepest gain reduction in the last block, in dB: 0 while
+    /// it is open or off, up to its range while it is closed.
+    pub(crate) fn gate_reduction_db(&self) -> f32 {
+        f32::from_bits(self.gate_reduction_db.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn store_gate_reduction(&self, db: f32) {
+        self.gate_reduction_db
+            .store(db.to_bits(), Ordering::Relaxed);
+    }
+
     pub(crate) fn reset_meters(&self) {
         self.store_meters(0.0, 0.0);
+        self.store_gate_reduction(0.0);
         self.store_dsp_time(DspTime::default());
     }
 

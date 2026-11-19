@@ -3,7 +3,7 @@
 use eframe::egui;
 use egui::{Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 
-use crate::ui::theme::{with_alpha, BORDER, CARD_RAISED, TEXT};
+use crate::ui::theme::{palette, with_alpha};
 
 /// Colour and accessible name for [`styled_slider`].
 ///
@@ -12,7 +12,6 @@ use crate::ui::theme::{with_alpha, BORDER, CARD_RAISED, TEXT};
 pub(crate) struct SliderStyle {
     color: Color32,
     name: String,
-    decibels: bool,
 }
 
 impl From<Color32> for SliderStyle {
@@ -20,7 +19,6 @@ impl From<Color32> for SliderStyle {
         Self {
             color,
             name: String::new(),
-            decibels: false,
         }
     }
 }
@@ -30,18 +28,13 @@ impl From<(Color32, &str)> for SliderStyle {
         Self {
             color,
             name: name.to_owned(),
-            decibels: false,
         }
     }
 }
 
 impl From<(Color32, String)> for SliderStyle {
     fn from((color, name): (Color32, String)) -> Self {
-        Self {
-            color,
-            name,
-            decibels: false,
-        }
+        Self { color, name }
     }
 }
 
@@ -83,21 +76,6 @@ pub(crate) fn row_info(
     });
 }
 
-pub(crate) fn db_slider(
-    ui: &mut egui::Ui,
-    value: &mut f32,
-    min: f32,
-    max: f32,
-    accent: impl Into<SliderStyle>,
-) -> bool {
-    let mut style = accent.into();
-    if style.name.is_empty() {
-        style.name = "Gain".to_owned();
-    }
-    style.decibels = true;
-    styled_slider(ui, value, min, max, 0.1, style).changed()
-}
-
 /// The gain slider's look, with an explicit step, for other values in the app.
 pub(crate) fn styled_slider(
     ui: &mut egui::Ui,
@@ -113,14 +91,17 @@ pub(crate) fn styled_slider(
         Sense::click_and_drag(),
     );
     // Inset the track so the 7px grip stays inside the allocated rect.
-    // Empty portion uses a lift above CARD so equal-length tracks read as
-    // equal (a short fill must not look like a short slider).
+    // The empty part is the well, so equal-length tracks read as equal
+    // (a short fill must not look like a short slider).  The grip is a
+    // slot: its idle edge is the line, and a hover uses the text colour.
+    // The caller colour is only the filled part.
+    let colours = palette(ui.ctx());
     let track = Rect::from_center_size(
         rect.center(),
         Vec2::new((rect.width() - 14.0).max(0.0), 4.0),
     );
     ui.painter()
-        .rect_filled(track, CornerRadius::same(2), Color32::from_rgb(42, 52, 70));
+        .rect_filled(track, CornerRadius::same(2), colours.well);
     if response.dragged() || response.clicked() {
         if let Some(position) = response.interact_pointer_pos() {
             let fraction = ((position.x - track.left()) / track.width()).clamp(0.0, 1.0);
@@ -166,20 +147,23 @@ pub(crate) fn styled_slider(
         );
     }
     ui.painter()
-        .circle_filled(egui::pos2(x, track.center().y), 7.0, CARD_RAISED);
+        .circle_filled(egui::pos2(x, track.center().y), 7.0, colours.slot);
     ui.painter().circle_stroke(
         egui::pos2(x, track.center().y),
         6.0,
-        Stroke::new(1.2, if response.hovered() { TEXT } else { BORDER }),
+        Stroke::new(
+            1.2,
+            if response.hovered() {
+                colours.text
+            } else {
+                colours.line
+            },
+        ),
     );
     ui.painter()
         .circle_filled(egui::pos2(x, track.center().y), 3.0, style.color);
     show_focus_ring(ui, &response, rect, 6);
-    let value_text = if style.decibels {
-        format!("{:+.1} dB", *value)
-    } else {
-        format_slider_value(*value, step)
-    };
+    let value_text = format_slider_value(*value, step);
     if style.name.is_empty() {
         style.name.clone_from(&value_text);
     }
@@ -209,7 +193,7 @@ pub(crate) fn styled_slider(
             builder.add_action(Action::Decrement);
         }
     });
-    response
+    response.on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal)
 }
 
 /// Arrow keys and a screen reader's increment or set-value, while a drag owns

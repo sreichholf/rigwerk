@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::shared::{initial_target, Shared};
-use crate::audio::types::StartConfig;
+use crate::audio::types::{OutputMode, StartConfig};
 
 use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
@@ -57,7 +57,7 @@ pub(crate) fn run_asio_duplex_bridge(
     }
     let input_channels = (counts.in_ as usize).min(2);
     // Cap at the map's addressable width so routing layer ② can reach every
-    // open channel.  Unused channels follow the clock device's unused mode.
+    // open channel.  Unused channels follow the clock output's unused mode.
     let output_channels = (counts.out as usize).min(crate::audio::MAX_OUTPUT_CHANNELS);
 
     let buffer = driver
@@ -76,6 +76,7 @@ pub(crate) fn run_asio_duplex_bridge(
     shared.set_output(
         rate,
         buffer_frames.max(1) as u32,
+        OutputMode::Asio,
         format!("ASIO in and out · one driver, {buffer_frames} smp"),
     );
     // The UI thread reloads plugins from the rate published above.
@@ -153,12 +154,13 @@ pub(crate) fn run_asio_duplex_bridge(
         input_channels, output_channels, buffer_frames, rate
     ));
 
-    let mut followers = crate::audio::follower::FollowerOutputs::new(config.output_buffer, rate);
+    let mut extra_outputs =
+        crate::audio::extra_output::ExtraOutputOutputs::new(config.output_buffer, rate);
     let wait = wait_for_callbacks(
         registration.signal(),
         || stop.load(Ordering::Relaxed),
         || {
-            followers.sync(&shared);
+            extra_outputs.sync(&shared);
             // One driver serves both cards.  A stop already in flight must
             // not open the panel on its way out.
             !stop.load(Ordering::Relaxed)
@@ -175,7 +177,7 @@ pub(crate) fn run_asio_duplex_bridge(
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.clear();
-            drop(followers);
+            drop(extra_outputs);
             return Err(if matches!(wait, CallbackWait::Reset) {
                 DRIVER_RESET_MESSAGE
             } else {
@@ -187,7 +189,7 @@ pub(crate) fn run_asio_duplex_bridge(
             let _ = driver.stop();
             let _ = driver.dispose_buffers();
             registration.abandon();
-            drop(followers);
+            drop(extra_outputs);
             shared.set_device_lost(
                 "The ASIO driver stopped responding — the interface may have been unplugged"
                     .to_owned(),
@@ -195,7 +197,7 @@ pub(crate) fn run_asio_duplex_bridge(
             return Ok(());
         }
     }
-    drop(followers);
+    drop(extra_outputs);
 
     let _ = driver.stop();
     let _ = driver.dispose_buffers();

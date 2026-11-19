@@ -52,7 +52,7 @@ fn duplex_bridge_runs_against_a_live_daemon() {
     let result = thread.join().expect("bridge thread");
     eprintln!(
         "status={:?} mode={:?} error={:?} frames={} input_frames={} rate={} step={} \
-         peak_in={peak_in} peak_out={peak_out} direct={} underruns={} path_delay={:?}",
+         peak_in={peak_in} peak_out={peak_out} direct={} dropouts={} path_delay={:?}",
         snapshot.status,
         snapshot.output_mode,
         snapshot.error,
@@ -61,7 +61,7 @@ fn duplex_bridge_runs_against_a_live_daemon() {
         snapshot.output_rate,
         snapshot.output_step_frames,
         snapshot.direct,
-        snapshot.underruns,
+        snapshot.dropouts,
         snapshot.path_delay_ms,
     );
     assert!(result.is_ok(), "{result:?}");
@@ -69,5 +69,5 @@ fn duplex_bridge_runs_against_a_live_daemon() {
     assert!(snapshot.frames > 0, "the node should have processed blocks");
     assert!(snapshot.input_frames > 0, "the source should be linked");
     assert!(peak_in > 0.0 && peak_out > 0.0, "audio should flow through");
-    assert_eq!(snapshot.underruns, 0);
+    assert_eq!(snapshot.dropouts, 0);
 }

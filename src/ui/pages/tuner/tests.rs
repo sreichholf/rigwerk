@@ -38,6 +38,15 @@ fn readout_keeps_the_preset_spelling() {
 }
 
 #[test]
+fn the_display_control_lists_needle_first() {
+    use crate::app::tuner::TunerDisplay;
+    assert_eq!(display_choice(TunerDisplay::Needle), 0);
+    assert_eq!(display_choice(TunerDisplay::Strobe), 1);
+    assert_eq!(display_from_choice(0), TunerDisplay::Needle);
+    assert_eq!(display_from_choice(1), TunerDisplay::Strobe);
+}
+
+#[test]
 fn a_centered_strobe_holds_still() {
     assert_eq!(super::gauge::strobe_phase(0.0, 3.0), 0.0);
     assert_eq!(super::gauge::strobe_phase(0.04, 3.0), 0.0);

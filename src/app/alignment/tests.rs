@@ -1,10 +1,10 @@
 use crate::app::blank_app;
-use crate::app::settings::FollowerPref;
+use crate::app::settings::ExtraOutputPref;
 
 #[test]
 fn alignment_follows_the_switch_and_the_trims() {
     let mut app = blank_app();
-    app.followers.push(FollowerPref::virtual_out());
+    app.extra_outputs.push(ExtraOutputPref::virtual_output());
     let second = app
         .duplicate_path(app.path_slots()[0])
         .expect("a free slot");
@@ -12,7 +12,7 @@ fn alignment_follows_the_switch_and_the_trims() {
     // No latency: nothing waits and nothing is added.
     // No bridge runs: the engine reports nothing, the app works it out.
     assert!(app.engine.device_alignment(0).is_none());
-    let aligned = app.device_alignment(0).expect("the clock device");
+    let aligned = app.device_alignment(0).expect("the clock output");
     assert!(aligned.align && !aligned.live);
     assert_eq!(aligned.waits_for, None);
     assert_eq!(aligned.per_path[0], Some(0.0));

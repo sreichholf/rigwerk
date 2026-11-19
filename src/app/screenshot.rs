@@ -8,7 +8,55 @@ use egui::{Vec2, ViewportCommand};
 use crate::app::RigWerkApp;
 
 /// Inner size that fits Live (and side-by-side routing) without a scrollbar.
-pub(crate) const SCREENSHOT_INNER_SIZE: Vec2 = Vec2::new(1440.0, 1080.0);
+const DEFAULT_INNER_SIZE: Vec2 = Vec2::new(1440.0, 1080.0);
+
+/// The smallest and the largest size `RIGWERK_SCREENSHOT_SIZE` may ask for.
+const MIN_INNER_SIZE: Vec2 = Vec2::new(640.0, 480.0);
+const MAX_INNER_SIZE: Vec2 = Vec2::new(7680.0, 4320.0);
+
+/// Test hook for screenshots at another window size:
+/// `RIGWERK_SCREENSHOT_SIZE=<w>x<h>` sets the inner size in points.  A
+/// blank value, one that does not parse, or one out of range is logged
+/// and the default 1440×1080 is used.
+pub(crate) fn screenshot_inner_size() -> Vec2 {
+    static SIZE: std::sync::OnceLock<Vec2> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| inner_size_from(std::env::var("RIGWERK_SCREENSHOT_SIZE").ok().as_deref()))
+}
+
+/// The size `value` names.  `None` is an unset variable and stays the
+/// default.  A present value that does not parse, including a blank one,
+/// is logged and the default is used.
+fn inner_size_from(value: Option<&str>) -> Vec2 {
+    let Some(value) = value else {
+        return DEFAULT_INNER_SIZE;
+    };
+    parse_inner_size(value).unwrap_or_else(|| {
+        eprintln!(
+            "RIGWERK_SCREENSHOT_SIZE={value:?} is not <w>x<h> from {:.0}x{:.0} to {:.0}x{:.0}; using {:.0}x{:.0}.",
+            MIN_INNER_SIZE.x,
+            MIN_INNER_SIZE.y,
+            MAX_INNER_SIZE.x,
+            MAX_INNER_SIZE.y,
+            DEFAULT_INNER_SIZE.x,
+            DEFAULT_INNER_SIZE.y
+        );
+        DEFAULT_INNER_SIZE
+    })
+}
+
+/// `<w>x<h>` in whole points (`x` or `X`, spaces allowed around either
+/// number), or `None` when it does not parse or is out of range.
+fn parse_inner_size(value: &str) -> Option<Vec2> {
+    let (width, height) = value.trim().split_once(['x', 'X'])?;
+    let width: u32 = width.trim().parse().ok()?;
+    let height: u32 = height.trim().parse().ok()?;
+    let size = Vec2::new(width as f32, height as f32);
+    (size.x >= MIN_INNER_SIZE.x
+        && size.y >= MIN_INNER_SIZE.y
+        && size.x <= MAX_INNER_SIZE.x
+        && size.y <= MAX_INNER_SIZE.y)
+        .then_some(size)
+}
 
 /// Test hook for screenshots further down a page: `RIGWERK_SCROLL=<px>`
 /// scrolls the page by that much (screenshot mode only).
@@ -29,7 +77,7 @@ fn screenshot_start() -> bool {
 }
 
 /// Frames to wait before the capture: longer once a bridge has started, so
-/// the meters, the scope and the follower links have settled.
+/// the meters, the scope and the extra output links have settled.
 const SETTLE_FRAMES: u64 = 120;
 const SETTLE_FRAMES_RUNNING: u64 = 480;
 
@@ -49,11 +97,7 @@ impl RigWerkApp {
         self.frames += 1;
         if self.frames == 1 && self.screenshot.is_some() {
             self.apply_screenshot_routing();
-            // A setup that loads inserts selects the last one; the stage a
-            // run asked for wins.
-            if let Some(stage) = super::initial_mixer_stage() {
-                self.select_chain(stage);
-            }
+            self.open_sheet_for_screenshot();
             if screenshot_start() {
                 self.start_bridge();
             }
@@ -68,20 +112,19 @@ impl RigWerkApp {
         };
         // Re-assert size after the first frame (X11/XWayland). Wayland itself
         // ignores this; screenshot mode already forced the X11 backend.
+        let size = screenshot_inner_size();
         if self.frames == 1 {
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(SCREENSHOT_INNER_SIZE));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         }
         if self.frames >= settle && !job.requested {
             let viewport = ctx.viewport_rect();
-            if (viewport.width() - SCREENSHOT_INNER_SIZE.x).abs() > 1.0
-                || (viewport.height() - SCREENSHOT_INNER_SIZE.y).abs() > 1.0
-            {
+            if (viewport.width() - size.x).abs() > 1.0 || (viewport.height() - size.y).abs() > 1.0 {
                 eprintln!(
                     "Screenshot viewport is {:.0}x{:.0}, expected {:.0}x{:.0}. On Wayland, XWayland or Xvfb is required so the size can be fixed.",
                     viewport.width(),
                     viewport.height(),
-                    SCREENSHOT_INNER_SIZE.x,
-                    SCREENSHOT_INNER_SIZE.y
+                    size.x,
+                    size.y
                 );
                 std::process::exit(1);
             }
@@ -115,34 +158,36 @@ impl RigWerkApp {
     }
 
     /// Test hook for screenshots of Signal Routing:
-    /// `RIGWERK_ROUTING_SETUP=drywet` applies the Dry L / Wet R card;
+    /// `RIGWERK_ROUTING_SETUP=drywet` applies the Dry L / Wet R layout;
     /// `sum3` adds a third path (a copy of the first, playing) on top of it,
-    /// routed L/R on the clock device, so two paths add up there.
+    /// routed L/R on the clock output, so two paths add up there.
     /// `blend` applies Blend clean with 128 samples of (fake) plugin
     /// latency on the driven path, aligned; `dualamp-off` applies Dual-amp
-    /// with 64 samples on the second amp and the clock device's alignment
+    /// with 64 samples on the second amp and the clock output's alignment
     /// off (the red warning); `live3` is `blend` plus an empty third path
-    /// (unmuted, routed nowhere: a Live Issues warning), for the Live page.
+    /// (unmuted, routed nowhere: an issues warning), for the console.
     /// `showcase` is the README setup: see [`Self::apply_screenshot_showcase`].
+    /// `showcase4` adds two paths, every other sink as an extra output and
+    /// a long chain (board 6): see [`Self::apply_screenshot_four_paths`].
     fn apply_screenshot_routing(&mut self) {
-        use crate::app::cards::Card;
+        use crate::app::layouts::PathLayout;
         let setup = std::env::var("RIGWERK_ROUTING_SETUP").unwrap_or_default();
         match setup.as_str() {
             "drywet" | "sum3" => {
-                if !self.apply_card(Card::DryWet) {
+                if !self.apply_layout(PathLayout::DryWet) {
                     return;
                 }
                 if setup == "sum3" {
                     let first = self.path_slots()[0];
                     if let Some(copy) = self.duplicate_path(first) {
                         self.set_path_mute(copy, false);
-                        self.clock_device.path_map[copy].map = crate::audio::ChannelMap::default();
+                        self.clock_output.path_map[copy].map = crate::audio::ChannelMap::default();
                         self.select_path(first);
                     }
                 }
             }
             "blend" | "live3" => {
-                if !self.apply_card(Card::Blend) {
+                if !self.apply_layout(PathLayout::Blend) {
                     return;
                 }
                 let slots = self.path_slots();
@@ -152,15 +197,19 @@ impl RigWerkApp {
                 if setup == "live3" {
                     if let Some(added) = self.add_path() {
                         self.rename_path(added, "Stream");
-                        // Unmuted: routed nowhere, so Live Issues warns.
+                        // Unmuted: routed nowhere, so the issues drawer warns.
                         self.set_path_mute(added, false);
                     }
                     self.select_path(slots[0]);
                 }
             }
             "showcase" => self.apply_screenshot_showcase(),
+            "showcase4" => {
+                self.apply_screenshot_showcase();
+                self.apply_screenshot_four_paths();
+            }
             "dualamp-off" => {
-                if !self.apply_card(Card::DualAmp) {
+                if !self.apply_layout(PathLayout::DualAmp) {
                     return;
                 }
                 let slots = self.path_slots();
@@ -173,33 +222,86 @@ impl RigWerkApp {
         }
     }
 
+    /// Board 6 on top of the showcase: Drive (a copy of Room, playing) and
+    /// an empty Stream path, every sink not yet in use as an extra output,
+    /// and ten stand-in effects on Drive so its list scrolls.
+    fn apply_screenshot_four_paths(&mut self) {
+        let slots = self.path_slots();
+        let Some(&room) = slots.get(1) else {
+            return;
+        };
+        if let Some(drive) = self.duplicate_path(room) {
+            self.rename_path(drive, "Drive");
+            self.set_path_mute(drive, false);
+            // Ten copies of the room's own effect, bypassed, so the chain
+            // scrolls without ten reverbs running at once.
+            let template =
+                self.engine
+                    .plugin_views(room)
+                    .first()
+                    .map(|view| crate::audio::PluginPref {
+                        path: view.path.clone(),
+                        format: view.format,
+                        class_id: view.class_id.clone(),
+                        name: view.name.clone(),
+                        bypass: true,
+                        ..crate::audio::PluginPref::default()
+                    });
+            for _ in 0..10 {
+                match &template {
+                    Some(template) => {
+                        let _ = self.engine.add_plugin(drive, template.clone());
+                    }
+                    None => self.add_screenshot_effect_always(drive),
+                }
+            }
+        }
+        if let Some(stream) = self.add_path() {
+            self.rename_path(stream, "Stream");
+        }
+        let used: Vec<String> = std::iter::once(self.selected_output().id.clone())
+            .chain(self.extra_outputs.iter().map(|extra| extra.id.clone()))
+            .collect();
+        let more: Vec<String> = self
+            .inventory
+            .outputs
+            .iter()
+            .map(|device| device.id.clone())
+            .filter(|id| !used.contains(id) && !id.starts_with("vbcable:"))
+            .collect();
+        for id in more {
+            self.add_extra_output_device(&id);
+        }
+        self.select_path(room);
+    }
+
     /// The README setup, the same on every page: a second output sink as a
-    /// follower plus RigWerk Out, Blend clean (Clean and Room), and the
-    /// inserts in `RIGWERK_SCREENSHOT_PLUGINS`, a `;` list of
+    /// extra output plus RigWerk Out, Blend clean (Clean and Room), and the
+    /// effects in `RIGWERK_SCREENSHOT_PLUGINS`, a `;` list of
     /// `<path number>=<bundle>[#<effect name>]` (path 1 is Clean).  Room
     /// stays selected.  A chain without plugin latency gets none faked.
     /// The plugin library is scanned too, so the Plugins page has a list.
-    /// The metronome runs at 96 BPM in 4/4, clicking on the follower only,
-    /// so the Mixer and Live show it in use.
+    /// The metronome runs at 96 BPM in 4/4, clicking on the extra output only,
+    /// so the console and the output sheet show it in use.
     fn apply_screenshot_showcase(&mut self) {
         self.begin_plugin_scan();
-        let follower = self
+        let extra_output = self
             .inventory
             .outputs
             .iter()
             .map(|device| device.id.clone())
             .find(|id| *id != self.selected_output().id && !id.starts_with("vbcable:"));
-        if let Some(id) = follower {
-            self.add_follower_device(&id);
-            // Device 1 is that follower: the click goes to the headphones.
+        if let Some(id) = extra_output {
+            self.add_extra_output_device(&id);
+            // Device 1 is that extra output: the click goes to the headphones.
             self.set_click_channel(1, 0, true);
             self.set_click_channel(1, 1, true);
         }
         self.set_metronome_bpm(96.0);
         self.set_metronome_rhythm(crate::audio::ClickRhythm::FourFour);
         self.set_metronome_running(true);
-        self.add_follower_device(crate::audio::VIRTUAL_OUT_ID);
-        if !self.apply_card(crate::app::cards::Card::Blend) {
+        self.add_extra_output_device(crate::audio::VIRTUAL_OUTPUT_ID);
+        if !self.apply_layout(crate::app::layouts::PathLayout::Blend) {
             return;
         }
         let slots = self.path_slots();
@@ -236,3 +338,6 @@ impl RigWerkApp {
         self.select_path(slots[1]);
     }
 }
+
+#[cfg(test)]
+mod tests;

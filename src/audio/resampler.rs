@@ -64,7 +64,7 @@ fn bessel_i0(x: f64) -> f64 {
 }
 
 /// One source frame the resampler can carry: the clock bridge's stereo pair,
-/// or a generic follower's device lanes.
+/// or a generic extra output's device lanes.
 pub(crate) trait ResampleFrame: Copy {
     /// The all-zero frame.
     const SILENCE: Self;
@@ -114,7 +114,7 @@ fn history_len(taps: usize) -> usize {
 /// allocates.  The nominal 1:1 case is left to the caller's bypass unless a
 /// drift correction is applied.
 ///
-/// The frame type is the stereo pair by default; a generic follower runs one
+/// The frame type is the stereo pair by default; a generic extra output runs one
 /// over its device lanes (`[f32; N]`, only the first [`Self::set_lanes`]
 /// lanes computed).
 pub(crate) struct FrameResampler<F: ResampleFrame = (f32, f32)> {

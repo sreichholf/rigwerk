@@ -1,9 +1,9 @@
 //! State shared between the input callback, the output callback and the
-//! UI: the ring buffer, the cushion (its fill target), meters, the master
+//! UI: the ring buffer, the bridge buffer (its fill target), meters, the master
 //! and device settings, the signal paths, the tuner tap and what each side
 //! really runs at.
 //! An armed round-trip measurement lives here too ([`super::calibration`]):
-//! its capture buffer and click are allocated with the session, so the
+//! its capture buffer and click are allocated with the run, so the
 //! callbacks only touch atomics.  An ASIO control-panel request lives here
 //! too: the UI sets it, and the bridge thread that owns the driver takes it
 //! between callbacks.  A recording of the frame one endpoint is about to
@@ -27,16 +27,16 @@ const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
 
 #[cfg(test)]
 use super::eq::{EqSettings, EqSlot};
-use super::follower::FollowerBus;
+use super::extra_output::ExtraOutputBus;
 #[cfg(test)]
 use super::gate::GateSettings;
-use super::output_map::{DeviceControls, DeviceFrame, OutputDeviceSettings, MAX_FOLLOWERS};
+use super::output_map::{DeviceControls, DeviceFrame, OutputDeviceSettings, MAX_EXTRA_OUTPUTS};
 use super::path::{DspCell, DspTime, LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
 use super::plugins::PluginPref;
 #[cfg(test)]
 use super::plugins::PluginView;
 use super::scope::ScopeLane;
-use super::types::{CushionMode, Snapshot};
+use super::types::{BufferMode, OutputMode, Snapshot};
 
 use super::asio_panel::AsioPanelRequests;
 use super::calibration::Calibration;
@@ -52,25 +52,25 @@ pub(crate) const TAP_CAPACITY_FRAMES: usize = 32_768;
 
 const _: () = assert!(crate::audio::tuner::TAP_COPY_FRAMES <= TAP_CAPACITY_FRAMES);
 
-/// One follower slot as the PipeWire linker / generic supervisor (and the UI)
+/// One extra output slot as the PipeWire linker / generic supervisor (and the UI)
 /// sees it.  Updated live; the audio callback only reads
-/// [`Shared::followers`] controls and the ring-active flags.
+/// [`Shared::extra_outputs`] controls and the ring-active flags.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct FollowerLink {
+pub(crate) struct ExtraOutputLink {
     /// cpal / inventory device id for generic open; empty when virtual.
     pub(crate) device_id: String,
     /// PipeWire `node.name` to link to, or empty when missing / virtual.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) node_name: String,
-    pub(crate) virtual_out: bool,
-    /// Virtual source advertised; ignored for hardware followers.
-    pub(crate) publish: bool,
+    pub(crate) virtual_output: bool,
+    /// Virtual source advertised; ignored for hardware extra outputs.
+    pub(crate) virtual_output_on: bool,
 }
 
-/// The live follower list the duplex/native main loop links from.
+/// The live extra output list the duplex/native main loop links from.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct FollowerPlan {
-    pub(crate) slots: [FollowerLink; MAX_FOLLOWERS],
+pub(crate) struct ExtraOutputPlan {
+    pub(crate) slots: [ExtraOutputLink; MAX_EXTRA_OUTPUTS],
     pub(crate) count: usize,
 }
 
@@ -95,21 +95,21 @@ pub(crate) struct Shared {
     tap_head: AtomicU64,
     tap_capacity: usize,
     pub(crate) target_frames: AtomicU64,
-    /// Starting cushion from the chosen buffer (Safe mode's floor).
+    /// Starting bridge buffer from the chosen buffer (Auto mode's floor).
     pub(crate) base_frames: AtomicU64,
     /// The steady block sizes each side really delivers, in input frames.
     pub(crate) input_block: AtomicU64,
     pub(crate) output_block: AtomicU64,
-    /// How the cushion is sized; see [`CushionMode`].
-    pub(crate) cushion_mode: AtomicU32,
-    pub(crate) manual_cushion_ms: AtomicU32,
+    /// How the bridge buffer is sized; see [`BufferMode`].
+    pub(crate) bridge_buffer_mode: AtomicU32,
+    pub(crate) fixed_bridge_buffer_ms: AtomicU32,
     pub(crate) in_l: AtomicU32,
     pub(crate) in_r: AtomicU32,
     pub(crate) out_l: AtomicU32,
     pub(crate) out_r: AtomicU32,
     scope_in: ScopeLane,
     scope_out: ScopeLane,
-    pub(crate) underruns: AtomicU64,
+    pub(crate) dropouts: AtomicU64,
     /// Frames the input dropped because the consumer had not kept up.
     pub(crate) overruns: AtomicU64,
     /// Frames the input callback delivered.  Unlike `head`, this advances even
@@ -135,7 +135,7 @@ pub(crate) struct Shared {
     pub(crate) metronome_gain: AtomicU32,
     /// 0 when stopped, otherwise the beat that last fired (`1..=beats`).
     /// The mixer writes it; the UI reads it.  Cleared when the bridge
-    /// stops, so a finished session does not keep showing the last beat.
+    /// stops, so a finished run does not keep showing the last beat.
     /// A block that was still running when the bridge failed can write it
     /// back, so the snapshot reads 0 once an error or a lost device is set,
     /// and while [`Self::running`] is false (a stop request leaves a
@@ -147,29 +147,29 @@ pub(crate) struct Shared {
     /// transport setting: that one can already name the next bar.
     metronome_beat: AtomicU16,
     pub(crate) input_enabled: [AtomicBool; 2],
-    /// The clock device's channel map, level and mute (applied after the
+    /// The clock output's channel map, level and mute (applied after the
     /// master) and its per-channel meters.
-    pub(crate) clock_device: DeviceControls,
-    /// Per-follower map, level, mute and meters.  Only the first
-    /// [`Self::follower_count`] slots are live.
-    pub(crate) followers: [DeviceControls; MAX_FOLLOWERS],
-    /// How many follower slots the mixer and PipeWire linker use right now.
-    follower_count: AtomicUsize,
-    /// Sink names / publish flags the PipeWire main loop links from.  Not
+    pub(crate) clock_output: DeviceControls,
+    /// Per-extra output map, level, mute and meters.  Only the first
+    /// [`Self::extra_output_count`] slots are live.
+    pub(crate) extra_outputs: [DeviceControls; MAX_EXTRA_OUTPUTS],
+    /// How many extra output slots the mixer and PipeWire linker use right now.
+    extra_output_count: AtomicUsize,
+    /// Sink names / virtual output switches the PipeWire main loop links from.  Not
     /// touched by audio callbacks.
-    follower_plan: Mutex<FollowerPlan>,
+    extra_output_plan: Mutex<ExtraOutputPlan>,
     /// Per-slot flags the realtime callback can read without the plan lock.
-    follower_virtual: [AtomicBool; MAX_FOLLOWERS],
-    follower_publish: [AtomicBool; MAX_FOLLOWERS],
-    /// Generic follower rings (finished mix → follower device).  Unused on
+    extra_output_virtual: [AtomicBool; MAX_EXTRA_OUTPUTS],
+    virtual_output_on: [AtomicBool; MAX_EXTRA_OUTPUTS],
+    /// Generic extra output rings (finished mix → extra output device).  Unused on
     /// the PipeWire duplex path, which fans out in-graph instead.
-    follower_buses: [FollowerBus; MAX_FOLLOWERS],
-    /// Set by the follower supervisor while a cpal stream is draining the
+    extra_output_buses: [ExtraOutputBus; MAX_EXTRA_OUTPUTS],
+    /// Set by the extra output supervisor while a cpal stream is draining the
     /// slot's ring.  The clock callback only pushes when this is true.
-    follower_ring_active: [AtomicBool; MAX_FOLLOWERS],
+    extra_output_ring_active: [AtomicBool; MAX_EXTRA_OUTPUTS],
     pub(crate) drift_enabled: AtomicBool,
     /// Set while input and output run in one PipeWire graph callback (the
-    /// duplex node).  The ring, cushion and drift steering are then unused.
+    /// duplex node).  The ring, bridge buffer and drift steering are then unused.
     pub(crate) direct: AtomicBool,
     pub(crate) status: Mutex<String>,
     pub(crate) error: Mutex<Option<String>>,
@@ -181,12 +181,15 @@ pub(crate) struct Shared {
     pub(crate) output_rate: AtomicU32,
     pub(crate) output_step_frames: AtomicU32,
     pub(crate) output_mode: Mutex<String>,
+    /// [`OutputMode::to_u8`] of the mode the output opened in, published
+    /// with [`Self::output_mode`]; 0 until it has opened.
+    opened_output_mode: AtomicU8,
     /// Nanoseconds from our playback stream to the graph edge (`pw_time.delay`).
     /// [`PATH_DELAY_UNKNOWN`] until a native PipeWire playback callback writes it.
     pub(crate) path_delay_ns: AtomicU64,
     /// The signal path slots.  Only live slots (see [`PathState`]) run;
     /// all are preallocated so adding one never allocates.  Slot 0 is the
-    /// one path every session has today.
+    /// one path every run has today.
     pub(crate) paths: [PathControls; MAX_PATHS],
     /// The DSP time of every live path's chain together, per block: the
     /// smoothed sum and the decaying peak of each block's sum (not the sum
@@ -201,7 +204,7 @@ pub(crate) struct Shared {
     pub(crate) asio_panel: AsioPanelRequests,
     /// The endpoint recording.  [`Recorder::new`] does not spawn; arming
     /// starts the writer, which keeps its own `Arc` so it can finish after
-    /// this session is dropped.
+    /// this run is dropped.
     pub(crate) recorder: Arc<Recorder>,
 }
 
@@ -224,15 +227,15 @@ impl Shared {
             base_frames: AtomicU64::new((sample_rate as u64 / 187).max(256)),
             input_block: AtomicU64::new(0),
             output_block: AtomicU64::new(0),
-            cushion_mode: AtomicU32::new(CushionMode::Safe as u32),
-            manual_cushion_ms: AtomicU32::new(10.0f32.to_bits()),
+            bridge_buffer_mode: AtomicU32::new(BufferMode::Auto as u32),
+            fixed_bridge_buffer_ms: AtomicU32::new(10.0f32.to_bits()),
             in_l: AtomicU32::new(0.0f32.to_bits()),
             in_r: AtomicU32::new(0.0f32.to_bits()),
             out_l: AtomicU32::new(0.0f32.to_bits()),
             out_r: AtomicU32::new(0.0f32.to_bits()),
             scope_in: ScopeLane::new(),
             scope_out: ScopeLane::new(),
-            underruns: AtomicU64::new(0),
+            dropouts: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
             input_frames: AtomicU64::new(0),
             frames: AtomicU64::new(0),
@@ -253,14 +256,14 @@ impl Shared {
                 super::metronome::ClickRhythm::FourFour as u8,
             )),
             input_enabled: [AtomicBool::new(true), AtomicBool::new(true)],
-            clock_device: DeviceControls::new(),
-            followers: std::array::from_fn(|_| DeviceControls::new()),
-            follower_count: AtomicUsize::new(0),
-            follower_plan: Mutex::new(FollowerPlan::default()),
-            follower_virtual: std::array::from_fn(|_| AtomicBool::new(false)),
-            follower_publish: std::array::from_fn(|_| AtomicBool::new(false)),
-            follower_buses: std::array::from_fn(|_| FollowerBus::new(sample_rate)),
-            follower_ring_active: std::array::from_fn(|_| AtomicBool::new(false)),
+            clock_output: DeviceControls::new(),
+            extra_outputs: std::array::from_fn(|_| DeviceControls::new()),
+            extra_output_count: AtomicUsize::new(0),
+            extra_output_plan: Mutex::new(ExtraOutputPlan::default()),
+            extra_output_virtual: std::array::from_fn(|_| AtomicBool::new(false)),
+            virtual_output_on: std::array::from_fn(|_| AtomicBool::new(false)),
+            extra_output_buses: std::array::from_fn(|_| ExtraOutputBus::new(sample_rate)),
+            extra_output_ring_active: std::array::from_fn(|_| AtomicBool::new(false)),
             drift_enabled: AtomicBool::new(true),
             direct: AtomicBool::new(false),
             status: Mutex::new("Waiting".to_owned()),
@@ -270,6 +273,7 @@ impl Shared {
             output_rate: AtomicU32::new(0),
             output_step_frames: AtomicU32::new(0),
             output_mode: Mutex::new(String::new()),
+            opened_output_mode: AtomicU8::new(0),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
             paths: std::array::from_fn(|_| PathControls::new(sample_rate)),
             total_dsp: DspCell::default(),
@@ -282,7 +286,7 @@ impl Shared {
     }
 
     /// Copies the settings that outlive one bridge start into this fresh
-    /// session.  Live plugin instances belong to the session that opened them;
+    /// run.  Live plugin instances belong to the run that opened them;
     /// only the saved preferences move, and the chain rebuilds from them.
     pub(crate) fn adopt_settings_from(&mut self, previous: &Shared) {
         self.input_gain.store(
@@ -313,8 +317,8 @@ impl Shared {
             previous.metronome_gain.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
-        // The displayed beat belongs to the session that published it.
-        // A new engine starts at "—", not on the previous session's beat.
+        // The displayed beat belongs to the run that published it.
+        // A new engine starts at "—", not on the previous run's beat.
         for (to, from) in self.input_enabled.iter().zip(&previous.input_enabled) {
             to.store(from.load(Ordering::Relaxed), Ordering::Relaxed);
         }
@@ -323,33 +327,36 @@ impl Shared {
             Ordering::Relaxed,
         );
         self.recorder.set_with_click(previous.recorder.with_click());
-        self.clock_device
-            .adopt_settings_from(&previous.clock_device);
-        let count = previous.follower_count.load(Ordering::Relaxed);
-        self.follower_count.store(count, Ordering::Relaxed);
-        for (to, from) in self.followers.iter().zip(previous.followers.iter()) {
+        self.clock_output
+            .adopt_settings_from(&previous.clock_output);
+        let count = previous.extra_output_count.load(Ordering::Relaxed);
+        self.extra_output_count.store(count, Ordering::Relaxed);
+        for (to, from) in self.extra_outputs.iter().zip(previous.extra_outputs.iter()) {
             to.adopt_settings_from(from);
         }
-        for index in 0..MAX_FOLLOWERS {
+        for index in 0..MAX_EXTRA_OUTPUTS {
             let active = index < count;
-            self.follower_virtual[index].store(
-                active && previous.follower_virtual[index].load(Ordering::Relaxed),
+            self.extra_output_virtual[index].store(
+                active && previous.extra_output_virtual[index].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
-            self.follower_publish[index].store(
-                active && previous.follower_publish[index].load(Ordering::Relaxed),
+            self.virtual_output_on[index].store(
+                active && previous.virtual_output_on[index].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
         }
-        if let (Ok(mut to), Ok(from)) = (self.follower_plan.lock(), previous.follower_plan.lock()) {
+        if let (Ok(mut to), Ok(from)) = (
+            self.extra_output_plan.lock(),
+            previous.extra_output_plan.lock(),
+        ) {
             *to = from.clone();
         }
-        self.cushion_mode.store(
-            previous.cushion_mode.load(Ordering::Relaxed),
+        self.bridge_buffer_mode.store(
+            previous.bridge_buffer_mode.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
-        self.manual_cushion_ms.store(
-            previous.manual_cushion_ms.load(Ordering::Relaxed),
+        self.fixed_bridge_buffer_ms.store(
+            previous.fixed_bridge_buffer_ms.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
         for (to, from) in self.paths.iter().zip(&previous.paths) {
@@ -563,37 +570,37 @@ impl Shared {
         self.in_r.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.out_l.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.out_r.store(0.0f32.to_bits(), Ordering::Relaxed);
-        self.clock_device.reset();
-        for follower in &self.followers {
-            follower.reset();
+        self.clock_output.reset();
+        for extra_output in &self.extra_outputs {
+            extra_output.reset();
         }
-        for bus in &self.follower_buses {
+        for bus in &self.extra_output_buses {
             bus.reset_playback();
         }
-        for flag in &self.follower_ring_active {
+        for flag in &self.extra_output_ring_active {
             flag.store(false, Ordering::Relaxed);
         }
         for path in &self.paths {
             path.reset_meters();
         }
         self.total_dsp.store(DspTime::default());
-        // Keep the plan and count across a session reset: the UI re-pushes
+        // Keep the plan and count across a run reset: the UI re-pushes
         // them every frame, and clearing here would drop links for a tick.
         self.scope_in.clear();
         self.scope_out.clear();
-        self.underruns.store(0, Ordering::Relaxed);
+        self.dropouts.store(0, Ordering::Relaxed);
         self.overruns.store(0, Ordering::Relaxed);
         self.input_frames.store(0, Ordering::Relaxed);
         self.frames.store(0, Ordering::Relaxed);
         self.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.running.store(false, Ordering::Relaxed);
         self.direct.store(false, Ordering::Relaxed);
-        // Only called on a session no callback has touched yet (every start
+        // Only called on a run no callback has touched yet (every start
         // and preview builds a fresh `Shared`), so the order of the two
         // stores does not matter.
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
-        // Defensive: a fresh session has written nothing, so the tap starts
+        // Defensive: a fresh run has written nothing, so the tap starts
         // empty and `copy_tap` reports nothing until it has a whole window.
         self.tap_head.store(0, Ordering::Relaxed);
         self.set_status("Starting bridge");
@@ -609,10 +616,11 @@ impl Shared {
         self.path_delay_ns
             .store(PATH_DELAY_UNKNOWN, Ordering::Relaxed);
         self.set_output_mode("");
-        // A measurement belongs to the session it was armed in; a restarted
+        self.opened_output_mode.store(0, Ordering::Relaxed);
+        // A measurement belongs to the run it was armed in; a restarted
         // bridge must not inherit a duck or a half-filled capture.
         self.calibration.finish();
-        // A panel request belongs to the session that was running.  A fresh
+        // A panel request belongs to the run that was running.  A fresh
         // start must not open a panel on the driver's behalf.
         self.asio_panel.clear_requests();
     }
@@ -637,7 +645,7 @@ impl Shared {
     pub(crate) fn set_source_rate(&self, rate: u32) {
         self.source_rate.store(rate, Ordering::Relaxed);
         self.scope_in.set_rate(rate);
-        // A manual cushion is set in milliseconds; re-measure it in frames.
+        // A fixed bridge buffer is set in milliseconds; re-measure it in frames.
         self.lift_to_floor();
     }
 
@@ -652,16 +660,26 @@ impl Shared {
         self.scope_out.set_rate(rate);
     }
 
-    pub(crate) fn set_output(&self, rate: u32, step_frames: u32, mode: impl Into<String>) {
+    /// Publishes what the output opened: its rate, the step it is fed in,
+    /// the mode it really runs in and the line that describes it.
+    pub(crate) fn set_output(
+        &self,
+        rate: u32,
+        step_frames: u32,
+        opened: OutputMode,
+        mode: impl Into<String>,
+    ) {
         self.output_rate.store(rate, Ordering::Relaxed);
         self.output_step_frames
             .store(step_frames, Ordering::Relaxed);
         self.scope_out.set_rate(rate);
         self.set_output_mode(mode);
-        // Size the cushion from the device step as soon as it is known.  Exclusive
+        self.opened_output_mode
+            .store(opened.to_u8(), Ordering::Relaxed);
+        // Size the bridge buffer from the device step as soon as it is known.  Exclusive
         // (and large REAL-style) wakes drain a full step each time; waiting for the
         // mixer's second block to call note_output_block leaves the target at the
-        // input-side initial guess and underruns into the fade ("helicopter").
+        // input-side initial guess and drops out into the fade ("helicopter").
         if step_frames > 0 {
             let source = match self.source_rate.load(Ordering::Relaxed) {
                 0 => rate.max(1),
@@ -675,7 +693,7 @@ impl Shared {
         }
     }
 
-    /// Sets the starting cushion for a new bridge.
+    /// Sets the starting bridge buffer for a new bridge.
     pub(crate) fn set_target_frames(&self, frames: usize) {
         self.base_frames
             .store(frames.max(64) as u64, Ordering::Relaxed);
@@ -687,29 +705,29 @@ impl Shared {
         self.target_frames.load(Ordering::Relaxed) as usize
     }
 
-    pub(crate) fn cushion_mode(&self) -> CushionMode {
-        CushionMode::from_u32(self.cushion_mode.load(Ordering::Relaxed))
+    pub(crate) fn bridge_buffer_mode(&self) -> BufferMode {
+        BufferMode::from_u32(self.bridge_buffer_mode.load(Ordering::Relaxed))
     }
 
-    /// The smallest cushion the current mode allows, in input frames.
+    /// The smallest bridge buffer the current mode allows, in input frames.
     pub(crate) fn floor_frames(&self) -> usize {
         let base = self.base_frames.load(Ordering::Relaxed) as usize;
         let input = self.input_block.load(Ordering::Relaxed) as usize;
         let output = self.output_block.load(Ordering::Relaxed) as usize;
-        let floor = match self.cushion_mode() {
+        let floor = match self.bridge_buffer_mode() {
             // Today's behaviour: twice the input buffer, never less than one
             // input block or two output blocks.
-            CushionMode::Safe => base.max(input).max(output * 2),
+            BufferMode::Auto => base.max(input).max(output * 2),
             // The least that can work: one block from each side.
-            CushionMode::LowLatency => {
+            BufferMode::Minimum => {
                 if input + output == 0 {
                     base
                 } else {
                     input + output
                 }
             }
-            CushionMode::Manual => {
-                let ms = f32::from_bits(self.manual_cushion_ms.load(Ordering::Relaxed));
+            BufferMode::Fixed => {
+                let ms = f32::from_bits(self.fixed_bridge_buffer_ms.load(Ordering::Relaxed));
                 let rate = match self.source_rate.load(Ordering::Relaxed) {
                     0 => 48_000,
                     rate => rate,
@@ -720,11 +738,11 @@ impl Shared {
         floor.clamp(32, self.capacity_frames / 2)
     }
 
-    /// Brings the target up to the floor; Manual pins it there exactly.
+    /// Brings the target up to the floor; Fixed pins it there exactly.
     pub(crate) fn lift_to_floor(&self) {
         let floor = self.floor_frames() as u64;
         let current = self.target_frames.load(Ordering::Relaxed);
-        if self.cushion_mode() == CushionMode::Manual {
+        if self.bridge_buffer_mode() == BufferMode::Fixed {
             if current != floor {
                 self.target_frames.store(floor, Ordering::Relaxed);
             }
@@ -753,27 +771,28 @@ impl Shared {
         }
     }
 
-    /// Applies a cushion choice while the bridge runs.  A new mode or manual
+    /// Applies a bridge buffer choice while the bridge runs.  A new mode or fixed
     /// size starts from its own floor straight away.
-    pub(crate) fn set_cushion(&self, mode: CushionMode, manual_ms: f32) {
-        let mode_changed = self.cushion_mode.swap(mode as u32, Ordering::Relaxed) != mode as u32;
+    pub(crate) fn set_bridge_buffer(&self, mode: BufferMode, fixed_ms: f32) {
+        let mode_changed =
+            self.bridge_buffer_mode.swap(mode as u32, Ordering::Relaxed) != mode as u32;
         let ms_changed = self
-            .manual_cushion_ms
-            .swap(manual_ms.to_bits(), Ordering::Relaxed)
-            != manual_ms.to_bits();
-        if mode_changed || (ms_changed && mode == CushionMode::Manual) {
+            .fixed_bridge_buffer_ms
+            .swap(fixed_ms.to_bits(), Ordering::Relaxed)
+            != fixed_ms.to_bits();
+        if mode_changed || (ms_changed && mode == BufferMode::Fixed) {
             self.target_frames
                 .store(self.floor_frames() as u64, Ordering::Relaxed);
         }
     }
 
-    pub(crate) fn raise_target_after_underrun(&self) {
-        let step = match self.cushion_mode() {
-            CushionMode::Safe => 256,
-            // Smaller steps, so one dropout does not undo the low setting.
-            CushionMode::LowLatency => (self.output_block.load(Ordering::Relaxed) / 4).max(64),
-            // Manual stays where the person put it.
-            CushionMode::Manual => return,
+    pub(crate) fn raise_target_after_dropout(&self) {
+        let step = match self.bridge_buffer_mode() {
+            BufferMode::Auto => 256,
+            // Smaller steps, so one dropout does not undo the minimum setting.
+            BufferMode::Minimum => (self.output_block.load(Ordering::Relaxed) / 4).max(64),
+            // Fixed stays where the person put it.
+            BufferMode::Fixed => return,
         };
         let floor = self.floor_frames() as u64;
         let current = self.target_frames.load(Ordering::Relaxed);
@@ -784,19 +803,19 @@ impl Shared {
         }
     }
 
-    /// How long playback must stay clean before the cushion shrinks a step.
+    /// How long playback must stay clean before the bridge buffer shrinks a step.
     pub(crate) fn relax_after(&self) -> Duration {
-        match self.cushion_mode() {
-            CushionMode::LowLatency => Duration::from_secs(2),
+        match self.bridge_buffer_mode() {
+            BufferMode::Minimum => Duration::from_secs(2),
             _ => Duration::from_secs(4),
         }
     }
 
     pub(crate) fn relax_target(&self) {
-        let step = match self.cushion_mode() {
-            CushionMode::Safe => 64,
-            CushionMode::LowLatency => 32,
-            CushionMode::Manual => return,
+        let step = match self.bridge_buffer_mode() {
+            BufferMode::Auto => 64,
+            BufferMode::Minimum => 32,
+            BufferMode::Fixed => return,
         };
         let floor = self.floor_frames() as u64;
         let current = self.target_frames.load(Ordering::Relaxed);
@@ -823,115 +842,120 @@ impl Shared {
         self.drift_enabled.store(drift, Ordering::Relaxed);
     }
 
-    /// How many follower slots are live (≤ [`MAX_FOLLOWERS`]).
-    pub(crate) fn follower_count(&self) -> usize {
-        self.follower_count
+    /// How many extra output slots are live (≤ [`MAX_EXTRA_OUTPUTS`]).
+    pub(crate) fn extra_output_count(&self) -> usize {
+        self.extra_output_count
             .load(Ordering::Relaxed)
-            .min(MAX_FOLLOWERS)
+            .min(MAX_EXTRA_OUTPUTS)
     }
 
-    /// Pushes follower settings, cushions and the link / open plan.  Level,
+    /// Pushes extra output settings, bridge buffers and the link / open plan.  Level,
     /// mute and map take effect on the next block; add/remove updates
     /// PipeWire links or generic streams on the next main-loop tick.  Not
     /// part of the bridge signature.
-    pub(crate) fn set_followers(
+    pub(crate) fn set_extra_outputs(
         &self,
         settings: &[OutputDeviceSettings],
-        plan: &FollowerPlan,
-        cushions: &[(CushionMode, f32)],
+        plan: &ExtraOutputPlan,
+        bridge_buffers: &[(BufferMode, f32)],
     ) {
-        let count = settings.len().min(plan.count).min(MAX_FOLLOWERS);
+        let count = settings.len().min(plan.count).min(MAX_EXTRA_OUTPUTS);
         for (index, slot) in settings.iter().take(count).enumerate() {
-            self.followers[index].set(slot);
-            // PipeWire followers are stereo port pairs; publish the count so
-            // the UI has meters as soon as the follower is added live.
-            // Generic followers overwrite this when their stream opens.
-            if self.followers[index].channels() == 0 {
-                self.followers[index].set_channels(2);
+            self.extra_outputs[index].set(slot);
+            // PipeWire extra outputs are stereo port pairs; publish the count so
+            // the UI has meters as soon as the extra output is added live.
+            // Generic extra outputs overwrite this when their stream opens.
+            if self.extra_outputs[index].channels() == 0 {
+                self.extra_outputs[index].set_channels(2);
             }
             let link = &plan.slots[index];
-            self.follower_virtual[index].store(link.virtual_out, Ordering::Relaxed);
-            self.follower_publish[index].store(link.publish, Ordering::Relaxed);
-            if let Some(&(mode, ms)) = cushions.get(index) {
-                self.follower_buses[index].set_cushion(mode, ms);
+            self.extra_output_virtual[index].store(link.virtual_output, Ordering::Relaxed);
+            self.virtual_output_on[index].store(link.virtual_output_on, Ordering::Relaxed);
+            if let Some(&(mode, ms)) = bridge_buffers.get(index) {
+                self.extra_output_buses[index].set_bridge_buffer(mode, ms);
             }
         }
-        for index in count..MAX_FOLLOWERS {
-            self.follower_virtual[index].store(false, Ordering::Relaxed);
-            self.follower_publish[index].store(false, Ordering::Relaxed);
-            self.follower_ring_active[index].store(false, Ordering::Relaxed);
+        for index in count..MAX_EXTRA_OUTPUTS {
+            self.extra_output_virtual[index].store(false, Ordering::Relaxed);
+            self.virtual_output_on[index].store(false, Ordering::Relaxed);
+            self.extra_output_ring_active[index].store(false, Ordering::Relaxed);
         }
-        self.follower_count.store(count, Ordering::Relaxed);
-        if let Ok(mut current) = self.follower_plan.lock() {
-            *current = FollowerPlan {
+        self.extra_output_count.store(count, Ordering::Relaxed);
+        if let Ok(mut current) = self.extra_output_plan.lock() {
+            *current = ExtraOutputPlan {
                 slots: plan.slots.clone(),
                 count,
             };
         }
     }
 
-    /// The playback bus for one generic follower slot.
-    pub(crate) fn follower_bus(&self, index: usize) -> &FollowerBus {
-        &self.follower_buses[index.min(MAX_FOLLOWERS - 1)]
+    /// The playback bus for one generic extra output slot.
+    pub(crate) fn extra_output_bus(&self, index: usize) -> &ExtraOutputBus {
+        &self.extra_output_buses[index.min(MAX_EXTRA_OUTPUTS - 1)]
     }
 
     /// Whether the clock callback should push finished frames into this
-    /// follower's ring.
-    pub(crate) fn follower_ring_active(&self, index: usize) -> &AtomicBool {
-        &self.follower_ring_active[index.min(MAX_FOLLOWERS - 1)]
+    /// extra output's ring.
+    pub(crate) fn extra_output_ring_active(&self, index: usize) -> &AtomicBool {
+        &self.extra_output_ring_active[index.min(MAX_EXTRA_OUTPUTS - 1)]
     }
 
-    /// Whether the clock callback maps generic follower `index` for its
-    /// ring: a follower stream drains it, and this is not the PipeWire
-    /// duplex graph (which plays the followers in-graph).  Read once per
+    /// Whether the clock callback maps generic extra output `index` for its
+    /// ring: an extra output stream drains it, and this is not the PipeWire
+    /// duplex graph (which plays the extra outputs in-graph).  Read once per
     /// block; the ring is laid out for the device before this turns true.
-    pub(crate) fn feeds_follower(&self, index: usize) -> bool {
+    pub(crate) fn feeds_extra_output(&self, index: usize) -> bool {
         !self.direct.load(Ordering::Relaxed)
-            && self.follower_ring_active(index).load(Ordering::Acquire)
+            && self.extra_output_ring_active(index).load(Ordering::Acquire)
     }
 
-    /// Pushes follower `index`'s finished device frame (its own sum of the
+    /// Pushes extra output `index`'s finished device frame (its own sum of the
     /// paths, aligned, mapped and levelled) into its ring, while a stream
     /// still drains it and the ring is still the one laid out at the start
-    /// of the block (`generation`, see [`FollowerBus::generation`]).
-    pub(crate) fn push_follower_frame(&self, index: usize, generation: u64, frame: &DeviceFrame) {
-        if self.follower_ring_active(index).load(Ordering::Relaxed)
-            && self.follower_bus(index).generation() == generation
+    /// of the block (`generation`, see [`ExtraOutputBus::generation`]).
+    pub(crate) fn push_extra_output_frame(
+        &self,
+        index: usize,
+        generation: u64,
+        frame: &DeviceFrame,
+    ) {
+        if self.extra_output_ring_active(index).load(Ordering::Relaxed)
+            && self.extra_output_bus(index).generation() == generation
         {
-            self.follower_bus(index).push_frame(frame);
+            self.extra_output_bus(index).push_frame(frame);
         }
     }
 
-    /// Notes the clock output's block size on every active follower bus so
-    /// their cushions size themselves from the producer step.
-    pub(crate) fn note_follower_producer_block(&self, frames: usize) {
+    /// Notes the clock output's block size on every active extra output bus so
+    /// their bridge buffers size themselves from the producer step.
+    pub(crate) fn note_extra_output_producer_block(&self, frames: usize) {
         if self.direct.load(Ordering::Relaxed) {
             return;
         }
-        let count = self.follower_count();
+        let count = self.extra_output_count();
         for index in 0..count {
-            if self.follower_ring_active[index].load(Ordering::Relaxed) {
-                self.follower_buses[index].note_input_block(frames);
+            if self.extra_output_ring_active[index].load(Ordering::Relaxed) {
+                self.extra_output_buses[index].note_input_block(frames);
             }
         }
     }
 
-    /// Whether follower `index` is the virtual RigWerk Out source.
+    /// Whether extra output `index` is the virtual RigWerk Out source.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn follower_is_virtual(&self, index: usize) -> bool {
-        index < MAX_FOLLOWERS && self.follower_virtual[index].load(Ordering::Relaxed)
+    pub(crate) fn extra_output_is_virtual(&self, index: usize) -> bool {
+        index < MAX_EXTRA_OUTPUTS && self.extra_output_virtual[index].load(Ordering::Relaxed)
     }
 
     /// Whether the virtual source at `index` should be advertised.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn follower_is_published(&self, index: usize) -> bool {
-        index < MAX_FOLLOWERS && self.follower_publish[index].load(Ordering::Relaxed)
+    pub(crate) fn virtual_output_is_on(&self, index: usize) -> bool {
+        index < MAX_EXTRA_OUTPUTS && self.virtual_output_on[index].load(Ordering::Relaxed)
     }
 
-    /// A clone of the live follower plan for the PipeWire linker.
+    /// A clone of the live extra output plan for the PipeWire linker.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn follower_plan(&self) -> FollowerPlan {
-        self.follower_plan
+    pub(crate) fn extra_output_plan(&self) -> ExtraOutputPlan {
+        self.extra_output_plan
             .lock()
             .map(|plan| plan.clone())
             .unwrap_or_default()
@@ -1009,7 +1033,7 @@ impl Shared {
     /// Copies the latest `frames` interleaved frames (oldest first) into
     /// `out`, which must hold `frames * 2` samples.  Called from the UI
     /// thread.  Returns 0 while the tap has not yet seen a whole window, so a
-    /// fresh session reads nothing instead of stale or partly unwritten data.
+    /// fresh run reads nothing instead of stale or partly unwritten data.
     pub(crate) fn copy_tap(&self, out: &mut [f32], frames: usize) -> usize {
         if frames == 0 || frames > self.tap_capacity || out.len() < frames * 2 {
             return 0;
@@ -1109,7 +1133,7 @@ impl Shared {
         // A callback mid-block when the bridge failed may store its beat
         // after `set_error`, and a stopping bridge keeps mixing until its
         // teardown ends; a bridge that is not running shows no beat.
-        let (beat, metronome_rhythm) = self.metronome_beat();
+        let (beat, _) = self.metronome_beat();
         let running = self.running.load(Ordering::Relaxed);
         let metronome_beat = if error.is_some() || device_lost || !running {
             0
@@ -1121,30 +1145,64 @@ impl Shared {
             in_r: f32::from_bits(self.in_r.load(Ordering::Relaxed)),
             out_l: f32::from_bits(self.out_l.load(Ordering::Relaxed)),
             out_r: f32::from_bits(self.out_r.load(Ordering::Relaxed)),
-            out_channels: self.clock_device.meters(),
-            out_reduction_db: self.clock_device.reduction_db(),
-            output_channels: self.clock_device.channels(),
-            follower_count: self
-                .follower_count
+            gate_reduction_db: std::array::from_fn(|slot| self.paths[slot].gate_reduction_db()),
+            out_channels: self.clock_output.meters(),
+            out_reduction_db: self.clock_output.reduction_db(),
+            output_channels: self.clock_output.channels(),
+            extra_output_count: self
+                .extra_output_count
                 .load(Ordering::Relaxed)
-                .min(MAX_FOLLOWERS),
-            follower_channels: std::array::from_fn(|index| self.followers[index].meters()),
-            follower_reduction_db: std::array::from_fn(|index| {
-                self.followers[index].reduction_db()
+                .min(MAX_EXTRA_OUTPUTS),
+            extra_output_channels: std::array::from_fn(|index| self.extra_outputs[index].meters()),
+            extra_output_reduction_db: std::array::from_fn(|index| {
+                self.extra_outputs[index].reduction_db()
             }),
-            follower_channel_counts: std::array::from_fn(|index| self.followers[index].channels()),
-            follower_missing: std::array::from_fn(|index| {
-                self.follower_buses[index].missing.load(Ordering::Relaxed)
+            extra_output_channel_counts: std::array::from_fn(|index| {
+                self.extra_outputs[index].channels()
             }),
-            follower_underruns: std::array::from_fn(|index| {
-                self.follower_buses[index].underruns.load(Ordering::Relaxed)
+            extra_output_missing: std::array::from_fn(|index| {
+                self.extra_output_buses[index]
+                    .missing
+                    .load(Ordering::Relaxed)
             }),
-            follower_drift_at_limit: std::array::from_fn(|index| {
-                self.follower_buses[index]
+            extra_output_dropouts: std::array::from_fn(|index| {
+                self.extra_output_buses[index]
+                    .dropouts
+                    .load(Ordering::Relaxed)
+            }),
+            extra_output_drift_at_limit: std::array::from_fn(|index| {
+                self.extra_output_buses[index]
                     .drift_at_limit
                     .load(Ordering::Relaxed)
             }),
-            underruns: self.underruns.load(Ordering::Relaxed),
+            extra_output_rates: std::array::from_fn(|index| {
+                self.extra_output_buses[index].playback_rate()
+            }),
+            extra_output_buffer_frames: std::array::from_fn(|index| {
+                let bus = &self.extra_output_buses[index];
+                if bus.playback_rate() == 0 {
+                    0
+                } else {
+                    bus.device_block()
+                }
+            }),
+            extra_output_ring_fill: std::array::from_fn(|index| {
+                let bus = &self.extra_output_buses[index];
+                if bus.playback_rate() == 0 {
+                    0.0
+                } else {
+                    bus.fill()
+                }
+            }),
+            extra_output_target_frames: std::array::from_fn(|index| {
+                let bus = &self.extra_output_buses[index];
+                if bus.playback_rate() == 0 {
+                    0
+                } else {
+                    bus.target_frames()
+                }
+            }),
+            dropouts: self.dropouts.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
             input_frames: self.input_frames.load(Ordering::Relaxed),
             frames: self.frames.load(Ordering::Relaxed),
@@ -1167,10 +1225,12 @@ impl Shared {
                 .lock()
                 .map(|mode| mode.clone())
                 .unwrap_or_default(),
+            opened_output_mode: OutputMode::from_u8(
+                self.opened_output_mode.load(Ordering::Relaxed),
+            ),
             path_delay_ms: self.path_delay_ms(),
             direct: self.direct.load(Ordering::Relaxed),
             metronome_beat,
-            metronome_rhythm,
         }
     }
 }
@@ -1178,7 +1238,7 @@ impl Shared {
 /// Path 0 accessors from before paths existed, for tests.
 #[cfg(test)]
 impl Shared {
-    /// Replaces path 0's saved insert list without loading anything.
+    /// Replaces path 0's saved effect list without loading anything.
     pub(crate) fn restore_plugins(&self, prefs: Vec<PluginPref>) {
         self.main_path().restore_plugins(prefs);
     }
@@ -1209,7 +1269,7 @@ impl Shared {
         self.main_path().ensure_plugin_loaded(index);
     }
 
-    /// The loaded plugin behind one insert, for its own editor window.
+    /// The loaded plugin behind one effect, for its own editor window.
     pub(crate) fn plugin_handle(&self, index: usize) -> Option<super::plugins::PluginHandle> {
         self.main_path().plugin_handle(index)
     }
@@ -1223,7 +1283,7 @@ impl Shared {
         self.main_path().set_plugin_parameter(index, id, value)
     }
 
-    /// Path 0's insert views as last published.  Never takes the chain
+    /// Path 0's effect views as last published.  Never takes the chain
     /// lock, so drawing the UI cannot make the audio callback pass a block
     /// dry.
     pub(crate) fn plugin_views(&self) -> Arc<[PluginView]> {
@@ -1267,7 +1327,7 @@ pub(crate) fn unpack_metronome_beat(packed: u16) -> (u8, u8) {
 }
 
 /// Starting ring target for a given device buffer.  Two blocks is enough to
-/// start with; an underrun grows it and a calm stretch shrinks it again.
+/// start with; a dropout grows it and a calm stretch shrinks it again.
 pub(crate) fn initial_target(buffer_frames: usize) -> usize {
     (buffer_frames * 2).clamp(96, 4096)
 }

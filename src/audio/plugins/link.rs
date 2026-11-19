@@ -32,7 +32,7 @@ pub(crate) struct PluginShared {
     /// Restart work the UI owes the plugin: VST3 `RestartFlags` bits from
     /// `restartComponent`, or [`RESTART_ACTIVATION`] from CLAP.
     restart: AtomicU32,
-    /// The insert needs a structural rebuild (see [`Self::want_reload`]).
+    /// The effect needs a structural rebuild (see [`Self::want_reload`]).
     reload: AtomicBool,
     /// First processing failure, packed by [`ProcessFailure::pack`]; 0 is
     /// none.  Written once, by the audio thread.
@@ -128,7 +128,7 @@ impl PluginShared {
     }
 }
 
-/// Why a loaded insert stopped processing.  `Copy` and heap-free, so the
+/// Why a loaded effect stopped processing.  `Copy` and heap-free, so the
 /// audio thread records it in [`PluginShared`] without allocating; the UI
 /// writes the text ([`Self::message`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,7 +186,7 @@ const FAILURE_VST3_INACTIVE: u64 = 4;
 const FAILURE_RELOAD_LOOP: u64 = 5;
 
 impl ProcessFailure {
-    /// The text the insert's error shows (UI thread).
+    /// The text the effect's error shows (UI thread).
     pub(crate) fn message(self) -> String {
         match self {
             ProcessFailure::Vst3(code) => format!("Plugin process() failed: {code:#x}"),

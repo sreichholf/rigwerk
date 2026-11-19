@@ -17,12 +17,12 @@ use super::linux::pipewire;
 #[cfg(target_os = "linux")]
 use super::linux::sink_monitor::SinkMonitor;
 use super::metronome::{click_level_gain, ClickRhythm};
-use super::output_map::{AlignmentReport, OutputDeviceSettings, MAX_FOLLOWERS};
+use super::output_map::{AlignmentReport, OutputDeviceSettings, MAX_EXTRA_OUTPUTS};
 use super::path::{DspTime, PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
-use super::shared::FollowerPlan;
+use super::shared::ExtraOutputPlan;
 use super::shared::Shared;
-use super::types::{CushionMode, EngineState, Snapshot, StartConfig};
+use super::types::{BufferMode, EngineState, Snapshot, StartConfig};
 use super::PluginLockReport;
 
 /// A driver open can take seconds (ASIO's own timeout is six); a start that
@@ -39,18 +39,18 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const DROP_STOP_WAIT: Duration = Duration::from_millis(900);
 
 pub struct AudioEngine {
-    /// The session the UI reads and writes.  Every real start replaces it, so
-    /// an older bridge can only ever touch the session it was started with.
+    /// The run the UI reads and writes.  Every real start replaces it, so
+    /// an older bridge can only ever touch the run it was started with.
     pub(crate) shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
-    /// The thread of the current session.
+    /// The thread of the current run.
     handle: Option<JoinHandle<()>>,
     /// Bridge threads whose stop was requested but whose driver has not
     /// returned from teardown yet.  While one is alive it still owns its audio
-    /// device, so `start` must not open a second session.
+    /// device, so `start` must not open a second run.
     lingering: Vec<JoinHandle<()>>,
-    /// Rate each session's `Shared` is built at.  Devices negotiate their own
-    /// working rates inside the session.
+    /// Rate each run's `Shared` is built at.  Devices negotiate their own
+    /// working rates inside the run.
     sample_rate: u32,
     pub state: EngineState,
     /// When `Starting` began, for the start timeout.
@@ -63,13 +63,13 @@ pub struct AudioEngine {
     /// Input frames at the last heartbeat check and when they last advanced.
     last_input_frames: u64,
     last_input_frames_at: Instant,
-    /// Whether this session should be receiving input blocks while it runs.
+    /// Whether this run should be receiving input blocks while it runs.
     input_expected: bool,
-    /// ASIO CLSID this session opened on the input.  `None` when the input
+    /// ASIO CLSID this run opened on the input.  `None` when the input
     /// is not ASIO.  Cleared when the bridge stops, and reported only while
     /// `Running`, so the panel stays disabled until that driver is open.
     asio_input_clsid: Option<u128>,
-    /// ASIO CLSID this session opened on the output.  `None` when playback
+    /// ASIO CLSID this run opened on the output.  `None` when playback
     /// is not ASIO.  Same lifetime as [`Self::asio_input_clsid`].
     asio_output_clsid: Option<u128>,
     /// The quantum that was forced before RigWerk changed it, restored on stop.
@@ -188,7 +188,7 @@ impl AudioEngine {
         }
     }
 
-    /// Drops the session's ASIO identity and any panel request the bridge
+    /// Drops the run's ASIO identity and any panel request the bridge
     /// has not taken yet.  A panel that is already open still finishes.
     fn forget_asio_panel(&mut self) {
         self.asio_input_clsid = None;
@@ -245,10 +245,10 @@ impl AudioEngine {
             || self.lingering.iter().any(|handle| !handle.is_finished())
     }
 
-    /// Chooses how the cushion is sized.  Takes effect immediately, also while
+    /// Chooses how the bridge buffer is sized.  Takes effect immediately, also while
     /// the bridge runs.
-    pub fn set_cushion(&self, mode: CushionMode, manual_ms: f32) {
-        self.shared.set_cushion(mode, manual_ms);
+    pub fn set_bridge_buffer(&self, mode: BufferMode, fixed_ms: f32) {
+        self.shared.set_bridge_buffer(mode, fixed_ms);
     }
 
     /// Metronome transport.  Stores the level as a linear gain (0 dB is 1,
@@ -298,7 +298,7 @@ impl AudioEngine {
     }
 
     /// Puts a path with these settings and plugins into `slot` and makes it
-    /// active (used when a session or patch is loaded).  The plugins are
+    /// active (used when a session is loaded).  The plugins are
     /// restored, not opened.
     pub fn restore_path(&self, slot: usize, mix: &PathMix, plugins: Vec<PluginPref>) {
         if slot < MAX_PATHS {
@@ -329,7 +329,7 @@ impl AudioEngine {
         self.shared.path(slot).state()
     }
 
-    /// Path `slot`'s plugin chain latency in samples (bypassed inserts
+    /// Path `slot`'s plugin chain latency in samples (bypassed effects
     /// count).
     pub fn path_latency_samples(&self, slot: usize) -> u32 {
         self.shared.path(slot).latency_samples()
@@ -341,11 +341,11 @@ impl AudioEngine {
         std::array::from_fn(|slot| self.shared.path(slot).latency_samples())
     }
 
-    /// Output device `device`'s alignment (0 = clock device, then the
-    /// followers) as the running mixer applies it: the delay each path
+    /// Output device `device`'s alignment (0 = clock output, then the
+    /// extra outputs) as the running mixer applies it: the delay each path
     /// gets there, the path it waits for and the device's total latency
     /// from the chains and the alignment.  `None` while no mixer has
-    /// published one for this device (bridge stopped, or a follower that
+    /// published one for this device (bridge stopped, or an extra output that
     /// is not live); the UI then works it out from the settings
     /// (`OutputDeviceSettings::alignment`).
     pub fn device_alignment(&self, device: usize) -> Option<AlignmentReport> {
@@ -353,9 +353,9 @@ impl AudioEngine {
             return None;
         }
         let controls = match device {
-            0 => &self.shared.clock_device,
-            follower if follower <= self.shared.follower_count() => {
-                &self.shared.followers[follower - 1]
+            0 => &self.shared.clock_output,
+            extra_output if extra_output <= self.shared.extra_output_count() => {
+                &self.shared.extra_outputs[extra_output - 1]
             }
             _ => return None,
         };
@@ -363,7 +363,7 @@ impl AudioEngine {
     }
 
     /// The rate alignment delays are counted at when no bridge runs: the
-    /// plugin chains' rate (the last output rate, or the session's).
+    /// plugin chains' rate (the last output rate, or the run's).
     pub fn plugin_rate(&self) -> u32 {
         self.shared.path(0).chain_rate()
     }
@@ -398,7 +398,7 @@ impl AudioEngine {
     }
 
     /// Path `path`'s plugin counters: how often the audio thread tried the
-    /// chain and could not run it, and how often it tried each insert and
+    /// chain and could not run it, and how often it tried each effect and
     /// found it paused.  Measurement only; the report takes no lock on the
     /// sample path.
     pub fn plugin_lock_report(&self, path: usize) -> PluginLockReport {
@@ -481,25 +481,26 @@ impl AudioEngine {
         self.shared.calibration.capture_end_ns()
     }
 
-    /// Sets the clock device's channel map, level and mute (sanitized here).
+    /// Sets the clock output's channel map, level and mute (sanitized here).
     /// Takes effect immediately with a short crossfade, also while the
     /// bridge runs.
-    pub fn set_clock_device(&self, settings: &OutputDeviceSettings) {
-        self.shared.clock_device.set(settings);
+    pub fn set_clock_output(&self, settings: &OutputDeviceSettings) {
+        self.shared.clock_output.set(settings);
     }
 
-    /// Sets follower levels, mutes, maps, cushions and the link / open plan.
+    /// Sets extra output levels, mutes, maps, bridge buffers and the link / open plan.
     /// Live: not part of the bridge signature.
-    pub fn set_followers(
+    pub fn set_extra_outputs(
         &self,
         settings: &[OutputDeviceSettings],
-        plan: &FollowerPlan,
-        cushions: &[(crate::audio::CushionMode, f32)],
+        plan: &ExtraOutputPlan,
+        bridge_buffers: &[(crate::audio::BufferMode, f32)],
     ) {
-        self.shared.set_followers(settings, plan, cushions);
+        self.shared
+            .set_extra_outputs(settings, plan, bridge_buffers);
     }
 
-    /// Advances the session's observed state.  This is where a stuck start, a
+    /// Advances the run's observed state.  This is where a stuck start, a
     /// dead output or a bridge thread that ended on its own becomes visible;
     /// the UI calls it once a frame.
     pub fn poll(&mut self) {
@@ -509,7 +510,7 @@ impl AudioEngine {
         let current_finished = self.reap_current_bridge();
 
         // A user stop owns the state until the old thread confirms teardown.
-        // A late error from that same session must not turn Stopping into
+        // A late error from that same run must not turn Stopping into
         // Error; the watchdog is the only failure path while stopping.
         if self.state == EngineState::Stopping {
             if self.shared.asio_panel.is_open() {
@@ -569,7 +570,7 @@ impl AudioEngine {
                     self.stop.store(true, Ordering::Relaxed);
                     // Park the still-live thread before publishing the error,
                     // so the next Start sees teardown pending instead of a
-                    // second session on the same device.
+                    // second run on the same device.
                     let pending = self.park_current_bridge() || !self.lingering.is_empty();
                     if pending {
                         self.shared.set_error(format!(
@@ -636,13 +637,13 @@ impl AudioEngine {
 
     pub fn start_preview(&mut self) {
         self.stop();
-        // A preview starts no callback, but it still gets its own session: a
+        // A preview starts no callback, but it still gets its own run: a
         // bridge from a stop that timed out keeps the old `Arc<Shared>` and
         // can no longer write status, error or device-loss into what the UI
         // shows as Preview.
-        self.replace_session();
+        self.replace_run();
         self.shared.reset();
-        self.shared.set_status("Preview bridge · animated signal");
+        self.shared.set_status("Demo bridge · animated signal");
         self.started_at = None;
         self.stopping_since = None;
         self.input_expected = false;
@@ -651,7 +652,7 @@ impl AudioEngine {
         self.state = EngineState::Preview;
     }
 
-    /// Path `path`'s plugin insert chain as the UI needs it.
+    /// Path `path`'s plugin effect chain as the UI needs it.
     pub fn plugin_views(&self, path: usize) -> Arc<[PluginView]> {
         self.shared.path(path).plugin_views()
     }
@@ -663,7 +664,7 @@ impl AudioEngine {
         self.shared.service_plugins();
     }
 
-    /// Path `path`'s insert chain as it should be saved, with fresh plugin
+    /// Path `path`'s effect chain as it should be saved, with fresh plugin
     /// state.
     pub fn plugin_prefs(&self, path: usize) -> Vec<PluginPref> {
         self.shared.path(path).plugin_prefs()
@@ -703,17 +704,17 @@ impl AudioEngine {
         self.shared.path(path).set_plugin_mix(index, mix);
     }
 
-    /// Opens a saved insert on demand so its controls can be edited.
+    /// Opens a saved effect on demand so its controls can be edited.
     pub fn ensure_plugin_loaded(&self, path: usize, index: usize) {
         self.shared.path(path).ensure_plugin_loaded(index);
     }
 
-    /// The loaded plugin behind one insert, for its own editor window.
+    /// The loaded plugin behind one effect, for its own editor window.
     pub fn plugin_handle(&self, path: usize, index: usize) -> Option<super::plugins::PluginHandle> {
         self.shared.path(path).plugin_handle(index)
     }
 
-    /// Reads every control of an insert again after its own editor changed
+    /// Reads every control of an effect again after its own editor changed
     /// them (before a save or a bridge start).  The service frames follow
     /// the editor as it goes; this full read catches anything a plugin
     /// changed without reporting it.
@@ -721,7 +722,7 @@ impl AudioEngine {
         self.shared.path(path).sync_plugin_parameters(index);
     }
 
-    /// Copies the editor's last changes back and marks the insert's saved
+    /// Copies the editor's last changes back and marks the effect's saved
     /// state for capture, when its editor closes.
     pub fn finish_plugin_editor(&self, path: usize, index: usize) {
         let controls = self.shared.path(path);
@@ -756,15 +757,15 @@ impl AudioEngine {
         let (rate, channels) = match &source {
             crate::audio::record::RecordSource::Clock => (
                 self.shared.output_rate.load(Ordering::Relaxed),
-                self.shared.clock_device.channels() as usize,
+                self.shared.clock_output.channels() as usize,
             ),
-            crate::audio::record::RecordSource::Follower(slot) => {
-                if *slot >= MAX_FOLLOWERS {
+            crate::audio::record::RecordSource::ExtraOutput(slot) => {
+                if *slot >= MAX_EXTRA_OUTPUTS {
                     return false;
                 }
                 (
-                    self.follower_recording_rate(*slot),
-                    self.shared.followers[*slot].channels() as usize,
+                    self.extra_output_recording_rate(*slot),
+                    self.shared.extra_outputs[*slot].channels() as usize,
                 )
             }
         };
@@ -775,14 +776,14 @@ impl AudioEngine {
     }
 
     /// Asks the writer to finish and returns immediately.  The writer keeps
-    /// its own `Arc` from arm, so the file can close after this session is
+    /// its own `Arc` from arm, so the file can close after this run is
     /// gone.  This does not join that thread.
     pub(crate) fn disarm_recording(&self) {
         self.shared.recorder.disarm();
     }
 
     /// Whether takes carry the metronome tick and the calibration click.
-    /// Applies from the next frame, also mid-take, and every new session
+    /// Applies from the next frame, also mid-take, and every new run
     /// inherits it.
     pub(crate) fn set_record_click(&self, with_click: bool) {
         self.shared.recorder.set_with_click(with_click);
@@ -793,17 +794,17 @@ impl AudioEngine {
         self.shared.recorder.status()
     }
 
-    /// Rate follower `slot` is actually playing.
+    /// Rate extra output `slot` is actually playing.
     ///
-    /// A generic follower publishes its opened device rate when the stream
+    /// A generic extra output publishes its opened device rate when the stream
     /// starts.  That is the rate after its resampler.  With no opened rate,
-    /// the clock rate is used only for an in-graph duplex follower: that
+    /// the clock rate is used only for an in-graph duplex extra output: that
     /// path writes the device buffer in the clock callback and does not
-    /// resample.  A generic follower converts rate, and plays the ring bit
+    /// resample.  A generic extra output converts rate, and plays the ring bit
     /// for bit only when its own rate is the clock rate, so a missing
     /// opened rate is not guessed.
-    fn follower_recording_rate(&self, slot: usize) -> u32 {
-        let opened = self.shared.follower_bus(slot).playback_rate();
+    fn extra_output_recording_rate(&self, slot: usize) -> u32 {
+        let opened = self.shared.extra_output_bus(slot).playback_rate();
         if opened > 0 {
             return opened;
         }
@@ -814,18 +815,18 @@ impl AudioEngine {
         }
     }
 
-    /// Swaps in a fresh session that inherits the settings which outlive a
+    /// Swaps in a fresh run that inherits the settings which outlive a
     /// bridge start.  Every older bridge keeps the `Arc<Shared>` it was
-    /// started with, so none of them can write into the session the UI now
+    /// started with, so none of them can write into the run the UI now
     /// uses.
-    fn replace_session(&mut self) {
+    fn replace_run(&mut self) {
         // The old writer finishes on the Arc it kept at arm.  Shared::new
-        // below builds a fresh recorder for the session that replaces it.
+        // below builds a fresh recorder for the run that replaces it.
         self.disarm_recording();
         let previous = Arc::clone(&self.shared);
-        let mut session = Shared::new(self.sample_rate);
-        session.adopt_settings_from(&previous);
-        self.shared = Arc::new(session);
+        let mut run = Shared::new(self.sample_rate);
+        run.adopt_settings_from(&previous);
+        self.shared = Arc::new(run);
         drop(previous);
     }
 
@@ -835,7 +836,7 @@ impl AudioEngine {
             // The driver ignored the stop flag and still owns the old device
             // session.  Opening the device again would put two streams on the
             // same hardware, so fail visibly instead while it finishes.  The
-            // error belongs to the current session, which is the old one.
+            // error belongs to the current run, which is the old one.
             self.shared.set_error(
                 "The previous bridge is still shutting down and has not released the audio device. Start again once it has finished.",
             );
@@ -844,11 +845,11 @@ impl AudioEngine {
         }
         self.reap_finished_bridge();
 
-        // Every start gets its own session state.  A bridge that outlived a
+        // Every start gets its own run state.  A bridge that outlived a
         // stop keeps the `Arc<Shared>` it was started with, so it can no
         // longer write `running`, `status`, `error`, `device_lost`, meters or
-        // samples into the session this start is about to open.
-        self.replace_session();
+        // samples into the run this start is about to open.
+        self.replace_run();
 
         self.shared.reset();
         // Ask PipeWire for the low quantum before the output opens, so the
@@ -875,7 +876,7 @@ impl AudioEngine {
             };
         }
         // Plugin load stays on this thread (the UI thread), not on the
-        // bridge.  The saved inserts open at the planned rate before the
+        // bridge.  The saved effects open at the planned rate before the
         // first callback.  If the device opens at another rate, `set_output`
         // publishes it and `service_plugins` reloads the chain here.
         self.shared
@@ -895,7 +896,7 @@ impl AudioEngine {
         self.asio_input_clsid = config.asio_clsid;
         self.asio_output_clsid = config.output_asio_clsid;
 
-        // The closure gets the new session's `Arc` and nothing older, so this
+        // The closure gets the new run's `Arc` and nothing older, so this
         // bridge's writes cannot reach a later start either.
         let shared = Arc::clone(&self.shared);
         let stop = Arc::clone(&self.stop);
@@ -965,7 +966,7 @@ impl AudioEngine {
     fn finish_stop(&mut self) {
         self.forget_asio_panel();
         self.shared.running.store(false, Ordering::Relaxed);
-        // A half-done measurement belongs to the session that just ended; the
+        // A half-done measurement belongs to the run that just ended; the
         // next start gets a fresh one.  Nothing audible was forced here.
         self.shared.calibration.finish();
         // No mixer runs any more: what it published is stale.
@@ -973,13 +974,13 @@ impl AudioEngine {
             path.store_dsp_time(DspTime::default());
         }
         self.shared.total_dsp.store(DspTime::default());
-        self.shared.clock_device.clear_alignment();
-        for follower in &self.shared.followers {
-            follower.clear_alignment();
+        self.shared.clock_output.clear_alignment();
+        for extra_output in &self.shared.extra_outputs {
+            extra_output.clear_alignment();
         }
         self.shared.device_lost.store(false, Ordering::Relaxed);
         // The mixer has stopped writing.  A beat it published would sit on
-        // the Live strip until the next session.
+        // the Live strip until the next run.
         self.shared.clear_metronome_beat();
         self.release_quantum();
         self.close_sink_monitor();
@@ -994,8 +995,8 @@ impl AudioEngine {
     }
 
     /// Joins a bridge that finished after its stop was requested, releasing
-    /// the old session it kept alive.  The result is deliberately ignored:
-    /// with a preview or a later session the `Shared` it wrote to is no
+    /// the old run it kept alive.  The result is deliberately ignored:
+    /// with a preview or a later run the `Shared` it wrote to is no
     /// longer the one the UI reads.
     fn reap_finished_bridge(&mut self) {
         let mut index = 0;
@@ -1025,7 +1026,7 @@ impl AudioEngine {
         }
     }
 
-    /// Joins the current session's thread if it ended, so a clean exit or a
+    /// Joins the current run's thread if it ended, so a clean exit or a
     /// panic cannot leave it running invisibly.  Returns whether it ended.
     fn reap_current_bridge(&mut self) -> bool {
         if !self.handle.as_ref().is_some_and(JoinHandle::is_finished) {
@@ -1050,7 +1051,7 @@ impl AudioEngine {
 
     /// Publishes an error as the visible engine state and gives a forced
     /// PipeWire quantum back.
-    /// Every error ends the session: a bridge thread that reported a failure
+    /// Every error ends the run: a bridge thread that reported a failure
     /// but is still alive (a WASAPI or ASIO output that stopped, a device
     /// loss) would otherwise keep its devices and block the next start.
     fn enter_error(&mut self) {
@@ -1087,11 +1088,11 @@ impl AudioEngine {
                     confirmed = state;
                 }
                 Err(error) => {
-                    self.note_quantum_failure(format!("PipeWire quantum not set: {error}"));
+                    self.note_quantum_failure(format!("PipeWire graph buffer not set: {error}"));
                 }
             },
             Err(error) => {
-                self.note_quantum_failure(format!("PipeWire quantum not set: {error}"));
+                self.note_quantum_failure(format!("PipeWire graph buffer not set: {error}"));
             }
         }
         match pipewire::decide_quantum_force(previous.ok(), wrote, confirmed.is_some(), restored) {
@@ -1102,13 +1103,13 @@ impl AudioEngine {
                 if let Some(state) = confirmed {
                     self.quantum_note = None;
                     self.shared.set_status(format!(
-                        "PipeWire quantum {} frames ({:.1} ms)…",
+                        "PipeWire graph buffer {} frames ({:.1} ms)…",
                         state.quantum,
                         state.quantum as f32 / state.rate.max(1) as f32 * 1000.0
                     ));
                 } else {
                     self.note_quantum_failure(
-                        "PipeWire accepted the quantum but did not report it back, and restoring the previous value failed. It will be restored when the bridge stops.".to_owned(),
+                        "PipeWire accepted the graph buffer but did not report it back, and restoring the previous value failed. It will be restored when the bridge stops.".to_owned(),
                     );
                 }
             }
@@ -1116,7 +1117,7 @@ impl AudioEngine {
                 self.quantum_forced = false;
                 self.quantum_retry_at = None;
                 self.note_quantum_failure(
-                    "PipeWire accepted the quantum but did not report it back, so the previous quantum was restored.".to_owned(),
+                    "PipeWire accepted the graph buffer but did not report it back, so the previous graph buffer was restored.".to_owned(),
                 );
             }
             QuantumForce::Untouched => {
@@ -1151,7 +1152,7 @@ impl AudioEngine {
                 }
                 Err(error) => {
                     self.note_quantum_failure(format!(
-                        "PipeWire quantum was not restored: {error}"
+                        "PipeWire graph buffer was not restored: {error}"
                     ));
                     self.quantum_retry_at = Some(Instant::now() + Duration::from_secs(2));
                 }

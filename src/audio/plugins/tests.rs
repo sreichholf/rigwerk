@@ -346,10 +346,10 @@ fn fake_clap_slot(fail_process: bool) -> Slot {
     )
 }
 
-/// A CLAP port change takes the insert out of the chain at once, without
+/// A CLAP port change takes the effect out of the chain at once, without
 /// an error, and keeps its latency counted while it waits for the reload.
 #[test]
-fn a_port_change_takes_the_insert_out_and_keeps_its_latency() {
+fn a_port_change_takes_the_effect_out_and_keeps_its_latency() {
     let slot = Slot::with_plugin_for_test(
         PluginPref::default(),
         super::super::clap::tests::fake_plugin_with_latency_for_test(32),
@@ -384,7 +384,7 @@ fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
     );
     assert!(slot.error.is_none());
     assert!(slot.failed());
-    assert_eq!(chain.active(), 0, "the failed insert left the chain");
+    assert_eq!(chain.active(), 0, "the failed effect left the chain");
     // The block is the input.
     assert!(left.iter().chain(&right).all(|&sample| sample == 0.5));
 
@@ -393,7 +393,7 @@ fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
         chain.views()[0].error.as_deref(),
         Some("Processing failed: The CLAP plugin reported a processing error.")
     );
-    // A failed insert is not run again, so it does not fail again.
+    // A failed effect is not run again, so it does not fail again.
     assert!(!chain.process(&mut left, &mut right, 64));
 }
 
@@ -418,7 +418,7 @@ fn a_vst3_processing_failure_is_formatted_from_its_error() {
 }
 
 #[test]
-fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
+fn the_chain_latency_counts_bypassed_effects_but_not_failed_ones() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
@@ -429,7 +429,7 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(32));
     // The fake loaded last is the one `restart_fake_with_latency_for_test` moves.
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64));
-    // A saved insert that was never opened.
+    // A saved effect that was never opened.
     chain.push_for_test(Slot::empty(PluginPref::default()));
     assert_eq!(chain.latency_samples(), 112);
     assert_eq!(chain.latency(), 112);
@@ -437,7 +437,7 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     // Bypass keeps the latency, so the alignment does not move.
     chain.set_bypass(1, true);
     assert_eq!(chain.latency_samples(), 112);
-    // A failed insert is out of the chain.
+    // A failed effect is out of the chain.
     chain
         .slot_mut_for_test(0)
         .plugin
@@ -452,8 +452,6 @@ fn the_chain_latency_counts_bypassed_inserts_but_not_failed_ones() {
     let views = chain.views();
     let latencies: Vec<u32> = views.iter().map(|view| view.latency).collect();
     assert_eq!(latencies, vec![0, 32, 64, 0]);
-    assert_eq!(views[2].latency_label().as_deref(), Some("· 64 smp"));
-    assert_eq!(views[3].latency_label(), None);
 
     let mut left = vec![0.0f32; 32];
     let mut right = vec![0.0f32; 32];
@@ -558,7 +556,7 @@ fn impulse(frames: usize, at: usize) -> Vec<f32> {
 }
 
 #[test]
-fn a_rate_reload_keeps_the_insert_counters() {
+fn a_rate_reload_keeps_the_effect_counters() {
     use super::ChainModel;
     let mut chain = ChainModel::new(48_000, Default::default());
     let home = chain.home();
@@ -571,7 +569,7 @@ fn a_rate_reload_keeps_the_insert_counters() {
         runtime.process(&mut left, &mut right, 32);
     }
     let before = chain.links()[0].controls.lock_stats();
-    assert_eq!(before.attempts, 1, "the insert was tried once");
+    assert_eq!(before.attempts, 1, "the effect was tried once");
 
     let plan = chain.reload_plan(96_000).expect("a new rate reloads");
     assert_eq!(plan.jobs.len(), 1);
@@ -607,13 +605,13 @@ fn a_partial_mix_lines_the_dry_side_up_with_the_wet_one() {
 }
 
 #[test]
-fn a_skipped_insert_still_delays_by_its_latency() {
+fn a_skipped_effect_still_delays_by_its_latency() {
     use super::ChainRuntime;
     let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_delay_for_test(16);
     chain.insert_delay_for_test(8);
     assert_eq!(chain.latency_samples(), 24);
-    // Bypass, mix at 0 and a running insert all add up to the same delay.
+    // Bypass, mix at 0 and a running effect all add up to the same delay.
     chain.set_bypass(0, true);
     chain.set_mix(1, 0.0);
     let mut left = impulse(64, 0);
@@ -621,23 +619,23 @@ fn a_skipped_insert_still_delays_by_its_latency() {
     chain.process(&mut left, &mut right, 64);
     assert_eq!(left, impulse(64, 24));
     assert_eq!(right, impulse(64, 25));
-    // A bypassed or mix-0 insert never counts an attempt: the delay comes
+    // A bypassed or mix-0 effect never counts an attempt: the delay comes
     // from the dry fallback, not from a paused one.
     for index in 0..2 {
         assert_eq!(
             chain.slot_mut_for_test(index).controls.lock_stats(),
             crate::audio::LockStats::default(),
-            "insert {index}"
+            "effect {index}"
         );
     }
 }
 
-/// A CLAP insert has no instance lock the audio thread could find busy:
+/// A CLAP effect has no instance lock the audio thread could find busy:
 /// its editor working on the UI side never makes a block skip it.  A
 /// restart pauses it instead, and the paused block still comes out by the
-/// insert's latency.
+/// effect's latency.
 #[test]
-fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_in_a_restart() {
+fn a_clap_effect_keeps_processing_while_its_editor_works_and_keeps_its_latency_in_a_restart() {
     use super::super::clap::tests::{
         fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
     };
@@ -651,7 +649,7 @@ fn a_clap_insert_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
     assert_eq!(left[0], 1.0);
 
     let Some(handle) = chain.slot_links()[0].plugin.clone() else {
-        panic!("a CLAP insert");
+        panic!("a CLAP effect");
     };
     // Its editor holds the plugin's UI side: the block still runs it.
     let ran = handle.with_clap(|_editor| {
@@ -708,7 +706,7 @@ fn a_bypass_after_a_latency_change_delays_by_the_new_latency_at_once() {
     let mut left = vec![0.0f32; 128];
     let mut right = vec![0.0f32; 128];
     chain.process(&mut left, &mut right, 128);
-    // The insert switches to 64 frames while it runs fully wet: its dry
+    // The effect switches to 64 frames while it runs fully wet: its dry
     // side is not read, but has to follow.
     chain.slot_links()[0].set_test_latency(64);
     for _ in 0..4 {
@@ -742,14 +740,14 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
     assert_eq!(right, impulse(64, 25));
     assert!(
         !chain.slot_mut_for_test(0).controls.bypass(),
-        "the active insert's bypass is not written"
+        "the active effect's bypass is not written"
     );
     assert!(chain.slot_mut_for_test(1).controls.bypass());
     for index in 0..2 {
         assert_eq!(
             chain.slot_mut_for_test(index).controls.lock_stats(),
             crate::audio::LockStats::default(),
-            "insert {index} did not run"
+            "effect {index} did not run"
         );
     }
     assert_eq!(chain.latency_samples(), 24);
@@ -761,7 +759,7 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
     assert!(!chain.process(&mut left, &mut right, 64));
     assert!(!chain.slot_mut_for_test(0).controls.bypass());
     assert!(chain.slot_mut_for_test(1).controls.bypass());
-    // Turning chain bypass off runs the active insert again.
+    // Turning chain bypass off runs the active effect again.
     assert_eq!(chain.slot_mut_for_test(0).controls.lock_stats().attempts, 1);
     assert_eq!(chain.slot_mut_for_test(1).controls.lock_stats().attempts, 0);
     assert_eq!(chain.latency_samples(), 24);
@@ -795,7 +793,7 @@ const FIXTURE_BLOCK: usize = 256;
 /// The peak of the quiet test tone.
 const TONE_PEAK: f32 = 0.1;
 
-/// The saved insert a scan would add for fixture `name`, or `None` when
+/// The saved effect a scan would add for fixture `name`, or `None` when
 /// the fixtures are not configured.
 fn fixture_pref(name: &str, class_id: &str) -> Option<PluginPref> {
     let path = super::vst3_fixture(name)?;
@@ -847,7 +845,7 @@ fn fixture_path(pref: PluginPref) -> crate::audio::path::PathControls {
     path
 }
 
-/// The only insert's published view, with its error checked.
+/// The only effect's published view, with its error checked.
 fn only_view(path: &crate::audio::path::PathControls) -> super::PluginView {
     let views = path.plugin_views();
     assert_eq!(views.len(), 1);
@@ -927,7 +925,7 @@ fn vst3_fixture_again_gain_sets_the_output_level() {
     assert!(silent < 1e-6, "zero gain peak {silent}");
 }
 
-/// The saved-state envelope a VST3 insert's [`PluginState`] holds: 16 bytes
+/// The saved-state envelope a VST3 effect's [`PluginState`] holds: 16 bytes
 /// of magic, then little-endian u32 version (1), component length and
 /// controller length (`u32::MAX` for none), then the two payloads.  Saved
 /// preferences carry it, so a new host has to keep reading it.
@@ -951,7 +949,7 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     // What a preference save stores: the parameter and a fresh blob.
     let saved = path.plugin_prefs();
     assert_eq!(saved.len(), 1);
-    let saved = saved.into_iter().next().expect("one insert");
+    let saved = saved.into_iter().next().expect("one effect");
     assert_eq!(saved.class_id.as_deref(), Some(AGAIN_CLASS));
     assert!(saved
         .params
@@ -973,7 +971,7 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     assert!(component > 0, "AGain writes a component state");
     assert_eq!(blob.len(), STATE_HEADER + component + controller_len);
 
-    // A session restore: the saved insert reopens with the same value.
+    // A session restore: the saved effect reopens with the same value.
     let restored = crate::audio::path::PathControls::new(48_000);
     restored.restore_plugins(vec![saved.clone()]);
     restored.ensure_plugin_loaded(0);
@@ -1228,7 +1226,7 @@ fn vst3_fixture_restart_waits_for_the_audio_thread() {
     assert!(handle.shared().pause.processing(), "not processing again");
 }
 
-/// A value set while the insert is bypassed reaches the processor through
+/// A value set while the effect is bypassed reaches the processor through
 /// an empty flush block, so the state saved afterwards holds it, with no
 /// saved parameter to help.  That state also survives a rate reload.
 #[test]
@@ -1249,7 +1247,7 @@ fn vst3_fixture_again_a_value_set_while_bypassed_reaches_the_state() {
         (bypassed - TONE_PEAK).abs() < 0.01,
         "bypassed peak {bypassed}"
     );
-    let saved = path.plugin_prefs().into_iter().next().expect("one insert");
+    let saved = path.plugin_prefs().into_iter().next().expect("one effect");
     let blob = saved
         .state
         .as_ref()
@@ -1357,7 +1355,7 @@ fn vst3_fixture_again_a_reload_request_rebuilds_it_with_its_values() {
 
 /// The audio side processes AGain as fast as it can while the UI side moves
 /// its gain through the normal control path.  Neither the chain nor the
-/// insert is ever skipped: a control set takes no lock the audio thread
+/// effect is ever skipped: a control set takes no lock the audio thread
 /// takes.  The output must stay finite; the counts are printed so a CI log
 /// records them.
 #[test]
@@ -1415,21 +1413,53 @@ fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
         audio.join().expect("the audio side panicked")
     });
     let report = path.plugin_lock_report();
-    let insert = report.inserts[0];
+    let effect = report.effects[0];
     eprintln!(
         "[vst3_fixture] lock baseline: {sets} sets, {blocks} blocks ({missed} without the chain); \
-         chain lock {}/{} skipped, insert {}/{} paused ({:.1}%)",
+         chain lock {}/{} skipped, effect {}/{} paused ({:.1}%)",
         report.chain.skipped(),
         report.chain.attempts,
-        insert.skipped(),
-        insert.attempts,
-        insert.share() * 100.0
+        effect.skipped(),
+        effect.attempts,
+        effect.share() * 100.0
     );
     assert_eq!(failures, Vec::<String>::new(), "a control set failed");
     assert!(blocks > 0 && sets > 0);
     assert_eq!(missed, 0, "a block missed the chain");
     assert_eq!(report.chain.skipped(), 0, "the chain lock was skipped");
-    assert_eq!(insert.skipped(), 0, "a control set paused the insert");
+    assert_eq!(effect.skipped(), 0, "a control set paused the effect");
     path.service_plugins();
     only_view(&path);
+}
+
+/// A restart pauses the effect, and its view says so until it resumes.
+#[test]
+fn an_effect_in_a_restart_reads_paused() {
+    use super::super::clap::tests::{
+        fake_plugin_with_latency_for_test, restart_fake_with_latency_for_test,
+    };
+    use super::ChainRuntime;
+    let mut chain = ChainRuntime::for_test(48_000);
+    chain.insert_clap_for_test(fake_plugin_with_latency_for_test(16));
+    let mut left = vec![0.0f32; 64];
+    let mut right = vec![0.0f32; 64];
+    chain.process(&mut left, &mut right, 64);
+    let link = chain.slot_links()[0].clone();
+    let Some(handle) = link.plugin.clone() else {
+        panic!("a CLAP effect");
+    };
+    assert!(!link.view().paused);
+
+    restart_fake_with_latency_for_test(32);
+    assert!(!handle.service());
+    assert!(link.view().paused, "asked to stop");
+    chain.process(&mut left, &mut right, 64);
+    assert!(link.view().paused, "stopped");
+    handle.service();
+    assert!(!link.view().paused, "restarted and resumed");
+    chain.process(&mut left, &mut right, 64);
+    assert!(!link.view().paused);
+    drop(link);
+    drop(handle);
+    drop(chain.clear_for_test());
 }

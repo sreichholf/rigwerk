@@ -9,7 +9,7 @@ use crate::app::settings::Preferences;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{
     tuning_index, AudioEngine, EngineState, TunerAnalysis, TunerChannel, TunerFrame,
-    TunerTolerance, Tuning, DEFAULT_PRESET_ID, PRESETS, TAP_COPY_FRAMES,
+    TunerTolerance, Tuning, DEFAULT_PRESET_ID, TAP_COPY_FRAMES, TUNINGS,
 };
 /// The A4 reference the page offers.  415 is the bottom of the baroque range
 /// and 466 the top of the classical one.
@@ -66,8 +66,8 @@ impl TunerListen {
 }
 
 pub(crate) struct TunerState {
-    /// Index into [`PRESETS`]; `None` is chromatic and has no string rows.
-    pub(crate) preset: Option<usize>,
+    /// Index into [`TUNINGS`]; `None` is chromatic and has no string rows.
+    pub(crate) tuning: Option<usize>,
     pub(crate) reference_hz: f32,
     pub(crate) channel: TunerChannel,
     pub(crate) display: TunerDisplay,
@@ -87,19 +87,19 @@ impl TunerState {
     /// reference so the image is reproducible; the tolerance follows the
     /// stored choice.
     pub(crate) fn new(preferences: &Preferences, screenshot: bool) -> Self {
-        let preset = if screenshot {
+        let tuning = if screenshot {
             tuning_index("drop-c")
         } else {
-            tuning_index(preferences.tuner_tuning.trim()).filter(|index| *index < PRESETS.len())
+            tuning_index(preferences.tuner_tuning.trim()).filter(|index| *index < TUNINGS.len())
         };
         let mut listen = if screenshot {
             TunerListen::All
         } else {
             TunerListen::from_u8(preferences.tuner_listen)
         };
-        // All strings has no meaning without a preset; a stale value from a
+        // All strings has no meaning without a tuning; a stale value from a
         // save made in another mode falls back to the single readout.
-        if preset.is_none() {
+        if tuning.is_none() {
             listen = TunerListen::Single;
         }
         let display = if screenshot {
@@ -108,7 +108,7 @@ impl TunerState {
             TunerDisplay::from_u8(preferences.tuner_display)
         };
         let mut state = Self {
-            preset,
+            tuning,
             reference_hz: if screenshot {
                 DEFAULT_REFERENCE_HZ
             } else {
@@ -141,7 +141,7 @@ impl TunerState {
     }
 
     pub(crate) fn preset(&self) -> Option<&'static Tuning> {
-        self.preset.and_then(|index| PRESETS.get(index))
+        self.tuning.and_then(|index| TUNINGS.get(index))
     }
 
     pub(crate) fn preset_id(&self) -> &'static str {
@@ -150,14 +150,14 @@ impl TunerState {
             .unwrap_or(DEFAULT_PRESET_ID)
     }
 
-    /// Picks a preset (or chromatic).  The analysis starts over so a reading
+    /// Picks a tuning (or chromatic).  The analysis starts over so a reading
     /// taken against the old string table cannot leak into the new one.
     pub(crate) fn set_preset(&mut self, index: Option<usize>) {
-        let index = index.filter(|index| *index < PRESETS.len());
-        if self.preset == index {
+        let index = index.filter(|index| *index < TUNINGS.len());
+        if self.tuning == index {
             return;
         }
-        self.preset = index;
+        self.tuning = index;
         if index.is_none() {
             self.listen = TunerListen::Single;
         }

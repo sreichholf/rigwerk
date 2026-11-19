@@ -46,7 +46,7 @@ cargo test --locked
 ```
 
 The hardware tests read the devices from the environment: `RIGWERK_IN`,
-`RIGWERK_OUT`, optionally `RIGWERK_OUT_BACKEND` and `RIGWERK_CUSHION`
+`RIGWERK_OUT`, optionally `RIGWERK_OUT_BACKEND` and `RIGWERK_BRIDGE_BUFFER`
 (see `src/audio/hardware_tests.rs`).
 
 CI (`.github/workflows/ci.yml`) also compiles the ignored hardware tests
@@ -134,8 +134,13 @@ opens them.
 - `src/app`: window state, startup, preferences, device selection, and
   bridge control. It does not draw. The frame shell lives in
   `ui/frame.rs`.
-- `src/ui`: egui. One module per sidebar page under `ui/pages`. Shared
-  controls live in `ui/widgets`. Colours and type scale live in
+- `src/ui`: egui. The title bar, status bar, banner and the sheet and
+  drawer hosts live in `ui/shell.rs`. Menus are `ui/menus`, sheets
+  `ui/sheets`, drawers `ui/drawers`. The console is the home screen
+  (`ui/pages/console.rs`, one file per strip under `console/`). Setup
+  replaces Devices and Guide (`ui/pages/setup.rs`). The tuner is a screen
+  of its own (`ui/pages/tuner.rs`). There are no classic pages left.
+  Shared controls live in `ui/widgets`. Colours and type scale live in
   `ui/theme.rs`.
 - Platform code stays in `audio/linux` and `audio/win`, behind `cfg`.
   The `linux` module is also compiled for tests on other targets
@@ -168,7 +173,7 @@ import `app` or `ui`, and it does not import egui.
   in `app/`.
 - `ui` draws.  A page calls a `RigWerkApp` method.  It does not read
   `engine.shared`.  It does not call `engine.set_*` for a value an app
-  field already stores (gains, cushion, path mix): add the setter on
+  field already stores (gains, bridge buffer, path mix): add the setter on
   `RigWerkApp` and call that.
 
 These splits are already right.  Do not merge them and do not wrap
@@ -235,14 +240,14 @@ This applies to an input callback, an output callback, an ASIO
   `add_plugin`), which builds and loads the slot before it sends it.
   The audio thread does not build plugin views.
 - Hold a `DenormalGuard` for the whole block so the EQ, the gate, and
-  the inserts run in flush-to-zero. Drop restores the previous mode.
+  the effects run in flush-to-zero. Drop restores the previous mode.
 - The resampler kernel is preallocated through `PREALLOCATED_SOURCE_RATE`
   in `resampler.rs`. A rate change inside that range must not allocate.
 - Gains, mute, routes, and drift move continuously. Level and route
   changes ramp (`mixer/ramp.rs`). Drift is the slow PI on ring fill in
   `mixer`, capped at `DRIFT_LIMIT_PPM`. The EQ and the gate are
   per-sample and add no buffering.
-- A follower that fails to open is marked missing and retried. It does
+- An extra output that fails to open is marked missing and retried. It does
   not stop the clock bridge.
 - ASIO sample copies happen inside `bufferSwitch`. Do not call
   `outputReady`.
@@ -250,7 +255,7 @@ This applies to an input callback, an output callback, an ASIO
   size is not a measurement.
 
 Each `AudioEngine::start` replaces `Shared`. An old bridge may only
-touch the session it was started with. Do not open a new session while
+touch the run it was started with. Do not open a new run while
 a lingering teardown still owns the device.
 
 ## Preferences
@@ -261,7 +266,7 @@ Settings are RON in eframe storage (`app/settings`).
   Bump `PREFERENCES_SCHEMA` only when an old save cannot load from field
   defaults. When the file is newer than this build, keep the original
   bytes.
-- One unreadable session, plugin, or follower is skipped. A file that
+- One unreadable session, plugin, or extra output is skipped. A file that
   does not parse at all is kept under the backup key and the app starts
   from defaults. Do not throw away the original text.
 - `sanitize_preferences` is what keeps a NaN gain or an illegal rate out
@@ -274,9 +279,11 @@ Settings are RON in eframe storage (`app/settings`).
 - Take colours from `ui/theme.rs` and text sizes from `ts()`. Reuse
   `ui/widgets` before adding a one-off control.
 - Meters, scopes, and latency figures come from the live snapshot.
-- Screenshot runs use `--screenshot <file>` and `RIGWERK_PAGE` (`live`,
-  `mixer`, `routing`, `devices`, `sessions`, `plugins`, `tuner`, `guide`,
-  `diagnostics`). `RIGWERK_MIXER_STAGE` selects a Mixer stage.
+- Screenshot runs use `--screenshot <file>` and `RIGWERK_PAGE`
+  (`console`, `tuner`, `setup`). `devices` and `guide` open Setup; anything
+  else opens the console. `RIGWERK_SHEET` (`eq`, `gate`, `effect`, `path`,
+  `output`, `scope`, `diagnostics`) opens a sheet on the selected path and
+  `RIGWERK_DRAWER` (`browser`, `issues`) a drawer.
   Screenshot mode drops Wayland so the requested window size sticks.
   The README set and how to retake it: `docs/screenshots/README.md`.
 

@@ -63,9 +63,9 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
     let _x_client = xcb::Connection::connect(None).expect("reach the X server");
     let mut app = crate::app::blank_app();
     assert!(app.add_plugin_from_bundle(&bundle, Some("AGain VST3")));
-    let key = InsertKey {
+    let key = EffectKey {
         path: app.selected_path,
-        insert: 0,
+        effect: 0,
     };
     let views = app.engine.plugin_views(key.path);
     assert_eq!(views.len(), 1);
@@ -85,11 +85,11 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
         fds + timers > 0,
         "VSTGUI registered nothing with the run loop"
     );
-    // AGain asks to be reloaded (as `kReloadComponent` does): the insert
+    // AGain asks to be reloaded (as `kReloadComponent` does): the effect
     // is rebuilt, and its editor opens again on the new instance.
     let old = app
         .engine
-        .plugin_handle(key.path, key.insert)
+        .plugin_handle(key.path, key.effect)
         .expect("loaded");
     old.request_restart_for_test(crate::audio::vst3::RELOAD_COMPONENT);
     let old_id = old.instance_id();
@@ -101,9 +101,9 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
     }
     let new = app
         .engine
-        .plugin_handle(key.path, key.insert)
+        .plugin_handle(key.path, key.effect)
         .expect("reloaded");
-    assert_ne!(new.instance_id(), old_id, "the insert was rebuilt");
+    assert_ne!(new.instance_id(), old_id, "the effect was rebuilt");
     assert_eq!(app.engine.plugin_views(key.path)[0].error, None);
     let log: Vec<String> = app.log.iter().map(|entry| entry.text.clone()).collect();
     let gui = app
@@ -112,11 +112,11 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
         .unwrap_or_else(|| panic!("the editor opened again: {log:?}"));
     assert_eq!(gui.instance_id(), new.instance_id());
     drop(new);
-    app.close_plugin_gui();
+    app.finish_plugin_gui();
     assert!(app.plugin_gui.is_none());
-    // Removing the insert unloads AGain: none of its handlers is left for
+    // Removing the effect unloads AGain: none of its handlers is left for
     // the run loop to call.
-    app.engine.remove_plugin(key.path, key.insert);
+    app.engine.remove_plugin(key.path, key.effect);
     app.engine.service_plugins();
     #[cfg(target_os = "linux")]
     assert_eq!(crate::audio::vst3::run_loop_counts(), (0, 0));

@@ -663,7 +663,7 @@ fn an_open_editor_keeps_the_plugin_active_until_its_view_is_removed() {
         .attach(crate::audio::clap::ParentWindow::X11(1))
         .expect("attached");
     fake.log.lock().unwrap().clear();
-    // The slot goes (a session replaced, a rate reload) while the editor
+    // The slot goes (a run replaced, a rate reload) while the editor
     // is open: processing stops, nothing else.
     drop(plugin);
     assert_eq!(fake.calls(), vec!["stop"]);
@@ -713,7 +713,7 @@ impl Reloads {
     }
 }
 
-/// A path with one stand-in insert, loaded (and reloaded) through
+/// A path with one stand-in effect, loaded (and reloaded) through
 /// `load_plugin` with the settings in the returned [`Reloads`].
 fn reloading_path() -> (
     crate::audio::path::PathControls,
@@ -756,7 +756,7 @@ fn run_path(path: &crate::audio::path::PathControls, blocks: usize) {
     }
 }
 
-/// The insert's only view, with no error.
+/// The effect's only view, with no error.
 fn view_of(path: &crate::audio::path::PathControls) -> crate::audio::PluginView {
     let view = path.plugin_views()[0].clone();
     assert_eq!(view.error, None);
@@ -770,7 +770,7 @@ fn a_bus_change_reloads_the_plugin_with_the_new_buses_and_its_values() {
     path.set_plugin_parameter(0, GAIN, 0.3).expect("set Gain");
     run_path(&path, 2);
     let old = path.plugin_handle(0).expect("loaded");
-    let stereo = old.vst3_layout_for_test().expect("a VST3 insert");
+    let stereo = old.vst3_layout_for_test().expect("a VST3 effect");
     assert_eq!(stereo.outputs, vec![2]);
 
     // The plugin goes mono and says so.
@@ -844,7 +844,7 @@ fn a_plugin_that_asks_again_right_after_its_rebuild_is_stopped() {
         "rebuilt to the limit, then stopped"
     );
     let view = path.plugin_views()[0].clone();
-    let error = view.error.expect("the insert says why");
+    let error = view.error.expect("the effect says why");
     assert!(error.contains("keeps asking to be reloaded"), "{error}");
 }
 
@@ -944,7 +944,7 @@ fn a_parameter_list_that_depends_on_the_state_is_not_a_layout_change() {
 }
 
 #[test]
-fn an_insert_waiting_for_its_reload_is_not_processed() {
+fn an_effect_waiting_for_its_reload_is_not_processed() {
     let _main = crate::audio::claim_main_thread();
     let (path, reloads, _loader) = reloading_path();
     run_path(&path, 1);
@@ -1037,7 +1037,7 @@ fn two_requests_in_one_frame_rebuild_both_slots() {
 fn a_reload_request_opens_no_other_slot() {
     let _main = crate::audio::claim_main_thread();
     let (path, reloads, _loader) = reloading_path();
-    // A saved insert that was never opened (the bridge is stopped).
+    // A saved effect that was never opened (the bridge is stopped).
     let mut prefs = path.plugin_prefs();
     prefs.push(PluginPref {
         path: format!("{}vst3", crate::audio::plugins::TEST_PATH),
@@ -1105,7 +1105,7 @@ fn a_reload_that_fails_to_load_shows_why_and_is_not_retried() {
     assert_eq!(reloads.loads.get(), 2, "one attempt per request");
 }
 
-/// Whether the snapshot of the insert's saved state lists `id`.
+/// Whether the snapshot of the effect's saved state lists `id`.
 fn snapshot_lists(handle: &PluginHandle, id: u32) -> bool {
     let (_, state) = handle.saved();
     state
@@ -1130,7 +1130,7 @@ fn a_flush_the_plugin_refuses_leaves_the_value_undelivered() {
     assert!(!snapshot_lists(&handle, GAIN), "the blob does not hold it");
     assert!(handle.wants_capture());
     // A restore applies the saved value on top of the older blob.
-    let pref = path.plugin_prefs().into_iter().next().expect("one insert");
+    let pref = path.plugin_prefs().into_iter().next().expect("one effect");
     let restored = new_fake();
     let mut plugin = load(
         &restored,
@@ -1265,7 +1265,7 @@ fn a_bypassed_plugin_that_refuses_empty_blocks_is_not_asked_every_chunk() {
     let bypassed = reloads.fake(1);
     bypassed.refuse_flush.store(true, SeqCst);
     path.set_plugin_parameter(1, GAIN, 0.3).expect("set Gain");
-    // The active first insert keeps the chain running.
+    // The active first effect keeps the chain running.
     run_path(&path, 50);
     assert_eq!(
         bypassed.flushes.load(SeqCst),

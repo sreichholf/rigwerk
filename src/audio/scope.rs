@@ -87,7 +87,7 @@ impl ScopeLane {
             bin.store(0.0f32.to_bits(), Ordering::Relaxed);
         }
         self.head.store(0, Ordering::Relaxed);
-        // SAFETY: reset runs before callbacks touch a fresh session.
+        // SAFETY: reset runs before callbacks touch a fresh run.
         let writer = unsafe { &mut *self.writer.get() };
         writer.accum = 0.0;
         writer.count = 0;

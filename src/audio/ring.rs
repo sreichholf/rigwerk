@@ -1,6 +1,6 @@
 //! Lock-free multi-lane SPSC ring: one producer, one consumer, no allocation
-//! in the push/pop path.  Each generic follower has one: the clock callback
-//! pushes the follower's finished device channels, the follower's own stream
+//! in the push/pop path.  Each generic extra output has one: the clock callback
+//! pushes the extra output's finished device channels, the extra output's own stream
 //! drains them.  (The clock bridge's input ring lives in `shared`.)
 
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -17,8 +17,8 @@ pub(crate) type LaneFrame = [f32; FRAME_LANES];
 ///
 /// The storage is allocated once, when it is created, for
 /// `sample_rate * 2` frames (floored at 4096) of [`FRAME_LANES`] lanes: two
-/// seconds at the engine rate whatever the device's channel count, so a
-/// Safe cushion (two follower blocks) and the excess purge line above it
+/// seconds at the engine rate whatever the device's channel count, so an
+/// Auto bridge buffer (two extra output blocks) and the excess purge line above it
 /// fit at eight channels and 192 kHz alike.  About 3.5 MB at 48 kHz.
 ///
 /// The lane count changes only through [`Self::set_lanes`], while no

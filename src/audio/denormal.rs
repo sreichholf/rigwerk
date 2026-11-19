@@ -1,7 +1,7 @@
 //! Flushing subnormal floats to zero on the audio threads.
 //!
 //! When a signal decays into silence, IIR filter states (the EQ biquads) and
-//! envelope followers (the gate) pass through the subnormal range on their way
+//! envelope extra outputs (the gate) pass through the subnormal range on their way
 //! to zero.  On x86 every operation on such a value takes a slow microcode
 //! path, often a hundred times slower than a normal one, and a decay can stay
 //! there for seconds.  At small buffers that is enough to miss a deadline.
@@ -9,7 +9,7 @@
 //! [`DenormalGuard`] switches the current thread to flush-to-zero (and, on
 //! x86, denormals-are-zero) for as long as it lives and restores the previous
 //! mode when it is dropped.  The audio callbacks hold one for the length of a
-//! block, so the plugin inserts processed inside that block see the same mode
+//! block, so the plugin effects processed inside that block see the same mode
 //! a DAW would give them, while the driver's own code on that thread runs
 //! with whatever mode it had before.  Reading and writing the control register
 //! is a couple of instructions and never enters the kernel.

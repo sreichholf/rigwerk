@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use crate::app::settings::rate_label;
 use crate::app::{LogTone, RigWerkApp};
-use crate::audio::EngineState;
+use crate::audio::{EngineState, OutputMode};
 
 /// Whether a driver result is good news or a limitation worth attention.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -213,54 +213,33 @@ impl RigWerkApp {
     #[allow(dead_code)]
     pub(crate) fn refresh_quantum_if_idle(&mut self) {}
 
-    /// One short line for the Live page MODE / OUTPUT footers: graph block
-    /// size in samples and how long that block lasts. Backend name is already
-    /// on the cards above; "quantum" is PipeWire jargon that does not help here.
-    pub(crate) fn quantum_summary(&self) -> Option<String> {
+    /// The PipeWire graph buffer and whether the ALSA buffer fits it.
+    /// None off Linux.
+    pub(crate) fn graph_buffer_line(&self) -> Option<String> {
         #[cfg(target_os = "linux")]
         {
-            self.quantum.as_ref().map(|info| {
-                if info.available {
-                    let ms = info.quantum as f32 / info.rate.max(1) as f32 * 1000.0;
-                    format!("block {} smp · {:.1} ms", info.quantum, ms)
-                } else {
-                    "graph size unknown".to_owned()
-                }
-            })
+            let info = self.quantum.as_ref()?;
+            if !info.available || info.quantum == 0 {
+                return Some("The PipeWire graph buffer could not be read.".to_owned());
+            }
+            let alsa = if info.alsa_period == 0 {
+                "The ALSA buffer size is not known yet.".to_owned()
+            } else if info.fits {
+                format!("The ALSA buffer of {} samples fits it.", info.alsa_period)
+            } else {
+                format!(
+                    "The ALSA buffer of {} samples does not fit it.",
+                    info.alsa_period
+                )
+            };
+            Some(format!(
+                "PipeWire graph buffer: {} samples. {alsa}",
+                info.quantum
+            ))
         }
         #[cfg(not(target_os = "linux"))]
         {
             None
-        }
-    }
-
-    /// Hover for the MODE / OUTPUT graph-block line.
-    pub(crate) fn graph_block_hint(&self) -> String {
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(info) = self.quantum.as_ref() {
-                if info.available {
-                    let ms = info.quantum as f32 / info.rate.max(1) as f32 * 1000.0;
-                    let mut text = format!(
-                        "PipeWire graph block: {} samples lasting {:.1} ms at {:.1} kHz. \
-                         That is one chunk the desktop audio graph processes — not RigWerk's \
-                         end-to-end latency (see LATENCY / HEARD above).",
-                        info.quantum,
-                        ms,
-                        info.rate as f32 / 1000.0
-                    );
-                    if let Some(problem) = self.quantum_problem() {
-                        text.push(' ');
-                        text.push_str(&problem);
-                    }
-                    return text;
-                }
-            }
-            "PipeWire graph block size is not available yet.".to_owned()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.output_mode_text()
         }
     }
 
@@ -392,6 +371,7 @@ impl RigWerkApp {
             return None;
         }
         let mode = &self.snapshot.output_mode;
+        let opened = self.snapshot.opened_output_mode;
         let asio = self.selected_output().asio_clsid.is_some();
         let mut notes = Vec::new();
 
@@ -416,27 +396,27 @@ impl RigWerkApp {
             ));
         }
 
-        if mode.starts_with("REAL-style") {
+        if opened == Some(OutputMode::RealStyle) {
             // REAL-style asks for the driver's smallest step, not the chosen
             // buffer; only a step above it, or a driver with no smaller step
             // at all, is worth a word.
             if mode.contains("another app holds") {
                 notes.push(format!(
-                    "REAL-style is on, but another app holds this device at {} samples ({:.1} ms), above the driver's minimum. Close other audio apps on this device and restart the bridge.",
+                    "Shared, smallest buffer is on, but another app holds this device at {} samples ({:.1} ms), above the driver's minimum. Close other audio apps on this device and restart the bridge.",
                     frames,
                     block_ms(frames, rate)
                 ));
             } else if mode.contains("no smaller step") {
                 notes.push(format!(
-                    "This output offers only {:.1} ms steps in shared mode: that is the driver's own minimum, so no app (including the REAL tool) can go below it here while other apps share the device. For a smaller step, install Windows' in-box \"High Definition Audio Device\" driver for this output, or choose an ASIO output. The bridge still runs at this minimum instead of a larger buffer.",
+                    "This output offers only {:.1} ms steps in shared mode: that is the driver's own minimum, so nothing can go below it here while other apps share the device. For a smaller step, install Windows' in-box \"High Definition Audio Device\" driver for this output, or choose an ASIO output. The bridge still runs at this minimum instead of a larger buffer.",
                     block_ms(frames, rate)
                 ));
             }
-        } else if mode.starts_with("Exclusive") {
+        } else if opened == Some(OutputMode::Exclusive) {
             // Exclusive uses the driver's exclusive period, not the chosen
             // shared output buffer.  A size mismatch is expected and not a
             // shared-mode mixing note.
-        } else if mode.starts_with("Low latency") {
+        } else if opened == Some(OutputMode::LowLatency) {
             // Low latency deliberately asks for a different size than the
             // manual output buffer, so a difference is not a surprise here.
         } else if frames as usize != self.output_buffer {
@@ -457,8 +437,10 @@ impl RigWerkApp {
             };
             if let Some(reason) = mode.split("Exclusive refused: ").nth(1) {
                 note.push_str(&format!(" Exclusive mode was refused: {reason}."));
-            } else if let Some(reason) = mode.split("REAL-style refused: ").nth(1) {
-                note.push_str(&format!(" REAL-style could not go lower: {reason}."));
+            } else if let Some(reason) = mode.split("Shared, smallest buffer refused: ").nth(1) {
+                note.push_str(&format!(
+                    " Shared, smallest buffer could not go lower: {reason}."
+                ));
             }
             notes.push(note);
         }
@@ -928,7 +910,7 @@ fn probe_output(id: &str) -> Result<DriverActual, String> {
     let mut notes = Vec::new();
     let tone = if min >= default {
         notes.push(format!(
-            "This output's driver offers only {:.1} ms steps in shared mode — its own minimum, so REAL-style cannot go below it here. If the device is still on its vendor driver, Windows' in-box \"High Definition Audio Device\" driver often allows about 3 ms; an ASIO output can also go lower.",
+            "This output's driver offers only {:.1} ms steps in shared mode — its own minimum, so Shared, smallest buffer cannot go below it here. If the device is still on its vendor driver, Windows' in-box \"High Definition Audio Device\" driver often allows about 3 ms; an ASIO output can also go lower.",
             block_ms(min, rate)
         ));
         DriverTone::Notice

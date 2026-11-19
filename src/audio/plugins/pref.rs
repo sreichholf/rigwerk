@@ -1,6 +1,6 @@
 //! Plugin preferences, opaque state, and UI views.
 
-/// Which plugin format an insert uses.  Saved inserts written before CLAP
+/// Which plugin format an effect uses.  Saved effects written before CLAP
 /// support default to VST3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -17,16 +17,9 @@ impl PluginFormat {
             Self::Clap => "CLAP",
         }
     }
-
-    pub fn short(self) -> &'static str {
-        match self {
-            Self::Vst3 => "V3",
-            Self::Clap => "CL",
-        }
-    }
 }
 
-/// A parameter value the person changed, kept with the insert so the plugin
+/// A parameter value the person changed, kept with the effect so the plugin
 /// opens with the same settings after a restart or a sample-rate change.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PluginParamPref {
@@ -38,7 +31,7 @@ pub struct PluginParamPref {
 /// the format's own state call produced (CLAP `clap_plugin_state.save`, or
 /// the VST3 envelope in `vst3::stream`, the layout older builds wrote
 /// through `vst3-host`), base64-encoded.  A blob with any other version is
-/// ignored and the insert falls back to its parameters.
+/// ignored and the effect falls back to its parameters.
 pub(crate) const PLUGIN_STATE_VERSION: u32 = 1;
 
 /// A plugin's opaque state, captured on the UI thread whenever preferences
@@ -79,7 +72,7 @@ impl PluginState {
 
 /// Reads a saved state blob, treating a damaged one as absent: losing the
 /// blob falls back to the parameter list, while failing here would drop the
-/// whole insert from the preferences.
+/// whole effect from the preferences.
 fn lenient_state<'de, D>(deserializer: D) -> Result<Option<PluginState>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -145,7 +138,7 @@ pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One effect in the insert chain, in the form that is saved to preferences.
+/// One effect in the effect chain, in the form that is saved to preferences.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PluginPref {
     pub path: String,
@@ -233,18 +226,15 @@ pub struct PluginView {
     pub has_editor: bool,
     /// Which loaded instance this view describes (see
     /// [`super::PluginHandle::instance_id`]); `None` while the slot is not loaded.
-    /// An open editor checks it to notice that its insert was replaced.
+    /// An open editor checks it to notice that its effect was replaced.
     pub(crate) instance: Option<usize>,
-    /// The latency in samples the insert adds (see
+    /// The latency in samples the effect adds (see
     /// `ChainRuntime::latency_samples`); 0 when it reports none, is not
-    /// loaded, or failed.  Bypassed inserts keep theirs.
+    /// loaded, or failed.  Bypassed effects keep theirs.
     pub latency: u32,
-}
-
-impl PluginView {
-    /// `· 64 smp` for an insert row, or `None` when the insert adds no
-    /// latency.
-    pub fn latency_label(&self) -> Option<String> {
-        (self.latency > 0).then(|| format!("· {} smp", self.latency))
-    }
+    /// The plugin is paused for a restart or a reactivation (see
+    /// `plugins::pause`): its blocks play dry, delayed by its latency,
+    /// until it resumes.  False for a failed effect, which shows its error
+    /// instead.
+    pub paused: bool,
 }

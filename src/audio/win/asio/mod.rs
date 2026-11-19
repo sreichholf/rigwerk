@@ -79,7 +79,7 @@ pub(crate) unsafe extern "system" fn asio_message(
     }
     // A reset (new rate or buffer size from the driver's panel) needs the
     // whole bridge torn down.  The bridge thread sees the request and ends
-    // the session with an explanation; the callback cannot do that itself.
+    // the run with an explanation; the callback cannot do that itself.
     if selector == MessageSelector::RESET_REQUEST {
         callback::note_driver_reset();
         return Bool::TRUE.0;

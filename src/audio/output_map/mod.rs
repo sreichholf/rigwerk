@@ -53,8 +53,8 @@
 //! and the gain returns to unity over a few tens of milliseconds.  A signal
 //! that stays under the ceiling is not touched.  The reduction in dB (0 when
 //! not limiting) is published beside the device meters.  The same limiter
-//! runs for the clock device and every follower, including the virtual
-//! publish device, because each of them is mapped here.
+//! runs for the clock output and every extra output, including the virtual
+//! virtual output, because each of them is mapped here.
 //!
 //! # Metronome
 //!
@@ -89,7 +89,7 @@
 //! last tick has left every read position the line is reset and skipped,
 //! and with the click limiter released a stopped metronome costs nothing
 //! per frame.  A block with frames in which a device was not mapped (a
-//! follower whose ring was not fed) resets it too, so ticks from before
+//! extra output whose ring was not fed) resets it too, so ticks from before
 //! the gap never play late.  A measurement ducks the tick after that line,
 //! on its own ramp, so a tick already waiting does not play into it.
 //!
@@ -109,10 +109,10 @@
 //! apply.  A changed delay (a plugin reports a new latency, a path is
 //! routed somewhere else, a trim moves) crossfades from the old tap to the
 //! new one over a few ms (`delay::TAP_FADE_SECONDS`), it never jumps.  The
-//! same mapping runs for the clock device and every follower, on the ring
-//! path and the PipeWire direct path alike: a generic follower is mapped on
+//! same mapping runs for the clock output and every extra output, on the ring
+//! path and the PipeWire direct path alike: a generic extra output is mapped on
 //! the clock callback and only its finished channels cross into its own
-//! stream (see `follower`).  The mapper publishes what it applies
+//! stream (see `extra_output`).  The mapper publishes what it applies
 //! ([`DeviceControls::alignment`]) for the UI.
 //!
 //! An unaligned path with no trim reads its line at delay 0, which is the
@@ -132,8 +132,8 @@ pub(crate) use mapper::{
 pub(crate) use types::low_bits;
 pub use types::{
     ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings, UnusedChannels,
-    DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_FOLLOWERS, MAX_OUTPUT_CHANNELS, PATH_TRIM_MAX_MS,
-    VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS,
+    PATH_TRIM_MAX_MS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 pub(in crate::audio) use weights::level_gain;
 

@@ -1,0 +1,174 @@
+//! Bottom sheets: the header every sheet shares (`docs/ui-spec.md` §4.3)
+//! and the dispatch to each sheet's body.
+//!
+//! The shell draws the sheet's frame, height and drag edge.  This file
+//! draws the header (the path dot and name, `/`, the item, *On* /
+//! *Bypass* for a stage, ‹ › through the chain, ×) and picks the body.
+
+pub(crate) mod diagnostics;
+pub(crate) mod effect;
+pub(crate) mod eq;
+pub(crate) mod gate;
+pub(crate) mod output;
+pub(crate) mod path;
+pub(crate) mod scope;
+
+use eframe::egui;
+use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
+
+use crate::app::screen::Sheet;
+use crate::app::RigWerkApp;
+use crate::ui::fonts::Face;
+use crate::ui::theme::{font, palette, TypeRole};
+use crate::ui::widgets::{row_info, segmented};
+
+/// Buttons inside a sheet are 28 pt high (§4.5).
+const SHEET_BUTTON_H: f32 = 28.0;
+
+impl RigWerkApp {
+    /// The open sheet's title, without the path: *Pre EQ*, an effect's
+    /// name, an output's name.
+    pub(crate) fn sheet_title(&self, sheet: Sheet) -> String {
+        match sheet {
+            Sheet::Diagnostics => "Diagnostics".to_owned(),
+            Sheet::Scope => "Scope".to_owned(),
+            Sheet::Eq { post: false, .. } => "Pre EQ".to_owned(),
+            Sheet::Eq { post: true, .. } => "Post EQ".to_owned(),
+            Sheet::Gate { .. } => "Gate".to_owned(),
+            Sheet::Path { .. } => "Path".to_owned(),
+            Sheet::Effect { path, index } => self
+                .engine
+                .plugin_views(path)
+                .get(index)
+                .map(|view| view.name.clone())
+                .unwrap_or_else(|| "Effect".to_owned()),
+            Sheet::Output { output } => self
+                .output_device_rows()
+                .get(output)
+                .map(|row| row.name.clone())
+                .unwrap_or_else(|| "Output".to_owned()),
+        }
+    }
+
+    /// The header row: path dot and name, `/`, the item, its *On* /
+    /// *Bypass*, then ‹ › and × on the right.
+    pub(crate) fn sheet_header(&mut self, ui: &mut egui::Ui) {
+        let Some(sheet) = self.chrome.sheet else {
+            return;
+        };
+        let colours = palette(ui.ctx());
+        let title = self.sheet_title(sheet);
+        let path = sheet
+            .path()
+            .and_then(|slot| self.paths.get(slot).and_then(Option::as_ref))
+            .map(|path| (path.colour, path.name.clone()));
+        let previous = self.sheet_neighbour(false);
+        let next = self.sheet_neighbour(true);
+        let mut step = None;
+        let mut close = false;
+        let mut stage_on = None;
+        ui.horizontal(|ui| {
+            ui.set_min_height(SHEET_BUTTON_H);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if let Some((colour, name)) = &path {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+                ui.painter().circle_filled(
+                    dot.center(),
+                    4.0,
+                    colours.path[*colour as usize % colours.path.len()],
+                );
+                ui.label(
+                    RichText::new(name)
+                        .font(font(Face::SansMedium, TypeRole::Title))
+                        .color(colours.text2),
+                );
+                ui.label(
+                    RichText::new("/")
+                        .font(font(Face::Sans, TypeRole::Title))
+                        .color(colours.text3),
+                );
+            }
+            let heading = ui.label(
+                RichText::new(&title)
+                    .font(font(Face::SansSemibold, TypeRole::Title))
+                    .color(colours.text),
+            );
+            row_info(&heading, egui::Role::Heading, true, &title, None, None);
+            if let Some((slot, stage)) = sheet.stage() {
+                ui.add_space(8.0);
+                let on = self.stage_on(slot, stage);
+                let mut choice = usize::from(!on);
+                if segmented(ui, &mut choice, &["On", "Bypass"]).changed() {
+                    stage_on = Some((slot, stage, choice == 0));
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if sheet_button(ui, "×", "Close", true).clicked() {
+                    close = true;
+                }
+                if sheet.stage().is_some() {
+                    if sheet_button(ui, "›", "Next stage", next.is_some()).clicked() {
+                        step = Some(true);
+                    }
+                    if sheet_button(ui, "‹", "Previous stage", previous.is_some()).clicked() {
+                        step = Some(false);
+                    }
+                }
+            });
+        });
+        if let Some((slot, stage, on)) = stage_on {
+            self.set_stage_on(slot, stage, on);
+        }
+        if let Some(forward) = step {
+            self.step_sheet(forward);
+        }
+        if close {
+            self.close_sheet();
+        }
+    }
+
+    /// The open sheet's body, at most `height` tall; it scrolls inside.
+    pub(crate) fn sheet_body(&mut self, ui: &mut egui::Ui, height: f32) {
+        let Some(sheet) = self.chrome.sheet else {
+            return;
+        };
+        // The sheet edits its own path.
+        if let Some(path) = sheet.path() {
+            self.select_path(path);
+        }
+        egui::ScrollArea::vertical()
+            .id_salt(("sheet_body", format!("{sheet:?}")))
+            .max_height(height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| match sheet {
+                Sheet::Diagnostics => self.diagnostics_page(ui),
+                Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
+                Sheet::Gate { path } => self.gate_sheet(ui, path),
+                Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
+                Sheet::Path { path } => self.path_sheet(ui, path),
+                Sheet::Output { output } => self.output_sheet(ui, output),
+                Sheet::Scope => self.scope_sheet(ui),
+            });
+    }
+}
+
+/// An outline button 28 pt high.  `name` is what it does, for screen
+/// readers and hover, when the label is a glyph.
+fn sheet_button(ui: &mut egui::Ui, label: &str, name: &str, enabled: bool) -> egui::Response {
+    let colours = palette(ui.ctx());
+    let button = egui::Button::new(
+        RichText::new(label)
+            .font(font(Face::Sans, TypeRole::Control))
+            .color(if enabled { colours.text } else { colours.text3 }),
+    )
+    .fill(colours.slot)
+    .stroke(Stroke::new(1.0, colours.line2))
+    .corner_radius(CornerRadius::same(4))
+    .min_size(Vec2::new(SHEET_BUTTON_H, SHEET_BUTTON_H));
+    let response = ui.add_enabled(enabled, button);
+    row_info(&response, egui::Role::Button, enabled, name, None, None);
+    response.on_hover_text(name)
+}
+
+#[cfg(test)]
+mod tests;

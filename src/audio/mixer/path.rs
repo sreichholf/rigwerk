@@ -13,16 +13,16 @@ use super::ramp::{PathRamps, Ramp};
 
 /// The chain of one signal path, from the split to the sum: routing,
 /// channel enable and mono (ramped), the pre EQ, a PRE gate, the plugin
-/// inserts, a POST gate and the post EQ.  [`OutputMixer`] owns one per
+/// effects, a POST gate and the post EQ.  [`OutputMixer`] owns one per
 /// possible path, preallocated, and runs only the active ones; every path
 /// gets the same stereo frame from the clock side.
 pub(crate) struct PathProcessor {
     /// One block of this path's taps, kept between callbacks so the plugin
-    /// inserts can work on the whole block without allocating.
+    /// effects can work on the whole block without allocating.
     pub(super) block: Vec<[f32; 4]>,
     plugin_l: Vec<f32>,
     plugin_r: Vec<f32>,
-    /// The two built-in EQs (pre and post inserts), and the settings version
+    /// The two built-in EQs (pre and post effects), and the settings version
     /// each was last updated from.
     eq: [Equalizer; 2],
     eq_version: [u64; 2],
@@ -59,7 +59,7 @@ pub(crate) struct PathProcessor {
     /// (see `plugins::chain`).
     chain: Option<ChainLease>,
     /// The input of the plugin chain, for the blocks the chain cannot run
-    /// (see [`Self::run_inserts`]): read back delayed by the chain latency.
+    /// (see [`Self::run_effects`]): read back delayed by the chain latency.
     chain_line: DelayLine,
     chain_tap: DelayTap,
     /// How much of the chain's own output plays: 0 right after a missed
@@ -67,7 +67,7 @@ pub(crate) struct PathProcessor {
     chain_mix: f32,
     chain_step: f32,
     /// Frames the chain still has to run before its output fades back in
-    /// after a missed lock: its inserts missed that input, so for one
+    /// after a missed lock: its effects missed that input, so for one
     /// latency's worth of frames their delay lines still hold the gap.
     chain_hold: u32,
     /// [`TAP_FADE_SECONDS`] in frames at the current rate.
@@ -344,17 +344,17 @@ impl PathProcessor {
     /// The front of the chain over a block of staged input frames, in
     /// place: routing, channel enable and mono (with their ramps), then the
     /// pre EQ and a PRE gate.  The result waits in `block` for the plugin
-    /// inserts.  Each path's state only moves with its own frames, so
+    /// effects.  Each path's state only moves with its own frames, so
     /// running it per block instead of per frame gives the same samples,
     /// and the mixer can time each path as one piece.
     pub(super) fn run_front(&mut self, frames: usize) {
         for index in 0..frames {
             let [left, right, _, _] = self.block[index];
             // Routing, channel enable and mono move with the ramps, before
-            // the EQ and the inserts, which is where those controls act.
+            // the EQ and the effects, which is where those controls act.
             let mut out = self.ramps.next_input(left, right);
             // The chain on the path's mix (taps 1/2), in order: pre EQ,
-            // optional PRE gate, plugin inserts, optional POST gate, post
+            // optional PRE gate, plugin effects, optional POST gate, post
             // EQ.  Built-ins are per-sample → no added latency.
             if self.plan.pre_eq {
                 (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
@@ -385,7 +385,7 @@ impl PathProcessor {
         measured
     }
 
-    /// Runs the plugin inserts over a block that `run_front` filled, in
+    /// Runs the plugin effects over a block that `run_front` filled, in
     /// chunks of at most [`CHAIN_CHUNK`] frames.
     ///
     /// The chain never just drops out.  No edit holds a lock the chain
@@ -395,16 +395,16 @@ impl PathProcessor {
     /// the chain cannot run plays that input delayed by the chain latency
     /// instead.  That
     /// keeps the path's timing in the sum (no comb, no phase jump), but not
-    /// its sound: for the missed chunk the path plays dry (its inserts'
+    /// its sound: for the missed chunk the path plays dry (its effects'
     /// level and tone are gone).  The switch into the fallback cannot
     /// crossfade (the chain's output for that chunk does not exist), so its
     /// step is smoothed over [`DECLICK_SECONDS`] instead.  Once the chain
     /// runs again its output fades back in over [`CHAIN_RESUME_SECONDS`],
-    /// after one latency's worth of frames (`chain_hold`): the inserts
+    /// after one latency's worth of frames (`chain_hold`): the effects
     /// missed that input, so their own delay lines still hold the gap.  A
-    /// chain with no active insert but some latency (all bypassed) still
-    /// runs: its skipped inserts delay by their latency.
-    pub(super) fn run_inserts(&mut self, controls: &PathControls, frames: usize) {
+    /// chain with no active effect but some latency (all bypassed) still
+    /// runs: its skipped effects delay by their latency.
+    pub(super) fn run_effects(&mut self, controls: &PathControls, frames: usize) {
         if !controls.has_plugins() && self.latency == 0 {
             // Nothing runs and nothing delays.  The history is stale from
             // here on; a chain that comes back starts from silence.
@@ -488,8 +488,8 @@ impl PathProcessor {
         self.plugin_r = right;
     }
 
-    /// The rest of the path after the inserts: the POST gate and the post
-    /// EQ, in place, then the path meters.
+    /// The rest of the path after the effects: the POST gate and the post
+    /// EQ, in place, then the path meters and the gate's reduction.
     pub(super) fn finish_block(&mut self, controls: &PathControls, frames: usize) {
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
@@ -504,6 +504,7 @@ impl PathProcessor {
             peak_r = peak_r.max(out[1].abs());
         }
         controls.store_meters(peak_l, peak_r);
+        controls.store_gate_reduction(self.gate.take_reduction_db());
     }
 }
 

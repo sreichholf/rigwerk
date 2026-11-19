@@ -2,18 +2,16 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
-use super::silence::{SILENCE_RAISE_ALONE, SILENCE_RAISE_WITH_UNDERRUNS};
+use super::silence::{SILENCE_RAISE_ALONE, SILENCE_RAISE_WITH_DROPOUTS};
 use super::{
-    highlight_strength, DspAlarm, HeldFlag, IssueAction, IssueCard, IssueFilter, IssueKey,
-    IssueSeverity, UnderrunWatch, CARD_HIGHLIGHT_FOR, DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER,
-    UNDERRUN_BURST_WINDOW, UNDERRUN_QUIET,
+    Anchor, DropoutWatch, DspAlarm, HeldFlag, IssueAction, IssueFilter, IssueKey, IssueSeverity,
+    DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER, DROPOUT_BURST_WINDOW, DROPOUT_QUIET,
 };
-use crate::app::cards::Card;
-use crate::app::chain::ChainSelection;
 use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
-use crate::app::settings::{cushion_to_pref, FollowerPref};
+use crate::app::layouts::PathLayout;
+use crate::app::settings::{bridge_buffer_to_pref, ExtraOutputPref};
 use crate::app::{blank_app, Page, RigWerkApp};
-use crate::audio::{ChannelMap, CushionMode, DeviceItem, EngineState, PathMapSettings, MAX_ALIGN};
+use crate::audio::{BufferMode, ChannelMap, DeviceItem, EngineState, PathMapSettings, MAX_ALIGN};
 
 /// A real (not demo) clock output the driver check can read.
 fn with_real_output(app: &mut RigWerkApp) {
@@ -42,7 +40,7 @@ fn one_path_has_no_path_issues() {
 #[test]
 fn an_unaligned_sum_is_a_warning_that_aligns_on_a_click() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::Blend));
+    assert!(app.apply_layout(PathLayout::Blend));
     assert!(app.live_issues().is_empty(), "aligned, same latency");
     let second = app.path_slots()[1];
     app.engine.screenshot_path_latency(second, 480);
@@ -74,7 +72,7 @@ fn an_unaligned_sum_is_a_warning_that_aligns_on_a_click() {
 #[test]
 fn a_path_past_the_alignment_limit_warns() {
     let mut app = blank_app();
-    assert!(app.apply_card(Card::Blend));
+    assert!(app.apply_layout(PathLayout::Blend));
     let second = app.path_slots()[1];
     app.engine.screenshot_path_latency(second, MAX_ALIGN + 1);
     let issues = app.live_issues();
@@ -97,22 +95,25 @@ fn an_unmuted_path_no_device_plays_warns() {
     );
     app.set_path_mute(added, false);
     assert_eq!(app.live_issues()[0].title, "Path 2 is routed nowhere");
-    app.clock_device.path_map[added].map = ChannelMap::default();
+    app.clock_output.path_map[added].map = ChannelMap::default();
     assert!(app.live_issues().is_empty());
-    app.clock_device.mute = true;
+    app.clock_output.mute = true;
     let issues = app.live_issues();
     assert!(issues
         .iter()
         .any(|issue| issue.title == "Path 2 is routed nowhere audible"));
     app.apply_issue_action(issues[0].action);
-    assert!(app.page == Page::Routing);
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 0 })
+    );
 }
 
 #[test]
 fn the_only_path_routed_nowhere_warns() {
     let mut app = blank_app();
     let main = app.path_slots()[0];
-    app.clock_device.path_map[main] = PathMapSettings::unrouted();
+    app.clock_output.path_map[main] = PathMapSettings::unrouted();
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert_eq!(issues[0].title, "Main is routed nowhere");
@@ -124,7 +125,7 @@ fn the_only_path_routed_nowhere_warns() {
 #[test]
 fn the_only_path_on_a_muted_device_warns() {
     let mut app = blank_app();
-    app.clock_device.mute = true;
+    app.clock_output.mute = true;
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert_eq!(issues[0].title, "Main is routed nowhere audible");
@@ -146,80 +147,80 @@ fn the_dsp_alarm_has_hysteresis() {
 }
 
 #[test]
-fn underruns_warn_and_clear_after_a_quiet_spell() {
+fn dropouts_warn_and_clear_after_a_quiet_spell() {
     let start = Instant::now();
-    let mut watch = UnderrunWatch::default();
+    let mut watch = DropoutWatch::default();
     watch.update(0, start);
     assert!(watch.episode().is_none());
     watch.update(1, start + Duration::from_secs(1));
-    let episode = *watch.episode().expect("one underrun raises it");
+    let episode = *watch.episode().expect("one dropout raises it");
     assert_eq!(episode.count, 1);
     assert!(!episode.burst);
     watch.update(1, start + Duration::from_secs(4));
     assert_eq!(watch.episode().unwrap().since_last, Duration::from_secs(3));
-    watch.update(1, start + Duration::from_secs(1) + UNDERRUN_QUIET);
+    watch.update(1, start + Duration::from_secs(1) + DROPOUT_QUIET);
     assert!(watch.episode().is_none(), "quiet long enough");
-    assert_eq!(watch.session_count(), 1, "the session count stays");
+    assert_eq!(watch.run_count(), 1, "the run count stays");
 }
 
 #[test]
-fn an_underrun_burst_is_an_error_until_it_goes_quiet() {
+fn a_dropout_burst_is_an_error_until_it_goes_quiet() {
     let start = Instant::now();
-    let mut watch = UnderrunWatch::default();
+    let mut watch = DropoutWatch::default();
     watch.update(1, start);
-    watch.update(2, start + UNDERRUN_BURST_WINDOW + Duration::from_secs(1));
-    watch.update(3, start + UNDERRUN_BURST_WINDOW + Duration::from_secs(2));
+    watch.update(2, start + DROPOUT_BURST_WINDOW + Duration::from_secs(1));
+    watch.update(3, start + DROPOUT_BURST_WINDOW + Duration::from_secs(2));
     assert!(
         !watch.episode().unwrap().burst,
         "three, but spread wider than the window"
     );
-    let late = start + UNDERRUN_BURST_WINDOW + Duration::from_secs(3);
+    let late = start + DROPOUT_BURST_WINDOW + Duration::from_secs(3);
     watch.update(4, late);
     let episode = watch.episode().unwrap();
     assert!(episode.burst, "the last three within the window");
     assert_eq!(episode.count, 4);
     watch.update(4, late + Duration::from_secs(5));
     assert!(watch.episode().unwrap().burst, "held while the run lasts");
-    watch.update(4, late + UNDERRUN_QUIET);
+    watch.update(4, late + DROPOUT_QUIET);
     assert!(watch.episode().is_none());
-    watch.update(5, late + UNDERRUN_QUIET + Duration::from_secs(1));
+    watch.update(5, late + DROPOUT_QUIET + Duration::from_secs(1));
     assert!(!watch.episode().unwrap().burst, "a new run starts calm");
 }
 
 #[test]
-fn a_lower_underrun_count_is_a_new_session() {
+fn a_lower_dropout_count_is_a_new_run() {
     let now = Instant::now();
-    let mut watch = UnderrunWatch::default();
+    let mut watch = DropoutWatch::default();
     watch.update(5, now);
     assert!(watch.episode().unwrap().burst, "five at once");
     watch.update(0, now + Duration::from_millis(20));
     assert!(watch.episode().is_none());
-    assert_eq!(watch.session_count(), 0);
+    assert_eq!(watch.run_count(), 0);
 }
 
 #[test]
-fn underruns_while_running_offer_a_safer_latency() {
+fn dropouts_while_running_offer_a_safer_latency() {
     let mut app = blank_app();
     let now = Instant::now();
-    app.issue_state.underruns.update(2, now);
+    app.issue_state.dropouts.update(2, now);
     assert!(app.live_issues().is_empty(), "only while the bridge runs");
     app.engine.state = EngineState::Running;
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
     let issue = &issues[0];
     assert_eq!(issue.severity, IssueSeverity::Warning);
-    assert_eq!(issue.title, "The output ran dry");
+    assert_eq!(issue.title, "The output had a dropout");
     assert!(
         issue
             .detail
-            .starts_with("2 underruns, the last just now (2 underruns this session)"),
+            .starts_with("2 dropouts, the last just now (2 dropouts this run)"),
         "{}",
         issue.detail
     );
-    app.cushion_mode = CushionMode::LowLatency;
-    assert_eq!(app.live_issues()[0].action, IssueAction::SafeCushion);
-    app.apply_issue_action(IssueAction::SafeCushion);
-    assert_eq!(app.cushion_mode, CushionMode::Safe);
+    app.bridge_buffer_mode = BufferMode::Minimum;
+    assert_eq!(app.live_issues()[0].action, IssueAction::AutoBridgeBuffer);
+    app.apply_issue_action(IssueAction::AutoBridgeBuffer);
+    assert_eq!(app.bridge_buffer_mode, BufferMode::Auto);
     let action = app.live_issues()[0].action;
     if cfg!(target_os = "windows") {
         assert_eq!(action, IssueAction::SharedOutput);
@@ -228,28 +229,20 @@ fn underruns_while_running_offer_a_safer_latency() {
         assert_eq!(action.label(), "Turn Low latency off");
         app.apply_issue_action(action);
         assert!(!app.low_latency_output);
-        assert!(app
-            .log
-            .last()
-            .unwrap()
-            .text
-            .starts_with("Low-latency output off"));
+        assert!(app.log.last().unwrap().text.starts_with("Low latency off"));
         assert_eq!(
             app.live_issues()[0].action,
             IssueAction::SetOutputBuffer(256)
         );
     }
     app.issue_state
-        .underruns
+        .dropouts
         .update(4, now + Duration::from_millis(500));
     assert_eq!(app.live_issues()[0].severity, IssueSeverity::Error);
-    assert_eq!(
-        app.live_issues()[0].title,
-        "Audio is dropping out on the output"
-    );
+    assert_eq!(app.live_issues()[0].title, "Dropouts on the output");
     app.issue_state
-        .underruns
-        .update(4, now + Duration::from_millis(500) + UNDERRUN_QUIET);
+        .dropouts
+        .update(4, now + Duration::from_millis(500) + DROPOUT_QUIET);
     assert!(app.live_issues().is_empty(), "cleared after a quiet spell");
     app.engine.state = EngineState::Idle;
 }
@@ -262,13 +255,17 @@ fn a_period_that_does_not_fit_the_graph_block_sets_the_buffer() {
     app.output_buffer = 128;
     let issue = app
         .quantum_info_issue(&crate::audio::QuantumInfo::assess(true, 64, 48_000, 128))
-        .expect("128 frames do not fit a 64-frame block");
+        .expect("128 samples do not fit a 64-sample buffer");
     assert_eq!(issue.severity, IssueSeverity::Warning);
-    assert_eq!(issue.title, "Graph block and output period do not line up");
+    assert_eq!(issue.title, "The buffer sizes do not line up");
+    assert_eq!(
+        issue.anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Clock)
+    );
     assert_eq!(issue.action, IssueAction::SetOutputBuffer(64));
     assert_eq!(
         issue.action_name(),
-        "Set buffer to 64: Graph block and output period do not line up"
+        "Set buffer to 64: The buffer sizes do not line up"
     );
     app.apply_issue_action(issue.action);
     assert_eq!(app.output_buffer, 64);
@@ -295,7 +292,10 @@ fn a_large_graph_block_matters_only_under_low_latency_while_running() {
     assert!(app.quantum_info_issue(&idle).is_none(), "not running yet");
     app.engine.state = EngineState::Running;
     let issue = app.quantum_info_issue(&idle).expect("low latency is on");
-    assert_eq!(issue.title, "Low latency is on, but the graph block is not");
+    assert_eq!(
+        issue.title,
+        "Low latency is on, but the graph buffer is not"
+    );
     assert_eq!(issue.action, IssueAction::OpenDiagnostics);
     app.low_latency_output = false;
     assert!(
@@ -312,9 +312,13 @@ fn a_failed_quantum_change_is_one_row() {
         .note_quantum_failure("PipeWire quantum not set: test".to_owned());
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
-    assert_eq!(issues[0].title, "PipeWire did not take the quantum change");
+    assert_eq!(issues[0].title, "PipeWire did not take the buffer change");
     assert_eq!(issues[0].detail, "PipeWire quantum not set: test");
-    assert_eq!(issues[0].place, "OUTPUT · Low latency");
+    assert_eq!(issues[0].place, "Setup");
+    assert_eq!(
+        issues[0].anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Clock)
+    );
 }
 
 #[test]
@@ -328,7 +332,11 @@ fn an_unchecked_low_latency_driver_warns_until_it_has_a_reading() {
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert_eq!(issues[0].title, "Output driver not checked yet");
-    assert_eq!(issues[0].place, "OUTPUT · Driver");
+    assert_eq!(issues[0].place, "Setup");
+    assert_eq!(
+        issues[0].anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Devices)
+    );
     assert_eq!(issues[0].action, IssueAction::CheckDriver);
     assert_eq!(issues[0].action.label(), "Check driver");
 
@@ -369,7 +377,8 @@ fn reading_the_issues_does_not_move_the_dsp_latches() {
     for _ in 0..3 {
         let issues = app.live_issues();
         assert_eq!(issues.len(), 1, "{issues:?}");
-        assert_eq!(issues[0].title, "The chain overloads the output block");
+        assert_eq!(issues[0].title, "The chain overloads the output buffer");
+        assert_eq!(issues[0].anchor, Anchor::Path(app.path_slots()[0]));
         assert_eq!(issues[0].severity, IssueSeverity::Warning);
     }
     assert!(app.issue_state.dsp.warning, "only a tick moves the latch");
@@ -383,46 +392,51 @@ fn reading_the_issues_does_not_move_the_dsp_latches() {
 }
 
 #[test]
-fn a_bridge_start_or_stop_clears_the_dsp_latches_and_underruns() {
+fn a_bridge_start_or_stop_clears_the_dsp_latches_and_dropouts() {
     let mut app = blank_app();
     app.issue_state.dsp = DspAlarm {
         warning: true,
         error: true,
     };
-    app.issue_state.underruns.update(3, Instant::now());
+    app.issue_state.dropouts.update(3, Instant::now());
     app.stop_bridge();
     assert_eq!(app.issue_state.dsp, DspAlarm::default());
-    assert_eq!(app.issue_state.underruns.session_count(), 0);
+    assert_eq!(app.issue_state.dropouts.run_count(), 0);
 }
 
 #[test]
-fn a_new_error_expands_a_collapsed_strip_and_a_warning_does_not() {
+fn a_new_error_sets_the_banner_and_a_warning_does_not() {
     let mut app = blank_app();
     let added = app.add_path().expect("a free slot");
     app.set_path_mute(added, false);
-    app.live_issues_collapsed = true;
     app.expand_on_new_error();
-    assert!(app.live_issues_collapsed, "a warning leaves it collapsed");
+    assert!(
+        app.chrome.error_title.is_none(),
+        "a warning leaves the banner"
+    );
 
     app.issue_state.dsp = DspAlarm {
         warning: true,
         error: true,
     };
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed, "a new error opens it");
-    app.live_issues_collapsed = true;
+    assert_eq!(
+        app.chrome.error_title.as_deref(),
+        Some("Paths overload the output buffer")
+    );
+    app.chrome.error_dismissed = true;
     app.expand_on_new_error();
     assert!(
-        app.live_issues_collapsed,
-        "the same error, collapsed on purpose, stays collapsed"
+        app.chrome.error_dismissed,
+        "the same error does not raise the banner again"
     );
 
     app.issue_state.dsp.error = false;
     app.expand_on_new_error();
-    assert!(app.live_issues_collapsed);
+    assert!(app.chrome.error_title.is_none());
     app.issue_state.dsp.error = true;
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed, "it came back: new again");
+    assert!(app.chrome.error_title.is_some(), "it came back: new again");
 }
 
 #[test]
@@ -432,19 +446,14 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
         warning: true,
         error: false,
     };
-    app.live_issues_collapsed = true;
     app.alert_lost_device("Scarlett 2i2 was unplugged, so the bridge was stopped.".to_owned());
-    assert_eq!(
-        app.issue_state.dsp,
-        DspAlarm::default(),
-        "the session ended"
-    );
+    assert_eq!(app.issue_state.dsp, DspAlarm::default(), "the run ended");
     assert!(
         app.live_issues().is_empty(),
         "the alert window is the hard stop; no second copy behind it"
     );
     app.expand_on_new_error();
-    assert!(app.live_issues_collapsed);
+    assert!(app.chrome.error_title.is_none());
 
     app.device_alert = None;
     let issues = app.live_issues();
@@ -457,11 +466,23 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
         "Scarlett 2i2 was unplugged, so the bridge was stopped."
     );
     assert_eq!(issue.action, IssueAction::OpenDevices);
-    assert_eq!(issue.action.label(), "Open Devices");
+    assert_eq!(issue.action.label(), "Open Setup");
+    assert_eq!(issue.place, "Setup");
+    assert_eq!(
+        issue.anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Devices)
+    );
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed, "the strip opens on it");
+    assert_eq!(
+        app.chrome.error_title.as_deref(),
+        Some("The bridge stopped: a device was disconnected")
+    );
     app.apply_issue_action(issue.action);
-    assert!(app.page == Page::Devices);
+    assert!(app.page == Page::Setup);
+    assert_eq!(
+        app.chrome.setup_section,
+        Some(crate::app::screen::SetupSection::Devices)
+    );
     assert!(app.live_issues().len() == 1, "a click changes nothing else");
 
     app.start_bridge();
@@ -480,12 +501,14 @@ fn with_unrouted_path() -> (RigWerkApp, usize) {
 }
 
 #[test]
-fn issues_carry_a_stable_key_and_their_card() {
+fn issues_carry_a_stable_key_and_their_anchor() {
     let (mut app, added) = with_unrouted_path();
     let issue = &app.live_issues()[0];
     assert_eq!(issue.key, IssueKey::RoutedNowhere(added));
-    assert_eq!(issue.card, None, "routing rows point to another page");
-    assert_eq!(issue.show_label(), None);
+    assert_eq!(issue.anchor, Anchor::Path(added));
+    assert_eq!(issue.place, "Path 2");
+    assert_eq!(issue.show_label(), "Show");
+    assert_eq!(issue.show_name(), "Show: Path 2 is routed nowhere");
 
     app.engine
         .note_quantum_failure("PipeWire quantum not set: test".to_owned());
@@ -493,35 +516,38 @@ fn issues_carry_a_stable_key_and_their_card() {
         .live_issues()
         .into_iter()
         .find(|issue| issue.key == IssueKey::QuantumNotTaken)
-        .expect("the quantum row");
-    assert_eq!(quantum.card, Some(IssueCard::Output));
-    assert_eq!(quantum.show_label().as_deref(), Some("Show on Output"));
+        .expect("the buffer-change row");
     assert_eq!(
-        quantum.show_name().as_deref(),
-        Some("Show on Output: PipeWire did not take the quantum change")
+        quantum.anchor,
+        Anchor::Setup(crate::app::screen::SetupSection::Clock)
+    );
+    assert_eq!(quantum.show_label(), "Show");
+    assert_eq!(
+        quantum.show_name(),
+        "Show: PipeWire did not take the buffer change"
     );
 
-    app.issue_state.underruns.update(1, Instant::now());
+    app.issue_state.dropouts.update(1, Instant::now());
     app.engine.state = EngineState::Running;
     let first = app
         .live_issues()
         .into_iter()
-        .find(|issue| issue.key == IssueKey::Underruns)
-        .expect("the underrun row");
+        .find(|issue| issue.key == IssueKey::Dropouts)
+        .expect("the dropout row");
     app.issue_state
-        .underruns
+        .dropouts
         .update(2, Instant::now() + Duration::from_secs(3));
     let later = app
         .live_issues()
         .into_iter()
-        .find(|issue| issue.key == IssueKey::Underruns)
-        .expect("the underrun row");
+        .find(|issue| issue.key == IssueKey::Dropouts)
+        .expect("the dropout row");
     assert_ne!(first.detail, later.detail, "the wording moves");
     assert_eq!(first.key, later.key, "the key does not");
 }
 
 #[test]
-fn a_filter_lists_its_rows_and_opens_the_strip() {
+fn a_filter_lists_its_rows() {
     let (mut app, _) = with_unrouted_path();
     app.issue_state.dsp = DspAlarm {
         warning: true,
@@ -532,12 +558,7 @@ fn a_filter_lists_its_rows_and_opens_the_strip() {
     assert_eq!(view.count(IssueFilter::All), 2);
     assert_eq!(view.count(IssueFilter::Warnings), 1);
     assert_eq!(view.count(IssueFilter::Errors), 1);
-    app.live_issues_collapsed = true;
     app.set_issue_filter(IssueFilter::Errors);
-    assert!(
-        !app.live_issues_collapsed,
-        "choosing a filter opens the strip"
-    );
     let rows: Vec<_> = app
         .issue_view()
         .filtered(IssueFilter::Errors)
@@ -565,10 +586,8 @@ fn the_filter_falls_back_to_all_when_nothing_is_left_or_an_error_is_new() {
 
     app.set_path_mute(added, false);
     app.set_issue_filter(IssueFilter::Warnings);
-    app.live_issues_collapsed = true;
     app.issue_state.dsp.error = true;
     app.expand_on_new_error();
-    assert!(!app.live_issues_collapsed);
     assert_eq!(
         app.issue_state.filter,
         IssueFilter::All,
@@ -603,17 +622,12 @@ fn a_dismissed_warning_stays_hidden_until_it_clears_and_comes_back() {
     assert_eq!(app.issue_view().visible.len(), 1, "shown again on request");
 
     app.dismiss_issue(key);
-    app.live_issues_collapsed = true;
-    app.restore_dismissed_issues();
-    assert!(!app.live_issues_collapsed, "shown in an open strip");
-
-    app.dismiss_issue(key);
     app.stop_bridge();
     app.refresh_issues();
     assert_eq!(
         app.issue_view().visible.len(),
         1,
-        "a new bridge session shows it again"
+        "a new bridge run shows it again"
     );
 }
 
@@ -643,7 +657,6 @@ fn dismissing_one_quantum_problem_does_not_hide_another() {
 #[test]
 fn an_error_is_not_dismissed_and_a_dismissed_warning_that_turns_error_shows() {
     let mut app = blank_app();
-    let now = Instant::now();
     app.issue_state.dsp = DspAlarm {
         warning: true,
         error: false,
@@ -660,7 +673,7 @@ fn an_error_is_not_dismissed_and_a_dismissed_warning_that_turns_error_shows() {
     let view = app.issue_view();
     assert_eq!(view.visible.len(), 1, "an error always shows");
     assert_eq!(view.hidden, 0);
-    app.issue_state.settle(&issues, now);
+    app.issue_state.settle(&issues);
     app.dismiss_issue(IssueKey::Dsp);
     app.issue_state.dsp.error = false;
     app.refresh_issues();
@@ -672,33 +685,60 @@ fn an_error_is_not_dismissed_and_a_dismissed_warning_that_turns_error_shows() {
 }
 
 #[test]
-fn show_on_a_card_rings_it_for_a_moment() {
+fn show_selects_the_anchor_and_closes_the_drawer() {
     let mut app = blank_app();
-    let now = Instant::now();
-    assert_eq!(app.card_highlight(IssueCard::Output, now), None);
-    app.show_issue_card(IssueCard::Output, IssueSeverity::Warning, now);
+    app.chrome.drawer = Some(crate::app::screen::Drawer::Issues);
+    app.show_issue(Anchor::Input);
+    assert_eq!(app.page, Page::Console);
+    assert!(app.chrome.sheet.is_none());
+    assert!(app.chrome.drawer.is_none());
+
+    app.show_issue(Anchor::Master);
+    assert_eq!(app.page, Page::Console);
+    assert!(app.chrome.sheet.is_none());
+
+    let slot = app.path_slots()[0];
+    app.show_issue(Anchor::Path(slot));
+    assert_eq!(app.page, Page::Console);
+    assert_eq!(app.selected_path, slot);
     assert_eq!(
-        app.card_highlight(IssueCard::Output, now),
-        Some((IssueSeverity::Warning, 1.0))
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Path { path: slot })
     );
-    assert_eq!(app.card_highlight(IssueCard::Bridge, now), None);
-    let half = app
-        .card_highlight(IssueCard::Output, now + CARD_HIGHLIGHT_FOR / 2)
-        .expect("still ringing")
-        .1;
-    assert!(half > 0.0 && half < 1.0, "{half}");
+    assert_eq!(app.chrome.reveal_path, Some(slot));
+
+    app.show_issue(Anchor::Stage {
+        path: slot,
+        stage: crate::app::chain::ChainStage::Gate,
+    });
     assert_eq!(
-        app.card_highlight(IssueCard::Output, now + CARD_HIGHLIGHT_FOR),
-        None
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Gate { path: slot })
     );
-    assert_eq!(highlight_strength(CARD_HIGHLIGHT_FOR * 2), 0.0);
-    app.tick_issues(now + CARD_HIGHLIGHT_FOR);
-    assert!(app.issue_state.highlight.is_none(), "the tick forgets it");
+    assert!(app.chrome.follow_stage);
+    assert_eq!(app.chrome.reveal_path, Some(slot));
+    assert_eq!(app.selected_path, slot);
+
+    app.show_issue(Anchor::Output(1));
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 1 })
+    );
+    assert_eq!(app.page, Page::Console);
+
+    app.chrome.drawer = Some(crate::app::screen::Drawer::Issues);
+    app.show_issue(Anchor::Setup(crate::app::screen::SetupSection::Clock));
+    assert_eq!(app.page, Page::Setup);
+    assert_eq!(
+        app.chrome.setup_section,
+        Some(crate::app::screen::SetupSection::Clock)
+    );
+    assert!(app.chrome.drawer.is_none());
 }
 
-/// A running bridge with one generic follower, "USB Headphones", in the
-/// device list and on a Low latency cushion.
-fn with_follower() -> RigWerkApp {
+/// A running bridge with one generic extra output, "USB Headphones", in the
+/// device list and on a Minimum bridge buffer.
+fn with_extra_output() -> RigWerkApp {
     let mut app = blank_app();
     app.inventory.outputs.push(DeviceItem {
         id: "test:usb".to_owned(),
@@ -709,45 +749,47 @@ fn with_follower() -> RigWerkApp {
         preferred: false,
         asio_clsid: None,
     });
-    app.followers.push(FollowerPref {
+    app.extra_outputs.push(ExtraOutputPref {
         id: "test:usb".to_owned(),
         backend: "ALSA".to_owned(),
         name: "USB Headphones".to_owned(),
-        cushion_mode: cushion_to_pref(CushionMode::LowLatency),
-        ..FollowerPref::default()
+        bridge_buffer_mode: bridge_buffer_to_pref(BufferMode::Minimum),
+        ..ExtraOutputPref::default()
     });
     app.engine.state = EngineState::Running;
     app
 }
 
 #[test]
-fn a_follower_being_retried_is_a_warning_that_shows_it_in_the_mixer() {
-    let mut app = with_follower();
+fn a_extra_output_being_retried_is_a_warning_that_shows_it_in_the_mixer() {
+    let mut app = with_extra_output();
     assert!(app.live_issues().is_empty(), "{:?}", app.live_issues());
-    app.snapshot.follower_missing[0] = true;
+    app.snapshot.extra_output_missing[0] = true;
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
     let issue = &issues[0];
-    assert_eq!(issue.key, IssueKey::FollowerRetrying(0));
+    assert_eq!(issue.key, IssueKey::ExtraOutputRetrying(0));
     assert_eq!(issue.severity, IssueSeverity::Warning, "the clock plays on");
     assert_eq!(issue.title, "USB Headphones is not playing");
     assert!(issue.detail.contains("retrying"), "{}", issue.detail);
-    assert_eq!(issue.place, "OUTPUT · USB Headphones");
-    assert_eq!(issue.card, Some(IssueCard::Output));
-    assert_eq!(issue.action, IssueAction::ShowFollower(0));
-    assert_eq!(issue.action.label(), "Show in Mixer");
+    assert_eq!(issue.place, "USB Headphones");
+    assert_eq!(issue.anchor, Anchor::Output(1));
+    assert_eq!(issue.action, IssueAction::ShowExtraOutput(0));
+    assert_eq!(issue.action.label(), "Show output");
     app.apply_issue_action(issue.action);
-    assert!(app.page == Page::Mixer);
-    assert_eq!(app.chain_selected, ChainSelection::OutputDevice(1));
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 1 })
+    );
     app.refresh_issues();
-    app.dismiss_issue(IssueKey::FollowerRetrying(0));
+    app.dismiss_issue(IssueKey::ExtraOutputRetrying(0));
     assert_eq!(app.issue_view().hidden, 1);
 
-    app.snapshot.follower_missing[0] = false;
+    app.snapshot.extra_output_missing[0] = false;
     app.inventory.outputs.clear();
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "gone from the device list: {issues:?}");
-    assert_eq!(issues[0].key, IssueKey::FollowerNotListed(0));
+    assert_eq!(issues[0].key, IssueKey::ExtraOutputNotListed(0));
     app.refresh_issues();
     assert_eq!(app.issue_view().hidden, 0, "a different problem");
     assert!(
@@ -761,39 +803,40 @@ fn a_follower_being_retried_is_a_warning_that_shows_it_in_the_mixer() {
 }
 
 #[test]
-fn follower_underruns_offer_its_own_cushion_then_the_buffer() {
-    let mut app = with_follower();
+fn extra_output_dropouts_offer_its_own_bridge_buffer_then_the_buffer() {
+    let mut app = with_extra_output();
     let now = Instant::now();
-    app.snapshot.follower_underruns[0] = 2;
+    app.snapshot.extra_output_dropouts[0] = 2;
     app.tick_issues(now);
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "the clock output is fine: {issues:?}");
     let issue = &issues[0];
-    assert_eq!(issue.key, IssueKey::FollowerUnderruns(0));
+    assert_eq!(issue.key, IssueKey::ExtraOutputDropouts(0));
     assert_eq!(issue.severity, IssueSeverity::Warning);
-    assert_eq!(issue.title, "USB Headphones ran dry");
+    assert_eq!(issue.title, "USB Headphones had a dropout");
     assert!(
         issue
             .detail
-            .starts_with("2 underruns, the last just now (2 underruns since it opened)"),
+            .starts_with("2 dropouts, the last just now (2 dropouts since it opened)"),
         "{}",
         issue.detail
     );
-    assert_eq!(issue.place, "OUTPUT · USB Headphones");
-    assert_eq!(issue.action, IssueAction::FollowerSafeCushion(0));
-    assert_eq!(issue.action.label(), "Use Safe cushion");
+    assert_eq!(issue.place, "USB Headphones");
+    assert_eq!(issue.anchor, Anchor::Output(1));
+    assert_eq!(issue.action, IssueAction::ExtraOutputAutoBridgeBuffer(0));
+    assert_eq!(issue.action.label(), "Use Auto bridge buffer");
 
-    // The clock's own cushion is not the one that helps here.
-    app.cushion_mode = CushionMode::LowLatency;
-    app.apply_issue_action(IssueAction::FollowerSafeCushion(0));
+    // The clock's own bridge buffer is not the one that helps here.
+    app.bridge_buffer_mode = BufferMode::Minimum;
+    app.apply_issue_action(IssueAction::ExtraOutputAutoBridgeBuffer(0));
     assert_eq!(
-        app.followers[0].cushion_mode,
-        cushion_to_pref(CushionMode::Safe)
+        app.extra_outputs[0].bridge_buffer_mode,
+        bridge_buffer_to_pref(BufferMode::Auto)
     );
-    assert_eq!(app.cushion_mode, CushionMode::LowLatency);
+    assert_eq!(app.bridge_buffer_mode, BufferMode::Minimum);
     assert_eq!(
         app.log.last().unwrap().text,
-        "USB Headphones: cushion Safe."
+        "USB Headphones: Bridge buffer: Auto."
     );
 
     app.low_latency_output = true;
@@ -801,49 +844,49 @@ fn follower_underruns_offer_its_own_cushion_then_the_buffer() {
     assert_eq!(
         action,
         IssueAction::SetOutputBuffer(256),
-        "never the clock device's Low latency"
+        "never the clock output's Low latency"
     );
     assert!(app.live_issues()[0].detail.ends_with(
-        "Followers ask for the output buffer: 256 samples give USB Headphones more room."
+        "Extra outputs ask for the output buffer: 256 samples give USB Headphones more room."
     ));
 
-    app.snapshot.follower_underruns[0] = 4;
+    app.snapshot.extra_output_dropouts[0] = 4;
     app.tick_issues(now + Duration::from_millis(500));
     let issue = &app.live_issues()[0];
     assert_eq!(issue.severity, IssueSeverity::Error);
-    assert_eq!(issue.title, "Audio is dropping out on USB Headphones");
+    assert_eq!(issue.title, "Dropouts on USB Headphones");
 
-    app.tick_issues(now + Duration::from_millis(500) + UNDERRUN_QUIET);
+    app.tick_issues(now + Duration::from_millis(500) + DROPOUT_QUIET);
     assert!(app.live_issues().is_empty(), "cleared after a quiet spell");
 
-    app.snapshot.follower_underruns[0] = 5;
-    app.tick_issues(now + UNDERRUN_QUIET * 2);
+    app.snapshot.extra_output_dropouts[0] = 5;
+    app.tick_issues(now + DROPOUT_QUIET * 2);
     assert_eq!(app.live_issues().len(), 1);
     app.stop_bridge();
     assert_eq!(
-        app.issue_state.follower_underruns[0].session_count(),
+        app.issue_state.extra_output_dropouts[0].run_count(),
         0,
         "per session"
     );
 }
 
 #[test]
-fn a_missing_follower_has_no_underrun_or_drift_row() {
-    let mut app = with_follower();
-    app.snapshot.follower_underruns[0] = 1;
-    app.snapshot.follower_drift_at_limit[0] = true;
+fn a_missing_extra_output_has_no_dropout_or_drift_row() {
+    let mut app = with_extra_output();
+    app.snapshot.extra_output_dropouts[0] = 1;
+    app.snapshot.extra_output_drift_at_limit[0] = true;
     let now = Instant::now();
     app.tick_issues(now);
     app.tick_issues(now + DRIFT_RAISE_AFTER);
-    app.snapshot.follower_missing[0] = true;
+    app.snapshot.extra_output_missing[0] = true;
     let keys: Vec<IssueKey> = app.live_issues().iter().map(|issue| issue.key).collect();
-    assert_eq!(keys, [IssueKey::FollowerRetrying(0)]);
+    assert_eq!(keys, [IssueKey::ExtraOutputRetrying(0)]);
 }
 
 #[test]
-fn a_pinned_follower_drift_loop_is_a_warning() {
-    let mut app = with_follower();
-    app.snapshot.follower_drift_at_limit[0] = true;
+fn a_pinned_extra_output_drift_loop_is_a_warning() {
+    let mut app = with_extra_output();
+    app.snapshot.extra_output_drift_at_limit[0] = true;
     let now = Instant::now();
     app.tick_issues(now);
     assert!(app.live_issues().is_empty(), "not pinned long enough yet");
@@ -851,64 +894,71 @@ fn a_pinned_follower_drift_loop_is_a_warning() {
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
     let issue = &issues[0];
-    assert_eq!(issue.key, IssueKey::FollowerDrift(0));
+    assert_eq!(issue.key, IssueKey::ExtraOutputDrift(0));
     assert_eq!(issue.severity, IssueSeverity::Warning);
     assert_eq!(issue.title, "USB Headphones drifts too far to follow");
     assert!(issue.detail.contains("500 ppm limit"), "{}", issue.detail);
-    assert_eq!(issue.place, "OUTPUT · USB Headphones");
+    assert_eq!(issue.place, "USB Headphones");
+    assert_eq!(issue.anchor, Anchor::Output(1));
     assert_eq!(issue.action, IssueAction::OpenDiagnostics);
 }
 
 #[test]
-fn a_follower_drift_warning_is_held_against_flicker() {
-    let mut app = with_follower();
+fn a_extra_output_drift_warning_is_held_against_flicker() {
+    let mut app = with_extra_output();
     let start = Instant::now();
     let at = |ms: u64| start + Duration::from_millis(ms);
     // Hovering at the limit: pinned, free, pinned, never a full second.
     for (ms, pinned) in [(0, true), (600, false), (700, true), (1500, false)] {
-        app.snapshot.follower_drift_at_limit[0] = pinned;
+        app.snapshot.extra_output_drift_at_limit[0] = pinned;
         app.tick_issues(at(ms));
         assert!(app.live_issues().is_empty(), "{ms} ms");
     }
-    app.snapshot.follower_drift_at_limit[0] = true;
+    app.snapshot.extra_output_drift_at_limit[0] = true;
     app.tick_issues(at(2000));
     app.tick_issues(at(3000));
-    assert_eq!(app.live_issues()[0].key, IssueKey::FollowerDrift(0));
+    assert_eq!(app.live_issues()[0].key, IssueKey::ExtraOutputDrift(0));
     // Free for a moment: the warning holds.
-    app.snapshot.follower_drift_at_limit[0] = false;
+    app.snapshot.extra_output_drift_at_limit[0] = false;
     app.tick_issues(at(3100));
-    app.snapshot.follower_drift_at_limit[0] = true;
+    app.snapshot.extra_output_drift_at_limit[0] = true;
     app.tick_issues(at(4000));
-    app.snapshot.follower_drift_at_limit[0] = false;
+    app.snapshot.extra_output_drift_at_limit[0] = false;
     app.tick_issues(at(4100));
     app.tick_issues(at(4100) + DRIFT_CLEAR_AFTER - Duration::from_millis(1));
     assert_eq!(app.live_issues().len(), 1, "still held");
     app.tick_issues(at(4100) + DRIFT_CLEAR_AFTER);
     assert!(app.live_issues().is_empty(), "clear for the full hold");
 
-    app.snapshot.follower_drift_at_limit[0] = true;
+    app.snapshot.extra_output_drift_at_limit[0] = true;
     app.tick_issues(at(9000));
     app.tick_issues(at(10000));
     assert_eq!(app.live_issues().len(), 1);
     app.stop_bridge();
-    assert!(!app.issue_state.follower_drift[0].raised(), "per session");
+    assert!(
+        !app.issue_state.extra_output_drift[0].raised(),
+        "per session"
+    );
 }
 
 #[test]
-fn a_slot_that_holds_another_follower_starts_over() {
-    let mut app = with_follower();
+fn a_slot_that_holds_another_extra_output_starts_over() {
+    let mut app = with_extra_output();
     let now = Instant::now();
     app.tick_issues(now);
-    app.snapshot.follower_underruns[0] = 2;
-    app.snapshot.follower_drift_at_limit[0] = true;
+    app.snapshot.extra_output_dropouts[0] = 2;
+    app.snapshot.extra_output_drift_at_limit[0] = true;
     app.tick_issues(now + Duration::from_millis(100));
     app.tick_issues(now + DRIFT_RAISE_AFTER * 2);
     let keys: Vec<IssueKey> = app.live_issues().iter().map(|issue| issue.key).collect();
     assert_eq!(
         keys,
-        [IssueKey::FollowerUnderruns(0), IssueKey::FollowerDrift(0)]
+        [
+            IssueKey::ExtraOutputDropouts(0),
+            IssueKey::ExtraOutputDrift(0)
+        ]
     );
-    app.dismiss_issue(IssueKey::FollowerUnderruns(0));
+    app.dismiss_issue(IssueKey::ExtraOutputDropouts(0));
     assert_eq!(app.issue_view().hidden, 1);
 
     // Replaced live by another device; its stream has not opened yet, so
@@ -922,9 +972,9 @@ fn a_slot_that_holds_another_follower_starts_over() {
         preferred: false,
         asio_clsid: None,
     });
-    app.followers[0].id = "test:dock".to_owned();
-    app.followers[0].name = "Dock".to_owned();
-    app.snapshot.follower_drift_at_limit[0] = false;
+    app.extra_outputs[0].id = "test:dock".to_owned();
+    app.extra_outputs[0].name = "Dock".to_owned();
+    app.snapshot.extra_output_drift_at_limit[0] = false;
     let later = now + DRIFT_RAISE_AFTER * 3;
     app.tick_issues(later);
     assert!(app.live_issues().is_empty(), "{:?}", app.live_issues());
@@ -934,19 +984,19 @@ fn a_slot_that_holds_another_follower_starts_over() {
         "the dismissal was the old one's"
     );
 
-    // Its stream opens (the count starts over), then it runs dry itself.
-    app.snapshot.follower_underruns[0] = 0;
+    // Its stream opens (the count starts over), then it has a dropout itself.
+    app.snapshot.extra_output_dropouts[0] = 0;
     app.tick_issues(later + Duration::from_millis(100));
-    app.snapshot.follower_underruns[0] = 1;
+    app.snapshot.extra_output_dropouts[0] = 1;
     app.tick_issues(later + Duration::from_millis(200));
     let view = app.issue_view();
     assert_eq!(view.hidden, 0);
-    assert_eq!(view.visible[0].key, IssueKey::FollowerUnderruns(0));
-    assert_eq!(view.visible[0].title, "Dock ran dry");
+    assert_eq!(view.visible[0].key, IssueKey::ExtraOutputDropouts(0));
+    assert_eq!(view.visible[0].title, "Dock had a dropout");
     assert!(
         view.visible[0]
             .detail
-            .starts_with("1 underrun, the last just now (1 underrun since it opened)"),
+            .starts_with("1 dropout, the last just now (1 dropout since it opened)"),
         "{}",
         view.visible[0].detail
     );
@@ -980,7 +1030,7 @@ fn tick_for(app: &mut RigWerkApp, from: Instant, span: Duration) -> Instant {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_silent_sink_under_low_latency_is_an_error_only_with_underruns() {
+fn a_silent_sink_under_low_latency_is_an_error_only_with_dropouts() {
     let mut app = blank_app();
     app.engine.state = EngineState::Running;
     app.low_latency_output = true;
@@ -994,10 +1044,9 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_underruns() {
         "no monitor data: never a guess"
     );
 
-    // Without underruns the RigWerk stream may just be muted in the
+    // Without dropouts the RigWerk stream may just be muted in the
     // desktop mixer: a warning that says so, and the strip stays shut.
     app.engine.set_test_sink_peak(Some(0.0));
-    app.live_issues_collapsed = true;
     let now = tick_for(&mut app, now, SILENCE_RAISE_ALONE);
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "{issues:?}");
@@ -1006,11 +1055,12 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_underruns() {
     assert_eq!(issue.severity, IssueSeverity::Warning);
     assert_eq!(issue.title, "Output may be silent under low latency");
     assert!(issue.detail.contains("desktop mixer"), "{}", issue.detail);
-    assert_eq!(issue.card, Some(IssueCard::Output));
+    assert_eq!(issue.anchor, Anchor::Output(0));
+    assert_eq!(issue.place, "Clock output");
     assert_eq!(issue.action, IssueAction::LowLatencyOff);
     assert!(
-        app.live_issues_collapsed,
-        "a warning does not open the strip"
+        app.chrome.error_title.is_none(),
+        "a warning does not raise the banner"
     );
 
     app.mute = true;
@@ -1023,10 +1073,10 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_underruns() {
     let now = tick_for(&mut app, now, Duration::from_secs(5));
     assert!(app.live_issues().is_empty());
 
-    // With underruns the shorter hold applies, and it is an error.
+    // With dropouts the shorter hold applies, and it is an error.
     app.snapshot.out_channels[1] = 0.1;
-    app.snapshot.underruns = 1;
-    let now = tick_for(&mut app, now, SILENCE_RAISE_WITH_UNDERRUNS);
+    app.snapshot.dropouts = 1;
+    let now = tick_for(&mut app, now, SILENCE_RAISE_WITH_DROPOUTS);
     let issue = app
         .live_issues()
         .into_iter()
@@ -1034,8 +1084,11 @@ fn a_silent_sink_under_low_latency_is_an_error_only_with_underruns() {
         .expect("the silence row");
     assert_eq!(issue.severity, IssueSeverity::Error);
     assert_eq!(issue.title, "Output went silent under low latency");
-    assert!(issue.detail.contains("ran dry"), "{}", issue.detail);
-    assert!(!app.live_issues_collapsed, "a new error opens the strip");
+    assert!(issue.detail.contains("had a dropout"), "{}", issue.detail);
+    assert!(
+        app.chrome.error_title.is_some(),
+        "a new error raises the banner"
+    );
 
     app.engine.set_test_sink_peak(Some(0.05));
     tick_for(&mut app, now, Duration::from_secs(1));
@@ -1068,18 +1121,18 @@ fn a_device_against_the_ceiling_warns_until_the_signal_drops() {
         preferred: false,
         asio_clsid: None,
     });
-    let headphones = FollowerPref {
+    let headphones = ExtraOutputPref {
         id: "test:hp".to_owned(),
         name: "Headphones".to_owned(),
-        ..FollowerPref::default()
+        ..ExtraOutputPref::default()
     };
-    let mut hidden = FollowerPref::virtual_out();
-    hidden.publish = false;
+    let mut hidden = ExtraOutputPref::virtual_output();
+    hidden.virtual_output_on = false;
     hidden.name = "RigWerk Out".to_owned();
-    app.followers.push(headphones);
-    app.followers.push(hidden);
-    app.snapshot.follower_reduction_db[0] = 3.2;
-    app.snapshot.follower_reduction_db[1] = 9.0;
+    app.extra_outputs.push(headphones);
+    app.extra_outputs.push(hidden);
+    app.snapshot.extra_output_reduction_db[0] = 3.2;
+    app.snapshot.extra_output_reduction_db[1] = 9.0;
 
     let now = Instant::now();
     app.tick_issues(now);
@@ -1091,8 +1144,9 @@ fn a_device_against_the_ceiling_warns_until_the_signal_drops() {
         .expect("the ceiling row");
     assert_eq!(issue.title, "Headphones is against the safety ceiling");
     assert_eq!(issue.detail, "−1.0 dB · 3.2 dB reduction.");
-    assert_eq!(issue.card, Some(IssueCard::Output));
-    assert_eq!(issue.action, IssueAction::ShowOutput);
+    assert_eq!(issue.anchor, Anchor::Output(1));
+    assert_eq!(issue.place, "Headphones");
+    assert_eq!(issue.action, IssueAction::ShowOutput(1));
     assert!(!issue.dismissable());
     app.dismiss_issue(IssueKey::SafetyCeiling);
     assert!(
@@ -1105,13 +1159,14 @@ fn a_device_against_the_ceiling_warns_until_the_signal_drops() {
         .visible
         .iter()
         .any(|issue| issue.key == IssueKey::SafetyCeiling));
-    app.apply_issue_action(IssueAction::ShowOutput);
-    assert!(app
-        .card_highlight(IssueCard::Output, Instant::now())
-        .is_some());
+    app.apply_issue_action(IssueAction::ShowOutput(1));
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 1 })
+    );
 
     app.snapshot.out_reduction_db = 0.0;
-    app.snapshot.follower_reduction_db = [0.0; crate::audio::MAX_FOLLOWERS];
+    app.snapshot.extra_output_reduction_db = [0.0; crate::audio::MAX_EXTRA_OUTPUTS];
     app.tick_issues(now);
     assert!(app
         .live_issues()

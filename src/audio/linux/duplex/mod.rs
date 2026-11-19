@@ -3,14 +3,14 @@
 //! When both the input and the output are PipeWire nodes they already share
 //! one graph clock: PipeWire itself keeps any second device in step with the
 //! graph driver.  Two separate streams joined by RigWerk's ring would add a
-//! cushion and drift steering that have nothing to correct, and because the
+//! bridge buffer and drift steering that have nothing to correct, and because the
 //! two streams are not linked to each other the graph may run playback before
 //! capture in a cycle, which costs one more quantum.
 //!
 //! This path is a single `pw_filter` node, "RigWerk", with two DSP input
 //! ports and two DSP output ports.  One realtime callback reads the input
 //! ports, runs the mixer chain on that block and writes the output ports in
-//! the same graph cycle.  There is no ring, no cushion, no priming, no drift
+//! the same graph cycle.  There is no ring, no bridge buffer, no priming, no drift
 //! steering and no rate conversion: DSP ports always run at the graph rate.
 //!
 //! A filter is not placed by the session manager the way a stream with
@@ -47,13 +47,13 @@ use std::time::Duration;
 use pipewire as pw;
 
 use crate::audio::shared::Shared;
-use crate::audio::types::StartConfig;
+use crate::audio::types::{OutputMode, StartConfig};
 
 use super::native::{node_latency_frames, node_name};
 
 use filter::Filter;
 use links::{MadeLink, Observed};
-use virtual_source::{PublishSlot, VirtualSource};
+use virtual_source::{VirtualOutputSlot, VirtualSource};
 
 /// The largest graph quantum the scratch is sized for.  PipeWire's own
 /// `clock.max-quantum` default is 8192.
@@ -129,7 +129,7 @@ pub(crate) fn run(
         quantum: Arc::new(AtomicU64::new(frames as u64)),
         error: Arc::new(AtomicBool::new(false)),
     };
-    let publish = Arc::new(PublishSlot::new());
+    let virtual_feed = Arc::new(VirtualOutputSlot::new());
     let filter = Rc::new(
         Filter::new(
             &core,
@@ -137,7 +137,7 @@ pub(crate) fn run(
             rate,
             Arc::clone(&shared),
             &observed,
-            Arc::clone(&publish),
+            Arc::clone(&virtual_feed),
         )
         .map_err(setup)?,
     );
@@ -151,7 +151,12 @@ pub(crate) fn run(
         let low = if low_latency { "Low latency · " } else { "" };
         format!("{low}PipeWire duplex node · {quantum} frames at {rate} Hz · no bridge buffer")
     };
-    shared.set_output(rate, frames, mode(rate, frames as u64));
+    let opened = if low_latency {
+        OutputMode::LowLatency
+    } else {
+        OutputMode::Standard
+    };
+    shared.set_output(rate, frames, opened, mode(rate, frames as u64));
     shared.running.store(true, Ordering::Relaxed);
     shared.set_status(format!(
         "Bridging 2 ch · {rate} Hz · one PipeWire node (no bridge buffer)"
@@ -171,15 +176,15 @@ pub(crate) fn run(
     let made: Rc<RefCell<HashMap<(u32, u32), MadeLink>>> = Rc::default();
     let shown = std::cell::Cell::new((rate, frames as u64));
     let filter_ref = Rc::clone(&filter);
-    let virtual_out: Rc<RefCell<Option<VirtualSource>>> = Rc::default();
+    let virtual_output: Rc<RefCell<Option<VirtualSource>>> = Rc::default();
 
     let stop_flag = Arc::clone(&stop);
     let loop_quit = mainloop.clone();
     let tick_graph = Rc::clone(&graph);
     let tick_made = Rc::clone(&made);
     let tick_core = core.clone();
-    let tick_virtual = Rc::clone(&virtual_out);
-    let tick_publish = Arc::clone(&publish);
+    let tick_virtual = Rc::clone(&virtual_output);
+    let tick_feed = Arc::clone(&virtual_feed);
     let seen_rate = Arc::clone(&observed.rate);
     let seen_quantum = Arc::clone(&observed.quantum);
     let error = Arc::clone(&observed.error);
@@ -196,14 +201,14 @@ pub(crate) fn run(
         if rate > 0 && (rate, quantum) != shown.get() {
             shown.set((rate, quantum));
             shared.note_direct_rate(rate);
-            shared.set_output(rate, quantum as u32, mode(rate, quantum));
+            shared.set_output(rate, quantum as u32, opened, mode(rate, quantum));
         }
-        // Create or drop RigWerk Out when publish is toggled live.
-        let want_publish = (0..shared.follower_count())
-            .any(|slot| shared.follower_is_virtual(slot) && shared.follower_is_published(slot));
+        // Create or drop RigWerk Out when the virtual output is switched live.
+        let want_virtual_output = (0..shared.extra_output_count())
+            .any(|slot| shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot));
         let mut virtual_slot = tick_virtual.borrow_mut();
-        match (want_publish, virtual_slot.is_some()) {
-            (true, false) => match VirtualSource::new(&tick_core, Arc::clone(&tick_publish)) {
+        match (want_virtual_output, virtual_slot.is_some()) {
+            (true, false) => match VirtualSource::new(&tick_core, Arc::clone(&tick_feed)) {
                 Ok(source) => *virtual_slot = Some(source),
                 Err(message) => shared.set_status(format!("RigWerk Out: {message}")),
             },
@@ -216,14 +221,14 @@ pub(crate) fn run(
         };
         let mut graph = tick_graph.borrow_mut();
         let mut made = tick_made.borrow_mut();
-        // Follower add/remove is live: rebuild links whenever the plan moves.
-        let plan = shared.follower_plan();
-        let follower_sinks: Vec<(usize, &str)> = plan
+        // Extra output add/remove is live: rebuild links whenever the plan moves.
+        let plan = shared.extra_output_plan();
+        let extra_output_sinks: Vec<(usize, &str)> = plan
             .slots
             .iter()
             .take(plan.count)
             .enumerate()
-            .filter(|(_, slot)| !slot.virtual_out && !slot.node_name.is_empty())
+            .filter(|(_, slot)| !slot.virtual_output && !slot.node_name.is_empty())
             .map(|(index, slot)| (index, slot.node_name.as_str()))
             .collect();
         links::sync_wanted_links(
@@ -233,7 +238,7 @@ pub(crate) fn run(
             own,
             &source,
             &sink,
-            &follower_sinks,
+            &extra_output_sinks,
             shared,
         );
     });
@@ -249,7 +254,7 @@ pub(crate) fn run(
     drop(timer);
     // Links first, then the virtual source, then the node.
     made.borrow_mut().clear();
-    virtual_out.borrow_mut().take();
+    virtual_output.borrow_mut().take();
     drop(filter);
     Ok(())
 }

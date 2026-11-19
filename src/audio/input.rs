@@ -94,7 +94,7 @@ where
                 promote.run();
                 let _denormals = DenormalGuard::new();
                 // The ring has to hold at least one whole input block, or
-                // the output runs dry between two deliveries.
+                // the output drops out between two deliveries.
                 gain_shared.note_input_block(data.len() / channels);
                 gain_shared.note_input_frames(data.len() / channels);
                 let gain = gain_shared.input_gain();

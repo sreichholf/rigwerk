@@ -1,5 +1,5 @@
-//! One signal path's insert chain on the UI side: the [`ChainModel`].  It
-//! is the chain as the UI edits and shows it, one [`SlotLink`] per insert,
+//! One signal path's effect chain on the UI side: the [`ChainModel`].  It
+//! is the chain as the UI edits and shows it, one [`SlotLink`] per effect,
 //! and the only sender of [`ChainCommand`]s to the path's
 //! [`ChainRuntime`](super::ChainRuntime) (see `chain`).
 //!
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use super::chain::{
     release_command, release_slot, ChainCommand, ChainHome, ChainRuntime, COMMAND_QUEUE,
-    MAX_INSERTS, RETURN_QUEUE,
+    MAX_EFFECTS, RETURN_QUEUE,
 };
 #[cfg(test)]
 use super::handle::LoadedPlugin;
@@ -38,9 +38,9 @@ pub(crate) struct ReloadPlan {
     pub(crate) requested: Vec<usize>,
 }
 
-/// One path's insert chain as the UI edits it.
+/// One path's effect chain as the UI edits it.
 pub(crate) struct ChainModel {
-    /// One per insert, in chain order: the chain as it stands once every
+    /// One per effect, in chain order: the chain as it stands once every
     /// queued command applied.
     links: Vec<SlotLink>,
     /// The rate the slots are built for.
@@ -89,7 +89,7 @@ impl ChainModel {
     }
 
     pub(crate) fn is_full(&self) -> bool {
-        self.links.len() >= MAX_INSERTS
+        self.links.len() >= MAX_EFFECTS
     }
 
     /// Whether a restored slot is still waiting for its first open.
@@ -144,19 +144,19 @@ impl ChainModel {
         !self.backlog.is_empty() || !self.commands.is_empty()
     }
 
-    /// Replaces every insert with unopened slots for `prefs`.  Only the
-    /// first [`MAX_INSERTS`] are kept.
+    /// Replaces every effect with unopened slots for `prefs`.  Only the
+    /// first [`MAX_EFFECTS`] are kept.
     pub(crate) fn restore(&mut self, mut prefs: Vec<PluginPref>) {
         for index in (0..self.links.len()).rev() {
             self.send(ChainCommand::Remove { index });
         }
         self.links.clear();
-        if prefs.len() > MAX_INSERTS {
+        if prefs.len() > MAX_EFFECTS {
             eprintln!(
-                "[plugins] a path holds at most {MAX_INSERTS} inserts; {} were not restored",
-                prefs.len() - MAX_INSERTS
+                "[plugins] a path holds at most {MAX_EFFECTS} effects; {} were not restored",
+                prefs.len() - MAX_EFFECTS
             );
-            prefs.truncate(MAX_INSERTS);
+            prefs.truncate(MAX_EFFECTS);
         }
         for pref in prefs {
             self.append(Slot::empty(pref));
@@ -183,7 +183,7 @@ impl ChainModel {
         });
     }
 
-    /// Takes the insert at `index` out.  The runtime hands its slot back.
+    /// Takes the effect at `index` out.  The runtime hands its slot back.
     pub(crate) fn remove(&mut self, index: usize) {
         if index < self.links.len() {
             self.links.remove(index);
@@ -191,7 +191,7 @@ impl ChainModel {
         }
     }
 
-    /// Swaps the insert at `index` with its neighbour `delta` places away
+    /// Swaps the effect at `index` with its neighbour `delta` places away
     /// (clamped to the chain).
     pub(crate) fn move_slot(&mut self, index: usize, delta: isize) {
         if index >= self.links.len() {
@@ -207,8 +207,8 @@ impl ChainModel {
         }
     }
 
-    /// Puts `slot` in place of the insert at `index`.  It keeps that
-    /// insert's controls, so mix, bypass and the counters carry over.
+    /// Puts `slot` in place of the effect at `index`.  It keeps that
+    /// effect's controls, so mix, bypass and the counters carry over.
     fn replace(&mut self, index: usize, mut slot: Slot) {
         let Some(link) = self.links.get_mut(index) else {
             return;
@@ -276,7 +276,7 @@ impl ChainModel {
     }
 
     /// Puts slots built for a [`ReloadPlan`] in place, then moves the chain
-    /// to `rate`.  Each keeps the controls of the insert it replaces.
+    /// to `rate`.  Each keeps the controls of the effect it replaces.
     pub(crate) fn install(&mut self, rate: u32, built: Vec<(usize, Slot)>) {
         for (index, slot) in built {
             self.replace(index, slot);
@@ -333,7 +333,7 @@ impl ChainModel {
     fn open_handle(&mut self, index: usize) -> Result<PluginHandle, String> {
         self.open_if_needed(index);
         let Some(link) = self.links.get(index) else {
-            return Err("That insert is no longer in the chain".to_owned());
+            return Err("That effect is no longer in the chain".to_owned());
         };
         match &link.plugin {
             Some(plugin) => Ok(plugin.clone()),
@@ -344,7 +344,7 @@ impl ChainModel {
         }
     }
 
-    /// Sets one insert's bypass.  The UI goes through the published links
+    /// Sets one effect's bypass.  The UI goes through the published links
     /// instead (`PathControls::set_plugin_bypass`).
     #[cfg(test)]
     pub(crate) fn set_bypass(&mut self, index: usize, bypass: bool) {
@@ -360,7 +360,7 @@ impl ChainModel {
         self.append(super::chain::clap_slot_for_test(plugin, self.rate));
     }
 
-    /// Adds the pure-delay test insert (see `Slot::delay_for_test`).
+    /// Adds the pure-delay test effect (see `Slot::delay_for_test`).
     #[cfg(test)]
     pub(crate) fn insert_delay_for_test(&mut self, latency: u32) {
         self.append(Slot::delay_for_test(latency));

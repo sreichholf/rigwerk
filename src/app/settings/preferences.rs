@@ -1,16 +1,19 @@
-//! Launch preferences, follower prefs, bridge settings and load/store.
+//! Launch preferences, extra output prefs, bridge settings and load/store.
 
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use super::path_pref::{default_path_name, sanitize_paths, PathPref};
-use super::preset::Preset;
 use super::serde_util::{skip_unreadable, skip_unreadable_option};
+use super::session::Session;
+use crate::app::appearance::{sanitize_ui_size, ThemeChoice, UI_SIZE_DEFAULT};
 use crate::app::latency::MeasuredLatency;
+use crate::app::plugins::{sanitize_effect_ids, EffectId};
+use crate::app::screen::{SHEET_MAX, SHEET_MIN};
 use crate::app::Page;
 use crate::audio::{
-    CushionMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings, PluginPref,
-    WasapiOutputMode, MAX_FOLLOWERS, VIRTUAL_OUT_ID, VIRTUAL_OUT_NAME,
+    BufferMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings, PluginPref,
+    WasapiOutputMode, MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
 /// 2: signal paths (`paths`, per-device `path_map`); layout 1 files load
@@ -26,17 +29,17 @@ pub(crate) struct Preferences {
     #[serde(default)]
     pub(crate) schema_version: u32,
     pub(crate) auto_start_bridge: bool,
-    /// A saved patch that cannot be read is skipped, not fatal.
+    /// A saved session that cannot be read is skipped, not fatal.
     #[serde(deserialize_with = "skip_unreadable")]
-    pub(crate) sessions: Vec<Preset>,
+    pub(crate) sessions: Vec<Session>,
     pub(crate) session_name: String,
     /// The page that was open when the app was last used.
     pub(crate) page: String,
-    /// Which of the two EQs the Mixer page was editing: 0 pre, 1 post.
+    /// Which of the two EQs was last edited: 0 pre, 1 post.
     pub(crate) eq_edit: u8,
     /// Whether the output list was showing the low-latency tab.
     pub(crate) output_tab_low_latency: bool,
-    /// The patch (profile) that was selected in the Sessions list.
+    /// The session that was selected in the Sessions list.
     pub(crate) selected_session: Option<usize>,
     /// Selected devices. `*_id` is [`crate::audio::DeviceItem::id`] (cpal's
     /// `DeviceId` text, or `asio:{clsid}` / `asio-out:{clsid}`) and
@@ -84,21 +87,23 @@ pub(crate) struct Preferences {
     /// Output side rate; 0 follows the input.
     pub(crate) output_rate: u32,
     pub(crate) output_buffer: usize,
-    /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
-    pub(crate) cushion_mode: u8,
-    pub(crate) cushion_ms: f32,
-    /// Path 1's EQ before the plugin inserts in files from before paths
+    /// Bridge buffer: 0 Auto, 1 Minimum, 2 Fixed (size in `bridge_buffer_ms`).
+    #[serde(rename = "cushion_mode")]
+    pub(crate) bridge_buffer_mode: u8,
+    #[serde(rename = "cushion_ms")]
+    pub(crate) bridge_buffer_ms: f32,
+    /// Path 1's EQ before the plugin effects in files from before paths
     /// existed (saves from before there were two EQs load into this one).
     /// Read, never written.
     #[serde(skip_serializing)]
     pub(crate) eq: EqSettings,
-    /// Path 1's EQ after the inserts, in files from before paths.
+    /// Path 1's EQ after the effects, in files from before paths.
     #[serde(skip_serializing)]
     pub(crate) eq_post: EqSettings,
     /// Path 1's gate, in files from before paths.
     #[serde(default, skip_serializing)]
     pub(crate) gate: GateSettings,
-    /// Path 1's insert chain, in files from before paths.  An entry that
+    /// Path 1's effect chain, in files from before paths.  An entry that
     /// cannot be read is skipped, not fatal.
     #[serde(deserialize_with = "skip_unreadable", skip_serializing)]
     pub(crate) plugins: Vec<PluginPref>,
@@ -106,13 +111,14 @@ pub(crate) struct Preferences {
     /// none: their top-level mix fields load as path 1 (see
     /// [`Self::path_prefs`]).  New files write only this.
     pub(crate) paths: Vec<PathPref>,
-    /// The path the Mixer and Plugins pages edit (a position in `paths`).
+    /// The path the console, sheets and browser edit (a position in `paths`).
     pub(crate) selected_path: usize,
-    /// Level, mute and channel map of the clock device (`output_id`).
-    pub(crate) clock_device: OutputDeviceSettings,
+    /// Level, mute and channel map of the clock output (`output_id`).
+    #[serde(rename = "clock_device")]
+    pub(crate) clock_output: OutputDeviceSettings,
     /// Extra output devices.  An entry that cannot be read is skipped.
-    #[serde(deserialize_with = "skip_unreadable")]
-    pub(crate) followers: Vec<FollowerPref>,
+    #[serde(deserialize_with = "skip_unreadable", rename = "followers")]
+    pub(crate) extra_outputs: Vec<ExtraOutputPref>,
     /// The last measured loopback, with the input, output, rates, buffers
     /// and output mode it was made under.  Missing on older saves; an entry
     /// that cannot be read is treated as missing (the app re-measures).
@@ -142,7 +148,7 @@ pub(crate) struct Preferences {
     /// Off: a take is the output without them.
     #[serde(default)]
     pub(crate) record_click: bool,
-    /// Metronome transport.  Not part of a patch: applying one does not
+    /// Metronome transport.  Not part of a session: applying one does not
     /// start, stop or retune the click.  Missing fields take the defaults
     /// below (off, 120 BPM, 4/4, −12 dB).  `metronome_running` is neither
     /// saved nor read: a launch always starts the click stopped, and an old
@@ -152,6 +158,60 @@ pub(crate) struct Preferences {
     pub(crate) metronome_bpm: f32,
     pub(crate) metronome_rhythm: crate::audio::ClickRhythm,
     pub(crate) metronome_level_db: f32,
+    /// System, Dark or Light.  Missing on older saves → System.
+    #[serde(default)]
+    pub(crate) theme: ThemeChoice,
+    /// The interface size, egui's zoom factor: 0.8–1.5, clamped in
+    /// [`sanitize_preferences`].  Missing on older saves → 1.0.
+    #[serde(default = "default_ui_size")]
+    pub(crate) ui_size: f32,
+    /// Effects the browser keeps starred.  Empty is not written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) effect_favourites: Vec<EffectId>,
+    /// The last effects added from the browser, newest last.  Empty is
+    /// not written.  [`sanitize_preferences`] keeps ten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) effect_recent: Vec<EffectId>,
+    /// Bottom sheet height in points.  0 means 40 % of the console area.
+    /// Missing on older saves, and omitted while it is still the default.
+    #[serde(default, skip_serializing_if = "sheet_height_unset")]
+    pub(crate) sheet_height: f32,
+    /// What a double-click on an effect opens.  Missing on older saves, and
+    /// omitted while it is still the editor.  Not the dropped
+    /// `prefer_plugin_interface` key.
+    #[serde(default, skip_serializing_if = "effect_open_is_editor")]
+    pub(crate) effect_double_click: EffectOpen,
+    /// The metronome channels an output had when its *Metronome* toggle
+    /// was last switched off; switching one on restores them where they
+    /// fit.  Missing on older saves, and omitted while unused (0).
+    #[serde(default, skip_serializing_if = "click_mask_unused")]
+    pub(crate) last_click_mask: u8,
+}
+
+/// What a double-click on an effect opens.  An unknown value reads as the
+/// editor, which is also the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum EffectOpen {
+    Controls,
+    #[default]
+    #[serde(other)]
+    Editor,
+}
+
+fn effect_open_is_editor(open: &EffectOpen) -> bool {
+    *open == EffectOpen::Editor
+}
+
+fn click_mask_unused(mask: &u8) -> bool {
+    *mask == 0
+}
+
+fn sheet_height_unset(height: &f32) -> bool {
+    *height == 0.0
+}
+
+fn default_ui_size() -> f32 {
+    UI_SIZE_DEFAULT
 }
 
 impl Default for Preferences {
@@ -161,7 +221,7 @@ impl Default for Preferences {
             auto_start_bridge: false,
             sessions: Vec::new(),
             session_name: "My guitar rig".to_owned(),
-            page: "live".to_owned(),
+            page: "console".to_owned(),
             eq_edit: 0,
             output_tab_low_latency: cfg!(target_os = "linux"),
             selected_session: None,
@@ -190,16 +250,16 @@ impl Default for Preferences {
             routes: [[true, false, false, false], [false, true, false, false]],
             output_rate: 0,
             output_buffer: DEFAULT_BUFFER,
-            cushion_mode: 0,
-            cushion_ms: DEFAULT_CUSHION_MS,
+            bridge_buffer_mode: 0,
+            bridge_buffer_ms: DEFAULT_BRIDGE_BUFFER_MS,
             eq: EqSettings::default(),
             eq_post: EqSettings::default(),
             gate: GateSettings::default(),
             plugins: Vec::new(),
             paths: Vec::new(),
             selected_path: 0,
-            clock_device: OutputDeviceSettings::default(),
-            followers: Vec::new(),
+            clock_output: OutputDeviceSettings::default(),
+            extra_outputs: Vec::new(),
             measured_latency: None,
             tuner_tuning: crate::audio::DEFAULT_PRESET_ID.to_owned(),
             tuner_reference_hz: 440.0,
@@ -214,6 +274,13 @@ impl Default for Preferences {
             metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
             metronome_rhythm: crate::audio::ClickRhythm::FourFour,
             metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
+            theme: ThemeChoice::System,
+            ui_size: UI_SIZE_DEFAULT,
+            effect_favourites: Vec::new(),
+            effect_recent: Vec::new(),
+            sheet_height: 0.0,
+            effect_double_click: EffectOpen::Editor,
+            last_click_mask: 0,
         }
     }
 }
@@ -257,93 +324,97 @@ impl Preferences {
     }
 }
 
-pub(crate) fn cushion_from_pref(value: u8) -> CushionMode {
+pub(crate) fn bridge_buffer_from_pref(value: u8) -> BufferMode {
     match value {
-        1 => CushionMode::LowLatency,
-        2 => CushionMode::Manual,
-        _ => CushionMode::Safe,
+        1 => BufferMode::Minimum,
+        2 => BufferMode::Fixed,
+        _ => BufferMode::Auto,
     }
 }
 
-pub(crate) fn cushion_to_pref(mode: CushionMode) -> u8 {
+pub(crate) fn bridge_buffer_to_pref(mode: BufferMode) -> u8 {
     match mode {
-        CushionMode::Safe => 0,
-        CushionMode::LowLatency => 1,
-        CushionMode::Manual => 2,
+        BufferMode::Auto => 0,
+        BufferMode::Minimum => 1,
+        BufferMode::Fixed => 2,
     }
 }
 
 /// An extra output device that plays the finished mix.  On PipeWire it is a
-/// sink linked from the duplex/native node; [`Self::virtual_out`] is the
-/// RigWerk Out source other apps capture.  It is never the clock device.
+/// sink linked from the duplex/native node; [`Self::virtual_output`] is the
+/// RigWerk Out source other apps capture.  It is never the clock output.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub(crate) struct FollowerPref {
+pub(crate) struct ExtraOutputPref {
     /// [`crate::audio::DeviceItem::id`] and its backend; the name is only the
-    /// display fallback.  PipeWire RigWerk Out uses [`VIRTUAL_OUT_ID`];
-    /// Windows VB-Cable publish keeps the WASAPI render id.
+    /// display fallback.  PipeWire RigWerk Out uses [`VIRTUAL_OUTPUT_ID`];
+    /// on Windows the VB-Cable virtual output keeps the WASAPI render id.
     pub(crate) id: String,
     pub(crate) backend: String,
     pub(crate) name: String,
     pub(crate) settings: OutputDeviceSettings,
-    /// Cushion: 0 Safe, 1 Low latency, 2 Manual (size in `cushion_ms`).
-    /// Unused on PipeWire followers (the graph keeps them in step).
-    pub(crate) cushion_mode: u8,
-    pub(crate) cushion_ms: f32,
-    /// RigWerk Out: a virtual source endpoint, not a device picker.
-    pub(crate) virtual_out: bool,
-    /// Whether the virtual source is advertised.  Ignored for hardware
-    /// followers.  Missing on old saves → off.
-    pub(crate) publish: bool,
+    /// Bridge buffer: 0 Auto, 1 Minimum, 2 Fixed (size in `bridge_buffer_ms`).
+    /// Unused on PipeWire extra outputs (the graph keeps them in step).
+    #[serde(rename = "cushion_mode")]
+    pub(crate) bridge_buffer_mode: u8,
+    #[serde(rename = "cushion_ms")]
+    pub(crate) bridge_buffer_ms: f32,
+    /// This entry is the virtual output (RigWerk Out), not a device.
+    #[serde(rename = "virtual_out")]
+    pub(crate) virtual_output: bool,
+    /// Whether the virtual output is on (advertised).  Ignored for hardware
+    /// extra outputs.  Missing on old saves → off.
+    #[serde(rename = "publish")]
+    pub(crate) virtual_output_on: bool,
 }
 
-impl Default for FollowerPref {
+impl Default for ExtraOutputPref {
     fn default() -> Self {
         Self {
             id: String::new(),
             backend: String::new(),
             name: String::new(),
             settings: OutputDeviceSettings::default(),
-            cushion_mode: 0,
-            cushion_ms: DEFAULT_CUSHION_MS,
-            virtual_out: false,
-            publish: false,
+            bridge_buffer_mode: 0,
+            bridge_buffer_ms: DEFAULT_BRIDGE_BUFFER_MS,
+            virtual_output: false,
+            virtual_output_on: false,
         }
     }
 }
 
-impl FollowerPref {
-    /// A new RigWerk Out follower, published on.
+impl ExtraOutputPref {
+    /// A new RigWerk Out extra output, switched on.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn virtual_out() -> Self {
+    pub(crate) fn virtual_output() -> Self {
         Self {
-            id: VIRTUAL_OUT_ID.to_owned(),
+            id: VIRTUAL_OUTPUT_ID.to_owned(),
             backend: "PipeWire".to_owned(),
-            name: VIRTUAL_OUT_NAME.to_owned(),
+            name: VIRTUAL_OUTPUT_NAME.to_owned(),
             settings: OutputDeviceSettings::default(),
-            cushion_mode: 1,
-            cushion_ms: DEFAULT_CUSHION_MS,
-            virtual_out: true,
-            publish: true,
+            bridge_buffer_mode: 1,
+            bridge_buffer_ms: DEFAULT_BRIDGE_BUFFER_MS,
+            virtual_output: true,
+            virtual_output_on: true,
         }
     }
 
     pub(crate) fn sanitized(mut self) -> Self {
         self.settings = self.settings.sanitized();
-        self.cushion_ms = finite_cushion(self.cushion_ms);
-        if self.virtual_out {
+        self.bridge_buffer_ms = finite_bridge_buffer(self.bridge_buffer_ms);
+        if self.virtual_output {
             #[cfg(target_os = "windows")]
             {
-                // VB-Cable publish: keep the WASAPI render id.  Rewriting to
+                // VB-Cable virtual output: keep the WASAPI render id.  Rewriting to
                 // the PipeWire sentinel would stop the supervisor opening it
                 // after preference load or session apply.  Drop the sentinel
                 // from older / cross-platform saves; inventory rematch fills
                 // the live WASAPI id.
-                if self.id == VIRTUAL_OUT_ID {
+                if self.id == VIRTUAL_OUTPUT_ID {
                     self.id.clear();
                 }
                 if self.name.trim().is_empty() {
-                    self.name = VIRTUAL_OUT_NAME.to_owned();
+                    self.name = VIRTUAL_OUTPUT_NAME.to_owned();
                 }
                 if self.backend.trim().is_empty() {
                     self.backend = "WASAPI".to_owned();
@@ -351,10 +422,10 @@ impl FollowerPref {
             }
             #[cfg(not(target_os = "windows"))]
             {
-                self.id = VIRTUAL_OUT_ID.to_owned();
+                self.id = VIRTUAL_OUTPUT_ID.to_owned();
                 self.backend = "PipeWire".to_owned();
                 if self.name.trim().is_empty() {
-                    self.name = VIRTUAL_OUT_NAME.to_owned();
+                    self.name = VIRTUAL_OUTPUT_NAME.to_owned();
                 }
             }
         }
@@ -362,10 +433,10 @@ impl FollowerPref {
     }
 }
 
-fn sanitize_followers(followers: &mut Vec<FollowerPref>) {
+fn sanitize_extra_outputs(extra_outputs: &mut Vec<ExtraOutputPref>) {
     let mut seen_virtual = false;
-    followers.retain(|follower| {
-        if follower.virtual_out {
+    extra_outputs.retain(|extra_output| {
+        if extra_output.virtual_output {
             if seen_virtual {
                 return false;
             }
@@ -373,28 +444,31 @@ fn sanitize_followers(followers: &mut Vec<FollowerPref>) {
         }
         true
     });
-    followers.truncate(MAX_FOLLOWERS);
-    for follower in followers.iter_mut() {
-        *follower = follower.clone().sanitized();
+    extra_outputs.truncate(MAX_EXTRA_OUTPUTS);
+    for extra_output in extra_outputs.iter_mut() {
+        *extra_output = extra_output.clone().sanitized();
     }
 }
 
-/// Bind Windows VB-Cable publish to the live WASAPI render id from inventory.
+/// Bind the Windows VB-Cable virtual output to the live WASAPI render id.
 ///
-/// Older saves and cross-platform presets may still carry
-/// [`VIRTUAL_OUT_ID`]; a missing or non-WASAPI id also needs a rematch when
+/// Older saves and cross-platform sessions may still carry
+/// [`VIRTUAL_OUTPUT_ID`]; a missing or non-WASAPI id also needs a rematch when
 /// CABLE Input is present.
-pub(crate) fn rematch_windows_virtual_out(followers: &mut [FollowerPref], outputs: &[DeviceItem]) {
+pub(crate) fn rematch_windows_virtual_output(
+    extra_outputs: &mut [ExtraOutputPref],
+    outputs: &[DeviceItem],
+) {
     #[cfg(target_os = "windows")]
     {
-        for follower in followers.iter_mut() {
-            if !follower.virtual_out {
+        for extra_output in extra_outputs.iter_mut() {
+            if !extra_output.virtual_output {
                 continue;
             }
-            let present = outputs.iter().any(|device| device.id == follower.id);
-            let stale = follower.id.is_empty()
-                || follower.id == VIRTUAL_OUT_ID
-                || !crate::audio::is_generic_follower(&follower.id)
+            let present = outputs.iter().any(|device| device.id == extra_output.id);
+            let stale = extra_output.id.is_empty()
+                || extra_output.id == VIRTUAL_OUTPUT_ID
+                || !crate::audio::is_generic_extra_output(&extra_output.id)
                 || !present;
             if !stale {
                 continue;
@@ -405,16 +479,16 @@ pub(crate) fn rematch_windows_virtual_out(followers: &mut [FollowerPref], output
             else {
                 continue;
             };
-            follower.id = cable.id.clone();
-            follower.backend = cable.backend.clone();
-            if follower.name.trim().is_empty() {
-                follower.name = VIRTUAL_OUT_NAME.to_owned();
+            extra_output.id = cable.id.clone();
+            extra_output.backend = cable.backend.clone();
+            if extra_output.name.trim().is_empty() {
+                extra_output.name = VIRTUAL_OUTPUT_NAME.to_owned();
             }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (followers, outputs);
+        let _ = (extra_outputs, outputs);
     }
 }
 
@@ -438,10 +512,10 @@ pub(crate) const MIN_OUTPUT_BUFFER: usize = 16;
 /// offered size, so a corrupt huge value is not asked of the device.
 pub(crate) const MAX_SANE_BUFFER: usize = 512;
 
-/// Input fader, in dB. The Live card and the Mixer strip use this same range.
+/// Input fader, in dB. The console strip and the fader use this range.
 pub(crate) const INPUT_GAIN_MIN_DB: f32 = -24.0;
 pub(crate) const INPUT_GAIN_MAX_DB: f32 = 18.0;
-/// Output fader, in dB. Same range as the Live and Mixer output sliders.
+/// Output fader, in dB. Same range as the console output faders.
 pub(crate) const OUTPUT_GAIN_MIN_DB: f32 = -36.0;
 pub(crate) const OUTPUT_GAIN_MAX_DB: f32 = 6.0;
 
@@ -449,17 +523,17 @@ pub(crate) const OUTPUT_GAIN_MAX_DB: f32 = 6.0;
 pub(crate) const DEFAULT_INPUT_GAIN: f32 = 0.0;
 pub(crate) const DEFAULT_OUTPUT_GAIN: f32 = -1.5;
 
-/// Manual cushion slider, in milliseconds. Same ends as the Live card.
-pub(crate) const CUSHION_MS_MIN: f32 = 1.0;
-pub(crate) const CUSHION_MS_MAX: f32 = 40.0;
-pub(crate) const DEFAULT_CUSHION_MS: f32 = 10.0;
+/// Fixed bridge buffer slider, in milliseconds. Same ends as the Live card.
+pub(crate) const BRIDGE_BUFFER_MS_MIN: f32 = 1.0;
+pub(crate) const BRIDGE_BUFFER_MS_MAX: f32 = 40.0;
+pub(crate) const DEFAULT_BRIDGE_BUFFER_MS: f32 = 10.0;
 
 /// How a stored `output_buffer` of 0 is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutputBufferZero {
     /// Preferences never used 0 as a sentinel. It is not a buffer size.
     Invalid,
-    /// Patches saved before the output side existed stored 0 to mean
+    /// Sessions saved before the output side existed stored 0 to mean
     /// "use the input buffer".
     FollowInput,
 }
@@ -474,10 +548,10 @@ pub(crate) struct BridgeSettings {
     pub(crate) output_buffer: usize,
     pub(crate) input_gain: f32,
     pub(crate) output_gain: f32,
-    pub(crate) cushion_ms: f32,
+    pub(crate) bridge_buffer_ms: f32,
 }
 
-/// One check for saved preferences and for applying a patch.
+/// One check for saved preferences and for applying a session.
 ///
 /// Gains that are NaN become the ordinary defaults, then every gain is
 /// clamped to the fader range. ±infinity lands on the nearer end, so the
@@ -494,7 +568,7 @@ pub(crate) struct BridgeSettings {
 /// applied raw. With [`OutputBufferZero::FollowInput`], a 0 output buffer
 /// stays 0 so the caller can substitute the input buffer.
 ///
-/// A NaN cushion becomes 10 ms. ±infinity is clamped to the manual slider
+/// A NaN bridge buffer becomes 10 ms. ±infinity is clamped to the fixed slider
 /// (1–40 ms).
 pub(crate) fn validate_bridge_settings(
     settings: BridgeSettings,
@@ -520,7 +594,7 @@ pub(crate) fn validate_bridge_settings(
             OUTPUT_GAIN_MIN_DB,
             OUTPUT_GAIN_MAX_DB,
         ),
-        cushion_ms: finite_cushion(settings.cushion_ms),
+        bridge_buffer_ms: finite_bridge_buffer(settings.bridge_buffer_ms),
     }
 }
 
@@ -553,9 +627,13 @@ fn finite_gain(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
     value.clamp(min, max)
 }
 
-fn finite_cushion(ms: f32) -> f32 {
-    let ms = if ms.is_nan() { DEFAULT_CUSHION_MS } else { ms };
-    ms.clamp(CUSHION_MS_MIN, CUSHION_MS_MAX)
+fn finite_bridge_buffer(ms: f32) -> f32 {
+    let ms = if ms.is_nan() {
+        DEFAULT_BRIDGE_BUFFER_MS
+    } else {
+        ms
+    };
+    ms.clamp(BRIDGE_BUFFER_MS_MIN, BRIDGE_BUFFER_MS_MAX)
 }
 
 fn bridge_settings_from_preferences(preferences: &Preferences) -> BridgeSettings {
@@ -566,7 +644,7 @@ fn bridge_settings_from_preferences(preferences: &Preferences) -> BridgeSettings
         output_buffer: preferences.output_buffer,
         input_gain: preferences.input_gain,
         output_gain: preferences.output_gain,
-        cushion_ms: preferences.cushion_ms,
+        bridge_buffer_ms: preferences.bridge_buffer_ms,
     }
 }
 
@@ -577,11 +655,11 @@ fn write_bridge_settings(preferences: &mut Preferences, settings: BridgeSettings
     preferences.output_buffer = settings.output_buffer;
     preferences.input_gain = settings.input_gain;
     preferences.output_gain = settings.output_gain;
-    preferences.cushion_ms = settings.cushion_ms;
+    preferences.bridge_buffer_ms = settings.bridge_buffer_ms;
 }
 
-/// Checks the preference numbers and every saved patch. Called from
-/// [`load_preferences`]; applying a patch checks again.
+/// Checks the preference numbers and every saved session. Called from
+/// [`load_preferences`]; applying a session checks again.
 ///
 /// The tuner's A4 reference is clamped to the range the page offers, and a
 /// NaN becomes 440 Hz, so the pitch maths never sees it.
@@ -605,23 +683,31 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.metronome_bpm = crate::audio::clamp_metronome_bpm(preferences.metronome_bpm);
     preferences.metronome_level_db =
         crate::audio::clamp_click_level_db(preferences.metronome_level_db);
+    preferences.ui_size = sanitize_ui_size(preferences.ui_size);
+    sanitize_effect_ids(&mut preferences.effect_favourites, false);
+    sanitize_effect_ids(&mut preferences.effect_recent, true);
+    if !preferences.sheet_height.is_finite() || preferences.sheet_height < 0.0 {
+        preferences.sheet_height = 0.0;
+    } else if preferences.sheet_height > 0.0 {
+        preferences.sheet_height = preferences.sheet_height.clamp(SHEET_MIN, SHEET_MAX);
+    }
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
     let current = preferences.paths[0].clone();
     preferences.selected_path = preferences
         .selected_path
         .min(preferences.paths.len().saturating_sub(1));
-    preferences.clock_device = preferences.clock_device.sanitized();
-    sanitize_followers(&mut preferences.followers);
+    preferences.clock_output = preferences.clock_output.sanitized();
+    sanitize_extra_outputs(&mut preferences.extra_outputs);
     // A measurement that cannot describe a real path is dropped; the app
     // then asks for a new one instead of showing a number that never was.
     preferences.measured_latency = preferences
         .measured_latency
         .take()
         .and_then(MeasuredLatency::sanitized);
-    for preset in &mut preferences.sessions {
-        preset.migrate_paths(&current);
-        sanitize_preset(preset);
+    for session in &mut preferences.sessions {
+        session.migrate_paths(&current);
+        sanitize_session(session);
     }
 }
 
@@ -642,44 +728,49 @@ pub(crate) fn resolved_wasapi_output_mode(preferences: &Preferences) -> WasapiOu
         .unwrap_or_else(|| WasapiOutputMode::from_low_latency(preferences.low_latency_output))
 }
 
-pub(crate) fn sanitize_preset(preset: &mut Preset) {
+pub(crate) fn sanitize_session(session: &mut Session) {
     let settings = validate_bridge_settings(
         BridgeSettings {
-            sample_rate: preset.rate,
-            buffer_size: preset.buffer,
-            output_rate: preset.output_rate,
-            output_buffer: preset.output_buffer,
-            input_gain: preset.input_gain,
-            output_gain: preset.output_gain,
-            cushion_ms: preset.cushion_ms,
+            sample_rate: session.rate,
+            buffer_size: session.buffer,
+            output_rate: session.output_rate,
+            output_buffer: session.output_buffer,
+            input_gain: session.input_gain,
+            output_gain: session.output_gain,
+            bridge_buffer_ms: session.bridge_buffer_ms,
         },
         OutputBufferZero::FollowInput,
     );
-    preset.rate = settings.sample_rate;
-    preset.buffer = settings.buffer_size;
-    preset.output_rate = settings.output_rate;
-    preset.output_buffer = settings.output_buffer;
-    preset.input_gain = settings.input_gain;
-    preset.output_gain = settings.output_gain;
-    preset.cushion_ms = settings.cushion_ms;
-    migrate_wasapi_output_mode(&mut preset.wasapi_output_mode, preset.low_latency_output);
-    if let Some(eq) = preset.eq.as_mut() {
+    session.rate = settings.sample_rate;
+    session.buffer = settings.buffer_size;
+    session.output_rate = settings.output_rate;
+    session.output_buffer = settings.output_buffer;
+    session.input_gain = settings.input_gain;
+    session.output_gain = settings.output_gain;
+    session.bridge_buffer_ms = settings.bridge_buffer_ms;
+    migrate_wasapi_output_mode(&mut session.wasapi_output_mode, session.low_latency_output);
+    if let Some(eq) = session.eq.as_mut() {
         *eq = eq.sanitized();
     }
-    if let Some(eq) = preset.eq_post.as_mut() {
+    if let Some(eq) = session.eq_post.as_mut() {
         *eq = eq.sanitized();
     }
-    if let Some(gate) = preset.gate.as_mut() {
+    if let Some(gate) = session.gate.as_mut() {
         *gate = gate.sanitized();
     }
-    if !preset.paths.is_empty() {
-        sanitize_paths(&mut preset.paths);
+    if !session.paths.is_empty() {
+        sanitize_paths(&mut session.paths);
     }
-    preset.clock_device = preset.clock_device.sanitized();
-    sanitize_followers(&mut preset.followers);
+    session.clock_output = session.clock_output.sanitized();
+    sanitize_extra_outputs(&mut session.extra_outputs);
 }
+/// A sample rate as people read it: `48 kHz`, `44.1 kHz`.
 pub(crate) fn rate_label(rate: u32) -> String {
-    format!("{:.1} kHz", rate as f32 / 1000.0)
+    if rate.is_multiple_of(1000) {
+        format!("{} kHz", rate / 1000)
+    } else {
+        format!("{:.1} kHz", rate as f32 / 1000.0)
+    }
 }
 
 pub(crate) const PREFERENCES_KEY: &str = "rigwerk-preferences";
@@ -688,29 +779,21 @@ pub(crate) const PREFERENCES_KEY: &str = "rigwerk-preferences";
 /// working when pages are added or reordered.
 pub(crate) fn page_key(page: Page) -> &'static str {
     match page {
-        Page::Live => "live",
-        Page::Mixer => "mixer",
+        Page::Console => "console",
         Page::Tuner => "tuner",
-        Page::Routing => "routing",
-        Page::Devices => "devices",
-        Page::Sessions => "sessions",
-        Page::Plugins => "plugins",
-        Page::Guide => "guide",
-        Page::Diagnostics => "diagnostics",
+        Page::Setup => "setup",
     }
 }
 
 pub(crate) fn page_from_key(key: &str) -> Page {
     match key.trim().to_lowercase().as_str() {
-        "mixer" => Page::Mixer,
         "tuner" => Page::Tuner,
-        "routing" => Page::Routing,
-        "devices" => Page::Devices,
-        "sessions" => Page::Sessions,
-        "plugins" => Page::Plugins,
-        "guide" => Page::Guide,
-        "diagnostics" => Page::Diagnostics,
-        _ => Page::Live,
+        "setup" | "devices" | "guide" => Page::Setup,
+        // The console replaces Live, Mixer, Routing and Plugins, and the
+        // old Sessions and Diagnostics pages are its menu and its sheet.  A
+        // key from a newer build opens it too.  An old build reading
+        // `console` or `setup` falls back to Live.
+        _ => Page::Console,
     }
 }
 /// How many entries the stored lists held before unreadable ones were
@@ -726,25 +809,25 @@ struct StoredCounts {
     measured_latency: Option<IgnoredAny>,
 }
 
-/// How many inserts one stored path held.
+/// How many effects one stored path held.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct StoredPathCounts {
     plugins: Vec<IgnoredAny>,
 }
 
-/// "1 saved patch(es) and 2 plugin insert(s)": only the lists that lost
+/// "1 saved session(s) and 2 plugin effect(s)": only the lists that lost
 /// entries, or `None` when nothing was skipped.
 fn skipped_summary(
     sessions: usize,
     plugins: usize,
-    followers: usize,
+    extra_outputs: usize,
     measurements: usize,
 ) -> Option<String> {
     let parts: Vec<String> = [
-        (sessions, "saved patch(es)"),
-        (plugins, "plugin insert(s)"),
-        (followers, "output device(s)"),
+        (sessions, "saved session(s)"),
+        (plugins, "plugin effect(s)"),
+        (extra_outputs, "output device(s)"),
         (measurements, "measurement(s)"),
     ]
     .into_iter()
@@ -803,7 +886,7 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
     };
     let mut notices = Vec::new();
     let counts: StoredCounts = ron::from_str(raw).unwrap_or_default();
-    // List lengths before sanitizing: a follower the cap drops is not an
+    // List lengths before sanitizing: an extra output the cap drops is not an
     // unreadable entry, and the duplicate virtual out is dropped on purpose.
     let sessions_loaded = preferences.sessions.len();
     let plugins_loaded = preferences.plugins.len()
@@ -812,7 +895,7 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
             .iter()
             .map(|path| path.plugins.len())
             .sum::<usize>();
-    let followers_loaded = preferences.followers.len();
+    let extra_outputs_loaded = preferences.extra_outputs.len();
     // Sanitizing can still drop a measurement that parsed but cannot describe
     // a real path; the measurement notice is counted after it runs.
     sanitize_preferences(&mut preferences);
@@ -824,13 +907,13 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
             .map(|path| path.plugins.len())
             .sum::<usize>();
     let skipped_plugins = stored_plugins.saturating_sub(plugins_loaded);
-    let skipped_followers = counts.followers.len().saturating_sub(followers_loaded);
+    let skipped_extra_outputs = counts.followers.len().saturating_sub(extra_outputs_loaded);
     let skipped_measurements =
         usize::from(counts.measured_latency.is_some() && preferences.measured_latency.is_none());
     if let Some(skipped) = skipped_summary(
         skipped_sessions,
         skipped_plugins,
-        skipped_followers,
+        skipped_extra_outputs,
         skipped_measurements,
     ) {
         notices.push(format!(
@@ -867,12 +950,12 @@ pub(crate) fn store_preferences(
         storage.set_string(&key, raw);
     }
     // Only `paths` is written: anything still held in the legacy mix fields
-    // (preferences or a patch from before paths) moves there first.
+    // (preferences or a session from before paths) moves there first.
     let mut preferences = preferences.clone();
     preferences.migrate_paths();
     if let Some(current) = preferences.paths.first().cloned() {
-        for preset in &mut preferences.sessions {
-            preset.migrate_paths(&current);
+        for session in &mut preferences.sessions {
+            session.migrate_paths(&current);
         }
     }
     eframe::set_value(storage, PREFERENCES_KEY, &preferences);

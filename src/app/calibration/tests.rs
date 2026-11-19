@@ -70,7 +70,7 @@ fn a_stopped_bridge_or_a_preview_cannot_measure() {
     assert!(preview
         .calibration_blocker()
         .expect("preview")
-        .contains("Preview"));
+        .contains("demo device"));
 }
 
 #[test]
