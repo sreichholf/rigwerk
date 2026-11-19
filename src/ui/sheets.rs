@@ -10,6 +10,7 @@
 
 pub(crate) mod diagnostics;
 pub(crate) mod eq;
+pub(crate) mod gate;
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
@@ -144,8 +145,7 @@ impl RigWerkApp {
                 match sheet {
                     Sheet::Diagnostics => self.diagnostics_page(ui),
                     Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
-                    // Until gate_sheet lands
-                    Sheet::Gate { .. } => self.gate_inspector(ui),
+                    Sheet::Gate { path } => self.gate_sheet(ui, path),
                     // Until effect_sheet lands
                     Sheet::Effect { index, .. } => self.effect_inspector(ui, index),
                     // Until path_sheet lands

@@ -1,15 +1,12 @@
 //! Noise-gate inspector: threshold, range, hysteresis, attack/release/hold, slot.
 
-use crate::app::LogTone;
 use eframe::egui;
 use egui::{Align, Color32, Layout, RichText, Vec2};
 
 use crate::app::RigWerkApp;
-use crate::audio::{
-    GateSettings, GateSlot, GATE_MAX_ATTACK_MS, GATE_MAX_HOLD_MS, GATE_MAX_HYSTERESIS_DB,
-    GATE_MAX_RANGE_DB, GATE_MAX_RELEASE_MS, GATE_MAX_THRESHOLD_DB, GATE_MIN_ATTACK_MS,
-    GATE_MIN_HOLD_MS, GATE_MIN_HYSTERESIS_DB, GATE_MIN_RANGE_DB, GATE_MIN_RELEASE_MS,
-    GATE_MIN_THRESHOLD_DB,
+use crate::audio::GateSlot;
+use crate::ui::sheets::gate::{
+    reset_gate, slot_hint, GateUnit, GATE_CONTROLS, RESET_HINT, SUMMARY,
 };
 use crate::ui::theme::ts;
 use crate::ui::theme::{AMBER, BLUE, DIM, GREEN, MUTED, TEAL, TEXT};
@@ -32,17 +29,8 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Gate").size(ts(16.0)).color(TEXT).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if hinted_tab(
-                    ui,
-                    "RESET",
-                    false,
-                    MUTED,
-                    "Restore threshold, range, timing and slot to the defaults. On/off is kept.",
-                ) {
-                    gate = GateSettings {
-                        enabled: gate.enabled,
-                        ..GateSettings::default()
-                    };
+                if hinted_tab(ui, "RESET", false, MUTED, RESET_HINT) {
+                    gate = reset_gate(gate);
                     reset = true;
                 }
                 ui.add_space(4.0);
@@ -57,11 +45,7 @@ impl RigWerkApp {
                 }
             });
         });
-        ui.label(
-            RichText::new("Causal · no added latency · first transient can leak before it opens")
-                .size(ts(11.0))
-                .color(DIM),
-        );
+        ui.label(RichText::new(SUMMARY).size(ts(11.0)).color(DIM));
         ui.add_space(10.0);
 
         // One width for every row so tracks and readouts share a right edge,
@@ -81,99 +65,31 @@ impl RigWerkApp {
                         GateSlot::Pre => "PRE",
                         GateSlot::Post => "POST",
                     };
-                    let hint = match slot {
-                        GateSlot::Pre => {
-                            "Before effects: gates single-coil / interface hiss into amp sims."
-                        }
-                        GateSlot::Post => {
-                            "After effects (default): gates idle roar / gain-stage hiss."
-                        }
-                    };
-                    if hinted_tab(ui, label, gate.slot == slot, TEAL, hint) {
+                    if hinted_tab(ui, label, gate.slot == slot, TEAL, slot_hint(slot)) {
                         gate.slot = slot;
                     }
                 }
             });
             ui.add_space(10.0);
 
-            knob_row(
-                ui,
-                row_w,
-                slider_w,
-                "THRESHOLD",
-                &mut gate.threshold_db,
-                GATE_MIN_THRESHOLD_DB,
-                GATE_MAX_THRESHOLD_DB,
-                0.5,
-                AMBER,
-                Unit::Db,
-                "Open threshold. Signal above this opens a closed gate.",
-            );
-            knob_row(
-                ui,
-                row_w,
-                slider_w,
-                "RANGE",
-                &mut gate.range_db,
-                GATE_MIN_RANGE_DB,
-                GATE_MAX_RANGE_DB,
-                1.0,
-                AMBER,
-                Unit::Db,
-                "Gain when fully closed. 0 dB is pass-through; −80 dB is near mute.",
-            );
-            knob_row(
-                ui,
-                row_w,
-                slider_w,
-                "HYSTERESIS",
-                &mut gate.hysteresis_db,
-                GATE_MIN_HYSTERESIS_DB,
-                GATE_MAX_HYSTERESIS_DB,
-                0.5,
-                GREEN,
-                Unit::Db,
-                "Close threshold sits this far below the open threshold. Stops chatter.",
-            );
-            knob_row(
-                ui,
-                row_w,
-                slider_w,
-                "ATTACK",
-                &mut gate.attack_ms,
-                GATE_MIN_ATTACK_MS,
-                GATE_MAX_ATTACK_MS,
-                0.1,
-                TEAL,
-                Unit::Ms,
-                "Gain time constant while opening (~63% of the remaining gap).",
-            );
-            knob_row(
-                ui,
-                row_w,
-                slider_w,
-                "RELEASE",
-                &mut gate.release_ms,
-                GATE_MIN_RELEASE_MS,
-                GATE_MAX_RELEASE_MS,
-                1.0,
-                BLUE,
-                Unit::Ms,
-                "Gain time constant while closing.",
-            );
-            knob_row(
-                ui,
-                row_w,
-                slider_w,
-                "HOLD",
-                &mut gate.hold_ms,
-                GATE_MIN_HOLD_MS,
-                GATE_MAX_HOLD_MS,
-                1.0,
-                MUTED,
-                Unit::Ms,
-                "Keep the gate open this long after the detector drops below the close threshold.",
-            );
+            for (control, color) in GATE_CONTROLS
+                .iter()
+                .zip([AMBER, AMBER, GREEN, TEAL, BLUE, MUTED])
+            {
+                knob_row(
+                    ui,
+                    row_w,
+                    slider_w,
+                    &control.name.to_uppercase(),
+                    control.value(&mut gate),
+                    control.min,
+                    control.max,
+                    control.step,
+                    color,
+                    control.unit,
+                    control.hint,
+                );
+            }
 
             ui.add_space(10.0);
             ui.label(
@@ -186,46 +102,7 @@ impl RigWerkApp {
             );
         });
 
-        let gate = gate.sanitized();
-        if gate != current {
-            if reset {
-                self.push_log("Gate reset to defaults.", LogTone::Amber);
-            } else if gate.enabled != current.enabled {
-                self.push_log(
-                    if gate.enabled {
-                        "Gate on.".to_owned()
-                    } else {
-                        "Gate bypassed.".to_owned()
-                    },
-                    LogTone::Amber,
-                );
-            } else if gate.slot != current.slot {
-                self.push_log(
-                    match gate.slot {
-                        GateSlot::Pre => "Gate slot: PRE effects.",
-                        GateSlot::Post => "Gate slot: POST effects.",
-                    },
-                    LogTone::Amber,
-                );
-            }
-            self.set_path_gate(gate);
-            self.push_paths_to_engine();
-        }
-    }
-}
-
-enum Unit {
-    Db,
-    Ms,
-}
-
-impl Unit {
-    fn format(self, value: f32) -> String {
-        match self {
-            Self::Db => format!("{value:.0} dB"),
-            Self::Ms if value < 10.0 => format!("{value:.1} ms"),
-            Self::Ms => format!("{value:.0} ms"),
-        }
+        self.apply_gate(current, gate, reset);
     }
 }
 
@@ -243,7 +120,7 @@ fn knob_row(
     max: f32,
     step: f32,
     color: Color32,
-    unit: Unit,
+    unit: GateUnit,
     hint: &str,
 ) {
     ui.allocate_ui_with_layout(
