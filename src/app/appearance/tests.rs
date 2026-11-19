@@ -51,24 +51,27 @@ fn the_saved_theme_and_size_win_over_egui_memory() {
     assert!(!ctx.options(|options| options.zoom_with_keyboard));
 }
 
-/// Until the console replaces the old pages, which paint with the dark
-/// constants, every saved choice draws dark and stays saved as chosen.
+/// The saved choice draws as chosen, and a run override wins for the run.
 #[test]
-fn the_window_stays_dark_until_the_old_pages_are_gone() {
+fn the_saved_theme_draws_and_a_forced_one_wins() {
     for saved in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
-        assert_eq!(drawn_theme(saved, None), ThemeChoice::Dark);
+        assert_eq!(drawn_theme(saved, None), saved);
         assert_eq!(
             drawn_theme(saved, Some(ThemeChoice::Light)),
             ThemeChoice::Light
         );
-
-        let ctx = egui::Context::default();
-        let mut app = blank_app();
-        app.theme = saved;
-        app.apply_appearance(&ctx, None);
-        assert_eq!(ctx.theme(), egui::Theme::Dark);
-        assert_eq!(app.theme, saved);
     }
+
+    let ctx = egui::Context::default();
+    let mut app = blank_app();
+    app.theme = ThemeChoice::Light;
+    app.apply_appearance(&ctx, None);
+    assert_eq!(ctx.theme(), egui::Theme::Light);
+    assert_eq!(app.theme, ThemeChoice::Light);
+
+    app.theme = ThemeChoice::Dark;
+    app.apply_appearance(&ctx, None);
+    assert_eq!(ctx.theme(), egui::Theme::Dark);
 }
 
 #[test]
@@ -100,7 +103,7 @@ fn setters_store_the_value_and_change_the_context() {
     let mut app = blank_app();
     app.set_theme(&ctx, ThemeChoice::Light);
     assert_eq!(app.theme, ThemeChoice::Light);
-    assert_eq!(ctx.theme(), egui::Theme::Dark);
+    assert_eq!(ctx.theme(), egui::Theme::Light);
 
     app.set_ui_size(&ctx, 9.0);
     assert_eq!(app.ui_size, 1.5);

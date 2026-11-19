@@ -110,11 +110,8 @@ impl eframe::App for RigWerkApp {
                 // The console, Mixer and Plugins scroll inside their own panes
                 // and fill the remaining height, so they stay outside the page
                 // ScrollArea.
-                match self.page {
-                    Page::Console => return self.console_page(ui),
-                    Page::Mixer => return self.mixer_page(ui),
-                    Page::Plugins => return self.plugins_page(ui),
-                    _ => {}
+                if self.page == Page::Console {
+                    return self.console_page(ui);
                 }
                 let mut page_scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
                 if let Some(offset) = self
@@ -131,11 +128,7 @@ impl eframe::App for RigWerkApp {
                     }
                     match self.page {
                         Page::Console => self.console_page(ui),
-                        Page::Live => self.live_page(ui, &ctx),
-                        Page::Mixer => self.mixer_page(ui),
                         Page::Tuner => self.tuner_page(ui),
-                        Page::Routing => self.routing_page(ui),
-                        Page::Plugins => self.plugins_page(ui),
                         Page::Setup => self.setup_page(ui),
                     }
                     ui.add_space(if self.page == Page::Tuner { 2.0 } else { 18.0 });
@@ -204,7 +197,6 @@ impl eframe::App for RigWerkApp {
                 });
         }
 
-        self.plugin_editor_window(&ctx);
         self.calibration_window(&ctx);
 
         if self.startup.is_some() {

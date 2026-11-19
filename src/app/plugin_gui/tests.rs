@@ -112,7 +112,7 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
         .unwrap_or_else(|| panic!("the editor opened again: {log:?}"));
     assert_eq!(gui.instance_id(), new.instance_id());
     drop(new);
-    app.close_plugin_gui();
+    app.finish_plugin_gui();
     assert!(app.plugin_gui.is_none());
     // Removing the effect unloads AGain: none of its handlers is left for
     // the run loop to call.

@@ -41,28 +41,6 @@ fn set_wasapi_output_mode_keeps_the_legacy_bool_aligned() {
     );
 }
 
-#[cfg(target_os = "windows")]
-#[test]
-fn planned_output_mode_text_names_each_wasapi_choice() {
-    let mut app = latency_app();
-    app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Shared);
-    assert!(
-        app.output_mode_text().contains("Shared"),
-        "{}",
-        app.output_mode_text()
-    );
-    app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::RealStyle);
-    assert!(
-        app.output_mode_text().contains("Shared, smallest buffer"),
-        "{}",
-        app.output_mode_text()
-    );
-    app.set_wasapi_output_mode(crate::audio::WasapiOutputMode::Exclusive);
-    let text = app.output_mode_text();
-    assert!(text.contains("Exclusive"), "{text}");
-    assert!(text.contains("this device only"), "{text}");
-}
-
 #[test]
 fn running_latency_uses_the_delivered_input_block() {
     let mut app = latency_app();
@@ -142,7 +120,7 @@ fn stopped_latency_ignores_the_previous_bridge_buffer() {
 }
 
 #[test]
-fn heard_latency_adds_the_pipewire_path_delay() {
+fn heard_estimate_adds_the_pipewire_path_delay() {
     let mut app = latency_app();
     app.buffer_size = 128;
     app.sample_rate = 48_000;
@@ -157,9 +135,16 @@ fn heard_latency_adds_the_pipewire_path_delay() {
 
     let us = app.latency_ms();
     assert!((us - bridge_ms(64.0, 128.0, 48_000.0, 64.0, 48_000.0)).abs() < 0.01);
-    assert!((app.path_delay_ms().unwrap() - 147.5).abs() < 0.01);
-    assert!((app.heard_latency_ms().unwrap() - (us + 147.5)).abs() < 0.01);
-    assert_eq!(app.latency_caption(), format!("{us:.1} · 147.5 ms"));
+    let heard = app.heard_estimate();
+    let after = heard
+        .parts
+        .iter()
+        .find(|part| part.label == "After RigWerk")
+        .expect("an after-node part");
+    assert_eq!(after.ms, Some(147.5));
+    app.snapshot.path_delay_ms = None;
+    let without = app.heard_estimate();
+    assert!((heard.total_ms - without.total_ms - 147.5).abs() < 0.01);
 }
 
 #[test]
@@ -167,10 +152,20 @@ fn path_delay_is_ignored_while_stopped() {
     let mut app = latency_app();
     app.engine.state = EngineState::Idle;
     app.snapshot.path_delay_ms = Some(147.5);
-    assert_eq!(app.path_delay_ms(), None);
-    assert_eq!(app.heard_latency_ms(), None);
-    assert!(app.latency_caption().ends_with(" ms"));
-    assert!(!app.latency_caption().contains('·'));
+    let budget = app.latency_budget();
+    let after = budget
+        .parts
+        .iter()
+        .find(|part| part.label == "AFTER PLAYBACK NODE")
+        .expect("an after-node part");
+    assert_eq!(after.ms, None);
+    let heard = app.heard_estimate();
+    let after = heard
+        .parts
+        .iter()
+        .find(|part| part.label == "After RigWerk")
+        .expect("an after-node part");
+    assert_eq!(after.ms, None);
 }
 
 #[test]
@@ -182,7 +177,7 @@ fn tuner_auto_mute_silences_the_click_and_the_master_mute_does_not() {
     let mut app = latency_app();
     app.engine.state = EngineState::Running;
     app.tuner.auto_mute = true;
-    app.page = crate::app::Page::Live;
+    app.page = crate::app::Page::Console;
     app.set_metronome_running(true);
     assert!(engine_running(&app));
 
@@ -205,7 +200,7 @@ fn tuner_auto_mute_silences_the_click_and_the_master_mute_does_not() {
     app.tuner.auto_mute = true;
     app.apply_metronome();
     assert!(!engine_running(&app));
-    app.page = crate::app::Page::Live;
+    app.page = crate::app::Page::Console;
     app.apply_metronome();
     assert!(engine_running(&app));
 
@@ -224,7 +219,7 @@ fn a_frame_pushes_the_click_only_when_the_tuner_layer_changes() {
     let mut app = latency_app();
     app.engine.state = EngineState::Running;
     app.tuner.auto_mute = true;
-    app.page = crate::app::Page::Live;
+    app.page = crate::app::Page::Console;
     app.set_metronome_running(true);
     assert!(shared_running(&app).load(Ordering::Relaxed));
 
@@ -238,7 +233,7 @@ fn a_frame_pushes_the_click_only_when_the_tuner_layer_changes() {
     app.page = crate::app::Page::Tuner;
     app.follow_metronome_audible();
     assert!(!shared_running(&app).load(Ordering::Relaxed));
-    app.page = crate::app::Page::Live;
+    app.page = crate::app::Page::Console;
     app.follow_metronome_audible();
     assert!(shared_running(&app).load(Ordering::Relaxed));
 }

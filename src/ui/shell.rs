@@ -1,9 +1,8 @@
 //! The window shell: title bar, status bar, error banner, and the sheet
 //! and drawer hosts.
 //!
-//! Classic pages still draw in the middle.  *Classic* reaches the ones
-//! that have not been replaced.  Sessions and Diagnostics are the menu
-//! and the sheet.
+//! The console, the tuner or Setup draws in the middle.  Sessions are the
+//! menu; Diagnostics is a sheet.
 
 use std::time::Instant;
 
@@ -13,7 +12,7 @@ use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MAX, SHEET_MIN};
 use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
-use crate::audio::EngineState;
+use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::drawers::issues::issue_counts;
 use crate::ui::theme::{font, palette, Face, TypeRole};
 
@@ -22,6 +21,43 @@ const STATUS_H: f32 = 30.0;
 const DRAWER_W: f32 = 460.0;
 
 impl RigWerkApp {
+    /// The ASIO control-panel button for one side of the bridge.  Hidden
+    /// unless that side is ASIO, disabled until the running bridge has that
+    /// driver open; a click only posts a request.
+    pub(crate) fn asio_panel_chip(&mut self, ui: &mut egui::Ui, side: AsioPanelSide) {
+        let clsid = match side {
+            AsioPanelSide::Input => self.active_input().asio_clsid,
+            AsioPanelSide::Output => self.selected_output().asio_clsid,
+        };
+        let Some(clsid) = clsid else {
+            return;
+        };
+        let colours = palette(ui.ctx());
+        let ready = self.engine.open_asio_driver(side) == Some(clsid);
+        let response = ui.add_enabled(
+            ready,
+            egui::Button::new(
+                RichText::new("Driver panel")
+                    .font(font(Face::Sans, TypeRole::Control))
+                    .color(if ready { colours.text } else { colours.text3 }),
+            )
+            .fill(colours.slot)
+            .stroke(Stroke::new(1.0, colours.line2))
+            .corner_radius(CornerRadius::same(4))
+            .min_size(Vec2::new(32.0, 28.0)),
+        );
+        if !ready {
+            let _ = response.on_disabled_hover_text(
+                "The driver panel is available once the bridge is running on that ASIO driver.",
+            );
+        } else if response
+            .on_hover_text("Open this ASIO driver's control panel.")
+            .clicked()
+        {
+            self.engine.request_asio_panel(side);
+        }
+    }
+
     pub(crate) fn title_bar(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         ui.horizontal(|ui| {
@@ -59,7 +95,6 @@ impl RigWerkApp {
                 }
             }
             self.mute_button(ui);
-            self.classic_menu(ui);
         });
     }
 
@@ -125,25 +160,6 @@ impl RigWerkApp {
         let mute = bar_button(ui.ctx(), label, on);
         if ui.add(mute).on_hover_text("Mute the master").clicked() && self.monitor {
             self.mute = !self.mute;
-        }
-    }
-
-    fn classic_menu(&mut self, ui: &mut egui::Ui) {
-        let classic = bar_button(ui.ctx(), "Classic ▸", false);
-        let button = ui.add(classic);
-        let mut target = None;
-        egui::Popup::menu(&button)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                ui.set_min_width(160.0);
-                for (label, page) in CLASSIC {
-                    if ui.button(*label).clicked() {
-                        target = Some(*page);
-                    }
-                }
-            });
-        if let Some(page) = target {
-            self.page = page;
         }
     }
 
@@ -480,25 +496,6 @@ impl RigWerkApp {
     }
 }
 
-const CLASSIC: &[(&str, Page)] = &[
-    ("Console", Page::Console),
-    ("Live", Page::Live),
-    ("Mixer", Page::Mixer),
-    ("Routing", Page::Routing),
-    ("Plugins", Page::Plugins),
-];
-
-fn bridge_label(state: EngineState) -> &'static str {
-    match state {
-        EngineState::Idle => "Stopped",
-        EngineState::Starting => "Starting…",
-        EngineState::Running => "Running",
-        EngineState::Preview => "Demo",
-        EngineState::Stopping => "Stopping…",
-        EngineState::Error => "Error",
-    }
-}
-
 fn bar_button<'a>(ctx: &egui::Context, label: &'a str, on: bool) -> egui::Button<'a> {
     let colours = palette(ctx);
     let (fill, text) = if on {
@@ -518,6 +515,17 @@ fn bar_button<'a>(ctx: &egui::Context, label: &'a str, on: bool) -> egui::Button
     ))
     .corner_radius(CornerRadius::same(4))
     .min_size(Vec2::new(32.0, 32.0))
+}
+
+fn bridge_label(state: EngineState) -> &'static str {
+    match state {
+        EngineState::Idle => "Stopped",
+        EngineState::Starting => "Starting…",
+        EngineState::Running => "Running",
+        EngineState::Preview => "Demo",
+        EngineState::Stopping => "Stopping…",
+        EngineState::Error => "Error",
+    }
 }
 
 fn status_text(ctx: &egui::Context, text: &str) -> RichText {

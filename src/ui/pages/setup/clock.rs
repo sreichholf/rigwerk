@@ -15,8 +15,17 @@ use crate::ui::widgets::{segmented, styled_slider};
 impl RigWerkApp {
     pub(super) fn setup_clock(&mut self, ui: &mut egui::Ui, section: Option<SetupSection>) {
         let direct = self.engine.state == EngineState::Running && self.snapshot.direct;
-        let fill = self.bridge_fill(ui.ctx());
-        let dropouts = self.bridge_dropouts();
+        let fill = match self.engine.state {
+            EngineState::Running => self.snapshot.ring_fill,
+            EngineState::Preview => 0.38 + (ui.input(|input| input.time) as f32 * 0.8).sin() * 0.04,
+            _ => 0.0,
+        }
+        .clamp(0.0, 1.0);
+        let dropouts = if self.engine.state == EngineState::Running {
+            self.snapshot.dropouts
+        } else {
+            0
+        };
         let drift = if self.engine.state == EngineState::Running {
             format!("{:+.1} ppm", self.snapshot.drift_ppm)
         } else {

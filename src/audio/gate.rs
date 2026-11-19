@@ -28,10 +28,6 @@ pub enum GateSlot {
     Post,
 }
 
-impl GateSlot {
-    pub const ALL: [GateSlot; 2] = [GateSlot::Pre, GateSlot::Post];
-}
-
 /// Soft limits for the UI and for [`GateSettings::sanitized`].
 pub const MIN_THRESHOLD_DB: f32 = -80.0;
 pub const MAX_THRESHOLD_DB: f32 = -10.0;

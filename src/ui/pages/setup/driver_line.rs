@@ -3,7 +3,7 @@
 //! It is a reading only: no amber and no button.  On the output side a
 //! click on the line asks the sound system about the driver again without
 //! opening any audio; "Output driver not checked yet" and the quantum fit
-//! are Live Issues rows (`app::issues`), not this line.
+//! are issues rows (`app::issues`), not this line.
 
 use eframe::egui;
 use egui::{Align, Color32, Layout, RichText, Sense};

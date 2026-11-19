@@ -422,23 +422,6 @@ impl OutputDeviceSettings {
         Self { path_map, ..*self }
     }
 
-    /// How many of a `channels`-channel device's channels play the sum of
-    /// the `live` paths: those a path reaches, plus the unreached ones under
-    /// [`UnusedChannels::MonoCopy`] (they carry a mono copy).  Level and
-    /// mute don't count: this is about the routing, not about what is
-    /// audible.
-    pub fn playing_channels(&self, channels: usize, live: [bool; MAX_PATHS]) -> usize {
-        let maps = self.path_map.map(|entry| entry.map);
-        (0..channels.min(MAX_OUTPUT_CHANNELS))
-            .filter(|&channel| {
-                (0..MAX_PATHS).any(|path| {
-                    path_channel_weights(&maps, live, self.unused, channels, channel, path)
-                        != [0.0; 3]
-                })
-            })
-            .count()
-    }
-
     /// Which of the `live` paths this device plays on any of its
     /// `channels` channels (by their own map, or through the mono copy).
     /// The routing decides, not what is audible: muted and un-soloed paths

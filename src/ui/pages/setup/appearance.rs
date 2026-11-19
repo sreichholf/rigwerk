@@ -40,7 +40,7 @@ impl RigWerkApp {
             }
             hint(
                 ui,
-                "The saved theme is kept. The window stays dark until the console replaces the older pages.",
+                "The window follows this choice. System uses what the desktop reports, and dark when it reports nothing.",
             );
             ui.add_space(8.0);
             hint(ui, "Size");

@@ -34,30 +34,19 @@ const BANNED: &[&str] = &[
 /// any banned word.  It stays.
 const PLATFORM: &[&str] = &["src/audio/linux/", "src/audio/win/"];
 
+/// Files whose literals are stored preference values, not text a person
+/// reads.  §2.4 keeps the stored keys unchanged, so those literals stay.
+const STORED_KEYS: &[&str] = &[
+    // The saved output mode, read from files written before the rename.
+    "src/app/latency.rs",
+];
+
 /// Files not migrated yet, with the banned words each one may still use.
 /// Each entry says which step of the rewrite removes it (docs/ui-spec.md
 /// §2.4 for a code rename, §12 for a step); the test fails when an entry
 /// allows a word the file no longer uses, so the list only shrinks.  Step 8
 /// empties it.
-const NOT_MIGRATED: &[(&str, &[&str])] = &[
-    // The stored mode key.  The label is "Shared, smallest buffer".
-    ("src/app/latency.rs", &["REAL-style"]),
-    // Demo device and the graph's buffer size: the log lines stay until
-    // the console (step 6) stops showing them as activity.
-    ("src/audio/engine.rs", &["preview", "quantum"]),
-    // The Live page: step 6 (the console replaces it).
-    ("src/ui/pages/live/input_card.rs", &["preview"]),
-    // BYP: step 6 (the EQ sheet).
-    ("src/ui/pages/mixer/eq_card.rs", &["BYP"]),
-    // BYP: step 6 (the gate sheet).
-    ("src/ui/pages/mixer/gate_card.rs", &["BYP"]),
-    // The demo device's state: step 6 (the output sheet).
-    ("src/ui/pages/mixer/output_devices/mod.rs", &["preview"]),
-    // BYP: step 6 (chain rows).
-    ("src/ui/pages/mixer/rack.rs", &["BYP"]),
-    // The demo device: step 6 (the console).
-    ("src/ui/widgets/mod.rs", &["preview"]),
-];
+const NOT_MIGRATED: &[(&str, &[&str])] = &[];
 
 /// One banned word in one literal.
 #[derive(Debug, PartialEq)]
@@ -344,6 +333,7 @@ fn no_literal_uses_a_word_the_glossary_bans() {
     let not_allowed: Vec<String> = hits
         .iter()
         .filter(|hit| !PLATFORM.iter().any(|dir| hit.file.starts_with(dir)))
+        .filter(|hit| !STORED_KEYS.contains(&hit.file.as_str()))
         .filter(|hit| {
             !NOT_MIGRATED
                 .iter()

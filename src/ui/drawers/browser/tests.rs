@@ -192,7 +192,8 @@ fn shift_enter_adds_and_opens_the_controls() {
     });
     let _ = run_frame(&ctx, input, |ui| app.effect_browser(ui));
     assert_eq!(app.engine.plugin_views(0).len(), 1);
-    assert!(app.plugin_browser.open);
+    // Opening the effect's controls is a sheet, so the browser drawer closes.
+    assert!(!app.plugin_browser.open);
     assert!(app.plugin_editor.is_some());
 }
 

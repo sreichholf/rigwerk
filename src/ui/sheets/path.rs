@@ -114,10 +114,17 @@ impl RigWerkApp {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         for (side, label) in ["L", "R"].into_iter().enumerate() {
                             let name = format!("Path output {label}");
-                            if chip(ui, &mut enabled[side], label)
-                                .on_hover_text(&name)
-                                .changed()
-                            {
+                            let response = chip(ui, &mut enabled[side], label);
+                            let on = enabled[side];
+                            row_info(
+                                &response,
+                                egui::Role::Button,
+                                true,
+                                name.clone(),
+                                Some(on),
+                                None,
+                            );
+                            if response.on_hover_text(&name).changed() {
                                 self.set_path_output_enabled(enabled);
                             }
                         }

@@ -1,4 +1,4 @@
-//! Live Issues: the judgments the Live page shows in one strip.  Readings
+//! Issues: the judgments the console, Setup and the sheets raise.  Readings
 //! stay on the cards; a problem becomes one row here, with a severity,
 //! where it is and one action that only runs on a click.
 //!
@@ -7,7 +7,7 @@
 //! a warning.
 //!
 //! Producers so far are the signal paths':
-//! - unaligned paths that add up on one device channel (the Signal Routing
+//! - unaligned paths that add up on one device channel (the output sheet's
 //!   `Sum` warning, `app::alignment`): a warning,
 //! - a device playing a path whose chain latency is past what the
 //!   alignment covers ([`MAX_ALIGN`]),
@@ -49,7 +49,7 @@
 //! bridge runs:
 //! - an extra output that failed to open, was lost, or is not among the output
 //!   devices: a warning, since the clock output and the others play on and
-//!   the extra output is retried.  The button shows it in the Mixer, where it can
+//!   the extra output is retried.  The button opens its output sheet, where it can
 //!   be pointed at another device or removed.
 //! - dropouts of its own ring (`ExtraOutputBus::dropouts`, counted since its
 //!   stream opened: a reopen starts over), one [`DropoutWatch`] per slot
@@ -105,7 +105,7 @@
 //! judgments is drawn there.  The fixes the output rows offer are the
 //! controls the cards already have: Check driver, the output buffer, Low
 //! latency, the WASAPI mode and the bridge buffer, and an extra output's own bridge buffer
-//! in the Mixer.
+//! in the output sheet.
 
 use crate::app::LogTone;
 use std::collections::VecDeque;
@@ -553,9 +553,9 @@ impl IssueState {
 pub(crate) enum IssueAction {
     /// Turn the alignment on for output device `device`.
     AlignDevice(usize),
-    /// Open Signal Routing with output device `device` selected.
+    /// Open the output sheet for `device`.
     ShowRouting(usize),
-    /// Open Signal Routing (no device in particular).
+    /// Open the clock output's sheet.
     OpenRouting,
     OpenDiagnostics,
     /// Open Setup at the devices section (reconnect or pick another device).
@@ -570,7 +570,7 @@ pub(crate) enum IssueAction {
     SharedOutput,
     /// Set the input-to-output bridge buffer to Auto.
     AutoBridgeBuffer,
-    /// Open the Mixer on extra output `extra_output` (index into the extra outputs).
+    /// Open extra output `extra_output`'s sheet (index into the extra outputs).
     ShowExtraOutput(usize),
     /// Set extra output `extra_output`'s own bridge buffer to Auto.
     ExtraOutputAutoBridgeBuffer(usize),
@@ -582,7 +582,7 @@ impl IssueAction {
     pub(crate) fn label(self) -> String {
         match self {
             IssueAction::AlignDevice(_) => "Align paths".to_owned(),
-            IssueAction::ShowRouting(_) | IssueAction::OpenRouting => "Show in Routing".to_owned(),
+            IssueAction::ShowRouting(_) | IssueAction::OpenRouting => "Show output".to_owned(),
             IssueAction::OpenDiagnostics => "Open diagnostics".to_owned(),
             IssueAction::OpenDevices => "Open Setup".to_owned(),
             IssueAction::CheckDriver => "Check driver".to_owned(),
@@ -592,7 +592,7 @@ impl IssueAction {
             IssueAction::AutoBridgeBuffer | IssueAction::ExtraOutputAutoBridgeBuffer(_) => {
                 "Use Auto bridge buffer".to_owned()
             }
-            IssueAction::ShowExtraOutput(_) => "Show in Mixer".to_owned(),
+            IssueAction::ShowExtraOutput(_) => "Show output".to_owned(),
             IssueAction::ShowOutput => "Show on Output".to_owned(),
         }
     }
@@ -841,6 +841,10 @@ impl RigWerkApp {
             severity,
             since: now,
         });
+        self.close_drawer();
+        if card == IssueCard::Output {
+            self.open_sheet(crate::app::screen::Sheet::Output { output: 0 });
+        }
     }
 
     /// How strongly `card` rings at `now`, and in which severity, while a
@@ -1452,7 +1456,6 @@ impl RigWerkApp {
 
     /// Runs an issue's action (a click on its button).
     pub(crate) fn apply_issue_action(&mut self, action: IssueAction) {
-        use crate::app::Page;
         match action {
             IssueAction::AlignDevice(device) => {
                 self.set_device_align(device, true);
@@ -1467,9 +1470,11 @@ impl RigWerkApp {
             }
             IssueAction::ShowRouting(device) => {
                 self.routing_device = device;
-                self.page = Page::Routing;
+                self.open_sheet(crate::app::screen::Sheet::Output { output: device });
             }
-            IssueAction::OpenRouting => self.page = Page::Routing,
+            IssueAction::OpenRouting => {
+                self.open_sheet(crate::app::screen::Sheet::Output { output: 0 });
+            }
             IssueAction::OpenDiagnostics => self.open_diagnostics(),
             IssueAction::OpenDevices => {
                 self.open_setup(crate::app::screen::SetupSection::Devices);
@@ -1494,9 +1499,9 @@ impl RigWerkApp {
             }
             IssueAction::ShowExtraOutput(extra_output) => {
                 // Row 0 is the clock output.
-                self.chain_selected =
-                    crate::app::chain::ChainSelection::OutputDevice(extra_output + 1);
-                self.page = Page::Mixer;
+                self.open_sheet(crate::app::screen::Sheet::Output {
+                    output: extra_output + 1,
+                });
             }
             IssueAction::ShowOutput => {
                 self.show_issue_card(IssueCard::Output, IssueSeverity::Warning, Instant::now());

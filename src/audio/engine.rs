@@ -643,7 +643,7 @@ impl AudioEngine {
         // shows as Preview.
         self.replace_run();
         self.shared.reset();
-        self.shared.set_status("Preview bridge · animated signal");
+        self.shared.set_status("Demo bridge · animated signal");
         self.started_at = None;
         self.stopping_since = None;
         self.input_expected = false;
@@ -1088,11 +1088,11 @@ impl AudioEngine {
                     confirmed = state;
                 }
                 Err(error) => {
-                    self.note_quantum_failure(format!("PipeWire quantum not set: {error}"));
+                    self.note_quantum_failure(format!("PipeWire graph buffer not set: {error}"));
                 }
             },
             Err(error) => {
-                self.note_quantum_failure(format!("PipeWire quantum not set: {error}"));
+                self.note_quantum_failure(format!("PipeWire graph buffer not set: {error}"));
             }
         }
         match pipewire::decide_quantum_force(previous.ok(), wrote, confirmed.is_some(), restored) {
@@ -1103,13 +1103,13 @@ impl AudioEngine {
                 if let Some(state) = confirmed {
                     self.quantum_note = None;
                     self.shared.set_status(format!(
-                        "PipeWire quantum {} frames ({:.1} ms)…",
+                        "PipeWire graph buffer {} frames ({:.1} ms)…",
                         state.quantum,
                         state.quantum as f32 / state.rate.max(1) as f32 * 1000.0
                     ));
                 } else {
                     self.note_quantum_failure(
-                        "PipeWire accepted the quantum but did not report it back, and restoring the previous value failed. It will be restored when the bridge stops.".to_owned(),
+                        "PipeWire accepted the graph buffer but did not report it back, and restoring the previous value failed. It will be restored when the bridge stops.".to_owned(),
                     );
                 }
             }
@@ -1117,7 +1117,7 @@ impl AudioEngine {
                 self.quantum_forced = false;
                 self.quantum_retry_at = None;
                 self.note_quantum_failure(
-                    "PipeWire accepted the quantum but did not report it back, so the previous quantum was restored.".to_owned(),
+                    "PipeWire accepted the graph buffer but did not report it back, so the previous graph buffer was restored.".to_owned(),
                 );
             }
             QuantumForce::Untouched => {
@@ -1152,7 +1152,7 @@ impl AudioEngine {
                 }
                 Err(error) => {
                     self.note_quantum_failure(format!(
-                        "PipeWire quantum was not restored: {error}"
+                        "PipeWire graph buffer was not restored: {error}"
                     ));
                     self.quantum_retry_at = Some(Instant::now() + Duration::from_secs(2));
                 }

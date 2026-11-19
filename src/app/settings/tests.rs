@@ -529,7 +529,7 @@ fn old_pages_open_the_console() {
         assert_eq!(page_from_key(key), Page::Console, "{key}");
     }
     assert_eq!(page_key(Page::Console), "console");
-    assert_eq!(page_key(Page::Live), "live");
+    assert_eq!(page_key(Page::Tuner), "tuner");
     assert_eq!(page_from_key(&Preferences::default().page), Page::Console);
 }
 

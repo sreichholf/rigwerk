@@ -247,13 +247,9 @@ pub struct Snapshot {
     /// duplex node): there is no ring, bridge buffer or drift correction.
     pub direct: bool,
     /// Metronome beat the mixer last published.  0 when it is stopped,
-    /// otherwise `1..=clicks` of [`Self::metronome_rhythm`].  The Live page
-    /// reads this.  0 after the bridge stops or the device is lost.
+    /// otherwise `1..=clicks` of the rhythm the beat belongs to.  0 after the
+    /// bridge stops or the device is lost.
     pub metronome_beat: u8,
-    /// Rhythm discriminant the published beat belongs to.  Written with
-    /// the beat, so the strip does not pair a beat from the bar that is
-    /// still playing with a signature that is waiting for the next click.
-    pub metronome_rhythm: u8,
 }
 
 /// How the bridge buffer between input and output (the ring buffer's fill

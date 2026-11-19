@@ -1,85 +1,43 @@
 //! Small controls shared by several screens: cards, labels, buttons, tabs,
-//! meters, sliders and the device picker.
+//! meters and sliders.
 //!
 //! The console kit (fader, meter, chain row, segmented control, chip, path
 //! dot, popover) follows `docs/ui-spec.md` §4.  Those modules read
-//! [`palette`] and [`font`]; the helpers below still paint the old pages.
+//! [`palette`] and [`font`]; the helpers below are shared by every screen.
 
 mod chain_row;
 mod chip;
 mod dot;
 mod fader;
 mod meter;
-mod path;
 mod popover;
 mod segmented;
 mod slider;
 
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the console calls these in a later step"
-)]
 pub(crate) use chain_row::{
-    add_effect_row, bypass_all, chain_event, chain_row, dashed_rect, effects_header, ChainEvent,
-    ChainMark, ChainRow, EffectDrag, CHAIN_ROW_H,
+    add_effect_row, chain_event, chain_row, dashed_rect, effects_header, ChainEvent, ChainMark,
+    ChainRow, EffectDrag, CHAIN_ROW_H,
 };
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the console calls these in a later step"
-)]
 pub(crate) use chip::chip;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the console calls these in a later step"
-)]
 pub(crate) use dot::path_dot;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the console calls these in a later step"
-)]
-pub(crate) use fader::{fader, fader_height, format_level, parse_level, FaderRange};
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the console calls these in a later step"
-)]
+pub(crate) use fader::{fader, fader_height, FaderRange};
 pub(crate) use meter::{horizontal_meter, vertical_meter, MeterChannel};
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the console calls these in a later step"
-)]
 pub(crate) use popover::popover;
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the console calls these in a later step"
-)]
 pub(crate) use segmented::segmented;
 
-pub(crate) use path::{colour_swatch, path_chip, path_level_text, path_toggle};
-pub(crate) use slider::{db_slider, row_info, show_focus_ring, styled_slider};
+pub(crate) use slider::{row_info, show_focus_ring, styled_slider};
 
 #[cfg(test)]
 pub(crate) use slider::nudge_slider;
 
 use eframe::egui;
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText,
-    Sense, Stroke, Vec2,
+    Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText, Sense,
+    Stroke, Vec2,
 };
 
-use crate::audio::DeviceItem;
-use crate::ui::icons::{paint_icon, Icon};
 use crate::ui::theme::ts;
-use crate::ui::theme::{
-    palette, with_alpha, AMBER, BLUE, BORDER_SOFT, CARD_DEEP, CARD_RAISED, DIM, GREEN, MUTED, TEAL,
-    TEXT,
-};
+use crate::ui::theme::{palette, with_alpha, BORDER_SOFT, CARD_RAISED, DIM, MUTED, TEXT};
 
 /// Accent ring on a focused control, from the active palette.
 pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
@@ -108,35 +66,6 @@ pub(crate) fn card<R>(
         .inner
 }
 
-/// A [`card`] with an exact outer height, so cards sharing a row always line
-/// up.  The inside keeps the same 15 px margin as `card`; content that does
-/// not fit is clipped instead of stretching the frame.
-pub(crate) fn card_fixed<R>(
-    ui: &mut egui::Ui,
-    fill: Color32,
-    border: Color32,
-    height: f32,
-    inner: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(13), fill);
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(13),
-        Stroke::new(1.0, border),
-        egui::StrokeKind::Inside,
-    );
-    let content = rect.shrink(15.0);
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(content)
-            .layout(Layout::top_down(Align::LEFT)),
-    );
-    child.set_clip_rect(content);
-    inner(&mut child)
-}
-
 pub(crate) fn micro_label(text: &str, color: Color32) -> RichText {
     RichText::new(text)
         .size(ts(9.5))
@@ -150,39 +79,6 @@ pub(crate) fn mono(text: impl Into<String>, color: Color32, size: f32) -> RichTe
         .family(FontFamily::Monospace)
         .size(ts(size))
         .color(color)
-}
-
-/// The chain's *Bypass all* pill.  `on` is the hot amber state; off stays
-/// a quiet outline.  The caller adds the tooltip.
-pub(crate) fn bypass_pill(ui: &mut egui::Ui, on: bool) -> egui::Response {
-    let color = if on { AMBER } else { DIM };
-    let galley = ui.painter().layout_no_wrap(
-        "Bypass all".to_owned(),
-        FontId::new(ts(7.0), FontFamily::Monospace),
-        color,
-    );
-    let size = Vec2::new(galley.size().x + 10.0, 15.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    if on {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(7), with_alpha(AMBER, 24));
-    }
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(7),
-        Stroke::new(
-            1.0,
-            if on {
-                with_alpha(AMBER, 55)
-            } else {
-                BORDER_SOFT
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, color);
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
@@ -243,132 +139,7 @@ pub(crate) fn ghost_button(ui: &mut egui::Ui, label: &str, width: f32) -> bool {
     .clicked()
 }
 
-/// A small, borderless button whose arrow is painted as two lines.  Drawing
-/// the glyph ourselves keeps it visible even when the font has no arrow
-/// characters, which otherwise leaves an empty rectangle behind.
-pub(crate) fn arrow_button(ui: &mut egui::Ui, up: bool, color: Color32) -> egui::Response {
-    let response = ui.add(
-        egui::Button::new("")
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(Vec2::new(16.0, 16.0)),
-    );
-    let tint = if response.hovered() { TEXT } else { color };
-    let center = response.rect.center();
-    let tip_y = center.y + if up { -3.0 } else { 3.0 };
-    let base_y = center.y + if up { 2.5 } else { -2.5 };
-    let tip = egui::pos2(center.x, tip_y);
-    ui.painter().line_segment(
-        [egui::pos2(center.x - 3.5, base_y), tip],
-        Stroke::new(1.3, tint),
-    );
-    ui.painter().line_segment(
-        [tip, egui::pos2(center.x + 3.5, base_y)],
-        Stroke::new(1.3, tint),
-    );
-    response
-}
-
-#[allow(dead_code, reason = "the sidebar row stays until the classic pages go")]
-pub(crate) fn nav_item(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    label: &str,
-    hint: &str,
-    selected: bool,
-) -> bool {
-    nav_row(ui, NavLead::Icon(icon), label, hint, selected).clicked()
-}
-
-/// Sub-entries sit this far right of the main entries.
-const NAV_SUB_INDENT: f32 = 26.0;
-
-pub(super) enum NavLead {
-    Icon(Icon),
-    Dot(Color32),
-}
-
-pub(super) fn nav_row(
-    ui: &mut egui::Ui,
-    lead: NavLead,
-    label: &str,
-    hint: &str,
-    selected: bool,
-) -> egui::Response {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
-    let indent = match lead {
-        NavLead::Icon(_) => 0.0,
-        NavLead::Dot(_) => NAV_SUB_INDENT,
-    };
-    // The highlight spans the full row (as the mockup's `.nav-path`); only
-    // the content moves right.
-    let content = Rect::from_min_max(rect.min + Vec2::new(indent, 0.0), rect.max);
-    let hover = response.hovered();
-    let fill = if selected {
-        with_alpha(TEAL, 16)
-    } else if hover {
-        with_alpha(TEXT, 7)
-    } else {
-        Color32::TRANSPARENT
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(9), fill);
-    if selected {
-        ui.painter().rect_filled(
-            Rect::from_min_size(rect.min + Vec2::new(0.0, 11.0), Vec2::new(3.0, 20.0)),
-            CornerRadius::same(2),
-            TEAL,
-        );
-    }
-    let lead_center = content.left_center() + Vec2::new(23.0, 0.0);
-    match lead {
-        NavLead::Icon(icon) => paint_icon(
-            ui.painter(),
-            Rect::from_center_size(lead_center, Vec2::splat(18.0)),
-            icon,
-            if selected { TEAL } else { MUTED },
-        ),
-        NavLead::Dot(colour) => {
-            ui.painter()
-                .circle_filled(lead_center, 6.0, with_alpha(colour, 50));
-            ui.painter().circle_filled(lead_center, 4.0, colour);
-        }
-    }
-    // Long path names are cut to the row, not run past the sidebar.
-    let text_w = (content.width() - 39.0 - 8.0).max(0.0);
-    let label_font = FontId::new(ts(12.2), FontFamily::Proportional);
-    let hint_font = FontId::new(ts(8.0), FontFamily::Proportional);
-    ui.painter().text(
-        content.left_center() + Vec2::new(39.0, -5.0),
-        Align2::LEFT_CENTER,
-        fit_text(ui, label, &label_font, text_w),
-        label_font,
-        if selected { TEXT } else { MUTED },
-    );
-    ui.painter().text(
-        content.left_center() + Vec2::new(39.0, 8.0),
-        Align2::LEFT_CENTER,
-        fit_text(ui, hint, &hint_font, text_w),
-        hint_font,
-        if selected { with_alpha(TEAL, 190) } else { DIM },
-    );
-    show_focus_ring(ui, &response, rect, 9);
-    row_info(
-        &response,
-        egui::Role::Button,
-        ui.is_enabled(),
-        label,
-        Some(selected),
-        Some(hint.to_owned()),
-    );
-    response
-}
-
-pub(crate) fn source_tab(ui: &mut egui::Ui, label: &str, selected: bool, color: Color32) -> bool {
-    tab_button(ui, label, selected, color).clicked()
-}
-
-/// A [`source_tab`] that explains itself on hover.
+/// A [`tab_button`] that explains itself on hover.
 pub(crate) fn hinted_tab(
     ui: &mut egui::Ui,
     label: &str,
@@ -425,71 +196,6 @@ pub(crate) fn tab_button_sized(
     )
 }
 
-pub(crate) fn channel_chip(ui: &mut egui::Ui, label: &str, checked: &mut bool, color: Color32) {
-    let fill = if *checked {
-        with_alpha(color, 22)
-    } else {
-        CARD_DEEP
-    };
-    let text_color = if *checked { color } else { DIM };
-    let response = ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .size(ts(9.0))
-                .color(text_color)
-                .strong(),
-        )
-        .fill(fill)
-        .stroke(Stroke::new(
-            1.0,
-            if *checked {
-                with_alpha(color, 65)
-            } else {
-                BORDER_SOFT
-            },
-        ))
-        .corner_radius(CornerRadius::same(6)),
-    );
-    if response.clicked() {
-        *checked = !*checked;
-    }
-}
-
-pub(crate) fn meter_row(ui: &mut egui::Ui, label: &str, value: f32, peak: f32, color: Color32) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [14.0, 12.0],
-            egui::Label::new(mono(label, DIM, 9.0)).selectable(false),
-        );
-        let desired = Vec2::new(ui.available_width(), 6.0);
-        let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(3), Color32::from_rgb(25, 32, 44));
-        let width = (rect.width() * value.clamp(0.0, 1.0)).max(0.0);
-        if width > 1.0 {
-            let filled = Rect::from_min_size(rect.min, Vec2::new(width, rect.height()));
-            ui.painter()
-                .rect_filled(filled, CornerRadius::same(3), with_alpha(color, 215));
-            let glow = Rect::from_min_size(
-                egui::pos2(rect.min.x, rect.min.y - 1.0),
-                Vec2::new(width, rect.height() + 2.0),
-            );
-            ui.painter()
-                .rect_filled(glow, CornerRadius::same(3), with_alpha(color, 22));
-        }
-        let peak_x = (rect.min.x + rect.width() * peak.clamp(0.0, 1.0))
-            .min(rect.right() - 1.0)
-            .max(rect.left());
-        ui.painter().line_segment(
-            [
-                egui::pos2(peak_x, rect.top() - 1.0),
-                egui::pos2(peak_x, rect.bottom() + 1.0),
-            ],
-            Stroke::new(1.0, with_alpha(TEXT, 195)),
-        );
-    });
-}
-
 /// A labelled bar: the name on the left, a formatted value in monospace on the
 /// right, and a 4 px bar underneath filled to `fraction`.
 pub(crate) fn progress_line(
@@ -516,87 +222,6 @@ pub(crate) fn progress_line(
         .rect_filled(filled, CornerRadius::same(2), with_alpha(color, 220));
 }
 
-pub(crate) fn metric_tile(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &str,
-    unit: &str,
-    color: Color32,
-    width: f32,
-) -> egui::Response {
-    metric_tile_with_badge(ui, label, value, unit, color, width, None)
-}
-
-/// Like [`metric_tile`], with an optional top-right micro badge (e.g. dropouts).
-pub(crate) fn metric_tile_with_badge(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &str,
-    unit: &str,
-    color: Color32,
-    width: f32,
-    badge: Option<(&str, Color32)>,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(8), CARD_DEEP);
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(8),
-        Stroke::new(1.0, BORDER_SOFT),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().text(
-        rect.left_top() + Vec2::new(9.0, 8.0),
-        Align2::LEFT_TOP,
-        label,
-        FontId::new(ts(8.0), FontFamily::Proportional),
-        DIM,
-    );
-    if let Some((badge_text, badge_color)) = badge {
-        ui.painter().text(
-            rect.right_top() + Vec2::new(-9.0, 8.0),
-            Align2::RIGHT_TOP,
-            badge_text,
-            FontId::new(ts(8.0), FontFamily::Monospace),
-            badge_color,
-        );
-    }
-    ui.painter().text(
-        rect.left_bottom() + Vec2::new(9.0, -8.0),
-        Align2::LEFT_BOTTOM,
-        value,
-        FontId::new(ts(18.0), FontFamily::Monospace),
-        color,
-    );
-    if !unit.is_empty() {
-        let value_width = ui
-            .painter()
-            .layout_no_wrap(
-                value.to_owned(),
-                FontId::new(ts(18.0), FontFamily::Monospace),
-                color,
-            )
-            .size()
-            .x;
-        ui.painter().text(
-            rect.left_bottom() + Vec2::new(11.0 + value_width, -10.0),
-            Align2::LEFT_BOTTOM,
-            unit,
-            FontId::new(ts(8.0), FontFamily::Proportional),
-            DIM,
-        );
-    }
-    response
-}
-
-pub(crate) fn small_fact(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.vertical(|ui| {
-        ui.label(micro_label(label, DIM));
-        ui.label(mono(value, MUTED, 9.5));
-    });
-}
-
 #[allow(dead_code, reason = "the route line stays until the classic pages go")]
 pub(crate) fn route_summary(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
     ui.horizontal(|ui| {
@@ -609,132 +234,6 @@ pub(crate) fn route_summary(ui: &mut egui::Ui, label: &str, value: &str, color: 
             );
         });
     });
-}
-
-pub(crate) fn legend_dot(ui: &mut egui::Ui, label: &str, color: Color32) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
-        ui.painter().circle_filled(rect.center(), 2.8, color);
-        ui.label(mono(label, MUTED, 8.5));
-    });
-}
-
-/// Draws the device combo. `true` when the person picks a row, including the
-/// row that was already selected. Opening the combo does not count.
-pub(crate) fn device_selector(
-    ui: &mut egui::Ui,
-    id_source: &str,
-    devices: &[DeviceItem],
-    selected: &mut usize,
-    accent: Color32,
-) -> bool {
-    let current = devices
-        .get(*selected)
-        .map(|device| crate::audio::device_choice_label(device, devices))
-        .unwrap_or_else(|| "No device".to_owned());
-    let mut picked = false;
-    egui::Frame::new()
-        .fill(CARD_DEEP)
-        .stroke(Stroke::new(1.0, BORDER_SOFT))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(9, 3))
-        .show(ui, |ui| {
-            egui::ComboBox::from_id_salt(id_source)
-                .width(ui.available_width())
-                .selected_text(
-                    RichText::new(ellipsize(&current, 30))
-                        .size(ts(12.0))
-                        .color(TEXT),
-                )
-                .show_ui(ui, |ui| {
-                    ui.set_min_width(250.0);
-                    for (index, device) in devices.iter().enumerate() {
-                        let label = format!(
-                            "{}  ·  {}",
-                            crate::audio::device_choice_label(device, devices),
-                            if device.demo {
-                                "preview".to_owned()
-                            } else {
-                                device.backend.clone()
-                            }
-                        );
-                        let response = ui.selectable_value(selected, index, label);
-                        if response.clicked() || response.changed() {
-                            picked = true;
-                        }
-                    }
-                });
-        });
-    if picked {
-        ui.ctx().request_repaint();
-    }
-    if let Some(device) = devices.get(*selected) {
-        ui.horizontal(|ui| {
-            ui.label(micro_label(&device.backend.to_uppercase(), accent));
-            if device.demo {
-                ui.label(micro_label("PREVIEW", AMBER));
-            } else {
-                ui.label(micro_label(&format!("{} CH", device.channels), DIM));
-            }
-        });
-    }
-    picked
-}
-
-const TAG_FONT: f32 = 7.5;
-const TAG_PAD: Vec2 = Vec2::new(5.0, 2.0);
-
-/// Paints a small outlined tag ("CLOCK") with its left edge centred on
-/// `left_center` and returns its width.
-pub(crate) fn paint_tag(ui: &egui::Ui, left_center: egui::Pos2, text: &str, color: Color32) -> f32 {
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        FontId::new(ts(TAG_FONT), FontFamily::Monospace),
-        color,
-    );
-    let size = galley.size() + TAG_PAD * 2.0;
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(left_center.x, left_center.y - size.y * 0.5),
-        size,
-    );
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(4), with_alpha(color, 18));
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(4),
-        Stroke::new(1.0, with_alpha(color, 90)),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().galley(rect.min + TAG_PAD, galley, color);
-    size.x
-}
-
-pub(crate) fn tag_width(ui: &egui::Ui, text: &str) -> f32 {
-    ui.painter()
-        .layout_no_wrap(
-            text.to_owned(),
-            FontId::new(ts(TAG_FONT), FontFamily::Monospace),
-            DIM,
-        )
-        .size()
-        .x
-        + TAG_PAD.x * 2.0
-}
-
-/// The CLOCK tag as a laid-out widget, for the inspector title.
-pub(crate) fn clock_tag(ui: &mut egui::Ui) {
-    let width = tag_width(ui, "CLOCK");
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
-    paint_tag(ui, rect.left_center(), "CLOCK", BLUE);
-    let _ = response.on_hover_text("The chain runs on this device's callback.");
-}
-
-/// The VIRTUAL tag for RigWerk Out.
-pub(crate) fn virtual_tag(ui: &mut egui::Ui) {
-    let width = tag_width(ui, "VIRTUAL");
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::hover());
-    paint_tag(ui, rect.left_center(), "VIRTUAL", GREEN);
-    let _ = response.on_hover_text("A virtual source other apps can capture.");
 }
 
 /// `text` shortened with "…" until it fits `max_width` in `font`.

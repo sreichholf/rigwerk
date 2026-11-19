@@ -143,12 +143,16 @@ fn an_effect_that_cannot_open_an_editor_opens_its_parameters() {
     app.open_plugin_editor(1);
     assert_eq!(app.plugin_editor, Some(EffectKey { path: 0, effect: 1 }));
     assert!(app.plugin_gui.is_none());
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Effect { path: 0, index: 1 })
+    );
 
     // The same effect keeps its filter; another effect starts clean.
     app.plugin_param_filter = "gain".to_owned();
-    app.open_plugin_parameters(1);
+    app.open_plugin_editor(1);
     assert_eq!(app.plugin_param_filter, "gain");
-    app.open_plugin_parameters(0);
+    app.open_plugin_editor(0);
     assert_eq!(app.plugin_editor, Some(EffectKey { path: 0, effect: 0 }));
     assert!(app.plugin_param_filter.is_empty());
 }
@@ -385,7 +389,7 @@ fn the_browser_adds_at_the_position_and_stays_open() {
     let mut added = listed("B", "Rig", "Delay");
     added.path = PathBuf::from(format!("{}b", crate::audio::TEST_PATH));
     app.open_effect_browser(0, 1);
-    assert!(matches!(app.page, crate::app::Page::Live));
+    assert_eq!(app.chrome.drawer, Some(crate::app::screen::Drawer::Browser));
     assert!(app.plugin_browser.open);
     assert!(app.add_listed_effect(&added, false));
     let names: Vec<_> = app

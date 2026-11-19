@@ -19,12 +19,8 @@ pub(crate) fn ts(size: f32) -> f32 {
     size * FONT_SCALE
 }
 
-/// A step of the type scale (`docs/ui-spec.md` §7.3).  The old pages keep
-/// `ts()`; the rewritten ones use this, which `FONT_SCALE` does not touch.
-#[allow(
-    dead_code,
-    reason = "the rewritten pages use it; the old ones use ts()"
-)]
+/// A step of the type scale (`docs/ui-spec.md` §7.3).  The rewritten pages
+/// use this; `ts()` remains for the controls that predate it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TypeRole {
     /// Grid headers, the meter scale.
@@ -43,15 +39,9 @@ pub(crate) enum TypeRole {
     TunerString,
     /// The tuner's cents.
     TunerCents,
-    /// The tuner's note.
-    TunerNote,
 }
 
 /// The size of `role` in points at 100 %.  The interface size zooms it.
-#[allow(
-    dead_code,
-    reason = "the rewritten pages use it; the old ones use ts()"
-)]
 pub(crate) fn type_size(role: TypeRole) -> f32 {
     match role {
         TypeRole::GridHeader => 11.0,
@@ -62,16 +52,11 @@ pub(crate) fn type_size(role: TypeRole) -> f32 {
         TypeRole::Heading => 18.0,
         TypeRole::TunerString => 22.0,
         TypeRole::TunerCents => 44.0,
-        TypeRole::TunerNote => 200.0,
     }
 }
 
 /// `role`'s size in one of the bundled faces, e.g.
 /// `font(Face::Mono, TypeRole::Secondary)` for the status bar.
-#[allow(
-    dead_code,
-    reason = "the rewritten pages use it; the old ones use ts()"
-)]
 pub(crate) fn font(face: Face, role: TypeRole) -> FontId {
     FontId::new(type_size(role), face.family())
 }
@@ -188,20 +173,11 @@ impl Palette {
 }
 
 /// The palette of the theme egui draws with now.
-#[allow(
-    dead_code,
-    reason = "the rewritten pages read it; the old ones use the constants"
-)]
 pub(crate) fn palette(ctx: &egui::Context) -> &'static Palette {
     Palette::of(ctx.theme())
 }
 
-// What the old pages draw with: the dark tokens, whatever the theme.
-#[allow(
-    dead_code,
-    reason = "the sidebar fill stays until the classic pages go"
-)]
-pub(crate) const SIDEBAR: Color32 = DARK.bar;
+// The dark tokens the controls that predate the palette still use.
 pub(crate) const CARD: Color32 = DARK.strip;
 pub(crate) const CARD_RAISED: Color32 = DARK.slot;
 pub(crate) const CARD_DEEP: Color32 = DARK.well;

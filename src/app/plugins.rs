@@ -1025,8 +1025,8 @@ impl RigWerkApp {
 
     /// Opens the plugin's own editor for one effect of the selected path,
     /// loading a saved plugin first if the bridge has not been started yet.
-    /// A plugin with no editor, or one whose editor cannot open here, gets
-    /// RigWerk's parameter panel instead.
+    /// A plugin with no editor, or one whose editor cannot open here, opens
+    /// the effect sheet's controls instead.
     pub(crate) fn open_plugin_editor(&mut self, index: usize) {
         let key = self.effect_key(index);
         self.engine.ensure_plugin_loaded(key.path, index);
@@ -1039,21 +1039,15 @@ impl RigWerkApp {
             self.plugin_editor = None;
             return;
         }
-        self.open_plugin_parameters(index);
-    }
-
-    /// Opens RigWerk's parameter panel for one effect of the selected path,
-    /// loading a saved plugin first if the bridge has not been started yet.
-    pub(crate) fn open_plugin_parameters(&mut self, index: usize) {
-        let key = self.effect_key(index);
-        self.engine.ensure_plugin_loaded(key.path, index);
         if self.plugin_editor != Some(key) {
-            // A different effect: the plugin editor and the filter belong to
-            // the one that was open before.
-            self.finish_plugin_gui();
+            // A different effect: the filter belongs to the one opened before.
             self.plugin_param_filter.clear();
         }
         self.plugin_editor = Some(key);
+        self.open_sheet(crate::app::screen::Sheet::Effect {
+            path: key.path,
+            index: key.effect,
+        });
     }
 
     pub(crate) fn set_plugin_parameter(&mut self, key: EffectKey, id: u32, value: f64) {

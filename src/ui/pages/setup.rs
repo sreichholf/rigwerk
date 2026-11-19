@@ -1,12 +1,12 @@
 //! Setup: devices on the left, time and preferences on the right.
 //!
-//! One scrolling screen.  *Done* returns to Live, which is home until the
-//! console exists.  The page draws and calls `RigWerkApp`; it does not
-//! read `engine.shared`.
+//! One scrolling screen.  *Done* returns to the console.  The page draws
+//! and calls `RigWerkApp`; it does not read `engine.shared`.
 
 mod appearance;
 mod clock;
 mod devices;
+mod driver_line;
 mod help;
 mod latency;
 
@@ -36,7 +36,7 @@ impl RigWerkApp {
                             .font(font(Face::Sans, TypeRole::Control))
                             .color(colours.accent_text),
                     )
-                    .on_hover_text("Back to Live")
+                    .on_hover_text("Back to the console")
                     .clicked()
                 {
                     self.close_setup();

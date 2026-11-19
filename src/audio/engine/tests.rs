@@ -107,7 +107,7 @@ fn a_missing_metadata_tool_is_kept_when_the_quantum_is_restored() {
             .quantum_note()
             .expect("a missing pw-metadata must be reported");
         assert!(
-            note.starts_with("PipeWire quantum was not restored:"),
+            note.starts_with("PipeWire graph buffer was not restored:"),
             "{note}"
         );
     }

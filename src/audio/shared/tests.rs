@@ -1076,7 +1076,6 @@ fn the_published_beat_and_rhythm_round_trip_in_one_value() {
     assert_eq!(shared.metronome_beat(), (3, ClickRhythm::SixEight as u8));
     let snapshot = shared.snapshot();
     assert_eq!(snapshot.metronome_beat, 3);
-    assert_eq!(snapshot.metronome_rhythm, ClickRhythm::SixEight as u8);
     // Stopping clears the beat, not the bar it belonged to.
     shared.clear_metronome_beat();
     assert_eq!(shared.metronome_beat(), (0, ClickRhythm::SixEight as u8));

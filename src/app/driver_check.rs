@@ -243,57 +243,6 @@ impl RigWerkApp {
         }
     }
 
-    /// One short line for the Live page MODE / OUTPUT footers: graph block
-    /// size in samples and how long that block lasts. Backend name is already
-    /// on the cards above; "quantum" is PipeWire jargon that does not help here.
-    pub(crate) fn quantum_summary(&self) -> Option<String> {
-        #[cfg(target_os = "linux")]
-        {
-            self.quantum.as_ref().map(|info| {
-                if info.available {
-                    let ms = info.quantum as f32 / info.rate.max(1) as f32 * 1000.0;
-                    format!("block {} smp · {:.1} ms", info.quantum, ms)
-                } else {
-                    "graph size unknown".to_owned()
-                }
-            })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
-    }
-
-    /// Hover for the MODE / OUTPUT graph-block line.
-    pub(crate) fn graph_block_hint(&self) -> String {
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(info) = self.quantum.as_ref() {
-                if info.available {
-                    let ms = info.quantum as f32 / info.rate.max(1) as f32 * 1000.0;
-                    let mut text = format!(
-                        "PipeWire graph block: {} samples lasting {:.1} ms at {:.1} kHz. \
-                         That is one chunk the desktop audio graph processes — not RigWerk's \
-                         end-to-end latency (see LATENCY / HEARD above).",
-                        info.quantum,
-                        ms,
-                        info.rate as f32 / 1000.0
-                    );
-                    if let Some(problem) = self.quantum_problem() {
-                        text.push(' ');
-                        text.push_str(&problem);
-                    }
-                    return text;
-                }
-            }
-            "PipeWire graph block size is not available yet.".to_owned()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.output_mode_text()
-        }
-    }
-
     /// The user-facing warning when the ALSA period and quantum collide or the
     /// quantum is too large to call low latency.
     pub(crate) fn quantum_problem(&self) -> Option<String> {

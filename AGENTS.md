@@ -139,9 +139,9 @@ opens them.
   `ui/sheets`, drawers `ui/drawers`. The console is the home screen
   (`ui/pages/console.rs`, one file per strip under `console/`). Setup
   replaces Devices and Guide (`ui/pages/setup.rs`). The tuner is a screen
-  of its own (`ui/pages/tuner.rs`). Classic pages stay under `ui/pages`,
-  reached from *Classic ▸*, until each one is replaced. Shared controls
-  live in `ui/widgets`. Colours and type scale live in `ui/theme.rs`.
+  of its own (`ui/pages/tuner.rs`). There are no classic pages left.
+  Shared controls live in `ui/widgets`. Colours and type scale live in
+  `ui/theme.rs`.
 - Platform code stays in `audio/linux` and `audio/win`, behind `cfg`.
   The `linux` module is also compiled for tests on other targets
   (`alsa`, `pipewire`). `duplex`, `hotplug`, and `native` stay
@@ -280,12 +280,10 @@ Settings are RON in eframe storage (`app/settings`).
   `ui/widgets` before adding a one-off control.
 - Meters, scopes, and latency figures come from the live snapshot.
 - Screenshot runs use `--screenshot <file>` and `RIGWERK_PAGE`
-  (`console`, `tuner`, `setup`, and the classic `live`, `mixer`,
-  `routing`, `plugins`). `devices` and `guide` open Setup; anything else
-  opens the console. `RIGWERK_SHEET` (`eq`, `gate`, `effect`, `path`,
-  `output`, `scope`, `diagnostics`) opens a sheet on the selected path,
-  `RIGWERK_DRAWER` (`browser`, `issues`) a drawer, and
-  `RIGWERK_MIXER_STAGE` selects a Mixer stage.
+  (`console`, `tuner`, `setup`). `devices` and `guide` open Setup; anything
+  else opens the console. `RIGWERK_SHEET` (`eq`, `gate`, `effect`, `path`,
+  `output`, `scope`, `diagnostics`) opens a sheet on the selected path and
+  `RIGWERK_DRAWER` (`browser`, `issues`) a drawer.
   Screenshot mode drops Wayland so the requested window size sticks.
   The README set and how to retake it: `docs/screenshots/README.md`.
 

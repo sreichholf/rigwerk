@@ -149,33 +149,6 @@ fn the_loudest_channel_stops_at_the_device_count() {
 }
 
 #[test]
-fn device_levels_follow_the_rows_and_their_meters() {
-    let mut app = blank_app();
-    let mut out = ExtraOutputPref::virtual_output();
-    out.settings.mute = true;
-    app.extra_outputs.push(out);
-    app.meter_out_channels[1] = 0.5;
-    app.peak_out_channels[1] = 0.6;
-    app.peak_out_channels[4] = 1.0;
-    app.meter_extra_output_channels[0][0] = 0.25;
-    app.peak_extra_output_channels[0][0] = 0.3;
-    let levels = app.output_device_levels();
-    assert_eq!(levels.len(), 2);
-    let clock = &levels[0];
-    assert_eq!((clock.meter, clock.peak, clock.mute), (0.5, 0.6, false));
-    let virtual_output = &levels[1];
-    assert_eq!(virtual_output.name, ExtraOutputPref::virtual_output().name);
-    assert_eq!(
-        (
-            virtual_output.meter,
-            virtual_output.peak,
-            virtual_output.mute
-        ),
-        (0.25, 0.3, true)
-    );
-}
-
-#[test]
 fn a_extra_output_reading_needs_a_running_bridge_and_a_stream() {
     let mut app = blank_app();
     app.snapshot.output_rate = 48_000;
@@ -368,4 +341,135 @@ fn output_level_and_mute_stay_in_range() {
     assert_eq!(app.clock_output.level_db, 0.0);
     app.set_output_mute(1, true);
     assert!(app.extra_outputs[0].settings.mute);
+}
+
+#[test]
+fn a_map_summary_reads_pairs_sides_and_unreached_channels() {
+    use super::map_summary;
+    use crate::audio::{ChannelMap, UnusedChannels};
+
+    let mut app = with_quad_output();
+    let settings = &mut app.extra_outputs[0].settings;
+    assert_eq!(map_summary(settings, 0, 4).text, "Out 1/2 · rest mono copy");
+
+    settings.path_map[0].map = ChannelMap {
+        left: 0b0101,
+        right: 0b1010,
+    };
+    assert_eq!(map_summary(settings, 0, 4).text, "Out 1/2 · Out 3/4");
+
+    settings.path_map[0].map = ChannelMap {
+        left: 0b0010,
+        right: 0b0001,
+    };
+    assert_eq!(
+        map_summary(settings, 0, 4).text,
+        "Out 1/2 swapped · rest mono copy"
+    );
+
+    settings.path_map[0].map = ChannelMap {
+        left: 0b0001,
+        right: 0b0100,
+    };
+    assert_eq!(
+        map_summary(settings, 0, 4).text,
+        "Out 1 ← L · Out 3 ← R · rest mono copy"
+    );
+
+    settings.path_map[0].map = ChannelMap {
+        left: 0b0001,
+        right: 0b0001,
+    };
+    assert_eq!(map_summary(settings, 0, 1).text, "Out 1 ← mono");
+
+    settings.path_map[0].map = ChannelMap { left: 0, right: 0 };
+    settings.unused = UnusedChannels::MonoCopy;
+    let empty = map_summary(settings, 0, 4);
+    assert_eq!(empty.text, "nothing routed · mono copy on all");
+    assert!(empty.nothing_routed && !empty.silent);
+
+    settings.unused = UnusedChannels::Silent;
+    let silent = map_summary(settings, 0, 4);
+    assert_eq!(silent.text, "nothing routed · plays silence");
+    assert!(silent.nothing_routed && silent.silent);
+
+    // A bit past this device's width reaches nothing.
+    settings.path_map[0].map = ChannelMap {
+        left: 1 << 7,
+        right: 0,
+    };
+    assert!(map_summary(settings, 0, 4).nothing_routed);
+}
+
+#[test]
+fn a_map_edit_writes_one_slot_and_logs_what_committed() {
+    use super::MapEdit;
+    use crate::app::layouts::{custom_label, PathLayout};
+
+    let mut app = with_quad_output();
+    assert!(app.apply_layout(PathLayout::Single));
+    assert_eq!(app.current_layout(), Some(PathLayout::Single));
+
+    app.apply_map_edit(
+        1,
+        MapEdit::Level {
+            slot: 0,
+            level_db: 40.0,
+            commit: true,
+        },
+    );
+    assert_eq!(
+        app.extra_outputs[0].settings.path_map[0].level_db,
+        crate::audio::PATH_LEVEL_MAX_DB
+    );
+    assert!(app
+        .log
+        .iter()
+        .any(|line| line.text.contains("Main level on Quad")));
+
+    app.apply_map_edit(
+        1,
+        MapEdit::Invert {
+            slot: 0,
+            invert: true,
+        },
+    );
+    assert!(app.extra_outputs[0].settings.path_map[0].invert);
+    assert!(app
+        .log
+        .iter()
+        .any(|line| line.text.contains("polarity on Quad")));
+
+    let logged = app.log.len();
+    app.apply_map_edit(
+        1,
+        MapEdit::Trim {
+            slot: 0,
+            trim_ms: 9.0,
+            commit: false,
+        },
+    );
+    assert_eq!(
+        app.extra_outputs[0].settings.path_map[0].trim_ms,
+        crate::audio::PATH_TRIM_MAX_MS
+    );
+    assert_eq!(app.log.len(), logged, "a drag logs only when it ends");
+
+    app.apply_map_edit(
+        1,
+        MapEdit::Cell {
+            slot: 0,
+            side: crate::audio::MixSide::L,
+            channel: 3,
+            on: true,
+        },
+    );
+    assert!(app.extra_outputs[0].settings.path_map[0]
+        .map
+        .routes(crate::audio::MixSide::L, 3));
+    assert_eq!(app.current_layout(), None);
+    assert_eq!(
+        custom_label(app.routing_last_layout),
+        "Custom · edited from Single path"
+    );
 }

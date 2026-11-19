@@ -25,7 +25,7 @@ fn the_add_columns_say_why_they_are_off() {
         "A removed path is still fading out"
     );
     assert_eq!(
-        console_reason(crate::ui::pages::mixer::output_devices::ADD_DEVICE_HINT_FULL),
+        console_reason("Four extra outputs is the maximum for now"),
         "Four extra outputs is the most"
     );
 }

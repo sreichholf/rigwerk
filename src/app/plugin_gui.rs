@@ -149,12 +149,6 @@ impl RigWerkApp {
         self.plugin_browser.notice = Some((message, Instant::now()));
     }
 
-    /// Closes the plugin's window, if one is open.  Dropping it detaches the
-    /// editor from its native window first, so nothing outlives the window.
-    pub(crate) fn close_plugin_gui(&mut self) {
-        self.finish_plugin_gui();
-    }
-
     /// Drops the editor after a last full sync, so whatever it changed
     /// without reporting it reaches the saved effect and its state blob.
     /// The service frames already follow its edits and reported values.

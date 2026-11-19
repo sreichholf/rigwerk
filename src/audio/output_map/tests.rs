@@ -434,7 +434,6 @@ fn unreached_channels_copy_the_paths_mapped_to_the_device() {
     let mut settings = OutputDeviceSettings::default();
     settings.path_map[1] = PathMapSettings::unrouted();
     assert_eq!(run(settings), [0.5, -0.25, 0.125, 0.125]);
-    assert_eq!(settings.playing_channels(4, [true, true, false, false]), 4);
     // Path 1 on Out 3 only: Out 4 copies both (mono of each, summed).
     settings.path_map[1].map = ChannelMap {
         left: 0b0100,
@@ -447,7 +446,6 @@ fn unreached_channels_copy_the_paths_mapped_to_the_device() {
     assert_eq!(run(settings), [0.625; 4]);
     settings.unused = UnusedChannels::Silent;
     assert_eq!(run(settings), [0.0; 4]);
-    assert_eq!(settings.playing_channels(4, [true, true, false, false]), 0);
 }
 
 #[test]
@@ -687,38 +685,38 @@ fn playing_channels_count_reached_and_copied_ones() {
     };
     let copy = UnusedChannels::MonoCopy;
     let silent = UnusedChannels::Silent;
-    assert_eq!(
-        settings(ChannelMap::default(), copy).playing_channels(2, ONE_PATH),
-        2
-    );
-    assert_eq!(
-        settings(ChannelMap::default(), copy).playing_channels(4, ONE_PATH),
-        4
-    );
-    assert_eq!(
-        settings(ChannelMap::default(), silent).playing_channels(4, ONE_PATH),
-        2
-    );
-    assert_eq!(
-        settings(map(0b0100, 0b1000), silent).playing_channels(4, ONE_PATH),
-        2
-    );
-    assert_eq!(settings(map(0, 0), silent).playing_channels(4, ONE_PATH), 0);
-    assert_eq!(settings(map(0, 0), copy).playing_channels(4, ONE_PATH), 4);
-    assert_eq!(
-        settings(map(0b0100, 0), silent).playing_channels(1, ONE_PATH),
-        1
-    );
-    assert_eq!(settings(map(0, 0), silent).playing_channels(1, ONE_PATH), 0);
+    // A channel plays the path when its weight is not zero: reached
+    // channels always, unreached ones under MonoCopy only.
+    let playing = |settings: OutputDeviceSettings, channels: usize| {
+        let maps = settings.path_map.map(|entry| entry.map);
+        (0..channels.min(crate::audio::MAX_OUTPUT_CHANNELS))
+            .filter(|&channel| {
+                (0..MAX_PATHS).any(|path| {
+                    super::weights::path_channel_weights(
+                        &maps,
+                        ONE_PATH,
+                        settings.unused,
+                        channels,
+                        channel,
+                        path,
+                    ) != [0.0; 3]
+                })
+            })
+            .count()
+    };
+    assert_eq!(playing(settings(ChannelMap::default(), copy), 2), 2);
+    assert_eq!(playing(settings(ChannelMap::default(), copy), 4), 4);
+    assert_eq!(playing(settings(ChannelMap::default(), silent), 4), 2);
+    assert_eq!(playing(settings(map(0b0100, 0b1000), silent), 4), 2);
+    assert_eq!(playing(settings(map(0, 0), silent), 4), 0);
+    assert_eq!(playing(settings(map(0, 0), copy), 4), 4);
+    assert_eq!(playing(settings(map(0b0100, 0), silent), 1), 1);
+    assert_eq!(playing(settings(map(0, 0), silent), 1), 0);
     let muted = OutputDeviceSettings {
         mute: true,
         ..OutputDeviceSettings::default()
     };
-    assert_eq!(
-        muted.playing_channels(2, ONE_PATH),
-        2,
-        "mute is not routing"
-    );
+    assert_eq!(playing(muted, 2), 2, "mute is not routing");
 }
 
 fn one_path(left: f32, right: f32) -> [[f32; 2]; MAX_PATHS] {

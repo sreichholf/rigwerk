@@ -9,7 +9,7 @@ use crate::app::settings::{rate_label, BUFFERS, RATES};
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{AsioPanelSide, DeviceItem, EngineState, WasapiOutputMode};
 use crate::ui::fonts::Face;
-use crate::ui::pages::live::driver_line::driver_line;
+use crate::ui::pages::setup::driver_line::driver_line;
 use crate::ui::pages::setup::{hint, panel};
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{palette_focus, row_info, segmented};
@@ -179,7 +179,7 @@ impl RigWerkApp {
                 None,
             );
             ui.add_space(6.0);
-            self.asio_panel_chip(ui, AsioPanelSide::Input, accent);
+            self.asio_panel_chip(ui, AsioPanelSide::Input);
         });
 
         panel(ui, "Clock output", section, None, |ui| {
@@ -261,7 +261,7 @@ impl RigWerkApp {
                     }
             }
             ui.add_space(6.0);
-            self.asio_panel_chip(ui, AsioPanelSide::Output, accent);
+            self.asio_panel_chip(ui, AsioPanelSide::Output);
         });
 
         if ui

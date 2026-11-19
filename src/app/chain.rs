@@ -55,21 +55,16 @@ pub(crate) fn neighbour_stage(
 /// What the Mixer inspector (and Live chips) currently point at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChainSelection {
-    Input,
     PreEq,
     /// The effect group header — not a single plugin.
     Plugins,
     Plugin(usize),
     Gate,
     PostEq,
-    /// The selected path's level, mute and solo (shown with 2+ paths).
-    Path,
     /// The master stage: master level and mute, and the device list.
     Output,
     /// One output device under the master; 0 is the clock output.
     OutputDevice(usize),
-    /// The add-output-device list under the Output stage.
-    AddOutput,
 }
 
 impl ChainSelection {
@@ -101,33 +96,8 @@ impl ChainSelection {
     pub(crate) fn clamp_output(self, device_count: usize) -> Self {
         match self {
             Self::OutputDevice(index) if index >= device_count => Self::Output,
-            Self::AddOutput if device_count == 0 => Self::Output,
             other => other,
         }
-    }
-
-    /// The Path stage only exists with several paths; with one it falls
-    /// back to the stage above it.
-    pub(crate) fn clamp_path(self, path_count: usize) -> Self {
-        match self {
-            Self::Path if path_count < 2 => Self::PostEq,
-            other => other,
-        }
-    }
-
-    /// The stage a `RIGWERK_MIXER_STAGE` key names (screenshots and checks).
-    pub(crate) fn from_key(key: &str) -> Option<Self> {
-        Some(match key {
-            "input" => Self::Input,
-            "pre_eq" => Self::PreEq,
-            "plugins" => Self::Plugins,
-            "gate" => Self::Gate,
-            "post_eq" => Self::PostEq,
-            "path" => Self::Path,
-            "output" => Self::Output,
-            "device" => Self::OutputDevice(0),
-            _ => return None,
-        })
     }
 
     /// The selection after the effect at `removed` left the chain, with
@@ -148,15 +118,6 @@ impl ChainSelection {
             ChainStage::Gate => Self::Gate,
             ChainStage::Effect(index) => Self::Plugin(index),
             ChainStage::PostEq => Self::PostEq,
-        }
-    }
-
-    /// Where a newly added effect should land. `None` means append.
-    pub(crate) fn plugin_effect_at(self, plugin_count: usize) -> Option<usize> {
-        match self {
-            Self::Plugin(index) => Some((index + 1).min(plugin_count)),
-            Self::Plugins => None,
-            _ => None,
         }
     }
 }

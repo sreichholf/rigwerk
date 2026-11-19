@@ -423,29 +423,6 @@ impl RigWerkApp {
         self.latency_parts().bridge_ms()
     }
 
-    /// Delay past our playback node (graph filters + device), when PipeWire
-    /// has reported it. Bluetooth A2DP often shows ~100–200 ms here.
-    pub(crate) fn path_delay_ms(&self) -> Option<f32> {
-        if self.engine.state != EngineState::Running {
-            return None;
-        }
-        self.snapshot.path_delay_ms
-    }
-
-    /// `latency_ms` plus path delay when known — a better "what you hear" guess
-    /// than the bridge alone. Still not a measured ear-to-mic round trip.
-    pub(crate) fn heard_latency_ms(&self) -> Option<f32> {
-        Some(self.latency_ms() + self.path_delay_ms()?)
-    }
-
-    /// Short readout for tiles: bridge alone, or `us · after` when the path is known.
-    pub(crate) fn latency_caption(&self) -> String {
-        match self.path_delay_ms() {
-            Some(after) => format!("{:.1} · {:.1} ms", self.latency_ms(), after),
-            None => format!("{:.1} ms", self.latency_ms()),
-        }
-    }
-
     /// The step the running output really got, in frames and milliseconds.
     pub(crate) fn output_step(&self) -> Option<(u32, f32)> {
         if self.engine.state != EngineState::Running {
@@ -516,37 +493,6 @@ impl RigWerkApp {
         }
         self.engine
             .set_extra_outputs(&settings, &plan, &bridge_buffers);
-    }
-
-    /// How the output runs right now, or how it will try to run.
-    pub(crate) fn output_mode_text(&self) -> String {
-        if self.engine.state == EngineState::Running && !self.snapshot.output_mode.is_empty() {
-            return self.snapshot.output_mode.clone();
-        }
-        if self.selected_output().asio_clsid.is_some() {
-            "ASIO output · the driver's own buffer".to_owned()
-        } else if cfg!(target_os = "windows") {
-            match self.wasapi_output_mode {
-                audio::WasapiOutputMode::Exclusive => {
-                    "Exclusive: this device only, at the driver's smallest exclusive buffer (shared output if refused)"
-                        .to_owned()
-                }
-                audio::WasapiOutputMode::RealStyle => {
-                    "Shared, smallest buffer: the driver's smallest shared step, one step queued (shared output if refused)"
-                        .to_owned()
-                }
-                audio::WasapiOutputMode::Shared => {
-                    format!("Shared · {} samples", self.output_buffer)
-                }
-            }
-        } else if self.low_latency_output {
-            format!(
-                "Low latency: PipeWire {}-sample buffer, ALSA's smallest usable buffer (the output buffer if refused)",
-                audio::PIPEWIRE_LOW_QUANTUM
-            )
-        } else {
-            format!("Standard · {} samples", self.output_buffer)
-        }
     }
 
     /// Turns the Low latency output on or off, and logs it.

@@ -2,13 +2,19 @@ use crate::app::blank_app;
 use crate::ui::widgets::{accesskit_frame, node_named};
 
 #[test]
-fn the_title_bar_names_mute_setup_and_classic() {
+fn the_title_bar_names_mute_setup_and_the_tuner_but_no_classic_menu() {
     let mut app = blank_app();
     let tree = accesskit_frame(|ui| app.title_bar(ui));
     let _ = node_named(&tree, "Mute");
     let _ = node_named(&tree, "Setup");
-    let _ = node_named(&tree, "Classic ▸");
+    let _ = node_named(&tree, "Tuner");
     let _ = node_named(&tree, "RigWerk");
+    assert!(
+        tree.nodes
+            .iter()
+            .all(|(_, node)| node.label() != Some("Classic ▸")),
+        "the classic menu is gone"
+    );
 }
 
 #[test]

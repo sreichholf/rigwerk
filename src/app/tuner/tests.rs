@@ -26,7 +26,7 @@ fn closing_the_tuner_reports_whether_the_output_comes_back() {
 
     app.log.clear();
     app.mute = true;
-    app.page = Page::Live;
+    app.page = Page::Console;
     app.log_tuner_page();
     assert!(app
         .log
@@ -38,7 +38,7 @@ fn closing_the_tuner_reports_whether_the_output_comes_back() {
     app.page = Page::Tuner;
     app.log_tuner_page();
     app.mute = false;
-    app.page = Page::Live;
+    app.page = Page::Console;
     app.log_tuner_page();
     assert!(app
         .log
@@ -59,7 +59,7 @@ fn auto_mute_follows_the_truth_table() {
     ];
     for auto in [false, true] {
         tuner.auto_mute = auto;
-        for page in [Page::Live, Page::Mixer, Page::Tuner] {
+        for page in [Page::Console, Page::Setup, Page::Tuner] {
             for state in &states {
                 let expected = auto
                     && page == Page::Tuner

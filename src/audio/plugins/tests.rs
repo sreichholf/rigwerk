@@ -452,8 +452,6 @@ fn the_chain_latency_counts_bypassed_effects_but_not_failed_ones() {
     let views = chain.views();
     let latencies: Vec<u32> = views.iter().map(|view| view.latency).collect();
     assert_eq!(latencies, vec![0, 32, 64, 0]);
-    assert_eq!(views[2].latency_label().as_deref(), Some("· 64 smp"));
-    assert_eq!(views[3].latency_label(), None);
 
     let mut left = vec![0.0f32; 32];
     let mut right = vec![0.0f32; 32];

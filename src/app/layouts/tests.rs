@@ -97,3 +97,20 @@ fn blend_and_dual_amp_copy_the_first_path() {
     assert!(!app.clock_output.path_map[second].invert);
     assert_eq!(app.current_layout(), Some(PathLayout::Blend));
 }
+
+#[test]
+fn every_layout_has_a_name_and_a_caption() {
+    for layout in PathLayout::ALL {
+        assert!(!layout.label().is_empty());
+        assert!(!layout.caption().is_empty(), "{}", layout.label());
+    }
+}
+
+#[test]
+fn custom_names_the_layout_it_was_edited_from() {
+    assert_eq!(super::custom_label(None), "Custom");
+    assert_eq!(
+        super::custom_label(Some(PathLayout::Blend)),
+        "Custom · edited from Blend clean"
+    );
+}

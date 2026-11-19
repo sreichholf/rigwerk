@@ -38,7 +38,7 @@ fn add_duplicate_and_remove_paths_in_the_app_and_the_engine() {
     let infos = app.path_infos();
     assert_eq!(infos.len(), 3);
     assert!(infos[2].selected && !infos[2].audible);
-    assert_eq!(infos[0].summary(), "0 stages · 0.0 ms");
+    assert_eq!((infos[0].stages, infos[0].latency_ms), (0, 0.0));
 
     assert!(app.remove_path(0));
     assert!(app.paths[0].is_none());
@@ -437,4 +437,32 @@ fn the_dsp_marker_goes_to_the_heaviest_path() {
     assert_eq!(heaviest_path(&[]), None);
     let app = blank_app();
     assert_eq!(app.dsp_marker_path(), None, "no alarm");
+}
+
+#[test]
+fn a_path_colour_is_stored_and_the_level_and_solo_are_independent() {
+    let mut app = blank_app();
+    let copy = app.duplicate_path(0).unwrap();
+    // A duplicate starts muted: unmute it to test level and solo on their own.
+    app.set_path_mute(copy, false);
+    app.set_path_colour(copy, 3);
+    assert_eq!(app.path_infos()[1].colour_index, 3);
+    app.set_path_level(copy, -6.0);
+    app.set_path_solo(copy, true);
+    let info = app
+        .path_infos()
+        .into_iter()
+        .find(|info| info.slot == copy)
+        .unwrap();
+    assert_eq!(info.level_db, -6.0);
+    assert!(info.solo);
+    assert!(!info.mute);
+    assert!(info.audible);
+    app.set_path_mute(copy, true);
+    let info = app
+        .path_infos()
+        .into_iter()
+        .find(|info| info.slot == copy)
+        .unwrap();
+    assert!(!info.audible);
 }

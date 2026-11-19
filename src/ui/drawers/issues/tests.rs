@@ -25,7 +25,7 @@ fn the_strip_counts_and_names_its_rows() {
     let tree = accesskit_frame(|ui| app.issues_strip(ui, 1200.0));
     let strip = node_named(&tree, "Live issues");
     assert_eq!(strip.value(), Some("1 warning"));
-    let _ = node_named(&tree, "Show in Routing: Path 2 is routed nowhere");
+    let _ = node_named(&tree, "Show output: Path 2 is routed nowhere");
 }
 
 #[test]

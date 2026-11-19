@@ -12,7 +12,6 @@ use crate::ui::theme::{with_alpha, BORDER, CARD_RAISED, TEXT};
 pub(crate) struct SliderStyle {
     color: Color32,
     name: String,
-    decibels: bool,
 }
 
 impl From<Color32> for SliderStyle {
@@ -20,7 +19,6 @@ impl From<Color32> for SliderStyle {
         Self {
             color,
             name: String::new(),
-            decibels: false,
         }
     }
 }
@@ -30,18 +28,13 @@ impl From<(Color32, &str)> for SliderStyle {
         Self {
             color,
             name: name.to_owned(),
-            decibels: false,
         }
     }
 }
 
 impl From<(Color32, String)> for SliderStyle {
     fn from((color, name): (Color32, String)) -> Self {
-        Self {
-            color,
-            name,
-            decibels: false,
-        }
+        Self { color, name }
     }
 }
 
@@ -81,21 +74,6 @@ pub(crate) fn row_info(
         }
         info
     });
-}
-
-pub(crate) fn db_slider(
-    ui: &mut egui::Ui,
-    value: &mut f32,
-    min: f32,
-    max: f32,
-    accent: impl Into<SliderStyle>,
-) -> bool {
-    let mut style = accent.into();
-    if style.name.is_empty() {
-        style.name = "Gain".to_owned();
-    }
-    style.decibels = true;
-    styled_slider(ui, value, min, max, 0.1, style).changed()
 }
 
 /// The gain slider's look, with an explicit step, for other values in the app.
@@ -175,11 +153,7 @@ pub(crate) fn styled_slider(
     ui.painter()
         .circle_filled(egui::pos2(x, track.center().y), 3.0, style.color);
     show_focus_ring(ui, &response, rect, 6);
-    let value_text = if style.decibels {
-        format!("{:+.1} dB", *value)
-    } else {
-        format_slider_value(*value, step)
-    };
+    let value_text = format_slider_value(*value, step);
     if style.name.is_empty() {
         style.name.clone_from(&value_text);
     }

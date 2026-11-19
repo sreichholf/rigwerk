@@ -34,7 +34,7 @@ pub(crate) struct Preferences {
     pub(crate) session_name: String,
     /// The page that was open when the app was last used.
     pub(crate) page: String,
-    /// Which of the two EQs the Mixer page was editing: 0 pre, 1 post.
+    /// Which of the two EQs was last edited: 0 pre, 1 post.
     pub(crate) eq_edit: u8,
     /// Whether the output list was showing the low-latency tab.
     pub(crate) output_tab_low_latency: bool,
@@ -110,7 +110,7 @@ pub(crate) struct Preferences {
     /// none: their top-level mix fields load as path 1 (see
     /// [`Self::path_prefs`]).  New files write only this.
     pub(crate) paths: Vec<PathPref>,
-    /// The path the Mixer and Plugins pages edit (a position in `paths`).
+    /// The path the console, sheets and browser edit (a position in `paths`).
     pub(crate) selected_path: usize,
     /// Level, mute and channel map of the clock output (`output_id`).
     #[serde(rename = "clock_device")]
@@ -511,10 +511,10 @@ pub(crate) const MIN_OUTPUT_BUFFER: usize = 16;
 /// offered size, so a corrupt huge value is not asked of the device.
 pub(crate) const MAX_SANE_BUFFER: usize = 512;
 
-/// Input fader, in dB. The Live card and the Mixer strip use this same range.
+/// Input fader, in dB. The console strip and the fader use this range.
 pub(crate) const INPUT_GAIN_MIN_DB: f32 = -24.0;
 pub(crate) const INPUT_GAIN_MAX_DB: f32 = 18.0;
-/// Output fader, in dB. Same range as the Live and Mixer output sliders.
+/// Output fader, in dB. Same range as the console output faders.
 pub(crate) const OUTPUT_GAIN_MIN_DB: f32 = -36.0;
 pub(crate) const OUTPUT_GAIN_MAX_DB: f32 = 6.0;
 
@@ -779,11 +779,7 @@ pub(crate) const PREFERENCES_KEY: &str = "rigwerk-preferences";
 pub(crate) fn page_key(page: Page) -> &'static str {
     match page {
         Page::Console => "console",
-        Page::Live => "live",
-        Page::Mixer => "mixer",
         Page::Tuner => "tuner",
-        Page::Routing => "routing",
-        Page::Plugins => "plugins",
         Page::Setup => "setup",
     }
 }

@@ -48,14 +48,11 @@ use crate::audio::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
-    /// The home screen of the rewrite: Input, the paths, Master and the
-    /// outputs side by side.
+    /// The home screen: Input, the paths, Master and the outputs side by
+    /// side.
     Console,
-    Live,
-    Mixer,
+    /// The tuner, a screen of its own.
     Tuner,
-    Routing,
-    Plugins,
     /// Devices and the guide, one scrolling screen.
     Setup,
 }
@@ -66,27 +63,14 @@ pub(crate) fn initial_page() -> Page {
     page_for_run(&std::env::var("RIGWERK_PAGE").unwrap_or_default())
 }
 
-/// The page a `RIGWERK_PAGE` value opens.  The classic pages stay
-/// reachable for screenshots until their sheets replace them; anything
-/// else, Sessions and Diagnostics (the menu and the sheet) included, is
-/// the console.
+/// The page a `RIGWERK_PAGE` value opens.  Anything else, and the old page
+/// names, open the console.
 pub(crate) fn page_for_run(key: &str) -> Page {
     match key.trim().to_lowercase().as_str() {
-        "live" => Page::Live,
-        "mixer" => Page::Mixer,
         "tuner" => Page::Tuner,
-        "routing" => Page::Routing,
-        "plugins" => Page::Plugins,
         "setup" | "devices" | "guide" => Page::Setup,
         _ => Page::Console,
     }
-}
-
-/// Test hook for screenshots of a Mixer stage: `RIGWERK_MIXER_STAGE=output`
-/// (or `device` for the clock output). Normal launches open the last EQ.
-fn initial_mixer_stage() -> Option<chain::ChainSelection> {
-    let key = std::env::var("RIGWERK_MIXER_STAGE").ok()?;
-    chain::ChainSelection::from_key(&key.to_lowercase())
 }
 
 /// Test hook for screenshots in one theme: `RIGWERK_THEME=light` (or
@@ -231,7 +215,7 @@ pub struct RigWerkApp {
     pub(crate) paths: [Option<paths::SignalPath>; MAX_PATHS],
     /// The live path slots in display (and save) order.
     pub(crate) path_order: Vec<usize>,
-    /// The path slot the Mixer and Plugins pages edit.
+    /// The path slot the console, the sheets and the browser edit.
     pub(crate) selected_path: usize,
     /// Level, mute and per-path channel maps of the clock output (the
     /// selected output), pushed to the engine every frame.
@@ -240,19 +224,19 @@ pub struct RigWerkApp {
     pub(crate) extra_outputs: Vec<ExtraOutputPref>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
-    /// Selected stage in the Mixer rack / Live chain strip.
+    /// Selected chain stage on the console.
     pub(crate) chain_selected: chain::ChainSelection,
-    /// Output device shown on Signal Routing (not persisted; apart from the
+    /// Output device the output sheet last showed (not persisted; apart from the
     /// Mixer's selection).
     pub(crate) routing_device: usize,
-    /// Path slot the Signal Routing presets set (page-local; falls back to
+    /// Path slot the output sheet's map presets set (sheet-local; falls back to
     /// the selected path).
     pub(crate) routing_preset_path: Option<usize>,
     /// The routing layout applied last, for "Custom · edited from <layout>".
     pub(crate) routing_last_layout: Option<crate::app::layouts::PathLayout>,
-    /// The Live Issues strip shows only its header (not persisted).
+    /// The issues drawer shows only its header (not persisted).
     pub(crate) live_issues_collapsed: bool,
-    /// What the Live Issues keep between frames (the DSP hysteresis, the
+    /// What the issues keep between frames (the DSP hysteresis, the
     /// session's dropouts, a lost device and the errors already shown).
     /// Moved once per tick by `tick_issues`.
     pub(crate) issue_state: crate::app::issues::IssueState,
@@ -352,7 +336,7 @@ pub struct RigWerkApp {
     /// does. The bridge stops only after a second miss.
     input_misses: u8,
     /// Consecutive scans that did not list the selected output.  Above 0,
-    /// the clock row in the Mixer reads missing.
+    /// the clock output's strip and sheet read missing.
     output_misses: u8,
     /// Planned ALSA period for one output setting, so the UI does not ask
     /// the device again on every frame.
@@ -686,9 +670,6 @@ impl RigWerkApp {
                 preferences: preferences.clone(),
             }),
         };
-        if let Some(stage) = initial_mixer_stage() {
-            app.select_chain(stage);
-        }
         // egui restored its own memory before this; the saved preference wins.
         // Track B: the effect browser's starred and recent effects.
         app.plugin_browser.favourites = preferences.effect_favourites.clone();
@@ -815,8 +796,8 @@ impl RigWerkApp {
 #[cfg(test)]
 pub(crate) fn blank_app() -> RigWerkApp {
     RigWerkApp {
-        page: Page::Live,
-        last_page: Page::Live,
+        page: Page::Console,
+        last_page: Page::Console,
         engine: AudioEngine::new(48_000),
         tuner: tuner::TunerState::new(&Preferences::default(), false),
         inventory: Inventory::default(),

@@ -11,13 +11,13 @@
 //! Only draws.  The filter, the dismissals and the card highlight live in
 //! `app::issues`; a click here calls those after the frame.  A new error
 //! opens a collapsed strip again; that is decided per tick in
-//! `RigWerkApp::tick_issues`, not here.  The ring on a card is painted by
-//! [`RigWerkApp::card_highlight_ring`], which `live.rs` calls per card.
+//! `RigWerkApp::tick_issues`, not here.  The console paints the ring on a
+//! strip when "Show on <card>" lights it.
 
 use std::time::Instant;
 
 use eframe::egui;
-use egui::{Align, Color32, CornerRadius, Layout, Margin, Rect, RichText, Sense, Stroke, Vec2};
+use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Sense, Stroke, Vec2};
 
 use crate::app::issues::{IssueAction, IssueCard, IssueFilter, IssueKey, IssueSeverity, LiveIssue};
 use crate::app::RigWerkApp;
@@ -267,22 +267,6 @@ impl RigWerkApp {
             None => {}
         }
         ui.add_space(10.0);
-    }
-
-    /// The ring around a Live card while "Show on <card>" lights it: drawn
-    /// just outside `rect` in the issue's colour, pulsing out.
-    pub(crate) fn card_highlight_ring(&self, ui: &egui::Ui, rect: Rect, card: IssueCard) {
-        let Some((severity, strength)) = self.card_highlight(card, Instant::now()) else {
-            return;
-        };
-        let alpha = (strength * 220.0).round().clamp(0.0, 255.0) as u8;
-        ui.painter().rect_stroke(
-            rect.expand(3.0),
-            CornerRadius::same(16),
-            Stroke::new(2.0, with_alpha(severity_color(severity), alpha)),
-            egui::StrokeKind::Outside,
-        );
-        ui.ctx().request_repaint();
     }
 }
 

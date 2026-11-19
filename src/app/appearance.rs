@@ -32,12 +32,10 @@ impl ThemeChoice {
     }
 }
 
-/// The theme the window is drawn in.  The old pages paint with the dark
-/// constants, so until the console replaces them (docs/ui-spec.md §12,
-/// step 6) the saved choice is kept but the window stays dark; only a
-/// screenshot run's `RIGWERK_THEME` shows light.
-pub(crate) fn drawn_theme(_saved: ThemeChoice, run_override: Option<ThemeChoice>) -> ThemeChoice {
-    run_override.unwrap_or(ThemeChoice::Dark)
+/// The theme the window is drawn in: the run's override, else the saved
+/// choice.  *System* follows the platform; egui falls back to dark.
+pub(crate) fn drawn_theme(saved: ThemeChoice, run_override: Option<ThemeChoice>) -> ThemeChoice {
+    run_override.unwrap_or(saved)
 }
 
 /// The interface size, as egui's zoom factor: 80–150 %.

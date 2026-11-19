@@ -1133,7 +1133,7 @@ impl Shared {
         // A callback mid-block when the bridge failed may store its beat
         // after `set_error`, and a stopping bridge keeps mixing until its
         // teardown ends; a bridge that is not running shows no beat.
-        let (beat, metronome_rhythm) = self.metronome_beat();
+        let (beat, _) = self.metronome_beat();
         let running = self.running.load(Ordering::Relaxed);
         let metronome_beat = if error.is_some() || device_lost || !running {
             0
@@ -1231,7 +1231,6 @@ impl Shared {
             path_delay_ms: self.path_delay_ms(),
             direct: self.direct.load(Ordering::Relaxed),
             metronome_beat,
-            metronome_rhythm,
         }
     }
 }

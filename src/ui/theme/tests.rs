@@ -159,7 +159,6 @@ fn the_type_scale_is_the_spec_and_ts_is_unchanged() {
         (TypeRole::Heading, 18.0),
         (TypeRole::TunerString, 22.0),
         (TypeRole::TunerCents, 44.0),
-        (TypeRole::TunerNote, 200.0),
     ];
     for (role, size) in scale {
         assert_eq!(type_size(role), size, "{role:?}");

@@ -11,6 +11,7 @@
 //! strip shows a 4 pt meter under its name.  Every change goes through a
 //! `RigWerkApp` method in `app/`; this module only draws.
 
+mod add_output;
 mod chain;
 mod density;
 mod input;
@@ -31,6 +32,28 @@ use crate::ui::widgets::{
 };
 
 use density::{density, DensityStep};
+
+/// The issue marker: a ring around the strip an issue's *Show* selected.
+fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issues::IssueCard)]) {
+    use crate::app::issues::IssueSeverity;
+    let now = std::time::Instant::now();
+    let colours = palette(ui.ctx());
+    for (rect, card) in rects {
+        let Some((severity, strength)) = app.card_highlight(*card, now) else {
+            continue;
+        };
+        let colour = match severity {
+            IssueSeverity::Error => colours.error,
+            IssueSeverity::Warning => colours.warn,
+        };
+        ui.painter().rect_stroke(
+            rect.expand(1.5),
+            CornerRadius::same(5),
+            Stroke::new(2.0, colour.gamma_multiply(strength)),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
 
 /// The group labels' row.
 const LABEL_H: f32 = 20.0;
@@ -199,6 +222,15 @@ impl RigWerkApp {
         self.add_output_column(ui, add_output_rect);
 
         self.chrome.follow_stage = false;
+        let mut rings = vec![
+            (input_rect, crate::app::issues::IssueCard::Bridge),
+            (master_rect, crate::app::issues::IssueCard::Output),
+        ];
+        if let Some(first) = strip_rects(outputs_left, top, outputs, widths.output, strip_h).first()
+        {
+            rings.push((*first, crate::app::issues::IssueCard::Output));
+        }
+        issue_rings(self, ui, &rings);
         ui.allocate_rect(full, Sense::hover());
     }
 
@@ -302,10 +334,7 @@ impl RigWerkApp {
     fn add_output_column(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let blocked = self.add_output_disabled_reason().map(console_reason);
         let response = add_column(ui, rect, blocked, "Add output");
-        popover(ui, &response, |ui| {
-            ui.set_max_width(380.0);
-            self.add_output_inspector(ui);
-        });
+        popover(ui, &response, |ui| self.add_output_list(ui));
     }
 }
 

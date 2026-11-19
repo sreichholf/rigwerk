@@ -12,6 +12,7 @@
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 
+use crate::app::output_devices::MapEdit;
 use crate::app::output_devices::{OutputBadge, OutputDeviceRow};
 use crate::app::screen::format_ms;
 use crate::app::settings::{
@@ -23,7 +24,6 @@ use crate::audio::{
     PATH_TRIM_MAX_MS,
 };
 use crate::ui::fonts::Face;
-use crate::ui::pages::routing::outputs::MapEdit;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{chip, horizontal_meter, row_info, segmented};
 
@@ -94,7 +94,7 @@ impl RigWerkApp {
                     remove = true;
                 }
                 if row.clock {
-                    self.asio_panel_chip(ui, crate::audio::AsioPanelSide::Output, colours.accent);
+                    self.asio_panel_chip(ui, crate::audio::AsioPanelSide::Output);
                 }
             });
         });
@@ -758,3 +758,6 @@ fn map_cell(ui: &mut egui::Ui, on: bool, colours: &Palette) -> egui::Response {
     }
     response
 }
+
+#[cfg(test)]
+mod tests;

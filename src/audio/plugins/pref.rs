@@ -17,13 +17,6 @@ impl PluginFormat {
             Self::Clap => "CLAP",
         }
     }
-
-    pub fn short(self) -> &'static str {
-        match self {
-            Self::Vst3 => "V3",
-            Self::Clap => "CL",
-        }
-    }
 }
 
 /// A parameter value the person changed, kept with the effect so the plugin
@@ -244,12 +237,4 @@ pub struct PluginView {
     /// until it resumes.  False for a failed effect, which shows its error
     /// instead.
     pub paused: bool,
-}
-
-impl PluginView {
-    /// `· 64 smp` for an effect row, or `None` when the effect adds no
-    /// latency.
-    pub fn latency_label(&self) -> Option<String> {
-        (self.latency > 0).then(|| format!("· {} smp", self.latency))
-    }
 }

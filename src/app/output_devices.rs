@@ -1,21 +1,28 @@
 //! The output devices under the master, as plain rows.
 //!
-//! Mixer, Routing, and Live Issues read the same list.  A row is names,
+//! The console strips, the output sheet and the issues drawer read the same
+//! list.  A row is names,
 //! flags, and settings.  The colour of a device's state stays in `ui`.
-//! [`DeviceLevel`] is one row's live meter, from the smoothed per-channel
-//! meters the bridge updates each frame (`app/bridge.rs`).
 //! [`ExtraOutputReading`] is what an extra output's own stream really runs at,
 //! from the live snapshot.
 
+use crate::app::chain::ChainSelection;
 use crate::app::latency::output_mode_phrase;
 use crate::app::screen::{format_ms, Sheet};
+use crate::app::settings::ExtraOutputPref;
 use crate::app::RigWerkApp;
+#[cfg(target_os = "windows")]
+use crate::audio::VIRTUAL_OUTPUT_NAME;
 use crate::audio::{
-    low_bits, ChannelMap, EngineState, MapPreset, OutputDeviceSettings, DEVICE_LEVEL_MAX_DB,
-    DEVICE_LEVEL_MIN_DB, MAX_OUTPUT_CHANNELS, MAX_PATHS,
+    low_bits, ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
+    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_EXTRA_OUTPUTS,
+    MAX_OUTPUT_CHANNELS, MAX_PATHS, VIRTUAL_OUTPUT_ID,
 };
 
-/// One output device as the Mixer lists it.
+/// At the extra output cap.
+pub(crate) const ADD_DEVICE_HINT_FULL: &str = "Four extra outputs is the maximum for now";
+
+/// One output device as the console and its sheet list it.
 #[derive(Clone, Debug)]
 pub(crate) struct OutputDeviceRow {
     pub(crate) name: String,
@@ -39,17 +46,6 @@ pub(crate) struct OutputDeviceRow {
     /// Safety-limiter gain reduction, dB.  0 when the device is not
     /// limiting, and when the bridge is not running.
     pub(crate) reduction_db: f32,
-}
-
-/// One output device's live level, loudest channel, as the Live strip shows it.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct DeviceLevel {
-    pub(crate) name: String,
-    /// Smoothed and peak-held linear amplitude, as `meter_row` takes them.
-    pub(crate) meter: f32,
-    pub(crate) peak: f32,
-    /// The device's own mute.  The master mute already zeroes the meters.
-    pub(crate) mute: bool,
 }
 
 /// What one extra output's own stream runs at, from the live snapshot.
@@ -147,7 +143,7 @@ pub(crate) fn device_channel_count(reported: u32, inventory: usize) -> usize {
     channels.min(MAX_OUTPUT_CHANNELS)
 }
 
-/// Channels the Mixer offers for a click mask.  A native PipeWire node
+/// Channels the output sheet offers for a click mask.  A native PipeWire node
 /// (`pipewire:` id) is opened stereo: the playback stream and the duplex
 /// node both map two channels, even when the sink reports more.  A chip
 /// past channel 2 would toggle a lane that is never written.  A device
@@ -269,32 +265,6 @@ impl RigWerkApp {
             });
         }
         rows
-    }
-
-    /// Each output device's live level, in [`Self::output_device_rows`] order.
-    pub(crate) fn output_device_levels(&self) -> Vec<DeviceLevel> {
-        self.output_device_rows()
-            .into_iter()
-            .map(|row| {
-                let (meters, peaks): (&[f32], &[f32]) = match row.extra_output_index {
-                    None => (&self.meter_out_channels, &self.peak_out_channels),
-                    Some(index) => (
-                        self.meter_extra_output_channels
-                            .get(index)
-                            .map_or(&[], |meters| meters),
-                        self.peak_extra_output_channels
-                            .get(index)
-                            .map_or(&[], |peaks| peaks),
-                    ),
-                };
-                DeviceLevel {
-                    meter: loudest(meters, row.channels),
-                    peak: loudest(peaks, row.channels),
-                    mute: row.settings.mute,
-                    name: row.name,
-                }
-            })
-            .collect()
     }
 
     /// Output `device`'s strip badge (0 = clock output, then extra outputs).
@@ -491,3 +461,445 @@ impl RigWerkApp {
 
 #[cfg(test)]
 mod tests;
+
+/// What a device's map plays, in one line (`docs/ui-spec.md` §6.2), and
+/// whether nothing is routed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MapSummary {
+    pub(crate) text: String,
+    /// No side of the path reaches any of the device's channels.
+    pub(crate) nothing_routed: bool,
+    /// Nothing routed and unused channels are silent: the output plays
+    /// silence.  The only case the sheet and the drawer warn about.
+    pub(crate) silent: bool,
+}
+
+/// Pairs as *Out 1/2* (*L/R* on a stereo device, *swapped* when reversed),
+/// single channels as *Out 3 ← L*, and *rest mono copy* when unreached
+/// channels carry the average.  Follows the mapping rule
+/// (`ChannelMap::sides_at`), so a one-channel device reads *Out 1 ← mono*
+/// for any non-empty map.
+pub(crate) fn map_summary(
+    settings: &OutputDeviceSettings,
+    path: usize,
+    channels: usize,
+) -> MapSummary {
+    let channels = channels.min(MAX_OUTPUT_CHANNELS);
+    let map = settings.map(path);
+    let copy = settings.unused == UnusedChannels::MonoCopy;
+    if !map.reaches_any(channels) {
+        return MapSummary {
+            text: if copy {
+                "nothing routed · mono copy on all".to_owned()
+            } else {
+                "nothing routed · plays silence".to_owned()
+            },
+            nothing_routed: true,
+            silent: !copy,
+        };
+    }
+    let sides = |channel: usize| map.sides_at(channels, channel);
+    let mut parts = Vec::new();
+    let mut unreached = false;
+    let mut channel = 0;
+    while channel < channels {
+        if channel % 2 == 0 && channel + 1 < channels {
+            let pair = (sides(channel), sides(channel + 1));
+            let name = if channels == 2 {
+                "L/R".to_owned()
+            } else {
+                format!("Out {}/{}", channel + 1, channel + 2)
+            };
+            if pair == ((true, false), (false, true)) {
+                parts.push(name);
+                channel += 2;
+                continue;
+            }
+            if pair == ((false, true), (true, false)) {
+                parts.push(format!("{name} swapped"));
+                channel += 2;
+                continue;
+            }
+        }
+        let out = channel + 1;
+        match sides(channel) {
+            (true, true) => parts.push(format!("Out {out} ← mono")),
+            (true, false) => parts.push(format!("Out {out} ← L")),
+            (false, true) => parts.push(format!("Out {out} ← R")),
+            (false, false) => unreached = true,
+        }
+        channel += 1;
+    }
+    if unreached && copy {
+        parts.push("rest mono copy".to_owned());
+    }
+    MapSummary {
+        text: parts.join(" · "),
+        nothing_routed: false,
+        silent: false,
+    }
+}
+
+/// One edit of an output device's settings, asked for while drawing and
+/// applied after it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MapEdit {
+    /// Turn one matrix cell of a path on or off.
+    Cell {
+        slot: usize,
+        side: MixSide,
+        channel: usize,
+        on: bool,
+    },
+    /// A preset: the path's whole map.
+    Map { slot: usize, map: ChannelMap },
+    /// The path's level on the device; `commit` on a click or at the end of
+    /// a drag (only then is it logged).
+    Level {
+        slot: usize,
+        level_db: f32,
+        commit: bool,
+    },
+    /// The path's polarity on the device.
+    Invert { slot: usize, invert: bool },
+    /// The path's alignment trim on the device, ms.
+    Trim {
+        slot: usize,
+        trim_ms: f32,
+        commit: bool,
+    },
+    /// The device's align switch.
+    Align(bool),
+    /// What the device's unreached channels play.
+    Unused(UnusedChannels),
+}
+
+impl RigWerkApp {
+    /// The stored settings of output `device` (0 is the clock output).
+    pub(crate) fn output_settings_mut(
+        &mut self,
+        device: usize,
+    ) -> Option<&mut OutputDeviceSettings> {
+        if device == 0 {
+            Some(&mut self.clock_output)
+        } else {
+            self.extra_outputs
+                .get_mut(device - 1)
+                .map(|extra_output| &mut extra_output.settings)
+        }
+    }
+
+    /// Applies one edit of output `device` and logs it: a map edit with the
+    /// device's new map, a level or trim only when committed, polarity and
+    /// the align switch on their own lines.
+    pub(crate) fn apply_map_edit(&mut self, device: usize, edit: MapEdit) {
+        let Some(row) = self.output_device_rows().into_iter().nth(device) else {
+            return;
+        };
+        let multi = self.path_count() > 1;
+        let path_name = |app: &Self, slot: usize| {
+            app.paths
+                .get(slot)
+                .and_then(Option::as_ref)
+                .map_or_else(String::new, |path| path.name.clone())
+        };
+        let edit_entry = |app: &mut Self, slot: usize, change: &dyn Fn(&mut PathMapSettings)| {
+            let Some(mut entry) = app.device_path_map(device, slot) else {
+                return false;
+            };
+            change(&mut entry);
+            app.set_device_path_map(device, slot, entry);
+            true
+        };
+        match edit {
+            MapEdit::Cell {
+                slot,
+                side,
+                channel,
+                on,
+            } => {
+                if !edit_entry(self, slot, &|entry| entry.map.set(side, channel, on)) {
+                    return;
+                }
+                self.log_map(device, &row.name, row.channels, slot, multi);
+            }
+            MapEdit::Map { slot, map } => {
+                if !edit_entry(self, slot, &|entry| entry.map = map) {
+                    return;
+                }
+                self.log_map(device, &row.name, row.channels, slot, multi);
+            }
+            MapEdit::Level {
+                slot,
+                level_db,
+                commit,
+            } => {
+                if !edit_entry(self, slot, &|entry| entry.level_db = level_db) || !commit {
+                    return;
+                }
+                let level = self
+                    .device_path_map(device, slot)
+                    .map_or(level_db, |entry| entry.level_db);
+                self.push_log(
+                    format!(
+                        "{} level on {}: {}.",
+                        path_name(self, slot),
+                        row.name,
+                        level_text(level)
+                    ),
+                    crate::app::LogTone::Teal,
+                );
+            }
+            MapEdit::Invert { slot, invert } => {
+                if !edit_entry(self, slot, &|entry| entry.invert = invert) {
+                    return;
+                }
+                self.push_log(
+                    format!(
+                        "{} polarity on {}: {}.",
+                        path_name(self, slot),
+                        row.name,
+                        if invert { "flipped" } else { "normal" }
+                    ),
+                    if invert {
+                        crate::app::LogTone::Amber
+                    } else {
+                        crate::app::LogTone::Teal
+                    },
+                );
+            }
+            MapEdit::Trim {
+                slot,
+                trim_ms,
+                commit,
+            } => {
+                if !edit_entry(self, slot, &|entry| entry.trim_ms = trim_ms) || !commit {
+                    return;
+                }
+                let trim = self
+                    .device_path_map(device, slot)
+                    .map_or(trim_ms, |entry| entry.trim_ms);
+                self.push_log(
+                    format!(
+                        "{} trim on {}: {trim:+.1} ms.",
+                        path_name(self, slot),
+                        row.name
+                    ),
+                    crate::app::LogTone::Teal,
+                );
+            }
+            MapEdit::Align(align) => {
+                self.set_device_align(device, align);
+                self.push_log(
+                    format!(
+                        "{}: alignment {}.",
+                        row.name,
+                        if align {
+                            "on, every path waits for the slowest"
+                        } else {
+                            "off, each path plays as its chain finishes"
+                        }
+                    ),
+                    if align {
+                        crate::app::LogTone::Teal
+                    } else {
+                        crate::app::LogTone::Amber
+                    },
+                );
+            }
+            MapEdit::Unused(mode) => {
+                if let Some(settings) = self.output_settings_mut(device) {
+                    settings.unused = mode;
+                }
+                self.push_log(
+                    format!(
+                        "{}: unused channels {}.",
+                        row.name,
+                        match mode {
+                            UnusedChannels::Silent => "silent",
+                            UnusedChannels::MonoCopy => "play a mono copy",
+                        }
+                    ),
+                    crate::app::LogTone::Teal,
+                );
+            }
+        }
+    }
+
+    /// Logs a path's map on a device after an edit.
+    fn log_map(&mut self, device: usize, name: &str, channels: usize, slot: usize, multi: bool) {
+        let Some(settings) = self.device_settings().get(device).copied().copied() else {
+            return;
+        };
+        let summary = map_summary(&settings, slot, channels);
+        let prefix = match self.paths.get(slot).and_then(Option::as_ref) {
+            Some(path) if multi => format!("{name}: {}", path.name),
+            _ => name.to_owned(),
+        };
+        self.push_log(
+            format!("{prefix}: {}.", summary.text),
+            if summary.silent {
+                crate::app::LogTone::Amber
+            } else {
+                crate::app::LogTone::Teal
+            },
+        );
+    }
+}
+
+/// A level as the log writes it: one decimal and the real minus.
+fn level_text(db: f32) -> String {
+    let tenths = (db * 10.0).round();
+    if tenths == 0.0 {
+        "0.0 dB".to_owned()
+    } else if tenths < 0.0 {
+        format!("−{:.1} dB", -tenths / 10.0)
+    } else {
+        format!("+{:.1} dB", tenths / 10.0)
+    }
+}
+
+impl RigWerkApp {
+    /// Whether the clock output is a native PipeWire node (in-graph extra
+    /// outputs and RigWerk Out).
+    pub(crate) fn pipewire_extra_outputs_enabled(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            crate::audio::is_native_id(&self.selected_output().id)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// Whether extra outputs can be added for the current clock.
+    pub(crate) fn extra_outputs_enabled(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "windows"))
+    }
+
+    /// Why add is disabled, or `None` when it is enabled.
+    pub(crate) fn add_output_disabled_reason(&self) -> Option<&'static str> {
+        if !self.extra_outputs_enabled() {
+            Some("Extra output devices are not available on this platform")
+        } else if self.extra_outputs.len() >= MAX_EXTRA_OUTPUTS {
+            Some(ADD_DEVICE_HINT_FULL)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the clock output is an ASIO driver (extra outputs are still
+    /// WASAPI-only).
+    pub(crate) fn clock_is_asio(&self) -> bool {
+        self.selected_output().asio_clsid.is_some()
+    }
+
+    /// Removes an extra output live; the bridge keeps running.
+    pub(crate) fn remove_extra_output(&mut self, index: usize) {
+        if index < self.extra_outputs.len() {
+            self.extra_outputs.remove(index);
+            self.chain_selected = self
+                .chain_selected
+                .clamp_output(self.output_device_rows().len());
+        }
+    }
+
+    /// Adds a hardware extra output by inventory index, or RigWerk Out.
+    pub(crate) fn add_extra_output_device(&mut self, device_id: &str) {
+        if self.add_output_disabled_reason().is_some() {
+            return;
+        }
+        if device_id == VIRTUAL_OUTPUT_ID || device_id.starts_with("vbcable:") {
+            if self.extra_outputs.iter().any(|extra| extra.virtual_output) {
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if !self.pipewire_extra_outputs_enabled() {
+                    return;
+                }
+                let mut extra_output = ExtraOutputPref::virtual_output();
+                // A new device plays what the clock output plays, path by
+                // path, instead of every path summed on its default map.
+                extra_output.settings.path_map = self.clock_output.path_map;
+                self.extra_outputs.push(extra_output);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let Some(cable) = self
+                    .inventory
+                    .outputs
+                    .iter()
+                    .find(|device| crate::audio::is_vb_cable_render(&device.name))
+                    .cloned()
+                else {
+                    return;
+                };
+                self.extra_outputs.push(ExtraOutputPref {
+                    id: cable.id,
+                    backend: cable.backend,
+                    name: VIRTUAL_OUTPUT_NAME.to_owned(),
+                    virtual_output: true,
+                    virtual_output_on: true,
+                    // Plays what the clock output plays, path by path.
+                    settings: crate::audio::OutputDeviceSettings {
+                        path_map: self.clock_output.path_map,
+                        ..Default::default()
+                    },
+                    ..ExtraOutputPref::default()
+                });
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                let _ = device_id;
+                return;
+            }
+        } else {
+            if self.extra_outputs.iter().any(|extra| extra.id == device_id)
+                || self.selected_output().id == device_id
+            {
+                return;
+            }
+            let Some(device) = self
+                .inventory
+                .outputs
+                .iter()
+                .find(|device| device.id == device_id)
+                .cloned()
+            else {
+                return;
+            };
+            #[cfg(target_os = "linux")]
+            {
+                let pw_clock = self.pipewire_extra_outputs_enabled();
+                let is_pw = crate::audio::linux_node_name(&device.id).is_some();
+                // PipeWire clock: only PW sinks (in-graph).  ALSA/cpal clock:
+                // only generic (non-native) devices on their own streams.
+                if pw_clock != is_pw {
+                    return;
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // WASAPI shared-mode extra outputs only (no ASIO / DS / MME).
+                if device.asio_clsid.is_some() || !device.backend.eq_ignore_ascii_case("WASAPI") {
+                    return;
+                }
+            }
+            let settings = crate::audio::OutputDeviceSettings {
+                path_map: self.clock_output.path_map,
+                ..Default::default()
+            };
+            self.extra_outputs.push(ExtraOutputPref {
+                id: device.id,
+                backend: device.backend,
+                name: device.name,
+                settings,
+                ..ExtraOutputPref::default()
+            });
+        }
+        let index = self.extra_outputs.len(); // clock + this extra output
+        self.chain_selected = ChainSelection::OutputDevice(index);
+    }
+}

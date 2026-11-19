@@ -98,22 +98,6 @@ pub(crate) struct PathInfo {
     pub(crate) selected: bool,
 }
 
-impl PathInfo {
-    /// "3 stages · 1.3 ms" (plus " · muted"), the sidebar sub-line.
-    pub(crate) fn summary(&self) -> String {
-        let stages = if self.stages == 1 {
-            "1 stage".to_owned()
-        } else {
-            format!("{} stages", self.stages)
-        };
-        let mut text = format!("{stages} · {:.1} ms", self.latency_ms);
-        if self.mute {
-            text.push_str(" · muted");
-        }
-        text
-    }
-}
-
 /// The slot with the most DSP time of `(slot, average ns)`; the first of
 /// a tie.  `None` when nothing was measured.
 pub(crate) fn heaviest_path(times: &[(usize, u64)]) -> Option<usize> {
@@ -277,6 +261,17 @@ impl RigWerkApp {
         (0..MAX_PATHS).any(|slot| {
             self.paths[slot].is_none() && self.engine.path_state(slot) == PathState::Inactive
         })
+    }
+
+    /// Why another path does not fit, or `None` while one does.
+    pub(crate) fn add_path_blocker(&self) -> Option<&'static str> {
+        if self.can_add_path() {
+            None
+        } else if self.path_count() >= MAX_PATHS {
+            Some("Four paths is the most RigWerk runs.")
+        } else {
+            Some("A removed path is still fading out. Try again in a moment.")
+        }
     }
 
     /// The first palette colour no live path uses.
@@ -447,21 +442,11 @@ impl RigWerkApp {
         self.path_mut().mix.gate = gate;
     }
 
-    /// One cell of the edited path's input matrix.
-    pub(crate) fn set_path_route(&mut self, input: usize, side: usize, on: bool) {
-        self.path_mut().mix.routes[input][side] = on;
-    }
-
     /// Mono sum for one path slot.
     pub(crate) fn set_path_mono(&mut self, slot: usize, mono: bool) {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
             path.mix.mono = mono;
         }
-    }
-
-    /// Mono sum for the edited path.
-    pub(crate) fn set_edited_mono(&mut self, mono: bool) {
-        self.path_mut().mix.mono = mono;
     }
 
     /// The edited path's output-channel enables.

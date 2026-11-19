@@ -8,7 +8,6 @@ use super::{
     IssueKey, IssueSeverity, CARD_HIGHLIGHT_FOR, DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER,
     DROPOUT_BURST_WINDOW, DROPOUT_QUIET,
 };
-use crate::app::chain::ChainSelection;
 use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
 use crate::app::layouts::PathLayout;
 use crate::app::settings::{bridge_buffer_to_pref, ExtraOutputPref};
@@ -105,7 +104,10 @@ fn an_unmuted_path_no_device_plays_warns() {
         .iter()
         .any(|issue| issue.title == "Path 2 is routed nowhere audible"));
     app.apply_issue_action(issues[0].action);
-    assert!(app.page == Page::Routing);
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 0 })
+    );
 }
 
 #[test]
@@ -727,10 +729,12 @@ fn a_extra_output_being_retried_is_a_warning_that_shows_it_in_the_mixer() {
     assert_eq!(issue.place, "OUTPUT · USB Headphones");
     assert_eq!(issue.card, Some(IssueCard::Output));
     assert_eq!(issue.action, IssueAction::ShowExtraOutput(0));
-    assert_eq!(issue.action.label(), "Show in Mixer");
+    assert_eq!(issue.action.label(), "Show output");
     app.apply_issue_action(issue.action);
-    assert!(app.page == Page::Mixer);
-    assert_eq!(app.chain_selected, ChainSelection::OutputDevice(1));
+    assert_eq!(
+        app.chrome.sheet,
+        Some(crate::app::screen::Sheet::Output { output: 1 })
+    );
     app.refresh_issues();
     app.dismiss_issue(IssueKey::ExtraOutputRetrying(0));
     assert_eq!(app.issue_view().hidden, 1);

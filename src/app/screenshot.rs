@@ -97,11 +97,6 @@ impl RigWerkApp {
         self.frames += 1;
         if self.frames == 1 && self.screenshot.is_some() {
             self.apply_screenshot_routing();
-            // A setup that loads effects selects the last one; the stage a
-            // run asked for wins.
-            if let Some(stage) = super::initial_mixer_stage() {
-                self.select_chain(stage);
-            }
             self.open_sheet_for_screenshot();
             if screenshot_start() {
                 self.start_bridge();
@@ -170,7 +165,7 @@ impl RigWerkApp {
     /// latency on the driven path, aligned; `dualamp-off` applies Dual-amp
     /// with 64 samples on the second amp and the clock output's alignment
     /// off (the red warning); `live3` is `blend` plus an empty third path
-    /// (unmuted, routed nowhere: a Live Issues warning), for the Live page.
+    /// (unmuted, routed nowhere: an issues warning), for the console.
     /// `showcase` is the README setup: see [`Self::apply_screenshot_showcase`].
     /// `showcase4` adds two paths, every other sink as an extra output and
     /// a long chain (board 6): see [`Self::apply_screenshot_four_paths`].
@@ -202,7 +197,7 @@ impl RigWerkApp {
                 if setup == "live3" {
                     if let Some(added) = self.add_path() {
                         self.rename_path(added, "Stream");
-                        // Unmuted: routed nowhere, so Live Issues warns.
+                        // Unmuted: routed nowhere, so the issues drawer warns.
                         self.set_path_mute(added, false);
                     }
                     self.select_path(slots[0]);
@@ -268,7 +263,7 @@ impl RigWerkApp {
     /// stays selected.  A chain without plugin latency gets none faked.
     /// The plugin library is scanned too, so the Plugins page has a list.
     /// The metronome runs at 96 BPM in 4/4, clicking on the extra output only,
-    /// so the Mixer and Live show it in use.
+    /// so the console and the output sheet show it in use.
     fn apply_screenshot_showcase(&mut self) {
         self.begin_plugin_scan();
         let extra_output = self

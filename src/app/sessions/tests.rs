@@ -21,7 +21,7 @@ fn device(id: &str, name: &str, backend: &str) -> DeviceItem {
 
 fn test_app() -> RigWerkApp {
     let mut app = crate::app::blank_app();
-    app.page = Page::Live;
+    app.page = Page::Console;
     app.inventory
         .asio
         .push(device("asio:focusrite", "Focusrite", "ASIO"));

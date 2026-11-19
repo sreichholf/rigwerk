@@ -727,11 +727,10 @@ fn a_run_opens_the_console_unless_it_names_another_page() {
     assert_eq!(page_for_run("diagnostics"), Page::Console);
     assert_eq!(page_for_run(" Tuner "), Page::Tuner);
     assert_eq!(page_for_run("devices"), Page::Setup);
-    // Classic pages stay reachable until their sheets land.
-    assert_eq!(page_for_run("live"), Page::Live);
-    assert_eq!(page_for_run("mixer"), Page::Mixer);
-    assert_eq!(page_for_run("routing"), Page::Routing);
-    assert_eq!(page_for_run("plugins"), Page::Plugins);
+    // The old page names open the console, which replaced them.
+    for key in ["live", "mixer", "routing", "plugins"] {
+        assert_eq!(page_for_run(key), Page::Console, "{key}");
+    }
 }
 
 #[test]
