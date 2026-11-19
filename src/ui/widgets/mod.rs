@@ -72,16 +72,6 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 2.2, color);
 }
 
-pub(crate) fn ellipsize(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_owned()
-    } else {
-        let mut output: String = text.chars().take(max.saturating_sub(1)).collect();
-        output.push('…');
-        output
-    }
-}
-
 /// A [`tab_button`] that explains itself on hover.
 pub(crate) fn hinted_tab(
     ui: &mut egui::Ui,

@@ -745,3 +745,15 @@ fn setup_and_the_tuner_return_to_the_console() {
     assert!(app.close_innermost());
     assert_eq!(app.page, Page::Console);
 }
+
+#[test]
+fn close_setup_clears_the_device_list_filters() {
+    use crate::app::screen::SetupSection;
+    let mut app = blank_app();
+    app.open_setup(SetupSection::Devices);
+    app.chrome.input_device_filter = "asio".into();
+    app.chrome.output_device_filter = "wasapi".into();
+    app.close_setup();
+    assert!(app.chrome.input_device_filter.is_empty());
+    assert!(app.chrome.output_device_filter.is_empty());
+}

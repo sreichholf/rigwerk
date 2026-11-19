@@ -1,7 +1,10 @@
 //! Input and clock output: the device lists, rate, buffer and driver line.
+//!
+//! Each panel keeps a Search field, pins the In use row above a nested
+//! scroll, and filters Direct / System by label and backend (with `*`).
 
 use eframe::egui;
-use egui::{Align2, RichText, Sense, Stroke, Vec2};
+use egui::{Align2, CornerRadius, FontId, RichText, Sense, Stroke, Vec2};
 
 use crate::app::devices::is_wrapper_driver;
 use crate::app::screen::SetupSection;
@@ -12,7 +15,75 @@ use crate::ui::fonts::Face;
 use crate::ui::pages::setup::driver_line::driver_line;
 use crate::ui::pages::setup::{hint, panel};
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{palette_focus, row_info, segmented};
+use crate::ui::widgets::{fit_text, palette_focus, row_info, segmented};
+
+/// Allocated height of one row, including the gap under it.
+pub(crate) const DEVICE_ROW_H: f32 = 30.0;
+const DEVICE_ROW_GAP: f32 = 2.0;
+/// Visible rows before the list scrolls.
+pub(crate) const DEVICE_SCROLL_AFTER: usize = 8;
+
+/// Viewport height for more than [`DEVICE_SCROLL_AFTER`] rows.  Fewer rows
+/// are not placed in a scroll area.
+pub(crate) fn device_list_scroll_height(rows: usize) -> Option<f32> {
+    (rows > DEVICE_SCROLL_AFTER).then_some(DEVICE_ROW_H * DEVICE_SCROLL_AFTER as f32)
+}
+
+/// Case-insensitive match on the device label or backend.  A blank filter
+/// matches all.  With no `*`, the filter is a substring; with `*`, it is a
+/// glob over any character sequence.
+pub(crate) fn device_matches_filter(label: &str, backend: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+    let filter = filter.to_lowercase();
+    let label = label.to_lowercase();
+    let backend = backend.to_lowercase();
+    text_matches(&label, &filter) || text_matches(&backend, &filter)
+}
+
+fn text_matches(haystack: &str, filter: &str) -> bool {
+    if filter.contains('*') {
+        glob_match(haystack, filter)
+    } else {
+        haystack.contains(filter)
+    }
+}
+
+fn glob_match(haystack: &str, pattern: &str) -> bool {
+    match pattern.split_once('*') {
+        None => haystack == pattern,
+        Some(("", rest)) => {
+            if rest.is_empty() {
+                true
+            } else {
+                (0..=haystack.len())
+                    .filter(|&index| haystack.is_char_boundary(index))
+                    .any(|index| glob_match(&haystack[index..], rest))
+            }
+        }
+        Some((head, rest)) => {
+            haystack.starts_with(head) && glob_match(&haystack[head.len()..], &format!("*{rest}"))
+        }
+    }
+}
+
+fn device_meta(device: &DeviceItem) -> String {
+    format!(
+        "{} · {} ch{}",
+        device.backend,
+        device.channels,
+        if device.demo { " · Demo device" } else { "" }
+    )
+}
+
+fn measure(ui: &egui::Ui, text: &str, font_id: &FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font_id.clone(), palette(ui.ctx()).text)
+        .size()
+        .x
+}
 
 pub(crate) fn device_row(
     ui: &mut egui::Ui,
@@ -24,7 +95,11 @@ pub(crate) fn device_row(
     let colours = palette(ui.ctx());
     let label = crate::audio::device_choice_label(device, peers);
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 52.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, DEVICE_ROW_H), Sense::click());
+    let card = egui::Rect::from_min_size(
+        rect.min,
+        Vec2::new(rect.width(), rect.height() - DEVICE_ROW_GAP),
+    );
     let fill = if selected {
         colours.accent_bg
     } else if response.hovered() {
@@ -32,28 +107,42 @@ pub(crate) fn device_row(
     } else {
         colours.bg
     };
-    ui.painter()
-        .rect_filled(rect, egui::CornerRadius::same(8), fill);
+    let radius = CornerRadius::same(5);
+    ui.painter().rect_filled(card, radius, fill);
     ui.painter().rect_stroke(
-        rect,
-        egui::CornerRadius::same(8),
+        card,
+        radius,
         Stroke::new(1.0, if selected { accent } else { colours.line }),
         egui::StrokeKind::Inside,
     );
-    let radio = egui::pos2(rect.left() + 15.0, rect.center().y);
+    let radio = egui::pos2(card.left() + 12.0, card.center().y);
     if selected {
-        ui.painter().circle_filled(radio, 5.5, colours.accent_bg);
-        ui.painter().circle_filled(radio, 2.6, accent);
+        ui.painter().circle_filled(radio, 5.0, colours.accent_bg);
+        ui.painter().circle_filled(radio, 2.4, accent);
     } else {
         ui.painter()
-            .circle_stroke(radio, 5.0, Stroke::new(1.0, colours.line2));
+            .circle_stroke(radio, 4.5, Stroke::new(1.0, colours.line2));
     }
-    let name_font = font(Face::Sans, TypeRole::Body);
+
+    let name_font = font(Face::Sans, TypeRole::Control);
     let meta_font = font(Face::Sans, TypeRole::Secondary);
+    let meta = device_meta(device);
+    let in_use = "In use";
+    let in_use_w = if selected {
+        measure(ui, in_use, &meta_font) + 8.0
+    } else {
+        0.0
+    };
+    let left = card.left() + 24.0;
+    let right = card.right() - 8.0 - in_use_w;
+    let meta_w = measure(ui, &meta, &meta_font);
+    let name_budget = (right - left - meta_w - 8.0).max(24.0);
+    let name_shown = fit_text(ui, &label, &name_font, name_budget);
+    let name_w = measure(ui, &name_shown, &name_font);
     ui.painter().text(
-        rect.left_center() + Vec2::new(28.0, -8.0),
+        egui::pos2(left, card.center().y),
         Align2::LEFT_CENTER,
-        crate::ui::widgets::ellipsize(&label, 34),
+        name_shown,
         name_font,
         if selected {
             colours.text
@@ -61,17 +150,14 @@ pub(crate) fn device_row(
             colours.text2
         },
     );
-    let meta = format!(
-        "{} · {} ch{}",
-        device.backend,
-        device.channels,
-        if device.demo { " · Demo device" } else { "" }
-    );
+    let meta_left = (left + name_w + 8.0).min(right - 4.0);
+    let meta_budget = (right - meta_left).max(0.0);
+    let meta_shown = fit_text(ui, &meta, &meta_font, meta_budget);
     ui.painter().text(
-        rect.left_center() + Vec2::new(28.0, 10.0),
+        egui::pos2(meta_left, card.center().y),
         Align2::LEFT_CENTER,
-        meta.clone(),
-        meta_font,
+        meta_shown,
+        meta_font.clone(),
         if device.demo {
             colours.warn
         } else {
@@ -80,14 +166,14 @@ pub(crate) fn device_row(
     );
     if selected {
         ui.painter().text(
-            rect.right_center() + Vec2::new(-11.0, 0.0),
+            egui::pos2(card.right() - 8.0, card.center().y),
             Align2::RIGHT_CENTER,
-            "In use",
-            font(Face::Sans, TypeRole::Secondary),
+            in_use,
+            meta_font,
             accent,
         );
     }
-    palette_focus(ui, &response, rect);
+    palette_focus(ui, &response, card);
     row_info(
         &response,
         egui::Role::RadioButton,
@@ -99,30 +185,129 @@ pub(crate) fn device_row(
     response.clicked()
 }
 
-fn device_group(
-    ui: &mut egui::Ui,
-    heading: &str,
-    devices: &[(usize, DeviceItem)],
-    selected_index: usize,
-    accent: egui::Color32,
-) -> Option<(usize, String)> {
-    if devices.is_empty() {
-        return None;
-    }
+fn device_search(ui: &mut egui::Ui, filter: &mut String, id_salt: &str) {
+    let response = ui.add(
+        egui::TextEdit::singleline(filter)
+            .id_salt(id_salt)
+            .hint_text("Search")
+            .desired_width(f32::INFINITY)
+            .font(font(Face::Sans, TypeRole::Body)),
+    );
+    row_info(
+        &response,
+        egui::Role::TextInput,
+        ui.is_enabled(),
+        "Search",
+        None,
+        None,
+    );
+}
+
+fn device_group_heading(ui: &mut egui::Ui, heading: &str) {
     let colours = palette(ui.ctx());
     ui.label(
         RichText::new(heading)
             .font(font(Face::Sans, TypeRole::Secondary))
             .color(colours.text3),
     );
+    ui.add_space(2.0);
+}
+
+fn filter_group<'a>(
+    devices: &'a [(usize, DeviceItem)],
+    peers: &[DeviceItem],
+    skip_index: usize,
+    filter: &str,
+) -> Vec<&'a (usize, DeviceItem)> {
+    devices
+        .iter()
+        .filter(|(index, device)| {
+            *index != skip_index
+                && device_matches_filter(
+                    &crate::audio::device_choice_label(device, peers),
+                    &device.backend,
+                    filter,
+                )
+        })
+        .collect()
+}
+
+/// Search, pinned In use, then filtered Direct / System (nested scroll).
+///
+/// `id_prefix` is `"setup_input"` or `"setup_output"`.  Returns
+/// `(inventory_index, name, from_direct)` when a row is picked.
+fn device_lists(
+    ui: &mut egui::Ui,
+    filter: &mut String,
+    id_prefix: &str,
+    low: &[(usize, DeviceItem)],
+    system: &[(usize, DeviceItem)],
+    selected: (usize, usize),
+    accent: egui::Color32,
+) -> Option<(usize, String, bool)> {
+    let (selected_direct, selected_system) = selected;
+    device_search(ui, filter, &format!("{id_prefix}_search"));
     ui.add_space(4.0);
-    let peers: Vec<DeviceItem> = devices.iter().map(|(_, device)| device.clone()).collect();
+
+    let low_peers: Vec<DeviceItem> = low.iter().map(|(_, device)| device.clone()).collect();
+    let system_peers: Vec<DeviceItem> = system.iter().map(|(_, device)| device.clone()).collect();
+
+    let pinned = low
+        .iter()
+        .find(|(index, _)| *index == selected_direct)
+        .map(|(index, device)| (*index, device, true, low_peers.as_slice()))
+        .or_else(|| {
+            system
+                .iter()
+                .find(|(index, _)| *index == selected_system)
+                .map(|(index, device)| (*index, device, false, system_peers.as_slice()))
+        });
+
     let mut picked = None;
-    for (index, device) in devices {
-        if device_row(ui, device, *index == selected_index, accent, &peers) {
-            picked = Some((*index, device.name.clone()));
+    if let Some((index, device, from_direct, peers)) = pinned {
+        if device_row(ui, device, true, accent, peers) {
+            picked = Some((index, device.name.clone(), from_direct));
         }
-        ui.add_space(3.0);
+        ui.add_space(2.0);
+    }
+
+    let low_shown = filter_group(low, &low_peers, selected_direct, filter);
+    let system_shown = filter_group(system, &system_peers, selected_system, filter);
+    let scroll_rows = low_shown.len() + system_shown.len();
+
+    let mut paint_groups = |ui: &mut egui::Ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if !low_shown.is_empty() {
+                device_group_heading(ui, "Direct");
+                for (index, device) in &low_shown {
+                    if device_row(ui, device, false, accent, &low_peers) {
+                        picked = Some((*index, device.name.clone(), true));
+                    }
+                }
+                if !system_shown.is_empty() {
+                    ui.add_space(4.0);
+                }
+            }
+            if !system_shown.is_empty() {
+                device_group_heading(ui, "System");
+                for (index, device) in &system_shown {
+                    if device_row(ui, device, false, accent, &system_peers) {
+                        picked = Some((*index, device.name.clone(), false));
+                    }
+                }
+            }
+        });
+    };
+
+    if let Some(height) = device_list_scroll_height(scroll_rows) {
+        egui::ScrollArea::vertical()
+            .id_salt(format!("{id_prefix}_devices"))
+            .max_height(height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| paint_groups(ui));
+    } else {
+        paint_groups(ui);
     }
     picked
 }
@@ -146,21 +331,29 @@ impl RigWerkApp {
             } else {
                 usize::MAX
             };
-            if let Some((index, name)) =
-                device_group(ui, "Direct", &low_inputs, selected_direct, accent)
-            {
-                self.asio_idx = index;
-                self.use_asio_input = true;
-                self.accept_asio_device();
-                self.push_log(format!("Input set to {name}."), LogTone::Teal);
-            }
-            if let Some((index, name)) =
-                device_group(ui, "System", &system_inputs, selected_system, accent)
-            {
-                self.input_idx = index;
-                self.use_asio_input = false;
-                self.accept_input_device();
-                self.push_log(format!("Input set to {name}."), LogTone::Blue);
+            let mut filter = std::mem::take(&mut self.chrome.input_device_filter);
+            let picked = device_lists(
+                ui,
+                &mut filter,
+                "setup_input",
+                &low_inputs,
+                &system_inputs,
+                (selected_direct, selected_system),
+                accent,
+            );
+            self.chrome.input_device_filter = filter;
+            if let Some((index, name, from_direct)) = picked {
+                if from_direct {
+                    self.asio_idx = index;
+                    self.use_asio_input = true;
+                    self.accept_asio_device();
+                    self.push_log(format!("Input set to {name}."), LogTone::Teal);
+                } else {
+                    self.input_idx = index;
+                    self.use_asio_input = false;
+                    self.accept_input_device();
+                    self.push_log(format!("Input set to {name}."), LogTone::Blue);
+                }
             }
             ui.add_space(8.0);
             self.input_rate_and_buffer(ui);
@@ -194,17 +387,19 @@ impl RigWerkApp {
                 .map(|index| (index, self.inventory.outputs[index].clone()))
                 .collect();
             let selected = self.output_idx;
-            if let Some((index, name)) = device_group(ui, "Direct", &low_outputs, selected, accent)
-            {
-                self.output_tab_low_latency = true;
-                self.output_idx = index;
-                self.accept_output_device();
-                self.push_log(format!("Clock output set to {name}."), LogTone::Blue);
-            }
-            if let Some((index, name)) =
-                device_group(ui, "System", &system_outputs, selected, accent)
-            {
-                self.output_tab_low_latency = false;
+            let mut filter = std::mem::take(&mut self.chrome.output_device_filter);
+            let picked = device_lists(
+                ui,
+                &mut filter,
+                "setup_output",
+                &low_outputs,
+                &system_outputs,
+                (selected, selected),
+                accent,
+            );
+            self.chrome.output_device_filter = filter;
+            if let Some((index, name, from_direct)) = picked {
+                self.output_tab_low_latency = from_direct;
                 self.output_idx = index;
                 self.accept_output_device();
                 self.push_log(format!("Clock output set to {name}."), LogTone::Blue);
