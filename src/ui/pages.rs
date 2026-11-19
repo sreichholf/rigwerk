@@ -1,5 +1,5 @@
-//! Classic pages, and Setup.  Live, Mixer, Routing, Plugins and Tuner stay
-//! until the console and the tuner screen replace them.
+//! Classic pages, the tuner screen and Setup.  Live, Mixer, Routing and
+//! Plugins stay until the console's sheets and the browser replace them.
 
 pub(crate) mod console;
 pub(crate) mod live;

@@ -138,9 +138,10 @@ opens them.
   drawer hosts live in `ui/shell.rs`. Menus are `ui/menus`, sheets
   `ui/sheets`, drawers `ui/drawers`. The console is the home screen
   (`ui/pages/console.rs`, one file per strip under `console/`). Setup
-  replaces Devices and Guide (`ui/pages/setup.rs`). Classic pages stay
-  under `ui/pages`, reached from *Classic ▸*, until each one is replaced. Shared controls live in `ui/widgets`. Colours and
-  type scale live in `ui/theme.rs`.
+  replaces Devices and Guide (`ui/pages/setup.rs`). The tuner is a screen
+  of its own (`ui/pages/tuner.rs`). Classic pages stay under `ui/pages`,
+  reached from *Classic ▸*, until each one is replaced. Shared controls
+  live in `ui/widgets`. Colours and type scale live in `ui/theme.rs`.
 - Platform code stays in `audio/linux` and `audio/win`, behind `cfg`.
   The `linux` module is also compiled for tests on other targets
   (`alsa`, `pipewire`). `duplex`, `hotplug`, and `native` stay

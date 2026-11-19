@@ -170,9 +170,8 @@ pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
 pub(crate) use shared::{ExtraOutputLink, ExtraOutputPlan, SCOPE_LEN};
 pub(crate) use tuner::{
-    cents_to_ratio, note_name, octave, tuning_index, StringReading, TuneState, TunerAnalysis,
-    TunerChannel, TunerFrame, TunerTolerance, Tuning, TuningGroup, CENTER_CENTS, DEFAULT_PRESET_ID,
-    TAP_COPY_FRAMES, TUNINGS,
+    cents_to_ratio, note_name, octave, tuning_index, TuneState, TunerAnalysis, TunerChannel,
+    TunerFrame, TunerTolerance, Tuning, TuningGroup, DEFAULT_PRESET_ID, TAP_COPY_FRAMES, TUNINGS,
 };
 #[cfg(test)]
 pub(crate) use tuner::{tuning_by_id, TunerReading};

@@ -486,7 +486,6 @@ const CLASSIC: &[(&str, Page)] = &[
     ("Mixer", Page::Mixer),
     ("Routing", Page::Routing),
     ("Plugins", Page::Plugins),
-    ("Tuner", Page::Tuner),
 ];
 
 fn bridge_label(state: EngineState) -> &'static str {

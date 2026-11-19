@@ -1,43 +1,29 @@
-//! Tuner: one note big, every string at once below it.  The analysis and the
-//! frame types live in `audio::tuner`; this module only draws the frame and
-//! edits the page settings.
+//! Tuner: one screen (`docs/ui-spec.md` §3.4).  The note very large, the
+//! cents and the state, the ±50 cent scale or the strobe, the string cells,
+//! and one bottom bar with every setting.  The title bar and the status bar
+//! stay, so the tuner is entered and left like any other screen.
+//!
+//! The analysis and the frame types live in `audio::tuner`; this module only
+//! draws the frame and edits the screen's settings.  While auto-mute holds
+//! the outputs, a strip under the title bar says so.
 
 mod gauge;
-mod rows;
 
 use eframe::egui;
-use egui::{
-    Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Rect, RichText,
-    Sense, Stroke, Vec2,
-};
+use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::app::tuner::{TunerDisplay, TunerListen, REFERENCE_MAX_HZ, REFERENCE_MIN_HZ};
 use crate::app::RigWerkApp;
 use crate::audio::{
     cents_to_ratio, note_name, octave, EngineState, TuneState, TunerChannel, TunerFrame,
-    TunerTolerance, Tuning, TuningGroup, CENTER_CENTS, TUNINGS,
+    TunerTolerance, Tuning, TuningGroup, TUNINGS,
 };
-use crate::ui::theme::ts;
-use crate::ui::theme::{
-    with_alpha, AMBER, BLUE, BORDER, BORDER_SOFT, CARD, CARD_DEEP, CARD_RAISED, DIM, MUTED, TEAL,
-    TEXT,
-};
-use crate::ui::widgets::{
-    card_fixed, micro_label, mono, pill, primary_button, progress_line, switch, tab_button,
-};
-
-/// Page content width the card split is tuned for (the 1240 px window).
-const REFERENCE_PAGE_W: f32 = 964.0;
-/// Settings card width at [`REFERENCE_PAGE_W`], and the floor it may shrink to.
-const SETTINGS_W: f32 = 344.0;
-const SETTINGS_MIN_W: f32 = 300.0;
-/// The main card never narrows past this; the settings card gives way first.
-const MAIN_MIN_W: f32 = 380.0;
-/// Height both side-by-side cards are drawn at, so their edges line up.
-const ROW_H: f32 = 396.0;
+use crate::ui::fonts::Face;
+use crate::ui::theme::{font, palette, Palette, TypeRole};
+use crate::ui::widgets::{chip, row_info, segmented};
 
 /// The settings the page was drawn with.  Copying them lets the frame stay
-/// borrowed while the card collects edits for after the draw.
+/// borrowed while the bar collects edits for after the draw.
 #[derive(Clone, Copy)]
 struct View {
     preset: Option<usize>,
@@ -79,7 +65,7 @@ struct Lead {
     target_hz: f32,
     detected_hz: f32,
     /// The analysed window's level and the reading's own clarity, so the
-    /// settings meters follow the same reading the big readout shows.
+    /// meters follow the same reading the big readout shows.
     level_db: f32,
     confidence: f32,
     state: TuneState,
@@ -103,12 +89,7 @@ impl Lead {
 
 impl RigWerkApp {
     pub(crate) fn tuner_page(&mut self, ui: &mut egui::Ui) {
-        let total = ui.available_width();
-        let gap = 10.0;
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let settings_w = (total * SETTINGS_W / REFERENCE_PAGE_W).clamp(SETTINGS_MIN_W, SETTINGS_W);
-        let main_w = (total - gap - settings_w).max(MAIN_MIN_W);
-
+        let colours = palette(ui.ctx());
         let view = View {
             preset: self.tuner.tuning,
             reference_hz: self.tuner.reference_hz,
@@ -129,48 +110,47 @@ impl RigWerkApp {
         let state = self.engine.state;
         let mut actions = Actions::default();
 
+        if muted {
+            muted_strip(ui, colours);
+            ui.add_space(6.0);
+        }
+
         {
             let frame = self.tuner.frame();
             let lead = lead_reading(frame, &view);
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                ui.allocate_ui_with_layout(
-                    Vec2::new(main_w, ROW_H),
-                    Layout::top_down(Align::LEFT),
-                    |ui| {
-                        ui.set_min_size(Vec2::new(main_w, ROW_H));
-                        card_fixed(ui, CARD, BORDER, ROW_H, |ui| {
-                            ui.set_width(main_w - 32.0);
-                            main_card(ui, frame, &view, &lead, active, state, &mut actions);
-                        });
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    Vec2::new(settings_w, ROW_H),
-                    Layout::top_down(Align::LEFT),
-                    |ui| {
-                        ui.set_min_size(Vec2::new(settings_w, ROW_H));
-                        card_fixed(ui, CARD, BORDER, ROW_H, |ui| {
-                            ui.set_width(settings_w - 32.0);
-                            settings_card(ui, &view, &lead, active, muted, &mut actions);
-                        });
-                    },
-                );
-            });
-            ui.add_space(14.0);
-            rows::all_strings_card(
-                ui,
-                total,
-                frame,
-                view.tuning(),
-                view.reference_hz,
-                view.tolerance.cents(),
-            );
+            readout(ui, &lead, view.tuning(), active, colours);
+            ui.add_space(4.0);
+            if active {
+                match view.display {
+                    TunerDisplay::Strobe => gauge::strobe(
+                        ui,
+                        lead.cents,
+                        lead.state,
+                        lead.valid,
+                        view.tolerance.cents(),
+                        colours,
+                    ),
+                    TunerDisplay::Needle => gauge::needle(
+                        ui,
+                        lead.cents,
+                        lead.state,
+                        lead.valid,
+                        view.tolerance.cents(),
+                        colours,
+                    ),
+                }
+            } else {
+                idle_panel(ui, state, &mut actions, colours);
+            }
+            ui.add_space(6.0);
+            level_and_confidence(ui, &lead, active, colours);
+            ui.add_space(8.0);
+            strings_section(ui, frame, view.tuning(), &lead, active, colours);
         }
 
+        ui.add_space(10.0);
+        bottom_bar(ui, &view, active, &mut actions, colours);
         self.apply_tuner_actions(actions);
-        ui.add_space(15.0);
-        self.activity_strip(ui, total);
     }
 
     fn apply_tuner_actions(&mut self, actions: Actions) {
@@ -203,67 +183,130 @@ impl RigWerkApp {
     }
 }
 
-fn main_card(
-    ui: &mut egui::Ui,
-    frame: &TunerFrame,
-    view: &View,
-    lead: &Lead,
-    active: bool,
-    state: EngineState,
-    actions: &mut Actions,
-) {
-    ui.spacing_mut().item_spacing.y = 4.0;
-    let tuning = view.tuning();
-    ui.horizontal(|ui| {
-        ui.label(micro_label("TUNER", TEAL));
-        ui.add_space(2.0);
-        let tag = match tuning {
-            Some(tuning) => format!(
-                "{} · {} STRINGS",
-                tuning.name.to_uppercase(),
-                tuning.strings.len()
-            ),
-            None => "CHROMATIC".to_owned(),
-        };
-        pill(ui, &tag, DIM);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            for display in [TunerDisplay::Strobe, TunerDisplay::Needle] {
-                let label = match display {
-                    TunerDisplay::Strobe => "Strobe",
-                    TunerDisplay::Needle => "Needle",
-                };
-                if tab_button(ui, label, view.display == display, TEAL).clicked() {
-                    actions.display = Some(display);
-                }
-            }
-        });
-    });
+/// The strip under the title bar while auto-mute holds the outputs.
+fn muted_strip(ui: &mut egui::Ui, colours: &Palette) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(4), colours.accent_bg);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(4),
+        Stroke::new(1.0, colours.accent),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        egui::pos2(rect.left() + 12.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        "Outputs and the metronome are muted while you tune",
+        font(Face::SansMedium, TypeRole::Secondary),
+        colours.accent_text,
+    );
+}
 
-    ui.add_space(2.0);
-    readout(ui, lead, tuning, active);
-    ui.add_space(4.0);
-    if active {
-        match view.display {
-            TunerDisplay::Strobe => gauge::strobe(
-                ui,
-                lead.cents,
-                lead.state,
-                lead.valid,
-                view.tolerance.cents(),
-            ),
-            TunerDisplay::Needle => gauge::needle(
-                ui,
-                lead.cents,
-                lead.state,
-                lead.valid,
-                view.tolerance.cents(),
-            ),
+/// The note, its octave, the target and heard frequencies, the cents and
+/// the state.
+fn readout(
+    ui: &mut egui::Ui,
+    lead: &Lead,
+    tuning: Option<&'static Tuning>,
+    active: bool,
+    colours: &Palette,
+) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 150.0), Sense::hover());
+    let painter = ui.painter();
+    let tint = |colour: Color32| {
+        if active {
+            colour
+        } else {
+            colour.gamma_multiply(0.55)
         }
-    } else {
-        idle_panel(ui, state, actions);
+    };
+    let colour = tint(state_colour(colours, lead.state));
+    let (name, octave_text) = match note_label(lead, tuning) {
+        Some((name, octave)) => (name.to_owned(), octave),
+        None => ("—".to_owned(), String::new()),
+    };
+    let letter = painter.layout_no_wrap(
+        name,
+        egui::FontId::new(104.0, Face::MonoMedium.family()),
+        tint(colours.text),
+    );
+    let letter_width = letter.size().x;
+    painter.galley(rect.left_top(), letter, tint(colours.text));
+    if lead.valid {
+        painter.text(
+            rect.left_top() + Vec2::new(letter_width + 4.0, 18.0),
+            Align2::LEFT_TOP,
+            octave_text,
+            font(Face::Mono, TypeRole::TunerString),
+            tint(colours.text3),
+        );
     }
-    ui.add_space(4.0);
-    strings_section(ui, frame, tuning, lead, active);
+
+    let target = if lead.valid {
+        format!("{:.2} Hz", lead.target_hz)
+    } else {
+        "—".to_owned()
+    };
+    let heard = if lead.valid {
+        format!("{:.2} Hz", lead.detected_hz)
+    } else {
+        "—".to_owned()
+    };
+    for (index, (label, value)) in [("Target", target), ("Heard", heard)].iter().enumerate() {
+        let y = rect.top() + 108.0 + index as f32 * 18.0;
+        painter.text(
+            egui::pos2(rect.left(), y),
+            Align2::LEFT_TOP,
+            *label,
+            font(Face::Sans, TypeRole::GridHeader),
+            tint(colours.text3),
+        );
+        painter.text(
+            egui::pos2(rect.left() + 52.0, y),
+            Align2::LEFT_TOP,
+            value,
+            font(Face::Mono, TypeRole::Secondary),
+            tint(colours.text2),
+        );
+    }
+
+    let cents = if lead.valid {
+        signed_cents(lead.cents)
+    } else {
+        "—".to_owned()
+    };
+    painter.text(
+        egui::pos2(rect.right(), rect.top()),
+        Align2::RIGHT_TOP,
+        cents,
+        font(Face::Mono, TypeRole::TunerCents),
+        colour,
+    );
+    painter.text(
+        egui::pos2(rect.right(), rect.top() + 56.0),
+        Align2::RIGHT_TOP,
+        state_text(lead.state),
+        font(Face::SansMedium, TypeRole::Title),
+        colour,
+    );
+}
+
+/// The note as the preset spells it, flats included; chromatic falls back to
+/// the sharp names.  The octave is the trailing digit of the preset name.
+fn note_label(lead: &Lead, tuning: Option<&'static Tuning>) -> Option<(&'static str, String)> {
+    if !lead.valid {
+        return None;
+    }
+    if let (Some(index), Some(tuning)) = (lead.string, tuning) {
+        if let Some((name, _)) = tuning.strings.get(index) {
+            if let Some(split) = name.find(|character: char| character.is_ascii_digit()) {
+                return Some((&name[..split], name[split..].to_owned()));
+            }
+        }
+    }
+    Some((note_name(lead.midi), octave(lead.midi).to_string()))
 }
 
 fn lead_reading(frame: &TunerFrame, view: &View) -> Lead {
@@ -303,131 +346,85 @@ fn lead_reading(frame: &TunerFrame, view: &View) -> Lead {
     }
 }
 
-fn readout(ui: &mut egui::Ui, lead: &Lead, tuning: Option<&'static Tuning>, active: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover());
-    let painter = ui.painter();
-    let tint = |color: Color32| {
-        if active {
-            color
+/// The level and the confidence as two thin bars under the scale.
+fn level_and_confidence(ui: &mut egui::Ui, lead: &Lead, active: bool, colours: &Palette) {
+    let level = if active && lead.level_db.is_finite() {
+        ((lead.level_db + 60.0) / 60.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    bar(
+        ui,
+        "Level",
+        &if active && lead.level_db.is_finite() {
+            format!("{:.1} dBFS", lead.level_db)
         } else {
-            with_alpha(color, 70)
-        }
-    };
-    let color = tint(state_color(lead.state));
-    let note_color = tint(TEXT);
-    let painter_text = |position: egui::Pos2,
-                        align: Align2,
-                        text: &str,
-                        size: f32,
-                        family: FontFamily,
-                        color: Color32| {
-        painter.text(
-            position,
-            align,
-            text.to_owned(),
-            FontId::new(ts(size), family),
-            color,
-        );
-    };
-
-    let (name, octave_text) = match note_label(lead, tuning) {
-        Some((name, octave)) => (name.to_owned(), octave),
-        None => ("—".to_owned(), String::new()),
-    };
-    let letter = painter.layout_no_wrap(
-        name,
-        FontId::new(ts(50.0), FontFamily::Monospace),
-        note_color,
+            "—".to_owned()
+        },
+        level,
+        colours.text2,
+        colours,
     );
-    let letter_width = letter.size().x;
-    painter.galley(rect.left_top(), letter, note_color);
-    if lead.valid {
-        painter_text(
-            rect.left_top() + Vec2::new(letter_width + 2.0, 4.0),
-            Align2::LEFT_TOP,
-            &octave_text,
-            19.0,
-            FontFamily::Monospace,
-            tint(MUTED),
-        );
-    }
-
-    let target = if lead.valid {
-        format!("{:.2} Hz", lead.target_hz)
+    let confidence = if active {
+        lead.confidence.clamp(0.0, 1.0)
     } else {
-        "—".to_owned()
+        0.0
     };
-    let detected = if lead.valid {
-        format!("{:.2} Hz", lead.detected_hz)
-    } else {
-        "—".to_owned()
-    };
-    for (index, (label, value)) in [("TARGET", target), ("DETECTED", detected)]
-        .iter()
-        .enumerate()
-    {
-        let y = rect.top() + 62.0 + index as f32 * 16.0;
-        painter_text(
-            egui::pos2(rect.left(), y),
-            Align2::LEFT_TOP,
-            label,
-            8.5,
-            FontFamily::Proportional,
-            tint(DIM),
-        );
-        painter_text(
-            egui::pos2(rect.left() + 58.0, y),
-            Align2::LEFT_TOP,
-            value,
-            9.5,
-            FontFamily::Monospace,
-            tint(MUTED),
-        );
-    }
-
-    let cents = if lead.valid {
-        signed_cents(lead.cents)
-    } else {
-        "—".to_owned()
-    };
-    painter_text(
-        egui::pos2(rect.right(), rect.top() + 2.0),
-        Align2::RIGHT_TOP,
-        &cents,
-        30.0,
-        FontFamily::Monospace,
-        color,
-    );
-    painter_text(
-        egui::pos2(rect.right(), rect.top() + 44.0),
-        Align2::RIGHT_TOP,
-        caption(lead.state),
-        8.5,
-        FontFamily::Proportional,
-        color,
-    );
-    paint_tag(
-        painter,
-        egui::pos2(rect.right(), rect.top() + 80.0),
-        state_label(lead.state),
-        color,
+    bar(
+        ui,
+        "Confidence",
+        &format!("{confidence:.2}"),
+        confidence,
+        colours.accent,
+        colours,
     );
 }
 
-/// The note as the preset spells it, flats included; chromatic falls back to
-/// the sharp names.  The octave is the trailing digit of the preset name.
-fn note_label(lead: &Lead, tuning: Option<&'static Tuning>) -> Option<(&'static str, String)> {
-    if !lead.valid {
-        return None;
-    }
-    if let (Some(index), Some(tuning)) = (lead.string, tuning) {
-        if let Some((name, _)) = tuning.strings.get(index) {
-            if let Some(split) = name.find(|character: char| character.is_ascii_digit()) {
-                return Some((&name[..split], name[split..].to_owned()));
-            }
+fn bar(
+    ui: &mut egui::Ui,
+    name: &str,
+    value: &str,
+    fraction: f32,
+    colour: egui::Color32,
+    colours: &Palette,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.allocate_ui_with_layout(
+            Vec2::new(88.0, 16.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.label(
+                    RichText::new(name)
+                        .font(font(Face::Sans, TypeRole::GridHeader))
+                        .color(colours.text3),
+                );
+            },
+        );
+        let width = (ui.available_width() - 74.0).max(40.0);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 6.0), Sense::hover());
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(2), colours.well);
+        if fraction > 0.0 {
+            let filled =
+                Rect::from_min_size(rect.min, Vec2::new(rect.width() * fraction, rect.height()));
+            ui.painter()
+                .rect_filled(filled, CornerRadius::same(2), colour);
         }
-    }
-    Some((note_name(lead.midi), octave(lead.midi).to_string()))
+        row_info(
+            &response,
+            egui::Role::Meter,
+            true,
+            name,
+            None,
+            Some(value.to_owned()),
+        );
+        ui.label(
+            RichText::new(value)
+                .font(font(Face::Mono, TypeRole::GridHeader))
+                .color(colours.text2),
+        );
+    });
 }
 
 fn strings_section(
@@ -436,13 +433,17 @@ fn strings_section(
     tuning: Option<&'static Tuning>,
     lead: &Lead,
     active: bool,
+    colours: &Palette,
 ) {
     ui.horizontal(|ui| {
-        let title = match tuning {
-            Some(tuning) => format!("STRINGS · {}", tuning.name.to_uppercase()),
-            None => "STRINGS".to_owned(),
-        };
-        ui.label(micro_label(&title, DIM));
+        ui.label(
+            RichText::new(match tuning {
+                Some(tuning) => format!("Strings · {}", tuning.name),
+                None => "Strings".to_owned(),
+            })
+            .font(font(Face::SansMedium, TypeRole::Secondary))
+            .color(colours.text3),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if tuning.is_some() {
                 let (tuned, total) = tuning_count(
@@ -451,74 +452,74 @@ fn strings_section(
                 );
                 ui.label(
                     RichText::new(format!("{tuned} / {total} in tune"))
-                        .size(ts(9.0))
-                        .color(TEAL),
+                        .font(font(Face::Mono, TypeRole::Secondary))
+                        .color(colours.accent_text),
                 );
             }
         });
     });
+    ui.add_space(4.0);
 
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 88.0), Sense::hover());
     let painter = ui.painter();
     let Some(tuning) = tuning else {
         painter.text(
             rect.left_center(),
             Align2::LEFT_CENTER,
-            "Chromatic mode — pick a tuning to see each string.",
-            FontId::new(ts(9.5), FontFamily::Proportional),
-            DIM,
+            "Pick a tuning to see each string",
+            font(Face::Sans, TypeRole::Body),
+            colours.text3,
         );
         return;
     };
 
     let gap = 6.0;
     let count = tuning.strings.len();
-    let width = ((rect.width() - gap * (count.saturating_sub(1)) as f32) / count as f32).max(36.0);
+    let width = ((rect.width() - gap * count.saturating_sub(1) as f32) / count as f32).max(36.0);
     for (index, (name, _)) in tuning.strings.iter().enumerate() {
         let left = rect.left() + index as f32 * (width + gap);
         if left + width > rect.right() + 0.5 {
             break;
         }
-        let chip = Rect::from_min_size(
+        let cell = Rect::from_min_size(
             egui::pos2(left, rect.top()),
             Vec2::new(width, rect.height()),
         );
         let row = frame.strings.get(index);
         let ghost = row.is_some_and(|row| row.harmonic_of.is_some());
         let state = row.map(|row| row.state).unwrap_or(TuneState::Silent);
-        let color = if ghost { DIM } else { state_color(state) };
+        let colour = if ghost {
+            colours.text3
+        } else {
+            state_colour(colours, state)
+        };
         let selected = lead.string == Some(index);
-        painter.rect_filled(
-            chip,
-            CornerRadius::same(9),
-            if selected { CARD_RAISED } else { CARD_DEEP },
-        );
+        painter.rect_filled(cell, CornerRadius::same(4), colours.slot);
         painter.rect_stroke(
-            chip,
-            CornerRadius::same(9),
+            cell,
+            CornerRadius::same(4),
             Stroke::new(
-                if selected { 1.4 } else { 1.0 },
-                if selected {
-                    color
-                } else if ghost {
-                    BORDER_SOFT
-                } else {
-                    with_alpha(color, 55)
-                },
+                if selected { 1.5 } else { 1.0 },
+                if selected { colour } else { colours.line2 },
             ),
             egui::StrokeKind::Inside,
         );
+        if selected {
+            painter.hline(
+                (cell.left() + 6.0)..=(cell.right() - 6.0),
+                cell.bottom() - 4.0,
+                Stroke::new(2.0, colours.accent),
+            );
+        }
         painter.text(
-            egui::pos2(chip.center().x, chip.top() + 9.0),
+            egui::pos2(cell.center().x, cell.top() + 8.0),
             Align2::CENTER_TOP,
-            *name,
-            FontId::new(ts(11.0), FontFamily::Monospace),
-            if !active {
-                with_alpha(TEXT, 90)
-            } else if ghost {
-                DIM
+            row.map(|row| row.name).unwrap_or(*name),
+            font(Face::Mono, TypeRole::TunerString),
+            if !active || ghost {
+                colours.text3
             } else {
-                TEXT
+                colours.text
             },
         );
         let cents = row
@@ -526,27 +527,59 @@ fn strings_section(
             .map(|row| signed_cents(row.cents))
             .unwrap_or_else(|| "—".to_owned());
         painter.text(
-            egui::pos2(chip.center().x, chip.top() + 32.0),
+            egui::pos2(cell.center().x, cell.top() + 34.0),
+            Align2::CENTER_TOP,
+            match row {
+                Some(row) => format!("{:.1} Hz", row.target_hz),
+                None => "—".to_owned(),
+            },
+            font(Face::Mono, TypeRole::GridHeader),
+            colours.text3,
+        );
+        painter.text(
+            egui::pos2(cell.center().x, cell.top() + 50.0),
             Align2::CENTER_TOP,
             cents,
-            FontId::new(ts(9.0), FontFamily::Monospace),
+            font(Face::Mono, TypeRole::GridHeader),
             if row.is_some_and(|row| row.sounding) {
-                color
+                colour
             } else {
-                DIM
+                colours.text3
             },
         );
+        painter.text(
+            egui::pos2(cell.center().x, cell.top() + 68.0),
+            Align2::CENTER_TOP,
+            if ghost {
+                "Harmonic".to_owned()
+            } else if row.is_some() {
+                state_text(state).to_owned()
+            } else {
+                "—".to_owned()
+            },
+            font(Face::Sans, TypeRole::GridHeader),
+            colour,
+        );
+        if ghost {
+            painter.text(
+                egui::pos2(cell.right() - 6.0, cell.top() + 6.0),
+                Align2::RIGHT_TOP,
+                "H",
+                font(Face::SansMedium, TypeRole::GridHeader),
+                colours.text3,
+            );
+        }
     }
 }
 
-fn idle_panel(ui: &mut egui::Ui, state: EngineState, actions: &mut Actions) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 146.0), Sense::hover());
+fn idle_panel(ui: &mut egui::Ui, state: EngineState, actions: &mut Actions, colours: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 150.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(10), CARD_DEEP);
+        .rect_filled(rect, CornerRadius::same(4), colours.strip);
     ui.painter().rect_stroke(
         rect,
-        CornerRadius::same(10),
-        Stroke::new(1.0, BORDER_SOFT),
+        CornerRadius::same(4),
+        Stroke::new(1.0, colours.line),
         egui::StrokeKind::Inside,
     );
     let mut child = ui.new_child(
@@ -555,340 +588,250 @@ fn idle_panel(ui: &mut egui::Ui, state: EngineState, actions: &mut Actions) {
             .layout(Layout::top_down(Align::Center)),
     );
     child.set_clip_rect(rect);
-    let (label, color) = match state {
-        EngineState::Starting => ("Linking…", BLUE),
-        EngineState::Stopping => ("Stopping…", AMBER),
-        _ => ("Start the bridge to tune", MUTED),
+    let (label, colour) = match state {
+        EngineState::Starting => ("Starting…", colours.accent_text),
+        EngineState::Stopping => ("Stopping…", colours.warn),
+        _ => ("Start the bridge to tune", colours.text2),
     };
     let can_start = matches!(state, EngineState::Idle | EngineState::Error);
-    child.add_space(if can_start { 34.0 } else { 58.0 });
-    child.label(RichText::new(label).size(ts(12.0)).color(color));
+    child.add_space(if can_start { 38.0 } else { 62.0 });
+    child.label(
+        RichText::new(label)
+            .font(font(Face::SansMedium, TypeRole::Title))
+            .color(colour),
+    );
     if can_start {
         child.add_space(8.0);
-        if primary_button(&mut child, "Start bridge", TEAL, 140.0) {
+        let response = child.add(
+            egui::Button::new(
+                RichText::new("Start")
+                    .font(font(Face::SansMedium, TypeRole::Control))
+                    .color(colours.bar),
+            )
+            .fill(colours.accent)
+            .stroke(Stroke::NONE)
+            .corner_radius(CornerRadius::same(4))
+            .min_size(Vec2::new(120.0, 32.0)),
+        );
+        if response.clicked() {
             actions.start = true;
         }
     }
 }
 
-fn settings_card(
+/// The bottom bar: tuning, A4, the in-tune band, the input, what to listen
+/// to, auto-mute, and the display.
+fn bottom_bar(
     ui: &mut egui::Ui,
     view: &View,
-    lead: &Lead,
     active: bool,
-    muted: bool,
     actions: &mut Actions,
+    colours: &Palette,
 ) {
-    ui.spacing_mut().item_spacing.y = 1.0;
-    ui.horizontal(|ui| {
-        ui.label(micro_label("SETTINGS", DIM));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(mono(format!("A4 {:.0}", view.reference_hz), DIM, 8.0));
-        });
-    });
-
-    ui.label(micro_label("TUNING", DIM));
-    let selected = match view.tuning() {
-        Some(tuning) => format!("{} · {}", group_prefix(tuning.group), tuning.name),
-        None => "Chromatic · any note".to_owned(),
-    };
     egui::Frame::new()
-        .fill(CARD_DEEP)
-        .stroke(Stroke::new(1.0, BORDER_SOFT))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(9, 2))
+        .fill(colours.strip)
+        .stroke(Stroke::new(1.0, colours.line))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
-            egui::ComboBox::from_id_salt("tuner_tuning")
-                .width(ui.available_width())
-                .height(360.0)
-                .selected_text(RichText::new(selected).size(ts(11.5)).color(TEXT))
-                .show_ui(ui, |ui| {
-                    ui.set_min_width(280.0);
-                    if ui
-                        .selectable_label(view.preset.is_none(), "Chromatic · any note")
-                        .clicked()
-                    {
-                        actions.preset = Some(None);
+            ui.spacing_mut().item_spacing.x = 16.0;
+            ui.horizontal_wrapped(|ui| {
+                group(ui, "Tuning", colours, |ui| {
+                    tuning_picker(ui, view, actions, colours);
+                });
+                group(ui, "A4", colours, |ui| {
+                    let step = |ui: &mut egui::Ui, label: &str| {
+                        let response = ui.add(
+                            egui::Button::new(
+                                RichText::new(label)
+                                    .font(font(Face::SansMedium, TypeRole::Control))
+                                    .color(colours.text),
+                            )
+                            .fill(colours.slot)
+                            .stroke(Stroke::new(1.0, colours.line2))
+                            .corner_radius(CornerRadius::same(4))
+                            .min_size(Vec2::splat(28.0)),
+                        );
+                        row_info(
+                            &response,
+                            egui::Role::Button,
+                            true,
+                            if label == "−" {
+                                "Lower A4"
+                            } else {
+                                "Raise A4"
+                            },
+                            None,
+                            None,
+                        );
+                        response.clicked()
+                    };
+                    if step(ui, "−") {
+                        actions.reference_hz = Some(
+                            (view.reference_hz - 1.0).clamp(REFERENCE_MIN_HZ, REFERENCE_MAX_HZ),
+                        );
                     }
-                    for group in TuningGroup::ALL {
-                        ui.add_space(3.0);
-                        ui.label(micro_label(group.label(), DIM));
-                        for (index, tuning) in TUNINGS
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, item)| item.group == group)
-                        {
-                            let label = format!("{} · {}", tuning.name, tuning.strings[0].0);
-                            if ui
-                                .selectable_label(view.preset == Some(index), label)
-                                .clicked()
-                            {
-                                actions.preset = Some(Some(index));
-                            }
-                        }
+                    ui.label(
+                        RichText::new(format!("{:.0}", view.reference_hz))
+                            .font(font(Face::MonoMedium, TypeRole::Control))
+                            .color(colours.text),
+                    );
+                    if step(ui, "+") {
+                        actions.reference_hz = Some(
+                            (view.reference_hz + 1.0).clamp(REFERENCE_MIN_HZ, REFERENCE_MAX_HZ),
+                        );
                     }
                 });
+                group(ui, "In tune within", colours, |ui| {
+                    let mut choice = TunerTolerance::ALL
+                        .iter()
+                        .position(|tolerance| *tolerance == view.tolerance)
+                        .unwrap_or(1);
+                    let labels: Vec<&str> = TunerTolerance::ALL
+                        .iter()
+                        .map(|tolerance| tolerance.label())
+                        .collect();
+                    if segmented(ui, &mut choice, &labels).changed() {
+                        actions.tolerance = TunerTolerance::ALL.get(choice).copied();
+                    }
+                });
+                group(ui, "Input", colours, |ui| {
+                    let mut choice = TunerChannel::ALL
+                        .iter()
+                        .position(|channel| *channel == view.channel)
+                        .unwrap_or(2);
+                    let labels: Vec<&str> = TunerChannel::ALL
+                        .iter()
+                        .map(|channel| channel.label())
+                        .collect();
+                    if segmented(ui, &mut choice, &labels).changed() {
+                        actions.channel = TunerChannel::ALL.get(choice).copied();
+                    }
+                });
+                group(ui, "Listen", colours, |ui| {
+                    let mut single = view.listen == TunerListen::Single;
+                    if chip(ui, &mut single, "Single note").changed() {
+                        actions.listen = Some(TunerListen::Single);
+                    }
+                    let mut all = view.listen == TunerListen::All;
+                    let response = ui.add_enabled_ui(view.preset.is_some(), |ui| {
+                        chip(ui, &mut all, "All strings")
+                    });
+                    if response.inner.changed() {
+                        actions.listen = Some(TunerListen::All);
+                    }
+                    if view.preset.is_none() {
+                        response
+                            .inner
+                            .on_disabled_hover_text("Pick a tuning to listen to each string");
+                    }
+                });
+                group(ui, "Mute while tuning", colours, |ui| {
+                    let mut on = view.auto_mute;
+                    let label = if on { "On" } else { "Off" };
+                    if chip(ui, &mut on, label).changed() {
+                        actions.auto_mute = Some(on);
+                    }
+                });
+                group(ui, "Display", colours, |ui| {
+                    let mut choice = usize::from(view.display == TunerDisplay::Needle);
+                    if segmented(ui, &mut choice, &["Needle", "Strobe"]).changed() {
+                        actions.display = Some(if choice == 0 {
+                            TunerDisplay::Needle
+                        } else {
+                            TunerDisplay::Strobe
+                        });
+                    }
+                });
+                if !active {
+                    ui.label(
+                        RichText::new("The gauge starts with the bridge")
+                            .font(font(Face::Sans, TypeRole::GridHeader))
+                            .color(colours.text3),
+                    );
+                }
+            });
         });
+}
 
-    ui.label(micro_label("LISTEN", DIM));
-    let tab_width = (ui.available_width() - 6.0) / 2.0;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        if wide_tab(
-            ui,
-            "Single note",
-            view.listen == TunerListen::Single,
-            TEAL,
-            tab_width,
-        ) {
-            actions.listen = Some(TunerListen::Single);
-        }
-        ui.add_enabled_ui(view.preset.is_some(), |ui| {
-            if wide_tab(
-                ui,
-                "All strings",
-                view.listen == TunerListen::All,
-                TEAL,
-                tab_width,
-            ) {
-                actions.listen = Some(TunerListen::All);
-            }
-        });
-    });
-
-    ui.horizontal(|ui| {
-        ui.label(micro_label("TOLERANCE", DIM));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "Green band {} · center ±{:.0}",
-                    view.tolerance.label(),
-                    CENTER_CENTS
-                ))
-                .size(ts(8.5))
-                .color(DIM),
-            );
-        });
-    });
-    let tab_width = (ui.available_width() - 12.0) / 3.0;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        for tolerance in TunerTolerance::ALL {
-            if wide_tab(
-                ui,
-                tolerance.label(),
-                view.tolerance == tolerance,
-                TEAL,
-                tab_width,
-            ) {
-                actions.tolerance = Some(tolerance);
-            }
-        }
-    });
-
-    ui.label(micro_label("REFERENCE", DIM));
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        if step_button(ui, "−") {
-            actions.reference_hz =
-                Some((view.reference_hz - 1.0).clamp(REFERENCE_MIN_HZ, REFERENCE_MAX_HZ));
-        }
-        ui.label(mono(format!("{:.1}", view.reference_hz), TEXT, 14.0));
-        ui.label(micro_label("Hz", DIM));
-        if step_button(ui, "+") {
-            actions.reference_hz =
-                Some((view.reference_hz + 1.0).clamp(REFERENCE_MIN_HZ, REFERENCE_MAX_HZ));
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(mono("A4", DIM, 8.0));
-        });
-    });
-
-    ui.label(micro_label("INPUT", DIM));
-    let channel_count = TunerChannel::ALL.len() as f32;
-    let tab_width = (ui.available_width() - 6.0 * (channel_count - 1.0)) / channel_count;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        for channel in [TunerChannel::Left, TunerChannel::Right, TunerChannel::Sum] {
-            if wide_tab(
-                ui,
-                channel.label(),
-                view.channel == channel,
-                TEAL,
-                tab_width,
-            ) {
-                actions.channel = Some(channel);
-            }
-        }
-    });
-
-    ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Auto-mute while tuning")
-                .size(ts(10.0))
-                .color(TEXT),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let mut on = view.auto_mute;
-            if switch(ui, &mut on, TEAL) {
-                actions.auto_mute = Some(on);
-            }
-        });
-    });
-    if muted {
+fn group(ui: &mut egui::Ui, label: &str, colours: &Palette, add: impl FnOnce(&mut egui::Ui)) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.label(RichText::new(label).font(small_font()).color(colours.text3));
         ui.horizontal(|ui| {
-            muted_speaker(ui);
-            ui.label(
-                RichText::new("Output muted by tuner")
-                    .size(ts(9.5))
-                    .color(AMBER),
-            );
+            ui.spacing_mut().item_spacing.x = 6.0;
+            add(ui);
         });
-    }
+    });
+}
 
-    let level = lead.level_db;
-    let (level_text, level_fraction) = if active && level.is_finite() {
-        (
-            format!("{level:.1} dBFS"),
-            ((level + 60.0) / 60.0).clamp(0.0, 1.0),
-        )
-    } else {
-        ("—".to_owned(), 0.0)
+/// A label in the bottom bar's scale.  Kept apart from the content font so a
+/// long bar never grows taller.
+fn small_font() -> egui::FontId {
+    font(Face::Sans, TypeRole::GridHeader)
+}
+
+fn tuning_picker(ui: &mut egui::Ui, view: &View, actions: &mut Actions, colours: &Palette) {
+    let selected = match view.tuning() {
+        Some(tuning) => format!("{} · {}", group_prefix(tuning.group), tuning.name),
+        None => "Chromatic".to_owned(),
     };
-    ui.add_space(2.0);
-    progress_line(ui, "LEVEL", &level_text, level_fraction, BLUE);
-    let confidence = if active {
-        lead.confidence.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    progress_line(
-        ui,
-        "CONFIDENCE",
-        &format!("{confidence:.2}"),
-        confidence,
-        TEAL,
-    );
-}
-
-fn wide_tab(ui: &mut egui::Ui, label: &str, selected: bool, color: Color32, width: f32) -> bool {
-    ui.add_sized(
-        [width, 22.0],
-        egui::Button::new(
-            RichText::new(label)
-                .size(ts(8.8))
-                .color(if selected { color } else { DIM })
-                .strong(),
+    egui::ComboBox::from_id_salt("tuner_tuning")
+        .width(220.0)
+        .height(380.0)
+        .selected_text(
+            RichText::new(selected)
+                .font(font(Face::Sans, TypeRole::Control))
+                .color(colours.text),
         )
-        .fill(if selected {
-            with_alpha(color, 20)
-        } else {
-            Color32::TRANSPARENT
-        })
-        .stroke(Stroke::new(
-            1.0,
-            if selected {
-                with_alpha(color, 60)
-            } else {
-                BORDER_SOFT
-            },
-        ))
-        .corner_radius(CornerRadius::same(5)),
-    )
-    .clicked()
+        .show_ui(ui, |ui| {
+            ui.set_min_width(260.0);
+            if ui
+                .selectable_label(view.preset.is_none(), "Chromatic · any note")
+                .clicked()
+            {
+                actions.preset = Some(None);
+            }
+            for group in TuningGroup::ALL {
+                ui.add_space(3.0);
+                ui.label(
+                    RichText::new(group.label())
+                        .font(font(Face::SansMedium, TypeRole::GridHeader))
+                        .color(colours.text3),
+                );
+                for (index, tuning) in TUNINGS
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| item.group == group)
+                {
+                    let label = format!("{} · {}", tuning.name, tuning.strings[0].0);
+                    if ui
+                        .selectable_label(view.preset == Some(index), label)
+                        .clicked()
+                    {
+                        actions.preset = Some(Some(index));
+                    }
+                }
+            }
+        });
 }
 
-fn step_button(ui: &mut egui::Ui, label: &str) -> bool {
-    ui.add_sized(
-        [24.0, 24.0],
-        egui::Button::new(RichText::new(label).size(ts(12.0)).color(TEXT))
-            .fill(CARD_DEEP)
-            .stroke(Stroke::new(1.0, BORDER_SOFT))
-            .corner_radius(CornerRadius::same(6)),
-    )
-    .clicked()
-}
-
-fn muted_speaker(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-    let painter = ui.painter();
-    let center = rect.center();
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(center.x - 4.5, center.y - 2.0),
-            egui::pos2(center.x - 1.5, center.y - 2.0),
-            egui::pos2(center.x + 1.5, center.y - 5.0),
-            egui::pos2(center.x + 1.5, center.y + 5.0),
-            egui::pos2(center.x - 1.5, center.y + 2.0),
-            egui::pos2(center.x - 4.5, center.y + 2.0),
-        ],
-        AMBER,
-        Stroke::NONE,
-    ));
-    painter.line_segment(
-        [
-            egui::pos2(center.x + 3.0, center.y - 3.0),
-            egui::pos2(center.x + 6.0, center.y + 3.0),
-        ],
-        Stroke::new(1.2, AMBER),
-    );
-    painter.line_segment(
-        [
-            egui::pos2(center.x + 6.0, center.y - 3.0),
-            egui::pos2(center.x + 3.0, center.y + 3.0),
-        ],
-        Stroke::new(1.2, AMBER),
-    );
-}
-
-fn tuning_count(frame: &TunerFrame, total: usize) -> (usize, usize) {
-    let tuned = frame
-        .strings
-        .iter()
-        .filter(|row| {
-            row.sounding
-                && row.harmonic_of.is_none()
-                && matches!(row.state, TuneState::Centered | TuneState::InTune)
-        })
-        .count();
-    (tuned, total)
-}
-
-pub(super) fn state_color(state: TuneState) -> Color32 {
+fn state_colour(colours: &Palette, state: TuneState) -> Color32 {
     match state {
-        TuneState::Centered | TuneState::InTune => TEAL,
-        TuneState::Flat => AMBER,
-        TuneState::Sharp => BLUE,
-        TuneState::Silent => DIM,
+        TuneState::Centered | TuneState::InTune => colours.accent,
+        TuneState::Flat => colours.warn,
+        TuneState::Sharp => colours.accent_text,
+        TuneState::Silent => colours.text3,
     }
 }
 
-pub(super) fn state_label(state: TuneState) -> &'static str {
+fn state_text(state: TuneState) -> &'static str {
     match state {
         TuneState::Centered => "Centered",
         TuneState::InTune => "In tune",
         TuneState::Flat => "Tune up",
         TuneState::Sharp => "Tune down",
         TuneState::Silent => "Listening",
-    }
-}
-
-fn caption(state: TuneState) -> &'static str {
-    match state {
-        TuneState::Centered => "CENTS · CENTERED",
-        TuneState::InTune => "CENTS · IN TUNE",
-        TuneState::Flat => "CENTS · FLAT",
-        TuneState::Sharp => "CENTS · SHARP",
-        TuneState::Silent => "CENTS",
-    }
-}
-
-fn group_prefix(group: TuningGroup) -> &'static str {
-    match group {
-        TuningGroup::Guitar6 => "Guitar",
-        TuningGroup::Extended => "Extended",
-        TuningGroup::Bass => "Bass",
     }
 }
 
@@ -909,31 +852,25 @@ pub(super) fn signed_cents(cents: f32) -> String {
     }
 }
 
-/// A right-aligned pill, for the painted readout and string rows.
-pub(super) fn paint_tag(
-    painter: &egui::Painter,
-    right_center: egui::Pos2,
-    text: &str,
-    color: Color32,
-) {
-    let galley = painter.layout_no_wrap(
-        text.to_owned(),
-        FontId::new(ts(9.0), FontFamily::Proportional),
-        color,
-    );
-    let size = Vec2::new(galley.size().x + 18.0, 22.0);
-    let rect = Rect::from_min_size(
-        egui::pos2(right_center.x - size.x, right_center.y - size.y / 2.0),
-        size,
-    );
-    painter.rect_filled(rect, CornerRadius::same(11), with_alpha(color, 22));
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(11),
-        Stroke::new(1.0, with_alpha(color, 60)),
-        egui::StrokeKind::Inside,
-    );
-    painter.galley(rect.center() - galley.size() / 2.0, galley, color);
+fn tuning_count(frame: &TunerFrame, total: usize) -> (usize, usize) {
+    let tuned = frame
+        .strings
+        .iter()
+        .filter(|row| {
+            row.sounding
+                && row.harmonic_of.is_none()
+                && matches!(row.state, TuneState::Centered | TuneState::InTune)
+        })
+        .count();
+    (tuned, total)
+}
+
+fn group_prefix(group: TuningGroup) -> &'static str {
+    match group {
+        TuningGroup::Guitar6 => "Guitar",
+        TuningGroup::Extended => "Extended",
+        TuningGroup::Bass => "Bass",
+    }
 }
 
 #[cfg(test)]

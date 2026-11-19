@@ -151,15 +151,6 @@ pub(crate) struct Tuning {
     pub strings: &'static [(&'static str, i16)],
 }
 
-impl Tuning {
-    pub(crate) fn string_hz(&self, index: usize, a4: f32) -> f32 {
-        self.strings
-            .get(index)
-            .map(|(_, midi)| midi_to_hz(*midi, a4))
-            .unwrap_or(0.0)
-    }
-}
-
 /// The static table.  Grouped by how the page lists them: six-string guitar
 /// tunings, extended range, then bass.
 pub(crate) const TUNINGS: &[Tuning] = &[

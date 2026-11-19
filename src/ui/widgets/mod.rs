@@ -152,26 +152,6 @@ pub(crate) fn mono(text: impl Into<String>, color: Color32, size: f32) -> RichTe
         .color(color)
 }
 
-pub(crate) fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(),
-        FontId::new(ts(9.5), FontFamily::Proportional),
-        color,
-    );
-    let size = Vec2::new(galley.size().x + 14.0, 19.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(9), with_alpha(color, 24));
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(9),
-        Stroke::new(1.0, with_alpha(color, 55)),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, color);
-}
-
 /// The chain's *Bypass all* pill.  `on` is the hot amber state; off stays
 /// a quiet outline.  The caller adds the tooltip.
 pub(crate) fn bypass_pill(ui: &mut egui::Ui, on: bool) -> egui::Response {
@@ -250,22 +230,6 @@ pub(crate) fn ellipsize(text: &str, max: usize) -> String {
         output.push('…');
         output
     }
-}
-
-pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, fill: Color32, width: f32) -> bool {
-    ui.add_sized(
-        [width, 34.0],
-        egui::Button::new(
-            RichText::new(label)
-                .size(ts(12.5))
-                .color(Color32::from_rgb(8, 16, 14))
-                .strong(),
-        )
-        .fill(fill)
-        .stroke(Stroke::new(1.0, with_alpha(Color32::WHITE, 28)))
-        .corner_radius(CornerRadius::same(9)),
-    )
-    .clicked()
 }
 
 pub(crate) fn ghost_button(ui: &mut egui::Ui, label: &str, width: f32) -> bool {
@@ -488,50 +452,6 @@ pub(crate) fn channel_chip(ui: &mut egui::Ui, label: &str, checked: &mut bool, c
     );
     if response.clicked() {
         *checked = !*checked;
-    }
-}
-
-/// A two-state switch: a 38 × 22 track with a 16 px knob.  Returns whether
-/// the click changed the value.
-pub(crate) fn switch(ui: &mut egui::Ui, value: &mut bool, color: Color32) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(38.0, 22.0), Sense::click());
-    let t = ui.ctx().animate_bool(response.id, *value);
-    ui.painter().rect_filled(
-        rect,
-        CornerRadius::same(11),
-        if *value {
-            with_alpha(color, 60)
-        } else {
-            CARD_DEEP
-        },
-    );
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(11),
-        Stroke::new(
-            1.0,
-            if *value {
-                with_alpha(color, 130)
-            } else {
-                BORDER_SOFT
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
-    let knob_x = rect.left() + 11.0 + (rect.width() - 22.0) * t;
-    ui.painter().circle_filled(
-        egui::pos2(knob_x, rect.center().y),
-        8.0,
-        if *value { color } else { MUTED },
-    );
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if response.clicked() {
-        *value = !*value;
-        true
-    } else {
-        false
     }
 }
 
