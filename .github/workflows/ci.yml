@@ -17,10 +17,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The mirror is slow (minutes for ~60 MB), so the downloaded .debs
+      # are cached.  Install still runs apt, so a stale cache only means a
+      # few fresh downloads; autoclean drops versions the mirror no longer
+      # has, which keeps the cache from growing.
+      - name: Restore apt archives
+        id: apt-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/apt-archives
+          key: apt-${{ runner.os }}-24.04-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: apt-${{ runner.os }}-24.04-
+
       - name: Install system libraries
         run: |
+          archives="$HOME/apt-archives"
+          mkdir -p "$archives/partial"
+          apt_opts=(-o "Dir::Cache::Archives=$archives" -o APT::Keep-Downloaded-Packages=true)
+          # man-db rebuilds its index after every install; nothing reads it.
+          sudo rm -f /var/lib/man-db/auto-update
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y --no-install-recommends "${apt_opts[@]}" \
             libasound2-dev \
             libpipewire-0.3-dev \
             libclang-dev \
@@ -47,6 +64,16 @@ jobs:
             libfreetype-dev \
             libfontconfig1-dev \
             libgtkmm-3.0-dev
+          sudo apt-get autoclean "${apt_opts[@]}"
+          sudo rm -rf "$archives/partial" "$archives/lock"
+          sudo chown -R "$USER" "$archives"
+
+      - name: Save apt archives
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       # rust-toolchain.toml pins 1.95.0 (MSRV) with rustfmt + clippy.
       - uses: dtolnay/rust-toolchain@master
