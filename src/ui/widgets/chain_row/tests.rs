@@ -202,3 +202,63 @@ fn the_effect_menu_removes_and_alt_up_moves() {
     });
     assert_eq!(event, Some(ChainEvent::MoveUp));
 }
+
+#[test]
+fn ctrl_enter_opens_the_focused_effect_editor() {
+    let ctx = egui::Context::default();
+    let sample = row("Room", ChainMark::Latency("5.0 ms"));
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        chain_row(ui, &sample).request_focus();
+    });
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        chain_row(ui, &sample);
+    });
+    let mut input = test_input(None);
+    input
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    input.events.push(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    let mut event = None;
+    let mut clicked = false;
+    let mut enter_left = false;
+    let _ = run_frame(&ctx, input, |ui| {
+        let response = chain_row(ui, &sample);
+        event = chain_event(&response);
+        clicked = response.clicked();
+        enter_left = ui.input(|input| input.key_pressed(egui::Key::Enter));
+    });
+    assert_eq!(event, Some(ChainEvent::Editor));
+    assert!(!clicked);
+    assert!(!enter_left);
+
+    let gate = row("Gate", ChainMark::Threshold("−24.0 dB"));
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        chain_row(ui, &gate).request_focus();
+    });
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        chain_row(ui, &gate);
+    });
+    let mut input = test_input(None);
+    input
+        .events
+        .push(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    input.events.push(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    let mut event = None;
+    let _ = run_frame(&ctx, input, |ui| {
+        let response = chain_row(ui, &gate);
+        event = chain_event(&response);
+    });
+    assert_ne!(event, Some(ChainEvent::Editor));
+}

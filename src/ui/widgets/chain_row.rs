@@ -8,9 +8,10 @@
 //! A paused effect draws a pause glyph.
 //!
 //! Click selects.  The LED bypasses.  Double-clicking an effect asks to
-//! open it.  An effect's right-click menu and Alt+↑ / Alt+↓ move it, and
-//! dragging it sets an [`EffectDrag`] payload.  The hover on that grip
-//! says that moving an effect closes its open editor.
+//! open it.  An effect's right-click menu and Alt+↑ / Alt+↓ move it,
+//! Ctrl+Enter opens its editor, and dragging it sets an [`EffectDrag`]
+//! payload.  The hover on that grip says that moving an effect closes its
+//! open editor.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};
@@ -93,7 +94,12 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
     } else {
         Sense::click()
     };
+    // Before allocation: Enter on a focused clickable row is also a click.
+    let open_editor = row.effect() && ctrl_enter(ui);
     let (rect, mut response) = ui.allocate_exact_size(Vec2::new(width, CHAIN_ROW_H), sense);
+    if response.dragged() {
+        response = response.on_hover_and_drag_cursor(egui::CursorIcon::Grabbing);
+    }
     let led = Rect::from_center_size(
         egui::pos2(rect.left() + 14.0, rect.center().y),
         Vec2::splat(14.0),
@@ -105,7 +111,9 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         .interact_pointer_pos()
         .or(led_response.interact_pointer_pos());
     let on_led = pointer.is_some_and(|pos| led.contains(pos));
-    if led_response.clicked() || (response.clicked() && on_led) {
+    if open_editor {
+        event = Some(ChainEvent::Editor);
+    } else if led_response.clicked() || (response.clicked() && on_led) {
         event = Some(ChainEvent::Bypass);
     } else if response.double_clicked() && row.effect() && !on_led {
         event = Some(ChainEvent::Open);
@@ -187,6 +195,14 @@ fn store_event(ui: &egui::Ui, id: egui::Id, event: Option<ChainEvent>) {
         }
         None => data.remove::<ChainEvent>(id),
     });
+}
+
+/// Ctrl+Enter on the widget about to be allocated, and only while it has
+/// focus.  The press is consumed so it is not also a click.
+fn ctrl_enter(ui: &egui::Ui) -> bool {
+    let id = ui.next_auto_id();
+    let focused = ui.input(|input| input.focused) && ui.memory(|memory| memory.has_focus(id));
+    focused && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
 }
 
 fn arrows(ui: &egui::Ui, response: &egui::Response) -> Option<ChainEvent> {
@@ -476,9 +492,6 @@ pub(crate) fn add_effect_row(ui: &mut egui::Ui, enabled: bool) -> egui::Response
             colours.text3
         },
     );
-    if enabled && response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     if !enabled {
         response = response.on_hover_text("32 effects is the most");
     }
