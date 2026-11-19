@@ -398,7 +398,10 @@ Right: time and preferences.
 
 - Meter bars of 5 pt (2–3 pt when a strip shows more than two channels), a
   scale (0, 6, 12, 24, 48), a fader cap of 24 × 12 pt on a 3 pt rail, and a
-  unity tick.
+  unity tick wider than the cap.
+- One taper on every fader: unity at 75 % of the travel whatever the range,
+  linear above it, bent below it so the travel near unity is finer than
+  near the floor.
 - Meter colours: `meter` up to −6 dBFS, `meter_hot` to −1, `error` above.
   Peak hold 1.5 s as a 2 pt line.  A clip latches red until clicked.
 - Drag 0.1 dB per pt near unity, Shift for fine, double-click for 0.0,
