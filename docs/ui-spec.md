@@ -354,8 +354,9 @@ Left: devices.
   and *System* (WASAPI, DirectSound, MME, PulseAudio).  Always-visible
   *Search* above the list (substring, or `*` wildcards on label and
   backend).  Denser single-line rows (~30 px) show driver, channels,
-  *In use*, *Demo device*.  After 8 rows the list scrolls; the *In use*
-  row stays pinned above the scroll.  Picking an ASIO row sets
+  *In use*, *Demo device*.  After 5 rows the list scrolls in a fixed
+  viewport (so the page scroll cannot crush it); the *In use* row stays
+  pinned above the scroll.  Picking an ASIO row sets
   `use_asio_input` and `asio_id`; any other sets `input_id` (today's two
   remembered inputs keep working).  Then *Rate* and *Buffer size*, the
   driver line (what the driver really runs, why it differs, hover for

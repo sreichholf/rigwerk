@@ -99,11 +99,27 @@ fn device_matches_filter_trims_the_query() {
 
 #[test]
 fn device_list_scroll_height_is_none_until_past_the_cap() {
-    assert_eq!(device_list_scroll_height(0), None);
-    assert_eq!(device_list_scroll_height(DEVICE_SCROLL_AFTER), None);
+    assert_eq!(device_list_scroll_height(0, false, false), None);
     assert_eq!(
-        device_list_scroll_height(DEVICE_SCROLL_AFTER + 1),
+        device_list_scroll_height(DEVICE_SCROLL_AFTER, true, true),
+        None
+    );
+    assert_eq!(
+        device_list_scroll_height(DEVICE_SCROLL_AFTER + 1, false, false),
         Some(DEVICE_ROW_H * DEVICE_SCROLL_AFTER as f32)
+    );
+}
+
+#[test]
+fn device_list_scroll_height_keeps_room_for_group_headings() {
+    let rows = DEVICE_ROW_H * DEVICE_SCROLL_AFTER as f32;
+    assert_eq!(
+        device_list_scroll_height(DEVICE_SCROLL_AFTER + 1, true, false),
+        Some(rows + 18.0)
+    );
+    assert_eq!(
+        device_list_scroll_height(DEVICE_SCROLL_AFTER + 1, true, true),
+        Some(rows + 18.0 + 18.0 + 4.0)
     );
 }
 

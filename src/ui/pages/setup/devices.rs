@@ -20,13 +20,29 @@ use crate::ui::widgets::{fit_text, palette_focus, row_info, segmented};
 /// Allocated height of one row, including the gap under it.
 pub(crate) const DEVICE_ROW_H: f32 = 30.0;
 const DEVICE_ROW_GAP: f32 = 2.0;
-/// Visible rows before the list scrolls.
-pub(crate) const DEVICE_SCROLL_AFTER: usize = 8;
+/// Direct / System heading plus the gap under it, inside the scroll.
+const DEVICE_HEADING_H: f32 = 18.0;
+/// Visible device rows before the list scrolls.
+pub(crate) const DEVICE_SCROLL_AFTER: usize = 5;
 
 /// Viewport height for more than [`DEVICE_SCROLL_AFTER`] rows.  Fewer rows
-/// are not placed in a scroll area.
-pub(crate) fn device_list_scroll_height(rows: usize) -> Option<f32> {
-    (rows > DEVICE_SCROLL_AFTER).then_some(DEVICE_ROW_H * DEVICE_SCROLL_AFTER as f32)
+/// are not placed in a scroll area.  `direct` / `system` add room for the
+/// group headings so five device rows stay visible.
+pub(crate) fn device_list_scroll_height(rows: usize, direct: bool, system: bool) -> Option<f32> {
+    if rows <= DEVICE_SCROLL_AFTER {
+        return None;
+    }
+    let mut height = DEVICE_ROW_H * DEVICE_SCROLL_AFTER as f32;
+    if direct {
+        height += DEVICE_HEADING_H;
+    }
+    if system {
+        height += DEVICE_HEADING_H;
+    }
+    if direct && system {
+        height += 4.0;
+    }
+    Some(height)
 }
 
 /// Case-insensitive match on the device label or backend.  A blank filter
@@ -285,22 +301,24 @@ fn device_lists(
     let low_shown = filter_group(low, &low_peers, selected_direct, filter);
     let system_shown = filter_group(system, &system_peers, selected_system, filter);
     let scroll_rows = low_shown.len() + system_shown.len();
+    let has_direct = !low_shown.is_empty();
+    let has_system = !system_shown.is_empty();
 
     let mut paint_groups = |ui: &mut egui::Ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            if !low_shown.is_empty() {
+            if has_direct {
                 device_group_heading(ui, "Direct");
                 for (index, device) in &low_shown {
                     if device_row(ui, device, false, accent, &low_peers) {
                         picked = Some((*index, device.name.clone(), true));
                     }
                 }
-                if !system_shown.is_empty() {
+                if has_system {
                     ui.add_space(4.0);
                 }
             }
-            if !system_shown.is_empty() {
+            if has_system {
                 device_group_heading(ui, "System");
                 for (index, device) in &system_shown {
                     if device_row(ui, device, false, accent, &system_peers) {
@@ -311,12 +329,23 @@ fn device_lists(
         });
     };
 
-    if let Some(height) = device_list_scroll_height(scroll_rows) {
-        egui::ScrollArea::vertical()
-            .id_salt(format!("{id_prefix}_devices"))
-            .max_height(height)
-            .auto_shrink([false, true])
-            .show(ui, |ui| paint_groups(ui));
+    if let Some(height) = device_list_scroll_height(scroll_rows, has_direct, has_system) {
+        // Force the viewport: Setup sits in the page ScrollArea, and a nested
+        // max_height alone collapses to the leftover strip (~1.5 rows).
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(width);
+                ui.set_min_height(height);
+                egui::ScrollArea::vertical()
+                    .id_salt(format!("{id_prefix}_devices"))
+                    .max_height(height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| paint_groups(ui));
+            },
+        );
     } else {
         paint_groups(ui);
     }
