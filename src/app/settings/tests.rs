@@ -161,7 +161,6 @@ fn session_missing_fields_still_loads() {
     assert_eq!(old.paths[0].output_channels, [true, true]);
     assert!(!old.paths[0].mono);
     assert!(!old.mute);
-    assert!(old.monitor);
     assert!(old.drift);
     assert!(old.low_latency_output);
     assert_eq!(old.wasapi_output_mode, Some(WasapiOutputMode::RealStyle));
@@ -389,7 +388,6 @@ fn a_full_session_round_trips_routes_gains_and_plugins() {
     full.output_channels = [false, true];
     full.mono = true;
     full.mute = true;
-    full.monitor = false;
     full.drift = false;
     full.low_latency_output = false;
     full.routes = [[false, true, false, true], [true, false, true, false]];
@@ -411,7 +409,6 @@ fn a_full_session_round_trips_routes_gains_and_plugins() {
     assert_eq!(back.output_gain, -12.0);
     assert_eq!(back.input_channels, [true, false]);
     assert!(back.mute);
-    assert!(!back.monitor);
     assert!(!back.drift);
     assert!(!back.low_latency_output);
     assert_eq!(back.bridge_buffer_mode, 2);
@@ -1691,7 +1688,6 @@ fn golden_session() -> Session {
         output_channels: [true, true],
         mono: false,
         mute: true,
-        monitor: false,
         drift: false,
         low_latency_output: false,
         wasapi_output_mode: Some(WasapiOutputMode::Exclusive),
@@ -1737,7 +1733,6 @@ fn golden_preferences() -> Preferences {
         mono: false,
         mute: true,
         drift: false,
-        monitor: false,
         low_latency_output: false,
         wasapi_output_mode: Some(WasapiOutputMode::RealStyle),
         routes: [[true, false, false, false], [false, true, false, false]],

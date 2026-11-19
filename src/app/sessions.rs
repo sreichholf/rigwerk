@@ -44,7 +44,6 @@ impl RigWerkApp {
             output_gain: self.output_gain,
             input_channels: self.input_channels,
             mute: self.mute,
-            monitor: self.monitor,
             drift: self.drift,
             low_latency_output: self.low_latency_output,
             wasapi_output_mode: Some(self.wasapi_output_mode),
@@ -170,7 +169,6 @@ impl RigWerkApp {
         self.output_gain = session.output_gain;
         self.input_channels = session.input_channels;
         self.mute = session.mute;
-        self.monitor = session.monitor;
         self.drift = session.drift;
         let mode = session.wasapi_output_mode.unwrap_or_else(|| {
             crate::audio::WasapiOutputMode::from_low_latency(session.low_latency_output)
@@ -231,7 +229,7 @@ impl RigWerkApp {
         self.install_paths(&session.paths, clock, extra_outputs, 0);
         self.apply_gains();
         self.engine
-            .set_master(self.mute, self.monitor, self.input_channels, self.drift);
+            .set_master(self.mute, self.input_channels, self.drift);
         self.apply_bridge_buffer();
         self.selected_session = Some(index);
         self.pending_delete = None;

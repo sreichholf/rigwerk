@@ -193,7 +193,6 @@ pub struct RigWerkApp {
     /// re-pushes the click only when the tuner's auto-mute changes it.
     pub(crate) metronome_pushed: Option<bool>,
     pub(crate) drift: bool,
-    pub(crate) monitor: bool,
     /// Linux low-latency output (PipeWire quantum / ALSA smallest period).
     /// On Windows this stays aligned with [`Self::wasapi_output_mode`] for
     /// older code paths and cross-platform preference saves.
@@ -435,7 +434,6 @@ impl RigWerkApp {
             input_channels: self.input_channels,
             mute: self.mute,
             drift: self.drift,
-            monitor: self.monitor,
             low_latency_output: self.low_latency_output,
             wasapi_output_mode: Some(if cfg!(target_os = "windows") {
                 self.wasapi_output_mode
@@ -553,7 +551,6 @@ impl RigWerkApp {
             chrome: screen::Chrome::at_launch(preferences.sheet_height),
             metronome_pushed: None,
             drift: preferences.drift,
-            monitor: preferences.monitor,
             low_latency_output: {
                 let mode = resolved_wasapi_output_mode(&preferences);
                 if cfg!(target_os = "windows") {
@@ -676,7 +673,7 @@ impl RigWerkApp {
         app.apply_metronome();
         app.engine.set_record_click(app.record_click);
         app.engine
-            .set_master(app.mute, app.monitor, app.input_channels, app.drift);
+            .set_master(app.mute, app.input_channels, app.drift);
         // Old files (and no file) load as one path.
         let (clock, extra_outputs) = (app.clock_output, app.extra_outputs.clone());
         app.install_paths(
@@ -819,7 +816,6 @@ pub(crate) fn blank_app() -> RigWerkApp {
         chrome: screen::Chrome::default(),
         metronome_pushed: None,
         drift: true,
-        monitor: true,
         low_latency_output: true,
         wasapi_output_mode: WasapiOutputMode::RealStyle,
         output_rate: 0,

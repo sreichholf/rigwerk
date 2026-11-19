@@ -71,7 +71,6 @@ pub(crate) struct Preferences {
     /// The master mute.
     pub(crate) mute: bool,
     pub(crate) drift: bool,
-    pub(crate) monitor: bool,
     /// Linux low-latency output, and the pre-exclusive Windows REAL-style
     /// switch.  Kept so older saves and Linux prefs round-trip.  On Windows
     /// the authoritative choice is [`Self::wasapi_output_mode`].
@@ -244,7 +243,6 @@ impl Default for Preferences {
             mono: false,
             mute: false,
             drift: true,
-            monitor: true,
             low_latency_output: true,
             wasapi_output_mode: Some(WasapiOutputMode::RealStyle),
             routes: [[true, false, false, false], [false, true, false, false]],

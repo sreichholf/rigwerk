@@ -186,7 +186,7 @@ impl RigWerkApp {
         // would leave those meters moving while the tuner layer holds.
         let output_muted = self.mute || self.tuner.auto_muted(self.page, self.engine.state);
         self.engine
-            .set_master(output_muted, self.monitor, self.input_channels, self.drift);
+            .set_master(output_muted, self.input_channels, self.drift);
         // The click skips the master mute, but not the tuner's layer.
         self.follow_metronome_audible();
         self.push_paths_to_engine();
@@ -545,12 +545,6 @@ impl RigWerkApp {
         if let Some(channel) = self.input_channels.get_mut(index) {
             *channel = on;
         }
-    }
-
-    /// Input monitoring.  Off, the master plays silence; the metronome
-    /// keeps playing.  The frame pushes it.
-    pub(crate) fn set_monitor(&mut self, on: bool) {
-        self.monitor = on;
     }
 
     /// Whether the click plays.  The master mute leaves it ticking, but the

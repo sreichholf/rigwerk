@@ -1,5 +1,4 @@
-//! The master strip: *Master*, the master level and *M*.  While *Monitor*
-//! is off it reads *Monitor off*, as the title bar does.
+//! The master strip: *Master*, the master level and *M*.
 
 use eframe::egui;
 use egui::{Rect, RichText, Sense};
@@ -27,14 +26,6 @@ impl RigWerkApp {
                 issue_marker(ui, severity, "The master has an issue");
             }
         });
-        if !self.monitor {
-            top.label(
-                RichText::new("Monitor off")
-                    .font(font(Face::SansMedium, TypeRole::Secondary))
-                    .color(colours.accent_text),
-            )
-            .on_hover_text("Input monitoring is off: the master plays silence");
-        }
         if layout.sheet_open {
             horizontal_meter(
                 &mut top,
@@ -57,7 +48,7 @@ impl RigWerkApp {
                 show_scale: true,
                 mute: Some(self.mute),
                 solo: None,
-                dim: self.mute || !self.monitor,
+                dim: self.mute,
             },
         );
         if let Some(level) = events.level {

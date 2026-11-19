@@ -121,7 +121,6 @@ pub(crate) struct Shared {
     pub(crate) input_gain: AtomicU32,
     pub(crate) output_gain: AtomicU32,
     pub(crate) mute: AtomicBool,
-    pub(crate) monitor: AtomicBool,
     /// Metronome transport.  The mixer reads these once per block.  The
     /// displayed beat is written by the mixer and read by the UI.
     pub(crate) metronome_running: AtomicBool,
@@ -244,7 +243,6 @@ impl Shared {
             input_gain: AtomicU32::new(1.0f32.to_bits()),
             output_gain: AtomicU32::new(1.0f32.to_bits()),
             mute: AtomicBool::new(false),
-            monitor: AtomicBool::new(true),
             metronome_running: AtomicBool::new(false),
             metronome_bpm: AtomicU32::new(super::metronome::METRONOME_BPM_DEFAULT.to_bits()),
             metronome_rhythm: AtomicU8::new(super::metronome::ClickRhythm::FourFour as u8),
@@ -299,8 +297,6 @@ impl Shared {
         );
         self.mute
             .store(previous.mute.load(Ordering::Relaxed), Ordering::Relaxed);
-        self.monitor
-            .store(previous.monitor.load(Ordering::Relaxed), Ordering::Relaxed);
         self.metronome_running.store(
             previous.metronome_running.load(Ordering::Relaxed),
             Ordering::Relaxed,
@@ -825,18 +821,11 @@ impl Shared {
         }
     }
 
-    /// The master and bridge-wide switches: master mute, monitor, input
-    /// channel enable and drift steering.  Per-path settings go through
+    /// The master and bridge-wide switches: master mute, input channel
+    /// enable and drift steering.  Per-path settings go through
     /// [`PathControls::set_mix`].
-    pub(crate) fn set_master(
-        &self,
-        mute: bool,
-        monitor: bool,
-        input_channels: [bool; 2],
-        drift: bool,
-    ) {
+    pub(crate) fn set_master(&self, mute: bool, input_channels: [bool; 2], drift: bool) {
         self.mute.store(mute, Ordering::Relaxed);
-        self.monitor.store(monitor, Ordering::Relaxed);
         self.input_enabled[0].store(input_channels[0], Ordering::Relaxed);
         self.input_enabled[1].store(input_channels[1], Ordering::Relaxed);
         self.drift_enabled.store(drift, Ordering::Relaxed);
@@ -1298,13 +1287,12 @@ impl Shared {
     pub(crate) fn set_mix(
         &self,
         mute: bool,
-        monitor: bool,
         mono: bool,
         input_channels: [bool; 2],
         output_channels: [bool; 2],
         drift: bool,
     ) {
-        self.set_master(mute, monitor, input_channels, drift);
+        self.set_master(mute, input_channels, drift);
         self.main_path().set_mono(mono);
         self.main_path().set_output_enabled(output_channels);
     }

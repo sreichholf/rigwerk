@@ -77,7 +77,7 @@ fn steady_mixer(signal: (f32, f32)) -> (OutputMixer, Shared) {
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
     shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
-    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    shared.set_mix(false, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
         ..EqSettings::default()
@@ -115,7 +115,7 @@ fn test_signal(frames: usize) -> (Vec<f32>, Vec<f32>) {
 fn busy_settings(shared: &Shared) {
     shared.set_source_rate(48_000);
     shared.set_bridge_buffer(BufferMode::Fixed, 2.0);
-    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    shared.set_mix(false, false, [true, true], [true, true], false);
     shared.set_routes([[true, false, true, false], [false, true, false, true]]);
     let mut pre = EqSettings::default();
     pre.bands[1].gain_db = 6.0;
@@ -381,26 +381,16 @@ fn mute_fades_out_and_a_new_level_fades_back_in() {
     let (mut mixer, shared) = steady_mixer((0.5, 0.0));
     let _adopted = render(&mut mixer, &shared, 16);
     store_gain(&shared, 0.5);
-    shared.set_mix(true, true, false, [true, true], [true, true], false);
+    shared.set_mix(true, false, [true, true], [true, true], false);
     let muted = render(&mut mixer, &shared, 320);
     assert!(muted[0][0] > 0.4);
     assert!(muted.last().unwrap()[0] == 0.0);
     assert!(muted.iter().all(|frame| frame[1] == 0.0));
 
-    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    shared.set_mix(false, false, [true, true], [true, true], false);
     let restored = render(&mut mixer, &shared, 320);
     assert!(restored[0][0] > 0.0 && restored[0][0] < 0.2);
     assert_eq!(restored.last().unwrap()[0], 0.25);
-}
-
-#[test]
-fn monitor_off_fades_to_silence() {
-    let (mut mixer, shared) = steady_mixer((0.5, 0.0));
-    let _adopted = render(&mut mixer, &shared, 16);
-    shared.set_mix(false, false, false, [true, true], [true, true], false);
-    let out = render(&mut mixer, &shared, 320);
-    assert!(out[0][0] > 0.4);
-    assert_eq!(out.last().unwrap()[0], 0.0);
 }
 
 #[test]
@@ -425,7 +415,7 @@ fn a_route_change_crossfades_and_leaves_other_taps_put() {
 fn disabling_a_channel_fades_that_tap_only() {
     let (mut mixer, shared) = steady_mixer((0.5, -0.25));
     let _adopted = render(&mut mixer, &shared, 16);
-    shared.set_mix(false, true, false, [true, true], [false, true], false);
+    shared.set_mix(false, false, [true, true], [false, true], false);
     let out = render(&mut mixer, &shared, 320);
     assert!(out.iter().all(|frame| frame[1] == -0.25));
     assert!(out[0][0] > 0.4);
@@ -448,7 +438,7 @@ fn render_blocks(mixer: &mut OutputMixer, shared: &Shared, blocks: usize) -> Vec
 
 fn dropout_fades_out(drift: bool) {
     let (mut mixer, shared) = steady_mixer((0.8, 0.8));
-    shared.set_mix(false, true, false, [true, true], [true, true], drift);
+    shared.set_mix(false, false, [true, true], [true, true], drift);
     // 5 000 frames drain in a little under 20 blocks; the 20th has a dropout
     // part way through.
     let out = render_blocks(&mut mixer, &shared, 24);
@@ -516,7 +506,7 @@ fn a_short_priming_fades_in_from_silence() {
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
     shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
-    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    shared.set_mix(false, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
         ..EqSettings::default()
@@ -590,7 +580,7 @@ fn golden_ring_render(hash: &mut Fnv) {
     let shared = Shared::new(48_000);
     shared.set_source_rate(44_100);
     shared.set_bridge_buffer(BufferMode::Fixed, 5.0);
-    shared.set_mix(false, true, false, [true, true], [true, true], true);
+    shared.set_mix(false, false, [true, true], [true, true], true);
     shared.set_routes([[true, false, true, false], [false, true, false, true]]);
     let mut pre = EqSettings::default();
     pre.bands[1].gain_db = 6.0;
@@ -617,8 +607,8 @@ fn golden_ring_render(hash: &mut Fnv) {
     }
     for block in 0..48 {
         match block {
-            8 => shared.set_mix(false, true, true, [true, true], [true, true], true),
-            12 => shared.set_mix(false, true, false, [true, true], [false, true], true),
+            8 => shared.set_mix(false, true, [true, true], [true, true], true),
+            12 => shared.set_mix(false, false, [true, true], [false, true], true),
             16 => {
                 gate.slot = GateSlot::Post;
                 shared.set_gate(gate);
@@ -634,8 +624,8 @@ fn golden_ring_render(hash: &mut Fnv) {
             }),
             24 => store_gain(&shared, 0.3),
             28 => shared.set_routes([[false, true, false, false], [true, false, false, true]]),
-            36 => shared.set_mix(true, true, false, [true, true], [true, true], true),
-            40 => shared.set_mix(false, true, false, [true, true], [true, true], false),
+            36 => shared.set_mix(true, false, [true, true], [true, true], true),
+            40 => shared.set_mix(false, false, [true, true], [true, true], false),
             _ => {}
         }
         // Blocks 30 and 31 starve the ring; block 33 catches up.
@@ -716,7 +706,7 @@ fn golden_direct_render(hash: &mut Fnv) {
                 &plan,
                 &[],
             ),
-            14 => shared.set_mix(false, true, true, [true, true], [true, true], false),
+            14 => shared.set_mix(false, true, [true, true], [true, true], false),
             18 => {
                 let mut pre = EqSettings::default();
                 pre.bands[0].gain_db = -6.0;
@@ -855,7 +845,7 @@ fn mono_crossfades_every_tap_to_the_average() {
     // Adopt the new route on its own before mono, so this test only
     // watches the mono crossfade.  One long block settles the route.
     let _routed = render(&mut mixer, &shared, 320);
-    shared.set_mix(false, true, true, [true, true], [true, true], false);
+    shared.set_mix(false, true, [true, true], [true, true], false);
     let out = render(&mut mixer, &shared, 320);
     assert!(out[0][0] > 0.4);
     assert_eq!(*out.last().unwrap(), [0.125; 4]);
@@ -1450,7 +1440,7 @@ fn a_calibration_click_leaves_on_the_channels_the_clock_map_plays() {
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
     shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
-    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    shared.set_mix(false, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
         ..EqSettings::default()
@@ -1511,7 +1501,7 @@ fn a_calibration_click_on_a_mono_output_uses_its_only_channel() {
     let shared = Shared::new(48_000);
     shared.set_source_rate(48_000);
     shared.set_bridge_buffer(BufferMode::Fixed, 100.0);
-    shared.set_mix(false, true, false, [true, true], [true, true], false);
+    shared.set_mix(false, false, [true, true], [true, true], false);
     let bypassed = EqSettings {
         enabled: false,
         ..EqSettings::default()

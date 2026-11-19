@@ -250,6 +250,4 @@ fn console_levels_are_clamped_and_switches_stored() {
     app.set_input_channel(1, false);
     assert_eq!(app.input_channels, [true, false]);
     app.set_input_channel(5, false);
-    app.set_monitor(false);
-    assert!(!app.monitor);
 }

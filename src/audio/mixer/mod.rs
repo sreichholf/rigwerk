@@ -13,7 +13,7 @@
 //!    a path whose plugins were restored but not opened yet stays silent
 //!    rather than playing dry.  A removed path whose fade reached silence is
 //!    moved to inactive here, at the end of the block.
-//! 4. The master (level, mute, monitor) scales each path's frame, before
+//! 4. The master (level, mute) scales each path's frame, before
 //!    the alignment: it is shared by every path, but a master change reaches
 //!    a delayed path up to its alignment delay later on that device.  (Kept
 //!    there so one path stays bit-identical to the chain before paths.)
@@ -171,8 +171,8 @@ pub(crate) struct OutputMixer {
     /// master is written here, and every device mapper reads it through its
     /// own alignment tap.
     lines: PathLines,
-    /// The master: mute, monitor and the output level folded into one
-    /// effective gain, ramped per sample so they compose without a step.
+    /// The master: mute and the output level folded into one effective
+    /// gain, ramped per sample so they compose without a step.
     gain: Ramp,
     /// The first block adopts the live master gain directly.
     gain_adopted: bool,
@@ -378,7 +378,7 @@ impl OutputMixer {
             timing.latency[slot] = path.latency_raw;
             path.reserve_block(frames);
         }
-        let silent = shared.mute.load(Ordering::Relaxed) || !shared.monitor.load(Ordering::Relaxed);
+        let silent = shared.mute.load(Ordering::Relaxed);
         let gain = if silent { 0.0 } else { shared.output_gain() };
         if self.gain_adopted {
             self.gain.set_target(gain, samples);
@@ -522,9 +522,9 @@ impl OutputMixer {
             self.calibration
                 .begin(&shared.calibration, self.output_rate, now);
         for index in 0..frames {
-            // Mute, monitor and the level are one ramp, so any of them can
-            // move without a step.  It scales each path before the device
-            // maps sum them, so one path is exactly `(x * gain) * weight`.
+            // Mute and the level are one ramp, so either can move without
+            // a step.  It scales each path before the device maps sum them,
+            // so one path is exactly `(x * gain) * weight`.
             let gain = self.gain.next();
             let (duck, click) = self
                 .calibration

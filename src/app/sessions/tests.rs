@@ -156,7 +156,6 @@ fn saving_and_applying_a_session_round_trips_the_mix() {
     app.path_mut().mix.output_enabled = [false, true];
     app.path_mut().mix.mono = true;
     app.mute = true;
-    app.monitor = false;
     app.drift = false;
     app.low_latency_output = false;
     app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
@@ -198,7 +197,6 @@ fn saving_and_applying_a_session_round_trips_the_mix() {
     app.path_mut().mix.routes = [[true, false, false, false], [false, true, false, false]];
     app.path_mut().mix.mono = false;
     app.mute = false;
-    app.monitor = true;
     app.drift = true;
     app.low_latency_output = true;
     app.wasapi_output_mode = crate::audio::WasapiOutputMode::RealStyle;
@@ -228,7 +226,6 @@ fn saving_and_applying_a_session_round_trips_the_mix() {
     assert_eq!(app.path().mix.output_enabled, [false, true]);
     assert!(app.path().mix.mono);
     assert!(app.mute);
-    assert!(!app.monitor);
     assert!(!app.drift);
     assert!(!app.low_latency_output);
     assert_eq!(

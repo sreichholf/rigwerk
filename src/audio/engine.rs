@@ -282,9 +282,9 @@ impl AudioEngine {
             .store(out_gain.to_bits(), Ordering::Relaxed);
     }
 
-    /// Master mute, monitor, input channel enable and drift steering.
-    pub fn set_master(&self, mute: bool, monitor: bool, input_channels: [bool; 2], drift: bool) {
-        self.shared.set_master(mute, monitor, input_channels, drift);
+    /// Master mute, input channel enable and drift steering.
+    pub fn set_master(&self, mute: bool, input_channels: [bool; 2], drift: bool) {
+        self.shared.set_master(mute, input_channels, drift);
     }
 
     /// Sets one path's routing, mono, enable, EQs, gate, level, mute and

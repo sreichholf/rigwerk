@@ -83,7 +83,6 @@ reads.
 | **Wet** | How much of an effect's output is mixed with the dry signal, 0–100 %. | mix (for an effect) |
 | **Bypass** | A stage passes the sound unchanged and keeps its latency.  *Bypass all* does that for every effect on a path. | BYP, FX |
 | **Master** | The sum of all paths, with one level and one mute, before the outputs. | Output stage, MIX, master mix |
-| **Monitor** | Input monitoring.  Off, the master plays silence like a mute, but the metronome keeps playing. | Direct monitor input |
 | **Level** | A fader's value in dB: path, master, output, and a path's level on one output. | volume, LEVEL HERE |
 | **Channel map** | Which path channels play on which output channels. | routing (noun), layer 2, map |
 | **Map preset** | A button that fills one path's channel map: *Out 1/2*, *Out 3/4*, *Out 1/2 + 3/4*, *Mono to all*, *Swap L/R*, *Clear*. | Stereo (for this), preset (alone) |
@@ -235,8 +234,7 @@ Left to right:
 - **Tuner** (Ctrl+T).
 - **Setup** (Ctrl+,).
 - **Mute**: mutes the master (Ctrl+Shift+M).  While muted it is filled with
-  the accent and reads *Muted*.  While *Monitor* is off it reads *Monitor
-  off* in the same style.
+  the accent and reads *Muted*.
 
 ### 3.2 Status bar (30 pt)
 
@@ -276,7 +274,6 @@ on paths), so the faders line up across the screen.
 - *In 1* / *In 2* toggles.
 - Scope.  A click opens the scope sheet: input and output overlaid, the
   peaks, and the sample count (today's Live scope).
-- *Monitor* toggle (see §2.1).
 - *Driver panel* when the input is ASIO.  Disabled until the bridge runs on
   that driver, with that reason on hover.
 - Input gain fader, stereo meter.
@@ -298,8 +295,7 @@ on paths), so the faders line up across the screen.
 - Level fader, M, S.  A muted path dims its fader and lights M.  While any
   path is soloed, the others dim.
 
-**Master strip**: *Master*, level fader, M.  While *Monitor* is off it
-reads *Monitor off*.
+**Master strip**: *Master*, level fader, M.
 
 **Output strip** (clock output first, then extra outputs in their order)
 
@@ -837,7 +833,6 @@ The rewrite is done when every row has been checked in the running app.
 | Signal path summary | The console |
 | Input → paths matrix | Source popover, path sheet |
 | Stereo / Mono sum | *Stereo* / *Mono* |
-| Direct monitor input | Input strip *Monitor*; master and title bar show *Monitor off* |
 | Automatic drift correction | Setup › Clock |
 | Path cards | Path strips |
 | Paths → outputs: device list, map presets, matrix, unused channels, mono rule | *Plays* dots, output sheet |
