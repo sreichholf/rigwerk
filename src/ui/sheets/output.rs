@@ -748,9 +748,6 @@ fn map_cell(ui: &mut egui::Ui, on: bool, colours: &Palette) -> egui::Response {
         ui.painter()
             .circle_filled(rect.center(), 3.5, colours.accent);
     }
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     response
 }
 

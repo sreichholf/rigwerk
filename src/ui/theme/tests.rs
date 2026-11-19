@@ -2,8 +2,8 @@ use eframe::egui;
 use egui::Color32;
 
 use super::{
-    font, palette, ts, type_size, Face, Palette, TypeRole, AMBER, CARD, CARD_RAISED, DARK, DIM,
-    LIGHT, MUTED, PATH_COLOURS, RED, TEAL, TEXT,
+    font, hover_cursor, palette, ts, type_size, Face, Palette, TypeRole, AMBER, CARD, DARK, DIM,
+    LIGHT, MUTED, TEAL, TEXT,
 };
 
 fn channel(c: u8) -> f64 {
@@ -40,10 +40,10 @@ fn dim_clears_wcag_aa_on_card_and_stays_quieter_than_muted() {
         on_card >= 4.5,
         "DIM on CARD is {on_card:.3}:1, below WCAG AA 4.5:1"
     );
-    let on_raised = contrast(DIM, CARD_RAISED);
+    let on_raised = contrast(DIM, DARK.slot);
     assert!(
         on_raised >= 4.5,
-        "DIM on CARD_RAISED is {on_raised:.3}:1, below WCAG AA 4.5:1"
+        "DIM on a slot is {on_raised:.3}:1, below WCAG AA 4.5:1"
     );
     assert!(on_card < contrast(MUTED, CARD));
     assert!(contrast(MUTED, CARD) < contrast(TEXT, CARD));
@@ -141,11 +141,8 @@ fn the_old_constants_are_the_dark_tokens() {
     assert_eq!(MUTED, DARK.text2);
     assert_eq!(DIM, DARK.text3);
     assert_eq!(CARD, DARK.strip);
-    assert_eq!(CARD_RAISED, DARK.slot);
     assert_eq!(TEAL, DARK.accent);
     assert_eq!(AMBER, DARK.warn);
-    assert_eq!(RED, DARK.error);
-    assert_eq!(PATH_COLOURS, DARK.path);
 }
 
 #[test]
@@ -175,6 +172,21 @@ fn font_names_the_bundled_family() {
         font(Face::SansSemibold, TypeRole::Heading).family,
         egui::FontFamily::Name("sans-semibold".into())
     );
+}
+
+#[test]
+fn a_click_is_a_hand_and_a_plain_drag_is_not() {
+    assert_eq!(
+        hover_cursor(egui::Sense::click(), true),
+        Some(egui::CursorIcon::PointingHand)
+    );
+    assert_eq!(
+        hover_cursor(egui::Sense::click_and_drag(), true),
+        Some(egui::CursorIcon::PointingHand)
+    );
+    assert_eq!(hover_cursor(egui::Sense::drag(), true), None);
+    assert_eq!(hover_cursor(egui::Sense::hover(), true), None);
+    assert_eq!(hover_cursor(egui::Sense::click(), false), None);
 }
 
 #[test]

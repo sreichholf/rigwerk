@@ -46,9 +46,6 @@ pub(crate) fn chip(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Respo
         *on = !*on;
         response.mark_changed();
     }
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     row_info(
         &response,
         egui::Role::Button,

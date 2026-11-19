@@ -204,9 +204,11 @@ pub(crate) fn format_ms(ms: f32) -> String {
 
 const LOG_LINE_FOR: Duration = Duration::from_secs(5);
 const PULSE_FOR: Duration = Duration::from_millis(700);
-/// The sheet is at least this tall, and never more than this.
+/// The sheet is at least this tall, unless the console area is shorter.
 pub(crate) const SHEET_MIN: f32 = 300.0;
-pub(crate) const SHEET_MAX: f32 = 900.0;
+/// Stored ceiling.  The drawn sheet stops at the console area, which is
+/// shorter than this on any window we open.
+pub(crate) const SHEET_MAX: f32 = 4096.0;
 
 impl RigWerkApp {
     pub(crate) fn open_diagnostics(&mut self) {
@@ -379,7 +381,11 @@ impl RigWerkApp {
         self.chrome.error_dismissed = true;
     }
 
-    /// The height to draw, from the saved value or 40 % of `available`.
+    /// The height to draw.  A saved height wins; otherwise 40 % of
+    /// `available`, the console area between the title bar and the status
+    /// bar.  Never below [`SHEET_MIN`] unless that area is shorter, and
+    /// never taller than the area, so a drag can take the space above the
+    /// sheet.
     pub(crate) fn sheet_draw_height(&self, available: f32) -> f32 {
         let height = if self.chrome.sheet_height > 0.0 {
             self.chrome.sheet_height

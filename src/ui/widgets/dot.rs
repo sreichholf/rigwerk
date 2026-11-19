@@ -26,9 +26,6 @@ pub(crate) fn path_dot(
         ui.painter()
             .circle_stroke(rect.center(), 3.5, Stroke::new(1.5, colour));
     }
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     row_info(
         &response,
         egui::Role::Button,

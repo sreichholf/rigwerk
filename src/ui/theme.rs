@@ -179,8 +179,6 @@ pub(crate) fn palette(ctx: &egui::Context) -> &'static Palette {
 
 // The dark tokens the controls that predate the palette still use.
 pub(crate) const CARD: Color32 = DARK.strip;
-pub(crate) const CARD_RAISED: Color32 = DARK.slot;
-pub(crate) const CARD_DEEP: Color32 = DARK.well;
 pub(crate) const BORDER: Color32 = DARK.line2;
 pub(crate) const BORDER_SOFT: Color32 = DARK.line;
 pub(crate) const TEXT: Color32 = DARK.text;
@@ -188,33 +186,9 @@ pub(crate) const MUTED: Color32 = DARK.text2;
 /// Secondary text, `text3`: about 5.4:1 on CARD and quieter than MUTED.
 pub(crate) const DIM: Color32 = DARK.text3;
 pub(crate) const TEAL: Color32 = DARK.accent;
-/// Outputs: their meters, traces and buttons.  The palette has no blue
-/// outside the path colours, so this is the meter colour.
-pub(crate) const BLUE: Color32 = DARK.meter;
 pub(crate) const AMBER: Color32 = DARK.warn;
-pub(crate) const RED: Color32 = DARK.error;
 /// OK states.  The palette's only green is the Green path colour.
 pub(crate) const GREEN: Color32 = DARK.path[2];
-
-/// Path palette.  The index is what `app` stores; this is the colour a row
-/// paints.  Same order as the saved `colour` field.
-pub(crate) const PATH_COLOURS: [Color32; crate::audio::MAX_PATHS] = DARK.path;
-
-pub(crate) fn path_colour(index: u8) -> Color32 {
-    PATH_COLOURS[index as usize % crate::audio::MAX_PATHS]
-}
-
-pub(crate) fn log_colour(tone: crate::app::LogTone) -> Color32 {
-    use crate::app::LogTone;
-    match tone {
-        LogTone::Muted => MUTED,
-        LogTone::Blue => BLUE,
-        LogTone::Amber => AMBER,
-        LogTone::Teal => TEAL,
-        LogTone::Green => GREEN,
-        LogTone::Red => RED,
-    }
-}
 
 /// Installs the fonts and both egui styles.  Which one is drawn is the
 /// theme preference, which `app` puts on the context at start.
@@ -223,6 +197,47 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
     for theme in [Theme::Dark, Theme::Light] {
         ctx.set_style_of(theme, style(theme));
     }
+    install_hover_cursor(ctx);
+}
+
+/// The pointer for a control that did not choose one.
+///
+/// Anything that can be clicked is a hand, a button and a painted row
+/// alike.  A fader, a slider, a curve handle and the sheet edge set their
+/// own cursor while they are hovered, and that choice wins over this one.
+pub(crate) fn hover_cursor(sense: egui::Sense, enabled: bool) -> Option<egui::CursorIcon> {
+    if enabled && sense.senses_click() {
+        Some(egui::CursorIcon::PointingHand)
+    } else {
+        None
+    }
+}
+
+fn install_hover_cursor(ctx: &egui::Context) {
+    let key = egui::Id::unique("rigwerk-hover-cursor");
+    if ctx.data(|data| data.get_temp::<bool>(key).unwrap_or(false)) {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(key, true));
+    ctx.on_end_pass(
+        "hover cursor",
+        std::sync::Arc::new(|ui| {
+            let ctx = ui.ctx().clone();
+            if ctx.output(|output| output.cursor_icon) != egui::CursorIcon::Default {
+                return;
+            }
+            let ids: Vec<egui::Id> =
+                ctx.interaction_snapshot(|snap| snap.hovered.iter().copied().collect());
+            let hand = ids.iter().any(|id| {
+                ctx.read_response(*id)
+                    .and_then(|response| hover_cursor(response.sense, response.enabled()))
+                    .is_some()
+            });
+            if hand {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+        }),
+    );
 }
 
 /// egui's style for `theme`, coloured from its palette.

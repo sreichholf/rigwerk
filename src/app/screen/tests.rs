@@ -108,6 +108,24 @@ fn a_sheet_closes_when_what_it_edits_is_gone() {
 }
 
 #[test]
+fn the_sheet_grows_into_the_console_and_stops_at_its_edges() {
+    let mut app = crate::app::blank_app();
+    assert_eq!(app.sheet_draw_height(1000.0), 400.0, "40 % until a drag");
+    app.chrome.sheet_height = 720.0;
+    assert_eq!(app.sheet_draw_height(1000.0), 720.0);
+    app.chrome.sheet_height = 2000.0;
+    assert_eq!(
+        app.sheet_draw_height(1000.0),
+        1000.0,
+        "the console area is the tallest"
+    );
+    app.chrome.sheet_height = 10.0;
+    assert_eq!(app.sheet_draw_height(1000.0), 300.0);
+    app.chrome.sheet_height = 10.0;
+    assert_eq!(app.sheet_draw_height(200.0), 200.0, "a short window wins");
+}
+
+#[test]
 fn sheet_keys_name_every_sheet() {
     assert_eq!(
         Sheet::from_key("eq", 2),

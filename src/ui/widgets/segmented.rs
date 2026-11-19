@@ -88,9 +88,6 @@ pub(crate) fn segmented(
             changed = true;
         }
         changed |= arrows(ui, &response, selected, index, options.len());
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
         row_info(
             &response,
             egui::Role::RadioButton,

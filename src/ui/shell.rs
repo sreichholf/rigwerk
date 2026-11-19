@@ -9,15 +9,15 @@ use std::time::Instant;
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
-use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MAX, SHEET_MIN};
+use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MIN};
 use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::theme::{font, palette, Face, TypeRole};
 
-const TITLE_H: f32 = 52.0;
-const STATUS_H: f32 = 30.0;
 const DRAWER_W: f32 = 460.0;
+/// How far the sheet's resize handle reaches, above the edge and inside it.
+const GRAB: f32 = 10.0;
 
 impl RigWerkApp {
     /// The ASIO control-panel button for one side of the bridge.  Hidden
@@ -386,41 +386,69 @@ impl RigWerkApp {
             return;
         }
         let colours = palette(ctx);
+        // `content_rect` is already the console, under the title bar and
+        // above the status bar.  The sheet grows up into that area.
         let screen = ctx.content_rect();
-        let available = (screen.height() - TITLE_H - STATUS_H).max(SHEET_MIN);
+        let available = screen.height().max(1.0);
         let mut height = self.sheet_draw_height(available);
-        let top = screen.bottom() - STATUS_H - height;
-        let rect = egui::Rect::from_min_max(
-            egui::pos2(screen.left(), top),
-            egui::pos2(screen.right(), screen.bottom() - STATUS_H),
-        );
+        let top = screen.bottom() - height;
+        // Half the grab sits in the gap above the sheet, so the edge
+        // itself is the handle.  At the top of the console it stays inside.
+        let overhang = GRAB.min((top - screen.top()).max(0.0));
+        let origin = egui::pos2(screen.left(), top - overhang);
         egui::Area::new(egui::Id::unique("sheet"))
             .order(egui::Order::Middle)
-            .fixed_pos(rect.min)
+            .fixed_pos(origin)
+            .constrain(false)
             .show(ctx, |ui| {
+                ui.set_width(screen.width());
+                let fill =
+                    egui::Rect::from_min_max(egui::pos2(screen.left(), top), screen.right_bottom());
+                // Under the header and the body, so a click on the empty
+                // part of the sheet does not land on a strip behind it.
+                let _ = ui.interact(fill, ui.scope_id().with("sheet_fill"), egui::Sense::click());
+                let (_grab_rect, grab) = ui.allocate_exact_size(
+                    Vec2::new(screen.width(), overhang + GRAB),
+                    egui::Sense::drag(),
+                );
+                // Drag only, so the shared hand rule does not cover it.
+                // The vertical resize is this edge's own cursor.
+                let grab = grab
+                    .on_hover_text("Drag to change the height")
+                    .on_hover_and_drag_cursor(egui::CursorIcon::ResizeVertical);
+                let reported = height;
+                grab.widget_info(move || {
+                    egui::WidgetInfo::slider(true, f64::from(reported), "Sheet height")
+                });
+                if grab.dragged() {
+                    let low = available.min(SHEET_MIN);
+                    height = (height - grab.drag_delta().y).clamp(low, available);
+                    self.chrome.sheet_height = height;
+                }
+                ui.painter()
+                    .rect_filled(fill, CornerRadius::ZERO, colours.sheet);
+                ui.painter()
+                    .hline(fill.x_range(), fill.top(), Stroke::new(1.0, colours.line));
+                let grip = egui::Rect::from_center_size(
+                    egui::pos2(fill.center().x, fill.top()),
+                    Vec2::new(36.0, 4.0),
+                );
+                ui.painter().rect_filled(
+                    grip,
+                    CornerRadius::same(2),
+                    if grab.hovered() || grab.dragged() {
+                        colours.text3
+                    } else {
+                        colours.line2
+                    },
+                );
                 egui::Frame::new()
-                    .fill(colours.sheet)
-                    .stroke(Stroke::new(1.0, colours.line))
-                    .inner_margin(Margin::symmetric(16, 8))
+                    .inner_margin(Margin::symmetric(16, 4))
                     .show(ui, |ui| {
-                        ui.set_width((rect.width() - 32.0).max(0.0));
-                        ui.set_min_height((height - 16.0).max(0.0));
-                        let handle = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 8.0),
-                            egui::Sense::drag(),
-                        );
-                        if handle.1.dragged() {
-                            height = (height - handle.1.drag_delta().y)
-                                .clamp(SHEET_MIN, SHEET_MAX.min(available));
-                            self.chrome.sheet_height = height;
-                        }
-                        ui.painter().hline(
-                            handle.0.x_range(),
-                            handle.0.center().y,
-                            Stroke::new(2.0, colours.line2),
-                        );
+                        ui.set_width((screen.width() - 32.0).max(0.0));
+                        ui.set_min_height((height - GRAB - 8.0).max(0.0));
                         self.sheet_header(ui);
-                        self.sheet_body(ui, (height - 64.0).max(40.0));
+                        self.sheet_body(ui, (height - 56.0).max(40.0));
                     });
             });
     }

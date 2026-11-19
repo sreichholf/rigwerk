@@ -9,6 +9,7 @@ use super::session::Session;
 use crate::app::appearance::{sanitize_ui_size, ThemeChoice, UI_SIZE_DEFAULT};
 use crate::app::latency::MeasuredLatency;
 use crate::app::plugins::{sanitize_effect_ids, EffectId};
+use crate::app::screen::{SHEET_MAX, SHEET_MIN};
 use crate::app::Page;
 use crate::audio::{
     BufferMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings, PluginPref,
@@ -171,7 +172,7 @@ pub(crate) struct Preferences {
     /// not written.  [`sanitize_preferences`] keeps ten.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) effect_recent: Vec<EffectId>,
-    /// Bottom sheet height in points.  0 means 40 % of the window.
+    /// Bottom sheet height in points.  0 means 40 % of the console area.
     /// Missing on older saves, and omitted while it is still the default.
     #[serde(default, skip_serializing_if = "sheet_height_unset")]
     pub(crate) sheet_height: f32,
@@ -688,7 +689,7 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     if !preferences.sheet_height.is_finite() || preferences.sheet_height < 0.0 {
         preferences.sheet_height = 0.0;
     } else if preferences.sheet_height > 0.0 {
-        preferences.sheet_height = preferences.sheet_height.clamp(300.0, 900.0);
+        preferences.sheet_height = preferences.sheet_height.clamp(SHEET_MIN, SHEET_MAX);
     }
     preferences.migrate_paths();
     sanitize_paths(&mut preferences.paths);
