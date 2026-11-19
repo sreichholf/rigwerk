@@ -217,53 +217,6 @@ impl RigWerkApp {
         self.apply_rack_actions(actions);
     }
 
-    /// The effect inspector for effect `index` of the selected path: what
-    /// the effect sheet shows until its own body lands.
-    pub(crate) fn effect_inspector(&mut self, ui: &mut egui::Ui, index: usize) {
-        let views = self.engine.plugin_views(self.selected_path);
-        let Some(view) = views.get(index) else {
-            return;
-        };
-        let mut actions = Vec::new();
-        plugin_inspector(ui, index, view, &mut actions);
-        self.apply_rack_actions(actions);
-    }
-
-    /// Output device `device`'s inspector: what the output sheet shows
-    /// until its own body lands.
-    pub(crate) fn output_device_panel(&mut self, ui: &mut egui::Ui, device: usize) {
-        let rows = self.output_device_rows();
-        let Some(row) = rows.get(device) else {
-            return;
-        };
-        let mut actions = Vec::new();
-        self.output_device_inspector(ui, row, &mut actions);
-        self.apply_rack_actions(actions);
-    }
-
-    /// The path stage inspector for path `slot`: what the path sheet shows
-    /// until its own body lands.
-    pub(crate) fn path_stage_panel(&mut self, ui: &mut egui::Ui, slot: usize) {
-        let infos = self.path_infos();
-        let Some(info) = infos.iter().find(|info| info.slot == slot) else {
-            return;
-        };
-        let meters = PathMeters {
-            level: self.meter_paths[slot],
-            peak: self.peak_paths[slot],
-        };
-        let mut path_actions = Vec::new();
-        path_inspector(
-            ui,
-            info,
-            &meters,
-            self.add_path_blocker().is_none(),
-            infos.len() > 1,
-            &mut path_actions,
-        );
-        self.apply_rack_actions(path_actions.into_iter().map(RackAction::Path).collect());
-    }
-
     fn apply_rack_actions(&mut self, actions: Vec<RackAction>) {
         for action in actions {
             match action {

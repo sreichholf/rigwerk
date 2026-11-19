@@ -32,21 +32,12 @@ const PATH_CARD_H: f32 = 176.0;
 
 /// The mono line under a layout's title.
 pub(crate) fn layout_caption(layout: PathLayout) -> &'static str {
-    match layout {
-        PathLayout::Single => "today · one chain",
-        PathLayout::DryWet => "split · no sum",
-        PathLayout::Blend => "sum · clean under drive",
-        PathLayout::DualAmp => "sum · two amps",
-        PathLayout::PerDevice => "each device own path",
-    }
+    layout.caption()
 }
 
 /// The tag shown when the routing matches no layout.
 pub(crate) fn custom_label(last: Option<PathLayout>) -> String {
-    match last {
-        Some(layout) => format!("Custom · edited from {}", layout.label()),
-        None => "Custom".to_owned(),
-    }
+    crate::app::layouts::custom_label(last)
 }
 
 /// The flow strip's Align node, from every output device's alignment:

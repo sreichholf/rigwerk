@@ -4,13 +4,14 @@
 //! The shell draws the sheet's frame, height and drag edge.  This file
 //! draws the header (the path dot and name, `/`, the item, *On* /
 //! *Bypass* for a stage, ‹ › through the chain, ×) and picks the body.
-//! A body that has not landed yet shows the classic inspector for the
-//! same thing, so no control is lost; each such arm is one line, marked
-//! `// Until <name>_sheet lands`.
 
 pub(crate) mod diagnostics;
+pub(crate) mod effect;
 pub(crate) mod eq;
 pub(crate) mod gate;
+pub(crate) mod output;
+pub(crate) mod path;
+pub(crate) mod scope;
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Stroke, Vec2};
@@ -131,50 +132,23 @@ impl RigWerkApp {
         let Some(sheet) = self.chrome.sheet else {
             return;
         };
-        // The classic inspectors edit the selected path.
+        // The sheet edits its own path.
         if let Some(path) = sheet.path() {
             self.select_path(path);
         }
-        let ctx = ui.ctx().clone();
         egui::ScrollArea::vertical()
             .id_salt(("sheet_body", format!("{sheet:?}")))
             .max_height(height)
             .auto_shrink([false, true])
-            .show(ui, |ui| {
-                let width = ui.available_width();
-                match sheet {
-                    Sheet::Diagnostics => self.diagnostics_page(ui),
-                    Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
-                    Sheet::Gate { path } => self.gate_sheet(ui, path),
-                    // Until effect_sheet lands
-                    Sheet::Effect { index, .. } => self.effect_inspector(ui, index),
-                    // Until path_sheet lands
-                    Sheet::Path { path } => self.path_stage_panel(ui, path),
-                    // Until output_sheet lands
-                    Sheet::Output { output } => self.output_panels(ui, output),
-                    // Until scope_sheet lands
-                    Sheet::Scope => self.scope_card(ui, &ctx, width),
-                }
+            .show(ui, |ui| match sheet {
+                Sheet::Diagnostics => self.diagnostics_page(ui),
+                Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
+                Sheet::Gate { path } => self.gate_sheet(ui, path),
+                Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
+                Sheet::Path { path } => self.path_sheet(ui, path),
+                Sheet::Output { output } => self.output_sheet(ui, output),
+                Sheet::Scope => self.scope_sheet(ui),
             });
-    }
-
-    /// The Mixer's inspector for output `output` beside Signal Routing's map
-    /// for it.
-    fn output_panels(&mut self, ui: &mut egui::Ui, output: usize) {
-        let width = ui.available_width();
-        let left = (width * 0.4).clamp(280.0, 460.0);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(Vec2::new(left, 0.0), Layout::top_down(Align::LEFT), |ui| {
-                ui.set_width(left);
-                self.output_device_panel(ui, output);
-            });
-            ui.add_space(16.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new((width - left - 24.0).max(200.0), 0.0),
-                Layout::top_down(Align::LEFT),
-                |ui| self.routing_device_panel(ui, output),
-            );
-        });
     }
 }
 

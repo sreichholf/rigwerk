@@ -304,7 +304,6 @@ impl RigWerkApp {
         let response = add_column(ui, rect, blocked, "Add output");
         popover(ui, &response, |ui| {
             ui.set_max_width(380.0);
-            // Until the add-output list of the output sheet lands.
             self.add_output_inspector(ui);
         });
     }

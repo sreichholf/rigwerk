@@ -48,6 +48,7 @@ fn every_strip_names_its_controls() {
         "Main level",
         "Mute Main",
         "Solo Main",
+        "Main path",
         "Master level",
         "Mute Master",
         "Main plays",

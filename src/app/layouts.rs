@@ -69,6 +69,17 @@ impl PathLayout {
         }
     }
 
+    /// The one-line summary beside the name in a menu.
+    pub(crate) fn caption(self) -> &'static str {
+        match self {
+            PathLayout::Single => "today · one chain",
+            PathLayout::DryWet => "split · no sum",
+            PathLayout::Blend => "sum · clean under drive",
+            PathLayout::DualAmp => "sum · two amps",
+            PathLayout::PerDevice => "each device own path",
+        }
+    }
+
     fn input_routes(self) -> [[bool; 4]; 2] {
         match self {
             PathLayout::Single | PathLayout::PerDevice => STEREO_IN,
@@ -106,6 +117,14 @@ impl PathLayout {
                 (if plays { stereo } else { none }, 0.0, false)
             }
         }
+    }
+}
+
+/// The tag shown when the routing matches no layout.
+pub(crate) fn custom_label(last: Option<PathLayout>) -> String {
+    match last {
+        Some(layout) => format!("Custom · edited from {}", layout.label()),
+        None => "Custom".to_owned(),
     }
 }
 

@@ -7,7 +7,7 @@ use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Vec2};
 
 use super::{level_block, menu_entry, strip_button, strip_parts, LevelBlock, StripLayout};
-use crate::app::screen::format_ms;
+use crate::app::screen::{format_ms, Sheet};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB};
@@ -34,7 +34,7 @@ impl RigWerkApp {
             return;
         };
         let colour = colours.path[path.colour as usize % colours.path.len()];
-        let (_, mut top, mut bottom) = strip_parts(ui, rect, layout, Sense::hover());
+        let (strip, mut top, mut bottom) = strip_parts(ui, rect, layout, Sense::click());
         let cap = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 3.0));
         ui.painter().rect_filled(
             cap,
@@ -128,6 +128,17 @@ impl RigWerkApp {
         }
         if events.solo {
             self.set_path_solo(slot, !path.mix.solo);
+        }
+        row_info(
+            &strip,
+            egui::Role::Button,
+            true,
+            format!("{} path", path.name),
+            None,
+            None,
+        );
+        if strip.clicked() {
+            self.open_sheet(Sheet::Path { path: slot });
         }
     }
 

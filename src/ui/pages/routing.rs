@@ -12,7 +12,7 @@
 //! monitoring).  With one path the page reads as before: Input -> Mix,
 //! Mix -> outputs, no per-path chrome.
 
-mod outputs;
+pub(crate) mod outputs;
 mod paths;
 mod sum;
 
