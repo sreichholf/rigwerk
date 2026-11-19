@@ -351,16 +351,20 @@ console.
 Left: devices.
 
 - **Input**: one device list grouped *Direct* (ASIO, PipeWire, ALSA hw:)
-  and *System* (WASAPI, DirectSound, MME, PulseAudio).  Rows show driver,
-  channels, *In use*, *Demo device*.  Picking an ASIO row sets
+  and *System* (WASAPI, DirectSound, MME, PulseAudio).  Always-visible
+  *Search* above the list (substring, or `*` wildcards on label and
+  backend).  Denser single-line rows (~30 px) show driver, channels,
+  *In use*, *Demo device*.  After 8 rows the list scrolls; the *In use*
+  row stays pinned above the scroll.  Picking an ASIO row sets
   `use_asio_input` and `asio_id`; any other sets `input_id` (today's two
   remembered inputs keep working).  Then *Rate* and *Buffer size*, the
   driver line (what the driver really runs, why it differs, hover for
   detail), and *Driver panel* for ASIO.
-- **Clock output**: the same list, *Rate* (*Match input* or a rate),
-  *Buffer size*, *Output mode* (§2.1; disabled with the reason for ASIO,
-  DirectSound and MME), the driver line, and *Check driver* while it has
-  not been checked.  On Windows the ASIO4ALL conflict warning shows here.
+- **Clock output**: the same list (Search, denser rows, nested scroll,
+  pinned *In use*), *Rate* (*Match input* or a rate), *Buffer size*,
+  *Output mode* (§2.1; disabled with the reason for ASIO, DirectSound
+  and MME), the driver line, and *Check driver* while it has not been
+  checked.  On Windows the ASIO4ALL conflict warning shows here.
 - *Rescan devices*, the PipeWire graph line (its buffer size, and whether
   the ALSA buffer size fits it), and the platform's driver note.
 

@@ -141,6 +141,10 @@ pub(crate) struct Chrome {
     pub(crate) issue_seen: usize,
     pub(crate) issue_pulse: Option<Instant>,
     pub(crate) setup_section: Option<SetupSection>,
+    /// Filter text for Setup › Input.  Not persisted.
+    pub(crate) input_device_filter: String,
+    /// Filter text for Setup › Clock output.  Not persisted.
+    pub(crate) output_device_filter: String,
     /// The path whose *Remove* was clicked once and waits for the second.
     pub(crate) remove_confirm: Option<usize>,
     /// A path the console should scroll into view (step 5).
@@ -165,6 +169,8 @@ impl Default for Chrome {
             issue_seen: 0,
             issue_pulse: None,
             setup_section: None,
+            input_device_filter: String::new(),
+            output_device_filter: String::new(),
             remove_confirm: None,
             reveal_path: None,
             follow_stage: false,
@@ -235,6 +241,8 @@ impl RigWerkApp {
             self.page = crate::app::Page::Console;
         }
         self.chrome.setup_section = None;
+        self.chrome.input_device_filter.clear();
+        self.chrome.output_device_filter.clear();
     }
 
     /// Closes the drawer.  The effect browser closes with it.
