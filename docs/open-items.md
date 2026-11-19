@@ -24,8 +24,9 @@ plans and the code review has landed; that history is in git.
 
 ## Not reproduced
 
-- A sink starving under Low latency.  The sink monitor behind the Live
-  silence row reads a live PipeWire graph (see "A PipeWire graph without
+- A sink starving under Low latency.  The sink monitor behind the
+  console's silence warning (the issues drawer row for an output that went
+  quiet) reads a live PipeWire graph (see "A PipeWire graph without
   hardware" in `AGENTS.md`), but the starving case has not been seen.
 - Plugin editors on a real X11 desktop and on Windows.  The editor test
   opens and closes AGain's editor under Xvfb and on the Windows CI
