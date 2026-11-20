@@ -9,6 +9,26 @@ use crate::app::RigWerkApp;
 use crate::audio::{self, EngineState, StartConfig};
 
 impl RigWerkApp {
+    /// Allocations the audio callbacks made since launch (`audio::rt_guard`).
+    /// Debug builds only.
+    #[cfg(debug_assertions)]
+    pub(crate) fn audio_thread_allocations(&self) -> u64 {
+        audio::rt_guard::audio_thread_allocations()
+    }
+
+    /// Logs once, from the UI thread, when the audio thread first allocates.
+    #[cfg(debug_assertions)]
+    pub(crate) fn log_audio_thread_allocations(&mut self) {
+        if self.rt_allocations_logged || self.audio_thread_allocations() == 0 {
+            return;
+        }
+        self.rt_allocations_logged = true;
+        self.push_log(
+            "The audio thread allocated or freed memory (debug build). See Diagnostics, Performance.",
+            LogTone::Amber,
+        );
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         matches!(
             self.engine.state,
@@ -124,8 +144,8 @@ impl RigWerkApp {
         // The new run did not inherit the live model.  Install it again
         // from the saved path before the first callback, if the device
         // rate is already known; a rate that arrives later is picked up
-        // by `sync_amp_models` after `service_plugins`.
-        self.sync_amp_models();
+        // by `sync_nam_models` after `service_plugins`.
+        self.sync_nam_models();
         self.sync_cab_files();
     }
 

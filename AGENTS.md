@@ -112,6 +112,25 @@ needs `xvfb-run` (or a real X server).  `audio/vst3` scans for bundles
 (from `moduleinfo.json`, without loading them), and loads, processes and
 opens them.
 
+### The NAM migration null test
+
+`a_migrated_stage_nulls_against_the_old_build` checks that a saved single
+NAM stage, migrated to one block, plays what the old `AmpStage` played.
+`scripts/nam-null-test.sh <dir>` checks out e429fee (the last build with
+`AmpStage`) as a worktree in `<dir>/old`, appends a reference render to
+its tests there, writes the output to `<dir>/reference` and then runs the
+new test against it.  Without `RIGWERK_NAM_REFERENCE` the test passes
+without doing anything; with it set, a missing file fails.
+`RIGWERK_NAM_CAPTURE=<file.nam>` adds a 48 kHz capture of your own.  The
+difference must be at most 1e-6 and is 0 today; the bypass case skips the
+fades, which went from 5 ms to 10 ms.  The old tree builds in
+`<dir>/target`; give the new one a target directory no other worktree
+builds into, since the test binary has the same name in every tree.
+
+```bash
+CARGO_TARGET_DIR=$PWD/target scripts/nam-null-test.sh .nam-null
+```
+
 ## When a test fails
 
 - Fix the source. Change the assertion only when the behavior change is

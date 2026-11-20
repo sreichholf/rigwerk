@@ -114,7 +114,11 @@ fn the_position_moves_the_gate_and_its_chain_row() {
 
     assert_eq!(gate(&app).slot, GateSlot::Pre);
     assert_eq!(
-        chain_stages(1, gate(&app).slot, crate::audio::AmpSlot::Pre)[1],
+        chain_stages(
+            1,
+            gate(&app).slot,
+            &app.paths[0].as_ref().unwrap().nam_stack()
+        )[1],
         ChainStage::Gate
     );
     let tree = frame(&ctx, &mut app, Vec::new());

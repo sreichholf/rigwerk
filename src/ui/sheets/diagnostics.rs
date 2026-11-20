@@ -1,7 +1,8 @@
 //! Diagnostics: the activity log, scan notes, the bridge status line, the
 //! signal paths' DSP time (per path, against the block it must fit), the
 //! chunks the audio thread could not run a path's chain (it did not hold
-//! the chain's runtime), and the chunks it found an effect paused.
+//! the chain's runtime), the chunks it found an effect paused, and, in a
+//! debug build, how often the audio callbacks allocated.
 //!
 //! The header pill still follows the engine state.  This page shows the
 //! bridge's own status string beside that, and keeps scan notes and quantum
@@ -35,6 +36,12 @@ pub(crate) fn dsp_text(dsp: Option<crate::audio::DspTime>) -> String {
         ),
         _ => "not running".to_owned(),
     }
+}
+
+/// The debug build's count of what the audio callbacks allocated.
+#[cfg(debug_assertions)]
+fn allocation_text(count: u64) -> String {
+    format!("Audio-thread allocations and frees (debug build): {count}")
 }
 
 /// "0 chunks", "1 chunk", "N chunks": the count with its unit, so a single
@@ -256,6 +263,8 @@ impl RigWerkApp {
                 (info, report, views)
             })
             .collect();
+        #[cfg(debug_assertions)]
+        lines.push(allocation_text(self.audio_thread_allocations()));
         lines.push("Plugin blocks (chain skipped, effect paused / attempted):".to_owned());
         let any_attempts = lock_reports.iter().any(|(_, report, _)| {
             // A poisoned chain has no attempts to show; it is still the only
@@ -563,6 +572,20 @@ impl RigWerkApp {
                     colours.text3,
                     TypeRole::Secondary,
                 ));
+                #[cfg(debug_assertions)]
+                {
+                    let allocations = self.audio_thread_allocations();
+                    ui.add_space(6.0);
+                    ui.label(mono_line(
+                        allocation_text(allocations),
+                        if allocations > 0 {
+                            colours.warn
+                        } else {
+                            colours.text2
+                        },
+                        TypeRole::GridHeader,
+                    ));
+                }
             });
 
             ui.add_space(10.0);

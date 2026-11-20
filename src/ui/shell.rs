@@ -182,8 +182,61 @@ impl RigWerkApp {
         });
     }
 
+    /// The one line a preset that loaded heavier than the DSP budget gets:
+    /// what every path's NAM blocks project together, the heaviest blocks
+    /// and their paths, and the one click that bypasses the suggested set.
+    /// It never bypasses anything by itself.
+    pub(crate) fn nam_banner(&mut self, ui: &mut egui::Ui) {
+        let colours = palette(ui.ctx());
+        let Some(warning) = self.nam_warning.as_ref() else {
+            return;
+        };
+        let heaviest = warning
+            .blocks
+            .iter()
+            .take(warning.suggested.clamp(1, 3))
+            .map(|block| {
+                format!(
+                    "{} · {} at {:.0} %",
+                    block.path,
+                    block.name,
+                    block.share * 100.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = format!(
+            "The NAM blocks project {:.0} % of the block.  Heaviest: {heaviest}.",
+            warning.load * 100.0
+        );
+        let label = format!("Bypass suggested ({})", warning.suggested);
+        let mut bypass = false;
+        let mut dismiss = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(text)
+                    .font(font(Face::Sans, TypeRole::Body))
+                    .color(colours.warn),
+            );
+            if banner_button(ui, &label).clicked() {
+                bypass = true;
+            }
+            if banner_button(ui, "Dismiss").clicked() {
+                dismiss = true;
+            }
+        });
+        if bypass {
+            // Checks again: the banner stays while the paths still do not
+            // fit.
+            self.bypass_suggested_nam();
+        } else if dismiss {
+            self.nam_warning = None;
+        }
+    }
+
     pub(crate) fn banner_open(&self) -> bool {
         self.device_alert.is_some()
+            || self.nam_warning.is_some()
             || (self.chrome.error_title.is_some() && !self.chrome.error_dismissed)
     }
 

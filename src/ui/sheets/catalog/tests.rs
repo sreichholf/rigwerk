@@ -3,8 +3,8 @@ use egui::{pos2, Event, Modifiers, Pos2};
 
 use crate::app::screen::Sheet;
 use crate::app::{blank_app, RigWerkApp};
-use crate::audio::amp::AmpCatalogEntry;
 use crate::audio::cab::CabCatalogEntry;
+use crate::audio::nam::{NamCatalogEntry, NamLoad};
 use crate::ui::theme;
 use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
 
@@ -34,17 +34,26 @@ fn width(rect: egui::accesskit::Rect) -> f64 {
     rect.x1 - rect.x0
 }
 
-fn seed_amps(app: &mut RigWerkApp, count: usize) {
+fn seed_models(app: &mut RigWerkApp, count: usize) {
     let folder = "/models".to_owned();
-    app.amp_folder.clone_from(&folder);
-    app.amp_catalog.folder = folder;
-    app.amp_rescan = false;
-    app.amp_catalog.entries = (0..count)
-        .map(|index| AmpCatalogEntry {
+    app.nam_folder.clone_from(&folder);
+    app.nam_catalog.folder = folder;
+    app.nam_rescan = false;
+    app.nam_catalog.entries = (0..count)
+        .map(|index| NamCatalogEntry {
             path: format!("/models/{index}.nam"),
             name: format!("Model {index}"),
+            arch: "WaveNet".to_owned(),
+            file_rate: 48_000,
+            slimmable: false,
+            load: NamLoad::default(),
         })
         .collect();
+}
+
+/// A path needs one NAM block for the sheet to show its settings column.
+fn seed_block(app: &mut RigWerkApp) {
+    assert!(app.add_nam_block(0).is_some(), "a block fits");
 }
 
 fn seed_cabs(app: &mut RigWerkApp, count: usize) {
@@ -99,14 +108,15 @@ fn click(
 /// height the window actually gives these sheets.
 #[test]
 fn the_list_stays_beside_the_settings() {
-    let mut amps = blank_app();
-    amps.open_sheet(Sheet::Amp { path: 0 });
-    seed_amps(&mut amps, 30);
-    let amp = accesskit_frame(|ui| amps.sheet_body(ui, 600.0));
-    let model = bounds(&amp, "Model 0");
-    let last = bounds(&amp, "Model 29");
-    let before = bounds(&amp, "Before effects");
-    let input = bounds(&amp, "Input");
+    let mut nam_app = blank_app();
+    nam_app.open_sheet(Sheet::Nam { path: 0, index: 0 });
+    seed_block(&mut nam_app);
+    seed_models(&mut nam_app, 30);
+    let nam = accesskit_frame(|ui| nam_app.sheet_body(ui, 600.0));
+    let model = bounds(&nam, "Model 0");
+    let last = bounds(&nam, "Model 29");
+    let before = bounds(&nam, "Before effects");
+    let input = bounds(&nam, "Input");
 
     let mut cabs = blank_app();
     cabs.open_sheet(Sheet::Cab { path: 0 });
@@ -130,11 +140,11 @@ fn the_list_stays_beside_the_settings() {
     );
     assert!(
         (model.x0 - none.x0).abs() < 1.0 && (width(model) - width(none)).abs() < 1.0,
-        "the amp and cab lists are not the same column"
+        "the NAM and cab lists are not the same column"
     );
     assert!(
         (before.x0 - level.x0).abs() < 1.0,
-        "the amp and cab settings are not the same column"
+        "the NAM and cab settings are not the same column"
     );
     assert!(
         width(model) > 250.0,
@@ -180,8 +190,9 @@ fn tree_of(
 #[test]
 fn the_list_fills_the_given_sheet_height() {
     let mut app = blank_app();
-    app.open_sheet(Sheet::Amp { path: 0 });
-    seed_amps(&mut app, 40);
+    app.open_sheet(Sheet::Nam { path: 0, index: 0 });
+    seed_block(&mut app);
+    seed_models(&mut app, 40);
     let tree = accesskit_frame(|ui| {
         app.sheet_body(ui, 220.0);
         ui.label("Sheet end");
@@ -207,24 +218,27 @@ fn the_list_fills_the_given_sheet_height() {
 }
 
 /// Opening the cab sheet must still scroll to its own selection after the
-/// amp sheet has revealed the same row index.
+/// NAM sheet has revealed the same row index.
 #[test]
 fn each_sheet_scrolls_to_its_own_selection() {
     let ctx = styled();
     let mut app = blank_app();
-    app.open_sheet(Sheet::Amp { path: 0 });
-    seed_amps(&mut app, 30);
+    app.open_sheet(Sheet::Nam { path: 0, index: 0 });
+    seed_models(&mut app, 30);
     seed_cabs(&mut app, 30);
     // The same identity on purpose: a row index, or a path, must not be
     // enough for the two sheets to share one "already revealed" flag.
-    app.amp_catalog.entries[20].path = "/captures/20".to_owned();
+    app.nam_catalog.entries[20].path = "/captures/20".to_owned();
     app.cab_catalog.entries[20].path = "/captures/20".to_owned();
     let path = app.paths[0].as_mut().unwrap();
-    path.amp_model = "/captures/20".to_owned();
+    let mut block = crate::app::paths::NamBlock::new(0);
+    block.model = "/captures/20".to_owned();
+    path.nam.push(block);
+    path.next_nam_id = 1;
     path.cab_file = "/captures/20".to_owned();
-    let amp = settle(&ctx, &mut app, |app, ui| app.sheet_body(ui, 280.0));
-    let input = bounds(&amp, "Input");
-    let model = bounds(&amp, "Model 20");
+    let nam = settle(&ctx, &mut app, |app, ui| app.sheet_body(ui, 280.0));
+    let input = bounds(&nam, "Input");
+    let model = bounds(&nam, "Model 20");
     assert!(
         model.y0 < input.y0 + 220.0,
         "the selected capture was left below the sheet ({}, settings at {})",
@@ -240,7 +254,7 @@ fn each_sheet_scrolls_to_its_own_selection() {
     let impulse = bounds(&cab, "Cab 20");
     assert!(
         impulse.y0 < level.y0 + 220.0,
-        "the cab list reused the amp scroll ({}, settings at {})",
+        "the cab list reused the NAM scroll ({}, settings at {})",
         impulse.y0,
         level.y0
     );
@@ -250,11 +264,11 @@ fn each_sheet_scrolls_to_its_own_selection() {
 fn choosing_a_row_selects_that_file() {
     let ctx = styled();
     let mut app = blank_app();
-    seed_amps(&mut app, 4);
-    let tree = tree_of(&ctx, &mut app, |app, ui| app.amp_sheet(ui, 0));
+    seed_models(&mut app, 4);
+    let tree = tree_of(&ctx, &mut app, |app, ui| app.nam_sheet(ui, 0, 0));
     let at = centre(bounds(&tree, "Model 2"));
-    click(&ctx, &mut app, at, |app, ui| app.amp_sheet(ui, 0));
-    assert_eq!(app.paths[0].as_ref().unwrap().amp_model, "/models/2.nam");
+    click(&ctx, &mut app, at, |app, ui| app.nam_sheet(ui, 0, 0));
+    assert_eq!(app.paths[0].as_ref().unwrap().nam[0].model, "/models/2.nam");
 
     let mut app = blank_app();
     seed_cabs(&mut app, 4);

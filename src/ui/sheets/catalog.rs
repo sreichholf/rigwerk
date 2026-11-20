@@ -1,4 +1,4 @@
-//! The file list the amp and cab sheets share.
+//! The file list the NAM and cab sheets share.
 //!
 //! Both sheets pick one file from a folder.  [`catalog_columns`] is that
 //! picker: the list is the left half of whatever height is left in the

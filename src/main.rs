@@ -4,6 +4,12 @@ mod app;
 mod audio;
 mod ui;
 
+/// Counts what the audio callbacks allocate, so a debug build and the tests
+/// can catch an allocation on the sample path (`audio::rt_guard`).
+#[cfg(debug_assertions)]
+#[global_allocator]
+static ALLOCATOR: audio::rt_guard::GuardAllocator = audio::rt_guard::GuardAllocator;
+
 #[cfg(test)]
 mod tests;
 

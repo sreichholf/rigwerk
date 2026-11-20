@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use super::super::eq::{EqSettings, EqSlot};
+use super::super::nam::NamStack;
 use super::super::output::write_frame;
 use super::super::output_map::{
     old_write_frame, ChannelMap, DeviceFrame, OutputDeviceSettings, PathMapSettings, UnusedChannels,
@@ -91,6 +92,9 @@ fn steady_mixer(signal: (f32, f32)) -> (OutputMixer, Shared) {
 }
 
 fn render(mixer: &mut OutputMixer, shared: &Shared, frames: usize) -> Vec<[f32; 4]> {
+    // The callback must not allocate: the scratch is sized here, as the
+    // backends do before the first block.
+    mixer.prepare(frames);
     let mut out = vec![[0.0f32; 4]; frames];
     mixer.render_taps(shared, frames, |index, frame| out[index] = frame);
     out
@@ -247,6 +251,9 @@ fn a_ten_channel_device_fills_every_channel_through_write_frame() {
     mixer.publish_device_channels(&shared);
     assert_eq!(shared.clock_output.channels(), 10);
     let frames = 64;
+    // The scratch is sized before the callback, as the backends do; nothing
+    // in the block may allocate.
+    mixer.prepare(frames);
     let mut data = vec![f32::NAN; frames * 10];
     mixer.render(&shared, frames, |index, mapped| {
         write_frame(&mut data[index * 10..(index + 1) * 10], mapped);
@@ -276,6 +283,8 @@ fn a_ten_channel_device_fills_every_channel_through_write_frame() {
 fn the_device_map_follows_the_master_and_crossfades() {
     let (mut mixer, shared) = steady_mixer((0.5, -0.25));
     let render_device = |mixer: &mut OutputMixer, shared: &Shared, frames: usize| {
+        // The scratch is sized before the callback, as the backends do.
+        mixer.prepare(frames);
         let mut out = vec![[0.0f32; 2]; frames];
         mixer.render(shared, frames, |index, mapped| {
             out[index] = [mapped.sample(0), mapped.sample(1)];
@@ -785,6 +794,8 @@ fn live_slots_add_up_and_a_reactivated_slot_starts_fresh() {
     shared.paths[1].set_eq(EqSlot::Pre, bypassed);
     shared.paths[1].set_eq(EqSlot::Post, bypassed);
     let device = |mixer: &mut OutputMixer, shared: &Shared| {
+        // The scratch is sized before the callback, as the backends do.
+        mixer.prepare(32);
         let mut out = vec![[0.0f32; 2]; 32];
         mixer.render(shared, 32, |index, mapped| {
             out[index] = [mapped.sample(0), mapped.sample(1)];
@@ -817,6 +828,7 @@ fn live_slots_add_up_and_a_reactivated_slot_starts_fresh() {
     for _ in 0..20_000 {
         shared.push_frame(0.5, -0.25);
     }
+    mixer.prepare(16_000);
     mixer.render(&shared, 16_000, |_, _| {});
     assert!(device(&mut mixer, &shared)
         .iter()
@@ -885,7 +897,9 @@ fn the_ring_path_pushes_finished_frames_into_active_extra_output_rings() {
     shared.extra_output_bus(0).set_source_rate(48_000);
 
     let frames = 64;
-    let mut clock = Vec::new();
+    // Sized up front: the write closure runs inside the allocation guard.
+    mixer.prepare(frames);
+    let mut clock = Vec::with_capacity(frames);
     mixer.render(&shared, frames, |_, mapped| {
         clock.push([mapped.sample(0), mapped.sample(1)]);
     });
@@ -987,7 +1001,7 @@ fn two_path_mixer(signal: (f32, f32), channels: usize) -> (OutputMixer, Shared) 
         eqs: [bypassed, bypassed],
         ..PathMix::default()
     };
-    shared.restore_path(1, &mix, Vec::new());
+    shared.restore_path(1, &mix, &NamStack::default(), Vec::new());
     (OutputMixer::new(48_000, channels), shared)
 }
 
@@ -1111,6 +1125,9 @@ fn device_frames(
     channels: usize,
     frames: usize,
 ) -> Vec<Vec<f32>> {
+    // The callback must not allocate: the scratch is sized here, as the
+    // backends do before the first block.
+    mixer.prepare(frames);
     let mut out = vec![vec![0.0f32; channels]; frames];
     mixer.render(shared, frames, |index, mapped| {
         for (channel, sample) in out[index].iter_mut().enumerate() {
@@ -1189,16 +1206,24 @@ fn level_and_polarity_apply_per_path_and_device() {
     shared.set_extra_outputs(&[OutputDeviceSettings::default()], &plan, &[]);
     // The duplex graph maps the extra outputs in this mixer.
     shared.direct.store(true, Ordering::Relaxed);
-    let mut clock = Vec::new();
-    let mut extra_output = Vec::new();
-    mixer.render_direct_devices(&shared, &[0.5; 64], &[-0.25; 64], |device, _, mapped| {
-        let frame = [mapped.sample(0), mapped.sample(1)];
-        if device == 0 {
-            clock.push(frame);
-        } else {
-            extra_output.push(frame);
-        }
-    });
+    // Sized up front and written by index: the write closure runs inside
+    // the allocation guard.
+    mixer.prepare(64);
+    let mut clock = [[0.0f32; 2]; 64];
+    let mut extra_output = [[0.0f32; 2]; 64];
+    mixer.render_direct_devices(
+        &shared,
+        &[0.5; 64],
+        &[-0.25; 64],
+        |device, index, mapped| {
+            let frame = [mapped.sample(0), mapped.sample(1)];
+            if device == 0 {
+                clock[index] = frame;
+            } else {
+                extra_output[index] = frame;
+            }
+        },
+    );
     assert_eq!(clock[63], [0.5 * gain - 0.5, -0.25 * gain + 0.25]);
     let ceiling = crate::audio::safety_ceiling_linear();
     assert_eq!(extra_output[63], [ceiling, -0.5 * ceiling]);
@@ -1389,7 +1414,7 @@ fn a_new_path_stays_silent_until_its_plugins_open_then_fades_in() {
         name: "Missing".to_owned(),
         ..crate::audio::PluginPref::default()
     };
-    shared.restore_path(1, &mix, vec![pending]);
+    shared.restore_path(1, &mix, &NamStack::default(), vec![pending]);
     assert!(shared.paths[1].chain_pending());
     let waiting = render(&mut mixer, &shared, 400);
     assert!(waiting.iter().all(|frame| *frame == [0.5, -0.25, 0.0, 0.0]));
@@ -1410,7 +1435,8 @@ fn a_calibration_click_reaches_the_clock_output_with_the_mix_ducked() {
     shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
 
     // The mix ramps to silence first; the frame there is silent.
-    let mut ducked = Vec::new();
+    mixer.prepare(64);
+    let mut ducked = Vec::with_capacity(40 * 64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, mapped| ducked.push(mapped.sample(0)));
     }
@@ -1426,7 +1452,7 @@ fn a_calibration_click_reaches_the_clock_output_with_the_mix_ducked() {
     for _ in 0..4_000 {
         shared.calibration.capture_frame(0.0, 0.0);
     }
-    let mut played = Vec::new();
+    let mut played = Vec::with_capacity(40 * 64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, mapped| played.push(mapped.sample(0)));
     }
@@ -1462,7 +1488,8 @@ fn a_calibration_click_leaves_on_the_channels_the_clock_map_plays() {
     let click = super::super::calibration::click_waveform(48_000);
     shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
 
-    let mut ducked: Vec<[f32; 6]> = Vec::new();
+    mixer.prepare(64);
+    let mut ducked: Vec<[f32; 6]> = Vec::with_capacity(40 * 64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, mapped| {
             ducked.push(std::array::from_fn(|channel| mapped.sample(channel)));
@@ -1478,7 +1505,7 @@ fn a_calibration_click_leaves_on_the_channels_the_clock_map_plays() {
     for _ in 0..4_000 {
         shared.calibration.capture_frame(0.0, 0.0);
     }
-    let mut played: Vec<[f32; 6]> = Vec::new();
+    let mut played: Vec<[f32; 6]> = Vec::with_capacity(40 * 64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, mapped| {
             played.push(std::array::from_fn(|channel| mapped.sample(channel)));
@@ -1515,13 +1542,14 @@ fn a_calibration_click_on_a_mono_output_uses_its_only_channel() {
     let click = super::super::calibration::click_waveform(48_000);
     shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
 
+    mixer.prepare(64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, _| {});
     }
     for _ in 0..4_000 {
         shared.calibration.capture_frame(0.0, 0.0);
     }
-    let mut played = Vec::new();
+    let mut played = Vec::with_capacity(40 * 64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, mapped| {
             played.push((mapped.sample(0), mapped.sample(1)));
@@ -1654,6 +1682,7 @@ fn recording_keeps_the_limited_device_frame() {
     wait_until_recording(&shared.recorder);
 
     let frames = 64;
+    mixer.prepare(frames);
     let mut written = Vec::with_capacity(frames * channels);
     mixer.render(&shared, frames, |_, mapped| {
         if channels > 0 {
@@ -1730,6 +1759,8 @@ fn the_published_beat_keeps_the_rhythm_that_is_playing() {
     shared.direct.store(true, Ordering::Relaxed);
     arm_click(&shared);
     let silence = |mixer: &mut OutputMixer, frames: usize| {
+        // The scratch is sized before the callback, as the backends do.
+        mixer.prepare(frames);
         let input = vec![0.0f32; frames];
         mixer.render_direct_devices(&shared, &input, &input, |_, _, _| {});
     };
@@ -1806,19 +1837,28 @@ fn direct_pair(
         arm_click(&shared);
     }
     let frames = 64;
-    let mut clock = Vec::new();
-    let mut followed = Vec::new();
-    mixer.render_direct_devices(&shared, &[0.4; 64], &[-0.2; 64], |device, _, mapped| {
+    // Fixed rows, written by index: the write closure runs inside the
+    // allocation guard.
+    mixer.prepare(frames);
+    let mut clock = [[0.0f32; 4]; 64];
+    let mut followed = [[0.0f32; 4]; 64];
+    let rendered = std::cell::Cell::new(0usize);
+    mixer.render_direct_devices(&shared, &[0.4; 64], &[-0.2; 64], |device, index, mapped| {
+        rendered.set(rendered.get().max(index + 1));
         let count = if device == 0 { 4 } else { 2 };
-        let frame = (0..count).map(|channel| mapped.sample(channel)).collect();
+        let mut frame = [0.0f32; 4];
+        for (channel, sample) in frame.iter_mut().enumerate().take(count) {
+            *sample = mapped.sample(channel);
+        }
         if device == 0 {
-            clock.push(frame);
+            clock[index] = frame;
         } else {
-            followed.push(frame);
+            followed[index] = frame;
         }
     });
-    assert_eq!(clock.len(), frames);
-    assert_eq!(followed.len(), frames);
+    assert_eq!(rendered.get(), frames);
+    let clock: Vec<Vec<f32>> = clock.iter().map(|frame| frame[..4].to_vec()).collect();
+    let followed: Vec<Vec<f32>> = followed.iter().map(|frame| frame[..2].to_vec()).collect();
     (clock, followed)
 }
 
@@ -1988,14 +2028,15 @@ fn device_mute_on_the_clock_does_not_mute_the_extra_output_tick() {
     shared.direct.store(true, Ordering::Relaxed);
     shared.set_extra_outputs(&[extra_output], &extra_output_plan(), &[]);
     arm_click(&shared);
+    mixer.prepare(400);
     // Adopt the unmuted devices and start the voice.
     mixer.render_direct_devices(&shared, &[0.4; 64], &[-0.2; 64], |_, _, _| {});
     shared.clock_output.set(&OutputDeviceSettings {
         mute: true,
         ..clock
     });
-    let mut clock_tick = Vec::new();
-    let mut extra_output_tick = Vec::new();
+    let mut clock_tick = Vec::with_capacity(400);
+    let mut extra_output_tick = Vec::with_capacity(400);
     mixer.render_direct_devices(&shared, &[0.4; 400], &[-0.2; 400], |device, _, mapped| {
         if device == 0 {
             clock_tick.push(mapped.sample(2));
@@ -2037,29 +2078,40 @@ fn an_armed_measurement_ducks_the_tick_on_every_device() {
         }
         let click = super::super::calibration::click_waveform(48_000);
         shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
-        let mut clock = Vec::new();
-        let mut followed = Vec::new();
-        let take = |mixer: &mut OutputMixer,
-                    clock: &mut Vec<Vec<f32>>,
-                    followed: &mut Vec<Vec<f32>>| {
-            mixer.render_direct_devices(&shared, &[0.25; 64], &[0.25; 64], |device, _, mapped| {
-                let frame = vec![mapped.sample(0), mapped.sample(1)];
-                if device == 0 {
-                    clock.push(frame);
-                } else {
-                    followed.push(frame);
-                }
-            });
+        // Sized up front and written by index: the write closure runs
+        // inside the allocation guard.
+        let mut clock = [[0.0f32; 2]; 80 * 64];
+        let mut followed = [[0.0f32; 2]; 80 * 64];
+        mixer.prepare(64);
+        let mut written = 0usize;
+        let mut take = |mixer: &mut OutputMixer| {
+            let offset = written * 64;
+            mixer.render_direct_devices(
+                &shared,
+                &[0.25; 64],
+                &[0.25; 64],
+                |device, index, mapped| {
+                    let frame = [mapped.sample(0), mapped.sample(1)];
+                    if device == 0 {
+                        clock[offset + index] = frame;
+                    } else {
+                        followed[offset + index] = frame;
+                    }
+                },
+            );
+            written += 1;
         };
         for _ in 0..40 {
-            take(&mut mixer, &mut clock, &mut followed);
+            take(&mut mixer);
         }
         for _ in 0..4_000 {
             shared.calibration.capture_frame(0.0, 0.0);
         }
         for _ in 0..40 {
-            take(&mut mixer, &mut clock, &mut followed);
+            take(&mut mixer);
         }
+        let clock: Vec<Vec<f32>> = clock.iter().map(|frame| frame.to_vec()).collect();
+        let followed: Vec<Vec<f32>> = followed.iter().map(|frame| frame.to_vec()).collect();
         (clock, followed)
     }
     let (clock, followed) = capture(true);
@@ -2082,7 +2134,9 @@ fn a_measurement_fades_a_sounding_tick_instead_of_cutting_it() {
         });
         shared.direct.store(true, Ordering::Relaxed);
         arm_click(&shared);
-        let mut lane = Vec::new();
+        // Sized up front: the write closure runs inside the allocation guard.
+        let mut lane = Vec::with_capacity(9 * 64);
+        mixer.prepare(64);
         let take = |mixer: &mut OutputMixer, lane: &mut Vec<f32>| {
             mixer.render_direct_devices(&shared, &[0.25; 64], &[0.25; 64], |device, _, mapped| {
                 if device == 0 {
@@ -2161,7 +2215,9 @@ fn a_measurement_ducks_a_tick_already_waiting_in_the_alignment_delay() {
             &[],
         );
         arm_click(&shared);
-        let mut lane = Vec::new();
+        // Sized up front: the write closure runs inside the allocation guard.
+        let mut lane = Vec::with_capacity(13 * 64);
+        mixer.prepare(64);
         let take = |mixer: &mut OutputMixer, lane: &mut Vec<f32>| {
             mixer.render_direct_devices(&shared, &[0.25; 64], &[0.25; 64], |device, _, mapped| {
                 if device == 1 {
@@ -2269,18 +2325,19 @@ fn played_and_recorded(running: bool, blocks: usize) -> (Vec<Vec<f32>>, Vec<Vec<
     if running {
         arm_click(&shared);
     }
-    let mut played = Vec::new();
-    let mut recorded = Vec::new();
-    for _ in 0..blocks {
-        mixer.render(&shared, 64, |_, mapped| {
-            played.push((0..4).map(|channel| mapped.sample(channel)).collect());
-            recorded.push(
-                (0..4)
-                    .map(|channel| mapped.record_sample(channel))
-                    .collect(),
-            );
+    // Sized up front: the write closure runs inside the allocation guard.
+    mixer.prepare(64);
+    let mut played = vec![[0.0f32; 4]; blocks * 64];
+    let mut recorded = vec![[0.0f32; 4]; blocks * 64];
+    for block in 0..blocks {
+        mixer.render(&shared, 64, |index, mapped| {
+            played[block * 64 + index] = std::array::from_fn(|channel| mapped.sample(channel));
+            recorded[block * 64 + index] =
+                std::array::from_fn(|channel| mapped.record_sample(channel));
         });
     }
+    let played: Vec<Vec<f32>> = played.iter().map(|frame| frame.to_vec()).collect();
+    let recorded: Vec<Vec<f32>> = recorded.iter().map(|frame| frame.to_vec()).collect();
     (played, recorded)
 }
 
@@ -2306,14 +2363,15 @@ fn the_click_free_frame_takes_the_calibration_duck_but_not_its_click() {
     let (mut mixer, shared) = steady_mixer((0.25, 0.25));
     let click = super::super::calibration::click_waveform(48_000);
     shared.calibration.arm(&click, 48_000, 1, 1).expect("armed");
+    mixer.prepare(64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, _| {});
     }
     for _ in 0..4_000 {
         shared.calibration.capture_frame(0.0, 0.0);
     }
-    let mut played = Vec::new();
-    let mut recorded = Vec::new();
+    let mut played = Vec::with_capacity(40 * 64);
+    let mut recorded = Vec::with_capacity(40 * 64);
     for _ in 0..40 {
         mixer.render(&shared, 64, |_, mapped| {
             played.push(mapped.sample(0));

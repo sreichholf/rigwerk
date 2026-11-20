@@ -12,7 +12,7 @@ use crate::app::plugins::{sanitize_effect_ids, EffectId};
 use crate::app::screen::{SHEET_MAX, SHEET_MIN};
 use crate::app::Page;
 use crate::audio::{
-    AmpSettings, BufferMode, DeviceItem, EqSettings, GateSettings, OutputDeviceSettings,
+    BufferMode, DeviceItem, EqSettings, GateSettings, LegacyNamSettings, OutputDeviceSettings,
     PluginPref, WasapiOutputMode, MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
@@ -143,7 +143,7 @@ pub(crate) struct Preferences {
     /// recordings folder by [`sanitize_preferences`].  The writer creates it.
     #[serde(default)]
     pub(crate) record_folder: String,
-    /// Folder of `.nam` captures the amp sheet lists.  Empty until set.
+    /// Folder of `.nam` captures the NAM sheet lists.  Empty until set.
     /// Missing on older saves.  Not written while empty, so those saves
     /// stay byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -310,7 +310,8 @@ impl Preferences {
             eq: self.eq,
             eq_post: self.eq_post,
             gate: self.gate,
-            amp: AmpSettings::default(),
+            nam_blocks: Vec::new(),
+            amp: LegacyNamSettings::default(),
             cab: crate::audio::CabSettings::default(),
             plugins: self.plugins.clone(),
             chain_bypass: false,
@@ -688,8 +689,8 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
         crate::app::tuner::sanitise_reference(preferences.tuner_reference_hz);
     preferences.record_folder =
         crate::app::record::resolved_record_folder(&preferences.record_folder);
-    preferences.amp_folder = crate::app::amp::normalize_amp_folder(&preferences.amp_folder);
-    preferences.cab_folder = crate::app::amp::normalize_amp_folder(&preferences.cab_folder);
+    preferences.amp_folder = crate::app::nam::normalize_models_folder(&preferences.amp_folder);
+    preferences.cab_folder = crate::app::nam::normalize_models_folder(&preferences.cab_folder);
     // Tempo and level are clamped here.  The app setters clamp a live edit
     // the same way; the engine stores those values as they are.  A loaded
     // rhythm is already a real bar (`ClickRhythm`'s serde other is 4/4).

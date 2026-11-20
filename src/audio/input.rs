@@ -93,6 +93,8 @@ where
                 // cpal's stream thread starts at normal priority on Linux.
                 promote.run();
                 let _denormals = DenormalGuard::new();
+                // Nothing in this callback may allocate (see `rt_guard`).
+                let _no_allocations = super::rt_guard::RtGuard::enter();
                 // The ring has to hold at least one whole input block, or
                 // the output drops out between two deliveries.
                 gain_shared.note_input_block(data.len() / channels);

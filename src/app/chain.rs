@@ -2,41 +2,50 @@
 //!
 //! This is navigation state on [`RigWerkApp`](crate::app::RigWerkApp), not
 //! paint.  Stage colours stay in `ui`.  [`chain_stages`] is the signal
-//! order the console draws and the sheet's ‹ › walk: the gate and the amp
-//! each sit before or after the effects as their slots say.  The cabinet
-//! always sits after the effects and after the amp.
+//! order the console draws and the sheet's ‹ › walk: the gate sits before or
+//! after the effects as its slot says, and each NAM block runs before or
+//! after them as its position says.  The cabinet always sits after the
+//! effects and after the NAM blocks.
 
-use crate::audio::{AmpSlot, EqSlot, GateSlot};
+use crate::audio::{EqSlot, GateSlot, NamPosition, NamStack};
 
 /// One stage of a path's chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChainStage {
     PreEq,
     Gate,
-    Amp,
+    /// The NAM block at this index of the path's stack.
+    Nam(usize),
     /// The effect at this index of the path's chain.
     Effect(usize),
-    /// The cabinet, after the effects and after the amp.
+    /// The cabinet, after the effects and after the NAM blocks.
     Cab,
     PostEq,
 }
 
 /// A chain's stages in the order the sound passes them: *Pre EQ*, the gate
-/// when it sits before the effects, the amp when it does, the effects, the
-/// amp when after, the cabinet, the gate when after, and *Post EQ*.
-pub(crate) fn chain_stages(effects: usize, gate: GateSlot, amp: AmpSlot) -> Vec<ChainStage> {
-    let mut stages = Vec::with_capacity(effects + 5);
+/// when it sits before the effects, the NAM blocks that sit there, the
+/// effects, the NAM blocks that sit after them, the cabinet, the gate when
+/// after, and *Post EQ*.
+pub(crate) fn chain_stages(effects: usize, gate: GateSlot, nam: &NamStack) -> Vec<ChainStage> {
+    let mut stages = Vec::with_capacity(effects + nam.count() + 5);
     stages.push(ChainStage::PreEq);
     if gate == GateSlot::Pre {
         stages.push(ChainStage::Gate);
     }
-    if amp == AmpSlot::Pre {
-        stages.push(ChainStage::Amp);
-    }
+    // An empty stack still gets one row: the sheet's way in.
+    let pre: Vec<usize> = nam
+        .in_position(NamPosition::Pre)
+        .map(|(index, _)| index)
+        .collect();
+    let post: Vec<usize> = nam
+        .in_position(NamPosition::Post)
+        .map(|(index, _)| index)
+        .collect();
+    let pre = if nam.is_empty() { vec![0] } else { pre };
+    stages.extend(pre.into_iter().map(ChainStage::Nam));
     stages.extend((0..effects).map(ChainStage::Effect));
-    if amp == AmpSlot::Post {
-        stages.push(ChainStage::Amp);
-    }
+    stages.extend(post.into_iter().map(ChainStage::Nam));
     stages.push(ChainStage::Cab);
     if gate == GateSlot::Post {
         stages.push(ChainStage::Gate);
@@ -46,15 +55,15 @@ pub(crate) fn chain_stages(effects: usize, gate: GateSlot, amp: AmpSlot) -> Vec<
 }
 
 /// The stage after `current` (`forward`) or before it.  `None` at either
-/// end, and for an effect index the chain does not have.
+/// end, and for an effect or block index the chain does not have.
 pub(crate) fn neighbour_stage(
     current: ChainStage,
     effects: usize,
     gate: GateSlot,
-    amp: AmpSlot,
+    nam: &NamStack,
     forward: bool,
 ) -> Option<ChainStage> {
-    let stages = chain_stages(effects, gate, amp);
+    let stages = chain_stages(effects, gate, nam);
     let at = stages.iter().position(|stage| *stage == current)?;
     if forward {
         stages.get(at + 1).copied()
@@ -72,7 +81,8 @@ pub(crate) enum ChainSelection {
     Plugins,
     Plugin(usize),
     Gate,
-    Amp,
+    /// The NAM block at this index of the path's stack.
+    Nam(usize),
     Cab,
     PostEq,
     /// The master stage: master level and mute, and the device list.
@@ -106,6 +116,15 @@ impl ChainSelection {
         }
     }
 
+    /// Keep a NAM block index inside the stack after add/remove/reorder.
+    pub(crate) fn clamp_nam(self, blocks: usize) -> Self {
+        match self {
+            Self::Nam(_) if blocks == 0 => Self::PreEq,
+            Self::Nam(index) if index >= blocks => Self::Nam(blocks - 1),
+            other => other,
+        }
+    }
+
     /// Keep an output device index inside the device list.
     pub(crate) fn clamp_output(self, device_count: usize) -> Self {
         match self {
@@ -130,7 +149,7 @@ impl ChainSelection {
         match stage {
             ChainStage::PreEq => Self::PreEq,
             ChainStage::Gate => Self::Gate,
-            ChainStage::Amp => Self::Amp,
+            ChainStage::Nam(index) => Self::Nam(index),
             ChainStage::Effect(index) => Self::Plugin(index),
             ChainStage::Cab => Self::Cab,
             ChainStage::PostEq => Self::PostEq,
@@ -159,7 +178,10 @@ impl crate::app::RigWerkApp {
             ChainStage::PreEq => path.mix.eqs[0].enabled,
             ChainStage::PostEq => path.mix.eqs[1].enabled,
             ChainStage::Gate => path.mix.gate.enabled,
-            ChainStage::Amp => path.mix.amp.enabled,
+            ChainStage::Nam(index) => path
+                .nam
+                .get(index)
+                .is_some_and(|block| block.controls.enabled),
             ChainStage::Cab => path.mix.cab.enabled,
             ChainStage::Effect(index) => self
                 .engine
@@ -170,7 +192,8 @@ impl crate::app::RigWerkApp {
     }
 
     /// Switches `stage` of path `slot` on, or bypasses it.  An EQ keeps its
-    /// bands and the gate its settings; an effect keeps its latency.
+    /// bands, the gate its settings and a NAM block its capture; an effect
+    /// keeps its latency.
     pub(crate) fn set_stage_on(&mut self, slot: usize, stage: ChainStage, on: bool) {
         if let ChainStage::Effect(index) = stage {
             if self.paths.get(slot).is_some_and(Option::is_some) {
@@ -185,10 +208,15 @@ impl crate::app::RigWerkApp {
             ChainStage::PreEq => path.mix.eqs[0].enabled = on,
             ChainStage::PostEq => path.mix.eqs[1].enabled = on,
             ChainStage::Gate => path.mix.gate.enabled = on,
-            ChainStage::Amp => path.mix.amp.enabled = on,
+            ChainStage::Nam(index) => {
+                if let Some(block) = path.nam.get_mut(index) {
+                    block.controls.enabled = on;
+                }
+            }
             ChainStage::Cab => path.mix.cab.enabled = on,
             ChainStage::Effect(_) => {}
         }
+        self.push_paths_to_engine();
     }
 }
 

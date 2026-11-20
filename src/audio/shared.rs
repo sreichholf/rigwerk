@@ -10,7 +10,7 @@
 //! play lives here too ([`super::record`]): the callbacks only push, and
 //! the writer runs off the audio thread.
 //!
-//! Everything a path owns (routing, mono, channel enable, EQs, gate, amp,
+//! Everything a path owns (routing, mono, channel enable, EQs, gate, NAM,
 //! plugin chain, level, mute, solo) lives in [`PathControls`], one per path slot in
 //! [`Shared::paths`].  Paths are added, duplicated and removed here, live
 //! (see the `path` module docs).  The older accessors (`set_eq`, `set_mix`,
@@ -25,13 +25,13 @@ use std::time::Duration;
 /// Sentinel for [`Shared::path_delay_ns`]: no PipeWire path delay sampled yet.
 const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
 
-use super::amp::AmpPark;
 use super::cab::CabPark;
 #[cfg(test)]
 use super::eq::{EqSettings, EqSlot};
 use super::extra_output::ExtraOutputBus;
 #[cfg(test)]
 use super::gate::GateSettings;
+use super::nam::{NamPark, NamStack};
 use super::output_map::{DeviceControls, DeviceFrame, OutputDeviceSettings, MAX_EXTRA_OUTPUTS};
 use super::path::{DspCell, DspTime, LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
 use super::plugins::PluginPref;
@@ -209,20 +209,20 @@ pub(crate) struct Shared {
     pub(crate) recorder: Arc<Recorder>,
     /// Models the audio side has released.  The engine keeps a clone so a
     /// bridge-thread drop of this run does not destroy them.
-    amp_park: Arc<AmpPark>,
+    nam_park: Arc<NamPark>,
     /// Cabinet kernels the audio side has released.  Same lifetime as
-    /// [`Self::amp_park`].
+    /// [`Self::nam_park`].
     cab_park: Arc<CabPark>,
 }
 
 impl Shared {
     pub(crate) fn new(sample_rate: u32) -> Self {
-        Self::with_park(sample_rate, AmpPark::new(), CabPark::new())
+        Self::with_park(sample_rate, NamPark::new(), CabPark::new())
     }
 
     pub(crate) fn with_park(
         sample_rate: u32,
-        amp_park: Arc<AmpPark>,
+        nam_park: Arc<NamPark>,
         cab_park: Arc<CabPark>,
     ) -> Self {
         let capacity_frames = (sample_rate as usize * 2).max(4096);
@@ -290,21 +290,21 @@ impl Shared {
             opened_output_mode: AtomicU8::new(0),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
             paths: std::array::from_fn(|_| {
-                PathControls::with_park(sample_rate, Arc::clone(&amp_park), Arc::clone(&cab_park))
+                PathControls::with_park(sample_rate, Arc::clone(&nam_park), Arc::clone(&cab_park))
             }),
             total_dsp: DspCell::default(),
             calibration: Calibration::new(),
             asio_panel: AsioPanelRequests::new(),
             recorder: Arc::new(Recorder::new()),
-            amp_park,
+            nam_park,
             cab_park,
         };
         shared.paths[0].set_state(PathState::Active);
         shared
     }
 
-    pub(crate) fn amp_park(&self) -> &Arc<AmpPark> {
-        &self.amp_park
+    pub(crate) fn nam_park(&self) -> &Arc<NamPark> {
+        &self.nam_park
     }
 
     pub(crate) fn cab_park(&self) -> &Arc<CabPark> {
@@ -441,12 +441,19 @@ impl Shared {
     /// one keeps playing and moves to the new settings with the usual
     /// ramps.  The plugins are restored, not opened: an open bridge opens
     /// them on the next `service_plugins`.  Call it from the UI thread.
-    pub(crate) fn restore_path(&self, slot: usize, mix: &PathMix, plugins: Vec<PluginPref>) {
+    pub(crate) fn restore_path(
+        &self,
+        slot: usize,
+        mix: &PathMix,
+        nam: &NamStack,
+        plugins: Vec<PluginPref>,
+    ) {
         let path = self.path(slot);
         // Set up before the mixer can see the slot.
         path.clear_removal();
         path.reset_meters();
         path.set_mix(mix);
+        path.set_nam(nam);
         path.restore_plugins(plugins);
         path.set_state(PathState::Active);
     }
@@ -459,7 +466,7 @@ impl Shared {
             mute: true,
             ..PathMix::default()
         };
-        self.restore_path(slot, &mix, Vec::new());
+        self.restore_path(slot, &mix, &NamStack::default(), Vec::new());
         Some(slot)
     }
 
@@ -482,7 +489,8 @@ impl Shared {
         };
         // Captures fresh plugin state first.
         let plugins = from.plugin_prefs();
-        self.restore_path(slot, &mix, plugins);
+        let nam = from.nam();
+        self.restore_path(slot, &mix, &nam, plugins);
         Some(slot)
     }
 

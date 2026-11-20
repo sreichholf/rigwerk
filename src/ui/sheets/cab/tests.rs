@@ -155,16 +155,20 @@ fn a_space_in_the_impulse_folder_survives_the_keystroke() {
 }
 
 #[test]
-fn a_bypassed_amp_does_not_warn_about_its_cabinet() {
+fn a_bypassed_nam_block_does_not_warn_about_its_cabinet() {
     let ctx = styled();
     let mut app = blank_app();
     let path = app.paths[0].as_mut().unwrap();
-    path.amp_gear = Some("amp".to_owned());
-    path.mix.amp.enabled = false;
+    let mut block = crate::app::paths::NamBlock::new(0);
+    block.model = "/captures/amp.nam".to_owned();
+    block.gear = Some("amp".to_owned());
+    block.controls.enabled = false;
+    path.nam.push(block);
+    path.next_nam_id = 1;
     app.open_sheet(crate::app::screen::Sheet::Cab { path: 0 });
     let quiet = tree(&ctx, &mut app);
     assert!(!any_text(&quiet, "This capture has no cabinet"));
-    app.paths[0].as_mut().unwrap().mix.amp.enabled = true;
+    app.paths[0].as_mut().unwrap().nam[0].controls.enabled = true;
     let warned = tree(&ctx, &mut app);
     assert!(any_text(&warned, "This capture has no cabinet"));
 }

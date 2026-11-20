@@ -1,12 +1,14 @@
 //! A path's chain on its strip (spec §4.2, §5.3): *Pre EQ*, the gate when
-//! it sits before the effects, the amp when it does, the effects group,
-//! the amp when after, the gate when after, and *Post EQ*.
+//! it sits before the effects, the NAM blocks that do, the effects group,
+//! the NAM blocks after them, the cabinet, the gate when after, and *Post
+//! EQ*.
 //!
 //! The built-in rows stay pinned; only the effects group scrolls, on its
 //! own for each path so the faders stay on one line.  On overflow it shows
 //! a 3 pt thumb, a fade at the bottom edge and *n more · scroll* in it.
 //! The stage whose sheet is open is scrolled into view when it opens.
-//! Dragging an effect reorders it, and the list scrolls at its edges.
+//! Dragging an effect reorders it, and so does dragging a NAM block inside
+//! its group; the list scrolls at its edges.
 
 use eframe::egui;
 use egui::{Rect, Stroke, Vec2};
@@ -15,12 +17,12 @@ use super::DensityStep;
 use crate::app::chain::ChainStage;
 use crate::app::screen::{format_ms, Sheet};
 use crate::app::RigWerkApp;
-use crate::audio::{AmpSlot, GateSlot, MAX_EFFECTS};
+use crate::audio::{GateSlot, NamPosition, MAX_EFFECTS};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{
     add_effect_row, chain_event, chain_row, effects_header, ChainEvent, ChainMark, ChainRow,
-    EffectDrag, CHAIN_ROW_H,
+    EffectDrag, NamDrag, CHAIN_ROW_H,
 };
 
 /// A row and the gap under it.
@@ -54,6 +56,18 @@ pub(super) fn rows_below(content: f32, offset: f32, viewport: f32) -> usize {
     }
 }
 
+/// One NAM row as the console draws it: what the block is called, what it
+/// costs, and where it sits.
+#[derive(Clone, Debug)]
+struct NamRow {
+    index: usize,
+    shown: Option<String>,
+    mark: String,
+    failed: bool,
+    reason: Option<String>,
+    position: NamPosition,
+}
+
 impl RigWerkApp {
     /// The chain of path `slot`, at most `height` tall.
     pub(super) fn chain_column(
@@ -63,38 +77,41 @@ impl RigWerkApp {
         height: f32,
         step: DensityStep,
     ) {
-        // The amp row shows its capture across the row, like an effect
-        // shows its plugin; with none chosen it reads "Amp" and "Off".
-        // The cabinet row does the same for the impulse response.
-        let Some((
-            mix,
-            amp_shown,
-            amp_mark,
-            amp_failed,
-            amp_reason,
-            cab_shown,
-            cab_mark,
-            cab_failed,
-            cab_reason,
-        )) = self.paths[slot].as_ref().map(|path| {
-            let none = path.amp_model.trim().is_empty();
-            let shown = (!none && !path.amp_name.is_empty()).then(|| path.amp_name.clone());
-            let mark = if none { "Off" } else { "" };
-            let cab_none = path.cab_file.trim().is_empty();
-            let cab_shown = (!cab_none && !path.cab_name.is_empty()).then(|| path.cab_name.clone());
-            let cab_mark = if cab_none { "Off" } else { "" };
-            (
-                path.mix,
-                shown,
-                mark,
-                path.amp_error.is_some(),
-                path.amp_error.clone(),
-                cab_shown,
-                cab_mark,
-                path.cab_error.is_some(),
-                path.cab_error.clone(),
-            )
-        })
+        // A NAM row shows its capture across the row, like an effect shows
+        // its plugin; a block with none reads "Off".  The cabinet row does
+        // the same for the impulse response.
+        let Some((mix, nam, cab_shown, cab_mark, cab_failed, cab_reason)) =
+            self.paths[slot].as_ref().map(|path| {
+                let nam: Vec<NamRow> = path
+                    .nam
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| NamRow {
+                        index,
+                        shown: (!block.name.is_empty()).then(|| block.name.clone()),
+                        mark: if block.model.trim().is_empty() {
+                            "Off".to_owned()
+                        } else {
+                            format!("{:.0} %", block.load_share(self.nam_rate()) * 100.0)
+                        },
+                        failed: block.error.is_some(),
+                        reason: block.error.clone(),
+                        position: block.controls.position,
+                    })
+                    .collect();
+                let cab_none = path.cab_file.trim().is_empty();
+                let cab_shown =
+                    (!cab_none && !path.cab_name.is_empty()).then(|| path.cab_name.clone());
+                let cab_mark = if cab_none { "Off" } else { "" };
+                (
+                    path.mix,
+                    nam,
+                    cab_shown,
+                    cab_mark,
+                    path.cab_error.is_some(),
+                    path.cab_error.clone(),
+                )
+            })
         else {
             return;
         };
@@ -108,6 +125,18 @@ impl RigWerkApp {
         let top = ui.cursor().top();
         let views = self.engine.plugin_views(slot);
         let count = views.len();
+        let pre: Vec<NamRow> = nam
+            .iter()
+            .filter(|row| row.position == NamPosition::Pre)
+            .cloned()
+            .collect();
+        let post: Vec<NamRow> = nam
+            .iter()
+            .filter(|row| row.position == NamPosition::Post)
+            .cloned()
+            .collect();
+        let overloaded =
+            self.issue_state.dsp.severity() == Some(crate::app::issues::IssueSeverity::Error);
 
         self.builtin_row(
             ui,
@@ -135,20 +164,22 @@ impl RigWerkApp {
                 rate,
             );
         }
-        if mix.amp.slot == AmpSlot::Pre {
+        if pre.is_empty() {
+            // The stack's way in: the row opens the sheet's add view.
             self.builtin_row(
                 ui,
                 slot,
-                ChainStage::Amp,
-                "Amp",
-                amp_shown.as_deref(),
-                ChainMark::Label(amp_mark),
-                amp_failed,
-                amp_reason.as_deref(),
+                ChainStage::Nam(0),
+                "NAM",
+                None,
+                ChainMark::Label("Off"),
+                false,
+                None,
                 show_curve,
                 rate,
             );
         }
+        self.nam_rows(ui, slot, &pre, show_curve, rate, open, overloaded);
 
         let mut bypassed = mix.chain_bypass;
         let latency: u32 = views.iter().map(|view| view.latency).sum();
@@ -161,12 +192,11 @@ impl RigWerkApp {
             self.set_chain_bypass(bypassed);
         }
 
-        // What stays below the group: + Add effect, the amp after the
-        // effects, the cabinet, the gate after the effects, Post EQ.
+        // What stays below the group: + Add effect, the NAM blocks after the
+        // effects, the cabinet, and the gate after the effects.
         let gap = ui.spacing().item_spacing.y;
-        let tail_rows = 3.0
-            + f32::from(u8::from(mix.amp.slot == AmpSlot::Post))
-            + f32::from(u8::from(mix.gate.slot == GateSlot::Post));
+        let tail_rows =
+            2.0 + post.len() as f32 + f32::from(u8::from(mix.gate.slot == GateSlot::Post));
         let used = ui.cursor().top() - top;
         let group = (height - used - gap - tail_rows * (CHAIN_ROW_H + gap)).max(ROW_PITCH);
         self.effect_rows(ui, slot, group, show_curve, rate, open);
@@ -175,20 +205,7 @@ impl RigWerkApp {
         if add.clicked() {
             self.open_effect_browser(slot, count);
         }
-        if mix.amp.slot == AmpSlot::Post {
-            self.builtin_row(
-                ui,
-                slot,
-                ChainStage::Amp,
-                "Amp",
-                amp_shown.as_deref(),
-                ChainMark::Label(amp_mark),
-                amp_failed,
-                amp_reason.as_deref(),
-                show_curve,
-                rate,
-            );
-        }
+        self.nam_rows(ui, slot, &post, show_curve, rate, open, overloaded);
         self.builtin_row(
             ui,
             slot,
@@ -229,7 +246,83 @@ impl RigWerkApp {
         );
     }
 
-    /// One pinned row: an EQ, the gate, the amp, or the cabinet.
+    /// The NAM blocks of one position group, one row each.  A dragged block
+    /// reorders inside its group; the mark of the heaviest block turns to the
+    /// warning colour while the DSP alarm is an error.
+    #[allow(clippy::too_many_arguments)]
+    fn nam_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        slot: usize,
+        rows: &[NamRow],
+        show_curve: bool,
+        rate: u32,
+        open: Option<Sheet>,
+        overloaded: bool,
+    ) {
+        let heaviest = if overloaded {
+            self.nam_heaviest(slot).first().map(|(index, _, _)| *index)
+        } else {
+            None
+        };
+        let mut moved = None;
+        for row in rows {
+            let stage = ChainStage::Nam(row.index);
+            let on = self.stage_on(slot, stage);
+            let selected = open
+                == Some(Sheet::Nam {
+                    path: slot,
+                    index: row.index,
+                });
+            let response = chain_row(
+                ui,
+                &ChainRow {
+                    name: "NAM",
+                    shown: row.shown.as_deref(),
+                    index: row.index,
+                    on,
+                    selected,
+                    failed: row.failed,
+                    fail_reason: row.reason.as_deref(),
+                    paused: false,
+                    mark: ChainMark::Label(&row.mark),
+                    show_curve,
+                    sample_rate: rate,
+                    menu: crate::ui::widgets::RowMenu::Nam,
+                    warn: heaviest == Some(row.index),
+                },
+            );
+            if let Some(drag) = response.dnd_hover_payload::<NamDrag>() {
+                if drag.0 != row.index {
+                    let y = if drag.0 < row.index {
+                        response.rect.bottom() + 1.5
+                    } else {
+                        response.rect.top() - 1.5
+                    };
+                    ui.painter().hline(
+                        response.rect.x_range(),
+                        y,
+                        Stroke::new(2.0, palette(ui.ctx()).accent),
+                    );
+                }
+            }
+            if let Some(drag) = response.dnd_release_payload::<NamDrag>() {
+                if drag.0 != row.index {
+                    moved = Some((drag.0, row.index));
+                }
+            }
+            self.chain_row_event(slot, stage, chain_event(&response), on);
+        }
+        if let Some((from, to)) = moved {
+            let index = self
+                .move_nam_block(slot, from, to as isize - from as isize)
+                .unwrap_or(from);
+            self.open_sheet(Sheet::Nam { path: slot, index });
+        }
+    }
+
+    /// One pinned row: an EQ, the gate, a NAM block's way in, or the
+    /// cabinet.
     #[allow(clippy::too_many_arguments)]
     fn builtin_row(
         &mut self,
@@ -260,6 +353,8 @@ impl RigWerkApp {
                 mark,
                 show_curve,
                 sample_rate: rate,
+                menu: crate::ui::widgets::RowMenu::Builtin,
+                warn: false,
             },
         );
         self.chain_row_event(slot, stage, chain_event(&response), on);
@@ -332,6 +427,8 @@ impl RigWerkApp {
                                 mark: ChainMark::Latency(&latency),
                                 show_curve,
                                 sample_rate: rate,
+                                menu: crate::ui::widgets::RowMenu::Effect,
+                                warn: false,
                             },
                         );
                         if let Some(drag) = response.dnd_hover_payload::<EffectDrag>() {
@@ -414,6 +511,15 @@ impl RigWerkApp {
             (ChainEvent::MoveUp, ChainStage::Effect(index)) => self.move_effect(slot, index, -1),
             (ChainEvent::MoveDown, ChainStage::Effect(index)) => self.move_effect(slot, index, 1),
             (ChainEvent::Remove, ChainStage::Effect(index)) => self.remove_effect(slot, index),
+            (ChainEvent::MoveUp, ChainStage::Nam(index)) => {
+                self.move_nam_block(slot, index, -1);
+            }
+            (ChainEvent::MoveDown, ChainStage::Nam(index)) => {
+                self.move_nam_block(slot, index, 1);
+            }
+            (ChainEvent::Remove, ChainStage::Nam(index)) => {
+                self.remove_nam_block(slot, index);
+            }
             _ => {}
         }
     }

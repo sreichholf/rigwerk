@@ -22,7 +22,7 @@ mod text_field;
 pub(crate) use button::{OutlineButton, CONTROL_H};
 pub(crate) use chain_row::{
     add_effect_row, chain_event, chain_row, dashed_rect, effects_header, ChainEvent, ChainMark,
-    ChainRow, EffectDrag, CHAIN_ROW_H,
+    ChainRow, EffectDrag, NamDrag, RowMenu, CHAIN_ROW_H,
 };
 pub(crate) use chip::chip;
 pub(crate) use dot::path_dot;

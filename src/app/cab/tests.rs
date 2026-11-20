@@ -1,5 +1,5 @@
-use crate::app::amp::normalize_amp_folder;
 use crate::app::blank_app;
+use crate::app::nam::normalize_models_folder;
 use crate::audio::CabControls;
 
 #[test]
@@ -8,7 +8,7 @@ fn a_wav_file_uses_its_folder() {
     std::fs::create_dir_all(&dir).expect("temp folder");
     let file = dir.join("speaker.wav");
     std::fs::write(&file, b"x").expect("temp impulse");
-    let got = normalize_amp_folder(&file.to_string_lossy());
+    let got = normalize_models_folder(&file.to_string_lossy());
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(got, dir.to_string_lossy());
 }

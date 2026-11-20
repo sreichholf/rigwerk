@@ -70,10 +70,9 @@ impl RigWerkApp {
             .into_iter()
             .find(|info| info.slot == slot)
             .map_or(0.0, |info| info.latency_ms);
-        let load = self
-            .engine
-            .path_dsp_time(slot)
-            .map(|time| time.avg_share() * 100.0);
+        let time = self.engine.path_dsp_time(slot);
+        let load = time.map(|time| time.avg_share() * 100.0);
+        let peak = time.map(|time| time.peak_share() * 100.0);
         let marker = self.dsp_marker_path() == Some(slot);
         top.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -87,6 +86,13 @@ impl RigWerkApp {
                 Some(share) => format!("DSP {share:.0} %"),
                 None => "DSP –".to_owned(),
             };
+            let detail = match (load, peak) {
+                (Some(share), Some(peak)) => format!(
+                    "This path's share of the buffer time: {share:.0} % on average, \
+                     {peak:.0} % at its worst in the last two seconds"
+                ),
+                _ => "This path's share of the buffer time".to_owned(),
+            };
             let response = ui.label(
                 RichText::new(if marker {
                     format!("▲ {load_text}")
@@ -97,11 +103,11 @@ impl RigWerkApp {
                 .color(if marker { colours.warn } else { colours.text3 }),
             );
             if marker {
-                response.on_hover_text(
-                    "The paths need more of the buffer than it has; this path takes the most",
-                );
+                response.on_hover_text(format!(
+                    "The paths need more of the buffer than it has; this path takes the most.  {detail}"
+                ));
             } else {
-                response.on_hover_text("This path's share of the buffer time");
+                response.on_hover_text(detail);
             }
         });
 

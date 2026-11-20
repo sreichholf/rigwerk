@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui::{pos2, Event, Modifiers, Pos2};
 
-use crate::app::amp::set_ctrl_v_for_test;
+use crate::app::nam::set_ctrl_v_for_test;
 use crate::app::{blank_app, RigWerkApp};
 use crate::ui::theme;
 use crate::ui::widgets::{node_named, run_frame, test_input};
@@ -20,7 +20,7 @@ fn frame(
 ) -> egui::accesskit::TreeUpdate {
     let mut input = test_input(None);
     input.events = events;
-    run_frame(ctx, input, |ui| app.amp_sheet(ui, 0))
+    run_frame(ctx, input, |ui| app.nam_sheet(ui, 0, 0))
         .platform_output
         .accesskit_update
         .expect("accesskit tree")
@@ -109,7 +109,7 @@ fn pasting_a_quoted_path_uses_the_folder() {
     click(&ctx, &mut app, at);
     frame(&ctx, &mut app, vec![Event::Paste(format!("\"{path}\""))]);
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(app.amp_folder, path);
+    assert_eq!(app.nam_folder, path);
 }
 
 #[test]
@@ -121,9 +121,9 @@ fn ctrl_v_does_not_steal_from_another_field() {
     let mut app = blank_app();
     frame(&ctx, &mut app, vec![]);
     assert!(
-        app.amp_folder.is_empty(),
+        app.nam_folder.is_empty(),
         "stole a paste: {}",
-        app.amp_folder
+        app.nam_folder
     );
     assert!(
         app.log.is_empty(),
@@ -145,7 +145,7 @@ fn ctrl_v_without_an_egui_event_pastes_once() {
         "a held Ctrl+V pasted on more than one frame ({logs} logs)"
     );
     assert!(
-        !app.amp_folder.is_empty() || logs == 1,
+        !app.nam_folder.is_empty() || logs == 1,
         "Ctrl+V did not read the clipboard"
     );
     set_ctrl_v_for_test(false);
@@ -161,6 +161,6 @@ fn ctrl_v_without_an_egui_event_pastes_once() {
         assert!(app.log.iter().all(|entry| entry.text.contains("clipboard")));
     } else {
         assert!(app.log.is_empty());
-        assert!(!app.amp_folder.is_empty());
+        assert!(!app.nam_folder.is_empty());
     }
 }

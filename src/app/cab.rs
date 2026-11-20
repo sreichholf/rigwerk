@@ -8,8 +8,8 @@
 //! file.  A rate or path change does.  The folder window and the clipboard
 //! read run on the UI thread too.
 
-use crate::app::amp::{
-    browse_start, clipboard_models_folder, looks_pasted, normalize_amp_folder, pasted_folder,
+use crate::app::nam::{
+    browse_start, clipboard_models_folder, looks_pasted, normalize_models_folder, pasted_folder,
 };
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::cab::{
@@ -41,7 +41,7 @@ pub(crate) struct CabInstall {
 impl RigWerkApp {
     /// Lists `*.wav` files in the impulse folder.  UI thread only.
     pub(crate) fn rescan_cab_folder(&mut self) {
-        let folder = normalize_amp_folder(&self.cab_folder);
+        let folder = normalize_models_folder(&self.cab_folder);
         self.cab_folder = folder.clone();
         let entries = scan_cab_folder(&folder);
         self.cab_catalog = CabCatalog { folder, entries };
@@ -50,7 +50,7 @@ impl RigWerkApp {
 
     /// Stores the impulse folder.  The sheet rescans when it next draws.
     pub(crate) fn set_cab_folder(&mut self, folder: String) {
-        let folder = normalize_amp_folder(&folder);
+        let folder = normalize_models_folder(&folder);
         if folder != self.cab_folder {
             self.cab_folder = folder;
             self.cab_rescan = true;
@@ -63,10 +63,10 @@ impl RigWerkApp {
     /// is normalized immediately.
     pub(crate) fn apply_typed_cab_folder(&mut self, previous: &str, edited: String, commit: bool) {
         if looks_pasted(previous, &edited) {
-            let folder = pasted_folder(&edited).unwrap_or_else(|| normalize_amp_folder(&edited));
+            let folder = pasted_folder(&edited).unwrap_or_else(|| normalize_models_folder(&edited));
             self.set_cab_folder(folder);
         } else if commit {
-            self.cab_folder = normalize_amp_folder(&edited);
+            self.cab_folder = normalize_models_folder(&edited);
             self.cab_rescan = true;
         } else if edited != self.cab_folder {
             self.cab_folder = edited;
@@ -136,7 +136,7 @@ impl RigWerkApp {
         let Some(path) = self.paths.get(slot).and_then(Option::as_ref) else {
             return;
         };
-        let rate = self.amp_rate();
+        let rate = self.nam_rate();
         let run = self.engine.run_id();
         let generation = self.engine.path_generation(slot);
         let controls = path.mix.cab.sanitized();

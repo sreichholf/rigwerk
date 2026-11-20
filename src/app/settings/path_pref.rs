@@ -2,7 +2,8 @@
 
 use super::serde_util::skip_unreadable;
 use crate::audio::{
-    AmpSettings, CabSettings, EqSettings, GateSettings, PathMix, PluginPref, MAX_PATHS,
+    CabSettings, EqSettings, GateSettings, LegacyNamSettings, NamBlockSettings, PathMix,
+    PluginPref, MAX_NAM_BLOCKS, MAX_PATHS,
 };
 
 /// One signal path: its name and colour (UI data), its chain settings, its
@@ -26,9 +27,14 @@ pub(crate) struct PathPref {
     /// The EQ after the plugin effects.
     pub(crate) eq_post: EqSettings,
     pub(crate) gate: GateSettings,
-    /// Built-in amp, including the capture path.  Missing on older saves.
-    #[serde(default, skip_serializing_if = "AmpSettings::is_unset")]
-    pub(crate) amp: AmpSettings,
+    /// The NAM blocks in signal order, with their captures.  Missing on
+    /// older saves, and omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) nam_blocks: Vec<NamBlockSettings>,
+    /// The single NAM stage older saves have.  [`Self::sanitize`] folds it
+    /// into `nam_blocks` and clears it, so a save never writes it again.
+    #[serde(default, skip_serializing_if = "LegacyNamSettings::is_unset")]
+    pub(crate) amp: LegacyNamSettings,
     /// Built-in cabinet, including the impulse path.  Missing on older
     /// saves, and omitted while it is still the default.
     #[serde(default, skip_serializing_if = "CabSettings::is_unset")]
@@ -52,7 +58,7 @@ impl Default for PathPref {
             default_path_name(0),
             0,
             &PathMix::default(),
-            "",
+            Vec::new(),
             "",
             Vec::new(),
         )
@@ -74,7 +80,7 @@ impl PathPref {
         name: String,
         colour: u8,
         mix: &PathMix,
-        model_path: &str,
+        nam_blocks: Vec<NamBlockSettings>,
         cab_file: &str,
         plugins: Vec<PluginPref>,
     ) -> Self {
@@ -87,7 +93,8 @@ impl PathPref {
             eq: mix.eqs[0],
             eq_post: mix.eqs[1],
             gate: mix.gate,
-            amp: AmpSettings::from_controls(mix.amp, model_path.trim().to_owned()),
+            nam_blocks,
+            amp: LegacyNamSettings::default(),
             cab: CabSettings::from_controls(mix.cab, cab_file.trim().to_owned()),
             plugins,
             chain_bypass: mix.chain_bypass,
@@ -105,7 +112,6 @@ impl PathPref {
             output_enabled: self.output_channels,
             eqs: [self.eq, self.eq_post],
             gate: self.gate,
-            amp: self.amp.controls(),
             cab: self.cab.controls(),
             level_db: self.level_db,
             mute: self.mute,
@@ -116,13 +122,22 @@ impl PathPref {
     }
 
     /// EQs, gate and level in range; a blank name gets the default; the
-    /// colour stays in the palette.
+    /// colour stays in the palette.  An older save's single NAM stage
+    /// becomes the first block, once.
     pub(crate) fn sanitize(&mut self, position: usize) {
+        if self.nam_blocks.is_empty() && !self.amp.is_unset() {
+            self.nam_blocks
+                .push(NamBlockSettings::from_legacy(&self.amp));
+        }
+        self.amp = LegacyNamSettings::default();
+        self.nam_blocks.truncate(MAX_NAM_BLOCKS);
+        for block in &mut self.nam_blocks {
+            *block = block.sanitized();
+        }
         let mix = self.mix();
         self.eq = mix.eqs[0];
         self.eq_post = mix.eqs[1];
         self.gate = mix.gate;
-        self.amp = AmpSettings::from_controls(mix.amp, self.amp.model_path.clone()).sanitized();
         self.cab = CabSettings::from_controls(mix.cab, self.cab.file.clone()).sanitized();
         self.level_db = mix.level_db;
         if self.name.trim().is_empty() {
