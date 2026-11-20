@@ -1,14 +1,17 @@
 //! The cabinet sheet's body: the impulse folder, the responses in it, the
 //! level, the cuts and the polarity.
 //!
-//! The header above (`sheets.rs`) already holds *On* / *Bypass*.  The page
-//! writes [`CabControls`](crate::audio::CabControls) onto the path; the
-//! frame's mix push carries them, and a cut or a polarity change is rebaked
-//! by `sync_cab_files`.  This file does not call the engine.
+//! The header above (`sheets.rs`) already holds *On* / *Bypass*.  The
+//! responses and the controls are
+//! [`catalog_columns`](super::catalog::catalog_columns), the same split the
+//! amp sheet uses.  The page writes [`CabControls`](crate::audio::CabControls)
+//! onto the path; the frame's mix push carries them, and a cut or a polarity
+//! change is rebaked by `sync_cab_files`.  This file does not call the engine.
 
 use eframe::egui;
 use egui::{Align, Layout, RichText};
 
+use super::catalog::{catalog_columns, catalog_empty_note, CatalogPick, CatalogRow};
 use crate::app::RigWerkApp;
 use crate::audio::cab::cab_note;
 use crate::audio::{
@@ -146,90 +149,95 @@ impl RigWerkApp {
 
         let entries = self.cab_catalog.entries.clone();
         ui.add_space(8.0);
-        let none = ui.selectable_label(file.trim().is_empty(), "None");
-        if none.clicked() {
-            chosen = Some(String::new());
-        }
-        if entries.is_empty() {
-            let note = if self.cab_folder.is_empty() {
-                "Browse for a folder, or paste its path."
-            } else if !std::path::Path::new(&self.cab_folder).is_dir() {
-                "That folder can't be read."
-            } else {
-                "No .wav files in that folder."
-            };
-            ui.label(
-                RichText::new(note)
-                    .font(font(Face::Sans, TypeRole::Body))
-                    .color(colours.text2),
-            );
-        } else {
-            for entry in &entries {
-                let selected = entry.path == file;
-                let response = ui.selectable_label(selected, &entry.name);
-                if response.clicked() {
-                    chosen = Some(entry.path.clone());
-                }
-            }
-        }
-
-        ui.add_space(8.0);
-        if let Some(error) = error.as_deref() {
-            ui.label(
-                RichText::new(error)
-                    .font(font(Face::Sans, TypeRole::Secondary))
-                    .color(colours.error_text),
-            );
-        }
-        if let Some(note) = cab_note(gear.as_deref(), ir_active) {
-            let text = match note {
-                CabNote::NoCabinet => {
-                    "This capture has no cabinet. Choose an impulse response so it does not sound like a DI."
-                }
-                CabNote::TwoCabinets => {
-                    "This capture already includes a cabinet. An impulse response here puts two cabinets in series."
-                }
-            };
-            ui.label(
-                RichText::new(text)
-                    .font(font(Face::Sans, TypeRole::Secondary))
-                    .color(colours.warn),
-            );
-        }
-
-        ui.add_space(12.0);
-        value_slider(
+        let rows: Vec<CatalogRow<'_>> = entries
+            .iter()
+            .map(|entry| CatalogRow {
+                name: entry.name.as_str(),
+                key: entry.path.as_str(),
+                selected: entry.path == file,
+            })
+            .collect();
+        let empty = entries
+            .is_empty()
+            .then(|| catalog_empty_note(&self.cab_folder, "No .wav files in that folder."));
+        let note = cab_note(gear.as_deref(), ir_active);
+        match catalog_columns(
             ui,
-            "Level",
-            "Output trim of the cabinet.",
-            &mut cab.level_db,
-            CAB_MIN_LEVEL_DB..=CAB_MAX_LEVEL_DB,
-            0.1,
-            false,
-        );
-        value_slider(
-            ui,
-            "Low cut",
-            "High-pass of the impulse. Off leaves the low end alone.",
-            &mut cab.low_cut_hz,
-            0.0..=CAB_MAX_LOW_CUT_HZ,
-            1.0,
-            true,
-        );
-        value_slider(
-            ui,
-            "High cut",
-            "Low-pass of the impulse. Off leaves the high end alone.",
-            &mut cab.high_cut_hz,
-            0.0..=CAB_MAX_HIGH_CUT_HZ,
-            100.0,
-            true,
-        );
+            "cab",
+            Some(CatalogRow {
+                name: "None",
+                key: "none",
+                selected: file.trim().is_empty(),
+            }),
+            &rows,
+            empty.as_deref(),
+            |ui| {
+                let mut noted = false;
+                if let Some(error) = error.as_deref() {
+                    ui.label(
+                        RichText::new(error)
+                            .font(font(Face::Sans, TypeRole::Secondary))
+                            .color(colours.error_text),
+                    );
+                    noted = true;
+                }
+                if let Some(note) = note {
+                    let text = match note {
+                        CabNote::NoCabinet => {
+                            "This capture has no cabinet. Choose an impulse response so it does not sound like a DI."
+                        }
+                        CabNote::TwoCabinets => {
+                            "This capture already includes a cabinet. An impulse response here puts two cabinets in series."
+                        }
+                    };
+                    ui.label(
+                        RichText::new(text)
+                            .font(font(Face::Sans, TypeRole::Secondary))
+                            .color(colours.warn),
+                    );
+                    noted = true;
+                }
+                if noted {
+                    ui.add_space(12.0);
+                }
+                value_slider(
+                    ui,
+                    "Level",
+                    "Output trim of the cabinet.",
+                    &mut cab.level_db,
+                    CAB_MIN_LEVEL_DB..=CAB_MAX_LEVEL_DB,
+                    0.1,
+                    false,
+                );
+                value_slider(
+                    ui,
+                    "Low cut",
+                    "High-pass of the impulse. Off leaves the low end alone.",
+                    &mut cab.low_cut_hz,
+                    0.0..=CAB_MAX_LOW_CUT_HZ,
+                    1.0,
+                    true,
+                );
+                value_slider(
+                    ui,
+                    "High cut",
+                    "Low-pass of the impulse. Off leaves the high end alone.",
+                    &mut cab.high_cut_hz,
+                    0.0..=CAB_MAX_HIGH_CUT_HZ,
+                    100.0,
+                    true,
+                );
 
-        ui.add_space(8.0);
-        let mut polarity = usize::from(cab.polarity);
-        if segmented(ui, &mut polarity, &["Normal", "Invert"]).changed() {
-            cab.polarity = polarity == 1;
+                ui.add_space(8.0);
+                let mut polarity = usize::from(cab.polarity);
+                if segmented(ui, &mut polarity, &["Normal", "Invert"]).changed() {
+                    cab.polarity = polarity == 1;
+                }
+            },
+        ) {
+            Some(CatalogPick::Leading) => chosen = Some(String::new()),
+            Some(CatalogPick::Entry(index)) => chosen = Some(entries[index].path.clone()),
+            None => {}
         }
 
         if cab != current {
