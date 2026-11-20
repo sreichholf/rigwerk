@@ -5,7 +5,7 @@ use crate::app::appearance::ThemeChoice;
 use crate::app::latency::{LoopbackKind, MeasuredLatency};
 use crate::app::Page;
 use crate::audio::{
-    ChannelMap, EqSettings, GateSettings, GateSlot, LegacyNamSettings, NamPosition,
+    ChannelMap, EqSettings, GateKey, GateSettings, GateSlot, LegacyNamSettings, NamPosition,
     OutputDeviceSettings, PluginFormat, PluginPref, UnusedChannels, WasapiOutputMode,
     MAX_EXTRA_OUTPUTS, MAX_NAM_BLOCKS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
@@ -182,6 +182,7 @@ fn gate_round_trips_in_preferences_and_sessions() {
     let gate = GateSettings {
         enabled: true,
         slot: GateSlot::Pre,
+        key: GateKey::Input,
         threshold_db: -42.5,
         range_db: -55.0,
         hysteresis_db: 8.0,
@@ -295,6 +296,18 @@ fn gate_missing_from_old_saves_uses_defaults() {
     assert_eq!(gate, GateSettings::default());
     assert_eq!(gate.slot, GateSlot::Post);
     assert!(!gate.enabled);
+}
+
+#[test]
+fn a_gate_saved_before_the_key_listens_to_its_signal() {
+    let raw = r#"(paths:[(gate:(enabled:true,slot:pre,threshold_db:-40.0))])"#;
+    let preferences = load_preferences(Some(raw), BACKUP)
+        .preferences
+        .expect("readable");
+    let gate = preferences.paths[0].gate;
+    assert!(gate.enabled);
+    assert_eq!(gate.slot, GateSlot::Pre);
+    assert_eq!(gate.key, GateKey::Signal);
 }
 
 #[test]
@@ -1718,6 +1731,7 @@ fn golden_path(name: &str) -> PathPref {
         gate: GateSettings {
             enabled: true,
             slot: GateSlot::Pre,
+            key: GateKey::Input,
             threshold_db: -45.0,
             range_db: -60.0,
             hysteresis_db: 6.0,

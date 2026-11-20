@@ -450,3 +450,119 @@ fn a_removed_path_plays_out_its_alignment_delay_before_it_stops() {
     let last = out.len() - 1;
     assert!((out[last][0] - delayed(last, LATENCY)).abs() < 1e-6);
 }
+
+/// One path with a pure delay of `latency` and a gate keyed on the dry
+/// input in `slot`: fast, deep, no hold.
+fn keyed_gate_mixer(
+    latency: u32,
+    slot: super::super::gate::GateSlot,
+) -> (OutputMixer, Shared, super::super::gate::GateSettings) {
+    use super::super::gate::{GateKey, GateSettings};
+    let shared = Shared::new(RATE);
+    shared.set_master(false, [true, true], false);
+    shared
+        .direct
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let off = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    let gate = GateSettings {
+        enabled: true,
+        slot,
+        key: GateKey::Input,
+        threshold_db: -40.0,
+        range_db: -80.0,
+        hold_ms: 0.0,
+        release_ms: 1.0,
+        attack_ms: 0.1,
+        ..GateSettings::default()
+    };
+    let mix = PathMix {
+        eqs: [off, off],
+        gate,
+        ..PathMix::default()
+    };
+    shared.restore_path(0, &mix, &NamStack::default(), Vec::new());
+    shared.paths[0].edit_chain(|chain| chain.insert_delay_for_test(latency));
+    let mut mixer = OutputMixer::new(RATE, 2);
+    mixer.prepare(BLOCK);
+    (mixer, shared, gate)
+}
+
+/// The clock output's left channel for `blocks` blocks of `input`, from
+/// frame `*clock`.
+fn run_left(
+    mixer: &mut OutputMixer,
+    shared: &Shared,
+    clock: &mut usize,
+    blocks: usize,
+    input: impl Fn(usize) -> f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; blocks * BLOCK];
+    for block in 0..blocks {
+        let left: Vec<f32> = (*clock..*clock + BLOCK).map(&input).collect();
+        mixer.render_direct_devices(shared, &left, &left, |device, index, mapped| {
+            if device == 0 {
+                out[block * BLOCK + index] = mapped.sample(0);
+            }
+        });
+        *clock += BLOCK;
+    }
+    out
+}
+
+/// A POST gate keyed on the dry input hears the note a chain latency late,
+/// so it opens and closes with the effects' output, not before it.
+#[test]
+fn a_gate_keyed_on_the_input_lines_up_with_the_chain() {
+    use super::super::gate::GateSlot;
+    const LATENCY: usize = 4_800;
+    const START: usize = 2_048;
+    const BURST: usize = 2_048;
+    const BLOCKS: usize = (START + LATENCY + BURST) / BLOCK + 8;
+    let (mut mixer, shared, _) = keyed_gate_mixer(LATENCY as u32, GateSlot::Post);
+    let input = |n: usize| {
+        if (START..START + BURST).contains(&n) {
+            0.25
+        } else {
+            0.0
+        }
+    };
+    let mut clock = 0;
+    let out = run_left(&mut mixer, &shared, &mut clock, BLOCKS, input);
+    // The delayed burst plays through an open gate, from just after it
+    // arrives until it ends.  Keyed on the undelayed input, the gate would
+    // have closed again 2 048 frames before it arrived.
+    let arrives = START + LATENCY;
+    for (n, sample) in out
+        .iter()
+        .enumerate()
+        .take(arrives + BURST)
+        .skip(arrives + 64)
+    {
+        assert!((sample - 0.25).abs() < 0.01, "frame {n}: {sample}");
+    }
+    // Before it arrives the path is silent, keyed or not.
+    assert!(out[..arrives].iter().all(|sample| sample.abs() < 1e-6));
+}
+
+/// Moved after the effects mid-note, a keyed gate already holds a chain
+/// latency of the input, so it stays open instead of hearing silence.
+#[test]
+fn a_keyed_gate_moved_after_the_effects_keeps_hearing_the_note() {
+    use super::super::gate::GateSlot;
+    const LATENCY: usize = 4_800;
+    let (mut mixer, shared, gate) = keyed_gate_mixer(LATENCY as u32, GateSlot::Pre);
+    let mut clock = 0;
+    let _ = run_left(&mut mixer, &shared, &mut clock, 40, |_| 0.25);
+    shared.paths[0].set_gate(super::super::gate::GateSettings {
+        slot: GateSlot::Post,
+        ..gate
+    });
+    // Past one latency: the old empty line would have closed it by then.
+    let out = run_left(&mut mixer, &shared, &mut clock, 24, |_| 0.25);
+    for (n, sample) in out.iter().enumerate() {
+        assert!((sample - 0.25).abs() < 0.01, "frame {n}: {sample}");
+    }
+}

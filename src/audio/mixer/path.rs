@@ -5,9 +5,11 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::super::cab::CabStage;
-use super::super::delay::{Declick, DelayLine, DelayTap, DECLICK_SECONDS, TAP_FADE_SECONDS};
+use super::super::delay::{
+    Declick, DelayLine, DelayTap, MonoDelayLine, DECLICK_SECONDS, TAP_FADE_SECONDS,
+};
 use super::super::eq::{EqSlot, Equalizer};
-use super::super::gate::{GateSlot, NoiseGate};
+use super::super::gate::{GateKey, GateSlot, NoiseGate};
 use super::super::nam::{NamPosition, NamStage};
 use super::super::path::{DspTime, PathControls, PathState};
 use super::super::plugins::{ChainLease, MAX_ALIGN};
@@ -32,6 +34,17 @@ pub(crate) struct PathProcessor {
     /// Built-in noise gate and the settings version it was last updated from.
     gate: NoiseGate,
     gate_version: u64,
+    /// The dry input's peak per frame of this block, taken after routing
+    /// and mono and before the pre EQ: the gate's key when it listens to
+    /// the input.
+    key: Vec<f32>,
+    /// That key delayed by the chain latency for a POST gate, so the
+    /// detector hears the note the gate is cutting, not one a chain's
+    /// latency earlier.  Fed while the gate is set to listen to the input,
+    /// on or off and in either slot, so turning it on or moving it after
+    /// the effects mid-note does not leave the detector a latency of
+    /// silence.
+    key_line: MonoDelayLine,
     /// Built-in NAM blocks.  Their models are taken at the start of the
     /// block; the scratch they process into is grown in
     /// [`Self::reserve_block`].
@@ -182,6 +195,8 @@ impl PathProcessor {
             eq_version: [0; 2],
             gate: NoiseGate::new(rate),
             gate_version: 0,
+            key: Vec::new(),
+            key_line: MonoDelayLine::new(MAX_ALIGN as usize),
             nam: NamStage::new(rate),
             cab: CabStage::new(rate),
             ramps: PathRamps::new(),
@@ -200,6 +215,7 @@ impl PathProcessor {
     fn restart(&mut self, rate: u32, generation: u64) {
         self.eq = [Equalizer::new(rate), Equalizer::new(rate)];
         self.gate = NoiseGate::new(rate);
+        self.key_line.reset();
         self.nam.restart(rate);
         self.cab.restart(rate);
         self.invalidate_settings();
@@ -236,6 +252,9 @@ impl PathProcessor {
     pub(super) fn reserve_block(&mut self, frames: usize) {
         if self.block.len() < frames {
             self.block.resize(frames, [0.0; 4]);
+        }
+        if self.key.len() < frames {
+            self.key.resize(frames, 0.0);
         }
         self.nam.reserve(frames);
         self.cab.reserve(frames);
@@ -303,6 +322,7 @@ impl PathProcessor {
             post_eq: self.eq[EqSlot::Post.index()].active(),
             gate_pre: self.gate.active() && self.gate.settings().slot == GateSlot::Pre,
             gate_post: self.gate.active() && self.gate.settings().slot == GateSlot::Post,
+            gate_keyed: self.gate.settings().key == GateKey::Input,
         };
         restarted
     }
@@ -374,6 +394,8 @@ impl PathProcessor {
             // Routing, channel enable and mono move with the ramps, before
             // the EQ and the effects, which is where those controls act.
             let mut out = self.ramps.next_input(left, right);
+            let key = out[0].abs().max(out[1].abs());
+            self.key[index] = key;
             // The chain on the path's mix (taps 1/2), in order: pre EQ,
             // optional PRE gate, the NAM blocks that sit before the plugin
             // effects, plugin effects, the NAM blocks after them, the
@@ -384,7 +406,11 @@ impl PathProcessor {
                 (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
             }
             if self.plan.gate_pre {
-                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+                (out[0], out[1]) = if self.plan.gate_keyed {
+                    self.gate.process_keyed(out[0], out[1], key)
+                } else {
+                    self.gate.process(out[0], out[1])
+                };
             }
             self.block[index] = out;
         }
@@ -516,15 +542,28 @@ impl PathProcessor {
     /// The rest of the path after the effects: the NAM blocks that sit after
     /// them, the cabinet, the POST gate and the post EQ, in place, then
     /// the path meters and the gate's reduction.  The cabinet adds no
-    /// latency.
+    /// latency.  A POST gate keyed on the input reads the key a chain
+    /// latency back, the delay the effects' output has too.
     pub(super) fn finish_block(&mut self, controls: &PathControls, frames: usize) {
         self.nam.process(&mut self.block, frames, NamPosition::Post);
         self.cab.process_block(&mut self.block, frames);
+        if !self.plan.gate_keyed {
+            self.key_line.reset();
+        }
+        let key_delay = self.latency as usize;
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
-        for out in &mut self.block[..frames] {
+        for (out, &key) in self.block[..frames].iter_mut().zip(&self.key[..frames]) {
+            if self.plan.gate_keyed {
+                self.key_line.push(key);
+            }
             if self.plan.gate_post {
-                (out[0], out[1]) = self.gate.process(out[0], out[1]);
+                (out[0], out[1]) = if self.plan.gate_keyed {
+                    let key = self.key_line.read(key_delay);
+                    self.gate.process_keyed(out[0], out[1], key)
+                } else {
+                    self.gate.process(out[0], out[1])
+                };
             }
             if self.plan.post_eq {
                 (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
@@ -544,4 +583,6 @@ struct BlockPlan {
     post_eq: bool,
     gate_pre: bool,
     gate_post: bool,
+    /// The gate listens to the path's dry input.
+    gate_keyed: bool,
 }

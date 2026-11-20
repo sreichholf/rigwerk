@@ -94,7 +94,11 @@ and each strip shows a thin meter.
 - **EQ** has five bands (low shelf, three bells, high shelf) with a curve
   and a band table, and a *Flat* button.
 - **Gate** has threshold, range, hysteresis, attack, release and hold, a
-  reduction meter, and *Before effects* / *After effects*.
+  reduction meter, *Before effects* / *After effects*, and what it
+  listens to: the *Gated signal*, or the *Dry input* before the chain,
+  lined up with the effects' latency.  Keyed on the dry input, a gate
+  after a high-gain amp is not held open by the amp's own noise; set its
+  threshold for the guitar's level.
 - **NAM** edits one block: a Neural Amp Modeler `.nam` capture from the
   models folder, *Before effects* / *After effects*, input and output
   trims, *Auto level*, and a width dial for slimmable captures.  Blocks

@@ -5,7 +5,7 @@ use egui::{pos2, Event, Modifiers, Pos2};
 use super::{reduction_fraction, slot_hint, GateUnit, GATE_CONTROLS};
 use crate::app::chain::{chain_stages, ChainStage};
 use crate::app::{blank_app, RigWerkApp};
-use crate::audio::{EngineState, GateSettings, GateSlot};
+use crate::audio::{EngineState, GateKey, GateSettings, GateSlot};
 use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
 
 fn gate(app: &RigWerkApp) -> GateSettings {
@@ -129,6 +129,33 @@ fn the_position_moves_the_gate_and_its_chain_row() {
 }
 
 #[test]
+fn the_key_choice_sets_what_the_gate_listens_to() {
+    let mut app = blank_app();
+    assert_eq!(gate(&app).key, GateKey::Signal);
+    let ctx = sheet_context();
+    let tree = frame(&ctx, &mut app, Vec::new());
+    assert_eq!(
+        node_named(&tree, "Gated signal").toggled(),
+        Some(Toggled::True)
+    );
+    click(&ctx, &mut app, centre(&tree, "Dry input"));
+
+    assert_eq!(
+        gate(&app),
+        GateSettings {
+            key: GateKey::Input,
+            ..GateSettings::default()
+        },
+        "only the key moved"
+    );
+    let tree = frame(&ctx, &mut app, Vec::new());
+    assert_eq!(
+        node_named(&tree, "Dry input").toggled(),
+        Some(Toggled::True)
+    );
+}
+
+#[test]
 fn reset_restores_the_defaults_and_keeps_on_off() {
     for enabled in [true, false] {
         let mut app = blank_app();
@@ -136,6 +163,7 @@ fn reset_restores_the_defaults_and_keeps_on_off() {
         let edited = GateSettings {
             enabled,
             slot: GateSlot::Pre,
+            key: GateKey::Input,
             threshold_db: -30.0,
             range_db: -20.0,
             hysteresis_db: 12.0,

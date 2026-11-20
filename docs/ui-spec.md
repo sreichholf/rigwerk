@@ -549,7 +549,8 @@ pre and post EQ are for, shelf vs bell Q) stay.
 
 **Gate**: threshold, range, hysteresis, attack, release and hold, each with
 its value and today's hover text; a reduction meter (audio addition, §0);
-*Before effects* / *After effects*; *Reset* (keeps on/off).
+*Before effects* / *After effects*; *Listens to*: *Gated signal* /
+*Dry input*; *Reset* (keeps on/off).
 
 **Effect**: header *On* / *Bypass*, *Wet* (its default on hover), latency,
 state (*Active*, *Bypassed*, *Didn't load*: today's controls-window marks),

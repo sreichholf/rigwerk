@@ -280,12 +280,13 @@ fn an_old_session_output_buffer_follows_the_input_buffer() {
 
 #[test]
 fn applying_a_session_restores_gate_settings() {
-    use crate::audio::{GateSettings, GateSlot};
+    use crate::audio::{GateKey, GateSettings, GateSlot};
 
     let mut app = test_app();
     let gate = GateSettings {
         enabled: true,
         slot: GateSlot::Pre,
+        key: GateKey::Input,
         threshold_db: -36.0,
         range_db: -72.0,
         hysteresis_db: 4.0,
@@ -456,7 +457,7 @@ fn the_click_mask_follows_the_device_when_a_session_swaps_clock_and_extra_output
 
 #[test]
 fn saving_a_session_writes_current_gate() {
-    use crate::audio::{GateSettings, GateSlot};
+    use crate::audio::{GateKey, GateSettings, GateSlot};
 
     let mut app = test_app();
     app.session_name = "Mine".to_owned();
@@ -466,6 +467,7 @@ fn saving_a_session_writes_current_gate() {
     app.path_mut().mix.gate = GateSettings {
         enabled: true,
         slot: GateSlot::Pre,
+        key: GateKey::Input,
         threshold_db: -40.0,
         range_db: -50.0,
         hysteresis_db: 5.0,
