@@ -1,4 +1,4 @@
-//! Built-in noise gate / downward expander on the master mix.
+//! Built-in noise gate / downward expander, one per signal path.
 //!
 //! Causal and feed-forward: each sample's gain depends only on the current
 //! and past samples.  That means zero added buffering latency, and it also
@@ -14,6 +14,13 @@
 //!
 //! The PRE/POST slot is where this stage sits relative to the plugin effects;
 //! the DSP itself is the same in either place.
+//!
+//! The key is what the detector hears.  [`GateKey::Signal`] is the signal
+//! being gated.  [`GateKey::Input`] is the path's dry input, before the
+//! chain: after a high-gain amp the noise floor is loud enough to hold a
+//! gate open, while the guitar's own level still says when a note ends.
+//! The mixer hands that key in delayed by the chain latency, so it lines up
+//! with what the gate cuts ([`NoiseGate::process_keyed`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +33,18 @@ pub enum GateSlot {
     /// After effects: gates idle roar / gain-stage hiss.  The default.
     #[default]
     Post,
+}
+
+/// What the gate's detector listens to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GateKey {
+    /// The signal being gated.  The default.
+    #[default]
+    Signal,
+    /// The path's dry input, before the chain, lined up with the chain's
+    /// latency.
+    Input,
 }
 
 /// Soft limits for the UI and for [`GateSettings::sanitized`].
@@ -54,6 +73,8 @@ const DETECTOR_RELEASE_MS: f32 = 20.0;
 pub struct GateSettings {
     pub enabled: bool,
     pub slot: GateSlot,
+    /// What the detector listens to.
+    pub key: GateKey,
     /// Open threshold in dBFS.  Signal above this opens a closed gate.
     pub threshold_db: f32,
     /// Gain when fully closed, in dB (0 = pass-through, −80 ≈ mute).
@@ -74,6 +95,7 @@ impl Default for GateSettings {
         Self {
             enabled: false,
             slot: GateSlot::Post,
+            key: GateKey::Signal,
             threshold_db: -48.0,
             range_db: -60.0,
             hysteresis_db: 6.0,
@@ -90,6 +112,7 @@ impl GateSettings {
         Self {
             enabled: self.enabled,
             slot: self.slot,
+            key: self.key,
             threshold_db: finite_or(self.threshold_db, defaults.threshold_db)
                 .clamp(MIN_THRESHOLD_DB, MAX_THRESHOLD_DB),
             range_db: finite_or(self.range_db, defaults.range_db).clamp(MIN_RANGE_DB, MAX_RANGE_DB),
@@ -275,12 +298,20 @@ impl NoiseGate {
         self.phase
     }
 
+    /// One frame, keyed on itself.
     #[inline]
     pub(crate) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
+        self.process_keyed(left, right, left.abs().max(right.abs()))
+    }
+
+    /// One frame, with the detector fed `key` (a peak, `max(|L|, |R|)` of
+    /// whatever the gate listens to) instead of the frame itself.
+    #[inline]
+    pub(crate) fn process_keyed(&mut self, left: f32, right: f32, key: f32) -> (f32, f32) {
         if !self.active {
             return (left, right);
         }
-        let peak = left.abs().max(right.abs());
+        let peak = if key.is_finite() { key.abs() } else { 0.0 };
         // Peak ballistics: rise fast toward peaks, fall slowly so a sustained
         // note's zero crossings do not collapse the envelope.
         if peak > self.envelope {

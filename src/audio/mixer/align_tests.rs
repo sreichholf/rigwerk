@@ -450,3 +450,340 @@ fn a_removed_path_plays_out_its_alignment_delay_before_it_stops() {
     let last = out.len() - 1;
     assert!((out[last][0] - delayed(last, LATENCY)).abs() < 1e-6);
 }
+
+/// One path with a pure delay of `latency` and a gate keyed on the dry
+/// input in `slot`: fast, deep, no hold.
+fn keyed_gate_mixer(
+    latency: u32,
+    slot: super::super::gate::GateSlot,
+) -> (OutputMixer, Shared, super::super::gate::GateSettings) {
+    use super::super::gate::{GateKey, GateSettings};
+    let shared = Shared::new(RATE);
+    shared.set_master(false, [true, true], false);
+    shared
+        .direct
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let off = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    let gate = GateSettings {
+        enabled: true,
+        slot,
+        key: GateKey::Input,
+        threshold_db: -40.0,
+        range_db: -80.0,
+        hold_ms: 0.0,
+        release_ms: 1.0,
+        attack_ms: 0.1,
+        ..GateSettings::default()
+    };
+    let mix = PathMix {
+        eqs: [off, off],
+        gate,
+        ..PathMix::default()
+    };
+    shared.restore_path(0, &mix, &NamStack::default(), Vec::new());
+    shared.paths[0].edit_chain(|chain| chain.insert_delay_for_test(latency));
+    let mut mixer = OutputMixer::new(RATE, 2);
+    mixer.prepare(BLOCK);
+    (mixer, shared, gate)
+}
+
+/// The clock output's left channel for `blocks` blocks of `input`, from
+/// frame `*clock`.
+fn run_left(
+    mixer: &mut OutputMixer,
+    shared: &Shared,
+    clock: &mut usize,
+    blocks: usize,
+    input: impl Fn(usize) -> f32,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; blocks * BLOCK];
+    for block in 0..blocks {
+        let left: Vec<f32> = (*clock..*clock + BLOCK).map(&input).collect();
+        mixer.render_direct_devices(shared, &left, &left, |device, index, mapped| {
+            if device == 0 {
+                out[block * BLOCK + index] = mapped.sample(0);
+            }
+        });
+        *clock += BLOCK;
+    }
+    out
+}
+
+/// A POST gate keyed on the dry input hears the note a chain latency late,
+/// so it opens and closes with the effects' output, not before it.
+#[test]
+fn a_gate_keyed_on_the_input_lines_up_with_the_chain() {
+    use super::super::gate::GateSlot;
+    const LATENCY: usize = 4_800;
+    const START: usize = 2_048;
+    const BURST: usize = 2_048;
+    const BLOCKS: usize = (START + LATENCY + BURST) / BLOCK + 8;
+    let (mut mixer, shared, _) = keyed_gate_mixer(LATENCY as u32, GateSlot::Post);
+    let input = |n: usize| {
+        if (START..START + BURST).contains(&n) {
+            0.25
+        } else {
+            0.0
+        }
+    };
+    let mut clock = 0;
+    let out = run_left(&mut mixer, &shared, &mut clock, BLOCKS, input);
+    // The delayed burst plays through an open gate, from just after it
+    // arrives until it ends.  Keyed on the undelayed input, the gate would
+    // have closed again 2 048 frames before it arrived.
+    let arrives = START + LATENCY;
+    for (n, sample) in out
+        .iter()
+        .enumerate()
+        .take(arrives + BURST)
+        .skip(arrives + 64)
+    {
+        assert!((sample - 0.25).abs() < 0.01, "frame {n}: {sample}");
+    }
+    // Before it arrives the path is silent, keyed or not.
+    assert!(out[..arrives].iter().all(|sample| sample.abs() < 1e-6));
+}
+
+/// Moved after the effects mid-note, a keyed gate already holds a chain
+/// latency of the input, so it stays open instead of hearing silence.
+#[test]
+fn a_keyed_gate_moved_after_the_effects_keeps_hearing_the_note() {
+    use super::super::gate::GateSlot;
+    const LATENCY: usize = 4_800;
+    let (mut mixer, shared, gate) = keyed_gate_mixer(LATENCY as u32, GateSlot::Pre);
+    let mut clock = 0;
+    let _ = run_left(&mut mixer, &shared, &mut clock, 40, |_| 0.25);
+    shared.paths[0].set_gate(super::super::gate::GateSettings {
+        slot: GateSlot::Post,
+        ..gate
+    });
+    // Past one latency: the old empty line would have closed it by then.
+    let out = run_left(&mut mixer, &shared, &mut clock, 24, |_| 0.25);
+    for (n, sample) in out.iter().enumerate() {
+        assert!((sample - 0.25).abs() < 0.01, "frame {n}: {sample}");
+    }
+}
+
+/// Paths 0 and 2 send to the return in slot 1 at `send_db`; path 0 has a
+/// pure delay of `latency`.  Only the paths in `routed` play on the clock
+/// output.
+fn return_mixer(latency: u32, send_db: f32, routed: [bool; 3]) -> (OutputMixer, Shared) {
+    use super::super::path::PathFeed;
+    let shared = Shared::new(RATE);
+    shared.set_master(false, [true, true], false);
+    shared
+        .direct
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let off = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    let mut sender = PathMix {
+        eqs: [off, off],
+        ..PathMix::default()
+    };
+    sender.sends[1] = send_db;
+    let ret = PathMix {
+        eqs: [off, off],
+        feed: PathFeed::Sends,
+        ..PathMix::default()
+    };
+    shared.restore_path(0, &sender, &NamStack::default(), Vec::new());
+    shared.restore_path(1, &ret, &NamStack::default(), Vec::new());
+    shared.restore_path(2, &sender, &NamStack::default(), Vec::new());
+    if latency > 0 {
+        shared.paths[0].edit_chain(|chain| chain.insert_delay_for_test(latency));
+    }
+    let mut device = OutputDeviceSettings::default();
+    for (slot, on) in routed.into_iter().enumerate() {
+        device.path_map[slot] = if on {
+            PathMapSettings::default()
+        } else {
+            PathMapSettings::unrouted()
+        };
+    }
+    shared.clock_output.set(&device);
+    (OutputMixer::new(RATE, 2), shared)
+}
+
+/// Lets the send and level ramps settle.
+const SETTLE: usize = 2 * BLOCK;
+
+#[test]
+fn a_return_plays_its_senders_lined_up_with_each_other() {
+    const LATENCY: usize = 64;
+    // Half of each: the return hears one copy of the sine in all.
+    let half = -20.0 * 2.0f32.log10();
+    let (mut mixer, shared) = return_mixer(LATENCY as u32, half, [false, true, true]);
+    let mut clock = 0;
+    let out = run(&mut mixer, &shared, &mut clock, 8);
+    // Path 2 waits for the return, which waits for path 0: the return's
+    // one copy and path 2's, both a latency late.
+    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
+        let want = 2.0 * delayed(n, LATENCY);
+        assert!((frame[0] - want).abs() < 1e-4, "frame {n}: {frame:?}");
+        assert!((frame[1] + want).abs() < 1e-4, "frame {n}: {frame:?}");
+    }
+    let report = shared.clock_output.alignment().expect("published");
+    assert_eq!(report.delays[1], Some(0), "the return is the slowest");
+    assert_eq!(report.delays[2], Some(LATENCY as u32));
+}
+
+#[test]
+fn a_send_is_taken_after_the_senders_mute() {
+    let (mut mixer, shared) = return_mixer(0, 0.0, [false, true, false]);
+    shared.paths[2].set_mute(true);
+    let mut clock = 0;
+    let out = run(&mut mixer, &shared, &mut clock, 4);
+    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
+        assert!((frame[0] - signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
+    }
+    shared.paths[0].set_mute(true);
+    let start = clock;
+    let out = run(&mut mixer, &shared, &mut clock, 4);
+    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
+        assert_eq!(frame[0], 0.0, "frame {}", start + n);
+    }
+}
+
+#[test]
+fn a_return_is_solo_safe_and_hears_only_the_soloed_senders() {
+    let (mut mixer, shared) = return_mixer(0, 0.0, [false, true, false]);
+    shared.paths[0].set_solo(true);
+    assert!(shared.any_solo());
+    let mut clock = 0;
+    let out = run(&mut mixer, &shared, &mut clock, 4);
+    // Path 2 is soloed out, so only path 0's send reaches the return,
+    // and the return itself still sounds.
+    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
+        assert!((frame[0] - signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
+    }
+    // A return's own solo does not silence the senders.
+    shared.paths[0].set_solo(false);
+    shared.paths[1].set_solo(true);
+    assert!(!shared.any_solo());
+}
+
+#[test]
+fn a_return_ignores_its_routing_and_sends_nothing() {
+    let (mut mixer, shared) = return_mixer(0, 0.0, [false, true, false]);
+    shared.paths[2].set_mute(true);
+    // Routing that would drop the right side, and a send back to path 0:
+    // neither applies to a return.
+    shared.paths[1].set_routes([[true, false, false, false], [false, false, false, false]]);
+    let mut back = [crate::audio::SEND_OFF_DB; crate::audio::MAX_PATHS];
+    back[0] = 0.0;
+    shared.paths[1].set_sends(back);
+    let mut clock = 0;
+    let out = run(&mut mixer, &shared, &mut clock, 4);
+    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
+        assert!((frame[0] - signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
+        assert!((frame[1] + signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
+    }
+}
+
+#[test]
+fn a_returns_own_chain_adds_to_its_wait() {
+    const SENDER: usize = 64;
+    const OWN: usize = 32;
+    let half = -20.0 * 2.0f32.log10();
+    let (mut mixer, shared) = return_mixer(SENDER as u32, half, [false, true, true]);
+    shared.paths[1].edit_chain(|chain| chain.insert_delay_for_test(OWN as u32));
+    let mut clock = 0;
+    let out = run(&mut mixer, &shared, &mut clock, 8);
+    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
+        let want = 2.0 * delayed(n, SENDER + OWN);
+        assert!((frame[0] - want).abs() < 1e-4, "frame {n}: {frame:?}");
+    }
+    let report = shared.clock_output.alignment().expect("published");
+    assert_eq!(report.delays[1], Some(0));
+    assert_eq!(report.delays[2], Some((SENDER + OWN) as u32));
+    // What the UI shows while no bridge runs counts the same.
+    assert_eq!(shared.alignment_latencies()[1], (SENDER + OWN) as u32);
+    assert_eq!(shared.alignment_latencies()[2], 0);
+}
+
+#[test]
+fn turning_a_send_off_does_not_move_the_alignment() {
+    const LATENCY: u32 = 64;
+    let (mut mixer, shared) = return_mixer(LATENCY, 0.0, [false, true, true]);
+    let mut clock = 0;
+    let _ = run(&mut mixer, &shared, &mut clock, 4);
+    let before = shared.clock_output.alignment().expect("published");
+    assert_eq!(before.delays[2], Some(LATENCY));
+    // The slow sender's send off: the return still waits for it.
+    shared.paths[0].set_sends([crate::audio::SEND_OFF_DB; crate::audio::MAX_PATHS]);
+    let _ = run(&mut mixer, &shared, &mut clock, 4);
+    let after = shared.clock_output.alignment().expect("published");
+    assert_eq!(after.delays, before.delays);
+}
+
+#[test]
+fn a_removed_sender_plays_out_its_send_before_it_stops() {
+    const LATENCY: u32 = 4_800;
+    // Path 0 plays only through the return; path 2 (muted) is slower, so
+    // path 0's send waits a whole latency in its tap.
+    let (mut mixer, shared) = return_mixer(0, 0.0, [false, true, false]);
+    shared.paths[2].edit_chain(|chain| chain.insert_delay_for_test(LATENCY));
+    shared.paths[2].set_mute(true);
+    let mut clock = 0;
+    let _ = run(&mut mixer, &shared, &mut clock, 24);
+    assert!(shared.remove_path(0));
+    let out = run(&mut mixer, &shared, &mut clock, 40).remove(0);
+    // A sine steps by under 0.01 per frame; the fade out of the tap must
+    // not do worse than a few of those.
+    let step = largest_step(&out, 0);
+    assert!(step < 0.03, "step {step}");
+    assert!(out[out.len() - 1][0].abs() < 1e-6, "faded out");
+}
+
+#[test]
+fn a_path_switches_feed_without_a_click() {
+    use super::super::path::PathFeed;
+    let half = -20.0 * 2.0f32.log10();
+    let (mut mixer, shared) = return_mixer(0, half, [false, true, true]);
+    let mut clock = 0;
+    // The frames on both sides of each switch, so a step at the block
+    // boundary counts too.
+    let mut out = run(&mut mixer, &shared, &mut clock, 4).remove(0);
+    // Path 2 becomes a second return: it fades out, then hears nothing.
+    shared.paths[2].set_feed(PathFeed::Sends);
+    out.extend(run(&mut mixer, &shared, &mut clock, 8).remove(0));
+    let step = largest_step(&out[SETTLE..], 0);
+    assert!(step < 0.03, "step {step}");
+    // Back on the input: it fades in again.
+    shared.paths[2].set_feed(PathFeed::Input);
+    let out = [out, run(&mut mixer, &shared, &mut clock, 8).remove(0)].concat();
+    let step = largest_step(&out[SETTLE..], 0);
+    assert!(step < 0.03, "step {step}");
+    let last = out.len() - 1;
+    let n = clock - 1;
+    assert!((out[last][0] - 2.0 * signal(n) * 0.5 - signal(n)).abs() < 1e-3);
+}
+
+#[test]
+fn a_return_plays_on_the_ring_path_too() {
+    use super::super::types::BufferMode;
+    let (mut mixer, shared) = return_mixer(0, 0.0, [false, true, false]);
+    shared
+        .direct
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    shared.paths[2].set_mute(true);
+    shared.set_source_rate(RATE);
+    shared.set_bridge_buffer(BufferMode::Fixed, 5.0);
+    mixer.prepare(BLOCK);
+    let mut last = [0.0f32; 2];
+    for _ in 0..16 {
+        for _ in 0..BLOCK {
+            shared.push_frame(0.25, -0.25);
+        }
+        mixer.render(&shared, BLOCK, |_, mapped| {
+            last = [mapped.sample(0), mapped.sample(1)];
+        });
+    }
+    assert!((last[0] - 0.25).abs() < 1e-4, "{last:?}");
+    assert!((last[1] + 0.25).abs() < 1e-4, "{last:?}");
+}

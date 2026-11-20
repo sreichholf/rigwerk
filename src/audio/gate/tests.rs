@@ -1,6 +1,6 @@
 use super::{
-    db_to_amp, pole_coeff, GatePhase, GateSettings, GateSlot, NoiseGate, DETECTOR_ATTACK_MS,
-    DETECTOR_RELEASE_MS,
+    db_to_amp, pole_coeff, GateKey, GatePhase, GateSettings, GateSlot, NoiseGate,
+    DETECTOR_ATTACK_MS, DETECTOR_RELEASE_MS,
 };
 
 const RATE: u32 = 48_000;
@@ -17,6 +17,7 @@ fn loud_gate() -> NoiseGate {
             release_ms: 50.0,
             hold_ms: 20.0,
             slot: GateSlot::Post,
+            key: GateKey::Signal,
         },
         RATE,
     );
@@ -153,6 +154,7 @@ fn gain_release_follows_the_time_constant_once_closed() {
             range_db: -60.0,
             hysteresis_db: 6.0,
             slot: GateSlot::Post,
+            key: GateKey::Signal,
         },
         RATE,
     );
@@ -290,4 +292,39 @@ fn a_disabled_gate_reduces_nothing() {
     );
     run(&mut gate, 0.0, RATE as usize / 10);
     assert_eq!(gate.take_reduction_db(), 0.0);
+}
+
+#[test]
+fn a_keyed_gate_follows_its_key_not_its_signal() {
+    let mut gate = loud_gate();
+    gate.update(
+        GateSettings {
+            key: GateKey::Input,
+            ..gate.settings()
+        },
+        RATE,
+    );
+    // A loud signal with a silent key: the gate stays closed.
+    for _ in 0..RATE as usize / 10 {
+        let _ = gate.process_keyed(0.25, 0.25, 0.0);
+    }
+    assert_eq!(gate.phase(), GatePhase::Closed);
+    assert!(gate.gain() < 0.01, "gain {}", gate.gain());
+    // A loud key opens it over a silent signal.
+    for _ in 0..RATE as usize / 50 {
+        let _ = gate.process_keyed(0.0, 0.0, 0.25);
+    }
+    assert_eq!(gate.phase(), GatePhase::Open);
+    assert!(gate.gain() > 0.95, "gain {}", gate.gain());
+}
+
+#[test]
+fn a_key_that_is_not_a_number_reads_as_silence() {
+    let mut gate = loud_gate();
+    for _ in 0..RATE as usize / 10 {
+        let (left, _) = gate.process_keyed(0.25, 0.25, f32::NAN);
+        assert!(left.is_finite());
+    }
+    assert_eq!(gate.phase(), GatePhase::Closed);
+    assert!(gate.envelope().is_finite());
 }

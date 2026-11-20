@@ -1,6 +1,7 @@
 //! The gate sheet's body (`docs/ui-spec.md` §6.1): the six gate values as
-//! sliders on the left; the position (*Before effects* / *After effects*)
-//! and the reduction meter on the right; *Reset* above them.
+//! sliders on the left; the position (*Before effects* / *After effects*),
+//! what it listens to (*Gated signal* / *Dry input*) and the reduction
+//! meter on the right; *Reset* above them.
 //!
 //! The header above (`sheets.rs`) already holds the gate's *On* /
 //! *Bypass*, so *Reset* keeps it.  The classic Mixer's gate card draws the
@@ -14,7 +15,7 @@ use egui::{Align, CornerRadius, Layout, Rect, RichText, Sense, Vec2};
 
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{
-    GateSettings, GateSlot, GATE_MAX_ATTACK_MS, GATE_MAX_HOLD_MS, GATE_MAX_HYSTERESIS_DB,
+    GateKey, GateSettings, GateSlot, GATE_MAX_ATTACK_MS, GATE_MAX_HOLD_MS, GATE_MAX_HYSTERESIS_DB,
     GATE_MAX_RANGE_DB, GATE_MAX_RELEASE_MS, GATE_MAX_THRESHOLD_DB, GATE_MIN_ATTACK_MS,
     GATE_MIN_HOLD_MS, GATE_MIN_HYSTERESIS_DB, GATE_MIN_RANGE_DB, GATE_MIN_RELEASE_MS,
     GATE_MIN_THRESHOLD_DB,
@@ -38,7 +39,7 @@ const MIN_TWO_COLUMNS_W: f32 = 320.0 + COLUMN_GAP + SIDE_W;
 const METER_H: f32 = 8.0;
 
 pub(crate) const RESET_HINT: &str =
-    "Restore threshold, range, timing and slot to the defaults. On/off is kept.";
+    "Restore threshold, range, timing, slot and key to the defaults. On/off is kept.";
 
 pub(crate) const SUMMARY: &str =
     "Causal · no added latency · first transient can leak before it opens";
@@ -162,6 +163,18 @@ pub(crate) fn slot_hint(slot: GateSlot) -> &'static str {
     }
 }
 
+/// What each key is for.
+pub(crate) fn key_hint(key: GateKey) -> &'static str {
+    match key {
+        GateKey::Signal => "Gated signal (default): the gate hears what it cuts.",
+        GateKey::Input => {
+            "Dry input: the gate hears the path's input before the chain, lined up with \
+             the effects' latency, so an amp's noise cannot hold it open. Set the \
+             threshold for the guitar's own level."
+        }
+    }
+}
+
 /// `gate` back to the defaults, keeping on/off.
 pub(crate) fn reset_gate(gate: GateSettings) -> GateSettings {
     GateSettings {
@@ -268,6 +281,14 @@ impl RigWerkApp {
                 },
                 LogTone::Amber,
             );
+        } else if gate.key != current.key {
+            self.push_log(
+                match gate.key {
+                    GateKey::Signal => "Gate listens to the gated signal.",
+                    GateKey::Input => "Gate listens to the dry input.",
+                },
+                LogTone::Amber,
+            );
         }
         self.set_path_gate(gate);
         self.push_paths_to_engine();
@@ -339,7 +360,7 @@ fn controls(ui: &mut egui::Ui, gate: &mut GateSettings, colours: &Palette) {
     }
 }
 
-/// *Before effects* / *After effects* and the reduction meter.
+/// *Before effects* / *After effects*, the key and the reduction meter.
 fn side(ui: &mut egui::Ui, gate: &mut GateSettings, reduction_db: f32, colours: &Palette) {
     heading(ui, "Position", colours);
     let mut choice = match gate.slot {
@@ -358,6 +379,25 @@ fn side(ui: &mut egui::Ui, gate: &mut GateSettings, reduction_db: f32, colours: 
         "{}\n{}",
         slot_hint(GateSlot::Pre),
         slot_hint(GateSlot::Post)
+    ));
+    ui.add_space(16.0);
+    heading(ui, "Listens to", colours);
+    let mut choice = match gate.key {
+        GateKey::Signal => 0,
+        GateKey::Input => 1,
+    };
+    let response = segmented(ui, &mut choice, &["Gated signal", "Dry input"]);
+    if response.changed() {
+        gate.key = if choice == 0 {
+            GateKey::Signal
+        } else {
+            GateKey::Input
+        };
+    }
+    response.on_hover_text(format!(
+        "{}\n{}",
+        key_hint(GateKey::Signal),
+        key_hint(GateKey::Input)
     ));
     ui.add_space(16.0);
     heading(ui, "Reduction", colours);

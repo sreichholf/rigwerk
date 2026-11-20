@@ -606,3 +606,128 @@ fn an_interleaved_save_loads_in_stack_order() {
     assert_eq!(stack, path.nam_ids(), "a row's index names the same block");
     assert_eq!(path.next_nam_id, 14);
 }
+
+#[test]
+fn an_effects_return_takes_sends_from_the_paths_fed_by_the_input() {
+    use crate::audio::{PathFeed, SEND_OFF_DB};
+    let mut app = blank_app();
+    let second = app.add_path().expect("slot 1");
+    let fx = app.add_return().expect("slot 2");
+    assert_eq!(app.paths[fx].as_ref().unwrap().name, "FX");
+    assert!(app.paths[fx].as_ref().unwrap().mix.is_return());
+    assert_eq!(app.return_slots(), vec![fx]);
+    assert_eq!(app.sender_slots(), vec![0, second]);
+    assert_eq!(app.source_label(fx), "Sends · none yet");
+
+    app.set_path_send(0, fx, -6.0);
+    app.set_path_send(second, fx, -12.0);
+    assert_eq!(app.path_send(0, fx), -6.0);
+    assert_eq!(app.source_label(fx), "Sends · 2 paths");
+    // Only to a return, and never from one.
+    app.set_path_send(0, second, -6.0);
+    assert_eq!(app.path_send(0, second), SEND_OFF_DB);
+    app.set_path_send(fx, fx, 0.0);
+    assert_eq!(app.path_send(fx, fx), SEND_OFF_DB);
+    // A return has no solo.
+    app.set_path_solo(fx, true);
+    assert!(!app.paths[fx].as_ref().unwrap().mix.solo);
+
+    app.push_paths_to_engine();
+    assert_eq!(app.engine.path_mix(0).sends[fx], -6.0);
+    assert_eq!(app.engine.path_mix(fx).feed, PathFeed::Sends);
+
+    // Back on the input: the sends to it go.
+    app.set_path_feed(fx, PathFeed::Input);
+    assert_eq!(app.path_send(0, fx), SEND_OFF_DB);
+    assert_eq!(app.path_send(second, fx), SEND_OFF_DB);
+    app.set_path_feed(fx, PathFeed::Sends);
+    app.set_path_send(0, fx, -3.0);
+    // Removed: the sends to it go too.
+    assert!(app.remove_path(fx));
+    assert_eq!(app.path_send(0, fx), SEND_OFF_DB);
+}
+
+#[test]
+fn a_solo_does_not_silence_a_return() {
+    let mut app = blank_app();
+    let fx = app.add_return().expect("slot 1");
+    app.set_path_mute(fx, false);
+    let second = app.add_path().expect("slot 2");
+    app.set_path_mute(second, false);
+    app.set_path_solo(0, true);
+    let gains = app.path_gains();
+    assert_eq!(gains[0], 1.0);
+    assert_eq!(gains[fx], 1.0, "solo-safe");
+    assert_eq!(gains[second], 0.0);
+}
+
+#[test]
+fn sends_save_in_display_order_and_load_into_the_new_slots() {
+    use crate::audio::{PathFeed, SEND_OFF_DB};
+    let mut app = blank_app();
+    app.add_path();
+    let fx = app.add_return().expect("slot 2");
+    app.remove_path(1);
+    app.engine.service_plugins();
+    // Saved as [Main, FX]: the send to FX is at position 1.
+    app.set_path_send(0, fx, -6.0);
+    let (paths, order) = app.saved_paths();
+    assert_eq!(order, vec![0, fx]);
+    assert_eq!(paths[0].sends, vec![SEND_OFF_DB, -6.0]);
+    assert!(paths[1].sends.is_empty(), "nothing on: nothing saved");
+    assert_eq!(paths[1].feed, PathFeed::Sends);
+
+    let mut loaded = blank_app();
+    loaded.install_paths(&paths, OutputDeviceSettings::default(), Vec::new(), 0);
+    let slots = loaded.path_slots();
+    assert_eq!(slots.len(), 2);
+    let ret = slots[1];
+    assert!(loaded.paths[ret].as_ref().unwrap().mix.is_return());
+    assert_eq!(loaded.path_send(slots[0], ret), -6.0);
+}
+
+#[test]
+fn a_layout_routes_only_the_paths_fed_by_the_input() {
+    use crate::app::layouts::PathLayout;
+    let mut app = blank_app();
+    let fx = app.add_return().expect("slot 1");
+    app.clock_output.path_map[fx] = PathMapSettings::default();
+    let before = app.paths[fx].as_ref().unwrap().mix.routes;
+    assert!(app.apply_layout(PathLayout::DryWet));
+    // A second input path was added; the return kept its map and routing.
+    assert_eq!(app.sender_slots().len(), 2);
+    assert_eq!(app.clock_output.path_map[fx], PathMapSettings::default());
+    assert_eq!(app.paths[fx].as_ref().unwrap().mix.routes, before);
+    assert_eq!(app.current_layout(), Some(PathLayout::DryWet));
+}
+
+#[test]
+fn the_last_path_fed_by_the_input_cannot_become_a_return() {
+    use crate::audio::PathFeed;
+    let mut app = blank_app();
+    app.set_path_feed(0, PathFeed::Sends);
+    assert!(!app.paths[0].as_ref().unwrap().mix.is_return());
+    let second = app.add_path().expect("slot 1");
+    app.set_path_feed(0, PathFeed::Sends);
+    assert!(app.paths[0].as_ref().unwrap().mix.is_return());
+    app.set_path_feed(second, PathFeed::Sends);
+    assert!(!app.paths[second].as_ref().unwrap().mix.is_return());
+}
+
+#[test]
+fn a_layout_with_no_path_fed_by_the_input_adds_empty_ones() {
+    use crate::app::layouts::PathLayout;
+    use crate::audio::PathFeed;
+    let mut app = blank_app();
+    app.add_path().expect("slot 1");
+    app.set_path_feed(0, PathFeed::Sends);
+    // A loaded session can still have only returns.
+    if let Some(path) = app.paths[1].as_mut() {
+        path.mix.feed = PathFeed::Sends;
+    }
+    assert!(app.sender_slots().is_empty());
+    assert!(app.apply_layout(PathLayout::Blend));
+    assert_eq!(app.sender_slots().len(), 2);
+    assert_eq!(app.return_slots().len(), 2);
+    assert_eq!(app.path_count(), MAX_PATHS);
+}

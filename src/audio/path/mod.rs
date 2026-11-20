@@ -32,7 +32,19 @@
 //!
 //! Each path has a level (dB), a mute and a solo, applied after its chain
 //! and before the master, as one ramped gain.  If any active path is
-//! soloed, only soloed paths sound.
+//! soloed, only soloed paths sound.  A return is solo-safe: it keeps
+//! sounding, and only hears the senders that still sound.
+//!
+//! # Returns
+//!
+//! A path fed by [`PathFeed::Sends`] is a return: its chain runs on the sum
+//! of the other paths' sends instead of the input, so one reverb or delay
+//! serves every path, and the return still has its own map, level and
+//! timing on each output.  Every path fed by the input has one send level
+//! per slot ([`PathMix::sends`]), taken after its level, mute and solo.
+//! A return does not send, so nothing loops.  The mixer lines the sends up
+//! with each other and counts the return's latency as the slowest live
+//! path fed by the input plus its own chain's (`mixer`, "Returns").
 //!
 //! # Latency
 //!
@@ -86,6 +98,20 @@ pub fn sanitize_path_level(level_db: f32) -> f32 {
     }
 }
 
+/// What a path's chain runs on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PathFeed {
+    /// The input, through the path's routing.  The default.
+    #[default]
+    Input,
+    /// The other paths' sends: the path is a return.
+    Sends,
+}
+
+/// A send at or below this is off.  Sends share the path level's range.
+pub const SEND_OFF_DB: f32 = PATH_LEVEL_MIN_DB;
+
 /// Linear gain of a path level: exactly 1.0 at 0 dB, silence at or below
 /// [`PATH_LEVEL_MIN_DB`].
 pub(crate) fn path_level_gain(level_db: f32) -> f32 {
@@ -124,6 +150,12 @@ pub struct PathMix {
     /// Skips every effect's processing without changing each effect's own
     /// bypass.  Latency stays counted.
     pub chain_bypass: bool,
+    /// What the chain runs on: the input, or the other paths' sends.
+    pub feed: PathFeed,
+    /// The send to each slot, dB, after this path's level ([`SEND_OFF_DB`]
+    /// is off).  Only a send to a return, from a path fed by the input,
+    /// plays.
+    pub sends: [f32; MAX_PATHS],
 }
 
 impl Default for PathMix {
@@ -139,20 +171,44 @@ impl Default for PathMix {
             mute: false,
             solo: false,
             chain_bypass: false,
+            feed: PathFeed::Input,
+            sends: [SEND_OFF_DB; MAX_PATHS],
         }
     }
 }
 
 impl PathMix {
-    /// Every value in range (EQ, gate and level).
+    /// Every value in range (EQ, gate, level and sends).  A NaN send is
+    /// off, not 0 dB.  A return has no solo and no sends of its own.
     pub fn sanitized(self) -> Self {
+        let is_return = self.is_return();
         Self {
             eqs: self.eqs.map(EqSettings::sanitized),
             gate: self.gate.sanitized(),
             cab: self.cab.sanitized(),
             level_db: sanitize_path_level(self.level_db),
+            solo: self.solo && !is_return,
+            sends: if is_return {
+                [SEND_OFF_DB; MAX_PATHS]
+            } else {
+                self.sends.map(sanitize_send)
+            },
             ..self
         }
+    }
+
+    pub fn is_return(&self) -> bool {
+        self.feed == PathFeed::Sends
+    }
+}
+
+/// A send level in range: NaN is off, the rest is clamped like a path
+/// level.
+pub fn sanitize_send(level_db: f32) -> f32 {
+    if level_db.is_nan() {
+        SEND_OFF_DB
+    } else {
+        sanitize_path_level(level_db)
     }
 }
 
@@ -348,6 +404,11 @@ pub(crate) struct PathControls {
     level_db: AtomicU32,
     mute: AtomicBool,
     solo: AtomicBool,
+    /// The path is a return ([`PathFeed::Sends`]).
+    is_return: AtomicBool,
+    /// The send to each slot, dB and as a linear gain (`f32` bits).
+    send_db: [AtomicU32; MAX_PATHS],
+    send_gain: [AtomicU32; MAX_PATHS],
     /// When the UI removed this path (UI thread only; the audio thread
     /// never takes it).  Lets the UI finish a fade no mixer is running.
     removed_at: Mutex<Option<Instant>>,
@@ -481,6 +542,9 @@ impl PathControls {
             level_db: AtomicU32::new(0.0f32.to_bits()),
             mute: AtomicBool::new(false),
             solo: AtomicBool::new(false),
+            is_return: AtomicBool::new(false),
+            send_db: std::array::from_fn(|_| AtomicU32::new(SEND_OFF_DB.to_bits())),
+            send_gain: std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits())),
             removed_at: Mutex::new(None),
             retired: AtomicBool::new(false),
             meter_l: AtomicU32::new(0.0f32.to_bits()),
@@ -539,6 +603,8 @@ impl PathControls {
         copy_bool(&self.mute, &previous.mute);
         copy_bool(&self.solo, &previous.solo);
         self.set_chain_bypass(previous.chain_bypassed());
+        self.set_feed(previous.feed());
+        self.set_sends(previous.sends());
         // A fade-out does not outlive its run.
         self.set_state(match previous.state() {
             PathState::Active => PathState::Active,
@@ -690,6 +756,8 @@ impl PathControls {
         self.set_mute(mix.mute);
         self.set_solo(mix.solo);
         self.set_chain_bypass(mix.chain_bypass);
+        self.set_feed(mix.feed);
+        self.set_sends(mix.sends);
     }
 
     /// The UI-owned settings as stored now.
@@ -719,7 +787,45 @@ impl PathControls {
             mute: self.muted(),
             solo: self.soloed(),
             chain_bypass: self.chain_bypassed(),
+            feed: self.feed(),
+            sends: self.sends(),
         }
+    }
+
+    pub(crate) fn set_feed(&self, feed: PathFeed) {
+        self.is_return
+            .store(feed == PathFeed::Sends, Ordering::Relaxed);
+    }
+
+    pub(crate) fn feed(&self) -> PathFeed {
+        if self.is_return() {
+            PathFeed::Sends
+        } else {
+            PathFeed::Input
+        }
+    }
+
+    /// Whether the path runs on the other paths' sends.
+    pub(crate) fn is_return(&self) -> bool {
+        self.is_return.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_sends(&self, sends: [f32; MAX_PATHS]) {
+        for (slot, level_db) in sends.into_iter().enumerate() {
+            let level_db = sanitize_send(level_db);
+            self.send_db[slot].store(level_db.to_bits(), Ordering::Relaxed);
+            self.send_gain[slot].store(path_level_gain(level_db).to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn sends(&self) -> [f32; MAX_PATHS] {
+        std::array::from_fn(|slot| f32::from_bits(self.send_db[slot].load(Ordering::Relaxed)))
+    }
+
+    /// The send to slot `slot` as a linear gain: 0 when off, exactly 1.0
+    /// at 0 dB.
+    pub(crate) fn send_gain(&self, slot: usize) -> f32 {
+        f32::from_bits(self.send_gain[slot].load(Ordering::Relaxed))
     }
 
     pub(crate) fn set_level_db(&self, level_db: f32) {

@@ -288,8 +288,8 @@ impl RigWerkApp {
         }
     }
 
-    /// The dashed column after the paths: *Empty path*, *Duplicate ▸* and
-    /// *Apply layout ▸*.  Disabled at the limit, with the reason on hover.
+    /// The dashed column after the paths: *Empty path*, *Effects return*,
+    /// *Duplicate ▸* and *Apply layout ▸*.  Disabled at the limit, with the reason on hover.
     fn add_path_column(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let blocked = self.add_path_blocker().map(console_reason);
         let response = add_column(ui, rect, blocked, "Add path");
@@ -301,6 +301,10 @@ impl RigWerkApp {
         popover(ui, &response, |ui| {
             if menu_entry(ui, "Empty path") {
                 let _ = self.add_path();
+                ui.close();
+            }
+            if menu_entry(ui, "Effects return") {
+                let _ = self.add_return();
                 ui.close();
             }
             ui.menu_button("Duplicate ▸", |ui| {

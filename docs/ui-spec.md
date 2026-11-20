@@ -549,7 +549,8 @@ pre and post EQ are for, shelf vs bell Q) stay.
 
 **Gate**: threshold, range, hysteresis, attack, release and hold, each with
 its value and today's hover text; a reduction meter (audio addition, §0);
-*Before effects* / *After effects*; *Reset* (keeps on/off).
+*Before effects* / *After effects*; *Listens to*: *Gated signal* /
+*Dry input*; *Reset* (keeps on/off).
 
 **Effect**: header *On* / *Bypass*, *Wet* (its default on hover), latency,
 state (*Active*, *Bypassed*, *Didn't load*: today's controls-window marks),
@@ -557,9 +558,11 @@ state (*Active*, *Bypassed*, *Didn't load*: today's controls-window marks),
 control…*, or *This effect draws its own controls*, *reports no controls*,
 *did not load*.  The errors the plugin reported are listed here.
 
-**Path**: name, colour, source (the 2 × 2 grid, *Stereo* / *Mono*), *Path
+**Path**: name, colour, source (*Input* / *Sends*; for the input the 2 × 2
+grid and *Stereo* / *Mono*), the sends (*Send to* each return, or on a
+return *Send from* each path, *Off* at the bottom), *Path
 outputs* L and R *(the chips that were OUT 1 / OUT 2 on Live)*, level,
-mute, solo, *Duplicate (muted)*, *Apply layout ▸* with *Custom · edited
+mute, solo (not on a return), *Duplicate (muted)*, *Apply layout ▸* with *Custom · edited
 from Blend clean* when the setup no longer matches one, *Remove*, and the
 path's latency on every output it plays on.
 
@@ -821,7 +824,7 @@ The rewrite is done when every row has been checked in the running app.
 
 | Today | After |
 |---|---|
-| Path chips, *+ Path* (Empty, Duplicate muted) | Strips; add column (*Empty path*, *Duplicate ▸*, *Apply layout ▸*) |
+| Path chips, *+ Path* (Empty, Duplicate muted) | Strips; add column (*Empty path*, *Effects return*, *Duplicate ▸*, *Apply layout ▸*) |
 | Path menu: rename (unique names), colour, duplicate, remove | Name menu, path sheet; remove with confirm |
 | Input stage | Input strip |
 | Pre EQ / Post EQ inspector | EQ sheet |

@@ -111,7 +111,7 @@ impl RigWerkApp {
             }
         });
 
-        let any_solo = self.paths.iter().flatten().any(|other| other.mix.solo);
+        let any_solo = self.any_solo();
         let events = level_block(
             &mut bottom,
             layout,
@@ -126,8 +126,9 @@ impl RigWerkApp {
                 name: &path.name,
                 show_scale: true,
                 mute: Some(path.mix.mute),
-                solo: Some(path.mix.solo),
-                dim: path.mix.mute || (any_solo && !path.mix.solo),
+                // A return is solo-safe and has no solo.
+                solo: (!path.mix.is_return()).then_some(path.mix.solo),
+                dim: !Self::mix_audible(&path.mix, any_solo),
             },
         );
         if let Some(level) = events.level {

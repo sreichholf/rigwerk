@@ -953,10 +953,12 @@ impl RigWerkApp {
             if !alignment.align || !alignment.clamped || alignment.path_count() < 2 {
                 continue;
             }
+            // A return counts its wait for its senders too.
+            let latencies = self.engine.path_latencies();
             let names: Vec<&str> = infos
                 .iter()
                 .filter(|info| {
-                    alignment.per_path[info.slot].is_some() && info.latency_samples > MAX_ALIGN
+                    alignment.per_path[info.slot].is_some() && latencies[info.slot] > MAX_ALIGN
                 })
                 .map(|info| info.name.as_str())
                 .collect();
@@ -978,17 +980,26 @@ impl RigWerkApp {
 
     /// (b) An unmuted path that no unmuted device plays: its chain runs
     /// for nothing.  A muted path is parked on purpose and does not warn.
-    /// Also checked with one path: then nothing is heard at all.
+    /// Also checked with one path: then nothing is heard at all.  A path
+    /// whose send reaches an unmuted return that is heard is heard too.
     fn unheard_path_issues(&self, infos: &[PathInfo], issues: &mut Vec<LiveIssue>) {
         let devices = self.device_settings();
+        let played = |slot: usize| {
+            devices
+                .iter()
+                .enumerate()
+                .any(|(device, settings)| !settings.mute && self.path_reaches_device(slot, device))
+        };
         for info in infos {
             if info.mute {
                 continue;
             }
-            let heard = devices.iter().enumerate().any(|(device, settings)| {
-                !settings.mute && self.path_reaches_device(info.slot, device)
+            let through_return = self.return_slots().into_iter().any(|ret| {
+                self.paths[ret].as_ref().is_some_and(|path| !path.mix.mute)
+                    && crate::audio::path_level_gain(self.path_send(info.slot, ret)) > 0.0
+                    && played(ret)
             });
-            if heard {
+            if played(info.slot) || through_return {
                 continue;
             }
             let (title, detail) = if info.routed {

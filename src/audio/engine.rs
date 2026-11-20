@@ -357,11 +357,12 @@ impl AudioEngine {
         self.shared.path(slot).latency_samples()
     }
 
-    /// Every path slot's chain latency in samples (0 for unused slots), as
-    /// the alignment counts it.  The NAM blocks add none, and the cabinet adds
+    /// Every path slot's latency in samples (0 for unused slots), as the
+    /// alignment counts it: its chain, and for a return also the wait for
+    /// its slowest sender.  The NAM blocks add none, and the cabinet adds
     /// none either.
     pub fn path_latencies(&self) -> [u32; MAX_PATHS] {
-        std::array::from_fn(|slot| self.shared.path(slot).latency_samples())
+        self.shared.alignment_latencies()
     }
 
     /// The rate the open output is running at, or 0 until it has opened.

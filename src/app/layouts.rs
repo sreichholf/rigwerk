@@ -5,7 +5,8 @@
 //! a path or an effect: missing paths are added (empty, or for Blend and
 //! Dual-amp as a copy of the first path), and paths past the layout's count
 //! are kept but routed nowhere.  Any edit afterwards reads as Custom
-//! ([`RigWerkApp::current_layout`] returns `None`).
+//! ([`RigWerkApp::current_layout`] returns `None`).  A layout counts and
+//! routes only the paths fed by the input: a return keeps its own maps.
 //!
 //! Blend and Dual-amp sum two paths on every channel; the per-device
 //! latency alignment (on by default, `app::alignment`) lines them up, so a
@@ -153,12 +154,12 @@ impl RigWerkApp {
     /// `false` if a path it needs could not be added.
     pub(crate) fn apply_layout(&mut self, layout: PathLayout) -> bool {
         let selected = self.selected_path;
-        while self.path_count() < layout.path_count() {
-            let first = self.path_slots()[0];
-            let added = if layout.sums_paths() {
-                self.duplicate_path(first)
-            } else {
-                self.add_path()
+        while self.sender_slots().len() < layout.path_count() {
+            // A copy of the first path fed by the input; with none, an
+            // empty one (a copy of a return would be another return).
+            let added = match self.sender_slots().first() {
+                Some(&first) if layout.sums_paths() => self.duplicate_path(first),
+                _ => self.add_path(),
             };
             let Some(slot) = added else {
                 return false;
@@ -166,7 +167,7 @@ impl RigWerkApp {
             self.set_path_mute(slot, false);
         }
         self.select_path(selected);
-        let slots = self.path_slots();
+        let slots = self.sender_slots();
         let shapes = self.device_shapes();
         for (position, &slot) in slots.iter().enumerate() {
             if position < layout.path_count() {
@@ -196,7 +197,7 @@ impl RigWerkApp {
 
     /// The layout the routing matches exactly, or `None` (Custom).
     pub(crate) fn current_layout(&self) -> Option<PathLayout> {
-        let slots = self.path_slots();
+        let slots = self.sender_slots();
         let shapes = self.device_shapes();
         let devices = self.device_settings();
         PathLayout::ALL.into_iter().find(|&layout| {

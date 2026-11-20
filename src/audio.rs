@@ -132,12 +132,13 @@ pub use eq::{
     MAX_Q as EQ_MAX_Q, MIN_Q as EQ_MIN_Q,
 };
 pub use gate::{
-    GateSettings, GateSlot, MAX_ATTACK_MS as GATE_MAX_ATTACK_MS, MAX_HOLD_MS as GATE_MAX_HOLD_MS,
-    MAX_HYSTERESIS_DB as GATE_MAX_HYSTERESIS_DB, MAX_RANGE_DB as GATE_MAX_RANGE_DB,
-    MAX_RELEASE_MS as GATE_MAX_RELEASE_MS, MAX_THRESHOLD_DB as GATE_MAX_THRESHOLD_DB,
-    MIN_ATTACK_MS as GATE_MIN_ATTACK_MS, MIN_HOLD_MS as GATE_MIN_HOLD_MS,
-    MIN_HYSTERESIS_DB as GATE_MIN_HYSTERESIS_DB, MIN_RANGE_DB as GATE_MIN_RANGE_DB,
-    MIN_RELEASE_MS as GATE_MIN_RELEASE_MS, MIN_THRESHOLD_DB as GATE_MIN_THRESHOLD_DB,
+    GateKey, GateSettings, GateSlot, MAX_ATTACK_MS as GATE_MAX_ATTACK_MS,
+    MAX_HOLD_MS as GATE_MAX_HOLD_MS, MAX_HYSTERESIS_DB as GATE_MAX_HYSTERESIS_DB,
+    MAX_RANGE_DB as GATE_MAX_RANGE_DB, MAX_RELEASE_MS as GATE_MAX_RELEASE_MS,
+    MAX_THRESHOLD_DB as GATE_MAX_THRESHOLD_DB, MIN_ATTACK_MS as GATE_MIN_ATTACK_MS,
+    MIN_HOLD_MS as GATE_MIN_HOLD_MS, MIN_HYSTERESIS_DB as GATE_MIN_HYSTERESIS_DB,
+    MIN_RANGE_DB as GATE_MIN_RANGE_DB, MIN_RELEASE_MS as GATE_MIN_RELEASE_MS,
+    MIN_THRESHOLD_DB as GATE_MIN_THRESHOLD_DB,
 };
 #[cfg(target_os = "linux")]
 pub(crate) use linux::alsa::alsa_pcm_is_direct;
@@ -178,8 +179,8 @@ pub use output_map::PATH_TRIM_MAX_MS;
 pub(crate) use path::path_level_gain;
 pub(crate) use path::PathState;
 pub use path::{
-    sanitize_path_level, DspTime, LockStats, PathMix, PluginLockReport, MAX_PATHS,
-    PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
+    sanitize_path_level, sanitize_send, DspTime, LockStats, PathFeed, PathMix, PluginLockReport,
+    MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, SEND_OFF_DB,
 };
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;

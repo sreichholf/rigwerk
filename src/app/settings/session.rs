@@ -166,6 +166,8 @@ impl Session {
             level_db: 0.0,
             mute: false,
             solo: false,
+            feed: crate::audio::PathFeed::Input,
+            sends: Vec::new(),
         }];
         sanitize_paths(&mut paths);
         self.paths = paths;
