@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::audio::plugins::MAX_AUDIO_PORTS;
 
+use super::host::SUPPORTED;
 use super::ttl::{self, TtlStore};
 
 const LV2_PLUGIN: &str = "http://lv2plug.in/ns/lv2core#Plugin";
@@ -46,18 +47,6 @@ const INSTANCE_ACCESS: &str = "http://lv2plug.in/ns/ext/instance-access";
 const DATA_ACCESS: &str = "http://lv2plug.in/ns/ext/data-access";
 const RESIZE_PORT: &str = "http://lv2plug.in/ns/ext/resize-port#resize-port";
 const UI_PREFIX: &str = "http://lv2plug.in/ns/extensions/ui#";
-
-/// The features the host supplies in phase 1.  A required feature outside
-/// this list is listed with a scan error and refuses to load later.
-pub(super) const SUPPORTED: &[&str] = &[
-    "http://lv2plug.in/ns/ext/urid#map",
-    "http://lv2plug.in/ns/ext/urid#unmap",
-    "http://lv2plug.in/ns/ext/options#options",
-    "http://lv2plug.in/ns/ext/buf-size#boundedBlockLength",
-    "http://lv2plug.in/ns/ext/worker#schedule",
-    "http://lv2plug.in/ns/ext/state#mapPath",
-    "http://lv2plug.in/ns/ext/state#freePath",
-];
 
 /// The binary extension this build can open.  A bundle that only ships
 /// another platform's binary is left out, not listed with an error.

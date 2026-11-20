@@ -30,14 +30,14 @@ use clap_sys::string_sizes::CLAP_NAME_SIZE;
 use clap_sys::version::CLAP_VERSION;
 
 use crate::audio::plugins::{
-    param_transfer, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared, Restore,
-    Retry,
+    param_transfer, AudioThreadScope, ParamIds, ParamOut, ParamReceiver, PluginParamView,
+    PluginShared, Restore, Retry,
 };
 
 use super::gui::{choose_editor_api, session_candidates, EditorApi};
 use super::host::{
     host_get_extension, host_request_callback, host_request_process, host_request_restart,
-    AudioThreadScope, HostState, StateSave, HOST_NAME, HOST_URL, HOST_VENDOR, HOST_VERSION,
+    HostState, StateSave, HOST_NAME, HOST_URL, HOST_VENDOR, HOST_VERSION,
 };
 use super::module::{acquire_module, ModuleHandle};
 use super::ports::{port_layout, read_audio_ports, PortBuffers};

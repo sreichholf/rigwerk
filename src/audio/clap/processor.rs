@@ -26,9 +26,10 @@ use clap_sys::ext::params::clap_plugin_params;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{clap_process, CLAP_PROCESS_ERROR};
 
-use crate::audio::plugins::{ClapFailure, ParamIds, ParamReceiver, ParamSender, Retry};
+use crate::audio::plugins::{
+    AudioThreadScope, ClapFailure, ParamIds, ParamReceiver, ParamSender, Retry,
+};
 
-use super::host::AudioThreadScope;
 use super::instance::ClapCore;
 use super::ports::PortBuffers;
 

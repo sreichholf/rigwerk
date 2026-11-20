@@ -16,6 +16,7 @@
 //! runtime let go of back the same way.  No lock is shared between the two
 //! sides.
 
+mod audio_thread;
 mod chain;
 #[cfg(test)]
 mod fixtures;
@@ -33,6 +34,8 @@ mod transfer;
 mod tests;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(crate) use audio_thread::{on_audio_thread, AudioThreadScope};
 
 /// The most audio ports one effect may declare, shared by the CLAP host and
 /// the LV2 scan.  More than this is a scan error for LV2 and a load error for
