@@ -69,6 +69,29 @@ pub(crate) fn screenshot_scroll() -> Option<f32> {
     })
 }
 
+/// The `<path number>=<file>` entries of the `;` list in `var`.
+fn screenshot_files(var: &str) -> Vec<(usize, String)> {
+    parse_screenshot_files(var, &std::env::var(var).unwrap_or_default())
+}
+
+/// The `<path number>=<file>` entries of `list`.  An entry without a
+/// number is logged under `var` and skipped.
+fn parse_screenshot_files(var: &str, list: &str) -> Vec<(usize, String)> {
+    list.split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let parsed = entry.split_once('=').and_then(|(number, file)| {
+                Some((number.trim().parse().ok()?, file.trim().to_owned()))
+            });
+            if parsed.is_none() {
+                eprintln!("{var} entry without a path number: {entry}");
+            }
+            parsed
+        })
+        .collect()
+}
+
 /// Test hook for screenshots of a running bridge: `RIGWERK_SCREENSHOT_START=1`
 /// starts it after the setup, so meters and the scope show real signal.
 /// It opens the selected devices; use it against a virtual graph.
@@ -335,7 +358,39 @@ impl RigWerkApp {
                 eprintln!("Screenshot plugin not loaded: {entry}");
             }
         }
+        self.apply_screenshot_nam_and_cab(&slots);
         self.select_path(slots[1]);
+    }
+
+    /// `RIGWERK_SCREENSHOT_NAM`, a `;` list of `<path number>=<file.nam>`
+    /// (one block each, in order, before the effects), and
+    /// `RIGWERK_SCREENSHOT_CAB`, the same list with one `.wav` per path.
+    /// The folder of the last file of each becomes the sheet's folder.
+    fn apply_screenshot_nam_and_cab(&mut self, slots: &[usize]) {
+        for (number, file) in screenshot_files("RIGWERK_SCREENSHOT_NAM") {
+            let Some(&slot) = slots.get(number.wrapping_sub(1)) else {
+                eprintln!("Screenshot NAM entry for a path that is not there: {number}");
+                continue;
+            };
+            let Some(index) = self.add_nam_block(slot) else {
+                continue;
+            };
+            if let Some(folder) = std::path::Path::new(&file).parent() {
+                self.set_models_folder(folder.display().to_string());
+            }
+            self.set_nam_model(slot, index, file);
+        }
+        for (number, file) in screenshot_files("RIGWERK_SCREENSHOT_CAB") {
+            let Some(&slot) = slots.get(number.wrapping_sub(1)) else {
+                eprintln!("Screenshot cab entry for a path that is not there: {number}");
+                continue;
+            };
+            if let Some(folder) = std::path::Path::new(&file).parent() {
+                self.set_cab_folder(folder.display().to_string());
+            }
+            self.set_path_cab_file(slot, file);
+            self.set_stage_on(slot, crate::app::chain::ChainStage::Cab, true);
+        }
     }
 }
 

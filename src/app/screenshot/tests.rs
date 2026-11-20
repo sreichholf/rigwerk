@@ -72,3 +72,18 @@ fn a_size_in_range_replaces_the_default() {
         Vec2::new(1280.0, 900.0)
     );
 }
+
+#[test]
+fn reads_numbered_files_and_skips_the_rest() {
+    assert_eq!(
+        parse_screenshot_files(
+            "T",
+            " 2=/a/Drive Pedal.nam ; ;x.nam; 2 = /a/Amp.nam;one=/b.nam"
+        ),
+        vec![
+            (2, "/a/Drive Pedal.nam".to_owned()),
+            (2, "/a/Amp.nam".to_owned())
+        ]
+    );
+    assert!(parse_screenshot_files("T", "").is_empty());
+}
