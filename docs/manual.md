@@ -119,6 +119,10 @@ and each strip shows a thin meter.
 
 ![The EQ sheet](screenshots/eq-sheet.png)
 
+![The NAM sheet](screenshots/nam-sheet.png)
+
+![The cab sheet](screenshots/cab-sheet.png)
+
 ![The output sheet](screenshots/output-sheet.png)
 
 The effects group opens the **effect browser** from its dashed *+ Add

@@ -33,7 +33,8 @@ export RIGWERK_SCREENSHOT_CAB="2=$HOME/Music/IR/Closed Back 4x12.wav"
 
 shot() {
   rm -rf "/tmp/shot-$1" && mkdir -p "/tmp/shot-$1"
-  HOME="/tmp/shot-$1" xvfb-run -a cargo run --release -- \
+  HOME="/tmp/shot-$1" LP_NUM_THREADS=1 \
+    xvfb-run -a -s "-screen 0 3200x2000x24" cargo run --release -- \
     --screenshot "docs/screenshots/$1"
 }
 ```
@@ -52,8 +53,12 @@ shot() {
 | `setup.png` | `RIGWERK_PAGE=setup shot setup.png` | Setup |
 | `console-1040x700.png` | `RIGWERK_SCREENSHOT_SIZE=1040x700 RIGWERK_PAGE=console shot console-1040x700.png` | the console at the minimum window size |
 
-On a shared VM the DSP alarm can trip on scheduling jitter at the 64-sample
-buffer; a shot that shows the amber ▲ beside a path's DSP figure is retaken.
+The large Xvfb screen keeps the pointer, which starts in its centre, off
+the window, so no tooltip shows.  `LP_NUM_THREADS=1` keeps Mesa's software
+renderer from starving the audio thread.  On a shared VM the DSP alarm can
+still trip on scheduling jitter at the 64-sample buffer, and a capture's
+load is measured once while the app starts: retake a shot that shows the
+amber ▲ beside a path's DSP figure or an implausible block load.
 
 The default size is 1440 × 1080; the set above asks for 1440 × 900 because
 that is the size the console is designed at. `--screenshot <file>` renders
