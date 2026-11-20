@@ -100,7 +100,7 @@ impl PathControls {
         drop(returned);
         // Models and cabinet kernels the audio side retired, from the same
         // UI-thread flush as the plugin slots just dropped.
-        self.amp_park.flush();
+        self.nam_park.flush();
         self.cab_park.flush();
         Some(result)
     }
@@ -114,7 +114,7 @@ impl PathControls {
             Err(_) => return,
         };
         drop(returned);
-        self.amp_park.flush();
+        self.nam_park.flush();
         self.cab_park.flush();
     }
 

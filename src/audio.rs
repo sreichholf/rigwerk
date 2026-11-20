@@ -46,20 +46,22 @@
 //!   pushes; a writer thread owns the disk.
 //! - `eq`: the built-in 5-band EQs before and after the plugin effects.
 //! - `gate`: the built-in noise gate (PRE or POST effects).
-//! - `amp`: the built-in Neural Amp Modeler stage (before or after the
-//!   effects).  The callback never builds or drops a model.
+//! - `nam`: the built-in Neural Amp Modeler blocks (before or after the
+//!   effects, up to sixteen of them).  The callback never builds or drops a
+//!   model, never loads one, and keeps each block's runtime state with the
+//!   block's id.
 //! - `cab`: the built-in cabinet impulse response, after the effects and
-//!   after the amp.  The first 128 taps are direct; the rest is partitioned
-//!   overlap-save.  The callback never reads a file, resamples, or drops
-//!   a kernel.
+//!   after the NAM blocks.  The first 128 taps are direct; the rest is
+//!   partitioned overlap-save.  The callback never reads a file, resamples,
+//!   or drops a kernel.
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute, safety ceiling and channel map.
 //! - `limiter`: the per-device sample-peak ceiling after the device level.
 //! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
+//! - `rt_guard`: the debug allocation guard the audio callbacks hold.
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
 
-pub(crate) mod amp;
 mod asio_panel;
 mod bridge;
 pub(crate) mod cab;
@@ -71,6 +73,7 @@ mod devices;
 mod engine;
 mod eq;
 mod extra_output;
+pub(crate) mod nam;
 #[cfg(target_os = "windows")]
 pub(crate) use extra_output::is_generic_extra_output;
 pub(crate) use extra_output::is_vb_cable_render;
@@ -89,6 +92,7 @@ pub(crate) use plugins::{set_test_loader, TEST_PATH};
 mod record;
 mod resampler;
 mod ring;
+pub(crate) mod rt_guard;
 mod scope;
 mod shared;
 mod thread_priority;
@@ -108,7 +112,6 @@ pub use win::wasapi::probe as probe_output_driver;
 #[cfg(test)]
 mod hardware_tests;
 
-pub use amp::{AmpControls, AmpSettings, AmpSlot, AMP_MAX_TRIM_DB, AMP_MIN_TRIM_DB};
 pub(crate) use asio_panel::AsioPanelSide;
 pub use cab::{
     CabControls, CabNote, CabSettings, CAB_MAX_HIGH_CUT_HZ, CAB_MAX_LEVEL_DB, CAB_MAX_LOW_CUT_HZ,
@@ -150,6 +153,10 @@ pub(crate) use linux::native::{is_native_id, node_latency_frames, node_name as l
 pub(crate) use linux::pipewire::{check_output as pipewire_check_output, is_pipewire_device};
 #[cfg(test)]
 pub(crate) use mixer::OutputMixer;
+pub use nam::{
+    LegacyNamSettings, NamBlockControls, NamBlockSettings, NamPosition, NamStack, MAX_NAM_BLOCKS,
+    NAM_MAX_TRIM_DB, NAM_MIN_TRIM_DB, NAM_SOFT_LIMIT,
+};
 pub(crate) use output_map::low_bits;
 pub use output_map::{
     AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,

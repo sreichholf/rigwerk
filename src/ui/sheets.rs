@@ -5,13 +5,13 @@
 //! draws the header (the path dot and name, `/`, the item, *On* /
 //! *Bypass* for a stage, ‹ › through the chain, ×) and picks the body.
 
-pub(crate) mod amp;
 pub(crate) mod cab;
 pub(crate) mod catalog;
 pub(crate) mod diagnostics;
 pub(crate) mod effect;
 pub(crate) mod eq;
 pub(crate) mod gate;
+pub(crate) mod nam;
 pub(crate) mod output;
 pub(crate) mod path;
 pub(crate) mod scope;
@@ -35,7 +35,7 @@ impl RigWerkApp {
             Sheet::Eq { post: false, .. } => "Pre EQ".to_owned(),
             Sheet::Eq { post: true, .. } => "Post EQ".to_owned(),
             Sheet::Gate { .. } => "Gate".to_owned(),
-            Sheet::Amp { .. } => "Amp".to_owned(),
+            Sheet::Nam { .. } => "NAM".to_owned(),
             Sheet::Cab { .. } => "Cab".to_owned(),
             Sheet::Path { .. } => "Path".to_owned(),
             Sheet::Effect { path, index } => self
@@ -148,7 +148,7 @@ impl RigWerkApp {
 
     /// The open sheet's body, at most `height` tall; it scrolls inside.
     ///
-    /// The amp and cab sheets fill that height instead of scrolling as one
+    /// The NAM and cab sheets fill that height instead of scrolling as one
     /// column.  Their file list and their settings each scroll in
     /// [`catalog::catalog_columns`].
     pub(crate) fn sheet_body(&mut self, ui: &mut egui::Ui, height: f32) {
@@ -161,7 +161,7 @@ impl RigWerkApp {
         }
         // A finite region, so the file list can be as tall as the sheet.
         // Inside the scroll area below, the available height is unbounded.
-        if matches!(sheet, Sheet::Amp { .. } | Sheet::Cab { .. }) {
+        if matches!(sheet, Sheet::Nam { .. } | Sheet::Cab { .. }) {
             let width = ui.available_width();
             ui.allocate_ui_with_layout(
                 Vec2::new(width, height),
@@ -169,9 +169,9 @@ impl RigWerkApp {
                 |ui| {
                     ui.set_width(width);
                     match sheet {
-                        Sheet::Amp { path } => self.amp_sheet(ui, path),
+                        Sheet::Nam { path, index } => self.nam_sheet(ui, path, index),
                         Sheet::Cab { path } => self.cab_sheet(ui, path),
-                        _ => unreachable!("only the amp and cab sheets fill this body"),
+                        _ => unreachable!("only the NAM and cab sheets fill this body"),
                     }
                 },
             );
@@ -189,8 +189,8 @@ impl RigWerkApp {
                 Sheet::Path { path } => self.path_sheet(ui, path),
                 Sheet::Output { output } => self.output_sheet(ui, output),
                 Sheet::Scope => self.scope_sheet(ui),
-                Sheet::Amp { .. } | Sheet::Cab { .. } => {
-                    unreachable!("the amp and cab sheets fill the body above")
+                Sheet::Nam { .. } | Sheet::Cab { .. } => {
+                    unreachable!("the NAM and cab sheets fill the body above")
                 }
             });
     }

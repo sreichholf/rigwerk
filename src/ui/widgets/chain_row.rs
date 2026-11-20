@@ -11,7 +11,10 @@
 //! open it.  An effect's right-click menu and Alt+↑ / Alt+↓ move it,
 //! Ctrl+Enter opens its editor, and dragging it sets an [`EffectDrag`]
 //! payload.  The hover on that grip says that moving an effect closes its
-//! open editor.
+//! open editor.  A NAM block row moves the same way and drags as a
+//! [`NamDrag`]; a built-in row only bypasses.  A `warn` row prints its mark
+//! in the warning colour, which is how an overloaded NAM block shows what
+//! it costs.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};
@@ -44,6 +47,21 @@ pub(crate) enum ChainEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EffectDrag(pub usize);
 
+/// Drag payload of a NAM row: the block's index in its path's stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NamDrag(pub usize);
+
+/// What a row's right-click menu offers, and how it moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowMenu {
+    /// A built-in stage: bypass only.
+    Builtin,
+    /// A plugin effect: editor, controls, move, remove, and drag.
+    Effect,
+    /// A NAM block: move and remove, and drag.
+    Nam,
+}
+
 /// The mark at the right of a row.
 #[derive(Clone, Copy)]
 pub(crate) enum ChainMark<'a> {
@@ -63,7 +81,7 @@ pub(crate) struct ChainRow<'a> {
     /// What screen readers call the row, and what it shows unless `shown`
     /// says otherwise.
     pub name: &'a str,
-    /// Text drawn in place of the name: the amp row shows its capture.
+    /// Text drawn in place of the name: a NAM row shows its capture.
     /// Screen readers get it as the description, and hover shows it whole.
     pub shown: Option<&'a str>,
     pub index: usize,
@@ -76,11 +94,18 @@ pub(crate) struct ChainRow<'a> {
     /// Density steps that drop the mini curve set this false.
     pub show_curve: bool,
     pub sample_rate: u32,
+    pub menu: RowMenu,
+    /// Draws the mark in the warning colour (an overloaded block).
+    pub warn: bool,
 }
 
 impl ChainRow<'_> {
     fn effect(&self) -> bool {
-        matches!(self.mark, ChainMark::Latency(_))
+        matches!(self.menu, RowMenu::Effect)
+    }
+
+    fn movable(&self) -> bool {
+        matches!(self.menu, RowMenu::Effect | RowMenu::Nam)
     }
 }
 
@@ -96,7 +121,7 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
             180.0
         }
     };
-    let sense = if row.effect() {
+    let sense = if row.movable() {
         Sense::click_and_drag()
     } else {
         Sense::click()
@@ -127,20 +152,24 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
     } else if response.clicked() && !on_led {
         event = Some(ChainEvent::Select);
     }
-    if row.effect() {
-        response.dnd_set_drag_payload(EffectDrag(row.index));
+    if row.movable() {
+        match row.menu {
+            RowMenu::Effect => response.dnd_set_drag_payload(EffectDrag(row.index)),
+            RowMenu::Nam => response.dnd_set_drag_payload(NamDrag(row.index)),
+            RowMenu::Builtin => {}
+        }
         event = event.or(arrows(ui, &response));
     }
 
-    let menu = if row.effect() {
-        response.context_menu(|ui| effect_menu(ui, &mut event))
-    } else {
-        response.context_menu(|ui| {
+    let menu = match row.menu {
+        RowMenu::Effect => response.context_menu(|ui| effect_menu(ui, &mut event)),
+        RowMenu::Nam => response.context_menu(|ui| nam_menu(ui, &mut event)),
+        RowMenu::Builtin => response.context_menu(|ui| {
             if menu_item(ui, "Bypass") {
                 event = Some(ChainEvent::Bypass);
                 ui.close();
             }
-        })
+        }),
     };
     let _ = menu;
 
@@ -245,6 +274,21 @@ fn arrows(ui: &egui::Ui, response: &egui::Response) -> Option<ChainEvent> {
             None
         }
     })
+}
+
+fn nam_menu(ui: &mut egui::Ui, event: &mut Option<ChainEvent>) {
+    ui.set_min_width(160.0);
+    for (label, item) in [
+        ("Bypass", ChainEvent::Bypass),
+        ("Move up", ChainEvent::MoveUp),
+        ("Move down", ChainEvent::MoveDown),
+        ("Remove", ChainEvent::Remove),
+    ] {
+        if menu_item(ui, label) {
+            *event = Some(item);
+            ui.close();
+        }
+    }
 }
 
 fn effect_menu(ui: &mut egui::Ui, event: &mut Option<ChainEvent>) {
@@ -411,6 +455,8 @@ fn paint_mark(ui: &egui::Ui, row: &ChainRow<'_>, rect: Rect, colours: &crate::ui
             );
             let colour = if row.failed {
                 colours.error_text
+            } else if row.warn {
+                colours.warn
             } else {
                 colours.text2
             };

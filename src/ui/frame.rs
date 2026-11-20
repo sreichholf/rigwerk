@@ -83,7 +83,10 @@ impl eframe::App for RigWerkApp {
                         .fill(bar)
                         .inner_margin(Margin::symmetric(12, 6)),
                 )
-                .show(root, |ui| self.error_banner(ui));
+                .show(root, |ui| {
+                    self.error_banner(ui);
+                    self.nam_banner(ui);
+                });
         }
 
         egui::Panel::bottom("rigwerk_status")

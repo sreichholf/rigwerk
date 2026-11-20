@@ -31,7 +31,7 @@ fn sheet_titles_name_the_item() {
     });
     assert_eq!(app.sheet_title(app.chrome.sheet.unwrap()), "Pre EQ");
     assert!(app.step_sheet(true));
-    assert_eq!(app.sheet_title(app.chrome.sheet.unwrap()), "Amp");
+    assert_eq!(app.sheet_title(app.chrome.sheet.unwrap()), "NAM");
     assert!(app.step_sheet(true));
     assert_eq!(app.sheet_title(app.chrome.sheet.unwrap()), "Cab");
     assert!(app.step_sheet(true));

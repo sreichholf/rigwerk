@@ -77,58 +77,126 @@ fn output_device_selection_falls_back_to_the_master() {
     assert_eq!(ChainSelection::OutputDevice(0).eq_slot(), None);
 }
 
+/// A stack with one block in `position`, for the chain-order tests.
+fn one_block(position: crate::audio::NamPosition) -> crate::audio::NamStack {
+    use crate::audio::{NamBlockControls, NamStack};
+    let mut stack = NamStack::default();
+    stack.push(NamBlockControls {
+        id: 0,
+        position,
+        ..NamBlockControls::default()
+    });
+    stack
+}
+
 #[test]
 fn the_chain_is_in_signal_order_with_the_gate_where_its_slot_says() {
     use super::{chain_stages, ChainStage::*};
-    use crate::audio::{AmpSlot, GateSlot};
+    use crate::audio::GateSlot;
+    let pre = one_block(crate::audio::NamPosition::Pre);
     assert_eq!(
-        chain_stages(2, GateSlot::Post, AmpSlot::Pre),
-        [PreEq, Amp, Effect(0), Effect(1), Cab, Gate, PostEq]
+        chain_stages(2, GateSlot::Post, &pre),
+        [PreEq, Nam(0), Effect(0), Effect(1), Cab, Gate, PostEq]
     );
     assert_eq!(
-        chain_stages(2, GateSlot::Pre, AmpSlot::Pre),
-        [PreEq, Gate, Amp, Effect(0), Effect(1), Cab, PostEq]
+        chain_stages(2, GateSlot::Pre, &pre),
+        [PreEq, Gate, Nam(0), Effect(0), Effect(1), Cab, PostEq]
     );
     assert_eq!(
-        chain_stages(0, GateSlot::Post, AmpSlot::Pre),
-        [PreEq, Amp, Cab, Gate, PostEq]
+        chain_stages(0, GateSlot::Post, &pre),
+        [PreEq, Nam(0), Cab, Gate, PostEq]
     );
 }
 
 #[test]
-fn the_amp_sits_before_effects_by_default_and_after_when_post() {
+fn the_nam_block_sits_before_effects_by_default_and_after_when_post() {
     use super::{chain_stages, ChainStage::*};
-    use crate::audio::{AmpSlot, GateSlot};
-    assert_eq!(AmpSlot::default(), AmpSlot::Pre);
+    use crate::audio::{GateSlot, NamPosition};
+    assert_eq!(NamPosition::default(), NamPosition::Pre);
+    let pre = one_block(NamPosition::Pre);
+    let post = one_block(NamPosition::Post);
     assert_eq!(
-        chain_stages(1, GateSlot::Post, AmpSlot::Pre),
-        [PreEq, Amp, Effect(0), Cab, Gate, PostEq]
+        chain_stages(1, GateSlot::Post, &pre),
+        [PreEq, Nam(0), Effect(0), Cab, Gate, PostEq]
     );
     assert_eq!(
-        chain_stages(1, GateSlot::Post, AmpSlot::Post),
-        [PreEq, Effect(0), Amp, Cab, Gate, PostEq]
+        chain_stages(1, GateSlot::Post, &post),
+        [PreEq, Effect(0), Nam(0), Cab, Gate, PostEq]
     );
     assert_eq!(
-        chain_stages(1, GateSlot::Pre, AmpSlot::Post),
-        [PreEq, Gate, Effect(0), Amp, Cab, PostEq]
+        chain_stages(1, GateSlot::Pre, &post),
+        [PreEq, Gate, Effect(0), Nam(0), Cab, PostEq]
     );
-    let post = chain_stages(1, GateSlot::Post, AmpSlot::Post);
-    let amp = post.iter().position(|stage| *stage == Amp).expect("amp");
-    let cab = post.iter().position(|stage| *stage == Cab).expect("cab");
-    let gate = post.iter().position(|stage| *stage == Gate).expect("gate");
-    assert_eq!(amp + 1, cab, "the cabinet follows a post amp");
+    let stages = chain_stages(1, GateSlot::Post, &post);
+    let nam = stages
+        .iter()
+        .position(|stage| *stage == Nam(0))
+        .expect("nam");
+    let cab = stages.iter().position(|stage| *stage == Cab).expect("cab");
+    let gate = stages
+        .iter()
+        .position(|stage| *stage == Gate)
+        .expect("gate");
+    assert_eq!(nam + 1, cab, "the cabinet follows a post NAM block");
     assert_eq!(cab + 1, gate, "the cabinet precedes a post gate");
+}
+
+#[test]
+fn nam_blocks_in_both_positions_appear_in_signal_order() {
+    use super::{chain_stages, neighbour_stage, ChainStage::*};
+    use crate::audio::{GateSlot, NamBlockControls, NamPosition, NamStack};
+    let mut stack = NamStack::default();
+    for (id, position) in [
+        (0, NamPosition::Pre),
+        (1, NamPosition::Pre),
+        (2, NamPosition::Post),
+    ] {
+        assert!(stack.push(NamBlockControls {
+            id,
+            position,
+            ..NamBlockControls::default()
+        }));
+    }
+    assert_eq!(
+        chain_stages(2, GateSlot::Post, &stack),
+        [
+            PreEq,
+            Nam(0),
+            Nam(1),
+            Effect(0),
+            Effect(1),
+            Nam(2),
+            Cab,
+            Gate,
+            PostEq
+        ]
+    );
+    // An empty stack still gets one row: the sheet's way in.
+    assert_eq!(
+        chain_stages(0, GateSlot::Post, &NamStack::default()),
+        [PreEq, Nam(0), Cab, Gate, PostEq]
+    );
+    // ‹ › walks from the Pre group into the effects and into the Post group.
+    assert_eq!(
+        neighbour_stage(Nam(1), 2, GateSlot::Post, &stack, true),
+        Some(Effect(0))
+    );
+    assert_eq!(
+        neighbour_stage(Nam(2), 2, GateSlot::Post, &stack, false),
+        Some(Effect(1))
+    );
 }
 
 #[test]
 fn neighbours_walk_the_chain_and_stop_at_its_ends() {
     use super::{neighbour_stage, ChainStage::*};
-    use crate::audio::{AmpSlot, GateSlot};
-    let next = |stage, gate| neighbour_stage(stage, 1, gate, AmpSlot::Pre, true);
-    let previous = |stage, gate| neighbour_stage(stage, 1, gate, AmpSlot::Pre, false);
+    use crate::audio::GateSlot;
+    let nam = one_block(crate::audio::NamPosition::Pre);
+    let next = |stage, gate| neighbour_stage(stage, 1, gate, &nam, true);
+    let previous = |stage, gate| neighbour_stage(stage, 1, gate, &nam, false);
     assert_eq!(next(PreEq, GateSlot::Pre), Some(Gate));
-    assert_eq!(next(Gate, GateSlot::Pre), Some(Amp));
-    assert_eq!(next(Amp, GateSlot::Pre), Some(Effect(0)));
+    assert_eq!(next(Gate, GateSlot::Pre), Some(Nam(0)));
+    assert_eq!(next(Nam(0), GateSlot::Pre), Some(Effect(0)));
     assert_eq!(next(Effect(0), GateSlot::Pre), Some(Cab));
     assert_eq!(next(Cab, GateSlot::Pre), Some(PostEq));
     assert_eq!(next(Effect(0), GateSlot::Post), Some(Cab));

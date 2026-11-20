@@ -70,7 +70,7 @@ fn previous_and_next_walk_the_chain_in_signal_order() {
                 post: false
             },
             Sheet::Gate { path: 0 },
-            Sheet::Amp { path: 0 },
+            Sheet::Nam { path: 0, index: 0 },
             Sheet::Effect { path: 0, index: 0 },
             Sheet::Effect { path: 0, index: 1 },
             Sheet::Cab { path: 0 },
@@ -137,7 +137,14 @@ fn sheet_keys_name_every_sheet() {
         })
     );
     assert_eq!(Sheet::from_key("Gate", 1), Some(Sheet::Gate { path: 1 }));
-    assert_eq!(Sheet::from_key("amp", 0), Some(Sheet::Amp { path: 0 }));
+    assert_eq!(
+        Sheet::from_key("amp", 0),
+        Some(Sheet::Nam { path: 0, index: 0 })
+    );
+    assert_eq!(
+        Sheet::from_key("nam", 0),
+        Some(Sheet::Nam { path: 0, index: 0 })
+    );
     assert_eq!(Sheet::from_key("cab", 0), Some(Sheet::Cab { path: 0 }));
     assert_eq!(
         Sheet::from_key("effect", 0),

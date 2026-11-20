@@ -19,17 +19,121 @@
 //! A removed path keeps its device entries while it fades out, so it fades
 //! where it played; the next path in that slot overwrites them.
 
-use crate::app::amp::AmpInstall;
 use crate::app::cab::CabInstall;
 use crate::app::chain::ChainSelection;
+use crate::app::nam::NamInstall;
 use crate::app::settings::{default_path_name, ExtraOutputPref, PathPref};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
+use crate::audio::nam::NamLoad;
 use crate::audio::{
     low_bits, path_level_gain, sanitize_path_level, EngineState, EqSettings, GateSettings,
-    MapPreset, OutputDeviceSettings, PathMapSettings, PathMix, PathState, UnusedChannels,
-    MAX_OUTPUT_CHANNELS, MAX_PATHS,
+    MapPreset, NamBlockControls, NamBlockSettings, NamStack, OutputDeviceSettings, PathMapSettings,
+    PathMix, PathState, UnusedChannels, MAX_NAM_BLOCKS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
 };
+
+/// One NAM block of a path, as the UI holds it: the controls the engine
+/// gets, the capture it runs, and what loading that capture produced.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NamBlock {
+    /// The controls the engine reads.  `id` is this block's handle.
+    pub(crate) controls: NamBlockControls,
+    /// The `.nam` capture.  Empty means the block has no model and passes
+    /// its input through.
+    pub(crate) model: String,
+    /// Display name of the loaded capture, or a stem when the load failed.
+    pub(crate) name: String,
+    /// Why the last load failed.  The path string is kept.
+    pub(crate) error: Option<String>,
+    /// Width thresholds of a slimmable capture, empty otherwise.  The width
+    /// dial shows when there are some.
+    pub(crate) slim_steps: Vec<f32>,
+    /// The file parsed and its sample rate is not the path's rate.
+    pub(crate) mismatch: bool,
+    /// The file's sample rate, when one was declared.  0 if unknown.
+    pub(crate) file_rate: u32,
+    /// The last install attempt.  A matching stamp is not rebuilt.
+    pub(crate) install: NamInstall,
+    /// Gear type of the loaded capture, trimmed.  UI only: the audio
+    /// thread never sees it.  Cleared when the model is cleared or fails.
+    pub(crate) gear: Option<String>,
+    /// The file's architecture, for the badge and the estimate.
+    pub(crate) arch: String,
+    /// What the capture measured as at the running rate and block size.
+    /// `None` until it is measured.
+    pub(crate) load: Option<NamLoad>,
+}
+
+impl NamBlock {
+    pub(crate) fn new(id: u32) -> Self {
+        Self {
+            controls: NamBlockControls {
+                id,
+                ..NamBlockControls::default()
+            },
+            model: String::new(),
+            name: String::new(),
+            error: None,
+            slim_steps: Vec::new(),
+            mismatch: false,
+            file_rate: 0,
+            install: NamInstall::default(),
+            gear: None,
+            arch: String::new(),
+            load: None,
+        }
+    }
+
+    pub(crate) fn from_settings(settings: &NamBlockSettings, id: u32) -> Self {
+        Self {
+            controls: NamBlockControls {
+                id,
+                ..settings.controls.sanitized()
+            },
+            model: settings.model.trim().to_owned(),
+            ..Self::new(id)
+        }
+    }
+
+    /// Forgets what the last load produced, for a block whose capture is
+    /// gone or whose file failed.
+    pub(crate) fn cleared(&mut self) {
+        self.name.clear();
+        self.error = None;
+        self.slim_steps.clear();
+        self.mismatch = false;
+        self.file_rate = 0;
+        self.gear = None;
+        self.arch.clear();
+        self.load = None;
+        self.controls.level_in_dbu = None;
+        self.controls.level_out_dbu = None;
+    }
+
+    pub(crate) fn settings(&self) -> NamBlockSettings {
+        NamBlockSettings {
+            model: self.model.clone(),
+            controls: self.controls.sanitized(),
+        }
+    }
+
+    /// Whether the block runs: on, and with a capture that loaded (or is
+    /// still loading).  A failed load or a rate mismatch runs nothing.
+    pub(crate) fn active(&self) -> bool {
+        self.controls.enabled
+            && !self.model.trim().is_empty()
+            && !self.mismatch
+            && self.error.is_none()
+    }
+
+    /// The share of one block the block is expected to take, measured when
+    /// there is a measurement, estimated from its architecture otherwise.
+    pub(crate) fn load_share(&self, rate: u32) -> f32 {
+        self.load.map(NamLoad::share).unwrap_or_else(|| {
+            crate::audio::nam::estimate_load(&self.arch, f64::from(rate)).share()
+        })
+    }
+}
 
 /// One live path's UI data (name, colour index) and the settings pushed to
 /// the engine.
@@ -39,24 +143,12 @@ pub(crate) struct SignalPath {
     /// Index into the path palette.  The colour is chosen when a row is drawn.
     pub(crate) colour: u8,
     pub(crate) mix: PathMix,
-    /// The `.nam` capture.  Empty means the stage has no model.
-    pub(crate) amp_model: String,
-    /// Display name of the loaded capture, or a stem when the load failed.
-    pub(crate) amp_name: String,
-    /// Why the last load failed.  The path string is kept.
-    pub(crate) amp_error: Option<String>,
-    /// Width thresholds of a slimmable capture, empty otherwise.  The width
-    /// dial shows when there are some.
-    pub(crate) amp_slim_steps: Vec<f32>,
-    /// The file parsed and its sample rate is not the path's rate.
-    pub(crate) amp_mismatch: bool,
-    /// The file's sample rate, when one was declared.  0 if unknown.
-    pub(crate) amp_file_rate: u32,
-    /// The last install attempt.  A matching stamp is not rebuilt.
-    pub(crate) amp_install: AmpInstall,
-    /// Gear type of the loaded capture, trimmed.  UI only: the audio
-    /// thread never sees it.  Cleared when the model is cleared or fails.
-    pub(crate) amp_gear: Option<String>,
+    /// The NAM blocks in signal order: the `Pre` group first, then the one
+    /// after the effects.  The engine gets their controls as one
+    /// [`NamStack`].
+    pub(crate) nam: Vec<NamBlock>,
+    /// The id the next added block gets.  Never reused within a path.
+    pub(crate) next_nam_id: u32,
     /// The impulse response.  Empty means the cabinet has no file.
     pub(crate) cab_file: String,
     /// Display name of the loaded impulse, or a stem when the load failed.
@@ -71,25 +163,36 @@ pub(crate) struct SignalPath {
 }
 
 impl SignalPath {
-    pub(crate) fn from_pref(pref: &PathPref) -> Self {
-        Self {
+    /// The path `pref` describes, its blocks numbered from `first_id`.  A
+    /// slot the engine may still hold block state for passes the first id
+    /// it has not used, so a new block never takes an old one's model.
+    /// The blocks are put in stack order (the `Pre` group, then `Post`):
+    /// a row or a sheet names a block by its index in that order.
+    pub(crate) fn from_pref(pref: &PathPref, first_id: u32) -> Self {
+        let nam: Vec<NamBlock> = pref
+            .nam_blocks
+            .iter()
+            .take(MAX_NAM_BLOCKS)
+            .enumerate()
+            .map(|(at, settings)| {
+                NamBlock::from_settings(settings, first_id.wrapping_add(at as u32))
+            })
+            .collect();
+        let mut path = Self {
             name: pref.name.clone(),
             colour: pref.colour % MAX_PATHS as u8,
             mix: pref.mix(),
-            amp_model: pref.amp.model_path.clone(),
-            amp_name: String::new(),
-            amp_error: None,
-            amp_slim_steps: Vec::new(),
-            amp_mismatch: false,
-            amp_file_rate: 0,
-            amp_install: AmpInstall::default(),
-            amp_gear: None,
+            next_nam_id: first_id.wrapping_add(nam.len() as u32),
+            nam,
             cab_file: pref.cab.file.clone(),
             cab_name: String::new(),
             cab_error: None,
             cab_install: CabInstall::default(),
             cab_raw: None,
-        }
+        };
+        let stack = path.nam_stack();
+        path.order_nam_like(&stack);
+        path
     }
 
     fn to_pref(&self, plugins: Vec<crate::audio::PluginPref>) -> PathPref {
@@ -97,10 +200,65 @@ impl SignalPath {
             self.name.clone(),
             self.colour,
             &self.mix,
-            &self.amp_model,
+            self.nam_settings(),
             &self.cab_file,
             plugins,
         )
+    }
+
+    /// The engine's view of the blocks: their controls, in signal order.
+    pub(crate) fn nam_stack(&self) -> NamStack {
+        let mut stack = NamStack::default();
+        for block in &self.nam {
+            if !stack.push(block.controls.sanitized()) {
+                break;
+            }
+        }
+        stack
+    }
+
+    /// Reorders the blocks to `stack`'s order, dropping the ones it left
+    /// out and keeping each block's runtime state with its id.
+    pub(crate) fn order_nam_like(&mut self, stack: &NamStack) {
+        let mut blocks = std::mem::take(&mut self.nam);
+        let mut ordered = Vec::with_capacity(stack.count());
+        for controls in stack.blocks() {
+            if let Some(at) = blocks
+                .iter()
+                .position(|block| block.controls.id == controls.id)
+            {
+                let mut block = blocks.remove(at);
+                block.controls = controls.sanitized();
+                ordered.push(block);
+            }
+        }
+        self.nam = ordered;
+    }
+
+    /// The blocks' ids, in signal order.
+    pub(crate) fn nam_ids(&self) -> Vec<u32> {
+        self.nam.iter().map(|block| block.controls.id).collect()
+    }
+
+    /// The blocks as saved: their captures and controls, in signal order.
+    pub(crate) fn nam_settings(&self) -> Vec<NamBlockSettings> {
+        self.nam.iter().map(NamBlock::settings).collect()
+    }
+
+    /// Whether any block runs.
+    pub(crate) fn nam_active(&self) -> bool {
+        self.nam.iter().any(NamBlock::active)
+    }
+
+    /// The gear type of the last active capture before the cabinet: a
+    /// capture that already includes a speaker box makes an impulse
+    /// response after it a second one.
+    pub(crate) fn last_nam_gear(&self) -> Option<String> {
+        self.nam
+            .iter()
+            .rev()
+            .find(|block| block.active())
+            .and_then(|block| block.gear.clone())
     }
 }
 
@@ -110,14 +268,8 @@ impl Default for SignalPath {
             name: default_path_name(0),
             colour: 0,
             mix: PathMix::default(),
-            amp_model: String::new(),
-            amp_name: String::new(),
-            amp_error: None,
-            amp_slim_steps: Vec::new(),
-            amp_mismatch: false,
-            amp_file_rate: 0,
-            amp_install: AmpInstall::default(),
-            amp_gear: None,
+            nam: Vec::new(),
+            next_nam_id: 0,
             cab_file: String::new(),
             cab_name: String::new(),
             cab_error: None,
@@ -278,7 +430,7 @@ impl RigWerkApp {
                 let builtins = [
                     mix.eqs[0].is_active(),
                     mix.gate.enabled,
-                    mix.amp.enabled,
+                    path.nam_active(),
                     mix.eqs[1].is_active(),
                 ]
                 .into_iter()
@@ -438,10 +590,17 @@ impl RigWerkApp {
                 solo: false,
                 ..original.mix
             },
-            // The copy loads its own model and its own impulse.
+            // The copy loads its own models and its own impulse.
             // Generations count per slot, so the source's stamp could
             // match the new slot.
-            amp_install: AmpInstall::default(),
+            nam: original
+                .nam
+                .iter()
+                .map(|block| NamBlock {
+                    install: NamInstall::default(),
+                    ..block.clone()
+                })
+                .collect(),
             cab_install: CabInstall::default(),
             cab_raw: None,
             ..original
@@ -513,12 +672,6 @@ impl RigWerkApp {
     /// The edited path's gate.
     pub(crate) fn set_path_gate(&mut self, gate: GateSettings) {
         self.path_mut().mix.gate = gate;
-    }
-
-    /// The edited path's amp controls.  Does not load a capture.
-    pub(crate) fn set_path_amp(&mut self, amp: crate::audio::AmpControls) {
-        self.path_mut().mix.amp = amp.sanitized();
-        self.push_paths_to_engine();
     }
 
     /// The edited path's cabinet controls.  Does not read an impulse.
@@ -766,10 +919,13 @@ impl RigWerkApp {
     }
 
     /// Pushes every live path's settings to the engine.  Called each frame.
+    /// The NAM blocks go separately: their stack is too large for the
+    /// [`PathMix`] snapshot.
     pub(crate) fn push_paths_to_engine(&self) {
         for (slot, path) in self.paths.iter().enumerate() {
             if let Some(path) = path {
                 self.engine.set_path_mix(slot, &path.mix);
+                self.engine.set_path_nam(slot, &path.nam_stack());
             }
         }
     }
@@ -859,9 +1015,10 @@ impl RigWerkApp {
             .collect();
 
         for (pref, &slot) in prefs.iter().zip(&targets) {
-            let path = SignalPath::from_pref(pref);
+            let first_id = self.unused_nam_id(slot);
+            let path = SignalPath::from_pref(pref, first_id);
             self.engine
-                .restore_path(slot, &path.mix, pref.plugins.clone());
+                .restore_path(slot, &path.mix, &path.nam_stack(), pref.plugins.clone());
             self.paths[slot] = Some(path);
         }
         for slot in 0..MAX_PATHS {
@@ -881,8 +1038,35 @@ impl RigWerkApp {
         }
         self.push_paths_to_engine();
         self.push_devices_to_engine();
-        self.sync_amp_models();
+        self.sync_nam_models();
         self.sync_cab_files();
+        // A preset that was saved on a bigger buffer may not fit this one.
+        // The budget is shared, so every path counts, selected or not.
+        self.check_nam_load();
+    }
+
+    /// The first NAM block id path slot `slot` has not handed out: past the
+    /// live path's ids and past every id the engine still publishes there
+    /// (a slot live only in the engine, or still fading out).  0 for a slot
+    /// that holds nothing.
+    fn unused_nam_id(&self, slot: usize) -> u32 {
+        let app = self
+            .paths
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map_or(0, |path| path.next_nam_id);
+        if slot >= MAX_PATHS || self.engine.path_state(slot) == PathState::Inactive {
+            return app;
+        }
+        let engine = self
+            .engine
+            .path_nam(slot)
+            .blocks()
+            .iter()
+            .map(|block| block.id.wrapping_add(1))
+            .max()
+            .unwrap_or(0);
+        app.max(engine)
     }
 
     /// The live paths as they should be saved (fresh plugin state), and

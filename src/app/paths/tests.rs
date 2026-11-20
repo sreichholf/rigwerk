@@ -112,11 +112,12 @@ fn a_removed_path_fades_where_it_played() {
     let mut mixer = OutputMixer::new(48_000, 2);
     mixer.prepare(256);
     let run = |mixer: &mut OutputMixer| {
-        let mut out = Vec::new();
-        mixer.render_direct_devices(&shared, &[0.5; 256], &[0.5; 256], |_, _, mapped| {
-            out.push([mapped.sample(0), mapped.sample(1)]);
+        // Sized up front: the write closure runs inside the allocation guard.
+        let mut out = [[0.0f32; 2]; 256];
+        mixer.render_direct_devices(&shared, &[0.5; 256], &[0.5; 256], |_, index, mapped| {
+            out[index] = [mapped.sample(0), mapped.sample(1)];
         });
-        out
+        out.to_vec()
     };
     let steady = run(&mut mixer);
     assert_eq!(steady[255], [0.5, -0.5]);
@@ -468,10 +469,11 @@ fn a_path_colour_is_stored_and_the_level_and_solo_are_independent() {
 }
 
 #[test]
-fn a_duplicated_path_loads_its_own_amp_model() {
+fn a_duplicated_path_loads_its_own_nam_model() {
     let mut app = blank_app();
     let source = app.add_path().expect("a free slot");
-    app.set_path_amp_model(source, "/nonexistent/cab.nam".to_owned());
+    let index = app.add_nam_block(source).expect("a block");
+    app.set_nam_model(source, index, "/nonexistent/cab.nam".to_owned());
     let copy = app.duplicate_path(source).expect("a free slot");
     // Both slots went live once: their generations match, so the source's
     // stamp would match the copy too.
@@ -480,12 +482,127 @@ fn a_duplicated_path_loads_its_own_amp_model() {
         app.engine.path_generation(copy)
     );
     let path = app.paths[copy].as_ref().unwrap();
-    assert_eq!(path.amp_model, "/nonexistent/cab.nam");
-    assert_eq!(path.amp_install, crate::app::amp::AmpInstall::default());
-    app.sync_amp_models();
+    assert_eq!(path.nam[0].model, "/nonexistent/cab.nam");
+    assert_eq!(path.nam[0].install, crate::app::nam::NamInstall::default());
+    app.sync_nam_models();
     let path = app.paths[copy].as_ref().unwrap();
     assert_eq!(
-        path.amp_install.path, "/nonexistent/cab.nam",
+        path.nam[0].install.path, "/nonexistent/cab.nam",
         "loaded again"
     );
+}
+
+#[test]
+fn moving_one_nam_block_after_the_effects_moves_only_that_block() {
+    use crate::audio::NamPosition;
+    let mut app = blank_app();
+    let slot = app.add_path().expect("a free slot");
+    let pedal = app.add_nam_block(slot).expect("a block");
+    let amp = app.add_nam_block(slot).expect("a block");
+    let path = app.paths[slot].as_ref().unwrap();
+    let (pedal_id, amp_id) = (path.nam[pedal].controls.id, path.nam[amp].controls.id);
+    let mut moved = path.nam[pedal].controls;
+    moved.position = NamPosition::Post;
+    moved.input_db = 1.5;
+    app.set_nam_controls(slot, pedal, moved);
+
+    let path = app.paths[slot].as_ref().unwrap();
+    let position = |id: u32| {
+        path.nam
+            .iter()
+            .find(|block| block.controls.id == id)
+            .map(|block| block.controls.position)
+    };
+    assert_eq!(
+        position(amp_id),
+        Some(NamPosition::Pre),
+        "the other block stays"
+    );
+    assert_eq!(position(pedal_id), Some(NamPosition::Post));
+    let ids: Vec<u32> = path.nam.iter().map(|block| block.controls.id).collect();
+    assert_eq!(ids, [amp_id, pedal_id], "Pre group first, then Post");
+    assert_eq!(path.nam[1].controls.input_db, 1.5, "the edit is kept");
+}
+
+#[test]
+fn a_preset_into_a_live_slot_never_reuses_a_block_id() {
+    use crate::app::settings::PathPref;
+    use crate::audio::NamBlockSettings;
+    let mut app = blank_app();
+    let live = app.path_slots()[0];
+    app.add_nam_block(live).expect("a block");
+    app.add_nam_block(live).expect("a block");
+    // A path that is fading out still holds its blocks in the engine.
+    let fading = app.add_path().expect("a free slot");
+    app.add_nam_block(fading).expect("a block");
+    assert!(app.remove_path(fading));
+    assert_eq!(app.engine.path_state(fading), PathState::FadingOut);
+
+    let pref = PathPref {
+        nam_blocks: vec![NamBlockSettings::default(); 2],
+        ..PathPref::default()
+    };
+    let prefs = vec![pref; MAX_PATHS];
+    app.install_paths(&prefs, OutputDeviceSettings::default(), Vec::new(), 0);
+
+    let ids = |app: &crate::app::RigWerkApp, slot: usize| -> Vec<u32> {
+        app.paths[slot]
+            .as_ref()
+            .unwrap()
+            .nam
+            .iter()
+            .map(|block| block.controls.id)
+            .collect()
+    };
+    let published = |app: &crate::app::RigWerkApp, slot: usize| -> Vec<u32> {
+        app.engine
+            .path_nam(slot)
+            .blocks()
+            .iter()
+            .map(|block| block.id)
+            .collect()
+    };
+    // The live slot numbers on from its own next id, and the old ids leave
+    // the published stack, so the engine fades them out.
+    assert_eq!(ids(&app, live), vec![2, 3]);
+    assert_eq!(published(&app, live), vec![2, 3]);
+    assert_eq!(app.paths[live].as_ref().unwrap().next_nam_id, 4);
+    // The fading slot numbers past what the engine still published.
+    assert_eq!(ids(&app, fading), vec![1, 2]);
+    assert_eq!(published(&app, fading), vec![1, 2]);
+    // A slot that held nothing starts at 0.
+    let fresh = app
+        .path_slots()
+        .into_iter()
+        .find(|&slot| slot != live && slot != fading)
+        .expect("a fresh slot");
+    assert_eq!(ids(&app, fresh), vec![0, 1]);
+}
+
+#[test]
+fn an_interleaved_save_loads_in_stack_order() {
+    use crate::app::settings::PathPref;
+    use crate::audio::{NamBlockControls, NamBlockSettings, NamPosition};
+    let block = |position: NamPosition, model: &str| NamBlockSettings {
+        model: model.to_owned(),
+        controls: NamBlockControls {
+            position,
+            ..NamBlockControls::default()
+        },
+    };
+    let pref = PathPref {
+        nam_blocks: vec![
+            block(NamPosition::Post, "a"),
+            block(NamPosition::Pre, "b"),
+            block(NamPosition::Post, "c"),
+            block(NamPosition::Pre, "d"),
+        ],
+        ..PathPref::default()
+    };
+    let path = super::SignalPath::from_pref(&pref, 10);
+    let models: Vec<&str> = path.nam.iter().map(|block| block.model.as_str()).collect();
+    assert_eq!(models, ["b", "d", "a", "c"], "Pre group first, then Post");
+    let stack: Vec<u32> = path.nam_stack().blocks().iter().map(|b| b.id).collect();
+    assert_eq!(stack, path.nam_ids(), "a row's index names the same block");
+    assert_eq!(path.next_nam_id, 14);
 }

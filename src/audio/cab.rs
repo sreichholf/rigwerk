@@ -1,12 +1,12 @@
 //! Built-in cabinet impulse response, one per signal path.
 //!
 //! The cabinet always sits after the plugin effects and after the built-in
-//! amp, whichever side of the effects the amp is on.  It adds no latency:
-//! nothing here is reported into path alignment.  The first [`PARTITION`]
-//! taps are a direct FIR.  The rest is uniformly partitioned overlap-save:
-//! the UI thread plans the FFTs and stores each partition's spectrum on
-//! the [`CabKernel`], and the callback only runs those plans on scratch
-//! the stage allocated up front.  The callback never reads a file, never
+//! NAM blocks, after whichever side of the effects they are on.  It adds no
+//! latency: nothing here is reported into path alignment.  The first
+//! [`PARTITION`] taps are a direct FIR.  The rest is uniformly partitioned
+//! overlap-save: the UI thread plans the FFTs and stores each partition's
+//! spectrum on the [`CabKernel`], and the callback only runs those plans on
+//! scratch the stage allocated up front.  The callback never reads a file, never
 //! resamples, and never drops a [`CabKernel`].  The UI thread builds one
 //! and queues it.  The callback only `try_lock`s that queue at the start
 //! of a block.  A kernel it replaces is moved into [`CabPark`], and only
@@ -56,7 +56,7 @@ const FFT_LEN: usize = PARTITION * 2;
 /// Tail partitions the stage keeps.  The longest IR uses every one.
 const TAIL_PARTS: usize = (CAB_MAX_TAPS - PARTITION).div_ceil(PARTITION);
 
-/// Level trim, the same span as the amp trims.
+/// Level trim, the same span as the NAM trims.
 pub const CAB_MIN_LEVEL_DB: f32 = -24.0;
 pub const CAB_MAX_LEVEL_DB: f32 = 24.0;
 

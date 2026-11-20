@@ -5,7 +5,6 @@
 //! (`impl eframe::App`) lives in `ui/frame.rs`; this file does not paint.
 
 pub(crate) mod alignment;
-pub(crate) mod amp;
 pub(crate) mod appearance;
 pub(crate) mod bridge;
 pub(crate) mod budget;
@@ -17,6 +16,7 @@ pub(crate) mod driver_check;
 pub(crate) mod issues;
 pub(crate) mod latency;
 pub(crate) mod layouts;
+pub(crate) mod nam;
 pub(crate) mod output_devices;
 pub(crate) mod paths;
 pub(crate) mod plugin_gui;
@@ -274,16 +274,26 @@ pub struct RigWerkApp {
     /// Directory takes are written into.  Empty is replaced on load; the
     /// writer creates it.
     pub(crate) record_folder: String,
-    /// Folder of `.nam` captures.  Empty until the amp sheet sets one.
-    pub(crate) amp_folder: String,
-    /// The last scan of [`Self::amp_folder`].  Not refreshed every frame.
-    pub(crate) amp_catalog: amp::AmpCatalog,
-    /// The amp sheet opened, or the folder changed: scan before drawing.
-    pub(crate) amp_rescan: bool,
-    /// Viewport the amp folder window is parented to.  Set each frame.
-    pub(crate) native_window: Option<amp::NativeWindow>,
+    /// Folder of `.nam` captures.  Empty until the NAM sheet sets one.
+    pub(crate) nam_folder: String,
+    /// The last scan of [`Self::nam_folder`].  Not refreshed every frame.
+    pub(crate) nam_catalog: nam::NamCatalog,
+    /// The NAM sheet opened, or the folder changed: scan before drawing.
+    pub(crate) nam_rescan: bool,
+    /// Viewport the models folder window is parented to.  Set each frame.
+    pub(crate) native_window: Option<nam::NativeWindow>,
     /// Ctrl+V was down last frame, so a held chord pastes the models folder once.
-    pub(crate) amp_paste_down: bool,
+    pub(crate) nam_paste_down: bool,
+    /// The thread that parses captures, measures them and hands them back.
+    /// Started the first time a block needs one.
+    pub(crate) nam_loader: Option<nam::NamLoader>,
+    /// A block the sheet would add, waiting for its confirmation because the
+    /// path already runs [`MAX_NAM_BLOCKS`](crate::audio::MAX_NAM_BLOCKS)
+    /// blocks' worth of DSP.
+    pub(crate) nam_confirm: Option<usize>,
+    /// A preset that loaded heavier than the DSP budget, with the blocks to
+    /// offer bypassing.  Dismissed or acted on once.
+    pub(crate) nam_warning: Option<nam::NamLoadWarning>,
     /// Folder of `.wav` impulse responses.  Empty until the cab sheet sets one.
     pub(crate) cab_folder: String,
     /// The last scan of [`Self::cab_folder`].  Not refreshed every frame.
@@ -369,6 +379,10 @@ pub struct RigWerkApp {
     /// the window can paint before hosts are probed.  The frame reads this
     /// to show the startup window.
     pub(crate) startup: Option<StartupGate>,
+    /// Whether the log has said the audio thread allocated.  Debug builds
+    /// only: release builds do not count.
+    #[cfg(debug_assertions)]
+    rt_allocations_logged: bool,
 }
 
 impl RigWerkApp {
@@ -390,12 +404,16 @@ impl RigWerkApp {
         self.watch_devices();
         self.poll_plugin_scan();
         self.engine.service_plugins();
-        self.sync_amp_models();
+        self.poll_nam_loader();
+        self.engine.flush_parks();
+        self.sync_nam_models();
         self.sync_cab_files();
         self.ui_scale = ctx.pixels_per_point();
         self.poll_plugin_gui();
         self.sync_bridge_config();
         self.tick_issues(Instant::now());
+        #[cfg(debug_assertions)]
+        self.log_audio_thread_allocations();
         let plugin_editor_open = self.plugin_editor.is_some() || self.plugin_gui.is_some();
         let interval = if self.startup.is_some() {
             Duration::from_millis(16)
@@ -479,7 +497,7 @@ impl RigWerkApp {
             tuner_auto_mute: self.tuner.auto_mute,
             tuner_tolerance: self.tuner.tolerance.to_u8(),
             record_folder: self.record_folder.clone(),
-            amp_folder: self.amp_folder.clone(),
+            amp_folder: self.nam_folder.clone(),
             cab_folder: self.cab_folder.clone(),
             record_click: self.record_click,
             metronome_bpm: self.metronome_bpm,
@@ -640,11 +658,14 @@ impl RigWerkApp {
             quantum: None,
             session_name: preferences.session_name.clone(),
             record_folder: preferences.record_folder.clone(),
-            amp_folder: preferences.amp_folder.clone(),
-            amp_catalog: amp::AmpCatalog::default(),
-            amp_rescan: true,
+            nam_folder: preferences.amp_folder.clone(),
+            nam_catalog: nam::NamCatalog::default(),
+            nam_rescan: true,
             native_window: None,
-            amp_paste_down: false,
+            nam_paste_down: false,
+            nam_loader: None,
+            nam_confirm: None,
+            nam_warning: None,
             cab_folder: preferences.cab_folder.clone(),
             cab_catalog: cab::CabCatalog::default(),
             cab_rescan: true,
@@ -696,6 +717,8 @@ impl RigWerkApp {
             startup: Some(StartupGate {
                 preferences: preferences.clone(),
             }),
+            #[cfg(debug_assertions)]
+            rt_allocations_logged: false,
         };
         // egui restored its own memory before this; the saved preference wins.
         // Track B: the effect browser's starred and recent effects.
@@ -889,11 +912,14 @@ pub(crate) fn blank_app() -> RigWerkApp {
         quantum: None,
         session_name: "My guitar rig".to_owned(),
         record_folder: String::new(),
-        amp_folder: String::new(),
-        amp_catalog: amp::AmpCatalog::default(),
-        amp_rescan: false,
+        nam_folder: String::new(),
+        nam_catalog: nam::NamCatalog::default(),
+        nam_rescan: false,
         native_window: None,
-        amp_paste_down: false,
+        nam_paste_down: false,
+        nam_loader: None,
+        nam_confirm: None,
+        nam_warning: None,
         cab_folder: String::new(),
         cab_catalog: cab::CabCatalog::default(),
         cab_rescan: false,
@@ -940,6 +966,8 @@ pub(crate) fn blank_app() -> RigWerkApp {
         #[cfg(target_os = "linux")]
         quantum_live_at: Instant::now(),
         startup: None,
+        #[cfg(debug_assertions)]
+        rt_allocations_logged: false,
     }
 }
 

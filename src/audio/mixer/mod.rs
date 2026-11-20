@@ -73,12 +73,15 @@ use super::output_map::{
 };
 use super::path::{LiveSlots, MAX_PATHS};
 use super::resampler::FrameResampler;
+use super::rt_guard::RtGuard;
 use super::shared::Shared;
 
 #[cfg(test)]
 mod align_tests;
 mod path;
 pub(crate) mod ramp;
+#[cfg(test)]
+mod rt_tests;
 
 use path::{DspMeter, PathProcessor};
 
@@ -720,6 +723,8 @@ impl OutputMixer {
         // The same flush-to-zero mode as `render`, for the EQ, gate and
         // effects of this block.
         let _denormals = DenormalGuard::new();
+        // Nothing in this block may allocate (see `audio::rt_guard`).
+        let _no_allocations = RtGuard::enter();
         // The block's clock stamp is taken here, at the callback's entry, so
         // the calibration measures from the frames' position and not from
         // when the effects happened to finish.
@@ -765,6 +770,8 @@ impl OutputMixer {
         // Decaying EQ and gate states must not drop into the slow subnormal
         // range; the effects run inside this block and get the same mode.
         let _denormals = DenormalGuard::new();
+        // Nothing in this block may allocate (see `audio::rt_guard`).
+        let _no_allocations = RtGuard::enter();
         let now = Instant::now();
         self.follow_source_rate(shared);
         self.begin_block(shared, frames);

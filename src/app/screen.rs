@@ -22,8 +22,11 @@ pub(crate) enum Sheet {
     Gate {
         path: usize,
     },
-    Amp {
+    /// The NAM block at `index` of the path's stack; the add view when the
+    /// stack has no such block.
+    Nam {
         path: usize,
+        index: usize,
     },
     Cab {
         path: usize,
@@ -50,7 +53,7 @@ impl Sheet {
         match stage {
             ChainStage::PreEq => Self::Eq { path, post: false },
             ChainStage::Gate => Self::Gate { path },
-            ChainStage::Amp => Self::Amp { path },
+            ChainStage::Nam(index) => Self::Nam { path, index },
             ChainStage::Cab => Self::Cab { path },
             ChainStage::Effect(index) => Self::Effect { path, index },
             ChainStage::PostEq => Self::Eq { path, post: true },
@@ -63,7 +66,7 @@ impl Sheet {
             Self::Eq { path, post: false } => Some((path, ChainStage::PreEq)),
             Self::Eq { path, post: true } => Some((path, ChainStage::PostEq)),
             Self::Gate { path } => Some((path, ChainStage::Gate)),
-            Self::Amp { path } => Some((path, ChainStage::Amp)),
+            Self::Nam { path, index } => Some((path, ChainStage::Nam(index))),
             Self::Cab { path } => Some((path, ChainStage::Cab)),
             Self::Effect { path, index } => Some((path, ChainStage::Effect(index))),
             _ => None,
@@ -85,7 +88,7 @@ impl Sheet {
         Some(match key.trim().to_lowercase().as_str() {
             "eq" => Self::Eq { path, post: false },
             "gate" => Self::Gate { path },
-            "amp" => Self::Amp { path },
+            "nam" | "amp" => Self::Nam { path, index: 0 },
             "cab" => Self::Cab { path },
             "effect" => Self::Effect { path, index: 0 },
             "path" => Self::Path { path },
@@ -280,8 +283,8 @@ impl RigWerkApp {
         if let Some((_, stage)) = sheet.stage() {
             self.select_chain(ChainSelection::from_stage(stage));
         }
-        if matches!(sheet, Sheet::Amp { .. }) {
-            self.amp_rescan = true;
+        if matches!(sheet, Sheet::Nam { .. }) {
+            self.nam_rescan = true;
         }
         if matches!(sheet, Sheet::Cab { .. }) {
             self.cab_rescan = true;
@@ -298,11 +301,17 @@ impl RigWerkApp {
     /// after this one in the path's chain, in signal order.  `None` at the
     /// ends, and for a sheet that is not a stage's.
     pub(crate) fn sheet_neighbour(&self, forward: bool) -> Option<Sheet> {
-        let (path, stage) = self.chrome.sheet?.stage()?;
-        let mix = &self.paths.get(path)?.as_ref()?.mix;
-        let effects = self.engine.plugin_views(path).len();
-        neighbour_stage(stage, effects, mix.gate.slot, mix.amp.slot, forward)
-            .map(|next| Sheet::for_stage(path, next))
+        let (slot, stage) = self.chrome.sheet?.stage()?;
+        let path = self.paths.get(slot)?.as_ref()?;
+        let effects = self.engine.plugin_views(slot).len();
+        neighbour_stage(
+            stage,
+            effects,
+            path.mix.gate.slot,
+            &path.nam_stack(),
+            forward,
+        )
+        .map(|next| Sheet::for_stage(slot, next))
     }
 
     /// Moves the open stage sheet one stage along its chain.  `false` when

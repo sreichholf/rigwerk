@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::amp::{AmpPark, PreparedAmp};
 use super::asio_panel::AsioPanelSide;
 use super::bridge::run_bridge;
 use super::cab::{CabKernel, CabPark};
@@ -19,6 +18,7 @@ use super::linux::pipewire;
 #[cfg(target_os = "linux")]
 use super::linux::sink_monitor::SinkMonitor;
 use super::metronome::{click_level_gain, ClickRhythm};
+use super::nam::{NamPark, NamStack, PreparedNam};
 use super::output_map::{AlignmentReport, OutputDeviceSettings, MAX_EXTRA_OUTPUTS};
 use super::path::{DspTime, PathMix, PathState, MAX_PATHS};
 use super::plugins::{PluginPref, PluginView};
@@ -99,8 +99,8 @@ pub struct AudioEngine {
     test_sink_peak: Option<f32>,
     /// Park for every run this engine starts.  Outlives a bridge thread so
     /// that thread can hand models back without dropping them.
-    amp_park: Arc<AmpPark>,
-    /// Park for cabinet kernels.  Same lifetime as [`Self::amp_park`].
+    nam_park: Arc<NamPark>,
+    /// Park for cabinet kernels.  Same lifetime as [`Self::nam_park`].
     cab_park: Arc<CabPark>,
     /// Bumped in [`Self::replace_run`].  The UI reinstalls captures when it
     /// changes, because a new run does not inherit a live model.
@@ -110,11 +110,11 @@ pub struct AudioEngine {
 impl AudioEngine {
     pub fn new(sample_rate: u32) -> Self {
         let shared = Shared::new(sample_rate);
-        let amp_park = Arc::clone(shared.amp_park());
+        let nam_park = Arc::clone(shared.nam_park());
         let cab_park = Arc::clone(shared.cab_park());
         Self {
             shared: Arc::new(shared),
-            amp_park,
+            nam_park,
             cab_park,
             run_id: 1,
             stop: Arc::new(AtomicBool::new(false)),
@@ -316,9 +316,15 @@ impl AudioEngine {
     /// Puts a path with these settings and plugins into `slot` and makes it
     /// active (used when a session is loaded).  The plugins are
     /// restored, not opened.
-    pub fn restore_path(&self, slot: usize, mix: &PathMix, plugins: Vec<PluginPref>) {
+    pub fn restore_path(
+        &self,
+        slot: usize,
+        mix: &PathMix,
+        nam: &NamStack,
+        plugins: Vec<PluginPref>,
+    ) {
         if slot < MAX_PATHS {
-            self.shared.restore_path(slot, mix, plugins);
+            self.shared.restore_path(slot, mix, nam, plugins);
         }
     }
 
@@ -352,7 +358,7 @@ impl AudioEngine {
     }
 
     /// Every path slot's chain latency in samples (0 for unused slots), as
-    /// the alignment counts it.  The amp adds none, and the cabinet adds
+    /// the alignment counts it.  The NAM blocks add none, and the cabinet adds
     /// none either.
     pub fn path_latencies(&self) -> [u32; MAX_PATHS] {
         std::array::from_fn(|slot| self.shared.path(slot).latency_samples())
@@ -368,21 +374,50 @@ impl AudioEngine {
         self.run_id
     }
 
+    /// Drops the NAM models and cabinet kernels every path has parked.
+    /// UI thread only: dropping them is what that thread is for.  The UI
+    /// calls it once per frame, so the parks never fill during a run.
+    pub(crate) fn flush_parks(&self) {
+        self.nam_park.flush();
+        self.cab_park.flush();
+    }
+
     pub(crate) fn path_generation(&self, slot: usize) -> u64 {
         self.shared.path(slot).generation()
     }
 
-    /// Queues a prewarmed model.  UI thread only.
-    pub(crate) fn queue_amp(&self, slot: usize, prepared: PreparedAmp) {
+    /// Queues a prewarmed model for block `id`.  UI thread only.
+    pub(crate) fn queue_nam(&self, slot: usize, id: u32, prepared: PreparedNam) {
         if slot < MAX_PATHS {
-            self.shared.path(slot).queue_amp(prepared);
+            self.shared.path(slot).queue_nam(id, prepared);
         }
     }
 
-    /// Asks the next block to take the live model out.  UI thread only.
-    pub(crate) fn clear_amp(&self, slot: usize) {
+    /// Asks the next block to take block `id`'s live model out.  UI thread
+    /// only.
+    pub(crate) fn clear_nam(&self, slot: usize, id: u32) {
         if slot < MAX_PATHS {
-            self.shared.path(slot).clear_amp();
+            self.shared.path(slot).clear_nam(id);
+        }
+    }
+
+    /// Sets one path's NAM blocks.  The models stay with the run that loaded
+    /// them; the UI queues those ([`Self::queue_nam`]).
+    pub(crate) fn set_path_nam(&self, slot: usize, nam: &NamStack) {
+        if slot < MAX_PATHS {
+            let path = self.shared.path(slot);
+            if path.state() == PathState::Active {
+                path.set_nam(nam);
+            }
+        }
+    }
+
+    /// One path's NAM blocks as published now.  UI thread only.
+    pub(crate) fn path_nam(&self, slot: usize) -> NamStack {
+        if slot < MAX_PATHS {
+            self.shared.path(slot).nam()
+        } else {
+            NamStack::default()
         }
     }
 
@@ -881,18 +916,18 @@ impl AudioEngine {
     fn replace_run(&mut self) {
         // The old writer finishes on the Arc it kept at arm.  Shared::new
         // below builds a fresh recorder for the run that replaces it.
-        // The live amp model and cabinet kernel do not move: the UI
+        // The live NAM models and cabinet kernel do not move: the UI
         // installs them again from the saved paths, which it notices
         // because `run_id` changed.  Kernels already parked are dropped
         // here, on the UI thread.
         self.disarm_recording();
         self.run_id = self.run_id.wrapping_add(1);
-        self.amp_park.flush();
+        self.nam_park.flush();
         self.cab_park.flush();
         let previous = Arc::clone(&self.shared);
         let mut run = Shared::with_park(
             self.sample_rate,
-            Arc::clone(&self.amp_park),
+            Arc::clone(&self.nam_park),
             Arc::clone(&self.cab_park),
         );
         run.adopt_settings_from(&previous);
@@ -1274,13 +1309,13 @@ impl Drop for AudioEngine {
             // that thread.  That drop parks models; it must not be the
             // last owner of the park, or the models would be destroyed
             // there.  This clone is never dropped.
-            std::mem::forget(Arc::clone(&self.amp_park));
+            std::mem::forget(Arc::clone(&self.nam_park));
             std::mem::forget(Arc::clone(&self.cab_park));
         } else {
             // Every bridge has joined, so the models and kernels they
             // parked are the only ones left, and this is the UI thread (or
             // process exit on it).
-            self.amp_park.flush();
+            self.nam_park.flush();
             self.cab_park.flush();
         }
     }

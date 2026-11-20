@@ -6,6 +6,7 @@
 //! extra output fed through its ring.
 
 use super::super::eq::EqSettings;
+use super::super::nam::NamStack;
 use super::super::output_map::{ChannelMap, OutputDeviceSettings, PathMapSettings, UnusedChannels};
 use super::super::path::PathMix;
 use super::super::shared::{ExtraOutputPlan, Shared};
@@ -42,8 +43,8 @@ fn aligned_mixer(latency: u32, extra_outputs: usize) -> (OutputMixer, Shared) {
         eqs: [off, off],
         ..PathMix::default()
     };
-    shared.restore_path(0, &mix, Vec::new());
-    shared.restore_path(1, &mix, Vec::new());
+    shared.restore_path(0, &mix, &NamStack::default(), Vec::new());
+    shared.restore_path(1, &mix, &NamStack::default(), Vec::new());
     shared.paths[0].edit_chain(|chain| chain.insert_delay_for_test(latency));
     assert_eq!(shared.paths[0].latency_samples(), latency);
     let plan = ExtraOutputPlan {
@@ -67,12 +68,16 @@ fn run(
     blocks: usize,
 ) -> Vec<Vec<[f32; 2]>> {
     let devices = 1 + shared.extra_output_count();
-    let mut out = vec![Vec::new(); devices];
-    for _ in 0..blocks {
+    // Sized up front: the write closure runs inside the allocation guard.
+    let mut out = vec![vec![[0.0f32; 2]; blocks * BLOCK]; devices];
+    // The callback must not allocate: the scratch is sized here, as the
+    // backends do before the first block.
+    mixer.prepare(BLOCK);
+    for block in 0..blocks {
         let left: Vec<f32> = (*clock..*clock + BLOCK).map(signal).collect();
         let right: Vec<f32> = left.iter().map(|value| -value).collect();
-        mixer.render_direct_devices(shared, &left, &right, |device, _, mapped| {
-            out[device].push([mapped.sample(0), mapped.sample(1)]);
+        mixer.render_direct_devices(shared, &left, &right, |device, index, mapped| {
+            out[device][block * BLOCK + index] = [mapped.sample(0), mapped.sample(1)];
         });
         *clock += BLOCK;
     }
@@ -200,10 +205,11 @@ fn a_generic_extra_output_is_aligned_on_the_clock_callback() {
         .extra_output_ring_active(0)
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
-    let mut clock = Vec::new();
-    for _ in 0..6 {
-        mixer.render(&shared, BLOCK, |_, mapped| {
-            clock.push([mapped.sample(0), mapped.sample(1)]);
+    let mut clock = vec![[0.0f32; 2]; 6 * BLOCK];
+    mixer.prepare(BLOCK);
+    for block in 0..6 {
+        mixer.render(&shared, BLOCK, |index, mapped| {
+            clock[block * BLOCK + index] = [mapped.sample(0), mapped.sample(1)];
         });
     }
     let mut extra_output = Vec::new();

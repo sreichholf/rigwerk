@@ -151,7 +151,7 @@ impl RigWerkApp {
                     path.name.clone(),
                     path.colour,
                     &path.mix,
-                    &path.amp_model,
+                    path.nam_settings(),
                     &path.cab_file,
                     Vec::new(),
                 )

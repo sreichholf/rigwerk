@@ -1,6 +1,6 @@
 //! One signal path's controls, as the UI writes them and the audio
 //! callback reads them: input routing, mono, channel enable, the two
-//! built-in EQs, the gate, the built-in amp, the plugin effect chain, the
+//! built-in EQs, the gate, the NAM blocks, the plugin effect chain, the
 //! cabinet and the path meters.
 //!
 //! [`Shared`](super::shared::Shared) holds [`MAX_PATHS`] of these as fixed
@@ -42,7 +42,7 @@
 //! an effect's dry/wet mix delays its dry side (see `ChainRuntime::process`).
 //! A path-level chain bypass skips every effect the same way, and the total
 //! still counts.  The mixer lines the paths up per device with it (`output_map`,
-//! "Alignment").  The built-in amp adds no latency.  The cabinet adds none
+//! "Alignment").  The NAM blocks add no latency.  The cabinet adds none
 //! either: a short direct head plus partitioned overlap-save, and a delay
 //! that is the impulse itself is not reported here.
 //!
@@ -55,10 +55,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use std::time::Instant;
 
-use super::amp::{AmpCommand, AmpControls, AmpPark, PreparedAmp};
 use super::cab::{CabCommand, CabControls, CabKernel, CabPark};
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
+use super::nam::{NamCommand, NamPark, NamPending, NamStack, PreparedNam};
 use super::output_map::level_gain;
 use super::plugins::{ChainHome, ChainModel, PluginView, SlotLink};
 
@@ -98,9 +98,11 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
 }
 
 /// The settings of one path the UI owns and pushes: input routing, mono,
-/// channel enable, the two EQs, the gate, the amp, the cabinet, the path
-/// level, mute and solo, and the effect-chain bypass.  The plugin chain,
-/// the amp capture, and the cabinet kernel live in the engine
+/// channel enable, the two EQs, the gate, the cabinet, the path level, mute
+/// and solo, and the effect-chain bypass.  The NAM blocks are pushed
+/// separately ([`PathControls::set_nam`]): sixteen of them do not fit a
+/// snapshot the mixer copies as one [`Copy`] value.  The plugin chain, the
+/// NAM captures, and the cabinet kernel live in the engine
 /// ([`PathControls`]); neither file path is copied onto the audio thread.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathMix {
@@ -113,8 +115,6 @@ pub struct PathMix {
     /// The EQs before and after the effects, indexed by [`EqSlot`].
     pub eqs: [EqSettings; 2],
     pub gate: GateSettings,
-    /// Built-in amp.  The `.nam` path is not here: this stays [`Copy`].
-    pub amp: AmpControls,
     /// Built-in cabinet.  The impulse path is not here: this stays [`Copy`].
     pub cab: CabControls,
     /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
@@ -134,7 +134,6 @@ impl Default for PathMix {
             output_enabled: [true, true],
             eqs: [EqSettings::default(), EqSettings::default()],
             gate: GateSettings::default(),
-            amp: AmpControls::default(),
             cab: CabControls::default(),
             level_db: 0.0,
             mute: false,
@@ -150,7 +149,6 @@ impl PathMix {
         Self {
             eqs: self.eqs.map(EqSettings::sanitized),
             gate: self.gate.sanitized(),
-            amp: self.amp.sanitized(),
             cab: self.cab.sanitized(),
             level_db: sanitize_path_level(self.level_db),
             ..self
@@ -424,17 +422,18 @@ pub(crate) struct PathControls {
     /// Built-in noise gate (PRE or POST effects).
     gate: Mutex<GateSettings>,
     gate_version: AtomicU64,
-    /// Built-in amp controls.  The callback copies them with `try_lock`.
-    /// The capture itself is [`pending_amp`], never this lock.
-    amp: Mutex<AmpControls>,
-    amp_version: AtomicU64,
-    /// A model the UI has prepared, waiting for the next block.  The
-    /// callback only `try_lock`s this.  Dropping a replaced model happens
-    /// on the UI thread, in [`Self::queue_amp`].
-    pending_amp: Mutex<Option<AmpCommand>>,
+    /// Built-in NAM blocks, in signal order.  The callback copies the whole
+    /// stack with `try_lock`, and only when its version moved.  The captures
+    /// themselves are [`pending_nam`], never this lock.
+    nam: Mutex<NamStack>,
+    nam_version: AtomicU64,
+    /// A model the UI has prepared, waiting for the next block, keyed by the
+    /// block it is for.  The callback only `try_lock`s this.  Dropping a
+    /// replaced model happens on the UI thread, in [`Self::queue_nam`].
+    pending_nam: Mutex<NamPending>,
     /// Where a model the audio side has let go of waits to be dropped.
     /// Shared with the engine so a bridge-thread drop can park it.
-    amp_park: Arc<AmpPark>,
+    nam_park: Arc<NamPark>,
     /// Built-in cabinet controls.  The callback copies them with `try_lock`.
     /// The kernel itself is [`pending_cab`], never this lock.
     cab: Mutex<CabControls>,
@@ -453,12 +452,12 @@ impl PathControls {
     /// a run shares one park via [`Self::with_park`].
     #[cfg(test)]
     pub(crate) fn new(sample_rate: u32) -> Self {
-        Self::with_park(sample_rate, AmpPark::new(), CabPark::new())
+        Self::with_park(sample_rate, NamPark::new(), CabPark::new())
     }
 
     pub(crate) fn with_park(
         sample_rate: u32,
-        amp_park: Arc<AmpPark>,
+        nam_park: Arc<NamPark>,
         cab_park: Arc<CabPark>,
     ) -> Self {
         let chain_bypass = Arc::new(AtomicBool::new(false));
@@ -510,10 +509,10 @@ impl PathControls {
             eq_version: [AtomicU64::new(1), AtomicU64::new(1)],
             gate: Mutex::new(GateSettings::default()),
             gate_version: AtomicU64::new(1),
-            amp: Mutex::new(AmpControls::default()),
-            amp_version: AtomicU64::new(1),
-            pending_amp: Mutex::new(None),
-            amp_park,
+            nam: Mutex::new(NamStack::default()),
+            nam_version: AtomicU64::new(1),
+            pending_nam: Mutex::new(NamPending::default()),
+            nam_park,
             cab: Mutex::new(CabControls::default()),
             cab_version: AtomicU64::new(1),
             pending_cab: Mutex::new(None),
@@ -556,10 +555,10 @@ impl PathControls {
             self.set_gate(*settings);
         }
         {
-            // The numeric amp controls move.  The live model stays with the
-            // run that loaded it; the UI installs it again from the saved path.
-            let settings = previous.amp.lock().unwrap_or_else(PoisonError::into_inner);
-            self.set_amp(*settings);
+            // The block settings move.  The live models stay with the run
+            // that loaded them; the UI queues them again from the saved path.
+            let stack = previous.nam.lock().unwrap_or_else(PoisonError::into_inner);
+            self.set_nam(&stack);
         }
         {
             // The numeric cabinet controls move.  The live kernel stays with
@@ -686,7 +685,6 @@ impl PathControls {
             self.set_eq(slot, mix.eqs[slot.index()]);
         }
         self.set_gate(mix.gate);
-        self.set_amp(mix.amp);
         self.set_cab(mix.cab);
         self.set_level_db(mix.level_db);
         self.set_mute(mix.mute);
@@ -716,7 +714,6 @@ impl PathControls {
             ],
             eqs: [eq(EqSlot::Pre), eq(EqSlot::Post)],
             gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
-            amp: *self.amp.lock().unwrap_or_else(PoisonError::into_inner),
             cab: *self.cab.lock().unwrap_or_else(PoisonError::into_inner),
             level_db: self.level_db(),
             mute: self.muted(),
@@ -872,61 +869,67 @@ impl PathControls {
         self.gate.try_lock().ok().map(|settings| *settings)
     }
 
-    /// Applies new amp controls.  Does not parse or build a model.
-    pub(crate) fn set_amp(&self, settings: AmpControls) {
-        let settings = settings.sanitized();
-        if let Ok(mut current) = self.amp.lock() {
-            if *current != settings {
-                *current = settings;
-                self.amp_version.fetch_add(1, Ordering::Release);
+    /// Applies the NAM blocks.  Does not parse or build a model.
+    pub(crate) fn set_nam(&self, stack: &NamStack) {
+        let stack = stack.sanitized();
+        if let Ok(mut current) = self.nam.lock() {
+            if *current != stack {
+                *current = stack;
+                self.nam_version.fetch_add(1, Ordering::Release);
             }
         }
     }
 
-    pub(crate) fn amp_version(&self) -> u64 {
-        self.amp_version.load(Ordering::Acquire)
+    pub(crate) fn nam_version(&self) -> u64 {
+        self.nam_version.load(Ordering::Acquire)
     }
 
-    /// The current controls, or `None` if the UI holds the lock right now.
-    pub(crate) fn try_amp(&self) -> Option<AmpControls> {
-        self.amp.try_lock().ok().map(|settings| *settings)
+    /// The current blocks, or `None` if the UI holds the lock right now.
+    pub(crate) fn try_nam(&self) -> Option<NamStack> {
+        self.nam.try_lock().ok().map(|stack| *stack)
     }
 
-    pub(crate) fn amp_park(&self) -> &Arc<AmpPark> {
-        &self.amp_park
+    /// The blocks as stored now (the UI thread).
+    pub(crate) fn nam(&self) -> NamStack {
+        *self.nam.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Queues a prewarmed model for the next block.  A model still waiting
-    /// is dropped here, on the UI thread.  The same path at the same rate
-    /// is the caller's to skip; this always replaces.
-    pub(crate) fn queue_amp(&self, prepared: PreparedAmp) {
-        let mut slot = self
-            .pending_amp
+    pub(crate) fn nam_park(&self) -> &Arc<NamPark> {
+        &self.nam_park
+    }
+
+    /// Queues a prewarmed model for block `id` for the next block.  A model
+    /// still waiting for that block is dropped here, on the UI thread.
+    pub(crate) fn queue_nam(&self, id: u32, prepared: PreparedNam) {
+        let live = *self.nam.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pending = self
+            .pending_nam
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(AmpCommand::Install(old)) = slot.replace(AmpCommand::Install(prepared)) {
+        if let Some(NamCommand::Install(old)) =
+            pending.queue(id, NamCommand::Install(prepared), &live)
+        {
             drop(old);
         }
     }
 
-    /// Asks the next block to drop the live model out of the processor.
-    /// A model still waiting is dropped here, on the UI thread.
-    pub(crate) fn clear_amp(&self) {
-        let mut slot = self
-            .pending_amp
+    /// Asks the next block to drop block `id`'s live model out of the
+    /// processor.  A model still waiting is dropped here, on the UI thread.
+    pub(crate) fn clear_nam(&self, id: u32) {
+        let live = *self.nam.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pending = self
+            .pending_nam
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(AmpCommand::Install(old)) = slot.replace(AmpCommand::Clear) {
+        if let Some(NamCommand::Install(old)) = pending.queue(id, NamCommand::Clear, &live) {
             drop(old);
         }
     }
 
-    /// The queued command, if the UI is not holding it.  The callback puts
-    /// a command back when it cannot park the model it would replace.
-    pub(crate) fn pending_amp_mut(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, Option<AmpCommand>>, ()> {
-        match self.pending_amp.try_lock() {
+    /// The queued commands, if the UI is not holding them.  The callback
+    /// puts a command back when it cannot park the model it would replace.
+    pub(crate) fn pending_nam_mut(&self) -> Result<std::sync::MutexGuard<'_, NamPending>, ()> {
+        match self.pending_nam.try_lock() {
             Ok(guard) => Ok(guard),
             Err(std::sync::TryLockError::Poisoned(poison)) => Ok(poison.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => Err(()),
@@ -1005,11 +1008,13 @@ impl Drop for PathControls {
         // controls.  The park outlives the run (the engine holds it), and
         // the UI thread is what later drops the model.
         let pending = self
-            .pending_amp
+            .pending_nam
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(AmpCommand::Install(prepared)) = pending.take() {
-            self.amp_park.retire(prepared.model);
+        for (_, command) in pending.drain() {
+            if let NamCommand::Install(prepared) = command {
+                self.nam_park.retire(prepared.model);
+            }
         }
         let pending = self
             .pending_cab

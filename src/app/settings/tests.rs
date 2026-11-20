@@ -5,8 +5,9 @@ use crate::app::appearance::ThemeChoice;
 use crate::app::latency::{LoopbackKind, MeasuredLatency};
 use crate::app::Page;
 use crate::audio::{
-    ChannelMap, EqSettings, GateSettings, GateSlot, OutputDeviceSettings, PluginFormat, PluginPref,
-    UnusedChannels, WasapiOutputMode, MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
+    ChannelMap, EqSettings, GateSettings, GateSlot, LegacyNamSettings, NamPosition,
+    OutputDeviceSettings, PluginFormat, PluginPref, UnusedChannels, WasapiOutputMode,
+    MAX_EXTRA_OUTPUTS, MAX_NAM_BLOCKS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
 const BACKUP: &str = "rigwerk-preferences-backup-1";
@@ -205,13 +206,84 @@ fn gate_round_trips_in_preferences_and_sessions() {
 }
 
 #[test]
-fn amp_missing_from_an_old_path_uses_defaults() {
+fn nam_missing_from_an_old_path_uses_defaults() {
     let pref: PathPref = ron::from_str(r#"(name:"Main",level_db:-3.0)"#).expect("old path");
-    assert_eq!(pref.amp, crate::audio::AmpSettings::default());
+    assert_eq!(pref.amp, crate::audio::LegacyNamSettings::default());
     assert!(pref.amp.model_path.is_empty());
     assert!(!pref.amp.enabled);
-    assert_eq!(pref.amp.slot, crate::audio::AmpSlot::Pre);
+    assert_eq!(pref.amp.slot, crate::audio::NamPosition::Pre);
+    assert!(pref.nam_blocks.is_empty());
     assert_eq!(pref.level_db, -3.0);
+}
+
+/// The single `amp` stage of an old save is read as the first NAM block.
+const LEGACY_AMP_PATH: &str = r#"(
+            name:"Main",
+            amp:(
+                enabled:true,
+                slot:post,
+                input_db:-3.0,
+                output_db:2.0,
+                slim:0.5,
+                model_path:"C:/Caps/pedal.nam"
+            ),
+        )"#;
+
+#[test]
+fn a_legacy_amp_stage_becomes_one_nam_block() {
+    let mut pref: PathPref = ron::from_str(LEGACY_AMP_PATH).expect("old path");
+    assert!(pref.nam_blocks.is_empty(), "the save had no block list");
+    pref.sanitize(0);
+    assert_eq!(pref.nam_blocks.len(), 1);
+    let block = &pref.nam_blocks[0];
+    assert_eq!(block.model, "C:/Caps/pedal.nam");
+    assert!(block.controls.enabled);
+    assert_eq!(block.controls.position, NamPosition::Post);
+    assert_eq!(block.controls.input_db, -3.0);
+    assert_eq!(block.controls.output_db, 2.0);
+    assert_eq!(block.controls.slim, 0.5);
+    assert!(block.controls.auto_level);
+    assert_eq!(pref.amp, LegacyNamSettings::default(), "the stage is gone");
+}
+
+#[test]
+fn a_migrated_path_saves_blocks_and_no_amp_key() {
+    let mut pref: PathPref = ron::from_str(LEGACY_AMP_PATH).expect("old path");
+    pref.sanitize(0);
+    let saved = ron::to_string(&pref).expect("save");
+    assert!(
+        !saved.contains("amp:"),
+        "the legacy stage was written again: {saved}"
+    );
+    assert!(
+        saved.contains("nam_blocks:"),
+        "the blocks were not written: {saved}"
+    );
+}
+
+#[test]
+fn a_migrated_path_round_trips() {
+    let mut pref: PathPref = ron::from_str(LEGACY_AMP_PATH).expect("old path");
+    pref.sanitize(0);
+    let saved = ron::to_string(&pref).expect("save");
+    let mut back: PathPref = ron::from_str(&saved).expect("load");
+    back.sanitize(0);
+    assert_eq!(back, pref, "load → save → load is stable");
+}
+
+#[test]
+fn a_path_keeps_at_most_sixteen_nam_blocks() {
+    let blocks: Vec<String> = (0..20)
+        .map(|index| format!("(model:\"/captures/{index}.nam\")"))
+        .collect();
+    let raw = format!("(paths:[(nam_blocks:[{}])])", blocks.join(","));
+    let preferences = load_preferences(Some(&raw), BACKUP)
+        .preferences
+        .expect("readable");
+    let saved = &preferences.paths[0].nam_blocks;
+    assert_eq!(saved.len(), MAX_NAM_BLOCKS);
+    assert_eq!(saved[0].model, "/captures/0.nam");
+    assert_eq!(saved[MAX_NAM_BLOCKS - 1].model, "/captures/15.nam");
 }
 
 #[test]
@@ -1669,7 +1741,8 @@ fn golden_path(name: &str) -> PathPref {
             verb,
         ],
         chain_bypass: true,
-        amp: crate::audio::AmpSettings::default(),
+        nam_blocks: Vec::new(),
+        amp: crate::audio::LegacyNamSettings::default(),
         cab: crate::audio::CabSettings::default(),
         level_db: -4.0,
         mute: true,

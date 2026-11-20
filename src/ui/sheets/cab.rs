@@ -4,7 +4,7 @@
 //! The header above (`sheets.rs`) already holds *On* / *Bypass*.  The
 //! responses and the controls are
 //! [`catalog_columns`](super::catalog::catalog_columns), the same split the
-//! amp sheet uses.  The page writes [`CabControls`](crate::audio::CabControls)
+//! NAM sheet uses.  The page writes [`CabControls`](crate::audio::CabControls)
 //! onto the path; the frame's mix push carries them, and a cut or a polarity
 //! change is rebaked by `sync_cab_files`.  This file does not call the engine.
 
@@ -55,12 +55,7 @@ impl RigWerkApp {
         let current = signal.mix.cab;
         let file = signal.cab_file.clone();
         let error = signal.cab_error.clone();
-        let gear = signal
-            .mix
-            .amp
-            .enabled
-            .then(|| signal.amp_gear.clone())
-            .flatten();
+        let gear = signal.last_nam_gear();
         let ir_active = current.enabled
             && error.is_none()
             && !file.trim().is_empty()
@@ -72,7 +67,7 @@ impl RigWerkApp {
         ui.label(
             RichText::new(
                 "The cabinet is after the effects, so the effect list sits between \
-                 the amp and the speaker.  An impulse response is resampled to the \
+                 the NAM blocks and the speaker.  An impulse response is resampled to the \
                  clock rate.",
             )
             .font(font(Face::Sans, TypeRole::Secondary))
@@ -80,21 +75,21 @@ impl RigWerkApp {
         );
         ui.add_space(8.0);
 
-        if let Some(folder) = super::amp::dropped_folder(ui) {
+        if let Some(folder) = super::nam::dropped_folder(ui) {
             self.set_cab_folder(folder);
             self.rescan_cab_folder();
         }
         let was_focused = ui.memory(|memory| memory.has_focus(edit_id));
         let nothing_focused = ui.memory(|memory| memory.focused().is_none());
         let window_focused = ui.input(|input| input.focused);
-        let chord_down = super::amp::folder_paste_down(ui);
-        let (paste_now, paste_held) = crate::app::amp::paste_chord_edge(
+        let chord_down = super::nam::folder_paste_down(ui);
+        let (paste_now, paste_held) = crate::app::nam::paste_chord_edge(
             window_focused && (was_focused || nothing_focused),
             chord_down,
             self.cab_paste_down,
         );
         self.cab_paste_down = paste_held;
-        let text_inserts = was_focused && super::amp::paste_text_queued(ui);
+        let text_inserts = was_focused && super::nam::paste_text_queued(ui);
         if paste_now && !text_inserts {
             self.paste_cab_folder();
         }

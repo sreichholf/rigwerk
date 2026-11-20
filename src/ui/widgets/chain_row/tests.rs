@@ -1,11 +1,12 @@
 use super::{
     add_effect_row, bypass_all, chain_event, chain_row, curve_db, effects_header, ChainEvent,
-    ChainMark, ChainRow,
+    ChainMark, ChainRow, RowMenu,
 };
 use crate::audio::EqSettings;
 use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
 use eframe::egui::{self, accesskit::Toggled};
 
+/// A built-in row: an EQ, the gate, or a NAM block's row without its menu.
 fn row<'a>(name: &'a str, mark: ChainMark<'a>) -> ChainRow<'a> {
     ChainRow {
         name,
@@ -19,6 +20,16 @@ fn row<'a>(name: &'a str, mark: ChainMark<'a>) -> ChainRow<'a> {
         mark,
         show_curve: true,
         sample_rate: 48_000,
+        menu: RowMenu::Builtin,
+        warn: false,
+    }
+}
+
+/// A plugin effect row, which has the editor, move and remove menu.
+fn effect_row<'a>(name: &'a str, mark: ChainMark<'a>) -> ChainRow<'a> {
+    ChainRow {
+        menu: RowMenu::Effect,
+        ..row(name, mark)
     }
 }
 
@@ -63,11 +74,11 @@ fn a_low_shelf_lifts_the_left_of_the_mini_curve() {
 fn rows_expose_their_name_and_state() {
     let mut eq = EqSettings::default();
     eq.bands[0].gain_db = 6.0;
-    let mut failed = row("Compressor", ChainMark::Latency("5.0 ms"));
+    let mut failed = effect_row("Compressor", ChainMark::Latency("5.0 ms"));
     failed.failed = true;
     failed.on = false;
     failed.fail_reason = Some("The plugin did not load");
-    let mut paused = row("Limiter", ChainMark::Latency(""));
+    let mut paused = effect_row("Limiter", ChainMark::Latency(""));
     paused.paused = true;
     let tree = accesskit_frame(|ui| {
         chain_row(ui, &row("Pre EQ", ChainMark::Eq(&eq)));
@@ -140,7 +151,7 @@ fn the_led_bypasses_and_the_row_selects() {
 fn the_effect_menu_removes_and_alt_up_moves() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
-    let sample = row("Room", ChainMark::Latency("5.0 ms"));
+    let sample = effect_row("Room", ChainMark::Latency("5.0 ms"));
     let output = run_frame(&ctx, test_input(None), |ui| {
         chain_row(ui, &sample);
     });
@@ -207,7 +218,7 @@ fn the_effect_menu_removes_and_alt_up_moves() {
 #[test]
 fn ctrl_enter_opens_the_focused_effect_editor() {
     let ctx = egui::Context::default();
-    let sample = row("Room", ChainMark::Latency("5.0 ms"));
+    let sample = effect_row("Room", ChainMark::Latency("5.0 ms"));
     let _ = run_frame(&ctx, test_input(None), |ui| {
         chain_row(ui, &sample).request_focus();
     });
