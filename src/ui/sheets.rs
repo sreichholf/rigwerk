@@ -7,6 +7,7 @@
 
 pub(crate) mod amp;
 pub(crate) mod cab;
+pub(crate) mod catalog;
 pub(crate) mod diagnostics;
 pub(crate) mod effect;
 pub(crate) mod eq;
@@ -146,6 +147,10 @@ impl RigWerkApp {
     }
 
     /// The open sheet's body, at most `height` tall; it scrolls inside.
+    ///
+    /// The amp and cab sheets fill that height instead of scrolling as one
+    /// column.  Their file list and their settings each scroll in
+    /// [`catalog::catalog_columns`].
     pub(crate) fn sheet_body(&mut self, ui: &mut egui::Ui, height: f32) {
         let Some(sheet) = self.chrome.sheet else {
             return;
@@ -153,6 +158,24 @@ impl RigWerkApp {
         // The sheet edits its own path.
         if let Some(path) = sheet.path() {
             self.select_path(path);
+        }
+        // A finite region, so the file list can be as tall as the sheet.
+        // Inside the scroll area below, the available height is unbounded.
+        if matches!(sheet, Sheet::Amp { .. } | Sheet::Cab { .. }) {
+            let width = ui.available_width();
+            ui.allocate_ui_with_layout(
+                Vec2::new(width, height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_width(width);
+                    match sheet {
+                        Sheet::Amp { path } => self.amp_sheet(ui, path),
+                        Sheet::Cab { path } => self.cab_sheet(ui, path),
+                        _ => unreachable!("only the amp and cab sheets fill this body"),
+                    }
+                },
+            );
+            return;
         }
         egui::ScrollArea::vertical()
             .id_salt(("sheet_body", format!("{sheet:?}")))
@@ -162,12 +185,13 @@ impl RigWerkApp {
                 Sheet::Diagnostics => self.diagnostics_page(ui),
                 Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
                 Sheet::Gate { path } => self.gate_sheet(ui, path),
-                Sheet::Amp { path } => self.amp_sheet(ui, path),
-                Sheet::Cab { path } => self.cab_sheet(ui, path),
                 Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
                 Sheet::Path { path } => self.path_sheet(ui, path),
                 Sheet::Output { output } => self.output_sheet(ui, output),
                 Sheet::Scope => self.scope_sheet(ui),
+                Sheet::Amp { .. } | Sheet::Cab { .. } => {
+                    unreachable!("the amp and cab sheets fill the body above")
+                }
             });
     }
 }

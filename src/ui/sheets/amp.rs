@@ -4,11 +4,14 @@
 //! A `.nam` file is a frozen capture, so there are no amp knobs.  The
 //! header above (`sheets.rs`) already holds *On* / *Bypass*.  The width
 //! dial is only there when the loaded file is a SlimmableContainer.  The
-//! page calls [`RigWerkApp`] methods; it does not touch the engine.
+//! captures and the trims are [`catalog_columns`](super::catalog::catalog_columns),
+//! the same split the cab sheet uses.  The page calls [`RigWerkApp`]
+//! methods; it does not touch the engine.
 
 use eframe::egui;
 use egui::{Align, Layout, RichText, Vec2};
 
+use super::catalog::{catalog_columns, catalog_empty_note, CatalogPick, CatalogRow};
 use crate::app::RigWerkApp;
 use crate::audio::{AmpSlot, AMP_MAX_TRIM_DB, AMP_MIN_TRIM_DB};
 use crate::ui::fonts::Face;
@@ -133,82 +136,75 @@ impl RigWerkApp {
 
         let entries = self.amp_catalog.entries.clone();
         ui.add_space(8.0);
-        if entries.is_empty() {
-            let note = if self.amp_folder.is_empty() {
-                "Browse for a folder, or paste its path."
-            } else if !std::path::Path::new(&self.amp_folder).is_dir() {
-                "That folder can't be read."
-            } else {
-                "No .nam files in that folder."
-            };
-            ui.label(
-                RichText::new(note)
-                    .font(font(Face::Sans, TypeRole::Body))
-                    .color(colours.text2),
-            );
-        } else {
-            for entry in &entries {
-                let selected = entry.path == model;
-                let response = ui.selectable_label(selected, &entry.name);
-                if response.clicked() {
-                    chosen = Some(entry.path.clone());
+        let rows: Vec<CatalogRow<'_>> = entries
+            .iter()
+            .map(|entry| CatalogRow {
+                name: entry.name.as_str(),
+                key: entry.path.as_str(),
+                selected: entry.path == model,
+            })
+            .collect();
+        let empty = entries
+            .is_empty()
+            .then(|| catalog_empty_note(&self.amp_folder, "No .nam files in that folder."));
+        let open_rate = self.amp_rate_for_sheet();
+        if let Some(CatalogPick::Entry(index)) =
+            catalog_columns(ui, "amp", None, &rows, empty.as_deref(), |ui| {
+                let mut position = usize::from(amp.slot == AmpSlot::Post);
+                if segmented(ui, &mut position, &["Before effects", "After effects"]).changed() {
+                    amp.slot = if position == 0 {
+                        AmpSlot::Pre
+                    } else {
+                        AmpSlot::Post
+                    };
                 }
-            }
-        }
 
-        ui.add_space(12.0);
-        let mut position = usize::from(amp.slot == AmpSlot::Post);
-        if segmented(ui, &mut position, &["Before effects", "After effects"]).changed() {
-            amp.slot = if position == 0 {
-                AmpSlot::Pre
-            } else {
-                AmpSlot::Post
-            };
-        }
+                ui.add_space(8.0);
+                trim_row(
+                    ui,
+                    "Input",
+                    "Gain into the model.",
+                    &mut amp.input_db,
+                    colours,
+                );
+                trim_row(
+                    ui,
+                    "Output",
+                    "Gain on the model output.",
+                    &mut amp.output_db,
+                    colours,
+                );
+                if slimmable {
+                    width_row(ui, &mut amp.slim, colours);
+                }
 
-        ui.add_space(8.0);
-        trim_row(
-            ui,
-            "Input",
-            "Gain into the model.",
-            &mut amp.input_db,
-            colours,
-        );
-        trim_row(
-            ui,
-            "Output",
-            "Gain on the model output.",
-            &mut amp.output_db,
-            colours,
-        );
-        if slimmable {
-            width_row(ui, &mut amp.slim, colours);
-        }
-
-        ui.add_space(8.0);
-        if mismatch {
-            let open = self.amp_rate_for_sheet();
-            ui.label(
-                RichText::new(format!(
-                    "This capture is {file_rate} Hz. The output is open at {open} Hz."
-                ))
-                .font(font(Face::Sans, TypeRole::Secondary))
-                .color(colours.warn),
-            );
-        }
-        if let Some(error) = error.as_deref() {
-            ui.label(
-                RichText::new(error)
-                    .font(font(Face::Sans, TypeRole::Secondary))
-                    .color(colours.error_text),
-            );
-        }
-        if !name.is_empty() && error.is_none() {
-            ui.label(
-                RichText::new(&name)
-                    .font(font(Face::Sans, TypeRole::Secondary))
-                    .color(colours.text3),
-            );
+                ui.add_space(8.0);
+                if mismatch {
+                    ui.label(
+                        RichText::new(format!(
+                            "This capture is {file_rate} Hz. The output is open at {open_rate} Hz."
+                        ))
+                        .font(font(Face::Sans, TypeRole::Secondary))
+                        .color(colours.warn),
+                    );
+                }
+                if let Some(error) = error.as_deref() {
+                    ui.label(
+                        RichText::new(error)
+                            .font(font(Face::Sans, TypeRole::Secondary))
+                            .color(colours.error_text),
+                    );
+                }
+                if !name.is_empty() && error.is_none() {
+                    ui.label(
+                        RichText::new(&name)
+                            .font(font(Face::Sans, TypeRole::Secondary))
+                            .color(colours.text3),
+                    );
+                }
+            })
+        {
+            chosen = Some(entries[index].path.clone());
         }
 
         if let Some(path_chosen) = chosen {
