@@ -20,6 +20,7 @@
 //! where it played; the next path in that slot overwrites them.
 
 use crate::app::amp::AmpInstall;
+use crate::app::cab::CabInstall;
 use crate::app::chain::ChainSelection;
 use crate::app::settings::{default_path_name, ExtraOutputPref, PathPref};
 use crate::app::LogTone;
@@ -53,6 +54,20 @@ pub(crate) struct SignalPath {
     pub(crate) amp_file_rate: u32,
     /// The last install attempt.  A matching stamp is not rebuilt.
     pub(crate) amp_install: AmpInstall,
+    /// Gear type of the loaded capture, trimmed.  UI only: the audio
+    /// thread never sees it.  Cleared when the model is cleared or fails.
+    pub(crate) amp_gear: Option<String>,
+    /// The impulse response.  Empty means the cabinet has no file.
+    pub(crate) cab_file: String,
+    /// Display name of the loaded impulse, or a stem when the load failed.
+    pub(crate) cab_name: String,
+    /// Why the last load failed.  The path string is kept.
+    pub(crate) cab_error: Option<String>,
+    /// The last install attempt.  A matching stamp is not rebuilt.
+    pub(crate) cab_install: CabInstall,
+    /// Channels already decoded and resampled to this rate, so a cut or a
+    /// polarity change does not read the file again.
+    pub(crate) cab_raw: Option<(u32, Vec<f32>, Vec<f32>)>,
 }
 
 impl SignalPath {
@@ -68,6 +83,12 @@ impl SignalPath {
             amp_mismatch: false,
             amp_file_rate: 0,
             amp_install: AmpInstall::default(),
+            amp_gear: None,
+            cab_file: pref.cab.file.clone(),
+            cab_name: String::new(),
+            cab_error: None,
+            cab_install: CabInstall::default(),
+            cab_raw: None,
         }
     }
 
@@ -77,6 +98,7 @@ impl SignalPath {
             self.colour,
             &self.mix,
             &self.amp_model,
+            &self.cab_file,
             plugins,
         )
     }
@@ -95,6 +117,12 @@ impl Default for SignalPath {
             amp_mismatch: false,
             amp_file_rate: 0,
             amp_install: AmpInstall::default(),
+            amp_gear: None,
+            cab_file: String::new(),
+            cab_name: String::new(),
+            cab_error: None,
+            cab_install: CabInstall::default(),
+            cab_raw: None,
         }
     }
 }
@@ -410,9 +438,12 @@ impl RigWerkApp {
                 solo: false,
                 ..original.mix
             },
-            // The copy loads its own model.  Generations count per slot,
-            // so the source's stamp could match the new slot.
+            // The copy loads its own model and its own impulse.
+            // Generations count per slot, so the source's stamp could
+            // match the new slot.
             amp_install: AmpInstall::default(),
+            cab_install: CabInstall::default(),
+            cab_raw: None,
             ..original
         };
         self.paths[slot] = Some(path);
@@ -487,6 +518,13 @@ impl RigWerkApp {
     /// The edited path's amp controls.  Does not load a capture.
     pub(crate) fn set_path_amp(&mut self, amp: crate::audio::AmpControls) {
         self.path_mut().mix.amp = amp.sanitized();
+        self.push_paths_to_engine();
+    }
+
+    /// The edited path's cabinet controls.  Does not read an impulse.
+    /// The cuts and the level are clamped here, not in the sheet.
+    pub(crate) fn set_path_cab(&mut self, cab: crate::audio::CabControls) {
+        self.path_mut().mix.cab = cab.sanitized();
         self.push_paths_to_engine();
     }
 
@@ -844,6 +882,7 @@ impl RigWerkApp {
         self.push_paths_to_engine();
         self.push_devices_to_engine();
         self.sync_amp_models();
+        self.sync_cab_files();
     }
 
     /// The live paths as they should be saved (fresh plugin state), and

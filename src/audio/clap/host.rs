@@ -68,7 +68,7 @@ impl Drop for AudioThreadScope {
 pub(super) const HOST_NAME: &[u8] = b"RigWerk\0";
 pub(super) const HOST_VENDOR: &[u8] = b"RigWerk\0";
 pub(super) const HOST_URL: &[u8] = b"https://rigwerk.local\0";
-pub(super) const HOST_VERSION: &[u8] = b"0.6.0\0";
+pub(super) const HOST_VERSION: &[u8] = b"0.7.0\0";
 
 pub(super) struct TimerEntry {
     pub(super) id: u32,

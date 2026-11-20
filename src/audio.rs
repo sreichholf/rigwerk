@@ -48,6 +48,10 @@
 //! - `gate`: the built-in noise gate (PRE or POST effects).
 //! - `amp`: the built-in Neural Amp Modeler stage (before or after the
 //!   effects).  The callback never builds or drops a model.
+//! - `cab`: the built-in cabinet impulse response, after the effects and
+//!   after the amp.  The first 128 taps are direct; the rest is partitioned
+//!   overlap-save.  The callback never reads a file, resamples, or drops
+//!   a kernel.
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute, safety ceiling and channel map.
 //! - `limiter`: the per-device sample-peak ceiling after the device level.
@@ -58,6 +62,7 @@
 pub(crate) mod amp;
 mod asio_panel;
 mod bridge;
+pub(crate) mod cab;
 mod calibration;
 pub(crate) mod clap;
 mod delay;
@@ -105,6 +110,10 @@ mod hardware_tests;
 
 pub use amp::{AmpControls, AmpSettings, AmpSlot, AMP_MAX_TRIM_DB, AMP_MIN_TRIM_DB};
 pub(crate) use asio_panel::AsioPanelSide;
+pub use cab::{
+    CabControls, CabNote, CabSettings, CAB_MAX_HIGH_CUT_HZ, CAB_MAX_LEVEL_DB, CAB_MAX_LOW_CUT_HZ,
+    CAB_MAX_MS, CAB_MAX_TAPS, CAB_MIN_LEVEL_DB,
+};
 pub(crate) use calibration::{
     analyze_channels, click_waveform, round_trip_ms, CalibrationFailure, CalibrationState,
     MAX_ROUND_TRIP_MS,

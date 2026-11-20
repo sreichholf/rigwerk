@@ -126,6 +126,7 @@ impl RigWerkApp {
         // rate is already known; a rate that arrives later is picked up
         // by `sync_amp_models` after `service_plugins`.
         self.sync_amp_models();
+        self.sync_cab_files();
     }
 
     pub(crate) fn stop_bridge(&mut self) {

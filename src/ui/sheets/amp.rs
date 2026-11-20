@@ -53,7 +53,8 @@ impl RigWerkApp {
                 "Neural Amp Modeler profiles (.nam): WaveNet and LSTM captures, \
                  A1 and A2, including slimmable A2 files.  A profile runs at its \
                  own sample rate and is not resampled.  It has no cabinet unless \
-                 one was captured with it: add an IR after it.",
+                 one was captured with it: the Cab row after the effects is \
+                 the speaker.",
             )
             .font(font(Face::Sans, TypeRole::Secondary))
             .color(colours.text3),
@@ -327,11 +328,11 @@ fn slider_row(
 }
 
 /// Ctrl+V, or a paste egui already turned into text.
-fn folder_paste_down(ui: &egui::Ui) -> bool {
+pub(crate) fn folder_paste_down(ui: &egui::Ui) -> bool {
     paste_text_queued(ui) || ctrl_v_key(ui) || crate::app::amp::ctrl_v_is_down()
 }
 
-fn paste_text_queued(ui: &egui::Ui) -> bool {
+pub(crate) fn paste_text_queued(ui: &egui::Ui) -> bool {
     ui.input(|input| {
         input
             .events
@@ -362,7 +363,7 @@ fn ctrl_v_key(ui: &egui::Ui) -> bool {
     })
 }
 
-fn dropped_folder(ui: &egui::Ui) -> Option<String> {
+pub(crate) fn dropped_folder(ui: &egui::Ui) -> Option<String> {
     let pos = ui.input(|input| input.pointer.interact_pos())?;
     if !ui.clip_rect().contains(pos) {
         return None;

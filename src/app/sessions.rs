@@ -152,6 +152,7 @@ impl RigWerkApp {
                     path.colour,
                     &path.mix,
                     &path.amp_model,
+                    &path.cab_file,
                     Vec::new(),
                 )
             })

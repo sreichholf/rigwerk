@@ -1,7 +1,9 @@
 //! One saved signal path, as `Preferences` and `Session` store it.
 
 use super::serde_util::skip_unreadable;
-use crate::audio::{AmpSettings, EqSettings, GateSettings, PathMix, PluginPref, MAX_PATHS};
+use crate::audio::{
+    AmpSettings, CabSettings, EqSettings, GateSettings, PathMix, PluginPref, MAX_PATHS,
+};
 
 /// One signal path: its name and colour (UI data), its chain settings, its
 /// plugins, whether that effect chain is bypassed, and its level, mute and
@@ -27,6 +29,10 @@ pub(crate) struct PathPref {
     /// Built-in amp, including the capture path.  Missing on older saves.
     #[serde(default, skip_serializing_if = "AmpSettings::is_unset")]
     pub(crate) amp: AmpSettings,
+    /// Built-in cabinet, including the impulse path.  Missing on older
+    /// saves, and omitted while it is still the default.
+    #[serde(default, skip_serializing_if = "CabSettings::is_unset")]
+    pub(crate) cab: CabSettings,
     /// The effect chain.  An entry that cannot be read is skipped.
     #[serde(deserialize_with = "skip_unreadable")]
     pub(crate) plugins: Vec<PluginPref>,
@@ -42,7 +48,14 @@ pub(crate) struct PathPref {
 
 impl Default for PathPref {
     fn default() -> Self {
-        Self::from_mix(default_path_name(0), 0, &PathMix::default(), "", Vec::new())
+        Self::from_mix(
+            default_path_name(0),
+            0,
+            &PathMix::default(),
+            "",
+            "",
+            Vec::new(),
+        )
     }
 }
 
@@ -62,6 +75,7 @@ impl PathPref {
         colour: u8,
         mix: &PathMix,
         model_path: &str,
+        cab_file: &str,
         plugins: Vec<PluginPref>,
     ) -> Self {
         Self {
@@ -74,6 +88,7 @@ impl PathPref {
             eq_post: mix.eqs[1],
             gate: mix.gate,
             amp: AmpSettings::from_controls(mix.amp, model_path.trim().to_owned()),
+            cab: CabSettings::from_controls(mix.cab, cab_file.trim().to_owned()),
             plugins,
             chain_bypass: mix.chain_bypass,
             level_db: mix.level_db,
@@ -91,6 +106,7 @@ impl PathPref {
             eqs: [self.eq, self.eq_post],
             gate: self.gate,
             amp: self.amp.controls(),
+            cab: self.cab.controls(),
             level_db: self.level_db,
             mute: self.mute,
             solo: self.solo,
@@ -107,6 +123,7 @@ impl PathPref {
         self.eq_post = mix.eqs[1];
         self.gate = mix.gate;
         self.amp = AmpSettings::from_controls(mix.amp, self.amp.model_path.clone()).sanitized();
+        self.cab = CabSettings::from_controls(mix.cab, self.cab.file.clone()).sanitized();
         self.level_db = mix.level_db;
         if self.name.trim().is_empty() {
             self.name = default_path_name(position);

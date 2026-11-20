@@ -26,6 +26,7 @@ use std::time::Duration;
 const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
 
 use super::amp::AmpPark;
+use super::cab::CabPark;
 #[cfg(test)]
 use super::eq::{EqSettings, EqSlot};
 use super::extra_output::ExtraOutputBus;
@@ -209,14 +210,21 @@ pub(crate) struct Shared {
     /// Models the audio side has released.  The engine keeps a clone so a
     /// bridge-thread drop of this run does not destroy them.
     amp_park: Arc<AmpPark>,
+    /// Cabinet kernels the audio side has released.  Same lifetime as
+    /// [`Self::amp_park`].
+    cab_park: Arc<CabPark>,
 }
 
 impl Shared {
     pub(crate) fn new(sample_rate: u32) -> Self {
-        Self::with_park(sample_rate, AmpPark::new())
+        Self::with_park(sample_rate, AmpPark::new(), CabPark::new())
     }
 
-    pub(crate) fn with_park(sample_rate: u32, amp_park: Arc<AmpPark>) -> Self {
+    pub(crate) fn with_park(
+        sample_rate: u32,
+        amp_park: Arc<AmpPark>,
+        cab_park: Arc<CabPark>,
+    ) -> Self {
         let capacity_frames = (sample_rate as usize * 2).max(4096);
         let shared = Self {
             ring: (0..capacity_frames * 2)
@@ -282,13 +290,14 @@ impl Shared {
             opened_output_mode: AtomicU8::new(0),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
             paths: std::array::from_fn(|_| {
-                PathControls::with_park(sample_rate, Arc::clone(&amp_park))
+                PathControls::with_park(sample_rate, Arc::clone(&amp_park), Arc::clone(&cab_park))
             }),
             total_dsp: DspCell::default(),
             calibration: Calibration::new(),
             asio_panel: AsioPanelRequests::new(),
             recorder: Arc::new(Recorder::new()),
             amp_park,
+            cab_park,
         };
         shared.paths[0].set_state(PathState::Active);
         shared
@@ -296,6 +305,10 @@ impl Shared {
 
     pub(crate) fn amp_park(&self) -> &Arc<AmpPark> {
         &self.amp_park
+    }
+
+    pub(crate) fn cab_park(&self) -> &Arc<CabPark> {
+        &self.cab_park
     }
 
     /// Copies the settings that outlive one bridge start into this fresh

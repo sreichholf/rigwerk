@@ -148,6 +148,10 @@ pub(crate) struct Preferences {
     /// stay byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) amp_folder: String,
+    /// Folder of `.wav` impulse responses the cab sheet lists.  Empty
+    /// until set.  Missing on older saves.  Not written while empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) cab_folder: String,
     /// Whether takes carry the metronome tick and the calibration click.
     /// Off: a take is the output without them.
     #[serde(default)]
@@ -273,6 +277,7 @@ impl Default for Preferences {
             tuner_tolerance: 1,
             record_folder: String::new(),
             amp_folder: String::new(),
+            cab_folder: String::new(),
             record_click: false,
             metronome_running: false,
             metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
@@ -306,6 +311,7 @@ impl Preferences {
             eq_post: self.eq_post,
             gate: self.gate,
             amp: AmpSettings::default(),
+            cab: crate::audio::CabSettings::default(),
             plugins: self.plugins.clone(),
             chain_bypass: false,
             level_db: 0.0,
@@ -683,6 +689,7 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.record_folder =
         crate::app::record::resolved_record_folder(&preferences.record_folder);
     preferences.amp_folder = crate::app::amp::normalize_amp_folder(&preferences.amp_folder);
+    preferences.cab_folder = crate::app::amp::normalize_amp_folder(&preferences.cab_folder);
     // Tempo and level are clamped here.  The app setters clamp a live edit
     // the same way; the engine stores those values as they are.  A loaded
     // rhythm is already a real bar (`ClickRhythm`'s serde other is 4/4).

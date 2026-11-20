@@ -75,7 +75,7 @@ reads.
 | **Source** | Which input channels feed a path, and whether it is *Stereo* or *Mono*. | routes, layer 1, mono sum |
 | **Path outputs** | Whether a path's L and R play at all (*L*, *R*), before any output. | OUT 1 / OUT 2 (for this) |
 | **Chain** | A path's stages, in the order the sound passes them. | signal chain, rack |
-| **Stage** | One step of a chain: *Pre EQ*, an effect, *Gate*, *Post EQ*. | slot, block |
+| **Stage** | One step of a chain: *Pre EQ*, *Amp*, an effect, *Cab*, *Gate*, *Post EQ*. | slot, block |
 | **Effect** | A VST3 or CLAP plugin placed in a chain. | insert, plug |
 | **Plugin** | The installed VST3 or CLAP file: the format, the scan, the plugin's own window. | (kept) |
 | **Editor** | The window a plugin draws itself. | plugin interface, own editor |
@@ -288,7 +288,8 @@ on paths), so the faders line up across the screen.
   grid (In 1, In 2 → L, R) and *Stereo* / *Mono*.  When the path outputs
   are not both on, the button adds `· L only` or `· R only`.
 - The chain (§4.2), in signal order: *Pre EQ*, *Gate* when it sits before
-  the effects, the effects group, *Gate* when after, *Post EQ*.
+  the effects, *Amp* when it sits before the effects, the effects group,
+  *Amp* when after, *Cab*, *Gate* when after, *Post EQ*.
 - The chain's latency and the path's DSP load.  The DSP alarm is raised on
   the total (as today, `app::issues`); the strip of the path with the
   largest share carries its marker.

@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::super::amp::{AmpSlot, AmpStage};
+use super::super::cab::CabStage;
 use super::super::delay::{Declick, DelayLine, DelayTap, DECLICK_SECONDS, TAP_FADE_SECONDS};
 use super::super::eq::{EqSlot, Equalizer};
 use super::super::gate::{GateSlot, NoiseGate};
@@ -14,8 +15,8 @@ use super::ramp::{PathRamps, Ramp};
 
 /// The chain of one signal path, from the split to the sum: routing,
 /// channel enable and mono (ramped), the pre EQ, a PRE gate, the amp when
-/// it sits before the effects, the plugin effects, the amp when after, a
-/// POST gate and the post EQ.  [`OutputMixer`] owns one per
+/// it sits before the effects, the plugin effects, the amp when after, the
+/// cabinet, a POST gate and the post EQ.  [`OutputMixer`] owns one per
 /// possible path, preallocated, and runs only the active ones; every path
 /// gets the same stereo frame from the clock side.
 pub(crate) struct PathProcessor {
@@ -34,6 +35,10 @@ pub(crate) struct PathProcessor {
     /// Built-in amp.  Its model is taken at the start of the block; the
     /// scratch it processes into is grown in [`Self::reserve_block`].
     amp: AmpStage,
+    /// Built-in cabinet, after the amp wherever the amp sits.  Its kernel
+    /// is taken at the start of the block.  The history is allocated in
+    /// [`CabStage::new`].
+    cab: CabStage,
     /// Per-sample ramps for routing, channel enable and mono.  A control
     /// read once per block would step; these move over a few milliseconds
     /// instead.
@@ -55,7 +60,7 @@ pub(crate) struct PathProcessor {
     pub(super) drain: Option<u32>,
     /// The chain latency (frames) read at the start of the block: what the
     /// alignment counts for this path, and what a missed chain is replaced
-    /// by.  The amp adds none.
+    /// by.  The amp adds none.  The cabinet adds none either.
     latency: u32,
     /// The same, before clamping to [`MAX_ALIGN`] (for the report).
     pub(super) latency_raw: u32,
@@ -177,6 +182,7 @@ impl PathProcessor {
             gate: NoiseGate::new(rate),
             gate_version: 0,
             amp: AmpStage::new(rate),
+            cab: CabStage::new(rate),
             ramps: PathRamps::new(),
             controls_adopted: false,
             plan: BlockPlan::default(),
@@ -194,6 +200,7 @@ impl PathProcessor {
         self.eq = [Equalizer::new(rate), Equalizer::new(rate)];
         self.gate = NoiseGate::new(rate);
         self.amp.restart(rate);
+        self.cab.restart(rate);
         self.invalidate_settings();
         self.ramps = PathRamps::new();
         self.controls_adopted = false;
@@ -230,6 +237,7 @@ impl PathProcessor {
             self.block.resize(frames, [0.0; 4]);
         }
         self.amp.reserve(frames);
+        self.cab.reserve(frames);
     }
 
     /// Forgets which settings the EQs and gate were built from, so the next
@@ -238,6 +246,7 @@ impl PathProcessor {
         self.eq_version = [0; 2];
         self.gate_version = 0;
         self.amp.invalidate();
+        self.cab.invalidate();
     }
 
     /// Picks up every UI change made since the last block and decides which
@@ -265,6 +274,7 @@ impl PathProcessor {
         let unopened = controls.begin_chain(&mut self.chain);
         self.latency_raw = controls.latency_samples();
         self.amp.begin(controls, rate, ramp_samples);
+        self.cab.begin(controls, rate, ramp_samples);
         self.latency = self.latency_raw.min(MAX_ALIGN);
         self.tap_fade = TAP_FADE_SECONDS * rate as f32;
         self.declick_len = (DECLICK_SECONDS * rate as f32) as u32;
@@ -366,8 +376,10 @@ impl PathProcessor {
             // the EQ and the effects, which is where those controls act.
             let mut out = self.ramps.next_input(left, right);
             // The chain on the path's mix (taps 1/2), in order: pre EQ,
-            // optional PRE gate, plugin effects, optional POST gate, post
-            // EQ.  Built-ins are per-sample → no added latency.
+            // optional PRE gate, the amp when before, plugin effects, the
+            // amp when after, the cabinet, optional POST gate, post EQ.
+            // Built-ins are per-sample → no added latency.  The cabinet adds
+            // none either: a short direct head, then partitioned overlap-save.
             if self.plan.pre_eq {
                 (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
             }
@@ -503,12 +515,15 @@ impl PathProcessor {
         self.plugin_r = right;
     }
 
-    /// The rest of the path after the effects: the POST gate and the post
-    /// EQ, in place, then the path meters and the gate's reduction.
+    /// The rest of the path after the effects: the amp when it sits after
+    /// them, the cabinet, the POST gate and the post EQ, in place, then
+    /// the path meters and the gate's reduction.  The cabinet adds no
+    /// latency.
     pub(super) fn finish_block(&mut self, controls: &PathControls, frames: usize) {
         if self.plan.amp_post {
             self.amp.process_block(&mut self.block, frames);
         }
+        self.cab.process_block(&mut self.block, frames);
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
         for out in &mut self.block[..frames] {

@@ -255,6 +255,9 @@ pub(crate) struct LoadedAmp {
     pub name: String,
     pub slim_steps: Vec<f32>,
     pub file_rate: u32,
+    /// `metadata.gear_type`, trimmed.  Empty becomes [`None`].  UI state
+    /// only: the audio thread never reads it.
+    pub gear_type: Option<String>,
 }
 
 /// The submodel a slimmable capture runs at width `slim`: the first whose
@@ -332,11 +335,20 @@ fn prepare_parsed(parsed: nam_rs::NamModel, name: &str, rate: u32, slim: f32) ->
         let mut silence = vec![0.0; warmup];
         model.process_buffer(&mut silence);
     }
+    let gear_type = parsed.metadata_typed().gear_type.and_then(|gear| {
+        let gear = gear.trim();
+        if gear.is_empty() {
+            None
+        } else {
+            Some(gear.to_owned())
+        }
+    });
     AmpFile::Ready(LoadedAmp {
         prepared: PreparedAmp { model, rate },
         name: name.to_owned(),
         slim_steps,
         file_rate,
+        gear_type,
     })
 }
 

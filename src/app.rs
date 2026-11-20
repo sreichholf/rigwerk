@@ -9,6 +9,7 @@ pub(crate) mod amp;
 pub(crate) mod appearance;
 pub(crate) mod bridge;
 pub(crate) mod budget;
+pub(crate) mod cab;
 pub(crate) mod calibration;
 pub(crate) mod chain;
 pub(crate) mod devices;
@@ -283,6 +284,14 @@ pub struct RigWerkApp {
     pub(crate) native_window: Option<amp::NativeWindow>,
     /// Ctrl+V was down last frame, so a held chord pastes the models folder once.
     pub(crate) amp_paste_down: bool,
+    /// Folder of `.wav` impulse responses.  Empty until the cab sheet sets one.
+    pub(crate) cab_folder: String,
+    /// The last scan of [`Self::cab_folder`].  Not refreshed every frame.
+    pub(crate) cab_catalog: cab::CabCatalog,
+    /// The cab sheet opened, or the folder changed: scan before drawing.
+    pub(crate) cab_rescan: bool,
+    /// Ctrl+V was down last frame, so a held chord pastes the impulse folder once.
+    pub(crate) cab_paste_down: bool,
     /// "Record the click": takes carry the metronome and calibration click.
     pub(crate) record_click: bool,
     pub(crate) sessions: Vec<Session>,
@@ -382,6 +391,7 @@ impl RigWerkApp {
         self.poll_plugin_scan();
         self.engine.service_plugins();
         self.sync_amp_models();
+        self.sync_cab_files();
         self.ui_scale = ctx.pixels_per_point();
         self.poll_plugin_gui();
         self.sync_bridge_config();
@@ -470,6 +480,7 @@ impl RigWerkApp {
             tuner_tolerance: self.tuner.tolerance.to_u8(),
             record_folder: self.record_folder.clone(),
             amp_folder: self.amp_folder.clone(),
+            cab_folder: self.cab_folder.clone(),
             record_click: self.record_click,
             metronome_bpm: self.metronome_bpm,
             metronome_rhythm: self.metronome_rhythm,
@@ -634,6 +645,10 @@ impl RigWerkApp {
             amp_rescan: true,
             native_window: None,
             amp_paste_down: false,
+            cab_folder: preferences.cab_folder.clone(),
+            cab_catalog: cab::CabCatalog::default(),
+            cab_rescan: true,
+            cab_paste_down: false,
             record_click: preferences.record_click,
             sessions,
             selected_session,
@@ -879,6 +894,10 @@ pub(crate) fn blank_app() -> RigWerkApp {
         amp_rescan: false,
         native_window: None,
         amp_paste_down: false,
+        cab_folder: String::new(),
+        cab_catalog: cab::CabCatalog::default(),
+        cab_rescan: false,
+        cab_paste_down: false,
         record_click: false,
         sessions: Vec::new(),
         selected_session: None,
