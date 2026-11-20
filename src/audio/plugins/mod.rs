@@ -34,6 +34,11 @@ mod tests;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// The most audio ports one effect may declare, shared by the CLAP host and
+/// the LV2 scan.  More than this is a scan error for LV2 and a load error for
+/// CLAP.
+pub(crate) const MAX_AUDIO_PORTS: usize = 32;
+
 /// The largest latency, in frames, one effect may report: the size the
 /// alignment delay lines are built for (about 170 ms at 192 kHz).  A larger
 /// report is clamped, so a broken value cannot blow up the alignment.

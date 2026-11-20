@@ -243,6 +243,9 @@ pub(crate) fn load_plugin(
                 },
             )
         }
+        // The scan lists LV2 effects already; loading them lands with the
+        // LV2 host's module, port table and instance.
+        PluginFormat::Lv2 => Err("LV2 loading is not available yet".to_owned()),
     }
 }
 

@@ -55,6 +55,7 @@ fn the_browser_names_the_path_the_row_and_its_controls() {
     assert_eq!(node_named(&tree, "Reverb").role(), egui::Role::Button);
     assert_eq!(node_named(&tree, "VST3").role(), egui::Role::Button);
     assert_eq!(node_named(&tree, "CLAP").role(), egui::Role::Button);
+    assert_eq!(node_named(&tree, "LV2").role(), egui::Role::Button);
     assert_eq!(node_named(&tree, "Amp").role(), egui::Role::Button);
     assert_eq!(node_named(&tree, "Amp").toggled(), Some(Toggled::True));
     assert_eq!(

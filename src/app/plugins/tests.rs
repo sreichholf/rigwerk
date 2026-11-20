@@ -281,6 +281,7 @@ fn search_ranks_a_prefix_then_a_favourite_then_a_recent_effect() {
         &EffectFilter::All,
         true,
         true,
+        true,
         &favourites,
         &recent,
     )
@@ -334,7 +335,7 @@ fn recent_use_does_not_reorder_the_library() {
     let library = vec![beta.clone(), alpha.clone()];
     let recent = vec![id_of(&beta)];
     let names = |filter| {
-        visible_effects(&library, "", filter, true, true, &[], &recent)
+        visible_effects(&library, "", filter, true, true, true, &[], &recent)
             .into_iter()
             .map(|candidate| candidate.name.clone())
             .collect::<Vec<_>>()
@@ -344,21 +345,90 @@ fn recent_use_does_not_reorder_the_library() {
 }
 
 #[test]
-fn the_format_filter_hides_the_other_format() {
+fn the_format_filter_hides_the_other_formats() {
     let vst = listed("Room", "", "Reverb");
     let mut clap = listed("Amp", "", "Amp");
     clap.format = PluginFormat::Clap;
     clap.path = PathBuf::from("Amp.clap");
-    let library = vec![vst, clap];
-    let names = |vst3, clap_on| {
-        visible_effects(&library, "", &EffectFilter::All, vst3, clap_on, &[], &[])
-            .into_iter()
-            .map(|candidate| candidate.name.clone())
-            .collect::<Vec<_>>()
+    let mut lv2 = listed("Tone", "", "Filter");
+    lv2.format = PluginFormat::Lv2;
+    lv2.path = PathBuf::from("Tone.lv2");
+    let library = vec![vst, clap, lv2];
+    let names = |vst3, clap_on, lv2_on| {
+        visible_effects(
+            &library,
+            "",
+            &EffectFilter::All,
+            vst3,
+            clap_on,
+            lv2_on,
+            &[],
+            &[],
+        )
+        .into_iter()
+        .map(|candidate| candidate.name.clone())
+        .collect::<Vec<_>>()
     };
-    assert_eq!(names(true, false), ["Room"]);
-    assert_eq!(names(false, true), ["Amp"]);
-    assert!(names(false, false).is_empty());
+    assert_eq!(names(true, false, false), ["Room"]);
+    assert_eq!(names(false, true, false), ["Amp"]);
+    assert_eq!(names(false, false, true), ["Tone"]);
+    assert!(names(false, false, false).is_empty());
+}
+
+#[test]
+fn a_show_lv2_flag_filters_the_lv2_rows() {
+    let mut lv2 = listed("Tone", "", "Filter");
+    lv2.format = PluginFormat::Lv2;
+    lv2.path = PathBuf::from("Tone.lv2");
+    let library = vec![listed("Room", "", "Reverb"), lv2];
+    let names = |lv2_on| {
+        visible_effects(
+            &library,
+            "",
+            &EffectFilter::All,
+            true,
+            true,
+            lv2_on,
+            &[],
+            &[],
+        )
+        .into_iter()
+        .map(|candidate| candidate.name.clone())
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(names(true), ["Room", "Tone"]);
+    assert_eq!(names(false), ["Room"]);
+}
+
+#[test]
+fn an_lv2_bundle_path_lists_its_effects() {
+    let bundle =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/audio/lv2/testdata/example.lv2");
+    let found = super::candidates_from_path(&bundle);
+    let rows: Vec<_> = found
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.format.label(),
+                candidate.class_id.as_deref(),
+                candidate.name.as_str(),
+                candidate.channels,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "LV2",
+                Some("http://example.com/lv2/example"),
+                "Example Amp",
+                Some(2)
+            ),
+            ("LV2", Some("http://example.com/lv2/tone"), "Tone", Some(1)),
+        ]
+    );
+    assert!(found.iter().all(|candidate| candidate.path == bundle));
 }
 
 #[test]

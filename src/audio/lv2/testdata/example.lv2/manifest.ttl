@@ -1,0 +1,14 @@
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<http://example.com/lv2/example>
+    a lv2:Plugin ;
+    rdfs:seeAlso <plugin.ttl> .
+
+<http://example.com/lv2/tone>
+    a lv2:Plugin ;
+    rdfs:seeAlso <plugin.ttl> .
+
+<http://example.com/lv2/synth>
+    a lv2:Plugin ;
+    rdfs:seeAlso <plugin.ttl> .

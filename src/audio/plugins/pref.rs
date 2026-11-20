@@ -8,6 +8,7 @@ pub enum PluginFormat {
     #[default]
     Vst3,
     Clap,
+    Lv2,
 }
 
 impl PluginFormat {
@@ -15,6 +16,7 @@ impl PluginFormat {
         match self {
             Self::Vst3 => "VST3",
             Self::Clap => "CLAP",
+            Self::Lv2 => "LV2",
         }
     }
 }
