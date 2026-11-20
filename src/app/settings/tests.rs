@@ -299,6 +299,20 @@ fn gate_missing_from_old_saves_uses_defaults() {
 }
 
 #[test]
+fn a_saved_return_loads_without_a_solo_or_sends() {
+    let raw = r#"(paths:[(name:"A",sends:[-60.0,-6.0]),(name:"FX",feed:sends,solo:true,sends:[0.0,0.0])])"#;
+    let preferences = load_preferences(Some(raw), BACKUP)
+        .preferences
+        .expect("readable");
+    let paths = &preferences.paths;
+    assert_eq!(paths[0].sends, vec![crate::audio::SEND_OFF_DB, -6.0]);
+    assert_eq!(paths[1].feed, crate::audio::PathFeed::Sends);
+    assert!(!paths[1].solo);
+    assert!(paths[1].sends.is_empty());
+    assert!(!paths[1].mix().solo);
+}
+
+#[test]
 fn a_gate_saved_before_the_key_listens_to_its_signal() {
     let raw = r#"(paths:[(gate:(enabled:true,slot:pre,threshold_db:-40.0))])"#;
     let preferences = load_preferences(Some(raw), BACKUP)
@@ -1708,6 +1722,7 @@ fn golden_extra_output(virtual_output: bool) -> ExtraOutputPref {
 }
 
 fn golden_path(name: &str) -> PathPref {
+    let is_return = name == "Drive";
     let mut eq = EqSettings {
         enabled: false,
         ..EqSettings::default()
@@ -1755,12 +1770,23 @@ fn golden_path(name: &str) -> PathPref {
             verb,
         ],
         chain_bypass: true,
+        // Drive is a return (no solo, no sends); the others send to it.
+        feed: if is_return {
+            crate::audio::PathFeed::Sends
+        } else {
+            crate::audio::PathFeed::Input
+        },
+        sends: if is_return {
+            Vec::new()
+        } else {
+            vec![crate::audio::SEND_OFF_DB, -12.0]
+        },
         nam_blocks: Vec::new(),
         amp: crate::audio::LegacyNamSettings::default(),
         cab: crate::audio::CabSettings::default(),
         level_db: -4.0,
         mute: true,
-        solo: true,
+        solo: !is_return,
     }
 }
 

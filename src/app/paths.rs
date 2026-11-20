@@ -18,6 +18,12 @@
 //!
 //! A removed path keeps its device entries while it fades out, so it fades
 //! where it played; the next path in that slot overwrites them.
+//!
+//! A return ([`PathFeed::Sends`]) runs on the other paths' sends.  Sends
+//! are indexed by slot like the device maps, and saved in the display
+//! order the same way.  Only a path fed by the input sends, and only to a
+//! return: a path that stops being a return, or goes away, takes every
+//! send to it along.  A return is solo-safe and has no solo of its own.
 
 use crate::app::cab::CabInstall;
 use crate::app::chain::ChainSelection;
@@ -27,9 +33,10 @@ use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::nam::NamLoad;
 use crate::audio::{
-    low_bits, path_level_gain, sanitize_path_level, EngineState, EqSettings, GateSettings,
-    MapPreset, NamBlockControls, NamBlockSettings, NamStack, OutputDeviceSettings, PathMapSettings,
-    PathMix, PathState, UnusedChannels, MAX_NAM_BLOCKS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
+    low_bits, path_level_gain, sanitize_path_level, sanitize_send, EngineState, EqSettings,
+    GateSettings, MapPreset, NamBlockControls, NamBlockSettings, NamStack, OutputDeviceSettings,
+    PathFeed, PathMapSettings, PathMix, PathState, UnusedChannels, MAX_NAM_BLOCKS,
+    MAX_OUTPUT_CHANNELS, MAX_PATHS, SEND_OFF_DB,
 };
 
 /// One NAM block of a path, as the UI holds it: the controls the engine
@@ -195,15 +202,19 @@ impl SignalPath {
         path
     }
 
-    fn to_pref(&self, plugins: Vec<crate::audio::PluginPref>) -> PathPref {
-        PathPref::from_mix(
-            self.name.clone(),
-            self.colour,
-            &self.mix,
-            self.nam_settings(),
-            &self.cab_file,
-            plugins,
-        )
+    /// The path as saved, its sends in the saved order `order`.
+    fn to_pref(&self, plugins: Vec<crate::audio::PluginPref>, order: &[usize]) -> PathPref {
+        PathPref {
+            sends: PathPref::sends_in_order(&self.mix.sends, order),
+            ..PathPref::from_mix(
+                self.name.clone(),
+                self.colour,
+                &self.mix,
+                self.nam_settings(),
+                &self.cab_file,
+                plugins,
+            )
+        }
     }
 
     /// The engine's view of the blocks: their controls, in signal order.
@@ -353,16 +364,127 @@ impl RigWerkApp {
         std::array::from_fn(|slot| self.paths[slot].is_some())
     }
 
+    /// Whether some path is soloed.  A return's solo does not count: a
+    /// return is solo-safe and has none.
+    pub(crate) fn any_solo(&self) -> bool {
+        self.paths
+            .iter()
+            .flatten()
+            .any(|path| path.mix.solo && !path.mix.is_return())
+    }
+
+    /// Whether `mix` sounds under the mute and the solos (`any_solo`).
+    pub(crate) fn mix_audible(mix: &PathMix, any_solo: bool) -> bool {
+        !mix.mute && (!any_solo || mix.solo || mix.is_return())
+    }
+
     /// Each slot's level, mute and solo as one gain (0 for no path), as the
     /// mixer applies it.
     pub(crate) fn path_gains(&self) -> [f32; MAX_PATHS] {
-        let any_solo = self.paths.iter().flatten().any(|path| path.mix.solo);
+        let any_solo = self.any_solo();
         std::array::from_fn(|slot| match &self.paths[slot] {
-            Some(path) if !path.mix.mute && (!any_solo || path.mix.solo) => {
+            Some(path) if Self::mix_audible(&path.mix, any_solo) => {
                 path_level_gain(path.mix.level_db)
             }
             _ => 0.0,
         })
+    }
+
+    /// The live returns, in display order.
+    pub(crate) fn return_slots(&self) -> Vec<usize> {
+        self.path_slots()
+            .into_iter()
+            .filter(|&slot| self.paths[slot].as_ref().is_some_and(|p| p.mix.is_return()))
+            .collect()
+    }
+
+    /// The live paths fed by the input, in display order: the ones that
+    /// can send.
+    pub(crate) fn sender_slots(&self) -> Vec<usize> {
+        self.path_slots()
+            .into_iter()
+            .filter(|&slot| {
+                self.paths[slot]
+                    .as_ref()
+                    .is_some_and(|p| !p.mix.is_return())
+            })
+            .collect()
+    }
+
+    /// Feeds path `slot` from the input or from the other paths' sends.  A
+    /// new return keeps no sends or solo of its own, and its routing goes
+    /// back to the default (it has no input to route).  A path that stops
+    /// being a return takes every send to it along.  The last path fed by
+    /// the input stays on it: a return would have nothing to hear.
+    pub(crate) fn set_path_feed(&mut self, slot: usize, feed: PathFeed) {
+        if feed == PathFeed::Sends && self.sender_slots() == [slot] {
+            self.push_log(
+                "A return needs another path that plays the input.",
+                LogTone::Amber,
+            );
+            return;
+        }
+        let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) else {
+            return;
+        };
+        if path.mix.feed == feed {
+            return;
+        }
+        path.mix.feed = feed;
+        let name = path.name.clone();
+        if feed == PathFeed::Sends {
+            let defaults = PathMix::default();
+            path.mix.sends = defaults.sends;
+            path.mix.solo = false;
+            path.mix.routes = defaults.routes;
+            path.mix.mono = defaults.mono;
+            self.push_log(
+                format!("{name} now plays the other paths' sends."),
+                LogTone::Teal,
+            );
+        } else {
+            self.clear_sends_to(slot);
+            self.push_log(format!("{name} now plays the input."), LogTone::Teal);
+        }
+    }
+
+    /// Path `sender`'s send to return `ret`, dB ([`SEND_OFF_DB`] is off).
+    /// Ignored unless `sender` is fed by the input and `ret` is another
+    /// path's return.
+    pub(crate) fn set_path_send(&mut self, sender: usize, ret: usize, level_db: f32) {
+        if sender == ret
+            || ret >= MAX_PATHS
+            || !self
+                .paths
+                .get(ret)
+                .and_then(Option::as_ref)
+                .is_some_and(|p| p.mix.is_return())
+        {
+            return;
+        }
+        if let Some(path) = self.paths.get_mut(sender).and_then(Option::as_mut) {
+            if !path.mix.is_return() {
+                path.mix.sends[ret] = sanitize_send(level_db);
+            }
+        }
+    }
+
+    /// Path `sender`'s send to `ret`, dB.
+    pub(crate) fn path_send(&self, sender: usize, ret: usize) -> f32 {
+        self.paths
+            .get(sender)
+            .and_then(Option::as_ref)
+            .and_then(|path| path.mix.sends.get(ret).copied())
+            .unwrap_or(SEND_OFF_DB)
+    }
+
+    /// Turns off every send to slot `slot`.
+    fn clear_sends_to(&mut self, slot: usize) {
+        for path in self.paths.iter_mut().flatten() {
+            if let Some(level) = path.mix.sends.get_mut(slot) {
+                *level = SEND_OFF_DB;
+            }
+        }
     }
 
     /// The selected slot, or the first live one if the selection is stale.
@@ -414,7 +536,7 @@ impl RigWerkApp {
 
     /// What the UI shows for every live path, in display order.
     pub(crate) fn path_infos(&self) -> Vec<PathInfo> {
-        let any_solo = self.paths.iter().flatten().any(|path| path.mix.solo);
+        let any_solo = self.any_solo();
         let rate = match self.snapshot.output_rate {
             0 => self.sample_rate.max(1),
             rate => rate,
@@ -450,7 +572,7 @@ impl RigWerkApp {
                     solo: mix.solo,
                     meters: self.engine.path_meters(slot),
                     routed: (0..devices).any(|device| self.path_reaches_device(slot, device)),
-                    audible: !mix.mute && (!any_solo || mix.solo),
+                    audible: Self::mix_audible(mix, any_solo),
                     selected: slot == selected,
                 })
             })
@@ -569,6 +691,24 @@ impl RigWerkApp {
         Some(slot)
     }
 
+    /// Adds a return, live, like [`Self::add_path`] (muted, routed to no
+    /// device), named *FX* (or *FX 2*, …), with every send to it off.
+    /// Selects it.  Returns its slot.
+    pub(crate) fn add_return(&mut self) -> Option<usize> {
+        let name = if self.name_taken("FX") {
+            self.copy_name("FX")
+        } else {
+            "FX".to_owned()
+        };
+        let slot = self.add_path()?;
+        if let Some(path) = self.paths[slot].as_mut() {
+            path.name = name;
+        }
+        self.set_path_feed(slot, PathFeed::Sends);
+        self.push_paths_to_engine();
+        Some(slot)
+    }
+
     /// Adds a muted copy of path `source`, live: its chain, its plugins
     /// with their current state (an open plugin window is synced first),
     /// and its map, level and polarity on every device.  Selects it.
@@ -646,6 +786,7 @@ impl RigWerkApp {
             self.plugin_param_filter.clear();
         }
         let removed = self.paths[slot].take();
+        self.clear_sends_to(slot);
         self.path_order.retain(|&other| other != slot);
         if self.selected_path == slot {
             let next = self.selected_slot();
@@ -707,9 +848,10 @@ impl RigWerkApp {
         }
     }
 
+    /// A return has no solo: it is solo-safe.
     pub(crate) fn set_path_solo(&mut self, slot: usize, solo: bool) {
         if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
-            path.mix.solo = solo;
+            path.mix.solo = solo && !path.mix.is_return();
         }
     }
 
@@ -754,6 +896,21 @@ impl RigWerkApp {
             return String::new();
         };
         let mix = &path.mix;
+        if mix.is_return() {
+            let senders = self
+                .paths
+                .iter()
+                .flatten()
+                .filter(|other| {
+                    !other.mix.is_return() && path_level_gain(other.mix.sends[slot]) > 0.0
+                })
+                .count();
+            return match senders {
+                0 => "Sends · none yet".to_owned(),
+                1 => "Sends · 1 path".to_owned(),
+                count => format!("Sends · {count} paths"),
+            };
+        }
         let fed = |input: usize| mix.routes[input][0] || mix.routes[input][1];
         let inputs = match (fed(0), fed(1)) {
             (true, true) => "In 1 + In 2",
@@ -1016,7 +1173,8 @@ impl RigWerkApp {
 
         for (pref, &slot) in prefs.iter().zip(&targets) {
             let first_id = self.unused_nam_id(slot);
-            let path = SignalPath::from_pref(pref, first_id);
+            let mut path = SignalPath::from_pref(pref, first_id);
+            path.mix.sends = pref.sends_by_slot(&targets);
             self.engine
                 .restore_path(slot, &path.mix, &path.nam_stack(), pref.plugins.clone());
             self.paths[slot] = Some(path);
@@ -1082,7 +1240,7 @@ impl RigWerkApp {
             .iter()
             .filter_map(|&slot| {
                 let path = self.paths[slot].as_ref()?;
-                Some(path.to_pref(self.engine.plugin_prefs(slot)))
+                Some(path.to_pref(self.engine.plugin_prefs(slot), &order))
             })
             .collect();
         (prefs, order)

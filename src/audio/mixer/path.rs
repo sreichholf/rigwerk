@@ -67,6 +67,14 @@ pub(crate) struct PathProcessor {
     generation: u64,
     /// Path level, mute, solo and the removal fade as one gain.
     pub(super) gain: Ramp,
+    /// That gain per frame of this block ([`Self::fill_gains`]), so a
+    /// send can take the path after its level before the sum reads it.
+    pub(super) gains: Vec<f32>,
+    /// The path is a return this block: it runs on the other paths'
+    /// sends, after them, and no solo silences it.  A change of feed is
+    /// taken only once the path gain has reached 0, so the chain's input
+    /// never switches while it is heard.
+    pub(super) is_return: bool,
     /// The slot was being removed when this block began.
     pub(super) fading: bool,
     /// Frames a removed, silent path still runs so its alignment delay
@@ -204,6 +212,8 @@ impl PathProcessor {
             plan: BlockPlan::default(),
             generation: 0,
             gain: Ramp::new(1.0),
+            gains: Vec::new(),
+            is_return: false,
             fading: false,
         }
     }
@@ -256,6 +266,9 @@ impl PathProcessor {
         if self.key.len() < frames {
             self.key.resize(frames, 0.0);
         }
+        if self.gains.len() < frames {
+            self.gains.resize(frames, 0.0);
+        }
         self.nam.reserve(frames);
         self.cab.reserve(frames);
     }
@@ -302,12 +315,18 @@ impl PathProcessor {
         self.follow_eq(controls, rate);
         self.follow_gate(controls, rate);
         let adopted = self.controls_adopted;
+        let wanted = controls.is_return();
+        if !adopted || self.gain.is_settled_at(0.0) {
+            self.is_return = wanted;
+        }
+        let switching = wanted != self.is_return;
         self.follow_controls(controls, ramp_samples);
         self.fading = controls.state() == PathState::FadingOut;
         // A chain whose plugins are still being opened (a path just added,
-        // duplicated or restored) stays silent rather than playing dry.
-        let silent =
-            self.fading || controls.muted() || (any_solo && !controls.soloed()) || unopened;
+        // duplicated or restored) stays silent rather than playing dry.  A
+        // return is solo-safe.
+        let soloed_out = any_solo && !controls.soloed() && !self.is_return;
+        let silent = self.fading || controls.muted() || soloed_out || unopened || switching;
         let gain = if silent { 0.0 } else { controls.level_gain() };
         if adopted {
             self.gain.set_target(gain, ramp_samples);
@@ -327,13 +346,33 @@ impl PathProcessor {
         restarted
     }
 
+    /// The chain latency this block, clamped to [`MAX_ALIGN`]: what the
+    /// chain really delays by.
+    pub(super) fn latency(&self) -> u32 {
+        self.latency
+    }
+
+    /// Advances the path gain over the block into [`Self::gains`].
+    pub(super) fn fill_gains(&mut self, frames: usize) {
+        let ramp = &mut self.gain;
+        for gain in &mut self.gains[..frames] {
+            *gain = ramp.next();
+        }
+    }
+
     /// Points the routing, enable and mono ramps at this block's settings.
+    /// A return's sends arrive as its L and R: its routing is ignored.
     fn follow_controls(&mut self, controls: &PathControls, ramp_samples: f32) {
         let coefficient = |flag: bool| if flag { 1.0 } else { 0.0 };
         let mut routes = [[0.0f32; 4]; 2];
         for (input, row) in routes.iter_mut().enumerate() {
             for (tap, coefficient_out) in row.iter_mut().enumerate() {
-                *coefficient_out = coefficient(controls.route(input, tap));
+                let on = if self.is_return {
+                    input == tap
+                } else {
+                    controls.route(input, tap)
+                };
+                *coefficient_out = coefficient(on);
             }
         }
         let enabled = [

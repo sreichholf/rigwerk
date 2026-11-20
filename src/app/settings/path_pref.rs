@@ -2,15 +2,15 @@
 
 use super::serde_util::skip_unreadable;
 use crate::audio::{
-    CabSettings, EqSettings, GateSettings, LegacyNamSettings, NamBlockSettings, PathMix,
-    PluginPref, MAX_NAM_BLOCKS, MAX_PATHS,
+    sanitize_send, CabSettings, EqSettings, GateSettings, LegacyNamSettings, NamBlockSettings,
+    PathFeed, PathMix, PluginPref, MAX_NAM_BLOCKS, MAX_PATHS, SEND_OFF_DB,
 };
 
 /// One signal path: its name and colour (UI data), its chain settings, its
 /// plugins, whether that effect chain is bypassed, and its level, mute and
 /// solo.  How it reaches each device lives with the device
 /// (`OutputDeviceSettings::path_map`, indexed by the path's position in the
-/// saved list).
+/// saved list).  Its sends are indexed the same way.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct PathPref {
@@ -50,6 +50,19 @@ pub(crate) struct PathPref {
     pub(crate) level_db: f32,
     pub(crate) mute: bool,
     pub(crate) solo: bool,
+    /// What the chain runs on.  Omitted for a path fed by the input, which
+    /// is what older saves have.
+    #[serde(default, skip_serializing_if = "is_input")]
+    pub(crate) feed: PathFeed,
+    /// The send to each path, dB, by that path's position in the saved
+    /// list.  Omitted while every send is off.  [`Self::mix`] does not read
+    /// it: slots are not positions, so the app maps it (`install_paths`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) sends: Vec<f32>,
+}
+
+fn is_input(feed: &PathFeed) -> bool {
+    *feed == PathFeed::Input
 }
 
 impl Default for PathPref {
@@ -101,7 +114,38 @@ impl PathPref {
             level_db: mix.level_db,
             mute: mix.mute,
             solo: mix.solo,
+            feed: mix.feed,
+            sends: Vec::new(),
         }
+    }
+
+    /// `sends` (indexed by slot) in the saved order `order`, as stored:
+    /// empty while every send is off.
+    pub(crate) fn sends_in_order(sends: &[f32; MAX_PATHS], order: &[usize]) -> Vec<f32> {
+        let saved: Vec<f32> = order
+            .iter()
+            .map(|&slot| sends.get(slot).copied().unwrap_or(SEND_OFF_DB))
+            .collect();
+        if saved
+            .iter()
+            .all(|&level| sanitize_send(level) <= SEND_OFF_DB)
+        {
+            Vec::new()
+        } else {
+            saved
+        }
+    }
+
+    /// The stored sends by slot, the path at saved position `n` living in
+    /// `slots[n]`.  Positions past `slots` are dropped.
+    pub(crate) fn sends_by_slot(&self, slots: &[usize]) -> [f32; MAX_PATHS] {
+        let mut sends = [SEND_OFF_DB; MAX_PATHS];
+        for (&level, &slot) in self.sends.iter().zip(slots) {
+            if slot < MAX_PATHS {
+                sends[slot] = sanitize_send(level);
+            }
+        }
+        sends
     }
 
     /// The chain settings the engine takes, sanitized.
@@ -117,12 +161,15 @@ impl PathPref {
             mute: self.mute,
             solo: self.solo,
             chain_bypass: self.chain_bypass,
+            feed: self.feed,
+            sends: [SEND_OFF_DB; MAX_PATHS],
         }
         .sanitized()
     }
 
-    /// EQs, gate and level in range; a blank name gets the default; the
-    /// colour stays in the palette.  An older save's single NAM stage
+    /// EQs, gate, level and sends in range, and a return without a solo or
+    /// sends; a blank name gets the default; the colour stays in the
+    /// palette.  An older save's single NAM stage
     /// becomes the first block, once.
     pub(crate) fn sanitize(&mut self, position: usize) {
         if self.nam_blocks.is_empty() && !self.amp.is_unset() {
@@ -140,6 +187,17 @@ impl PathPref {
         self.gate = mix.gate;
         self.cab = CabSettings::from_controls(mix.cab, self.cab.file.clone()).sanitized();
         self.level_db = mix.level_db;
+        self.solo = mix.solo;
+        if self.feed == PathFeed::Sends {
+            self.sends.clear();
+        }
+        self.sends.truncate(MAX_PATHS);
+        for level in &mut self.sends {
+            *level = sanitize_send(*level);
+        }
+        if self.sends.iter().all(|&level| level <= SEND_OFF_DB) {
+            self.sends.clear();
+        }
         if self.name.trim().is_empty() {
             self.name = default_path_name(position);
         }

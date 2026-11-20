@@ -34,9 +34,9 @@ use super::gate::GateSettings;
 use super::nam::{NamPark, NamStack};
 use super::output_map::{DeviceControls, DeviceFrame, OutputDeviceSettings, MAX_EXTRA_OUTPUTS};
 use super::path::{DspCell, DspTime, LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
-use super::plugins::PluginPref;
 #[cfg(test)]
 use super::plugins::PluginView;
+use super::plugins::{PluginPref, MAX_ALIGN};
 use super::scope::ScopeLane;
 use super::types::{BufferMode, OutputMode, Snapshot};
 
@@ -411,11 +411,36 @@ impl Shared {
         &self.paths[slot]
     }
 
-    /// Whether some active path (not one fading out) is soloed.
+    /// Every slot's latency as the mixer aligns it: the chain's, and for a
+    /// live return plus its wait, the slowest live path fed by the input
+    /// (each clamped to [`MAX_ALIGN`], as the mixer runs them).  See
+    /// `mixer`, "Returns".
+    pub(crate) fn alignment_latencies(&self) -> [u32; MAX_PATHS] {
+        let live = |path: &PathControls| path.state().is_live();
+        let wait = self
+            .paths
+            .iter()
+            .filter(|path| live(path) && !path.is_return())
+            .map(|path| path.latency_samples().min(MAX_ALIGN))
+            .max()
+            .unwrap_or(0);
+        std::array::from_fn(|slot| {
+            let path = &self.paths[slot];
+            let own = path.latency_samples();
+            if live(path) && path.is_return() {
+                own.saturating_add(wait)
+            } else {
+                own
+            }
+        })
+    }
+
+    /// Whether some active path (not one fading out, and not a return,
+    /// which is solo-safe) is soloed.
     pub(crate) fn any_solo(&self) -> bool {
         self.paths
             .iter()
-            .any(|path| path.state() == PathState::Active && path.soloed())
+            .any(|path| path.state() == PathState::Active && path.soloed() && !path.is_return())
     }
 
     /// How many paths are active (removed paths still fading out do not

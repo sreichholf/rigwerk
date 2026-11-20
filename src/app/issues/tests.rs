@@ -123,6 +123,25 @@ fn the_only_path_routed_nowhere_warns() {
 }
 
 #[test]
+fn a_path_heard_only_through_a_return_does_not_warn() {
+    let mut app = blank_app();
+    let main = app.path_slots()[0];
+    app.clock_output.path_map[main] = PathMapSettings::unrouted();
+    let fx = app.add_return().expect("a free slot");
+    app.set_path_mute(fx, false);
+    app.clock_output.path_map[fx] = PathMapSettings::default();
+    // No send yet: Main is still routed nowhere.
+    let titles: Vec<String> = app.live_issues().into_iter().map(|i| i.title).collect();
+    assert_eq!(titles, vec!["Main is routed nowhere".to_owned()]);
+    app.set_path_send(main, fx, -6.0);
+    assert!(app.live_issues().is_empty(), "{:?}", app.live_issues());
+    // A muted return carries nothing.
+    app.set_path_mute(fx, true);
+    let titles: Vec<String> = app.live_issues().into_iter().map(|i| i.title).collect();
+    assert_eq!(titles, vec!["Main is routed nowhere".to_owned()]);
+}
+
+#[test]
 fn the_only_path_on_a_muted_device_warns() {
     let mut app = blank_app();
     app.clock_output.mute = true;

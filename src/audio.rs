@@ -179,8 +179,8 @@ pub use output_map::PATH_TRIM_MAX_MS;
 pub(crate) use path::path_level_gain;
 pub(crate) use path::PathState;
 pub use path::{
-    sanitize_path_level, DspTime, LockStats, PathMix, PluginLockReport, MAX_PATHS,
-    PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB,
+    sanitize_path_level, sanitize_send, DspTime, LockStats, PathFeed, PathMix, PluginLockReport,
+    MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, SEND_OFF_DB,
 };
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;

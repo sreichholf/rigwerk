@@ -189,6 +189,8 @@ impl RigWerkApp {
     /// with 64 samples on the second amp and the clock output's alignment
     /// off (the red warning); `live3` is `blend` plus an empty third path
     /// (unmuted, routed nowhere: an issues warning), for the console.
+    /// `fx` is `blend` without the latency plus an effects return both
+    /// paths send to, selected.
     /// `showcase` is the README setup: see [`Self::apply_screenshot_showcase`].
     /// `showcase4` adds two paths, every other sink as an extra output and
     /// a long chain (board 6): see [`Self::apply_screenshot_four_paths`].
@@ -207,6 +209,25 @@ impl RigWerkApp {
                         self.clock_output.path_map[copy].map = crate::audio::ChannelMap::default();
                         self.select_path(first);
                     }
+                }
+            }
+            "fx" => {
+                // Blend clean plus an effects return both paths send to,
+                // selected so a path sheet opens on it.
+                if !self.apply_layout(PathLayout::Blend) {
+                    return;
+                }
+                let slots = self.path_slots();
+                self.rename_path(slots[0], "Clean");
+                self.rename_path(slots[1], "Drive");
+                if let Some(fx) = self.add_return() {
+                    self.set_path_mute(fx, false);
+                    self.clock_output.path_map[fx] = crate::audio::PathMapSettings::default();
+                    self.set_path_send(slots[0], fx, -12.0);
+                    self.set_path_send(slots[1], fx, -18.0);
+                    self.push_paths_to_engine();
+                    self.push_devices_to_engine();
+                    self.select_path(fx);
                 }
             }
             "blend" | "live3" => {

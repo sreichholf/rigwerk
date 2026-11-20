@@ -318,6 +318,8 @@ impl Preferences {
             level_db: 0.0,
             mute: false,
             solo: false,
+            feed: crate::audio::PathFeed::Input,
+            sends: Vec::new(),
         }]
     }
 

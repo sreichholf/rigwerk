@@ -1,7 +1,12 @@
 //! The path sheet's body (`docs/ui-spec.md` §6.1): the name and colour,
-//! the source (a 2 × 2 grid and *Stereo* / *Mono*), the path's L/R output
-//! channels, level, mute and solo, *Duplicate (muted)*, *Apply layout ▸*,
-//! *Remove*, and the path's latency on every output it plays on.
+//! the source (*Input* or *Sends*; for the input a 2 × 2 grid and *Stereo*
+//! / *Mono*), the sends, the path's L/R output channels, level, mute and
+//! solo, *Duplicate (muted)*, *Apply layout ▸*, *Remove*, and the path's
+//! latency on every output it plays on.
+//!
+//! A path fed by the input lists its send to each return; a return lists
+//! the send from each path fed by the input.  Both edit the same value.
+//! A return has no solo: it is solo-safe.
 //!
 //! The header above (`sheets.rs`) names the path and its dot.  Every edit
 //! goes through a `RigWerkApp` method; the sheet selects its path before it
@@ -13,7 +18,7 @@ use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 use crate::app::layouts::{custom_label, PathLayout};
 use crate::app::screen::format_ms;
 use crate::app::{LogTone, RigWerkApp};
-use crate::audio::{PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB};
+use crate::audio::{PathFeed, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, SEND_OFF_DB};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{chip, row_info, segmented, TextField};
@@ -54,6 +59,8 @@ impl RigWerkApp {
         let mut mono = path.mix.mono;
         let mut mute = path.mix.mute;
         let mut solo = path.mix.solo;
+        let mut feed = path.mix.feed;
+        let mut send_edits: Vec<(usize, usize, f32)> = Vec::new();
         let mut rename: Option<String> = None;
         let mut colour_pick: Option<u8> = None;
         let mut duplicate = false;
@@ -94,11 +101,76 @@ impl RigWerkApp {
                     colour_row(ui, path.colour, colour, &mut colour_pick, colours);
                     ui.add_space(10.0);
                     heading(ui, "Source", colours);
-                    source_grid_widget(ui, &mut routes, colours);
+                    let mut choice = usize::from(feed == PathFeed::Sends);
+                    let response = segmented(ui, &mut choice, &["Input", "Sends"]);
+                    if response.changed() {
+                        feed = if choice == 1 {
+                            PathFeed::Sends
+                        } else {
+                            PathFeed::Input
+                        };
+                    }
+                    response.on_hover_text(
+                        "Input: the interface, through the grid below.\n\
+                         Sends: the other paths' sends, after their level. One reverb \
+                         or delay here serves every path.",
+                    );
                     ui.add_space(8.0);
-                    let mut choice = usize::from(mono);
-                    if segmented(ui, &mut choice, &["Stereo", "Mono"]).changed() {
-                        mono = choice == 1;
+                    if path.mix.is_return() {
+                        heading(ui, "Sends from", colours);
+                        let senders = self.sender_slots();
+                        if senders.is_empty() {
+                            note(ui, "No path plays the input yet.", colours);
+                        }
+                        for sender in senders {
+                            let name = self.paths[sender]
+                                .as_ref()
+                                .map_or_else(String::new, |p| p.name.clone());
+                            let mut level = self.path_send(sender, slot);
+                            if send_row(
+                                ui,
+                                &format!("Send from {name}"),
+                                &name,
+                                &mut level,
+                                colour,
+                                colours,
+                            ) {
+                                send_edits.push((sender, slot, level));
+                            }
+                        }
+                        note(
+                            ui,
+                            "Each send is taken after that path's level, mute and solo.",
+                            colours,
+                        );
+                    } else {
+                        source_grid_widget(ui, &mut routes, colours);
+                        ui.add_space(8.0);
+                        let mut choice = usize::from(mono);
+                        if segmented(ui, &mut choice, &["Stereo", "Mono"]).changed() {
+                            mono = choice == 1;
+                        }
+                        let returns = self.return_slots();
+                        if !returns.is_empty() {
+                            ui.add_space(12.0);
+                            heading(ui, "Sends", colours);
+                            for ret in returns {
+                                let name = self.paths[ret]
+                                    .as_ref()
+                                    .map_or_else(String::new, |p| p.name.clone());
+                                let mut level = self.path_send(slot, ret);
+                                if send_row(
+                                    ui,
+                                    &format!("Send to {name}"),
+                                    &name,
+                                    &mut level,
+                                    colour,
+                                    colours,
+                                ) {
+                                    send_edits.push((slot, ret, level));
+                                }
+                            }
+                        }
                     }
                     ui.add_space(12.0);
                     heading(ui, "Path outputs", colours);
@@ -151,9 +223,10 @@ impl RigWerkApp {
                         {
                             self.set_path_mute(slot, mute);
                         }
-                        if chip(ui, &mut solo, "Solo")
-                            .on_hover_text("While any path is soloed, only soloed paths sound")
-                            .changed()
+                        if !path.mix.is_return()
+                            && chip(ui, &mut solo, "Solo")
+                                .on_hover_text("While any path is soloed, only soloed paths sound")
+                                .changed()
                         {
                             self.set_path_solo(slot, solo);
                         }
@@ -300,7 +373,13 @@ impl RigWerkApp {
         if let Some(index) = colour_pick {
             self.set_path_colour(slot, index);
         }
-        if routes != path.mix.routes {
+        for (sender, ret, level) in send_edits {
+            self.set_path_send(sender, ret, level);
+        }
+        if feed != path.mix.feed {
+            self.set_path_feed(slot, feed);
+        }
+        if routes != path.mix.routes && feed == PathFeed::Input {
             self.set_path_routes(slot, routes);
         }
         if mono != path.mix.mono {
@@ -417,6 +496,89 @@ fn source_grid_widget(ui: &mut egui::Ui, routes: &mut [[bool; 4]; 2], colours: &
                 ui.end_row();
             }
         });
+}
+
+fn note(ui: &mut egui::Ui, text: &str, colours: &Palette) {
+    ui.label(
+        RichText::new(text)
+            .font(font(Face::Sans, TypeRole::GridHeader))
+            .color(colours.text3),
+    );
+}
+
+/// A send level as it reads: *Off* at the bottom of the range.
+pub(crate) fn send_label(db: f32) -> String {
+    if db <= SEND_OFF_DB {
+        "Off".to_owned()
+    } else {
+        level_label(db)
+    }
+}
+
+/// One send: the other path's name, a slider and the level.  `name` is
+/// what the slider is called for a screen reader.  Returns whether it
+/// moved.
+fn send_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    label: &str,
+    level: &mut f32,
+    colour: egui::Color32,
+    colours: &Palette,
+) -> bool {
+    const LABEL_W: f32 = 96.0;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.allocate_ui_with_layout(
+            Vec2::new(LABEL_W, ROW_H),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_width(LABEL_W);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(label)
+                            .font(font(Face::Sans, TypeRole::Body))
+                            .color(colours.text2),
+                    )
+                    .truncate(),
+                );
+            },
+        );
+        ui.spacing_mut().slider_width = (ui.available_width() - VALUE_W - 8.0).max(80.0);
+        ui.visuals_mut().selection.bg_fill = colour;
+        let response = ui
+            .add(
+                egui::Slider::new(level, SEND_OFF_DB..=PATH_LEVEL_MAX_DB)
+                    .show_value(false)
+                    .step_by(0.5)
+                    .handle_shape(egui::style::HandleShape::Circle)
+                    .trailing_fill(true),
+            )
+            .on_hover_text("Send level, after the sending path's level. All the way down is off.");
+        row_info(
+            &response,
+            egui::Role::Slider,
+            true,
+            name,
+            None,
+            Some(send_label(*level)),
+        );
+        changed = response.changed();
+        ui.allocate_ui_with_layout(
+            Vec2::new(VALUE_W, ROW_H),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                ui.set_width(VALUE_W);
+                ui.label(
+                    RichText::new(send_label(*level))
+                        .font(font(Face::Mono, TypeRole::Secondary))
+                        .color(colours.text),
+                );
+            },
+        );
+    });
+    changed
 }
 
 fn level_row(ui: &mut egui::Ui, level: &mut f32, colour: egui::Color32, colours: &Palette) {

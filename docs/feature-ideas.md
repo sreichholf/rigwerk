@@ -88,4 +88,4 @@ make ducking and keyed effects work.
 ## Probably not
 
 A built-in reverb, delay or modulation.  Plugins cover them well, and
-effects on the master make one instance serve every path.
+an effects return makes one instance serve every path.

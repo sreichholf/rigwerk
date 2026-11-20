@@ -4,11 +4,14 @@
 //! 1. The clock side (ring, dropout recovery, drift trimming, rate
 //!    conversion) runs once in [`OutputMixer`].  The PipeWire duplex path
 //!    skips it and takes the frame straight from the graph buffers.
-//! 2. The split: that one stereo frame goes into every live path slot
-//!    ([`PathProcessor`]: routing, EQs, gate, plugin effects).
+//! 2. The split: that one stereo frame goes into every live path slot fed
+//!    by the input ([`PathProcessor`]: routing, EQs, gate, plugin
+//!    effects).  The returns run after them, on their sends (see
+//!    "Returns").
 //! 3. The path gain: level, mute, solo and a removed path's fade-out, as
 //!    one ramp per path.  If any active path is soloed, the others fall
-//!    silent.  A path that goes live while the mixer plays fades in from
+//!    silent; a return is solo-safe.  A path that goes live while the
+//!    mixer plays fades in from
 //!    silence (only the mixer's first block adopts the gains outright), and
 //!    a path whose plugins were restored but not opened yet stays silent
 //!    rather than playing dry.  A removed path whose fade reached silence is
@@ -36,6 +39,25 @@
 //!    the click" is on (see `record`).
 //!    On the ring path, each generic extra output's mapped frame goes into
 //!    that extra output's ring; its own stream plays it (see `extra_output`).
+//!
+//! # Returns
+//!
+//! A return (`PathFeed::Sends`) is not fed by the split.  Its chain runs
+//! after every path fed by the input has finished its block, on the sum of
+//! their sends: each sender's frame after its path gain (level, mute, solo
+//! and fade, taken per frame in [`PathProcessor::fill_gains`]), times its
+//! ramped send level.  Senders with different chain latencies would comb
+//! in that sum, so each sender's frames go into a send line and each
+//! return reads them through its own tap, at the return's slowest
+//! sender's latency minus the sender's: the sends line up with each other
+//! as the paths do on a device.  The wait counts every live path fed by
+//! the input, sending or not, so a send turned on or off does not move the
+//! alignment.  The return's latency for the device alignment is that wait
+//! plus its own chain's (`Shared::alignment_latencies` for the UI).  A
+//! sender whose sends are all off and settled writes no line.  A removed
+//! sender keeps running until its sends have played out of their taps.
+//! A path whose feed changes goes silent first and switches once its gain
+//! is at 0.  The master and the device maps treat a return like any path.
 //!
 //! The plugin chain of a path never drops out of the timing: a chunk that
 //! finds no chain runtime to run (rare: the UI applying an edit to the
@@ -65,13 +87,14 @@ use std::time::Instant;
 
 use super::calibration::CalibrationEmitter;
 use super::click_level_gain;
-use super::delay::DelayLine;
+use super::delay::{DelayLine, DelayTap, TAP_FADE_SECONDS};
 use super::denormal::DenormalGuard;
 use super::metronome::{Metronome, CLICK_LEVEL_DEFAULT_DB};
 use super::output_map::{
     DeviceFrame, DeviceMapper, PathLines, PathTiming, MAX_ALIGN_DELAY, MAX_EXTRA_OUTPUTS,
 };
 use super::path::{LiveSlots, MAX_PATHS};
+use super::plugins::MAX_ALIGN;
 use super::resampler::FrameResampler;
 use super::rt_guard::RtGuard;
 use super::shared::Shared;
@@ -174,6 +197,13 @@ pub(crate) struct OutputMixer {
     /// master is written here, and every device mapper reads it through its
     /// own alignment tap.
     lines: PathLines,
+    /// Each sender's frames after its path gain, for the returns (see
+    /// "Returns").  Written only while the sender has a send on.
+    send_lines: [DelayLine; MAX_PATHS],
+    /// `[sender][return]`: the tap that lines the sender up with the
+    /// return's slowest sender, and the ramped send level.
+    send_taps: [[DelayTap; MAX_PATHS]; MAX_PATHS],
+    send_levels: [[Ramp; MAX_PATHS]; MAX_PATHS],
     /// The master: mute and the output level folded into one effective
     /// gain, ramped per sample so they compose without a step.
     gain: Ramp,
@@ -234,6 +264,9 @@ impl OutputMixer {
             paths: std::array::from_fn(|_| PathProcessor::new(output_rate)),
             live: LiveSlots::default(),
             lines: std::array::from_fn(|_| DelayLine::new(MAX_ALIGN_DELAY as usize)),
+            send_lines: std::array::from_fn(|_| DelayLine::new(MAX_ALIGN as usize)),
+            send_taps: [[DelayTap::default(); MAX_PATHS]; MAX_PATHS],
+            send_levels: std::array::from_fn(|_| std::array::from_fn(|_| Ramp::new(0.0))),
             gain: Ramp::new(1.0),
             gain_adopted: false,
             device: DeviceMapper::new(device_channels),
@@ -375,12 +408,14 @@ impl OutputMixer {
             if restarted {
                 // A reused slot never replays what it held before.
                 self.lines[slot].reset();
+                self.send_lines[slot].reset();
             }
             // Unclamped, so the report can flag a chain past MAX_ALIGN; the
             // alignment itself clamps.
             timing.latency[slot] = path.latency_raw;
             path.reserve_block(frames);
         }
+        self.begin_sends(shared, samples, &mut timing);
         let silent = shared.mute.load(Ordering::Relaxed);
         let gain = if silent { 0.0 } else { shared.output_gain() };
         if self.gain_adopted {
@@ -455,12 +490,112 @@ impl OutputMixer {
         }
     }
 
-    /// Splits one input frame into every live path.  Their chains run in
-    /// [`Self::finish_block`].
+    /// Points every send at this block's level and lines up the senders
+    /// of each live return (see "Returns"), and adds each return's wait to
+    /// its latency in `timing`.  Only a live path fed by the input sends.
+    fn begin_sends(&mut self, shared: &Shared, samples: f32, timing: &mut PathTiming) {
+        let fade = TAP_FADE_SECONDS * self.output_rate as f32;
+        for ret in 0..MAX_PATHS {
+            let live_return = self.live.contains(ret) && self.paths[ret].is_return;
+            // The wait counts every live path fed by the input, sending or
+            // not, so turning a send on or off never moves the alignment
+            // (as muting a path does not).
+            let mut wait = 0;
+            // A send that was silent starts at its delay instead of fading
+            // its tap there.
+            let was_off: [bool; MAX_PATHS] =
+                std::array::from_fn(|sender| self.send_levels[sender][ret].is_settled_at(0.0));
+            for sender in 0..MAX_PATHS {
+                let level = &mut self.send_levels[sender][ret];
+                let sends = live_return
+                    && sender != ret
+                    && self.live.contains(sender)
+                    && !self.paths[sender].is_return;
+                if !sends {
+                    level.snap(0.0);
+                    continue;
+                }
+                let gain = shared.paths[sender].send_gain(ret);
+                level.set_target(gain, samples);
+                wait = wait.max(self.paths[sender].latency());
+            }
+            if !live_return {
+                continue;
+            }
+            for (sender, off) in was_off.into_iter().enumerate() {
+                let tap = &mut self.send_taps[sender][ret];
+                let delay = wait.saturating_sub(self.paths[sender].latency());
+                if off {
+                    tap.snap(delay);
+                } else {
+                    tap.set_target(delay, fade);
+                }
+            }
+            timing.latency[ret] = timing.latency[ret].saturating_add(wait);
+        }
+    }
+
+    /// Stages each live return's block from its senders' sends: each
+    /// sender's frame after its path gain, through its tap, at its send
+    /// level.  Runs after the senders' chains and [`PathProcessor::fill_gains`].
+    fn mix_sends(&mut self, frames: usize) {
+        let live = self.live;
+        let Self {
+            paths,
+            send_lines,
+            send_taps,
+            send_levels,
+            ..
+        } = self;
+        let mut sending = [false; MAX_PATHS];
+        for sender in live.iter() {
+            sending[sender] = !paths[sender].is_return
+                && send_levels[sender]
+                    .iter()
+                    .any(|level| !level.is_settled_at(0.0));
+            if !sending[sender] {
+                // Nothing reads it; a send turned on later starts clean.
+                send_lines[sender].reset();
+            }
+        }
+        for index in 0..frames {
+            for sender in live.iter() {
+                if !sending[sender] {
+                    continue;
+                }
+                let path = &paths[sender];
+                let gain = path.gains[index];
+                let [left, right, _, _] = path.block[index];
+                send_lines[sender].push([left * gain, right * gain]);
+            }
+            for ret in live.iter() {
+                if !paths[ret].is_return {
+                    continue;
+                }
+                let mut sum = [0.0f32; 2];
+                for sender in live.iter() {
+                    let level = &mut send_levels[sender][ret];
+                    if !sending[sender] || level.is_settled_at(0.0) {
+                        continue;
+                    }
+                    let level = level.next();
+                    let frame = send_taps[sender][ret].next(&send_lines[sender], 0);
+                    sum[0] += frame[0] * level;
+                    sum[1] += frame[1] * level;
+                }
+                paths[ret].stage_input(index, sum[0], sum[1]);
+            }
+        }
+    }
+
+    /// Splits one input frame into every live path fed by the input.  Their
+    /// chains run in [`Self::finish_block`].  A return is staged there.
     #[inline]
     fn stage_front(&mut self, index: usize, left: f32, right: f32) {
         for slot in self.live.iter() {
-            self.paths[slot].stage_input(index, left, right);
+            if !self.paths[slot].is_return {
+                self.paths[slot].stage_input(index, left, right);
+            }
         }
     }
 
@@ -485,15 +620,20 @@ impl OutputMixer {
         mut write: impl WriteFrame,
     ) {
         let live = self.live;
-        // Every front runs before any plugin can touch the float mode.
+        // Every front runs before any plugin can touch the float mode.  The
+        // returns run after the paths they hear.
         let mut mark = Instant::now();
         for slot in live.iter() {
-            self.paths[slot].run_front(frames);
-            mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+            if !self.paths[slot].is_return {
+                self.paths[slot].run_front(frames);
+                mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+            }
         }
         for slot in live.iter() {
-            self.paths[slot].run_effects(&shared.paths[slot], frames);
-            mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+            if !self.paths[slot].is_return {
+                self.paths[slot].run_effects(&shared.paths[slot], frames);
+                mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+            }
         }
 
         // A plugin may have cleared flush-to-zero; the POST gate, post EQ
@@ -504,9 +644,44 @@ impl OutputMixer {
         mark = Instant::now();
         let mut total_ns = 0u64;
         for slot in live.iter() {
-            self.paths[slot].finish_block(&shared.paths[slot], frames);
-            mark = self.paths[slot].add_dsp_time(mark, Instant::now());
-            total_ns += self.paths[slot].publish_dsp(&shared.paths[slot], frames, self.output_rate);
+            if !self.paths[slot].is_return {
+                self.paths[slot].finish_block(&shared.paths[slot], frames);
+                mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+                total_ns +=
+                    self.paths[slot].publish_dsp(&shared.paths[slot], frames, self.output_rate);
+            }
+        }
+        for slot in live.iter() {
+            self.paths[slot].fill_gains(frames);
+        }
+        if live.iter().any(|slot| self.paths[slot].is_return) {
+            let start = Instant::now();
+            self.mix_sends(frames);
+            mark = Instant::now();
+            total_ns += mark.saturating_duration_since(start).as_nanos() as u64;
+            for slot in live.iter() {
+                if self.paths[slot].is_return {
+                    self.paths[slot].run_front(frames);
+                    mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+                }
+            }
+            for slot in live.iter() {
+                if self.paths[slot].is_return {
+                    self.paths[slot].run_effects(&shared.paths[slot], frames);
+                    mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+                }
+            }
+            // The returns' effects may have cleared it again.
+            let _return_denormals = DenormalGuard::new();
+            mark = Instant::now();
+            for slot in live.iter() {
+                if self.paths[slot].is_return {
+                    self.paths[slot].finish_block(&shared.paths[slot], frames);
+                    mark = self.paths[slot].add_dsp_time(mark, Instant::now());
+                    total_ns +=
+                        self.paths[slot].publish_dsp(&shared.paths[slot], frames, self.output_rate);
+                }
+            }
         }
         // The total's peak is the peak of each block's sum: paths that peak
         // in different blocks must not add up.
@@ -539,7 +714,7 @@ impl OutputMixer {
                 let path = &mut self.paths[slot];
                 let mut out = path.block[index];
                 // Path level, mute, solo and fade; unity copies.
-                let path_gain = path.gain.next();
+                let path_gain = path.gains[index];
                 if path_gain != 1.0 {
                     for value in out.iter_mut() {
                         *value *= path_gain;
@@ -620,11 +795,23 @@ impl OutputMixer {
             let drain = match path.drain {
                 Some(left) => left.saturating_sub(frames as u32),
                 // Went silent in this block: from here, the longest tap on
-                // the clock output or a live extra output still has to play out.
-                None => self.extra_outputs[..self.live_extra_outputs]
-                    .iter()
-                    .map(|mapper| mapper.tap_delay(slot))
-                    .fold(self.device.tap_delay(slot), u32::max),
+                // the clock output or a live extra output still has to play
+                // out, and so does the longest of its sends into a return.
+                None => {
+                    let sends = live
+                        .iter()
+                        .filter(|&ret| {
+                            self.paths[ret].is_return
+                                && !self.send_levels[slot][ret].is_settled_at(0.0)
+                        })
+                        .map(|ret| self.send_taps[slot][ret].longest())
+                        .fold(0, u32::max);
+                    self.extra_outputs[..self.live_extra_outputs]
+                        .iter()
+                        .map(|mapper| mapper.tap_delay(slot))
+                        .fold(self.device.tap_delay(slot), u32::max)
+                        .max(sends)
+                }
             };
             self.paths[slot].drain = Some(drain);
             if drain == 0 {

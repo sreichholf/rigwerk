@@ -22,14 +22,30 @@ the scope; and the input gain. A click on the device opens Setup › Input.
 
 **Paths.** Up to four, each with:
 
-- a source: which input channels feed it, in stereo or summed to mono;
+- a source: which input channels feed it, in stereo or summed to mono,
+  or *Sends* for an effects return (below);
 - a chain in signal order: Pre EQ, the gate (when before), NAM blocks
   before the effects, the effects, NAM blocks after them, the cab, the
   gate (when after), Post EQ;
 - its latency and DSP load;
 - level, mute and solo.
 
-The dashed column adds an empty path, a duplicate (muted), or applies a
+**Effects return.** A path whose source is *Sends* runs its chain on the
+other paths' sends instead of the input, so one reverb or delay serves
+every path.  Each path fed by the input has a send level to each return,
+taken after its own level, mute and solo; set it in either path's sheet.
+A return keeps its own map, level and timing on each output like any
+path, so per-output mixes still work.  The sends are lined up with each
+other, and the return counts as late as the slowest path fed by the
+input plus its own effects, whether that path sends or not, so turning a
+send on or off never moves the timing.  A return does not send, and it is
+solo-safe: soloing a path keeps the return playing, with only the soloed
+paths' sends.  It has no solo of its own.  Changing a path's source fades
+it out and back in.  The last path fed by the input cannot become a
+return.  Layouts leave returns alone.
+
+The dashed column adds an empty path, an effects return, a duplicate
+(muted), or applies a
 starting layout: *Single path*, *Dry L / Wet R*, *Blend clean*, *Dual
 amp*, *Per-output mixes*. A layout only changes routing; your effects stay
 where they are. The path name menu renames a path, sets its colour,
@@ -80,7 +96,8 @@ the slowest one there. Each output can turn this off when nothing is
 summed on it, and each path has its own level, polarity and a small timing
 trim per output. Paths are lined up within one output, not between
 outputs, and only for delays up to about 0.7 s. A path cannot feed another
-path; duplicate it instead.
+path, except through the sends to an effects return; duplicate it
+instead.
 
 ## Sheets, drawers and diagnostics
 
@@ -111,9 +128,10 @@ and each strip shows a thin meter.
   blocks, and adds no latency.
 - **Effect** has on/bypass, wet, latency, state, its controls, *Editor*,
   *Reset to defaults* and *Remove*.
-- **Path** has name, colour, source, path outputs (which of the path's
-  L and R play at all, before any output), level, mute, solo, duplicate,
-  layouts and its latency on each output it plays on.
+- **Path** has name, colour, source (*Input* or *Sends*), its sends (to
+  each return, or on a return from each path), path outputs (which of the
+  path's L and R play at all, before any output), level, mute, solo,
+  duplicate, layouts and its latency on each output it plays on.
 - **Output** has the channel map grid and its presets, the metronome
   channels, *Channels nothing plays* (mono copy or silent), and per path
   the level here, polarity, trim and when it arrives. The alignment switch
