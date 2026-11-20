@@ -45,6 +45,20 @@ since.
   Adding one more is refused with a message; a saved chain longer than
   that is cut to 32 when it is restored, with only a log line, and the
   next save keeps the 32.
+- **NAM blocks.**  A path holds at most 16 (`nam::MAX_NAM_BLOCKS`), for
+  memory and load time, not as a product rule.  Blocks are ordered among
+  themselves and sit before or after the plugin effects — the two places
+  the built-in stage always had — not between two effects.  A capture at a
+  rate other than the output's still does not install: nothing resamples
+  it.  Each capture's load figure is measured once off the audio thread,
+  at the current rate and output step, and is not measured again when only
+  the buffer size changes; a block's runtime cost is not measured per
+  block.  A reorder dips the touched group to silence for about 20 ms
+  instead of crossfading.  The level match between two blocks uses only the
+  files' `input_level_dbu`/`output_level_dbu`; without them it is 0 dB.
+  Impedance interaction is not modelled, stacked high-gain captures alias
+  at 48 kHz, and captures that already include a boost or a cabinet double
+  up with a pedal or the Cab row.
 - **VSTGUI editor reopened on Linux.**  VSTGUI's X11 run loop closes
   its xcb connection when its last editor closes, without finishing the
   cairo device for it.  If a later editor from the same loaded module
