@@ -1,6 +1,7 @@
 # Screenshots
 
-The images for the [README](../../README.md), and how to take them again.
+The images for the [README](../../README.md) and the
+[manual](../manual.md), and how to take them again.
 Run the commands from the repository root.
 
 The set in this folder is current: it shows the console, its sheets and the
