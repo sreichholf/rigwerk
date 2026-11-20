@@ -83,15 +83,15 @@ fn the_chain_is_in_signal_order_with_the_gate_where_its_slot_says() {
     use crate::audio::{AmpSlot, GateSlot};
     assert_eq!(
         chain_stages(2, GateSlot::Post, AmpSlot::Pre),
-        [PreEq, Amp, Effect(0), Effect(1), Gate, PostEq]
+        [PreEq, Amp, Effect(0), Effect(1), Cab, Gate, PostEq]
     );
     assert_eq!(
         chain_stages(2, GateSlot::Pre, AmpSlot::Pre),
-        [PreEq, Gate, Amp, Effect(0), Effect(1), PostEq]
+        [PreEq, Gate, Amp, Effect(0), Effect(1), Cab, PostEq]
     );
     assert_eq!(
         chain_stages(0, GateSlot::Post, AmpSlot::Pre),
-        [PreEq, Amp, Gate, PostEq]
+        [PreEq, Amp, Cab, Gate, PostEq]
     );
 }
 
@@ -102,16 +102,22 @@ fn the_amp_sits_before_effects_by_default_and_after_when_post() {
     assert_eq!(AmpSlot::default(), AmpSlot::Pre);
     assert_eq!(
         chain_stages(1, GateSlot::Post, AmpSlot::Pre),
-        [PreEq, Amp, Effect(0), Gate, PostEq]
+        [PreEq, Amp, Effect(0), Cab, Gate, PostEq]
     );
     assert_eq!(
         chain_stages(1, GateSlot::Post, AmpSlot::Post),
-        [PreEq, Effect(0), Amp, Gate, PostEq]
+        [PreEq, Effect(0), Amp, Cab, Gate, PostEq]
     );
     assert_eq!(
         chain_stages(1, GateSlot::Pre, AmpSlot::Post),
-        [PreEq, Gate, Effect(0), Amp, PostEq]
+        [PreEq, Gate, Effect(0), Amp, Cab, PostEq]
     );
+    let post = chain_stages(1, GateSlot::Post, AmpSlot::Post);
+    let amp = post.iter().position(|stage| *stage == Amp).expect("amp");
+    let cab = post.iter().position(|stage| *stage == Cab).expect("cab");
+    let gate = post.iter().position(|stage| *stage == Gate).expect("gate");
+    assert_eq!(amp + 1, cab, "the cabinet follows a post amp");
+    assert_eq!(cab + 1, gate, "the cabinet precedes a post gate");
 }
 
 #[test]
@@ -123,10 +129,13 @@ fn neighbours_walk_the_chain_and_stop_at_its_ends() {
     assert_eq!(next(PreEq, GateSlot::Pre), Some(Gate));
     assert_eq!(next(Gate, GateSlot::Pre), Some(Amp));
     assert_eq!(next(Amp, GateSlot::Pre), Some(Effect(0)));
-    assert_eq!(next(Effect(0), GateSlot::Pre), Some(PostEq));
-    assert_eq!(next(Effect(0), GateSlot::Post), Some(Gate));
+    assert_eq!(next(Effect(0), GateSlot::Pre), Some(Cab));
+    assert_eq!(next(Cab, GateSlot::Pre), Some(PostEq));
+    assert_eq!(next(Effect(0), GateSlot::Post), Some(Cab));
+    assert_eq!(next(Cab, GateSlot::Post), Some(Gate));
+    assert_eq!(next(Gate, GateSlot::Post), Some(PostEq));
     assert_eq!(previous(PostEq, GateSlot::Post), Some(Gate));
-    assert_eq!(previous(Gate, GateSlot::Post), Some(Effect(0)));
+    assert_eq!(previous(Gate, GateSlot::Post), Some(Cab));
     assert_eq!(next(PostEq, GateSlot::Post), None);
     assert_eq!(previous(PreEq, GateSlot::Post), None);
     assert_eq!(next(Effect(4), GateSlot::Post), None, "not in the chain");

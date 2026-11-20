@@ -98,9 +98,10 @@ impl PathControls {
         };
         drop(stale);
         drop(returned);
-        // Models the audio side retired, from the same UI-thread flush as
-        // the plugin slots just dropped.
+        // Models and cabinet kernels the audio side retired, from the same
+        // UI-thread flush as the plugin slots just dropped.
         self.amp_park.flush();
+        self.cab_park.flush();
         Some(result)
     }
 
@@ -114,6 +115,7 @@ impl PathControls {
         };
         drop(returned);
         self.amp_park.flush();
+        self.cab_park.flush();
     }
 
     /// The effect at `index` as last published.

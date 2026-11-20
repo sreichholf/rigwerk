@@ -25,6 +25,9 @@ pub(crate) enum Sheet {
     Amp {
         path: usize,
     },
+    Cab {
+        path: usize,
+    },
     /// The effect at `index` of the path's chain.
     Effect {
         path: usize,
@@ -48,6 +51,7 @@ impl Sheet {
             ChainStage::PreEq => Self::Eq { path, post: false },
             ChainStage::Gate => Self::Gate { path },
             ChainStage::Amp => Self::Amp { path },
+            ChainStage::Cab => Self::Cab { path },
             ChainStage::Effect(index) => Self::Effect { path, index },
             ChainStage::PostEq => Self::Eq { path, post: true },
         }
@@ -60,6 +64,7 @@ impl Sheet {
             Self::Eq { path, post: true } => Some((path, ChainStage::PostEq)),
             Self::Gate { path } => Some((path, ChainStage::Gate)),
             Self::Amp { path } => Some((path, ChainStage::Amp)),
+            Self::Cab { path } => Some((path, ChainStage::Cab)),
             Self::Effect { path, index } => Some((path, ChainStage::Effect(index))),
             _ => None,
         }
@@ -81,6 +86,7 @@ impl Sheet {
             "eq" => Self::Eq { path, post: false },
             "gate" => Self::Gate { path },
             "amp" => Self::Amp { path },
+            "cab" => Self::Cab { path },
             "effect" => Self::Effect { path, index: 0 },
             "path" => Self::Path { path },
             "output" => Self::Output { output: 0 },
@@ -276,6 +282,9 @@ impl RigWerkApp {
         }
         if matches!(sheet, Sheet::Amp { .. }) {
             self.amp_rescan = true;
+        }
+        if matches!(sheet, Sheet::Cab { .. }) {
+            self.cab_rescan = true;
         }
         if let Some(path) = sheet.path() {
             self.chrome.reveal_path = Some(path);

@@ -93,8 +93,8 @@ pub(crate) struct AmpInstall {
 impl RigWerkApp {
     /// The rate a path is running at: the opened output, else the planned
     /// output, else the session rate.  A capture that names another rate
-    /// is not installed.
-    fn amp_rate(&self) -> u32 {
+    /// is not installed.  The cabinet resamples to this same rate.
+    pub(crate) fn amp_rate(&self) -> u32 {
         let opened = self.engine.opened_output_rate();
         if opened > 0 {
             opened
@@ -231,6 +231,7 @@ impl RigWerkApp {
             if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
                 path.amp_name.clear();
                 path.amp_error = None;
+                path.amp_gear = None;
                 path.amp_slim_steps.clear();
                 path.amp_mismatch = false;
                 path.amp_file_rate = 0;
@@ -249,6 +250,7 @@ impl RigWerkApp {
                 if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
                     path.amp_name = loaded.name;
                     path.amp_error = None;
+                    path.amp_gear = loaded.gear_type;
                     path.amp_slim_steps = loaded.slim_steps;
                     path.amp_mismatch = false;
                     path.amp_file_rate = loaded.file_rate;
@@ -260,6 +262,7 @@ impl RigWerkApp {
                 if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
                     path.amp_name = name;
                     path.amp_error = None;
+                    path.amp_gear = None;
                     path.amp_slim_steps.clear();
                     path.amp_mismatch = true;
                     path.amp_file_rate = file_rate;
@@ -279,6 +282,7 @@ impl RigWerkApp {
                 if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
                     path.amp_name = stem;
                     path.amp_error = Some(error);
+                    path.amp_gear = None;
                     path.amp_slim_steps.clear();
                     path.amp_mismatch = false;
                     path.amp_file_rate = 0;
@@ -339,13 +343,13 @@ fn platform_ctrl_v_down() -> bool {
     }
 }
 
-fn looks_pasted(previous: &str, edited: &str) -> bool {
+pub(crate) fn looks_pasted(previous: &str, edited: &str) -> bool {
     edited.chars().count() > previous.chars().count().saturating_add(1)
 }
 
 /// The edited text is a directory, or it matches the clipboard and the
 /// clipboard also holds a copied folder.
-fn pasted_folder(edited: &str) -> Option<String> {
+pub(crate) fn pasted_folder(edited: &str) -> Option<String> {
     let normalized = normalize_amp_folder(edited);
     if Path::new(&normalized).is_dir() {
         return Some(normalized);
@@ -359,7 +363,7 @@ fn pasted_folder(edited: &str) -> Option<String> {
     file_list_folder(&mut board)
 }
 
-fn clipboard_models_folder() -> Option<String> {
+pub(crate) fn clipboard_models_folder() -> Option<String> {
     let mut board = arboard::Clipboard::new().ok()?;
     let text = board.get_text().ok();
     if let Some(folder) = text.as_deref().map(normalize_amp_folder) {
@@ -393,7 +397,7 @@ fn file_list_folder(board: &mut arboard::Clipboard) -> Option<String> {
     }
 }
 
-fn browse_start(folder: &str) -> Option<PathBuf> {
+pub(crate) fn browse_start(folder: &str) -> Option<PathBuf> {
     let path = PathBuf::from(folder);
     if path.is_dir() {
         Some(path)

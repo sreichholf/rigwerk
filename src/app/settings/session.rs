@@ -159,6 +159,7 @@ impl Session {
             eq_post: self.eq_post.unwrap_or(current.eq_post),
             gate: self.gate.unwrap_or(current.gate),
             amp: current.amp.clone(),
+            cab: current.cab.clone(),
             plugins: std::mem::take(&mut self.plugins),
             chain_bypass: false,
             level_db: 0.0,

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use super::amp::{AmpPark, PreparedAmp};
 use super::asio_panel::AsioPanelSide;
 use super::bridge::run_bridge;
+use super::cab::{CabKernel, CabPark};
 use super::calibration::CalibrationState;
 #[cfg(target_os = "linux")]
 use super::linux::pipewire;
@@ -99,6 +100,8 @@ pub struct AudioEngine {
     /// Park for every run this engine starts.  Outlives a bridge thread so
     /// that thread can hand models back without dropping them.
     amp_park: Arc<AmpPark>,
+    /// Park for cabinet kernels.  Same lifetime as [`Self::amp_park`].
+    cab_park: Arc<CabPark>,
     /// Bumped in [`Self::replace_run`].  The UI reinstalls captures when it
     /// changes, because a new run does not inherit a live model.
     run_id: u64,
@@ -108,9 +111,11 @@ impl AudioEngine {
     pub fn new(sample_rate: u32) -> Self {
         let shared = Shared::new(sample_rate);
         let amp_park = Arc::clone(shared.amp_park());
+        let cab_park = Arc::clone(shared.cab_park());
         Self {
             shared: Arc::new(shared),
             amp_park,
+            cab_park,
             run_id: 1,
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
@@ -347,7 +352,8 @@ impl AudioEngine {
     }
 
     /// Every path slot's chain latency in samples (0 for unused slots), as
-    /// the alignment counts it.  The amp adds none.
+    /// the alignment counts it.  The amp adds none, and the cabinet adds
+    /// none either.
     pub fn path_latencies(&self) -> [u32; MAX_PATHS] {
         std::array::from_fn(|slot| self.shared.path(slot).latency_samples())
     }
@@ -377,6 +383,20 @@ impl AudioEngine {
     pub(crate) fn clear_amp(&self, slot: usize) {
         if slot < MAX_PATHS {
             self.shared.path(slot).clear_amp();
+        }
+    }
+
+    /// Queues a cabinet kernel.  UI thread only.
+    pub(crate) fn queue_cab(&self, slot: usize, kernel: CabKernel) {
+        if slot < MAX_PATHS {
+            self.shared.path(slot).queue_cab(kernel);
+        }
+    }
+
+    /// Asks the next block to take the live kernel out.  UI thread only.
+    pub(crate) fn clear_cab(&self, slot: usize) {
+        if slot < MAX_PATHS {
+            self.shared.path(slot).clear_cab();
         }
     }
 
@@ -861,14 +881,20 @@ impl AudioEngine {
     fn replace_run(&mut self) {
         // The old writer finishes on the Arc it kept at arm.  Shared::new
         // below builds a fresh recorder for the run that replaces it.
-        // The live amp model does not move: the UI installs it again from
-        // the saved path, which it notices because `run_id` changed.
-        // Models already parked are dropped here, on the UI thread.
+        // The live amp model and cabinet kernel do not move: the UI
+        // installs them again from the saved paths, which it notices
+        // because `run_id` changed.  Kernels already parked are dropped
+        // here, on the UI thread.
         self.disarm_recording();
         self.run_id = self.run_id.wrapping_add(1);
         self.amp_park.flush();
+        self.cab_park.flush();
         let previous = Arc::clone(&self.shared);
-        let mut run = Shared::with_park(self.sample_rate, Arc::clone(&self.amp_park));
+        let mut run = Shared::with_park(
+            self.sample_rate,
+            Arc::clone(&self.amp_park),
+            Arc::clone(&self.cab_park),
+        );
         run.adopt_settings_from(&previous);
         self.shared = Arc::new(run);
         drop(previous);
@@ -1249,11 +1275,13 @@ impl Drop for AudioEngine {
             // last owner of the park, or the models would be destroyed
             // there.  This clone is never dropped.
             std::mem::forget(Arc::clone(&self.amp_park));
+            std::mem::forget(Arc::clone(&self.cab_park));
         } else {
-            // Every bridge has joined, so the models they parked are the
-            // only ones left, and this is the UI thread (or process exit
-            // on it).
+            // Every bridge has joined, so the models and kernels they
+            // parked are the only ones left, and this is the UI thread (or
+            // process exit on it).
             self.amp_park.flush();
+            self.cab_park.flush();
         }
     }
 }

@@ -37,6 +37,9 @@ plans and the code review has landed; that history is in git.
 Recorded when the review fixes landed (November 2026), not re-checked
 since.
 
+- **Cabinet IR.**  A cabinet impulse response is truncated to 50 ms at
+  rates up to 192 kHz, and to 9600 taps above that.  The first 128 taps
+  are direct; the rest is partitioned FFT convolution.
 - **Effect limit.**  A path holds at most 32 effects
   (`plugins::MAX_EFFECTS`): the audio side's slot list is allocated once.
   Adding one more is refused with a message; a saved chain longer than

@@ -41,6 +41,8 @@ fn every_strip_names_its_controls() {
         "Input gain level",
         "Source",
         "Pre EQ",
+        "Amp",
+        "Cab",
         "Gate",
         "Post EQ",
         "+ Add effect",

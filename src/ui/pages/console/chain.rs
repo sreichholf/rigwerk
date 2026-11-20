@@ -65,19 +65,36 @@ impl RigWerkApp {
     ) {
         // The amp row shows its capture across the row, like an effect
         // shows its plugin; with none chosen it reads "Amp" and "Off".
-        let Some((mix, amp_shown, amp_mark, amp_failed, amp_reason)) =
-            self.paths[slot].as_ref().map(|path| {
-                let none = path.amp_model.trim().is_empty();
-                let shown = (!none && !path.amp_name.is_empty()).then(|| path.amp_name.clone());
-                let mark = if none { "Off" } else { "" };
-                (
-                    path.mix,
-                    shown,
-                    mark,
-                    path.amp_error.is_some(),
-                    path.amp_error.clone(),
-                )
-            })
+        // The cabinet row does the same for the impulse response.
+        let Some((
+            mix,
+            amp_shown,
+            amp_mark,
+            amp_failed,
+            amp_reason,
+            cab_shown,
+            cab_mark,
+            cab_failed,
+            cab_reason,
+        )) = self.paths[slot].as_ref().map(|path| {
+            let none = path.amp_model.trim().is_empty();
+            let shown = (!none && !path.amp_name.is_empty()).then(|| path.amp_name.clone());
+            let mark = if none { "Off" } else { "" };
+            let cab_none = path.cab_file.trim().is_empty();
+            let cab_shown = (!cab_none && !path.cab_name.is_empty()).then(|| path.cab_name.clone());
+            let cab_mark = if cab_none { "Off" } else { "" };
+            (
+                path.mix,
+                shown,
+                mark,
+                path.amp_error.is_some(),
+                path.amp_error.clone(),
+                cab_shown,
+                cab_mark,
+                path.cab_error.is_some(),
+                path.cab_error.clone(),
+            )
+        })
         else {
             return;
         };
@@ -145,9 +162,9 @@ impl RigWerkApp {
         }
 
         // What stays below the group: + Add effect, the amp after the
-        // effects, the gate after the effects, Post EQ.
+        // effects, the cabinet, the gate after the effects, Post EQ.
         let gap = ui.spacing().item_spacing.y;
-        let tail_rows = 2.0
+        let tail_rows = 3.0
             + f32::from(u8::from(mix.amp.slot == AmpSlot::Post))
             + f32::from(u8::from(mix.gate.slot == GateSlot::Post));
         let used = ui.cursor().top() - top;
@@ -172,6 +189,18 @@ impl RigWerkApp {
                 rate,
             );
         }
+        self.builtin_row(
+            ui,
+            slot,
+            ChainStage::Cab,
+            "Cab",
+            cab_shown.as_deref(),
+            ChainMark::Label(cab_mark),
+            cab_failed,
+            cab_reason.as_deref(),
+            show_curve,
+            rate,
+        );
         if mix.gate.slot == GateSlot::Post {
             self.builtin_row(
                 ui,
@@ -200,7 +229,7 @@ impl RigWerkApp {
         );
     }
 
-    /// One pinned row: an EQ, the gate, or the amp.
+    /// One pinned row: an EQ, the gate, the amp, or the cabinet.
     #[allow(clippy::too_many_arguments)]
     fn builtin_row(
         &mut self,

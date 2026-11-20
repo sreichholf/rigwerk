@@ -1,6 +1,7 @@
 //! One signal path's controls, as the UI writes them and the audio
 //! callback reads them: input routing, mono, channel enable, the two
-//! built-in EQs, the gate, the plugin effect chain and the path meters.
+//! built-in EQs, the gate, the built-in amp, the plugin effect chain, the
+//! cabinet and the path meters.
 //!
 //! [`Shared`](super::shared::Shared) holds [`MAX_PATHS`] of these as fixed
 //! slots, all preallocated, so adding a path never allocates in a callback.
@@ -41,7 +42,9 @@
 //! an effect's dry/wet mix delays its dry side (see `ChainRuntime::process`).
 //! A path-level chain bypass skips every effect the same way, and the total
 //! still counts.  The mixer lines the paths up per device with it (`output_map`,
-//! "Alignment").  The built-in amp adds no latency.
+//! "Alignment").  The built-in amp adds no latency.  The cabinet adds none
+//! either: a short direct head plus partitioned overlap-save, and a delay
+//! that is the impulse itself is not reported here.
 //!
 //! The plugin-chain side of [`PathControls`] (edits, publish, controls,
 //! servicing, state) is in `plugins`, with how a chain is handed between
@@ -53,6 +56,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use super::amp::{AmpCommand, AmpControls, AmpPark, PreparedAmp};
+use super::cab::{CabCommand, CabControls, CabKernel, CabPark};
 use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::output_map::level_gain;
@@ -94,10 +98,10 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
 }
 
 /// The settings of one path the UI owns and pushes: input routing, mono,
-/// channel enable, the two EQs, the gate, the amp, the path level, mute
-/// and solo, and the effect-chain bypass.  The plugin chain and the amp
-/// capture live in the engine ([`PathControls`]); the capture's path is
-/// not copied onto the audio thread.
+/// channel enable, the two EQs, the gate, the amp, the cabinet, the path
+/// level, mute and solo, and the effect-chain bypass.  The plugin chain,
+/// the amp capture, and the cabinet kernel live in the engine
+/// ([`PathControls`]); neither file path is copied onto the audio thread.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathMix {
     /// The 2 × 4 input routing (input × tap).  Only taps 1/2 (the path's
@@ -111,6 +115,8 @@ pub struct PathMix {
     pub gate: GateSettings,
     /// Built-in amp.  The `.nam` path is not here: this stays [`Copy`].
     pub amp: AmpControls,
+    /// Built-in cabinet.  The impulse path is not here: this stays [`Copy`].
+    pub cab: CabControls,
     /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
     pub level_db: f32,
     pub mute: bool,
@@ -129,6 +135,7 @@ impl Default for PathMix {
             eqs: [EqSettings::default(), EqSettings::default()],
             gate: GateSettings::default(),
             amp: AmpControls::default(),
+            cab: CabControls::default(),
             level_db: 0.0,
             mute: false,
             solo: false,
@@ -144,6 +151,7 @@ impl PathMix {
             eqs: self.eqs.map(EqSettings::sanitized),
             gate: self.gate.sanitized(),
             amp: self.amp.sanitized(),
+            cab: self.cab.sanitized(),
             level_db: sanitize_path_level(self.level_db),
             ..self
         }
@@ -427,6 +435,17 @@ pub(crate) struct PathControls {
     /// Where a model the audio side has let go of waits to be dropped.
     /// Shared with the engine so a bridge-thread drop can park it.
     amp_park: Arc<AmpPark>,
+    /// Built-in cabinet controls.  The callback copies them with `try_lock`.
+    /// The kernel itself is [`pending_cab`], never this lock.
+    cab: Mutex<CabControls>,
+    cab_version: AtomicU64,
+    /// A kernel the UI has prepared, waiting for the next block.  The
+    /// callback only `try_lock`s this.  Dropping a replaced kernel happens
+    /// on the UI thread, in [`Self::queue_cab`].
+    pending_cab: Mutex<Option<CabCommand>>,
+    /// Where a kernel the audio side has let go of waits to be dropped.
+    /// Shared with the engine so a bridge-thread drop can park it.
+    cab_park: Arc<CabPark>,
 }
 
 impl PathControls {
@@ -434,10 +453,14 @@ impl PathControls {
     /// a run shares one park via [`Self::with_park`].
     #[cfg(test)]
     pub(crate) fn new(sample_rate: u32) -> Self {
-        Self::with_park(sample_rate, AmpPark::new())
+        Self::with_park(sample_rate, AmpPark::new(), CabPark::new())
     }
 
-    pub(crate) fn with_park(sample_rate: u32, amp_park: Arc<AmpPark>) -> Self {
+    pub(crate) fn with_park(
+        sample_rate: u32,
+        amp_park: Arc<AmpPark>,
+        cab_park: Arc<CabPark>,
+    ) -> Self {
         let chain_bypass = Arc::new(AtomicBool::new(false));
         let chain = ChainModel::new(sample_rate, Arc::clone(&chain_bypass));
         Self {
@@ -491,6 +514,10 @@ impl PathControls {
             amp_version: AtomicU64::new(1),
             pending_amp: Mutex::new(None),
             amp_park,
+            cab: Mutex::new(CabControls::default()),
+            cab_version: AtomicU64::new(1),
+            pending_cab: Mutex::new(None),
+            cab_park,
         }
     }
 
@@ -533,6 +560,12 @@ impl PathControls {
             // run that loaded it; the UI installs it again from the saved path.
             let settings = previous.amp.lock().unwrap_or_else(PoisonError::into_inner);
             self.set_amp(*settings);
+        }
+        {
+            // The numeric cabinet controls move.  The live kernel stays with
+            // the run that loaded it; the UI installs it again from the saved path.
+            let settings = previous.cab.lock().unwrap_or_else(PoisonError::into_inner);
+            self.set_cab(*settings);
         }
         // Only an active path carries its chain over; a removed one starts
         // the new run empty.  Capture the old instances' state on this
@@ -654,6 +687,7 @@ impl PathControls {
         }
         self.set_gate(mix.gate);
         self.set_amp(mix.amp);
+        self.set_cab(mix.cab);
         self.set_level_db(mix.level_db);
         self.set_mute(mix.mute);
         self.set_solo(mix.solo);
@@ -683,6 +717,7 @@ impl PathControls {
             eqs: [eq(EqSlot::Pre), eq(EqSlot::Post)],
             gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
             amp: *self.amp.lock().unwrap_or_else(PoisonError::into_inner),
+            cab: *self.cab.lock().unwrap_or_else(PoisonError::into_inner),
             level_db: self.level_db(),
             mute: self.muted(),
             solo: self.soloed(),
@@ -897,6 +932,67 @@ impl PathControls {
             Err(std::sync::TryLockError::WouldBlock) => Err(()),
         }
     }
+
+    /// Applies new cabinet controls.  Does not read or resample an impulse.
+    pub(crate) fn set_cab(&self, settings: CabControls) {
+        let settings = settings.sanitized();
+        if let Ok(mut current) = self.cab.lock() {
+            if *current != settings {
+                *current = settings;
+                self.cab_version.fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
+    pub(crate) fn cab_version(&self) -> u64 {
+        self.cab_version.load(Ordering::Acquire)
+    }
+
+    /// The current controls, or `None` if the UI holds the lock right now.
+    pub(crate) fn try_cab(&self) -> Option<CabControls> {
+        self.cab.try_lock().ok().map(|settings| *settings)
+    }
+
+    pub(crate) fn cab_park(&self) -> &Arc<CabPark> {
+        &self.cab_park
+    }
+
+    /// Queues a kernel for the next block.  A kernel still waiting is
+    /// dropped here, on the UI thread.  The same path at the same rate is
+    /// the caller's to skip; this always replaces.
+    pub(crate) fn queue_cab(&self, kernel: CabKernel) {
+        let mut slot = self
+            .pending_cab
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(CabCommand::Install(old)) = slot.replace(CabCommand::Install(kernel)) {
+            drop(old);
+        }
+    }
+
+    /// Asks the next block to take the live kernel out of the processor.
+    /// A kernel still waiting is dropped here, on the UI thread.
+    pub(crate) fn clear_cab(&self) {
+        let mut slot = self
+            .pending_cab
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(CabCommand::Install(old)) = slot.replace(CabCommand::Clear) {
+            drop(old);
+        }
+    }
+
+    /// The queued command, if the UI is not holding it.  The callback puts
+    /// a command back when it cannot park the kernel it would replace.
+    pub(crate) fn pending_cab_mut(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<CabCommand>>, ()> {
+        match self.pending_cab.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(poison)) => Ok(poison.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Err(()),
+        }
+    }
 }
 
 impl Drop for PathControls {
@@ -914,6 +1010,13 @@ impl Drop for PathControls {
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(AmpCommand::Install(prepared)) = pending.take() {
             self.amp_park.retire(prepared.model);
+        }
+        let pending = self
+            .pending_cab
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(CabCommand::Install(kernel)) = pending.take() {
+            self.cab_park.retire(kernel);
         }
     }
 }

@@ -3,7 +3,8 @@
 //! This is navigation state on [`RigWerkApp`](crate::app::RigWerkApp), not
 //! paint.  Stage colours stay in `ui`.  [`chain_stages`] is the signal
 //! order the console draws and the sheet's ‹ › walk: the gate and the amp
-//! each sit before or after the effects as their slots say.
+//! each sit before or after the effects as their slots say.  The cabinet
+//! always sits after the effects and after the amp.
 
 use crate::audio::{AmpSlot, EqSlot, GateSlot};
 
@@ -15,14 +16,16 @@ pub(crate) enum ChainStage {
     Amp,
     /// The effect at this index of the path's chain.
     Effect(usize),
+    /// The cabinet, after the effects and after the amp.
+    Cab,
     PostEq,
 }
 
 /// A chain's stages in the order the sound passes them: *Pre EQ*, the gate
 /// when it sits before the effects, the amp when it does, the effects, the
-/// amp when after, the gate when after, and *Post EQ*.
+/// amp when after, the cabinet, the gate when after, and *Post EQ*.
 pub(crate) fn chain_stages(effects: usize, gate: GateSlot, amp: AmpSlot) -> Vec<ChainStage> {
-    let mut stages = Vec::with_capacity(effects + 4);
+    let mut stages = Vec::with_capacity(effects + 5);
     stages.push(ChainStage::PreEq);
     if gate == GateSlot::Pre {
         stages.push(ChainStage::Gate);
@@ -34,6 +37,7 @@ pub(crate) fn chain_stages(effects: usize, gate: GateSlot, amp: AmpSlot) -> Vec<
     if amp == AmpSlot::Post {
         stages.push(ChainStage::Amp);
     }
+    stages.push(ChainStage::Cab);
     if gate == GateSlot::Post {
         stages.push(ChainStage::Gate);
     }
@@ -69,6 +73,7 @@ pub(crate) enum ChainSelection {
     Plugin(usize),
     Gate,
     Amp,
+    Cab,
     PostEq,
     /// The master stage: master level and mute, and the device list.
     Output,
@@ -127,6 +132,7 @@ impl ChainSelection {
             ChainStage::Gate => Self::Gate,
             ChainStage::Amp => Self::Amp,
             ChainStage::Effect(index) => Self::Plugin(index),
+            ChainStage::Cab => Self::Cab,
             ChainStage::PostEq => Self::PostEq,
         }
     }
@@ -154,6 +160,7 @@ impl crate::app::RigWerkApp {
             ChainStage::PostEq => path.mix.eqs[1].enabled,
             ChainStage::Gate => path.mix.gate.enabled,
             ChainStage::Amp => path.mix.amp.enabled,
+            ChainStage::Cab => path.mix.cab.enabled,
             ChainStage::Effect(index) => self
                 .engine
                 .plugin_views(slot)
@@ -179,6 +186,7 @@ impl crate::app::RigWerkApp {
             ChainStage::PostEq => path.mix.eqs[1].enabled = on,
             ChainStage::Gate => path.mix.gate.enabled = on,
             ChainStage::Amp => path.mix.amp.enabled = on,
+            ChainStage::Cab => path.mix.cab.enabled = on,
             ChainStage::Effect(_) => {}
         }
     }

@@ -6,6 +6,7 @@
 //! *Bypass* for a stage, ‹ › through the chain, ×) and picks the body.
 
 pub(crate) mod amp;
+pub(crate) mod cab;
 pub(crate) mod diagnostics;
 pub(crate) mod effect;
 pub(crate) mod eq;
@@ -34,6 +35,7 @@ impl RigWerkApp {
             Sheet::Eq { post: true, .. } => "Post EQ".to_owned(),
             Sheet::Gate { .. } => "Gate".to_owned(),
             Sheet::Amp { .. } => "Amp".to_owned(),
+            Sheet::Cab { .. } => "Cab".to_owned(),
             Sheet::Path { .. } => "Path".to_owned(),
             Sheet::Effect { path, index } => self
                 .engine
@@ -161,6 +163,7 @@ impl RigWerkApp {
                 Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
                 Sheet::Gate { path } => self.gate_sheet(ui, path),
                 Sheet::Amp { path } => self.amp_sheet(ui, path),
+                Sheet::Cab { path } => self.cab_sheet(ui, path),
                 Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
                 Sheet::Path { path } => self.path_sheet(ui, path),
                 Sheet::Output { output } => self.output_sheet(ui, output),
