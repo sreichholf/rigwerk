@@ -600,13 +600,6 @@ impl Lv2Instance {
         }
     }
 
-    /// The native value of a normalized one at `index` of the table.
-    #[allow(dead_code)] // For the direct control write from a pause.
-    pub(crate) fn native(&self, index: usize, value: f64) -> Option<(u32, f64)> {
-        let range = self.ranges.get(index)?;
-        Some((range.id, range.denormalise(value)))
-    }
-
     /// Whether `id` is a control the plugin reports, which the host never
     /// sets.
     pub(crate) fn is_read_only(&self, id: u32) -> bool {

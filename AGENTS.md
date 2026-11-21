@@ -172,7 +172,8 @@ CARGO_TARGET_DIR=$PWD/target scripts/nam-null-test.sh .nam-null
 
 ## Layout
 
-- `src/audio`: the bridge, DSP, and device backends. `audio.rs` is the
+- `src/audio`: the bridge, DSP, device backends, and the plugin hosts
+  (`audio/vst3`, `audio/clap`, `audio/lv2`). `audio.rs` is the
   map of that crate.
 - `src/app`: window state, startup, preferences, device selection, and
   bridge control. It does not draw. The frame shell lives in

@@ -21,6 +21,23 @@ plans and the code review has landed; that history is in git.
   never loads a binary (`audio/vst3/scan.rs`).  Loading it takes the
   factory's first audio class, so a second class in such a bundle cannot
   be picked, and an instrument in one is listed too.
+- LV2 effects use RigWerk's parameter panel only; their X11 and Windows
+  UIs are not embedded yet.
+- The LV2 host is effects-only: no MIDI, time position, `patch:`
+  parameters, CV ports or presets, and atom ports are connected empty.  A
+  plugin whose only controls are `patch:writable` properties therefore has
+  no panel controls.  An optional CV or unknown port is connected to a
+  silent buffer or left unconnected; a required one is a load error.
+- LV2 plugins that require a fixed or power-of-two block length, `log:log`,
+  `state:makePath`, `instance-access`, `data-access`, `resize-port` or an
+  option the host does not supply are listed with an error and refuse to
+  load.  A default state (`state:loadDefaultState`) restores only the
+  values that have a plain atom form: paths, URIs, numbers, booleans and
+  strings.
+- LV2 worker responses are delivered before a `run`; a bypassed effect
+  keeps them, and values set while no audio runs stay queued until the
+  next processed block.  State saves keep only `LV2_STATE_IS_POD` values
+  and accept empty values (some plugins store empty defaults).
 
 ## Not reproduced
 
