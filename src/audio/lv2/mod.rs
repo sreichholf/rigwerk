@@ -13,8 +13,10 @@
 //! `module` keeps one library loaded per binary, the URID map (`urid`) is one
 //! process-wide table that answers from the audio thread without a lock,
 //! `host` owns the feature array an instance receives, `worker` holds the
-//! byte rings a worker request crosses, and `state` turns the plugin's keyed
-//! state properties into the blob the preferences store.
+//! byte rings a worker request crosses and the one process-wide thread that
+//! runs `work` once an instance is registered (a restore's requests run on
+//! the UI thread before that), and `state` turns the plugin's keyed state
+//! properties into the blob the preferences store.
 
 mod host;
 mod instance;

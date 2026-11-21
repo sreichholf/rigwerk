@@ -1,8 +1,10 @@
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use lv2_sys::{
     LV2_Descriptor, LV2_Feature, LV2_Handle,
@@ -13,7 +15,9 @@ use lv2_sys::{
     LV2_State_Status_LV2_STATE_ERR_NO_SPACE as LV2_STATE_ERR_NO_SPACE,
     LV2_State_Status_LV2_STATE_ERR_UNKNOWN as LV2_STATE_ERR_UNKNOWN,
     LV2_State_Status_LV2_STATE_SUCCESS as LV2_STATE_SUCCESS, LV2_State_Store_Function,
-    LV2_Worker_Schedule, LV2_Worker_Status_LV2_WORKER_ERR_NO_SPACE as LV2_WORKER_ERR_NO_SPACE,
+    LV2_Worker_Interface, LV2_Worker_Respond_Function, LV2_Worker_Respond_Handle,
+    LV2_Worker_Schedule, LV2_Worker_Status,
+    LV2_Worker_Status_LV2_WORKER_ERR_NO_SPACE as LV2_WORKER_ERR_NO_SPACE,
     LV2_Worker_Status_LV2_WORKER_ERR_UNKNOWN as LV2_WORKER_ERR_UNKNOWN,
     LV2_Worker_Status_LV2_WORKER_SUCCESS as LV2_WORKER_SUCCESS,
 };
@@ -30,12 +34,15 @@ use super::module::{native_binary, resolve, Descriptors, Lv2Module};
 use super::ports::{
     symbol_id, Buffer, PortBuffers, PortKind, PortTable, ScalePoint, ATOM_CAPACITY,
 };
-use super::processor::Lv2Processor;
+use super::processor::{Lv2Processor, WorkerCallbacks};
 use super::scan::{read_bundle, scan_bundle};
 use super::state;
 use super::ttl::{file_uri, lexical, path_from_file_uri, TtlStore};
 use super::urid;
-use super::worker::{schedule_struct, WorkerRings, RING_BYTES};
+use super::worker::{
+    hold_gate, loops_for_test, register, registered_for_test, respond, schedule_struct, unregister,
+    wake, WorkerRings, RING_BYTES,
+};
 
 const LV2_PLUGIN: &str = "http://lv2plug.in/ns/lv2core#Plugin";
 const LV2_BINARY: &str = "http://lv2plug.in/ns/lv2core#binary";
@@ -821,6 +828,18 @@ fn the_schedule_callback_reports_success_and_no_space() {
     let schedule = schedule_struct(&rings);
     let schedule_work = schedule.schedule_work.expect("a schedule callback");
     let message = b"load the impulse";
+    // Until the load knows the plugin has `work`, nothing is accepted.
+    let status = unsafe {
+        schedule_work(
+            schedule.handle,
+            message.len() as u32,
+            message.as_ptr() as *const c_void,
+        )
+    };
+    assert_eq!(status, LV2_WORKER_ERR_UNKNOWN);
+    assert!(!rings.request_pending());
+
+    rings.accept_requests();
     let status = unsafe {
         schedule_work(
             schedule.handle,
@@ -845,6 +864,419 @@ fn the_schedule_callback_reports_success_and_no_space() {
 
     let status = unsafe { schedule_work(schedule.handle, 4, ptr::null()) };
     assert_eq!(status, LV2_WORKER_ERR_UNKNOWN);
+}
+
+/// The worker thread is one per process, so the tests that block it take
+/// turns; otherwise a `work` that waits would stall another test's request.
+static WORKER_TESTS: Mutex<()> = Mutex::new(());
+
+fn worker_tests() -> std::sync::MutexGuard<'static, ()> {
+    WORKER_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Pops one response, waiting up to two seconds for the worker thread.
+fn wait_for_response(rings: &WorkerRings, out: &mut [u8]) -> usize {
+    for _ in 0..2000 {
+        if let Some(size) = rings.pop_response(out) {
+            return size;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("the worker thread sent no response");
+}
+
+/// How many `work` calls are inside right now.
+static WORK_INSIDE: AtomicU32 = AtomicU32::new(0);
+/// How many `work` calls a test's instance has seen.
+static WORK_CALLS: AtomicU32 = AtomicU32::new(0);
+
+/// A fake `work` that echoes every request back through `respond`.
+unsafe extern "C" fn echoing_work(
+    _instance: LV2_Handle,
+    respond: LV2_Worker_Respond_Function,
+    handle: LV2_Worker_Respond_Handle,
+    size: u32,
+    data: *const c_void,
+) -> LV2_Worker_Status {
+    WORK_CALLS.fetch_add(1, Ordering::SeqCst);
+    WORK_INSIDE.fetch_add(1, Ordering::SeqCst);
+    let status = match respond {
+        Some(respond) => unsafe { respond(handle, size, data) },
+        None => LV2_WORKER_ERR_UNKNOWN,
+    };
+    WORK_INSIDE.fetch_sub(1, Ordering::SeqCst);
+    status
+}
+
+#[test]
+fn the_worker_thread_echoes_requests_in_order_and_forgets_an_unregistered_one() {
+    let _serial = worker_tests();
+    let rings = Arc::new(WorkerRings::new());
+    let interface = LV2_Worker_Interface {
+        work: Some(echoing_work),
+        work_response: None,
+        end_run: None,
+    };
+    let calls = WORK_CALLS.load(Ordering::SeqCst);
+    let instance =
+        register(ptr::null_mut(), &interface, Arc::clone(&rings)).expect("start the worker thread");
+
+    let messages: [&[u8]; 3] = [b"first request", b"", b"a third, longer request"];
+    for message in messages {
+        assert!(rings.push_request(message));
+    }
+    wake(&instance);
+    let mut out = vec![0u8; RING_BYTES];
+    for message in messages {
+        let size = wait_for_response(&rings, &mut out);
+        assert_eq!(&out[..size], message, "a response lost its bytes or order");
+    }
+    assert_eq!(
+        WORK_CALLS.load(Ordering::SeqCst) - calls,
+        messages.len() as u32,
+        "one work call per request"
+    );
+
+    unregister(&instance);
+    assert_eq!(
+        WORK_INSIDE.load(Ordering::SeqCst),
+        0,
+        "the worker was still inside work after unregister"
+    );
+
+    // A removed instance is not looked at again, even with a request in its
+    // ring and a wake.
+    let calls = WORK_CALLS.load(Ordering::SeqCst);
+    assert!(rings.push_request(b"after unregister"));
+    wake(&instance);
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(WORK_CALLS.load(Ordering::SeqCst), calls);
+    assert!(!rings.response_pending());
+    assert_eq!(
+        registered_for_test(),
+        0,
+        "a test left an instance registered"
+    );
+}
+
+/// With nothing registered the worker thread parks without a timeout, so an
+/// idle process has no thread waking up every 50 ms.
+#[test]
+fn the_worker_thread_sleeps_while_no_instance_is_registered() {
+    let _serial = worker_tests();
+    let interface = LV2_Worker_Interface {
+        work: Some(echoing_work),
+        work_response: None,
+        end_run: None,
+    };
+    let rings = Arc::new(WorkerRings::new());
+    let instance =
+        register(ptr::null_mut(), &interface, Arc::clone(&rings)).expect("start the worker thread");
+    unregister(&instance);
+    assert_eq!(registered_for_test(), 0);
+    // Let the thread see the empty registry and park.
+    std::thread::sleep(Duration::from_millis(100));
+    let before = loops_for_test();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        loops_for_test(),
+        before,
+        "the worker thread woke with nothing registered"
+    );
+
+    // A registration still wakes it.
+    let instance =
+        register(ptr::null_mut(), &interface, Arc::clone(&rings)).expect("register again");
+    let mut out = vec![0u8; RING_BYTES];
+    assert!(rings.push_request(b"wake up"));
+    let size = wait_for_response(&rings, &mut out);
+    assert_eq!(&out[..size], b"wake up");
+    unregister(&instance);
+}
+
+/// `worker.h`: a request `schedule_work` accepted must reach `work`.  The
+/// gate is held while the instance is removed, so the worker thread skips it
+/// and only `unregister` can serve the request.
+#[test]
+fn unregister_serves_the_requests_still_queued() {
+    let _serial = worker_tests();
+    let rings = Arc::new(WorkerRings::new());
+    let interface = LV2_Worker_Interface {
+        work: Some(echoing_work),
+        work_response: None,
+        end_run: None,
+    };
+    let instance =
+        register(ptr::null_mut(), &interface, Arc::clone(&rings)).expect("start the worker thread");
+    let calls = WORK_CALLS.load(Ordering::SeqCst);
+
+    let gate = hold_gate(&instance);
+    assert!(rings.push_request(b"free the old sample"));
+    let removing = {
+        let instance = Arc::clone(&instance);
+        std::thread::spawn(move || unregister(&instance))
+    };
+    while registered_for_test() != 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        WORK_CALLS.load(Ordering::SeqCst),
+        calls,
+        "work ran under the gate"
+    );
+    drop(gate);
+    removing.join().expect("unregister");
+
+    assert_eq!(
+        WORK_CALLS.load(Ordering::SeqCst) - calls,
+        1,
+        "the queued request did not reach work"
+    );
+    assert!(!rings.request_pending());
+}
+
+#[test]
+fn a_worker_response_is_refused_when_the_response_ring_is_full() {
+    let rings = Arc::new(WorkerRings::new());
+    let handle = Arc::as_ptr(&rings) as *mut c_void;
+    let fills = vec![5u8; RING_BYTES - 4];
+    assert_eq!(
+        unsafe { respond(handle, fills.len() as u32, fills.as_ptr() as *const c_void) },
+        LV2_WORKER_SUCCESS
+    );
+    let one = b"x";
+    assert_eq!(
+        unsafe { respond(handle, 1, one.as_ptr() as *const c_void) },
+        LV2_WORKER_ERR_NO_SPACE,
+        "a response with no space left was accepted"
+    );
+    assert_eq!(
+        unsafe { respond(handle, 4, ptr::null()) },
+        LV2_WORKER_ERR_UNKNOWN,
+        "null data with a size was accepted"
+    );
+
+    let mut out = vec![0u8; RING_BYTES];
+    assert_eq!(rings.pop_response(&mut out), Some(RING_BYTES - 4));
+    assert_eq!(
+        unsafe { respond(handle, 1, one.as_ptr() as *const c_void) },
+        LV2_WORKER_SUCCESS,
+        "the freed space was not usable"
+    );
+
+    // An interface the worker could never call is refused at registration,
+    // so its requests cannot wait forever.
+    let no_work = LV2_Worker_Interface {
+        work: None,
+        work_response: None,
+        end_run: None,
+    };
+    assert!(
+        register(ptr::null_mut(), &no_work, Arc::new(WorkerRings::new())).is_err(),
+        "an interface without work was registered"
+    );
+}
+
+/// The sender a blocking `work` reports its start on.
+static BLOCK_STARTED: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+/// The receiver a blocking `work` waits on before it returns.
+static BLOCK_RELEASE: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
+
+/// A fake `work` that waits until the test releases it.
+unsafe extern "C" fn blocking_work(
+    _instance: LV2_Handle,
+    _respond: LV2_Worker_Respond_Function,
+    _handle: LV2_Worker_Respond_Handle,
+    _size: u32,
+    _data: *const c_void,
+) -> LV2_Worker_Status {
+    if let Some(started) = BLOCK_STARTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        let _ = started.send(());
+    }
+    let release = BLOCK_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(release) = release {
+        let _ = release.recv();
+    }
+    LV2_WORKER_SUCCESS
+}
+
+#[test]
+fn unregister_waits_for_a_work_call_already_inside() {
+    let _serial = worker_tests();
+    let rings = Arc::new(WorkerRings::new());
+    let interface = LV2_Worker_Interface {
+        work: Some(blocking_work),
+        work_response: None,
+        end_run: None,
+    };
+    let instance =
+        register(ptr::null_mut(), &interface, Arc::clone(&rings)).expect("start the worker thread");
+
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    *BLOCK_STARTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(started_sender);
+    *BLOCK_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(release_receiver);
+    assert!(rings.push_request(b"hold the worker"));
+    wake(&instance);
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the worker did not start work");
+
+    let returned = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&returned);
+    let waiter_instance = Arc::clone(&instance);
+    let waiter = std::thread::spawn(move || {
+        unregister(&waiter_instance);
+        flag.store(true, Ordering::Release);
+    });
+    // The worker is still inside `work`, which waits on the channel.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !returned.load(Ordering::Acquire),
+        "unregister returned while work was still inside"
+    );
+
+    release_sender.send(()).expect("release the work");
+    waiter.join().expect("join the unregister thread");
+    assert!(returned.load(Ordering::Acquire));
+    // The waiter already removed it from the registry; this second call is
+    // the cleanup the caller owes, and proves it is idempotent.
+    unregister(&instance);
+
+    *BLOCK_STARTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *BLOCK_RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    assert_eq!(
+        registered_for_test(),
+        0,
+        "a test left an instance registered"
+    );
+}
+
+#[test]
+fn one_instances_gate_does_not_block_another_and_unregistering_it_leaves_the_rest() {
+    let _serial = worker_tests();
+    let interface = LV2_Worker_Interface {
+        work: Some(echoing_work),
+        work_response: None,
+        end_run: None,
+    };
+    let first_rings = Arc::new(WorkerRings::new());
+    let first = register(ptr::null_mut(), &interface, Arc::clone(&first_rings))
+        .expect("register the first instance");
+    let second_rings = Arc::new(WorkerRings::new());
+    let second = register(ptr::null_mut(), &interface, Arc::clone(&second_rings))
+        .expect("register the second instance");
+    assert_eq!(registered_for_test(), 2);
+
+    // The first instance's gate is held by this thread; the second's gate is
+    // a different lock and is free.  (One long `work` still occupies the
+    // single worker thread by design.)
+    let held = hold_gate(&first);
+    let (paused_sender, paused_receiver) = mpsc::channel();
+    let second_for_thread = Arc::clone(&second);
+    let pauser = std::thread::spawn(move || {
+        let _second_gate = hold_gate(&second_for_thread);
+        let _ = paused_sender.send(());
+    });
+    paused_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the first instance's gate blocked the second");
+    pauser.join().expect("join the pause thread");
+    drop(held);
+
+    // Removing the first leaves the second serving requests.
+    unregister(&first);
+    let mut out = vec![0u8; RING_BYTES];
+    assert!(second_rings.push_request(b"still here"));
+    wake(&second);
+    let size = wait_for_response(&second_rings, &mut out);
+    assert_eq!(&out[..size], b"still here");
+
+    unregister(&second);
+    assert_eq!(
+        registered_for_test(),
+        0,
+        "a test left an instance registered"
+    );
+}
+
+/// How many requests a failing `work` has seen.
+static WORK_ERRORS: AtomicU32 = AtomicU32::new(0);
+
+/// A fake `work` that refuses every request.
+unsafe extern "C" fn failing_work(
+    _instance: LV2_Handle,
+    _respond: LV2_Worker_Respond_Function,
+    _handle: LV2_Worker_Respond_Handle,
+    _size: u32,
+    _data: *const c_void,
+) -> LV2_Worker_Status {
+    WORK_ERRORS.fetch_add(1, Ordering::SeqCst);
+    LV2_WORKER_ERR_UNKNOWN
+}
+
+#[test]
+fn a_failing_work_does_not_wedge_the_instance() {
+    let _serial = worker_tests();
+    let rings = Arc::new(WorkerRings::new());
+    let interface = LV2_Worker_Interface {
+        work: Some(failing_work),
+        work_response: None,
+        end_run: None,
+    };
+    let instance =
+        register(ptr::null_mut(), &interface, Arc::clone(&rings)).expect("start the worker thread");
+    let errors = WORK_ERRORS.load(Ordering::SeqCst);
+
+    assert!(rings.push_request(b"first"));
+    wake(&instance);
+    for _ in 0..2000 {
+        if WORK_ERRORS.load(Ordering::SeqCst) > errors {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(WORK_ERRORS.load(Ordering::SeqCst) - errors, 1);
+
+    // The failure is reported, not fatal: the next request still runs.
+    assert!(rings.push_request(b"second"));
+    wake(&instance);
+    for _ in 0..2000 {
+        if WORK_ERRORS.load(Ordering::SeqCst) - errors >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        WORK_ERRORS.load(Ordering::SeqCst) - errors,
+        2,
+        "a failed work wedged the instance"
+    );
+
+    unregister(&instance);
+    assert_eq!(
+        registered_for_test(),
+        0,
+        "a test left an instance registered"
+    );
 }
 
 const PARAMS_URI: &str = "http://example.com/lv2/params";
@@ -1368,6 +1800,7 @@ fn fake_processor(
         run,
         reported,
         max_block: 8,
+        worker: None,
         core,
     };
     (processor, to_audio, from_audio)
@@ -1463,6 +1896,218 @@ fn an_inactive_lv2_instance_does_not_process() {
     assert_eq!(
         processor.process(&mut left, &mut right),
         Err(Lv2Failure::NotActive)
+    );
+}
+
+/// Every response body the fake `work_response` saw.
+static WORK_RESPONSES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// How many responses the fake `run` had already seen when it was called.
+static RESPONSES_BEFORE_RUN: AtomicU32 = AtomicU32::new(u32::MAX);
+static END_RUN_CALLS: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn recorded_work_response(
+    _handle: LV2_Handle,
+    size: u32,
+    body: *const c_void,
+) -> LV2_Worker_Status {
+    let body = if body.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: the host promises `size` readable bytes for the call.
+        unsafe { std::slice::from_raw_parts(body as *const u8, size as usize) }.to_vec()
+    };
+    WORK_RESPONSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(body);
+    LV2_WORKER_SUCCESS
+}
+
+unsafe extern "C" fn response_counting_run(_handle: LV2_Handle, _frames: u32) {
+    RESPONSES_BEFORE_RUN.store(
+        WORK_RESPONSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len() as u32,
+        Ordering::SeqCst,
+    );
+}
+
+unsafe extern "C" fn counted_end_run(_handle: LV2_Handle) -> LV2_Worker_Status {
+    END_RUN_CALLS.fetch_add(1, Ordering::SeqCst);
+    LV2_WORKER_SUCCESS
+}
+
+#[test]
+fn responses_are_delivered_before_run_and_end_run_after_every_block() {
+    let table = params_table();
+    let core = Arc::new(Lv2Core::for_test(true));
+    let (mut processor, _sender, _from_audio) =
+        fake_processor(&table, Arc::clone(&core), response_counting_run);
+    let rings = Arc::new(WorkerRings::new());
+    let messages: [&[u8]; 2] = [b"impulse loaded", b"second"];
+    for message in messages {
+        assert!(rings.push_response(message));
+    }
+    processor.worker = Some(WorkerCallbacks {
+        rings: Arc::clone(&rings),
+        responses: vec![0u8; RING_BYTES],
+        work_response: Some(recorded_work_response),
+        end_run: Some(counted_end_run),
+    });
+    WORK_RESPONSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    let end_runs = END_RUN_CALLS.load(Ordering::SeqCst);
+
+    let (mut left, mut right) = (vec![0.0f32; 8], vec![0.0f32; 8]);
+    processor
+        .process(&mut left, &mut right)
+        .expect("process a block");
+    {
+        let responses = WORK_RESPONSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(responses.len(), messages.len(), "a response was lost");
+        for (response, message) in responses.iter().zip(messages) {
+            assert_eq!(response.as_slice(), message, "a response was reordered");
+        }
+    }
+    assert_eq!(
+        RESPONSES_BEFORE_RUN.load(Ordering::SeqCst),
+        messages.len() as u32,
+        "run saw the block before its responses"
+    );
+    assert_eq!(
+        END_RUN_CALLS.load(Ordering::SeqCst) - end_runs,
+        1,
+        "end_run was not called once after the block"
+    );
+    assert!(!rings.response_pending());
+
+    // A quiet block still closes the cycle, and nothing is delivered twice.
+    processor
+        .process(&mut left, &mut right)
+        .expect("a block with no response");
+    assert_eq!(
+        WORK_RESPONSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        messages.len()
+    );
+    assert_eq!(
+        END_RUN_CALLS.load(Ordering::SeqCst) - end_runs,
+        2,
+        "end_run must follow every run, response or not"
+    );
+    assert_eq!(
+        RESPONSES_BEFORE_RUN.load(Ordering::SeqCst),
+        messages.len() as u32
+    );
+
+    // A block the processor splits into chunks closes each run's cycle.
+    let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);
+    processor
+        .process(&mut left, &mut right)
+        .expect("a two-chunk block");
+    assert_eq!(
+        END_RUN_CALLS.load(Ordering::SeqCst) - end_runs,
+        4,
+        "end_run must follow every run, two chunks included"
+    );
+}
+
+#[test]
+fn a_plugin_without_work_response_has_its_responses_drained() {
+    // Its own `run`: `process_run`'s counter belongs to the test that
+    // counts frames, which runs in parallel.
+    unsafe extern "C" fn uncounted_run(_handle: LV2_Handle, _frames: u32) {}
+
+    let table = params_table();
+    let core = Arc::new(Lv2Core::for_test(true));
+    let (mut processor, _sender, _from_audio) = fake_processor(&table, core, uncounted_run);
+    let rings = Arc::new(WorkerRings::new());
+    assert!(rings.push_response(b"no handler"));
+    assert!(rings.push_response(b"second"));
+    processor.worker = Some(WorkerCallbacks {
+        rings: Arc::clone(&rings),
+        responses: vec![0u8; RING_BYTES],
+        work_response: None,
+        end_run: None,
+    });
+    let (mut left, mut right) = (vec![0.0f32; 8], vec![0.0f32; 8]);
+    processor
+        .process(&mut left, &mut right)
+        .expect("process a block");
+    assert!(
+        !rings.response_pending(),
+        "a response without a handler stayed in the ring"
+    );
+}
+
+static ZERO_FRAME_RUNS: AtomicU32 = AtomicU32::new(0);
+static ZERO_FRAME_FRAMES: AtomicU32 = AtomicU32::new(u32::MAX);
+static ZERO_FRAME_END_RUNS: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn zero_frame_run(_handle: LV2_Handle, frames: u32) {
+    ZERO_FRAME_FRAMES.store(frames, Ordering::SeqCst);
+    ZERO_FRAME_RUNS.fetch_add(1, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn zero_frame_end_run(_handle: LV2_Handle) -> LV2_Worker_Status {
+    ZERO_FRAME_END_RUNS.fetch_add(1, Ordering::SeqCst);
+    LV2_WORKER_SUCCESS
+}
+
+#[test]
+fn the_zero_frame_run_is_closed_by_end_run() {
+    let table = params_table();
+    let descriptor = Box::new(LV2_Descriptor {
+        URI: c"http://rigwerk.test/zero-frame".as_ptr(),
+        instantiate: None,
+        connect_port: None,
+        activate: None,
+        run: Some(zero_frame_run),
+        deactivate: None,
+        cleanup: None,
+        extension_data: None,
+    });
+    let core = Arc::new(Lv2Core {
+        handle: ptr::null_mut(),
+        descriptor: &*descriptor as *const LV2_Descriptor,
+        _features: HostFeatures::new(48_000.0, 8, ATOM_CAPACITY, None),
+        _rings: Arc::new(WorkerRings::new()),
+        _bundle_path: CString::default(),
+        retired: OnceLock::new(),
+        worker: OnceLock::new(),
+        active: AtomicBool::new(false),
+        activated: AtomicBool::new(false),
+        latency_raw: AtomicU32::new(0),
+        latency_changed: AtomicBool::new(false),
+        _module: None,
+    });
+    let ranges: Arc<[super::ports::Lv2Range]> = Arc::from(table.ranges.clone().into_boxed_slice());
+    let values: Vec<f32> = table
+        .ranges
+        .iter()
+        .map(|range| range.default as f32)
+        .collect();
+    let shared = Arc::new(PluginShared::new(0));
+    let mut instance = Lv2Instance::for_test(ranges, values, shared, core);
+    instance.set_worker_end_run_for_test(Some(zero_frame_end_run));
+    let mut buffers = PortBuffers::new(&table, 8);
+
+    let runs = ZERO_FRAME_RUNS.load(Ordering::SeqCst);
+    let ends = ZERO_FRAME_END_RUNS.load(Ordering::SeqCst);
+    instance.run_zero(&mut buffers);
+    assert_eq!(ZERO_FRAME_FRAMES.load(Ordering::SeqCst), 0);
+    assert_eq!(ZERO_FRAME_RUNS.load(Ordering::SeqCst) - runs, 1);
+    assert_eq!(
+        ZERO_FRAME_END_RUNS.load(Ordering::SeqCst) - ends,
+        1,
+        "end_run did not follow the zero-frame run"
     );
 }
 
@@ -1579,6 +2224,7 @@ fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
         run: handle_run,
         reported,
         max_block: 8,
+        worker: None,
         core,
     };
     let out = Arc::new(ParamOut::new(Arc::clone(&ids), to_audio));
@@ -2623,6 +3269,230 @@ fn the_bundle_path_outlives_the_plugin() {
         PATH_AT_CLEANUP.lock().expect("the cleanup record").take(),
         Some(expected)
     );
+}
+
+// A fake plugin that remembers where its gain control was connected and
+// reads it in `deactivate` and `cleanup`, as a plugin may.
+static GAIN_PORT: AtomicUsize = AtomicUsize::new(0);
+static GAIN_AT_CLEANUP: Mutex<Option<f32>> = Mutex::new(None);
+static PORT_KEEPER: u8 = 0;
+
+unsafe extern "C" fn port_keeping_instantiate(
+    _descriptor: *const LV2_Descriptor,
+    _rate: f64,
+    _bundle_path: *const std::ffi::c_char,
+    _features: *const *const LV2_Feature,
+) -> LV2_Handle {
+    &PORT_KEEPER as *const u8 as LV2_Handle
+}
+
+unsafe extern "C" fn gain_keeping_connect(_handle: LV2_Handle, port: u32, data: *mut c_void) {
+    if port == 4 {
+        GAIN_PORT.store(data as usize, Ordering::SeqCst);
+    }
+}
+
+unsafe extern "C" fn gain_reading_cleanup(_handle: LV2_Handle) {
+    let gain = GAIN_PORT.load(Ordering::SeqCst) as *const f32;
+    // SAFETY: the host frees the port buffers only after `cleanup`.
+    *GAIN_AT_CLEANUP.lock().expect("the cleanup record") = Some(unsafe { *gain });
+}
+
+/// The port buffers outlive `cleanup` even when the processor goes first
+/// and the instance keeps the core: the processor hands them to the core.
+#[test]
+fn the_port_buffers_outlive_cleanup() {
+    let descriptor = LV2_Descriptor {
+        URI: c"http://example.com/lv2/params".as_ptr(),
+        instantiate: Some(port_keeping_instantiate),
+        connect_port: Some(gain_keeping_connect),
+        activate: None,
+        run: Some(ignored_run),
+        deactivate: None,
+        cleanup: Some(gain_reading_cleanup),
+        extension_data: None,
+    };
+    let pref = PluginPref::default();
+    let shared = Arc::new(PluginShared::new(0));
+    let Lv2Loaded {
+        instance,
+        mut processor,
+        ..
+    } = Lv2Instance::load_descriptor(
+        &params_bundle(),
+        params_table(),
+        &descriptor,
+        None,
+        48_000.0,
+        64,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load the fake plugin");
+    let gain = table_slot(&processor, "gain");
+    let connected = match &mut processor.buffers.slots[gain].buffer {
+        Buffer::Control(samples) => samples.as_mut_ptr() as usize,
+        _ => panic!("the gain has no control buffer"),
+    };
+    assert_eq!(GAIN_PORT.load(Ordering::SeqCst), connected);
+
+    drop(processor);
+    let core = Arc::clone(&instance.core);
+    assert!(
+        core.retired
+            .get()
+            .is_some_and(|buffers| buffers.control(gain) == 1.0),
+        "the processor did not hand its buffers to the core"
+    );
+    drop(instance);
+    assert!(GAIN_AT_CLEANUP.lock().expect("the record").is_none());
+    drop(core);
+    assert_eq!(
+        GAIN_AT_CLEANUP.lock().expect("the cleanup record").take(),
+        Some(1.0),
+        "cleanup did not see the gain's buffer"
+    );
+}
+
+// A fake plugin that keeps the `worker:schedule` feature it was given and
+// schedules one request from its first `run`, the load's zero-frame one.
+static SCHEDULE_FEATURE: AtomicUsize = AtomicUsize::new(0);
+static ZERO_RUN_STATUS: AtomicI64 = AtomicI64::new(i64::MAX);
+static SCHEDULER: u8 = 0;
+
+unsafe extern "C" fn schedule_keeping_instantiate(
+    _descriptor: *const LV2_Descriptor,
+    _rate: f64,
+    _bundle_path: *const std::ffi::c_char,
+    features: *const *const LV2_Feature,
+) -> LV2_Handle {
+    let mut index = 0;
+    loop {
+        let feature = unsafe { *features.add(index) };
+        if feature.is_null() {
+            break;
+        }
+        if unsafe { CStr::from_ptr((*feature).URI) } == c"http://lv2plug.in/ns/ext/worker#schedule"
+        {
+            SCHEDULE_FEATURE.store(unsafe { (*feature).data } as usize, Ordering::SeqCst);
+        }
+        index += 1;
+    }
+    &SCHEDULER as *const u8 as LV2_Handle
+}
+
+/// Calls the kept `schedule_work` with `message`.
+fn schedule_kept(message: &[u8]) -> LV2_Worker_Status {
+    let schedule = SCHEDULE_FEATURE.load(Ordering::SeqCst) as *const LV2_Worker_Schedule;
+    let schedule = unsafe { schedule.as_ref() }.expect("the plugin kept worker:schedule");
+    let schedule_work = schedule.schedule_work.expect("a schedule callback");
+    unsafe {
+        schedule_work(
+            schedule.handle,
+            message.len() as u32,
+            message.as_ptr() as *const c_void,
+        )
+    }
+}
+
+unsafe extern "C" fn scheduling_run(_handle: LV2_Handle, frames: u32) {
+    if frames == 0 {
+        ZERO_RUN_STATUS.store(i64::from(schedule_kept(b"from run(0)")), Ordering::SeqCst);
+    }
+}
+
+static WORKER_INTERFACE: LV2_Worker_Interface = LV2_Worker_Interface {
+    work: Some(echoing_work),
+    work_response: None,
+    end_run: None,
+};
+
+unsafe extern "C" fn worker_extension(uri: *const std::ffi::c_char) -> *const c_void {
+    if unsafe { CStr::from_ptr(uri) } == c"http://lv2plug.in/ns/ext/worker#interface" {
+        &WORKER_INTERFACE as *const LV2_Worker_Interface as *const c_void
+    } else {
+        ptr::null()
+    }
+}
+
+fn scheduling_descriptor(
+    extension_data: Option<unsafe extern "C" fn(*const std::ffi::c_char) -> *const c_void>,
+) -> LV2_Descriptor {
+    LV2_Descriptor {
+        URI: c"http://example.com/lv2/params".as_ptr(),
+        instantiate: Some(schedule_keeping_instantiate),
+        connect_port: Some(ignored_connect),
+        activate: None,
+        run: Some(scheduling_run),
+        deactivate: None,
+        cleanup: None,
+        extension_data,
+    }
+}
+
+fn load_scheduling(descriptor: &LV2_Descriptor) -> Lv2Loaded {
+    let pref = PluginPref::default();
+    let shared = Arc::new(PluginShared::new(0));
+    Lv2Instance::load_descriptor(
+        &params_bundle(),
+        params_table(),
+        descriptor,
+        None,
+        48_000.0,
+        64,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load the fake plugin")
+}
+
+/// `worker.h`: the host must pass every request it accepts to `work`.  A
+/// plugin without a worker interface has no `work`, so `schedule_work`
+/// refuses instead of accepting a request nothing will serve.
+#[test]
+fn schedule_work_refuses_a_plugin_without_a_worker() {
+    let _serial = worker_tests();
+    let loaded = load_scheduling(&scheduling_descriptor(None));
+    assert_eq!(
+        ZERO_RUN_STATUS.load(Ordering::SeqCst),
+        i64::from(LV2_WORKER_ERR_UNKNOWN),
+        "run(0) had a request accepted"
+    );
+    assert_eq!(schedule_kept(b"later"), LV2_WORKER_ERR_UNKNOWN);
+    assert!(!loaded.instance.core._rings.request_pending());
+    drop(loaded);
+    assert_eq!(registered_for_test(), 0);
+}
+
+/// A request scheduled before the worker is registered (here from the
+/// load's zero-frame run) is accepted and reaches `work` once it is.
+#[test]
+fn a_request_scheduled_before_registration_reaches_work() {
+    let _serial = worker_tests();
+    let calls = WORK_CALLS.load(Ordering::SeqCst);
+    let loaded = load_scheduling(&scheduling_descriptor(Some(worker_extension)));
+    assert_eq!(
+        ZERO_RUN_STATUS.load(Ordering::SeqCst),
+        i64::from(LV2_WORKER_SUCCESS),
+        "run(0) had its request refused"
+    );
+    let rings = Arc::clone(&loaded.instance.core._rings);
+    let mut out = vec![0u8; RING_BYTES];
+    let size = wait_for_response(&rings, &mut out);
+    assert_eq!(&out[..size], b"from run(0)");
+    assert_eq!(WORK_CALLS.load(Ordering::SeqCst) - calls, 1);
+    assert_eq!(schedule_kept(b"later"), LV2_WORKER_SUCCESS);
+    drop(loaded);
+    assert_eq!(registered_for_test(), 0);
+}
+
+/// The buffer slot of the range for `symbol`.
+fn table_slot(processor: &Lv2Processor, symbol: &str) -> usize {
+    let index = processor
+        .ids
+        .index_of(symbol_id(symbol))
+        .expect("a range for the symbol");
+    processor.ranges[index].slot
 }
 
 // A fake library descriptor with one plugin, which counts its cleanups.

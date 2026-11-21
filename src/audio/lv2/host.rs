@@ -12,7 +12,8 @@
 //! paths.  There is no `buf-size:nominalBlockLength`: a plugin runs the
 //! bridge's block, which a load does not know, so no value would be true.  The
 //! loader always passes the instance's rings, so the scan's claim that
-//! `worker:schedule` is supplied holds for every load.  `log:log` is not
+//! `worker:schedule` is supplied holds for every load; its `schedule_work`
+//! refuses requests until the load has found the plugin's `work`.  `log:log` is not
 //! supplied: its variadic callbacks cannot be written in stable Rust.  The
 //! scan refuses a plugin that requires a feature outside [`SUPPORTED`].
 //!

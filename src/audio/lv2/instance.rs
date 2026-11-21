@@ -15,22 +15,29 @@
 //! audio-class: `connect_port` is done here at load, before the processor is
 //! handed to a slot and before any `run` can have started; `run` is the
 //! processor's.  `state.save` is a UI call that may overlap `run`, so a
-//! capture needs no pause.  There is no restart: LV2 has no call that asks
-//! for one, and a new sample rate loads a new instance.
+//! capture needs no pause.  The worker's `work` is called on the process-wide
+//! worker thread (`worker.rs`) only after this load registered the instance,
+//! and the core unregisters it before `deactivate`/`cleanup`, so no `work`
+//! can reach a plugin that is being torn down.  There is no restart: LV2 has
+//! no call that asks for one, and a new sample rate loads a new instance.
 //!
 //! The instance's values are native per range.  Restored values are written
 //! straight into the control buffers before activation, so the plugin sees
 //! them from its first block and the panel shows them; the `run(handle, 0)`
 //! after activation updates the control outputs and the latency report
-//! without processing audio.
+//! without processing audio.  The worker is registered after that run, so a
+//! restore or the activation sequence cannot race it.
 
 use std::ffi::{c_char, CString};
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use lv2_sys::{LV2_Descriptor, LV2_Handle, LV2_STATE__interface, LV2_State_Interface};
+use lv2_sys::{
+    LV2_Descriptor, LV2_Handle, LV2_STATE__interface, LV2_State_Interface, LV2_WORKER__interface,
+    LV2_Worker_Interface, LV2_Worker_Status,
+};
 
 use crate::audio::clap::StateSave;
 use crate::audio::plugins::{
@@ -42,13 +49,13 @@ use super::module::{self, ModuleHandle};
 use super::ports::{Lv2Range, PortBuffers, PortTable};
 use super::scan;
 use super::state;
-use super::worker::WorkerRings;
+use super::worker::{self, WorkerInstance, WorkerRings};
 
 /// What both halves of one plugin point into.  Fields drop in declaration
 /// order, which is the teardown order LV2 needs: the plugin is deactivated
-/// and cleaned up in `Drop`, then the features, the rings and the bundle path
-/// go, and only then the module (which unloads the library if this was its
-/// last user).
+/// and cleaned up in `Drop`, then the features, the rings, the bundle path
+/// and the port buffers it was connected to go, and only then the module
+/// (which unloads the library if this was its last user).
 pub(super) struct Lv2Core {
     pub(super) handle: LV2_Handle,
     pub(super) descriptor: *const LV2_Descriptor,
@@ -56,11 +63,19 @@ pub(super) struct Lv2Core {
     /// pointers were taken, so a moved handle never moves it.
     pub(super) _features: Box<HostFeatures>,
     /// The instance's worker rings; the schedule feature points at them.
-    /// The worker thread is wired up in commit 5.
     pub(super) _rings: Arc<WorkerRings>,
     /// The bundle path `instantiate` was given.  A plugin may keep the
     /// pointer, so it lives until after `cleanup`, as lilv keeps it.
     pub(super) _bundle_path: CString,
+    /// The port buffers, once the processor that owned them is gone.  The
+    /// plugin still points into them, and the instance may keep the core
+    /// for longer, so the processor hands them here and they are freed only
+    /// after `cleanup`.
+    pub(super) retired: OnceLock<PortBuffers>,
+    /// The instance as the worker thread knows it, once the load registered
+    /// it.  Empty for a plugin without `worker:interface` and for the test
+    /// fakes.  Dropped after `Drop::drop` unregistered it.
+    pub(super) worker: OnceLock<Arc<WorkerInstance>>,
     /// Whether processing is allowed: the load's `activate` has run (or none
     /// was needed).  The processor reads this.
     pub(super) active: AtomicBool,
@@ -85,6 +100,12 @@ unsafe impl Sync for Lv2Core {}
 
 impl Drop for Lv2Core {
     fn drop(&mut self) {
+        // The worker thread must not be inside `work` when the plugin is
+        // deactivated, cleaned up and its module unloaded.  `unregister`
+        // waits out an in-flight call; this runs on the UI thread.
+        if let Some(worker) = self.worker.get() {
+            worker::unregister(worker);
+        }
         if self.descriptor.is_null() {
             return;
         }
@@ -114,6 +135,8 @@ impl Lv2Core {
             _features: HostFeatures::new(48_000.0, 16, super::ports::ATOM_CAPACITY, None),
             _rings: Arc::new(WorkerRings::new()),
             _bundle_path: CString::default(),
+            retired: OnceLock::new(),
+            worker: OnceLock::new(),
             active: AtomicBool::new(active),
             activated: AtomicBool::new(false),
             latency_raw: AtomicU32::new(0),
@@ -133,6 +156,10 @@ pub(crate) struct Lv2Instance {
     /// The plugin's state extension, valid for as long as the instance (the
     /// descriptor promises that).  Null when the plugin has none.
     state: *const LV2_State_Interface,
+    /// The worker interface's `end_run`, when it has one.  Every `run` must
+    /// be followed by it, including the load's zero-frame run, which does
+    /// not go through the processor.
+    worker_end_run: Option<unsafe extern "C" fn(LV2_Handle) -> LV2_Worker_Status>,
     /// Last: the handle outlives everything above that points into it.
     pub(super) core: Arc<Lv2Core>,
 }
@@ -257,6 +284,34 @@ impl Lv2Instance {
                 None => ptr::null(),
             }
         };
+        // The worker extension, resolved the same way.  Null when the plugin
+        // has none; an interface whose `work` is null has nothing to run.
+        // SAFETY: as above, `descriptor` points into the module the core
+        // keeps loaded, and the URI is the null-terminated one the header
+        // names; a non-null result points at the plugin's interface.
+        let worker_interface = unsafe {
+            let extension_data = (*descriptor).extension_data;
+            match extension_data {
+                Some(extension_data) => {
+                    let data = extension_data(LV2_WORKER__interface.as_ptr() as *const c_char);
+                    data as *const LV2_Worker_Interface
+                }
+                None => ptr::null(),
+            }
+        };
+        // SAFETY: the interface points into the module the core keeps loaded
+        // until after the core has unregistered the instance.
+        let has_work = unsafe {
+            worker_interface
+                .as_ref()
+                .is_some_and(|interface| interface.work.is_some())
+        };
+        // Only a plugin whose requests can reach `work` may schedule.  This is
+        // before the restore and the zero-frame run, so what they schedule
+        // waits in the ring until the worker is registered below.
+        if has_work {
+            rings.accept_requests();
+        }
         // From here an early return deactivates and cleans the instance up
         // through the core's drop, then unloads the module.
         let core = Arc::new(Lv2Core {
@@ -265,6 +320,8 @@ impl Lv2Instance {
             _features: features,
             _rings: rings,
             _bundle_path: bundle_path,
+            retired: OnceLock::new(),
+            worker: OnceLock::new(),
             active: AtomicBool::new(false),
             activated: AtomicBool::new(false),
             latency_raw: AtomicU32::new(0),
@@ -316,10 +373,31 @@ impl Lv2Instance {
             values: native,
             shared: Arc::clone(shared),
             state: state_interface,
+            // SAFETY: the interface points into the module the core keeps
+            // loaded until after the instance is gone.
+            worker_end_run: unsafe {
+                worker_interface
+                    .as_ref()
+                    .and_then(|interface| interface.end_run)
+            },
             core: Arc::clone(&core),
         };
         instance.activate();
         instance.run_zero(&mut buffers);
+        // The audio half needs the interface's two audio-class functions;
+        // either may be absent.
+        // SAFETY: the interface points into the module the core keeps loaded,
+        // and the callbacks are only used while this instance exists.
+        let worker_callbacks = unsafe {
+            worker_interface
+                .as_ref()
+                .map(|interface| super::processor::WorkerCallbacks {
+                    rings: Arc::clone(&core._rings),
+                    responses: vec![0u8; super::worker::RING_BYTES],
+                    work_response: interface.work_response,
+                    end_run: interface.end_run,
+                })
+        };
         // The first value goes out with the views of the new effect.
         shared.take_latency_change();
 
@@ -356,8 +434,22 @@ impl Lv2Instance {
             run,
             reported,
             max_block: block,
+            worker: worker_callbacks,
             core: Arc::clone(&core),
         };
+        // The worker is registered only now: the restore and the zero-frame
+        // run are done, so no `work` can race them, and the requests they
+        // scheduled are served from here on.  A plugin without a `work`
+        // function had every request refused.  The processor exists already,
+        // so a failure here hands the buffers to the core like any teardown,
+        // and they outlive `cleanup`; the requests queued so far go with the
+        // instance.
+        if has_work {
+            let registered =
+                worker::register(handle, worker_interface, Arc::clone(&core._rings))
+                    .map_err(|error| format!("The LV2 worker could not be registered: {error}"))?;
+            let _ = core.worker.set(registered);
+        }
         Ok(Lv2Loaded {
             has_editor: instance.has_editor(),
             processor,
@@ -369,6 +461,16 @@ impl Lv2Instance {
             undelivered: Vec::new(),
             instance,
         })
+    }
+
+    /// Wakes the process-wide worker thread when this instance has a request
+    /// waiting, so a request waits at most one UI frame.  UI thread, once
+    /// per frame; a request the thread's timeout would find anyway is not
+    /// delayed by it.
+    pub(crate) fn service_worker(&self) {
+        if let Some(worker) = self.core.worker.get() {
+            worker::wake(worker);
+        }
     }
 
     /// `activate`, once, at load.  `activate` returns void, so it cannot
@@ -404,6 +506,13 @@ impl Lv2Instance {
         // SAFETY: the ports are connected, the instance is active, and no
         // other block is inside the plugin: the processor does not exist yet.
         unsafe { run(self.core.handle, 0) };
+        // The worker interface's `end_run` follows every `run`, this
+        // zero-frame one included.
+        if let Some(end_run) = self.worker_end_run {
+            // SAFETY: `end_run` is audio-class, and this is the run context
+            // the instance is in.
+            unsafe { end_run(self.core.handle) };
+        }
         if buffers.latency.is_some() {
             let raw = buffers.latency();
             self.core
@@ -525,6 +634,7 @@ impl Lv2Instance {
             values,
             shared,
             state: ptr::null(),
+            worker_end_run: None,
             core,
         }
     }
@@ -533,6 +643,15 @@ impl Lv2Instance {
     /// exercise [`Lv2Instance::save_state`] without a binary.
     pub(super) fn set_state_interface_for_test(&mut self, interface: *const LV2_State_Interface) {
         self.state = interface;
+    }
+
+    /// Gives the instance a fake worker `end_run`, for the zero-frame run
+    /// test.
+    pub(super) fn set_worker_end_run_for_test(
+        &mut self,
+        end_run: Option<unsafe extern "C" fn(LV2_Handle) -> LV2_Worker_Status>,
+    ) {
+        self.worker_end_run = end_run;
     }
 }
 

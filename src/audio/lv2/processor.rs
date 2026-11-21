@@ -16,23 +16,52 @@
 //! port's value is published through [`Lv2Core`]'s atomics.
 //!
 //! Nothing here allocates, locks, logs or opens a file: the buffers, the
-//! ranges and the transfer rings are sized at load, and every failure is a
-//! static [`Lv2Failure`].
+//! ranges, the transfer rings and the worker's response buffer are sized at
+//! load, and every failure is a static [`Lv2Failure`].
+//!
+//! A plugin with `worker:interface` gets [`WorkerCallbacks`]: before each
+//! `run` the audio thread drains the response ring into one preallocated
+//! buffer and calls `work_response` for each message, and after `run` it
+//! calls `end_run` when the plugin has one (even with no response).  Both
+//! are audio-class calls.  The load's zero-frame `run` delivers responses
+//! the same way, on the UI thread, before this processor exists.
 
+use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use lv2_sys::LV2_Handle;
+use lv2_sys::{LV2_Handle, LV2_Worker_Status};
 
 use crate::audio::plugins::{Lv2Failure, ParamIds, ParamReceiver, ParamSender};
 
 use super::instance::Lv2Core;
 use super::ports::{Lv2Range, PortBuffers};
+use super::worker::{WorkerRings, RING_BYTES};
+
+/// The worker half of one instance's plugin calls: the rings the audio side
+/// drains, the buffer a response is popped into, and the two functions LV2
+/// makes audio-class.
+pub(crate) struct WorkerCallbacks {
+    /// The instance's response ring.  The worker thread's `respond` writes
+    /// it; only this processor reads it.
+    pub(crate) rings: Arc<WorkerRings>,
+    /// The buffer one response is popped into; [`RING_BYTES`], sized at
+    /// load so a block never allocates.
+    pub(crate) responses: Vec<u8>,
+    /// `work_response`: one call per queued response, before `run`.
+    pub(crate) work_response:
+        Option<unsafe extern "C" fn(LV2_Handle, u32, *const c_void) -> LV2_Worker_Status>,
+    /// `end_run`: after every `run` when the plugin has one, response or
+    /// not.
+    pub(crate) end_run: Option<unsafe extern "C" fn(LV2_Handle) -> LV2_Worker_Status>,
+}
 
 /// The audio-thread half.  It lives in the chain's slot; the UI only drops
-/// it, on teardown, after the slot left every chain.
+/// it, on teardown, after the slot left every chain.  Dropping it hands the
+/// buffers to the core, which frees them after `cleanup`.
 pub(crate) struct Lv2Processor {
-    /// Every declared port's buffer, connected once at load.
+    /// Every declared port's buffer, connected once at load.  Moved into
+    /// [`Lv2Core::retired`] on drop, never freed here.
     pub(super) buffers: PortBuffers,
     /// The ranges the transfers are indexed by, shared with the instance.
     pub(super) ranges: Arc<[Lv2Range]>,
@@ -47,8 +76,21 @@ pub(crate) struct Lv2Processor {
     /// value that moved crosses back.
     pub(super) reported: Vec<u32>,
     pub(super) max_block: usize,
-    /// Last: the handle outlives everything above that points into it.
+    /// The worker's responses and callbacks, when the plugin has a worker
+    /// interface.
+    pub(super) worker: Option<WorkerCallbacks>,
+    /// The handle, which outlives the buffers once they are retired.
     pub(super) core: Arc<Lv2Core>,
+}
+
+impl Drop for Lv2Processor {
+    /// The plugin points into the buffers until `cleanup`, and the instance
+    /// may hold the core for longer than this processor, so the buffers move
+    /// to the core instead of being freed here.  UI thread: the audio side
+    /// never drops a slot.  The move does not allocate.
+    fn drop(&mut self) {
+        let _ = self.core.retired.set(std::mem::take(&mut self.buffers));
+    }
 }
 
 // SAFETY: the processor makes only audio-class calls (`run`) through the
@@ -93,6 +135,7 @@ impl Lv2Processor {
             run,
             reported,
             max_block,
+            worker,
             core,
         } = self;
         // A write into a control buffer always succeeds, so the values count
@@ -110,9 +153,27 @@ impl Lv2Processor {
                 count,
             );
             buffers.reset_atoms();
+            // Responses the worker finished since the last block are
+            // audio-class calls, so they go in just before `run`.
+            if let Some(worker) = worker.as_mut() {
+                deliver_responses(
+                    *handle,
+                    &worker.rings,
+                    &mut worker.responses,
+                    worker.work_response,
+                );
+            }
             // SAFETY: the instance is active, every declared port is
             // connected, and the buffers hold `count` frames.
             unsafe { run(*handle, count as u32) };
+            // `end_run` closes the cycle, with or without responses.
+            if let Some(worker) = worker.as_ref() {
+                // SAFETY: `end_run` is audio-class and belongs to a plugin
+                // that is active; this is the run context it expects.
+                if let Some(end_run) = worker.end_run {
+                    unsafe { end_run(*handle) };
+                }
+            }
             buffers.copy_output(
                 &mut left[offset..offset + count],
                 &mut right[offset..offset + count],
@@ -140,7 +201,8 @@ impl Lv2Processor {
     /// For a processing effect the chain skips (bypass, mix at 0): write the
     /// queued UI values into the control buffers so the next processed block
     /// and a later state save see them.  No plugin call is needed: LV2 reads
-    /// its control ports during `run`, which this does not make.
+    /// its control ports during `run`, which this does not make, and the
+    /// response ring waits for the next `run` in the same way.
     pub(crate) fn flush_if_queued(&mut self) {
         drain_values(
             &self.ids,
@@ -148,6 +210,39 @@ impl Lv2Processor {
             &mut self.buffers,
             &mut self.from_ui,
         );
+    }
+}
+
+/// Hands every queued worker response to `work_response`, oldest first, in
+/// the run context.  `responses` is a whole ring, allocated at load.  A
+/// plugin without `work_response` has the response dropped rather than left
+/// in the ring, which would stall every later one.  The processor calls this
+/// before each `run`, and the load's zero-frame run calls it before
+/// `run(handle, 0)`.
+pub(super) fn deliver_responses(
+    handle: LV2_Handle,
+    rings: &WorkerRings,
+    responses: &mut [u8],
+    work_response: Option<
+        unsafe extern "C" fn(LV2_Handle, u32, *const c_void) -> LV2_Worker_Status,
+    >,
+) {
+    debug_assert!(
+        responses.len() >= RING_BYTES,
+        "the response buffer must hold a whole ring"
+    );
+    while rings.response_pending() {
+        let Some(size) = rings.pop_response(responses) else {
+            break;
+        };
+        if let Some(work_response) = work_response {
+            // SAFETY: `work_response` is audio-class, called here from the
+            // run context, and `size` bytes of the popped message are live in
+            // the buffer for the call.
+            unsafe {
+                work_response(handle, size as u32, responses.as_ptr() as *const c_void);
+            }
+        }
     }
 }
 

@@ -767,8 +767,11 @@ pub(super) struct PortSlot {
     pub(super) buffer: Buffer,
 }
 
-/// Every buffer an instance owns, in port index order.  The buffer slot of a
+/// Every buffer an instance owns, in port index order.  The default is the
+/// empty set a processor leaves behind when it hands its buffers to the
+/// core.  The buffer slot of a
 /// port is its position here, which is also its `lv2:index`.
+#[derive(Default)]
 pub(super) struct PortBuffers {
     pub(super) slots: Vec<PortSlot>,
     /// The buffer slots of the first up to two audio inputs and outputs that
@@ -783,7 +786,7 @@ pub(super) struct PortBuffers {
 }
 
 /// `atom:Sequence` and `atom:Chunk`, as URIDs.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct AtomTypes {
     sequence: u32,
     chunk: u32,

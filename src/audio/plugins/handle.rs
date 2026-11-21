@@ -923,8 +923,9 @@ impl PluginHandle {
     /// (or this one, when it is not processing or the stream stalled)
     /// deactivates and reactivates it, reads its latency and resumes it.
     /// VST3: see [`Self::service_vst3`].  LV2: the control outputs the audio
-    /// side reported and a changed latency report; it has no main-thread
-    /// callbacks, flush request or restart request.
+    /// side reported, a changed latency report, and a wake for the worker
+    /// thread; it has no main-thread callbacks, flush request or restart
+    /// request.
     ///
     /// Returns whether the views need republishing: the latency or a
     /// control the plugin reported changed, or a restart failed.
@@ -991,10 +992,11 @@ impl PluginHandle {
         changed | shared.take_latency_change()
     }
 
-    /// An LV2 plugin's frame: the control outputs the audio side reported go
-    /// into the views and the instance's values, a latency change is
-    /// republished, and queued values settle once the processor applied them.
-    /// LV2 has no main-thread callbacks and no flush request.
+    /// An LV2 plugin's frame: the worker thread is woken when a request is
+    /// waiting, the control outputs the audio side reported go into the
+    /// views and the instance's values, a latency change is republished, and
+    /// queued values settle once the processor applied them.  LV2 has no
+    /// main-thread callbacks and no flush request.
     fn service_lv2(&self, ui: &mut UiSide) -> bool {
         let shared = &*self.0.shared;
         let UiSide {
@@ -1008,6 +1010,9 @@ impl PluginHandle {
         let PluginInstance::Lv2(lv2) = instance else {
             return false;
         };
+        // A worker request made during the last block goes out at once
+        // rather than at the thread's safety timeout.
+        lv2.service_worker();
         let reported = drain_values(from_audio);
         for &(index, value) in &reported {
             lv2.note_value(index, value);
