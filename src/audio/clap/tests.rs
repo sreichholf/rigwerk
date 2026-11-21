@@ -20,13 +20,12 @@ use super::host::{
 };
 use super::instance::ClapInstance;
 use super::module::{module_key, EntryInit, ModuleRegistry};
-use super::ports::{
-    port_layout, PortBuffers, PortInfo, PortLayout, MAX_AUDIO_PORTS, MAX_PORT_CHANNELS,
-};
+use super::ports::{port_layout, PortBuffers, PortInfo, PortLayout, MAX_PORT_CHANNELS};
 use super::scan::{scan_bundle, scan_module};
 use super::state::{StateReader, StateWriter};
 use crate::audio::plugins::{
     ClapFailure, LoadedPlugin, Outcome, PluginHandle, PluginPref, PluginShared, Restore, Saved,
+    MAX_AUDIO_PORTS,
 };
 
 /// A save while a value is still queued for the plugin captures anyway

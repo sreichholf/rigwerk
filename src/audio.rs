@@ -21,7 +21,7 @@
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
 //! - `shared`: the ring buffer, bridge buffer, meters and tuner tap both sides share.
 //! - `path`: one signal path's controls (routing, EQs, gate, effects).
-//! - `plugins`: the VST3 and CLAP chain on each path.  The slot owns each
+//! - `plugins`: the VST3, CLAP and LV2 chain on each path.  The slot owns each
 //!   plugin's processor; the UI reaches the rest through its handle and
 //!   holds views.  The audio side owns each chain's runtime and the UI
 //!   edits its model; edits cross as commands, never under a shared lock.
@@ -31,6 +31,9 @@
 //!   `moduleinfo.json` and never loads a binary.
 //! - `clap`: the CLAP host (the main-thread instance, the audio-thread
 //!   processor, the editor).
+//! - `lv2`: RigWerk's own LV2 effect host on the `lv2-sys` bindings (the
+//!   UI-thread instance, the audio-thread processor) and the bundle scan,
+//!   which reads the Turtle metadata and never loads a binary.
 //! - `scope`: decimated peak-hold lanes.  Drawing them is `ui/scope`.
 //! - `devices`: device discovery and stream configuration.
 //! - `input` / `output`: the cpal capture and playback sides.
@@ -81,6 +84,7 @@ pub(crate) use extra_output::EXTRA_OUTPUT_DRIFT_LIMIT_PPM;
 mod gate;
 mod input;
 mod limiter;
+pub(crate) mod lv2;
 mod metronome;
 mod mixer;
 mod output;

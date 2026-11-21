@@ -1,6 +1,6 @@
-//! Finding VST3 and CLAP bundles and adding them to a path's effect chain.
-//! Favourites, recent effects, where the next one is added, and how the
-//! browser ranks its rows live here.  The screen draws them; this file
+//! Finding VST3, CLAP and LV2 bundles and adding them to a path's effect
+//! chain.  Favourites, recent effects, where the next one is added, and how
+//! the browser ranks its rows live here.  The screen draws them; this file
 //! does not.
 
 use crate::app::LogTone;
@@ -11,6 +11,7 @@ use std::thread;
 use crate::app::paths::EffectKey;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{self, ClapCandidate};
+use crate::audio::lv2::{self, Lv2Candidate};
 use crate::audio::vst3;
 use crate::audio::{PluginFormat, PluginPref};
 
@@ -122,19 +123,21 @@ pub(crate) fn position_phrase(names: &[String], position: usize) -> String {
 /// name that starts with the query ranks above one that contains it, and
 /// a favourite ranks above the rest of that tier.  Recent use is the
 /// Recent chip, not another sort of the whole library.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn visible_effects<'a>(
     library: &'a [PluginCandidate],
     query: &str,
     filter: &EffectFilter,
     show_vst3: bool,
     show_clap: bool,
+    show_lv2: bool,
     favourites: &[EffectId],
     recent: &[EffectId],
 ) -> Vec<&'a PluginCandidate> {
     let query = query.trim().to_lowercase();
     let mut rows: Vec<&PluginCandidate> = library
         .iter()
-        .filter(|candidate| format_shown(candidate.format, show_vst3, show_clap))
+        .filter(|candidate| format_shown(candidate.format, show_vst3, show_clap, show_lv2))
         .filter(|candidate| filter_shown(candidate, filter, favourites, recent))
         .filter(|candidate| match_rank(candidate, &query).is_some())
         .collect();
@@ -152,10 +155,11 @@ pub(crate) fn visible_effects<'a>(
     rows
 }
 
-fn format_shown(format: PluginFormat, show_vst3: bool, show_clap: bool) -> bool {
+fn format_shown(format: PluginFormat, show_vst3: bool, show_clap: bool, show_lv2: bool) -> bool {
     match format {
         PluginFormat::Vst3 => show_vst3,
         PluginFormat::Clap => show_clap,
+        PluginFormat::Lv2 => show_lv2,
     }
 }
 
@@ -218,8 +222,8 @@ fn recent_rank(candidate: &PluginCandidate, recent: &[EffectId]) -> usize {
 }
 
 /// One plugin a scan found.  `class_id` is set when a bundle contains more
-/// than one audio class (VST3), or holds the plugin id (CLAP), so the right
-/// one can be opened later.
+/// than one audio class (VST3), holds the plugin id (CLAP), or the plugin URI
+/// (LV2), so the right one can be opened later.
 #[derive(Clone, Debug)]
 pub(crate) struct PluginCandidate {
     pub(crate) path: PathBuf,
@@ -229,11 +233,14 @@ pub(crate) struct PluginCandidate {
     pub(crate) vendor: String,
     pub(crate) category: String,
     /// The channel count the scan read without loading the binary: CLAP
-    /// features or VST3 sub-categories saying "mono" or "stereo".  `None`
-    /// when they say neither.
+    /// features or VST3 sub-categories saying "mono" or "stereo", or an LV2
+    /// plugin's count of audio input ports.  `None` when those say nothing
+    /// (or, for LV2, when there are more than two inputs).
     pub(crate) channels: Option<u32>,
     /// What went wrong reading this candidate, when the scan could still
-    /// list it (a VST3 `moduleinfo.json` it could not read or parse).
+    /// list it: a VST3 `moduleinfo.json` it could not read or parse, or an
+    /// LV2 plugin that needs an unsupported feature, a non-optional CV port,
+    /// or more audio ports than the host supplies.
     pub(crate) scan_error: Option<String>,
 }
 
@@ -264,6 +271,7 @@ pub(crate) struct PluginBrowser {
     pub(crate) filter: EffectFilter,
     pub(crate) show_vst3: bool,
     pub(crate) show_clap: bool,
+    pub(crate) show_lv2: bool,
     /// The row ↑/↓ moves and Enter adds.
     pub(crate) chosen: usize,
     /// The search field takes focus on the frame the browser opens.
@@ -291,6 +299,7 @@ impl Default for PluginBrowser {
             filter: EffectFilter::All,
             show_vst3: true,
             show_clap: true,
+            show_lv2: true,
             chosen: 0,
             focus_search: false,
             follow: false,
@@ -301,13 +310,16 @@ impl Default for PluginBrowser {
     }
 }
 
-/// The VST3 and CLAP folders a scan reads, for Setup.
+/// The VST3, CLAP and LV2 folders a scan reads, for Setup.
 pub(crate) fn plugin_scan_folders() -> Vec<String> {
     let mut folders = Vec::new();
     for path in crate::audio::vst3::search_roots() {
         push_folder(&mut folders, &path);
     }
     for path in crate::audio::clap::scan_roots() {
+        push_folder(&mut folders, &path);
+    }
+    for path in lv2::scan_roots() {
         push_folder(&mut folders, &path);
     }
     folders
@@ -344,6 +356,9 @@ fn scan_library() -> Vec<PluginCandidate> {
     for candidate in clap::scan_library() {
         candidates.push(candidate_from_clap(candidate));
     }
+    for candidate in lv2::scan_library() {
+        candidates.push(candidate_from_lv2(candidate));
+    }
     candidates.sort_by_cached_key(|candidate| candidate.name.to_lowercase());
     candidates.dedup_by(|a, b| {
         a.path == b.path
@@ -367,14 +382,30 @@ fn candidate_from_clap(candidate: ClapCandidate) -> PluginCandidate {
     }
 }
 
-/// The effects in one bundle: CLAP by its `.clap` extension, else VST3.
+fn candidate_from_lv2(candidate: Lv2Candidate) -> PluginCandidate {
+    PluginCandidate {
+        path: candidate.path,
+        format: PluginFormat::Lv2,
+        class_id: Some(candidate.plugin_uri),
+        name: candidate.name,
+        vendor: candidate.vendor,
+        category: candidate.category,
+        channels: candidate.channels,
+        scan_error: candidate.scan_error,
+    }
+}
+
+/// The effects in one bundle: CLAP by its `.clap` extension, LV2 by its
+/// `.lv2` folder, else VST3.
 fn candidates_from_path(path: &Path) -> Vec<PluginCandidate> {
-    if path
+    let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("clap"))
-    {
+        .unwrap_or_default();
+    if extension.eq_ignore_ascii_case("clap") {
         candidates_from_clap_bundle(path)
+    } else if extension.eq_ignore_ascii_case("lv2") {
+        candidates_from_lv2_bundle(path)
     } else {
         candidates_from_bundle(path)
     }
@@ -383,6 +414,13 @@ fn candidates_from_path(path: &Path) -> Vec<PluginCandidate> {
 fn candidates_from_clap_bundle(path: &Path) -> Vec<PluginCandidate> {
     match clap::scan_bundle(path) {
         Ok(found) => found.into_iter().map(candidate_from_clap).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn candidates_from_lv2_bundle(path: &Path) -> Vec<PluginCandidate> {
+    match lv2::scan_bundle(path) {
+        Ok(found) => found.into_iter().map(candidate_from_lv2).collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -486,6 +524,7 @@ fn screenshot_candidate(
     let path = match format {
         PluginFormat::Vst3 => format!("{name}.vst3"),
         PluginFormat::Clap => format!("{name}.clap"),
+        PluginFormat::Lv2 => format!("{name}.lv2"),
     };
     PluginCandidate {
         path: path.into(),
@@ -709,7 +748,7 @@ impl RigWerkApp {
                 self.plugin_browser.receiver = None;
                 self.push_log(
                     format!(
-                        "Found {} plugin{} (VST3 and CLAP).",
+                        "Found {} plugin{} (VST3, CLAP and LV2).",
                         self.plugin_browser.library.len(),
                         if self.plugin_browser.library.len() == 1 {
                             ""
@@ -802,8 +841,8 @@ impl RigWerkApp {
     }
 
     /// Adds the effect called `name` (the first one when `None`) from a
-    /// VST3 or CLAP bundle to the selected path.  `false` when the bundle
-    /// holds no such effect.  Used by the screenshot setup.
+    /// VST3, CLAP or LV2 bundle to the selected path.  `false` when the
+    /// bundle holds no such effect.  Used by the screenshot setup.
     pub(crate) fn add_plugin_from_bundle(&mut self, path: &Path, name: Option<&str>) -> bool {
         let candidates = candidates_from_path(path);
         let found = match name {

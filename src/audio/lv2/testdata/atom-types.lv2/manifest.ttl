@@ -1,0 +1,80 @@
+@prefix atom: <http://lv2plug.in/ns/ext/atom#> .
+@prefix doap: <http://usefulinc.com/ns/doap#> .
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+
+<http://example.com/lv2/double-port>
+    a lv2:Plugin, lv2:EffectPlugin ;
+    doap:name "Double Port" ;
+    lv2:binary <atoms.so>, <atoms.dll> ;
+    lv2:port
+        [ a lv2:InputPort, lv2:AudioPort ;
+          lv2:index 0 ;
+          lv2:symbol "in" ;
+          lv2:name "In" ],
+        [ a lv2:OutputPort, lv2:AudioPort ;
+          lv2:index 1 ;
+          lv2:symbol "out" ;
+          lv2:name "Out" ],
+        [ a lv2:InputPort, atom:AtomPort ;
+          lv2:index 2 ;
+          lv2:symbol "amount" ;
+          lv2:name "Amount" ;
+          atom:bufferType atom:Double ] .
+
+<http://example.com/lv2/untyped-port>
+    a lv2:Plugin, lv2:EffectPlugin ;
+    doap:name "Untyped Port" ;
+    lv2:binary <atoms.so>, <atoms.dll> ;
+    lv2:port
+        [ a lv2:InputPort, lv2:AudioPort ;
+          lv2:index 0 ;
+          lv2:symbol "in" ;
+          lv2:name "In" ],
+        [ a lv2:OutputPort, lv2:AudioPort ;
+          lv2:index 1 ;
+          lv2:symbol "out" ;
+          lv2:name "Out" ],
+        [ a lv2:InputPort, atom:AtomPort ;
+          lv2:index 2 ;
+          lv2:symbol "events" ;
+          lv2:name "Events" ] .
+
+<http://example.com/lv2/optional-double>
+    a lv2:Plugin, lv2:EffectPlugin ;
+    doap:name "Optional Double" ;
+    lv2:binary <atoms.so>, <atoms.dll> ;
+    lv2:port
+        [ a lv2:InputPort, lv2:AudioPort ;
+          lv2:index 0 ;
+          lv2:symbol "in" ;
+          lv2:name "In" ],
+        [ a lv2:OutputPort, lv2:AudioPort ;
+          lv2:index 1 ;
+          lv2:symbol "out" ;
+          lv2:name "Out" ],
+        [ a lv2:InputPort, atom:AtomPort ;
+          lv2:index 2 ;
+          lv2:symbol "amount" ;
+          lv2:name "Amount" ;
+          atom:bufferType atom:Double ;
+          lv2:portProperty lv2:connectionOptional ] .
+
+<http://example.com/lv2/huge-port>
+    a lv2:Plugin, lv2:EffectPlugin ;
+    doap:name "Huge Port" ;
+    lv2:binary <atoms.so>, <atoms.dll> ;
+    lv2:port
+        [ a lv2:InputPort, lv2:AudioPort ;
+          lv2:index 0 ;
+          lv2:symbol "in" ;
+          lv2:name "In" ],
+        [ a lv2:OutputPort, lv2:AudioPort ;
+          lv2:index 1 ;
+          lv2:symbol "out" ;
+          lv2:name "Out" ],
+        [ a lv2:OutputPort, atom:AtomPort ;
+          lv2:index 2 ;
+          lv2:symbol "events" ;
+          lv2:name "Events" ;
+          atom:bufferType atom:Sequence ;
+          <http://lv2plug.in/ns/ext/resize-port#minimumSize> 4294967296 ] .

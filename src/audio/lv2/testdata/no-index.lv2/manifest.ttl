@@ -1,0 +1,15 @@
+@prefix doap: <http://usefulinc.com/ns/doap#> .
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+
+<http://example.com/lv2/no-index>
+    a lv2:Plugin, lv2:EffectPlugin ;
+    doap:name "No Index" ;
+    lv2:binary <noindex.so>, <noindex.dll> ;
+    lv2:port
+        [ a lv2:InputPort, lv2:AudioPort ;
+          lv2:symbol "in" ;
+          lv2:name "In" ],
+        [ a lv2:OutputPort, lv2:AudioPort ;
+          lv2:index 1 ;
+          lv2:symbol "out" ;
+          lv2:name "Out" ] .

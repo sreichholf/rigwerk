@@ -7,7 +7,6 @@
 //! service (`ClapInstance` behind the plugin's UI lock); none of them
 //! calls into the plugin or blocks.
 
-use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -31,39 +30,7 @@ use clap_sys::host::clap_host;
 
 use super::cstring;
 use super::ports::{AUDIO_PORTS_RESCAN_ALL, AUDIO_PORTS_RESCAN_STOPS};
-use crate::audio::plugins::{PluginShared, RESTART_ACTIVATION};
-
-thread_local! {
-    /// True while the current thread makes CLAP audio-thread calls
-    /// (`start_processing`, `process`, `stop_processing`, an active
-    /// `params.flush`).  The thread-check callback answers from here, so
-    /// the audio callback never takes a host-state lock just to report its
-    /// identity.
-    pub(super) static ON_AUDIO_THREAD: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Marks the current thread as the CLAP audio thread for as long as it
-/// lives.  The UI thread enters one too when it makes an audio-thread call
-/// with no block inside the plugin (a forced pause, teardown); it is the
-/// plugin's audio thread for that call.  Scopes nest: dropping one restores
-/// what was there before.
-pub(super) struct AudioThreadScope {
-    previous: bool,
-}
-
-impl AudioThreadScope {
-    pub(super) fn enter() -> Self {
-        Self {
-            previous: ON_AUDIO_THREAD.with(|flag| flag.replace(true)),
-        }
-    }
-}
-
-impl Drop for AudioThreadScope {
-    fn drop(&mut self) {
-        ON_AUDIO_THREAD.with(|flag| flag.set(self.previous));
-    }
-}
+use crate::audio::plugins::{on_audio_thread, PluginShared, RESTART_ACTIVATION};
 
 pub(super) const HOST_NAME: &[u8] = b"RigWerk\0";
 pub(super) const HOST_VENDOR: &[u8] = b"RigWerk\0";
@@ -408,12 +375,11 @@ pub(super) static HOST_THREAD_CHECK: clap_host_thread_check = clap_host_thread_c
 /// The UI thread, except while it stands in as the audio thread (a forced
 /// stop, teardown, a flush with no block inside): one thread is never both.
 pub(super) unsafe extern "C" fn host_is_main_thread(host: *const clap_host) -> bool {
-    unsafe { state(host) }
-        .is_some_and(|state| state.on_main_thread() && !ON_AUDIO_THREAD.with(Cell::get))
+    unsafe { state(host) }.is_some_and(|state| state.on_main_thread() && !on_audio_thread())
 }
 
 pub(super) unsafe extern "C" fn host_is_audio_thread(_host: *const clap_host) -> bool {
-    ON_AUDIO_THREAD.with(|flag| flag.get())
+    on_audio_thread()
 }
 
 pub(super) static HOST_LOG: clap_host_log = clap_host_log {

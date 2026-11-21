@@ -142,6 +142,7 @@ pub(crate) enum ProcessFailure {
     /// A plugin rebuilt on its own request asked again at once.
     ReloadLoop,
     Clap(ClapFailure),
+    Lv2(Lv2Failure),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +150,37 @@ pub(crate) enum ClapFailure {
     NotActive,
     ProcessError,
     StartFailed,
+}
+
+/// Why an LV2 effect stopped processing.  LV2's `run` returns nothing, so a
+/// failure is an activation one.  `activate` also returns void, so a
+/// reactivation that cannot be called is the only failure left: there is no
+/// distinct "activation failed" kind to report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lv2Failure {
+    /// `run` was asked for while the instance is not active.
+    NotActive,
+}
+
+impl Lv2Failure {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Lv2Failure::NotActive => "The LV2 plugin is not active.",
+        }
+    }
+
+    fn code(self) -> u32 {
+        match self {
+            Lv2Failure::NotActive => 0,
+        }
+    }
+
+    fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Lv2Failure::NotActive),
+            _ => None,
+        }
+    }
 }
 
 impl ClapFailure {
@@ -184,6 +216,7 @@ const FAILURE_VST3_START: u64 = 2;
 const FAILURE_CLAP: u64 = 3;
 const FAILURE_VST3_INACTIVE: u64 = 4;
 const FAILURE_RELOAD_LOOP: u64 = 5;
+const FAILURE_LV2: u64 = 6;
 
 impl ProcessFailure {
     /// The text the effect's error shows (UI thread).
@@ -196,6 +229,7 @@ impl ProcessFailure {
             ProcessFailure::Vst3Inactive => "The VST3 plugin is not active.".to_owned(),
             ProcessFailure::ReloadLoop => "The plugin keeps asking to be reloaded.".to_owned(),
             ProcessFailure::Clap(failure) => failure.message().to_owned(),
+            ProcessFailure::Lv2(failure) => failure.message().to_owned(),
         }
     }
 
@@ -208,6 +242,7 @@ impl ProcessFailure {
             ProcessFailure::Vst3Inactive => FAILURE_VST3_INACTIVE << 32,
             ProcessFailure::ReloadLoop => FAILURE_RELOAD_LOOP << 32,
             ProcessFailure::Clap(failure) => FAILURE_CLAP << 32 | u64::from(failure.code()),
+            ProcessFailure::Lv2(failure) => FAILURE_LV2 << 32 | u64::from(failure.code()),
         }
     }
 
@@ -219,6 +254,7 @@ impl ProcessFailure {
             FAILURE_VST3_INACTIVE => Some(ProcessFailure::Vst3Inactive),
             FAILURE_RELOAD_LOOP => Some(ProcessFailure::ReloadLoop),
             FAILURE_CLAP => ClapFailure::from_code(code).map(ProcessFailure::Clap),
+            FAILURE_LV2 => Lv2Failure::from_code(code).map(ProcessFailure::Lv2),
             _ => None,
         }
     }

@@ -112,6 +112,30 @@ needs `xvfb-run` (or a real X server).  `audio/vst3` scans for bundles
 (from `moduleinfo.json`, without loading them), and loads, processes and
 opens them.
 
+### Real LV2 plugins
+
+The `lv2_fixture` tests load the LV2 repository's examples (`eg-amp`,
+`eg-params`, `eg-sampler`).  `scripts/lv2-fixtures.sh <dir>` clones the
+repository at a pinned tag, builds the plugins with meson and copies the
+three bundles into `<dir>/plugins`; they are never committed.  Without
+`RIGWERK_LV2_FIXTURES` the tests pass without doing anything.  With it
+set, a missing bundle fails.  CI runs them on Linux; the script is POSIX
+and does not build these on Windows yet.
+
+`eg-amp` covers load, process, a control port and the panel; `eg-params`
+covers state (it has only atom ports, so the test loads it directly
+through `audio/lv2`); `eg-sampler` covers `state:loadDefaultState` and a
+sample loaded through the worker (it has no audio input, so it is loaded
+the same way).  It needs libsndfile and libsamplerate to build.
+
+```bash
+scripts/lv2-fixtures.sh .lv2-fixtures
+RIGWERK_LV2_FIXTURES=.lv2-fixtures/plugins \
+  cargo test --locked lv2_fixture -- --nocapture
+```
+
+This needs `meson` and `ninja`.
+
 ### The NAM migration null test
 
 `a_migrated_stage_nulls_against_the_old_build` checks that a saved single
@@ -148,7 +172,8 @@ CARGO_TARGET_DIR=$PWD/target scripts/nam-null-test.sh .nam-null
 
 ## Layout
 
-- `src/audio`: the bridge, DSP, and device backends. `audio.rs` is the
+- `src/audio`: the bridge, DSP, device backends, and the plugin hosts
+  (`audio/vst3`, `audio/clap`, `audio/lv2`). `audio.rs` is the
   map of that crate.
 - `src/app`: window state, startup, preferences, device selection, and
   bridge control. It does not draw. The frame shell lives in

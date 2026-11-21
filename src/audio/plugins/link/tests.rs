@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use super::super::transfer::param_transfer;
-use super::{ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION};
+use super::{
+    ClapFailure, Lv2Failure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
+};
 use crate::audio::plugins::MAX_ALIGN;
 
 #[test]
@@ -20,6 +22,7 @@ fn only_the_first_failure_is_kept_and_reads_back() {
         ProcessFailure::Clap(ClapFailure::NotActive),
         ProcessFailure::Clap(ClapFailure::ProcessError),
         ProcessFailure::Clap(ClapFailure::StartFailed),
+        ProcessFailure::Lv2(Lv2Failure::NotActive),
     ] {
         let shared = PluginShared::new(0);
         shared.fail(failure);
@@ -56,6 +59,10 @@ fn failure_messages_keep_the_host_texts() {
     ] {
         assert_eq!(ProcessFailure::Clap(failure).message(), text);
     }
+    assert_eq!(
+        ProcessFailure::Lv2(Lv2Failure::NotActive).message(),
+        "The LV2 plugin is not active."
+    );
 }
 
 #[test]

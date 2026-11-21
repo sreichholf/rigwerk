@@ -1,0 +1,7 @@
+@prefix ex: <http://example.com/schema#> .
+
+<http://example.com/b>
+    ex:port _:p1 .
+
+_:p1
+    ex:name "B" .

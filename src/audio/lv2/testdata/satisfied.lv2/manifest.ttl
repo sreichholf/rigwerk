@@ -1,0 +1,22 @@
+@prefix doap: <http://usefulinc.com/ns/doap#> .
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix opts: <http://lv2plug.in/ns/ext/options#> .
+@prefix bufsize: <http://lv2plug.in/ns/ext/buf-size#> .
+@prefix urid: <http://lv2plug.in/ns/ext/urid#> .
+
+<http://example.com/lv2/satisfied>
+    a lv2:Plugin, lv2:EffectPlugin ;
+    doap:name "Satisfied" ;
+    lv2:binary <satisfied.so>, <satisfied.dll> ;
+    lv2:requiredFeature urid:map, lv2:inPlaceBroken, lv2:isLive,
+        lv2:hardRTCapable, opts:options ;
+    opts:requiredOption bufsize:maxBlockLength, bufsize:minBlockLength ;
+    lv2:port
+        [ a lv2:InputPort, lv2:AudioPort ;
+          lv2:index 0 ;
+          lv2:symbol "in" ;
+          lv2:name "In" ],
+        [ a lv2:OutputPort, lv2:AudioPort ;
+          lv2:index 1 ;
+          lv2:symbol "out" ;
+          lv2:name "Out" ] .

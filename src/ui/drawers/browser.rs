@@ -12,6 +12,7 @@ use crate::app::plugins::{
     category_tags, position_phrase, visible_effects, EffectFilter, PluginCandidate,
 };
 use crate::app::RigWerkApp;
+use crate::audio::PluginFormat;
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{chip, palette_focus, row_info, OutlineButton, TextField};
@@ -78,6 +79,7 @@ impl RigWerkApp {
                 &browser.filter,
                 browser.show_vst3,
                 browser.show_clap,
+                browser.show_lv2,
                 &browser.favourites,
                 &browser.recent,
             )
@@ -202,8 +204,9 @@ fn filters(ui: &mut egui::Ui, app: &mut RigWerkApp, tags: &[String]) {
     });
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        format_chip(ui, app, true);
-        format_chip(ui, app, false);
+        format_chip(ui, app, PluginFormat::Vst3);
+        format_chip(ui, app, PluginFormat::Clap);
+        format_chip(ui, app, PluginFormat::Lv2);
     });
 }
 
@@ -216,27 +219,29 @@ fn filter_chip(ui: &mut egui::Ui, app: &mut RigWerkApp, label: &str, filter: Eff
     }
 }
 
-fn format_chip(ui: &mut egui::Ui, app: &mut RigWerkApp, vst3: bool) {
-    let label = if vst3 { "VST3" } else { "CLAP" };
-    let mut on = if vst3 {
-        app.plugin_browser.show_vst3
-    } else {
-        app.plugin_browser.show_clap
+fn format_chip(ui: &mut egui::Ui, app: &mut RigWerkApp, format: PluginFormat) {
+    let browser = &mut app.plugin_browser;
+    let mut on = match format {
+        PluginFormat::Vst3 => browser.show_vst3,
+        PluginFormat::Clap => browser.show_clap,
+        PluginFormat::Lv2 => browser.show_lv2,
     };
-    if chip(ui, &mut on, label).clicked() {
-        if vst3 {
-            app.plugin_browser.show_vst3 = on;
-        } else {
-            app.plugin_browser.show_clap = on;
+    if chip(ui, &mut on, format.label()).clicked() {
+        match format {
+            PluginFormat::Vst3 => browser.show_vst3 = on,
+            PluginFormat::Clap => browser.show_clap = on,
+            PluginFormat::Lv2 => browser.show_lv2 = on,
         }
-        if !app.plugin_browser.show_vst3 && !app.plugin_browser.show_clap {
-            if vst3 {
-                app.plugin_browser.show_vst3 = true;
-            } else {
-                app.plugin_browser.show_clap = true;
+        if !browser.show_vst3 && !browser.show_clap && !browser.show_lv2 {
+            // The last one clicked stays on, so the list is never empty by
+            // format alone.
+            match format {
+                PluginFormat::Vst3 => browser.show_vst3 = true,
+                PluginFormat::Clap => browser.show_clap = true,
+                PluginFormat::Lv2 => browser.show_lv2 = true,
             }
         }
-        app.plugin_browser.chosen = 0;
+        browser.chosen = 0;
     }
 }
 
@@ -599,7 +604,7 @@ fn footer(
     ui.horizontal(|ui| {
         let mut path = app.plugin_browser.path_input.clone();
         let field = TextField::new(&mut path, "Add from path")
-            .hint("Path to a .vst3 or .clap file")
+            .hint("Path to a .vst3, .clap or .lv2 bundle")
             .id(path_id)
             .width((ui.available_width() - 150.0).max(80.0))
             .show(ui);

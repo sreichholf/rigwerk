@@ -11,6 +11,8 @@ use clap_sys::ext::audio_ports::{
 };
 use clap_sys::plugin::clap_plugin;
 
+use crate::audio::plugins::MAX_AUDIO_PORTS;
+
 /// Rescan flags that cannot invalidate the buffers: port names and metadata,
 /// and the in-place pairing, which this host never uses because every port has
 /// its own buffers.
@@ -27,9 +29,8 @@ pub(super) const AUDIO_PORTS_RESCAN_STOPS: u32 = CLAP_AUDIO_PORTS_RESCAN_LIST
 pub(super) const AUDIO_PORTS_RESCAN_ALL: u32 =
     AUDIO_PORTS_RESCAN_HARMLESS | AUDIO_PORTS_RESCAN_STOPS;
 
-/// The most audio ports per direction, and channels per port, RigWerk sets up
-/// buffers for.  Anything larger is a broken description, not an effect.
-pub(super) const MAX_AUDIO_PORTS: usize = 32;
+/// The most channels one audio port may declare.  A port with more is a
+/// broken description, not an effect.
 pub(super) const MAX_PORT_CHANNELS: usize = 64;
 
 /// What [`port_layout`] needs to know about one declared audio port.  The

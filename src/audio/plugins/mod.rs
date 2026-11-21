@@ -1,9 +1,10 @@
-//! VST3 and CLAP effect chains, one per signal path.
+//! VST3, CLAP and LV2 effect chains, one per signal path.
 //!
-//! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`] or
-//! the CLAP host in [`super::clap`]; each path's chain lives on that path in
-//! [`super::shared::Shared`] so the playback callback can process it.  The UI
-//! only ever holds descriptors, never the plugin objects themselves.
+//! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`], the
+//! CLAP host in [`super::clap`] or the LV2 host in [`super::lv2`]; each path's
+//! chain lives on that path in [`super::shared::Shared`] so the playback
+//! callback can process it.  The UI only ever holds descriptors, never the
+//! plugin objects themselves.
 //!
 //! Each loaded plugin is split in two (`handle`): the processor the chain's
 //! slot runs on the audio thread, and the [`PluginHandle`] the UI reaches
@@ -16,6 +17,7 @@
 //! runtime let go of back the same way.  No lock is shared between the two
 //! sides.
 
+mod audio_thread;
 mod chain;
 #[cfg(test)]
 mod fixtures;
@@ -33,6 +35,13 @@ mod transfer;
 mod tests;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(crate) use audio_thread::{on_audio_thread, AudioThreadScope};
+
+/// The most audio ports one effect may declare, shared by the CLAP host and
+/// the LV2 scan.  More than this is a scan error for LV2 and a load error for
+/// CLAP.
+pub(crate) const MAX_AUDIO_PORTS: usize = 32;
 
 /// The largest latency, in frames, one effect may report: the size the
 /// alignment delay lines are built for (about 170 ms at 192 kHz).  A larger
@@ -53,6 +62,8 @@ pub(crate) fn clamp_latency(latency: u32) -> u32 {
     }
 }
 
+#[cfg(test)]
+pub(crate) use pref::PluginState;
 pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
 #[cfg(test)]
@@ -62,11 +73,11 @@ pub(crate) use handle::PluginHandle;
 #[cfg(test)]
 pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
 pub(crate) use link::{
-    ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
+    ClapFailure, Lv2Failure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
 };
 #[cfg(test)]
 pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
-pub(crate) use load::{Restore, MAX_BLOCK};
+pub(crate) use load::{Restore, MAX_BLOCK, MAX_STATE_BLOB};
 pub(crate) use model::{ChainModel, ReloadPlan};
 #[cfg(test)]
 pub(crate) use pause::PAUSE_STALL;
@@ -78,6 +89,6 @@ pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
 pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};
 
 #[cfg(test)]
-pub(crate) use fixtures::vst3_fixture;
+pub(crate) use fixtures::{lv2_fixture, vst3_fixture};
 #[cfg(test)]
 pub(crate) use slot::{deferred_slot_count, tracked_slots_alive};
