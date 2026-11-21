@@ -49,6 +49,51 @@ fn the_display_control_lists_needle_first() {
 }
 
 #[test]
+fn the_strobe_row_matches_the_full_face_at_any_width() {
+    use super::gauge::{strobe_column_width, strobe_scale};
+    let period = 240.0;
+    let gap = super::STRING_COLUMN_GAP;
+    let mut previous = 0.0;
+    for span in [900.0, 1200.0, 1600.0, 2200.0] {
+        let column = strobe_column_width(span, 6, gap);
+        let scale = strobe_scale(column, span);
+        let used = column * 6.0 + gap * 5.0;
+        assert!((used - span).abs() < 1e-3, "{span}: row {used}");
+        let full = span / period;
+        let fitted = column / (period * scale);
+        assert!((full - fitted).abs() < 1e-3, "{span}: {full} vs {fitted}");
+        assert!(scale > previous, "{span}: {scale} vs {previous}");
+        previous = scale;
+    }
+    assert_eq!(strobe_scale(800.0, 800.0), 1.0);
+    assert_eq!(strobe_scale(0.0, 800.0), 1.0);
+    assert_eq!(strobe_scale(f32::NAN, 800.0), 1.0);
+    assert_eq!(strobe_scale(800.0, f32::INFINITY), 1.0);
+    assert_eq!(strobe_column_width(0.0, 6, gap), 0.0);
+    assert_eq!(strobe_column_width(1200.0, 0, gap), 0.0);
+}
+
+#[test]
+fn a_column_needle_stays_inside_its_face() {
+    use super::gauge::column_needle_radius;
+    assert_eq!(column_needle_radius(0.0, 200.0), 0.0);
+    assert_eq!(column_needle_radius(200.0, f32::NAN), 0.0);
+    let mut previous = 0.0;
+    for width in [120.0, 150.0, 180.0] {
+        let radius = column_needle_radius(width, 208.0);
+        assert!(radius > previous, "{width}: {radius} vs {previous}");
+        assert!(radius <= 92.0, "{radius}");
+        assert!(
+            radius + 10.0 <= width * 0.5 + 1e-3,
+            "{width}: radius {radius} spills"
+        );
+        previous = radius;
+    }
+    assert_eq!(column_needle_radius(800.0, 208.0), 92.0);
+    assert!(column_needle_radius(220.0, 208.0) <= column_needle_radius(220.0, 320.0));
+}
+
+#[test]
 fn the_strobe_holds_inside_one_cent_and_caps_the_rest() {
     use super::gauge::strobe_target_speed;
     assert_eq!(strobe_target_speed(0.0, true), 0.0);

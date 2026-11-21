@@ -1,7 +1,9 @@
 //! Tuner: one screen (`docs/ui-spec.md` §3.4).  The note very large, the
-//! cents and the state, the needle or the three strobe discs, the string
-//! cells, and one bottom bar with every setting.  The title bar and the
-//! status bar stay, so the tuner is entered and left like any other screen.
+//! cents and the state, the needle or the strobe, the string cells, and one
+//! bottom bar with every setting.  In All strings the strobe and the needle
+//! are one face per string, fitted to the row.  The title bar and the status
+//! bar stay, so the
+//! tuner is entered and left like any other screen.
 //!
 //! The analysis and the frame types live in `audio::tuner`; this module only
 //! draws the frame and edits the screen's settings.  While auto-mute holds
@@ -23,6 +25,10 @@ use crate::audio::{
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{chip, row_info, segmented, OutlineButton};
+
+/// Gap between string columns.  The strobe row uses it too, so a face sits
+/// on its cell.
+const STRING_COLUMN_GAP: f32 = 6.0;
 
 /// The settings the page was drawn with.  Copying them lets the frame stay
 /// borrowed while the bar collects edits for after the draw.
@@ -139,11 +145,22 @@ impl RigWerkApp {
             readout(ui, &lead, view.tuning(), active, colours);
             ui.add_space(4.0);
             if active {
-                match view.display {
-                    TunerDisplay::Strobe => {
-                        gauge::strobe(ui, lead.cents, lead.state, lead.valid, colours)
+                match (view.display, view.listen, view.tuning()) {
+                    (TunerDisplay::Strobe, TunerListen::All, Some(tuning)) => {
+                        gauge::strobes(ui, &string_gauges(frame, tuning, &lead), colours);
                     }
-                    TunerDisplay::Needle => gauge::needle(
+                    (TunerDisplay::Strobe, _, _) => {
+                        gauge::strobe(ui, lead.cents, lead.state, lead.valid, colours);
+                    }
+                    (TunerDisplay::Needle, TunerListen::All, Some(tuning)) => {
+                        gauge::needles(
+                            ui,
+                            &string_gauges(frame, tuning, &lead),
+                            view.tolerance.cents(),
+                            colours,
+                        );
+                    }
+                    (TunerDisplay::Needle, _, _) => gauge::needle(
                         ui,
                         lead.cents,
                         lead.state,
@@ -385,6 +402,38 @@ fn lead_reading(frame: &TunerFrame, view: &View, face: StringFace) -> Lead {
     }
 }
 
+/// One gauge face per preset string.  A harmonic or a silent row is not a
+/// pitch the gauge should show.
+fn string_gauges(frame: &TunerFrame, tuning: &Tuning, lead: &Lead) -> Vec<gauge::GaugeFace> {
+    tuning
+        .strings
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| {
+            let row = frame.strings.get(index);
+            let playable = row.is_some_and(|row| row.sounding && row.harmonic_of.is_none());
+            let pinned = lead.pinned && lead.string == Some(index);
+            gauge::GaugeFace {
+                column: Some(index),
+                title: name,
+                cents: if playable {
+                    row.map(|row| row.cents).unwrap_or(0.0)
+                } else {
+                    0.0
+                },
+                state: if playable {
+                    row.map(|row| row.state).unwrap_or(TuneState::Silent)
+                } else {
+                    TuneState::Silent
+                },
+                valid: playable,
+                followed: lead.following == Some(index) && !pinned,
+                pinned,
+            }
+        })
+        .collect()
+}
+
 /// The level and the confidence as two thin bars under the scale.
 fn level_and_confidence(ui: &mut egui::Ui, lead: &Lead, active: bool, colours: &Palette) {
     let level = if active && lead.level_db.is_finite() {
@@ -513,7 +562,7 @@ fn strings_section(
         return;
     };
 
-    let gap = 6.0;
+    let gap = STRING_COLUMN_GAP;
     let count = tuning.strings.len();
     let width = ((rect.width() - gap * count.saturating_sub(1) as f32) / count as f32).max(36.0);
     for (index, (name, _)) in tuning.strings.iter().enumerate() {

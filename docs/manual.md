@@ -188,7 +188,9 @@ The tuner is a full screen: *Tuner* in the title bar, or **Ctrl+T**; Esc
 or Ctrl+T goes back. It shows the note very large, its octave, the target
 and the heard frequency, a needle over ±50 cents, or a strobe of three
 discs seen from the front. Flat slides the discs left and sharp slides
-them right. Level and confidence run underneath.
+them right. With All strings either display is one face per string,
+fitted to the row so a resize keeps them on the screen, with the string
+and its cents above the gauge. Level and confidence run underneath.
 
 Pick Chromatic, or one of the 20 tunings (6, 7 and 8-string guitar; 4, 5
 and 6-string bass). A tuning shows one cell per string with its note,

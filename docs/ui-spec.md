@@ -332,7 +332,11 @@ auto-mute) keys on `Screen::Tuner`.
 - The note, very large, its octave, the target and the heard frequency.
 - The ±50 cent needle with the in-tune band and its centre, or the strobe:
   three discs seen from the front, sliding sideways (flat to the left,
-  sharp to the right).
+  sharp to the right).  In All strings either gauge is one face per
+  string across the row, taken from the window this frame.  A strobe face
+  is scaled by its width over the row, so the discs keep the full strobe's
+  bar count.  A needle's arc is fitted to the column.  Each face heads
+  with its string and its cents.
 - Cents and the state: *tune up*, *tune down*, *in tune*, *centered*
   (within the centre band).
 - With a tuning: one cell per string with its note, target Hz, cents, a
