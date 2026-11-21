@@ -1,5 +1,6 @@
-//! The tuner's two gauge faces.  Both are painted inside a 146 px panel and
-//! share the tolerance band and the permanent ±1 centered mark.
+//! The tuner's two gauge faces.  The needle is the ±50 cent arc.  The strobe
+//! is three discs seen from the front, wide to fine, and a disc holds inside
+//! ±1 cent.  Each disc is clipped to its own band so a slide cannot spill.
 
 use std::f32::consts::PI;
 
@@ -8,29 +9,37 @@ use egui::{Align2, CornerRadius, FontFamily, FontId, Pos2, Rect, Sense, Shape, S
 
 use crate::audio::TuneState;
 use crate::ui::theme::ts;
-use crate::ui::theme::{palette, with_alpha, Palette};
+use crate::ui::theme::{with_alpha, Palette};
 
 use super::{signed_cents, state_colour};
 
-const PANEL_H: f32 = 146.0;
-const STROBE_BARS: usize = 48;
+const PANEL_H: f32 = 172.0;
+/// Discs hold inside this many cents.  The same mark as `CENTER_CENTS`.
+const STROBE_HOLD_CENTS: f32 = 1.0;
+/// Past this many cents the discs do not spin any faster.
+const STROBE_SPEED_CAP_CENTS: f32 = 24.0;
+/// Pixels per second for one cent of error, before the gear.
+const STROBE_PIXELS_PER_CENT: f32 = 14.0;
+/// Share of each disc that stays clear.  The well colour shades the two
+/// edges, and the shade does not move with the segments.
+const STROBE_CLEAR: f32 = 0.56;
+/// (lit segment, gap, gear) for the wide, medium and fine discs.
+const DISCS: [(f32, f32, f32); 3] = [(168.0, 72.0, 1.0), (64.0, 28.0, 2.0), (16.0, 8.0, 5.0)];
 
-/// Phase added to the strobe pattern.  Negative cents (flat) move the bars
-/// left, positive cents (sharp) move them right.  The bars hold inside the
-/// band the cents readout draws as 0.0.
-pub(super) fn strobe_phase(cents: f32, phase: f32) -> f32 {
-    if cents < -super::DISPLAYED_ZERO_CENTS {
-        phase
-    } else if cents > super::DISPLAYED_ZERO_CENTS {
-        -phase
-    } else {
-        0.0
+/// Horizontal shift of one disc, in pixels.  Inside ±1 cent the disc holds.
+/// Outside, the sign is the direction (negative is flat, and flat moves
+/// left) and the magnitude is `min(|cents|, 24) * 14 * gear * time_secs`.
+pub(super) fn strobe_offset(cents: f32, time_secs: f32, gear: f32) -> f32 {
+    if !cents.is_finite() || cents.abs() <= STROBE_HOLD_CENTS {
+        return 0.0;
     }
+    let speed = cents.abs().min(STROBE_SPEED_CAP_CENTS) * STROBE_PIXELS_PER_CENT * gear;
+    cents.signum() * speed * time_secs
 }
 
 /// The empty panel both faces draw into.
 fn panel(ui: &mut egui::Ui) -> Rect {
-    let colours = palette(ui.ctx());
+    let colours = crate::ui::theme::palette(ui.ctx());
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), PANEL_H), Sense::hover());
     ui.painter()
@@ -44,26 +53,25 @@ fn panel(ui: &mut egui::Ui) -> Rect {
     rect
 }
 
-/// Strobe: bars that drift left when flat and right when sharp.
+/// Strobe: three full-width discs.  Flat slides left, sharp slides right.
 pub(super) fn strobe(
     ui: &mut egui::Ui,
     cents: f32,
     state: TuneState,
     valid: bool,
-    tolerance: f32,
     colours: &Palette,
 ) {
     let rect = panel(ui);
     let painter = ui.painter();
     let color = if valid {
-        state_colour(colours, state)
+        state_colour(colours, state, cents)
     } else {
         colours.text3
     };
     painter.text(
         egui::pos2(rect.left() + 14.0, rect.top() + 12.0),
         Align2::LEFT_CENTER,
-        "STROBE · FINE",
+        "STROBE",
         FontId::new(ts(8.5), FontFamily::Proportional),
         colours.text3,
     );
@@ -79,115 +87,93 @@ pub(super) fn strobe(
         color,
     );
 
-    let bars = Rect::from_min_max(
-        egui::pos2(rect.left() + 16.0, rect.top() + 26.0),
-        egui::pos2(rect.right() - 16.0, rect.bottom() - 40.0),
+    let bands = Rect::from_min_max(
+        egui::pos2(rect.left() + 1.0, rect.top() + 22.0),
+        egui::pos2(rect.right() - 1.0, rect.bottom() - 20.0),
     );
-    painter.rect_filled(bars, CornerRadius::same(6), with_alpha(color, 5));
-
-    let mid = bars.center().x;
-    let half = bars.width() / 2.0;
-    let step = bars.width() / STROBE_BARS as f32;
-    let bar_width = (step * 0.58).max(2.0);
+    let gap = 6.0;
+    let height = ((bands.height() - gap * (DISCS.len() - 1) as f32) / DISCS.len() as f32).max(0.0);
     let time = ui.input(|input| input.time) as f32;
-    // The pattern has to crawl without aliasing into a stationary image: the
-    // speed follows the offset, and an in-tune reading crawls slowly.
-    let speed = 0.7 + cents.abs().min(50.0) * 0.05;
-    let phase = if valid { time * speed * 2.0 } else { 0.0 };
-    let offset = strobe_phase(cents, phase);
-    let tolerance_x = half * (tolerance / 50.0).clamp(0.0, 1.0);
-
-    for index in 0..STROBE_BARS {
-        let x = bars.left() + (index as f32 + 0.5) * step;
-        let edge = ((x - mid) / half).clamp(-1.0, 1.0);
-        let dome = (1.0 - edge * edge).max(0.0);
-        let wave = 0.5 + 0.5 * (index as f32 * 0.62 + offset).sin();
-        let height = bars.height() * (0.50 + 0.42 * dome) * (0.72 + 0.28 * wave);
-        let bar_color = if !valid {
-            with_alpha(colours.text3, 55)
-        } else if (x - mid).abs() <= tolerance_x {
-            with_alpha(color, 225)
+    for (index, (on, space, gear)) in DISCS.iter().copied().enumerate() {
+        let top = bands.top() + index as f32 * (height + gap);
+        let disc = Rect::from_min_max(
+            egui::pos2(bands.left(), top),
+            egui::pos2(bands.right(), top + height),
+        );
+        let offset = if valid {
+            strobe_offset(cents, time, gear)
         } else {
-            with_alpha(color, 105)
+            0.0
         };
-        painter.rect_filled(
-            Rect::from_min_max(
-                egui::pos2(x - bar_width / 2.0, bars.bottom() - height),
-                egui::pos2(x + bar_width / 2.0, bars.bottom()),
-            ),
-            CornerRadius::same(1),
-            bar_color,
-        );
+        paint_disc(painter, disc, on, space, offset, color, colours.well);
     }
 
-    painter.rect_filled(
-        Rect::from_min_max(
-            egui::pos2(mid - tolerance_x, bars.bottom() + 1.0),
-            egui::pos2(mid + tolerance_x, bars.bottom() + 3.0),
-        ),
-        CornerRadius::same(1),
-        with_alpha(colours.accent, 55),
-    );
-    let center_x = half * (1.0 / 50.0);
-    painter.rect_filled(
-        Rect::from_min_max(
-            egui::pos2(mid - center_x, bars.top()),
-            egui::pos2(mid + center_x, bars.bottom()),
-        ),
-        0,
-        with_alpha(colours.accent, 24),
-    );
-    painter.line_segment(
-        [
-            egui::pos2(mid, bars.top() - 3.0),
-            egui::pos2(mid, bars.bottom() + 3.0),
-        ],
-        Stroke::new(1.4, with_alpha(colours.accent, 220)),
-    );
-
-    for (fraction, label) in [
-        (-1.0, "-50"),
-        (-0.5, "-25"),
-        (0.0, "0"),
-        (0.5, "+25"),
-        (1.0, "+50"),
-    ] {
-        painter.text(
-            egui::pos2(mid + half * fraction, rect.bottom() - 26.0),
-            Align2::CENTER_CENTER,
-            label,
-            FontId::new(ts(8.0), FontFamily::Monospace),
-            colours.text3,
-        );
-    }
-    // Arrow glyphs are not in the interface font, so the drift directions are
-    // painted as two-line chevrons.
-    chevron(
-        painter,
-        egui::pos2(bars.left() + 3.0, rect.bottom() - 9.0),
-        true,
-        colours,
-    );
     painter.text(
-        egui::pos2(bars.left() + 11.0, rect.bottom() - 9.0),
-        Align2::LEFT_CENTER,
-        "drifting flat",
+        egui::pos2(rect.center().x, rect.bottom() - 10.0),
+        Align2::CENTER_CENTER,
+        "Flat moves left, sharp moves right",
         FontId::new(ts(8.0), FontFamily::Proportional),
         colours.text3,
     );
-    painter.text(
-        egui::pos2(bars.right() - 11.0, rect.bottom() - 9.0),
-        Align2::RIGHT_CENTER,
-        "drifting sharp",
-        FontId::new(ts(8.0), FontFamily::Proportional),
-        colours.text3,
-    );
-    chevron(
-        painter,
-        egui::pos2(bars.right() - 3.0, rect.bottom() - 9.0),
-        false,
-        colours,
-    );
+}
+
+/// One disc: vertical segments of `on` pixels, a gap of `space`, then the
+/// still edge shade.  `offset` is in pixels and already carries the sign.
+fn paint_disc(
+    painter: &egui::Painter,
+    disc: Rect,
+    on: f32,
+    space: f32,
+    offset: f32,
+    colour: egui::Color32,
+    well: egui::Color32,
+) {
+    if disc.height() <= 0.0 || disc.width() <= 0.0 {
+        return;
+    }
+    let painter = painter.with_clip_rect(disc);
+    let period = on + space;
+    if period > 0.0 && on > 0.0 {
+        let shift = if offset.is_finite() {
+            offset.rem_euclid(period)
+        } else {
+            0.0
+        };
+        let mut x = disc.left() + shift - period;
+        while x < disc.right() {
+            painter.rect_filled(
+                Rect::from_min_max(egui::pos2(x, disc.top()), egui::pos2(x + on, disc.bottom())),
+                0,
+                colour,
+            );
+            x += period;
+        }
+    }
+    shade_disc(&painter, disc, well);
+}
+
+/// Well colour at the two edges, clear through the middle.  Painted over the
+/// segments, so the segments themselves stay a flat fill.
+fn shade_disc(painter: &egui::Painter, disc: Rect, well: egui::Color32) {
+    let clear = well.gamma_multiply(0.0);
+    let edge = (1.0 - STROBE_CLEAR) * 0.5;
+    let stops = [0.0, edge, 1.0 - edge, 1.0];
+    let colors = [well, clear, clear, well];
+    let mut mesh = egui::Mesh::default();
+    for (stop, color) in stops.iter().zip(colors) {
+        let x = disc.left() + disc.width() * stop;
+        mesh.colored_vertex(egui::pos2(x, disc.top()), color);
+        mesh.colored_vertex(egui::pos2(x, disc.bottom()), color);
+    }
+    for column in 0..3u32 {
+        let left_top = column * 2;
+        let left_bottom = left_top + 1;
+        let right_top = left_top + 2;
+        let right_bottom = left_top + 3;
+        mesh.add_triangle(left_top, right_top, left_bottom);
+        mesh.add_triangle(right_top, right_bottom, left_bottom);
+    }
+    painter.add(Shape::mesh(mesh));
 }
 
 /// Needle: a 180° arc over ±50 cents with the tolerance band and the ±1 mark
@@ -203,7 +189,7 @@ pub(super) fn needle(
     let rect = panel(ui);
     let painter = ui.painter();
     let color = if valid {
-        state_colour(colours, state)
+        state_colour(colours, state, cents)
     } else {
         colours.text3
     };
@@ -250,11 +236,11 @@ pub(super) fn needle(
     let tolerance_fraction = (tolerance / 50.0).clamp(0.0, 1.0);
     painter.add(Shape::line(
         arc(-tolerance_fraction, tolerance_fraction, 24),
-        Stroke::new(9.0, with_alpha(colours.accent, 120)),
+        Stroke::new(9.0, with_alpha(colours.path[2], 140)),
     ));
     painter.add(Shape::line(
         arc(-1.0 / 50.0, 1.0 / 50.0, 4),
-        Stroke::new(10.0, with_alpha(colours.accent, 200)),
+        Stroke::new(10.0, colours.path[2]),
     ));
 
     for tick in -10..=10 {
@@ -294,7 +280,7 @@ pub(super) fn needle(
         Align2::CENTER_CENTER,
         "0",
         FontId::new(ts(7.5), FontFamily::Monospace),
-        colours.accent,
+        colours.path[2],
     );
     painter.text(
         egui::pos2(hub.x - radius - 4.0, hub.y + 4.0),
@@ -338,12 +324,4 @@ pub(super) fn needle(
     painter.circle_filled(hub, 7.0, colours.bg);
     painter.circle_stroke(hub, 7.0, Stroke::new(1.2, colours.line));
     painter.circle_filled(hub, 3.2, color);
-}
-
-fn chevron(painter: &egui::Painter, center: egui::Pos2, left: bool, colours: &Palette) {
-    let tip = egui::pos2(center.x + if left { -3.0 } else { 3.0 }, center.y);
-    let base = egui::pos2(center.x + if left { 2.0 } else { -2.0 }, center.y - 4.0);
-    let base_low = egui::pos2(base.x, center.y + 4.0);
-    painter.line_segment([base, tip], Stroke::new(1.1, colours.text3));
-    painter.line_segment([base_low, tip], Stroke::new(1.1, colours.text3));
 }

@@ -1,7 +1,7 @@
 //! Tuner: one screen (`docs/ui-spec.md` §3.4).  The note very large, the
-//! cents and the state, the ±50 cent scale or the strobe, the string cells,
-//! and one bottom bar with every setting.  The title bar and the status bar
-//! stay, so the tuner is entered and left like any other screen.
+//! cents and the state, the needle or the three strobe discs, the string
+//! cells, and one bottom bar with every setting.  The title bar and the
+//! status bar stay, so the tuner is entered and left like any other screen.
 //!
 //! The analysis and the frame types live in `audio::tuner`; this module only
 //! draws the frame and edits the screen's settings.  While auto-mute holds
@@ -12,7 +12,9 @@ mod gauge;
 use eframe::egui;
 use egui::{Align, Align2, Color32, CornerRadius, Layout, Rect, RichText, Sense, Stroke, Vec2};
 
-use crate::app::tuner::{TunerDisplay, TunerListen, REFERENCE_MAX_HZ, REFERENCE_MIN_HZ};
+use crate::app::tuner::{
+    StringFace, TunerDisplay, TunerListen, REFERENCE_MAX_HZ, REFERENCE_MIN_HZ,
+};
 use crate::app::RigWerkApp;
 use crate::audio::{
     cents_to_ratio, note_name, octave, EngineState, TuneState, TunerChannel, TunerFrame,
@@ -51,15 +53,22 @@ struct Actions {
     listen: Option<TunerListen>,
     auto_mute: Option<bool>,
     tolerance: Option<TunerTolerance>,
+    /// A string cell the user tapped.  Applied once the frame borrow ends.
+    pin: Option<usize>,
     start: bool,
 }
 
-/// What the big readout shows.  In All strings mode this is the lowest
-/// sounding, non-ghost string rather than the mono reading, because a strummed
-/// chord's mono pitch can be a subharmonic of the whole chord.
+/// What the big readout shows.  In All strings mode this is the string the
+/// tuner is following, or the one the user pinned.  The mono reading stays
+/// off that face: a strummed chord's pitch can be a subharmonic of the chord.
 struct Lead {
     valid: bool,
     string: Option<usize>,
+    /// The face string is a pin.  Single-note listen leaves this false.
+    pinned: bool,
+    /// The All-strings follow target, even when a pin covers the face.
+    /// `None` in single-note listen.
+    following: Option<usize>,
     midi: i16,
     cents: f32,
     target_hz: f32,
@@ -76,6 +85,8 @@ impl Lead {
         Self {
             valid: false,
             string: None,
+            pinned: false,
+            following: None,
             midi: 0,
             cents: 0.0,
             target_hz: 0.0,
@@ -116,20 +127,22 @@ impl RigWerkApp {
         }
 
         {
+            // Decide the face before borrowing the frame.  `follow_face`
+            // writes the remembered string, and `frame` holds that borrow.
+            let face = if view.listen == TunerListen::All && view.preset.is_some() {
+                self.tuner.follow_face()
+            } else {
+                StringFace::default()
+            };
             let frame = self.tuner.frame();
-            let lead = lead_reading(frame, &view);
+            let lead = lead_reading(frame, &view, face);
             readout(ui, &lead, view.tuning(), active, colours);
             ui.add_space(4.0);
             if active {
                 match view.display {
-                    TunerDisplay::Strobe => gauge::strobe(
-                        ui,
-                        lead.cents,
-                        lead.state,
-                        lead.valid,
-                        view.tolerance.cents(),
-                        colours,
-                    ),
+                    TunerDisplay::Strobe => {
+                        gauge::strobe(ui, lead.cents, lead.state, lead.valid, colours)
+                    }
                     TunerDisplay::Needle => gauge::needle(
                         ui,
                         lead.cents,
@@ -145,7 +158,7 @@ impl RigWerkApp {
             ui.add_space(6.0);
             level_and_confidence(ui, &lead, active, colours);
             ui.add_space(8.0);
-            strings_section(ui, frame, view.tuning(), &lead, active, colours);
+            strings_section(ui, frame, &view, &lead, active, &mut actions, colours);
         }
 
         ui.add_space(10.0);
@@ -176,6 +189,9 @@ impl RigWerkApp {
         }
         if let Some(tolerance) = actions.tolerance {
             self.tuner.tolerance = tolerance;
+        }
+        if let Some(index) = actions.pin {
+            self.tuner.toggle_pin(index);
         }
         if actions.start {
             self.start_bridge();
@@ -222,7 +238,7 @@ fn readout(
             colour.gamma_multiply(0.55)
         }
     };
-    let colour = tint(state_colour(colours, lead.state));
+    let colour = tint(state_colour(colours, lead.state, lead.cents));
     let (name, octave_text) = match note_label(lead, tuning) {
         Some((name, octave)) => (name.to_owned(), octave),
         None => ("—".to_owned(), String::new()),
@@ -309,33 +325,56 @@ fn note_label(lead: &Lead, tuning: Option<&'static Tuning>) -> Option<(&'static 
     Some((note_name(lead.midi), octave(lead.midi).to_string()))
 }
 
-fn lead_reading(frame: &TunerFrame, view: &View) -> Lead {
+fn lead_reading(frame: &TunerFrame, view: &View, face: StringFace) -> Lead {
     if view.listen == TunerListen::All && view.preset.is_some() {
-        if let Some(row) = frame
-            .strings
-            .iter()
-            .find(|row| row.sounding && row.harmonic_of.is_none())
-        {
-            return Lead {
-                valid: true,
-                string: Some(row.string),
-                midi: row.midi,
-                cents: row.cents,
-                target_hz: row.target_hz,
-                detected_hz: row.target_hz * cents_to_ratio(row.cents),
-                level_db: row.level_db,
-                confidence: row.confidence,
-                state: row.state,
-            };
-        }
-        let mut lead = Lead::silent();
-        lead.level_db = frame.mono.level_db;
+        let mut lead = if let Some(index) = face.string {
+            match frame.strings.iter().find(|row| row.string == index) {
+                Some(row) => {
+                    let playable = row.sounding && row.harmonic_of.is_none();
+                    Lead {
+                        valid: playable,
+                        string: Some(row.string),
+                        pinned: face.pinned,
+                        following: None,
+                        midi: row.midi,
+                        cents: if playable { row.cents } else { 0.0 },
+                        target_hz: row.target_hz,
+                        detected_hz: if playable {
+                            row.target_hz * cents_to_ratio(row.cents)
+                        } else {
+                            0.0
+                        },
+                        level_db: row.level_db,
+                        confidence: if playable { row.confidence } else { 0.0 },
+                        state: if playable {
+                            row.state
+                        } else {
+                            TuneState::Silent
+                        },
+                    }
+                }
+                None => {
+                    let mut lead = Lead::silent();
+                    lead.string = Some(index);
+                    lead.pinned = face.pinned;
+                    lead.level_db = frame.mono.level_db;
+                    lead
+                }
+            }
+        } else {
+            let mut lead = Lead::silent();
+            lead.level_db = frame.mono.level_db;
+            lead
+        };
+        lead.following = face.following;
         return lead;
     }
     let mono = &frame.mono;
     Lead {
         valid: mono.valid,
         string: mono.string,
+        pinned: false,
+        following: None,
         midi: mono.midi,
         cents: mono.cents,
         target_hz: mono.target_hz,
@@ -375,7 +414,7 @@ fn level_and_confidence(ui: &mut egui::Ui, lead: &Lead, active: bool, colours: &
         "Confidence",
         &format!("{confidence:.2}"),
         confidence,
-        colours.accent,
+        colours.text2,
         colours,
     );
 }
@@ -430,11 +469,13 @@ fn bar(
 fn strings_section(
     ui: &mut egui::Ui,
     frame: &TunerFrame,
-    tuning: Option<&'static Tuning>,
+    view: &View,
     lead: &Lead,
     active: bool,
+    actions: &mut Actions,
     colours: &Palette,
 ) {
+    let tuning = view.tuning();
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(match tuning {
@@ -453,17 +494,16 @@ fn strings_section(
                 ui.label(
                     RichText::new(format!("{tuned} / {total} in tune"))
                         .font(font(Face::Mono, TypeRole::Secondary))
-                        .color(colours.accent_text),
+                        .color(colours.path[2]),
                 );
             }
         });
     });
     ui.add_space(4.0);
 
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 88.0), Sense::hover());
-    let painter = ui.painter();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 104.0), Sense::hover());
     let Some(tuning) = tuning else {
-        painter.text(
+        ui.painter().text(
             rect.left_center(),
             Align2::LEFT_CENTER,
             "Pick a tuning to see each string",
@@ -488,31 +528,56 @@ fn strings_section(
         let row = frame.strings.get(index);
         let ghost = row.is_some_and(|row| row.harmonic_of.is_some());
         let state = row.map(|row| row.state).unwrap_or(TuneState::Silent);
+        let cents_value = row.map(|row| row.cents).unwrap_or(0.0);
         let colour = if ghost {
             colours.text3
         } else {
-            state_colour(colours, state)
+            state_colour(colours, state, cents_value)
         };
-        let selected = lead.string == Some(index);
+        let pinned = lead.pinned && lead.string == Some(index);
+        // All strings marks the follow target while a different pin owns the
+        // face.  Single note marks the mono match, and never a pin.
+        let followed = if view.listen == TunerListen::All {
+            lead.following == Some(index) && !pinned
+        } else {
+            lead.string == Some(index)
+        };
+        let response = ui.interact(
+            cell,
+            ui.scope_id().with(("tuner_string", index)),
+            if ghost {
+                Sense::hover()
+            } else {
+                Sense::click()
+            },
+        );
+        if response.clicked() {
+            actions.pin = Some(index);
+        }
+        let painter = ui.painter();
         painter.rect_filled(cell, CornerRadius::same(4), colours.slot);
         painter.rect_stroke(
             cell,
             CornerRadius::same(4),
             Stroke::new(
-                if selected { 1.5 } else { 1.0 },
-                if selected { colour } else { colours.line2 },
+                if pinned { 1.5 } else { 1.0 },
+                if pinned {
+                    colours.accent
+                } else {
+                    colours.line2
+                },
             ),
             egui::StrokeKind::Inside,
         );
-        if selected {
+        if followed {
             painter.hline(
                 (cell.left() + 6.0)..=(cell.right() - 6.0),
                 cell.bottom() - 4.0,
-                Stroke::new(2.0, colours.accent),
+                Stroke::new(2.0, colour),
             );
         }
         painter.text(
-            egui::pos2(cell.center().x, cell.top() + 8.0),
+            egui::pos2(cell.center().x, cell.top() + 4.0),
             Align2::CENTER_TOP,
             row.map(|row| row.name).unwrap_or(*name),
             font(Face::Mono, TypeRole::TunerString),
@@ -527,7 +592,7 @@ fn strings_section(
             .map(|row| signed_cents(row.cents))
             .unwrap_or_else(|| "—".to_owned());
         painter.text(
-            egui::pos2(cell.center().x, cell.top() + 34.0),
+            egui::pos2(cell.center().x, cell.top() + 30.0),
             Align2::CENTER_TOP,
             match row {
                 Some(row) => format!("{:.1} Hz", row.target_hz),
@@ -537,7 +602,7 @@ fn strings_section(
             colours.text3,
         );
         painter.text(
-            egui::pos2(cell.center().x, cell.top() + 50.0),
+            egui::pos2(cell.center().x, cell.top() + 44.0),
             Align2::CENTER_TOP,
             cents,
             font(Face::Mono, TypeRole::GridHeader),
@@ -547,8 +612,12 @@ fn strings_section(
                 colours.text3
             },
         );
+        let mark = row
+            .filter(|row| row.sounding && row.harmonic_of.is_none())
+            .map(|row| row.cents);
+        string_track(painter, cell, mark, view.tolerance.cents(), colour, colours);
         painter.text(
-            egui::pos2(cell.center().x, cell.top() + 68.0),
+            egui::pos2(cell.center().x, cell.top() + 78.0),
             Align2::CENTER_TOP,
             if ghost {
                 "Harmonic".to_owned()
@@ -562,13 +631,57 @@ fn strings_section(
         );
         if ghost {
             painter.text(
-                egui::pos2(cell.right() - 6.0, cell.top() + 6.0),
+                egui::pos2(cell.right() - 6.0, cell.top() + 4.0),
                 Align2::RIGHT_TOP,
                 "H",
                 font(Face::SansMedium, TypeRole::GridHeader),
                 colours.text3,
             );
         }
+    }
+}
+
+/// The per-string track: a centre tick, the tolerance band across ±50 cents,
+/// and a 3 px mark when the string is sounding and not a ghost.
+fn string_track(
+    painter: &egui::Painter,
+    cell: Rect,
+    cents: Option<f32>,
+    tolerance: f32,
+    mark: Color32,
+    colours: &Palette,
+) {
+    let track = Rect::from_min_max(
+        egui::pos2(cell.left() + 8.0, cell.top() + 58.0),
+        egui::pos2(cell.right() - 8.0, cell.top() + 68.0),
+    );
+    if track.width() < 4.0 {
+        return;
+    }
+    painter.rect_filled(track, CornerRadius::same(2), colours.well);
+    let mid = track.center().x;
+    let half = track.width() * 0.5;
+    let band = half * (tolerance / 50.0).clamp(0.0, 1.0);
+    painter.rect_filled(
+        Rect::from_min_max(
+            egui::pos2(mid - band, track.top()),
+            egui::pos2(mid + band, track.bottom()),
+        ),
+        CornerRadius::same(2),
+        colours.path[2],
+    );
+    painter.vline(
+        mid,
+        (track.top() - 2.0)..=(track.bottom() + 2.0),
+        Stroke::new(1.0, colours.text),
+    );
+    if let Some(cents) = cents {
+        let x = mid + mark_fraction(cents) * half;
+        painter.rect_filled(
+            Rect::from_center_size(egui::pos2(x, track.center().y), Vec2::new(3.0, 14.0)),
+            0,
+            mark,
+        );
     }
 }
 
@@ -812,11 +925,20 @@ fn tuning_picker(ui: &mut egui::Ui, view: &View, actions: &mut Actions, colours:
         });
 }
 
-fn state_colour(colours: &Palette, state: TuneState) -> Color32 {
+/// Flat and sharp share one hue.  Within this many cents they use the
+/// warning colour; past it they use the error colour.
+const PITCH_WARN_CENTS: f32 = 25.0;
+
+fn state_colour(colours: &Palette, state: TuneState, cents: f32) -> Color32 {
     match state {
-        TuneState::Centered | TuneState::InTune => colours.accent,
-        TuneState::Flat => colours.warn,
-        TuneState::Sharp => colours.accent_text,
+        TuneState::Centered | TuneState::InTune => colours.path[2],
+        TuneState::Flat | TuneState::Sharp => {
+            if cents.abs() <= PITCH_WARN_CENTS {
+                colours.warn
+            } else {
+                colours.error
+            }
+        }
         TuneState::Silent => colours.text3,
     }
 }
@@ -831,9 +953,20 @@ fn state_text(state: TuneState) -> &'static str {
     }
 }
 
-/// Absolute cents the readout prints as 0.0.  The strobe holds still in
-/// the same band, so the pattern and the number agree on "centered".
+/// Absolute cents the readout prints as 0.0.  The strobe holds on a wider
+/// band, so a tenth of a cent can still be a still disc.
 const DISPLAYED_ZERO_CENTS: f32 = 0.05;
+
+/// Where a cents mark sits on a ±50 track.  0 is the centre, −1 the left
+/// edge, +1 the right edge.  Values outside ±50 clamp, and a non-finite
+/// reading sits at the centre.
+fn mark_fraction(cents: f32) -> f32 {
+    if !cents.is_finite() {
+        0.0
+    } else {
+        (cents / 50.0).clamp(-1.0, 1.0)
+    }
+}
 
 pub(super) fn signed_cents(cents: f32) -> String {
     if !cents.is_finite() {
@@ -848,15 +981,15 @@ pub(super) fn signed_cents(cents: f32) -> String {
     }
 }
 
+fn counts_in_tune(sounding: bool, ghost: bool, state: TuneState) -> bool {
+    sounding && !ghost && matches!(state, TuneState::Centered | TuneState::InTune)
+}
+
 fn tuning_count(frame: &TunerFrame, total: usize) -> (usize, usize) {
     let tuned = frame
         .strings
         .iter()
-        .filter(|row| {
-            row.sounding
-                && row.harmonic_of.is_none()
-                && matches!(row.state, TuneState::Centered | TuneState::InTune)
-        })
+        .filter(|row| counts_in_tune(row.sounding, row.harmonic_of.is_some(), row.state))
         .count();
     (tuned, total)
 }
