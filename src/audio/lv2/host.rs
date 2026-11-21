@@ -25,7 +25,8 @@
 //! `worker:schedule` is supplied holds for every load; its `schedule_work`
 //! refuses requests until the load has found the plugin's `work`.  `log:log`
 //! is not supplied: its variadic callbacks cannot be written in stable Rust.
-//! The scan refuses a plugin that requires a feature outside [`SUPPORTED`].
+//! A plugin that requires a feature outside [`SUPPORTED`] is still listed by
+//! the scan, with a scan error, and the loader refuses to instantiate it.
 //!
 //! Three core features carry no data and are met by how the host runs a
 //! plugin, so they are accepted as required but not put in the array, as
