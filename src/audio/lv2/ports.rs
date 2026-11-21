@@ -114,8 +114,8 @@ pub(super) enum PortKind {
     Control,
     Atom,
     Cv,
-    /// An optional port of a kind this host has no buffer for.  It gets no
-    /// connection: `lv2:connectionOptional` says the plugin handles that.
+    /// An optional port of a kind this host has no buffer for.  It is
+    /// connected to NULL, which `lv2:connectionOptional` allows.
     Other,
 }
 
@@ -764,16 +764,16 @@ pub(super) struct PortSlot {
     /// The port index the plugin knows it by, for `connect_port`.
     pub(super) port: u32,
     pub(super) input: bool,
-    /// Whether `connect_port` is called for it.  False for an optional port
-    /// of a kind this host has no buffer for.
+    /// Whether `connect_port` gets its buffer.  False for an optional port
+    /// of a kind this host has no buffer for, which is connected to NULL.
     pub(super) connect: bool,
     pub(super) buffer: Buffer,
 }
 
 /// Every buffer an instance owns, in port index order.  The default is the
 /// empty set a processor leaves behind when it hands its buffers to the
-/// core.  The buffer slot of a
-/// port is its position here, which is also its `lv2:index`.
+/// core.  The buffer slot of a port is its position here; its `lv2:index`
+/// is `PortSlot::port`, which differs when the indices have a gap.
 #[derive(Default)]
 pub(super) struct PortBuffers {
     pub(super) slots: Vec<PortSlot>,
@@ -819,8 +819,8 @@ impl PortBuffers {
                 PortKind::Control => Buffer::Control(vec![port.default; 1]),
                 PortKind::Cv => Buffer::Cv(vec![0.0; block]),
                 PortKind::Atom => Buffer::Atom(AtomBuffer::new(port.capacity)),
-                // Not connected: `lv2:connectionOptional` says the plugin
-                // handles a missing pointer.  The one-float slot only keeps
+                // Connected to NULL: `lv2:connectionOptional` says the
+                // plugin handles that.  The one-float slot only keeps
                 // positions equal to the port order; it is never read.
                 PortKind::Other => Buffer::Cv(vec![0.0; 1]),
             };
@@ -845,9 +845,9 @@ impl PortBuffers {
         }
     }
 
-    /// Hands every declared port's buffer to `connect_port`, except an
-    /// optional port of a kind this host has no buffer for.  UI thread, at
-    /// load, when no block is inside the plugin.
+    /// Calls `connect_port` for every declared port: with its buffer, or
+    /// with NULL for an optional port of a kind this host has no buffer for.
+    /// UI thread, at load, when no block is inside the plugin.
     pub(super) fn connect(&mut self, handle: LV2_Handle, descriptor: *const LV2_Descriptor) {
         // SAFETY: the loader passes a live descriptor from the module, which
         // the core keeps loaded for as long as the instance lives.
