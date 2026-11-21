@@ -332,6 +332,155 @@ fn a_localhost_file_uri_names_the_same_path() {
     assert!(path_from_file_uri("file:lv2/amp.so").is_err());
 }
 
+const FIX_B_REFUSED: &str = "http://example.com/lv2/fix-b/";
+
+/// The error `Lv2Instance::load` gives for `uri`.  Every plugin it is used
+/// on is refused before its (empty) binary would be opened.
+fn fix_b_load_error(bundle: &std::path::Path, uri: &str) -> String {
+    let shared = Arc::new(PluginShared::new(0));
+    let pref = PluginPref::default();
+    match Lv2Instance::load(bundle, uri, 48_000, 64, &Restore::from_pref(&pref), &shared) {
+        Ok(_) => panic!("{uri} was loaded"),
+        Err(error) => error,
+    }
+}
+
+/// Every plugin the loader refuses for its Turtle is listed, and its scan
+/// error is the loader's own error, word for word.
+#[test]
+fn a_plugin_the_loader_refuses_is_listed_with_the_loaders_error() {
+    let bundle = testdata("fix-b-refused.lv2");
+    let listed = scan_bundle(&bundle).expect("scan the bundle");
+    let cases = [
+        ("untyped", "no port type RigWerk can connect"),
+        ("no-index", "no valid lv2:index"),
+        ("bad-index", "no valid lv2:index"),
+        ("duplicate-index", "the port index 1 twice"),
+        ("both-directions", "both an input and an output"),
+        ("no-direction", "neither an input nor an output"),
+        ("unreadable-bound", "unreadable"),
+        ("nonfinite-bound", "non-finite"),
+        ("unreadable-minimum-size", "unreadable rsz:minimumSize"),
+        ("huge-minimum-size", "asks for a buffer of more than"),
+        ("chunk-port", "only takes atom:Chunk"),
+        ("required-default", "state:loadDefaultState"),
+    ];
+    assert_eq!(listed.len(), cases.len() + 2, "every plugin is listed");
+    for (name, expected) in cases {
+        let uri = format!("{FIX_B_REFUSED}{name}");
+        let candidate = listed
+            .iter()
+            .find(|candidate| candidate.plugin_uri == uri)
+            .unwrap_or_else(|| panic!("{uri} is not listed"));
+        let scan_error = candidate
+            .scan_error
+            .clone()
+            .unwrap_or_else(|| panic!("{uri} has no scan error"));
+        assert!(scan_error.contains(expected), "{uri}: {scan_error}");
+        assert_eq!(fix_b_load_error(&bundle, &uri), scan_error, "{uri}");
+    }
+}
+
+/// More ports than the table takes, and more audio ports than the chain
+/// wires, are listed with the loader's error too.
+#[test]
+fn a_plugin_over_a_port_limit_is_listed_with_the_loaders_error() {
+    let base = std::env::temp_dir().join(format!("rigwerk-lv2-fix-b-{}", std::process::id()));
+    let audio = |first: u32, count: u32, direction: &str| -> Vec<String> {
+        (first..first + count)
+            .map(|index| {
+                format!(
+                    r#"[ a lv2:{direction}, lv2:AudioPort ; lv2:index {index} ; lv2:symbol "a{index}" ]"#
+                )
+            })
+            .collect()
+    };
+    let controls = |first: u32, count: u32| -> Vec<String> {
+        (first..first + count)
+            .map(|index| {
+                format!(
+                    r#"[ a lv2:InputPort, lv2:ControlPort ; lv2:index {index} ; lv2:symbol "c{index}" ]"#
+                )
+            })
+            .collect()
+    };
+    let mut many_ports = audio(0, 1, "InputPort");
+    many_ports.extend(audio(1, 1, "OutputPort"));
+    many_ports.extend(controls(2, 511));
+    let mut many_audio = audio(0, 33, "InputPort");
+    many_audio.extend(audio(33, 1, "OutputPort"));
+    for (name, ports, expected) in [
+        ("many-ports", many_ports, "more than 512 ports"),
+        (
+            "many-audio",
+            many_audio,
+            "more than 32 audio inputs or outputs",
+        ),
+    ] {
+        let bundle = base.join(format!("{name}.lv2"));
+        std::fs::create_dir_all(&bundle).expect("create the bundle");
+        let binary = format!("plugin.{}", super::scan::PLATFORM_BINARY_EXTENSION);
+        std::fs::write(bundle.join(&binary), b"").expect("write the binary");
+        let uri = format!("{FIX_B_REFUSED}{name}");
+        std::fs::write(
+            bundle.join("manifest.ttl"),
+            format!(
+                "@prefix lv2: <http://lv2plug.in/ns/lv2core#> .\n<{uri}> a lv2:Plugin ;\n    lv2:binary <{binary}> ;\n    lv2:port {} .\n",
+                ports.join(",\n        ")
+            ),
+        )
+        .expect("write the manifest");
+        let listed = scan_bundle(&bundle).expect("scan the bundle");
+        assert_eq!(listed.len(), 1, "{name} is listed");
+        let scan_error = listed[0]
+            .scan_error
+            .clone()
+            .unwrap_or_else(|| panic!("{name} has no scan error"));
+        assert!(scan_error.contains(expected), "{name}: {scan_error}");
+        assert_eq!(fix_b_load_error(&bundle, &uri), scan_error, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Every plugin-level reason is named, then the port the loader cannot
+/// connect, in the scan and at load alike.
+#[test]
+fn every_reason_a_plugin_is_refused_for_is_named() {
+    let bundle = testdata("fix-b-refused.lv2");
+    let uri = format!("{FIX_B_REFUSED}three-reasons");
+    let expected = "Needs a fixed block length; \
+        The LV2 plugin requires state:loadDefaultState, but its bundle has no state:state to restore.; \
+        The LV2 port \"Gain\" has no valid lv2:index.";
+    let listed = scan_bundle(&bundle).expect("scan the bundle");
+    let candidate = listed
+        .iter()
+        .find(|candidate| candidate.plugin_uri == uri)
+        .expect("listed");
+    assert_eq!(candidate.scan_error.as_deref(), Some(expected));
+    assert_eq!(fix_b_load_error(&bundle, &uri), expected);
+}
+
+/// An `lv2:sampleRate` bound far past a float is kept in a float's range at
+/// every rate, so whether the plugin loads never depends on the rate.
+#[test]
+fn a_scaled_bound_stays_in_a_floats_range_at_every_rate() {
+    let bundle = testdata("fix-b-refused.lv2");
+    let uri = format!("{FIX_B_REFUSED}scaled-bound");
+    let listed = scan_bundle(&bundle).expect("scan the bundle");
+    let candidate = listed
+        .iter()
+        .find(|candidate| candidate.plugin_uri == uri)
+        .expect("listed");
+    assert_eq!(candidate.scan_error, None);
+    for rate in [1, 8_000, 48_000, 768_000, u32::MAX] {
+        let table = PortTable::read(&bundle, &uri, rate).expect("accepted at every rate");
+        let range = range_named(&table, "Frequency");
+        assert_eq!(range.max, f64::from(f32::MAX), "{rate}");
+        assert_eq!(range.default, f64::from(f32::MAX), "{rate}");
+        assert!(table.ports[2].default.is_finite(), "{rate}");
+    }
+}
+
 #[test]
 fn a_store_appends_files_and_answers_by_subject_and_predicate() {
     let bundle = testdata("example.lv2");

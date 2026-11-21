@@ -4,7 +4,11 @@
 //! (`scan::read_bundle` is shared with the scan, so manifest and
 //! `rdfs:seeAlso` handling exists once) and never changes afterwards: both
 //! halves of an instance read the same immutable ranges, exactly as the CLAP
-//! host shares its range table.
+//! host shares its range table.  Every rule a load is refused by that the
+//! Turtle decides lives here, and the scan reports the same refusal
+//! (`PortTable::check`) as its `scan_error`.  Whether a plugin is refused
+//! never depends on the sample rate: an `lv2:sampleRate` bound is scaled and
+//! kept in a float's range, never refused for it.
 //!
 //! A port is identified by its `lv2:index`.  Indices must be unique but need
 //! not be contiguous: a bundle with a gap is accepted, the buffer slot is the
@@ -41,10 +45,9 @@ use lv2_sys::{LV2_Atom_Sequence, LV2_Atom_Sequence_Body, LV2_Descriptor, LV2_Han
 
 use crate::audio::plugins::{ParamIds, PluginParamView, MAX_AUDIO_PORTS};
 
-use super::host::SUPPORTED;
-use super::scan::{
-    blocked_reason, has_property, missing_options, read_bundle, unsupported_atom_type,
-};
+use super::host::{SUPPLIED_OPTIONS, SUPPORTED};
+use super::scan::read_bundle;
+use super::state;
 use super::ttl::TtlStore;
 use super::urid;
 
@@ -73,6 +76,19 @@ const LV2_IS_SIDE_CHAIN: &str = "http://lv2plug.in/ns/lv2core#isSideChain";
 const LV2_LATENCY: &str = "http://lv2plug.in/ns/lv2core#latency";
 const LV2_REPORTS_LATENCY: &str = "http://lv2plug.in/ns/lv2core#reportsLatency";
 const LV2_REQUIRED_FEATURE: &str = "http://lv2plug.in/ns/lv2core#requiredFeature";
+const LV2_PORT_PROPERTY: &str = "http://lv2plug.in/ns/lv2core#portProperty";
+const OPTS_REQUIRED_OPTION: &str = "http://lv2plug.in/ns/ext/options#requiredOption";
+const ATOM_BUFFER_TYPE: &str = "http://lv2plug.in/ns/ext/atom#bufferType";
+const ATOM_SEQUENCE_IRI: &str = "http://lv2plug.in/ns/ext/atom#Sequence";
+
+const BUF_SIZE_FIXED: &str = "http://lv2plug.in/ns/ext/buf-size#fixedBlockLength";
+const BUF_SIZE_POWER_OF_TWO: &str = "http://lv2plug.in/ns/ext/buf-size#powerOf2BlockLength";
+const LOG_LOG: &str = "http://lv2plug.in/ns/ext/log#log";
+const STATE_MAKE_PATH: &str = "http://lv2plug.in/ns/ext/state#makePath";
+const INSTANCE_ACCESS: &str = "http://lv2plug.in/ns/ext/instance-access";
+const DATA_ACCESS: &str = "http://lv2plug.in/ns/ext/data-access";
+const RESIZE_PORT: &str = "http://lv2plug.in/ns/ext/resize-port#resize-port";
+const UI_PREFIX: &str = "http://lv2plug.in/ns/extensions/ui#";
 
 const RDF_VALUE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#value";
 const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
@@ -104,6 +120,11 @@ const MAX_ATOM_BYTES: u64 = 16 * 1024 * 1024;
 /// any effect; the cap only keeps a broken description from sizing buffers
 /// without bound.
 const MAX_PORTS: usize = 512;
+
+/// Why a plugin that requires `state:loadDefaultState` cannot load without
+/// a `state:state` in its bundle.
+const NO_DEFAULT_STATE: &str =
+    "The LV2 plugin requires state:loadDefaultState, but its bundle has no state:state to restore.";
 
 /// The most audio ports that form the main pair, one mono port per channel.
 const MAIN_CHANNELS: usize = 2;
@@ -279,7 +300,11 @@ impl PortTable {
     }
 
     /// Builds the table from an already parsed bundle, so the loader parses
-    /// the Turtle once for both the table and the binary.
+    /// the Turtle once for both the table and the binary.  This is every
+    /// rule the Turtle decides a load by: the scan lists a plugin with this
+    /// error ([`Self::check`]), so the two cannot disagree.  Every
+    /// plugin-level reason is named, joined by "; ", then the first port
+    /// rule the plugin breaks.
     pub(super) fn read_store(
         store: &TtlStore,
         plugins: &[String],
@@ -289,18 +314,39 @@ impl PortTable {
         if !plugins.iter().any(|plugin| plugin == plugin_uri) {
             return Err(format!("The LV2 bundle does not declare {plugin_uri}."));
         }
-        // Defense in depth: the scan already lists a plugin with an
-        // unsupported required feature with an error, but the loader must not
-        // instantiate one it cannot serve.
-        for feature in store.iris(plugin_uri, LV2_REQUIRED_FEATURE) {
-            if !SUPPORTED.contains(&feature.as_str()) {
-                return Err(blocked_reason(&feature));
+        let mut reasons: Vec<String> = store
+            .iris(plugin_uri, LV2_REQUIRED_FEATURE)
+            .iter()
+            .filter(|feature| !SUPPORTED.contains(&feature.as_str()))
+            .map(|feature| blocked_reason(feature))
+            .collect();
+        reasons.extend(missing_options(store, plugin_uri));
+        // The feature can only be offered with something to restore.
+        if state::requires_load_default(store, plugin_uri)
+            && state::default_state(store, plugin_uri).is_none()
+        {
+            reasons.push(NO_DEFAULT_STATE.to_owned());
+        }
+        match Self::read_table(store, plugin_uri, sample_rate) {
+            Ok(table) if reasons.is_empty() => Ok(table),
+            Ok(_) => Err(reasons.join("; ")),
+            Err(error) => {
+                reasons.push(error);
+                Err(reasons.join("; "))
             }
         }
-        if let Some(missing) = missing_options(store, plugin_uri).into_iter().next() {
-            return Err(missing);
-        }
+    }
 
+    /// Why the loader would refuse `plugin_uri`, without loading anything.
+    /// The answer never depends on the sample rate (a scaled bound is kept
+    /// in a float's range, never refused), so the rate checked with is
+    /// arbitrary.
+    pub(super) fn check(store: &TtlStore, plugins: &[String], plugin_uri: &str) -> Option<String> {
+        Self::read_store(store, plugins, plugin_uri, 48_000).err()
+    }
+
+    /// The ports, ranges and ids, or the first port rule the plugin breaks.
+    fn read_table(store: &TtlStore, plugin_uri: &str, sample_rate: u32) -> Result<Self, String> {
         let (mut ports, nodes) = read_ports(store, plugin_uri)?;
         if ports.len() > MAX_PORTS {
             return Err(format!(
@@ -630,8 +676,8 @@ fn read_points(store: &TtlStore, node: &str, scale: f64) -> Vec<ScalePoint> {
                 .trim()
                 .parse::<f64>()
                 .ok()
-                .filter(|value| value.is_finite())?
-                * scale;
+                .filter(|value| value.is_finite())?;
+            let value = scaled(value, scale);
             let label = store.literal(&point, RDFS_LABEL).unwrap_or_default();
             Some(ScalePoint { value, label })
         })
@@ -641,8 +687,9 @@ fn read_points(store: &TtlStore, node: &str, scale: f64) -> Vec<ScalePoint> {
 }
 
 /// One of a control range's bounds, scaled to the sample rate.  A value the
-/// bundle states must parse and stay finite; both are load errors, so no NaN
-/// or infinity ever reaches the audio math.
+/// bundle states must parse and be finite; both are load errors, so no NaN
+/// or infinity ever reaches the audio math.  Whether a bound is refused
+/// never depends on the rate: the scaled value is kept in a float's range.
 fn parsed_bound(
     store: &TtlStore,
     node: &str,
@@ -657,13 +704,21 @@ fn parsed_bound(
         .trim()
         .parse()
         .map_err(|_| format!("The LV2 port {name:?} has an unreadable {predicate} value."))?;
-    let value = value * scale;
     if !value.is_finite() {
         return Err(format!(
             "The LV2 port {name:?} has a non-finite {predicate} value."
         ));
     }
-    Ok(Some(value))
+    Ok(Some(scaled(value, scale)))
+}
+
+/// A finite stated value times the `lv2:sampleRate` scale, within the range
+/// of the single `float` a control port holds (lv2core: "A port connected to
+/// a single `float`").  The port cannot hold more, and an overflow at a high
+/// rate must not turn into an infinity.
+fn scaled(value: f64, scale: f64) -> f64 {
+    let limit = f64::from(f32::MAX);
+    (value * scale).clamp(-limit, limit)
 }
 
 /// Whether a control output reports latency, by designation or port property.
@@ -673,6 +728,66 @@ fn is_latency_port(store: &TtlStore, node: &str) -> bool {
         .iter()
         .any(|designation| designation == LV2_LATENCY)
         || has_property(store, node, LV2_REPORTS_LATENCY)
+}
+
+/// Whether `node` declares `property` as a port property.  The spec writes a
+/// port property as `lv2:portProperty <property>`; the property's own IRI as
+/// a direct predicate (with `true`) is accepted too, which older bundles and
+/// some of the test fixtures use.
+pub(super) fn has_property(store: &TtlStore, node: &str, property: &str) -> bool {
+    store
+        .iris(node, LV2_PORT_PROPERTY)
+        .iter()
+        .any(|declared| declared == property)
+        || store
+            .objects(node, property)
+            .iter()
+            .any(|value| !value.eq_ignore_ascii_case("false"))
+}
+
+/// Why an atom port cannot be connected, or `None` when it lists
+/// `atom:Sequence`, the only buffer type this host supplies.  The atom spec
+/// forbids connecting a port to a type it does not list, so a port that
+/// lists none cannot be connected either.
+fn unsupported_atom_type(store: &TtlStore, node: &str) -> Option<String> {
+    let types = store.iris(node, ATOM_BUFFER_TYPE);
+    if types.iter().any(|kind| kind == ATOM_SEQUENCE_IRI) {
+        return None;
+    }
+    Some(if types.is_empty() {
+        "declares no atom:bufferType".to_owned()
+    } else {
+        let listed: Vec<String> = types
+            .iter()
+            .map(|kind| format!("atom:{}", local_name(kind)))
+            .collect();
+        format!("only takes {}", listed.join(", "))
+    })
+}
+
+/// Why each `opts:requiredOption` the host does not supply blocks the plugin.
+fn missing_options(store: &TtlStore, plugin: &str) -> Vec<String> {
+    store
+        .iris(plugin, OPTS_REQUIRED_OPTION)
+        .iter()
+        .filter(|option| !SUPPLIED_OPTIONS.contains(&option.as_str()))
+        .map(|option| format!("Needs the option {}", local_name(option)))
+        .collect()
+}
+
+/// Why a required feature is not supplied, in words the browser can show.
+fn blocked_reason(uri: &str) -> String {
+    match uri {
+        BUF_SIZE_FIXED => "Needs a fixed block length".to_owned(),
+        BUF_SIZE_POWER_OF_TWO => "Needs a power-of-two block length".to_owned(),
+        LOG_LOG => "Needs log:log".to_owned(),
+        STATE_MAKE_PATH => "Needs state:makePath".to_owned(),
+        INSTANCE_ACCESS => "Needs instance-access".to_owned(),
+        DATA_ACCESS => "Needs data-access".to_owned(),
+        RESIZE_PORT => "Needs resize-port".to_owned(),
+        other if other.starts_with(UI_PREFIX) => "Needs a plugin UI feature".to_owned(),
+        other => format!("Requires {other}"),
+    }
 }
 
 fn local_name(uri: &str) -> &str {
