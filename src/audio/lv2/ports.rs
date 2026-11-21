@@ -592,7 +592,9 @@ fn read_range(
         read_only,
         step_count,
         unit: unit_symbol(store, node),
-        points: read_points(store, node),
+        // Scale points use the same units as the bounds, so a sample-rate
+        // port scales them too.
+        points: read_points(store, node, scale),
     })
 }
 
@@ -618,7 +620,7 @@ fn unit_symbol(store: &TtlStore, node: &str) -> String {
     }
 }
 
-fn read_points(store: &TtlStore, node: &str) -> Vec<ScalePoint> {
+fn read_points(store: &TtlStore, node: &str, scale: f64) -> Vec<ScalePoint> {
     let mut points: Vec<ScalePoint> = store
         .iris(node, LV2_SCALE_POINT)
         .into_iter()
@@ -628,7 +630,8 @@ fn read_points(store: &TtlStore, node: &str) -> Vec<ScalePoint> {
                 .trim()
                 .parse::<f64>()
                 .ok()
-                .filter(|value| value.is_finite())?;
+                .filter(|value| value.is_finite())?
+                * scale;
             let label = store.literal(&point, RDFS_LABEL).unwrap_or_default();
             Some(ScalePoint { value, label })
         })

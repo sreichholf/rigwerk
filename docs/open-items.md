@@ -26,18 +26,25 @@ plans and the code review has landed; that history is in git.
 - The LV2 host is effects-only: no MIDI, time position, `patch:`
   parameters, CV ports or presets, and atom ports are connected empty.  A
   plugin whose only controls are `patch:writable` properties therefore has
-  no panel controls.  An optional CV or unknown port is connected to a
-  silent buffer or left unconnected; a required one is a load error.
+  no panel controls.  An optional CV port gets a silent buffer, an optional
+  port of a kind the host cannot use is connected to NULL, and a required
+  one is a load error.  Atom ports are only connected to `atom:Sequence`;
+  a required atom port that lists no such `atom:bufferType` is the same
+  load error.
 - LV2 plugins that require a fixed or power-of-two block length, `log:log`,
   `state:makePath`, `instance-access`, `data-access`, `resize-port` or an
   option the host does not supply are listed with an error and refuse to
   load.  A default state (`state:loadDefaultState`) restores only the
   values that have a plain atom form: paths, URIs, numbers, booleans and
-  strings.
+  strings.  `state:mapPath` keeps the path it is given, so a saved sample
+  or impulse response path is absolute and does not move with the session.
 - LV2 worker responses are delivered before a `run`; a bypassed effect
   keeps them, and values set while no audio runs stay queued until the
   next processed block.  State saves keep only `LV2_STATE_IS_POD` values
-  and accept empty values (some plugins store empty defaults).
+  and accept empty values (some plugins store empty defaults).  An LV2
+  state value whose body contains URIDs (an `atom:Object` or a sequence)
+  is stored opaque and only round-trips in the process that saved it.  A
+  top-level `atom:URID` is stored as the URI.
 
 ## Not reproduced
 
