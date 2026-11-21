@@ -1,6 +1,8 @@
 //! The tuner's two gauge faces.  The needle is the ±50 cent arc.  The strobe
 //! is three discs seen from the front, wide to fine, and a disc holds inside
-//! ±1 cent.  Each disc is clipped to its own band so a slide cannot spill.
+//! ±1 cent.  Disc speed eases toward the cents reading, and the pattern is
+//! the integral of that speed, so a new reading cannot jump the discs.  Each
+//! disc is clipped to its own band so a slide cannot spill.
 
 use std::f32::consts::PI;
 
@@ -23,18 +25,117 @@ const STROBE_PIXELS_PER_CENT: f32 = 14.0;
 /// Share of each disc that stays clear.  The well colour shades the two
 /// edges, and the shade does not move with the segments.
 const STROBE_CLEAR: f32 = 0.56;
+/// How fast the disc speed closes on a new cents reading, per second.
+/// A tenth of a second reaches most of the way there, so one noisy poll
+/// cannot slam the pattern.
+const STROBE_EASE_PER_SEC: f32 = 8.0;
+/// Below this many pixels per second a disc that is heading for a stop is
+/// already still.  It keeps the tuner from requesting frames forever.
+const STROBE_SPEED_SETTLE: f32 = 0.5;
 /// (lit segment, gap, gear) for the wide, medium and fine discs.
 const DISCS: [(f32, f32, f32); 3] = [(168.0, 72.0, 1.0), (64.0, 28.0, 2.0), (16.0, 8.0, 5.0)];
+/// One revolution of the shared phase.  A multiple of every disc period, so
+/// wrapping it leaves each geared pattern where it was.
+const STROBE_PHASE_WRAP: f32 = {
+    const fn gcd(mut a: u32, mut b: u32) -> u32 {
+        while b != 0 {
+            let next = a % b;
+            a = b;
+            b = next;
+        }
+        a
+    }
+    const fn lcm(a: u32, b: u32) -> u32 {
+        a / gcd(a, b) * b
+    }
+    lcm(lcm(168 + 72, 64 + 28), 16 + 8) as f32
+};
+const _: () = {
+    let mut index = 0;
+    while index < DISCS.len() {
+        let period = (DISCS[index].0 + DISCS[index].1) as u32;
+        let wrap = STROBE_PHASE_WRAP as u32;
+        if period == 0 || !wrap.is_multiple_of(period) {
+            panic!("strobe phase wrap must cover each disc period");
+        }
+        index += 1;
+    }
+};
 
-/// Horizontal shift of one disc, in pixels.  Inside ±1 cent the disc holds.
-/// Outside, the sign is the direction (negative is flat, and flat moves
-/// left) and the magnitude is `min(|cents|, 24) * 14 * gear * time_secs`.
-pub(super) fn strobe_offset(cents: f32, time_secs: f32, gear: f32) -> f32 {
-    if !cents.is_finite() || cents.abs() <= STROBE_HOLD_CENTS {
+/// Gear-1 speed in pixels per second for this reading.  Zero inside ±1 cent,
+/// for a silent face, and for a non-finite cents value.  The sign is the
+/// direction: negative is flat, and flat moves left.
+pub(super) fn strobe_target_speed(cents: f32, valid: bool) -> f32 {
+    if !valid || !cents.is_finite() || cents.abs() <= STROBE_HOLD_CENTS {
         return 0.0;
     }
-    let speed = cents.abs().min(STROBE_SPEED_CAP_CENTS) * STROBE_PIXELS_PER_CENT * gear;
-    cents.signum() * speed * time_secs
+    cents.signum() * cents.abs().min(STROBE_SPEED_CAP_CENTS) * STROBE_PIXELS_PER_CENT
+}
+
+/// Moves `speed` part of the way to `target` over `dt` seconds.  The step is
+/// a fraction of the gap, so a cents jump changes velocity and not position.
+pub(super) fn ease_strobe_speed(speed: f32, target: f32, dt: f32) -> f32 {
+    if !speed.is_finite() {
+        return 0.0;
+    }
+    if !target.is_finite() || !dt.is_finite() || dt <= 0.0 {
+        return speed;
+    }
+    let alpha = 1.0 - (-STROBE_EASE_PER_SEC * dt.min(0.05)).exp();
+    let next = speed + (target - speed) * alpha;
+    if target == 0.0 && next.abs() < STROBE_SPEED_SETTLE {
+        0.0
+    } else {
+        next
+    }
+}
+
+/// Advances the shared phase by `speed * dt` pixels and wraps it.  Callers
+/// scale the result by a disc's gear.
+pub(super) fn advance_strobe_phase(phase: f32, speed: f32, dt: f32) -> f32 {
+    let phase = if phase.is_finite() { phase } else { 0.0 };
+    if !speed.is_finite() || !dt.is_finite() || dt <= 0.0 {
+        return phase.rem_euclid(STROBE_PHASE_WRAP);
+    }
+    (phase + speed * dt.min(0.05)).rem_euclid(STROBE_PHASE_WRAP)
+}
+
+/// The speed and the pattern position carried from one frame to the next.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StrobeMotion {
+    pub(super) speed: f32,
+    pub(super) phase: f32,
+    last_time: f64,
+}
+
+impl Default for StrobeMotion {
+    fn default() -> Self {
+        Self {
+            speed: 0.0,
+            phase: 0.0,
+            last_time: f64::NAN,
+        }
+    }
+}
+
+impl StrobeMotion {
+    /// One frame.  `now` is the egui clock, in seconds.  The first call only
+    /// records the clock, so a late first paint does not leap.
+    pub(super) fn step(&mut self, cents: f32, valid: bool, now: f64) {
+        let dt = if self.last_time.is_finite() {
+            (now - self.last_time).clamp(0.0, 0.05)
+        } else {
+            0.0
+        };
+        self.last_time = now;
+        self.speed = ease_strobe_speed(self.speed, strobe_target_speed(cents, valid), dt as f32);
+        self.phase = advance_strobe_phase(self.phase, self.speed, dt as f32);
+    }
+
+    /// True while the discs are moving or still catching a non-zero reading.
+    fn moving(&self, cents: f32, valid: bool) -> bool {
+        self.speed != 0.0 || strobe_target_speed(cents, valid) != 0.0
+    }
 }
 
 /// The empty panel both faces draw into.
@@ -93,19 +194,30 @@ pub(super) fn strobe(
     );
     let gap = 6.0;
     let height = ((bands.height() - gap * (DISCS.len() - 1) as f32) / DISCS.len() as f32).max(0.0);
-    let time = ui.input(|input| input.time) as f32;
+    let motion_id = ui.scope_id().with("strobe_motion");
+    let mut motion = ui
+        .data(|data| data.get_temp::<StrobeMotion>(motion_id))
+        .unwrap_or_default();
+    motion.step(cents, valid, ui.input(|input| input.time));
+    if motion.moving(cents, valid) {
+        ui.ctx().request_repaint();
+    }
+    ui.data_mut(|data| data.insert_temp(motion_id, motion));
     for (index, (on, space, gear)) in DISCS.iter().copied().enumerate() {
         let top = bands.top() + index as f32 * (height + gap);
         let disc = Rect::from_min_max(
             egui::pos2(bands.left(), top),
             egui::pos2(bands.right(), top + height),
         );
-        let offset = if valid {
-            strobe_offset(cents, time, gear)
-        } else {
-            0.0
-        };
-        paint_disc(painter, disc, on, space, offset, color, colours.well);
+        paint_disc(
+            painter,
+            disc,
+            on,
+            space,
+            motion.phase * gear,
+            color,
+            colours.well,
+        );
     }
 
     painter.text(
