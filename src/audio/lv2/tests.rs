@@ -4916,6 +4916,8 @@ unsafe extern "C" fn teardown_end_run(_instance: LV2_Handle) -> LV2_Worker_Statu
 /// `worker.h`: a response `respond` accepted must reach `work_response`.
 /// The gate keeps the worker thread out, so the load request, its response
 /// and the free that response schedules are all finished by `unregister`.
+/// `end_run` closes a `run` cycle, and no `run` precedes these, so the fake
+/// `end_run` is never called.
 #[test]
 fn unregister_delivers_the_responses_and_serves_what_they_schedule() {
     let _serial = worker_tests();
@@ -4954,13 +4956,8 @@ fn unregister_delivers_the_responses_and_serves_what_they_schedule() {
         .clone();
     assert_eq!(
         calls,
-        [
-            "work load",
-            "response new sample",
-            "end_run",
-            "work free old sample"
-        ],
-        "the teardown did not finish the exchange in order"
+        ["work load", "response new sample", "work free old sample"],
+        "the teardown did not finish the exchange in order, or called end_run with no run"
     );
     assert!(!rings.request_pending());
     assert!(!rings.response_pending());
