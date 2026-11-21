@@ -74,6 +74,26 @@ fn the_strobe_row_matches_the_full_face_at_any_width() {
 }
 
 #[test]
+fn a_column_needle_stays_inside_its_face() {
+    use super::gauge::column_needle_radius;
+    assert_eq!(column_needle_radius(0.0, 200.0), 0.0);
+    assert_eq!(column_needle_radius(200.0, f32::NAN), 0.0);
+    let mut previous = 0.0;
+    for width in [120.0, 150.0, 180.0] {
+        let radius = column_needle_radius(width, 208.0);
+        assert!(radius > previous, "{width}: {radius} vs {previous}");
+        assert!(radius <= 92.0, "{radius}");
+        assert!(
+            radius + 10.0 <= width * 0.5 + 1e-3,
+            "{width}: radius {radius} spills"
+        );
+        previous = radius;
+    }
+    assert_eq!(column_needle_radius(800.0, 208.0), 92.0);
+    assert!(column_needle_radius(220.0, 208.0) <= column_needle_radius(220.0, 320.0));
+}
+
+#[test]
 fn the_strobe_holds_inside_one_cent_and_caps_the_rest() {
     use super::gauge::strobe_target_speed;
     assert_eq!(strobe_target_speed(0.0, true), 0.0);

@@ -1,7 +1,8 @@
 //! Tuner: one screen (`docs/ui-spec.md` §3.4).  The note very large, the
 //! cents and the state, the needle or the strobe, the string cells, and one
-//! bottom bar with every setting.  In All strings the strobe is one face per
-//! string, scaled to the row.  The title bar and the status bar stay, so the
+//! bottom bar with every setting.  In All strings the strobe and the needle
+//! are one face per string, fitted to the row.  The title bar and the status
+//! bar stay, so the
 //! tuner is entered and left like any other screen.
 //!
 //! The analysis and the frame types live in `audio::tuner`; this module only
@@ -146,10 +147,18 @@ impl RigWerkApp {
             if active {
                 match (view.display, view.listen, view.tuning()) {
                     (TunerDisplay::Strobe, TunerListen::All, Some(tuning)) => {
-                        gauge::strobes(ui, &string_strobes(frame, tuning, &lead), colours);
+                        gauge::strobes(ui, &string_gauges(frame, tuning, &lead), colours);
                     }
                     (TunerDisplay::Strobe, _, _) => {
                         gauge::strobe(ui, lead.cents, lead.state, lead.valid, colours);
+                    }
+                    (TunerDisplay::Needle, TunerListen::All, Some(tuning)) => {
+                        gauge::needles(
+                            ui,
+                            &string_gauges(frame, tuning, &lead),
+                            view.tolerance.cents(),
+                            colours,
+                        );
                     }
                     (TunerDisplay::Needle, _, _) => gauge::needle(
                         ui,
@@ -393,9 +402,9 @@ fn lead_reading(frame: &TunerFrame, view: &View, face: StringFace) -> Lead {
     }
 }
 
-/// One strobe face per preset string.  A harmonic or a silent row holds its
-/// discs: it is not a pitch the row should spin.
-fn string_strobes(frame: &TunerFrame, tuning: &Tuning, lead: &Lead) -> Vec<gauge::StrobeFace> {
+/// One gauge face per preset string.  A harmonic or a silent row is not a
+/// pitch the gauge should show.
+fn string_gauges(frame: &TunerFrame, tuning: &Tuning, lead: &Lead) -> Vec<gauge::GaugeFace> {
     tuning
         .strings
         .iter()
@@ -404,7 +413,7 @@ fn string_strobes(frame: &TunerFrame, tuning: &Tuning, lead: &Lead) -> Vec<gauge
             let row = frame.strings.get(index);
             let playable = row.is_some_and(|row| row.sounding && row.harmonic_of.is_none());
             let pinned = lead.pinned && lead.string == Some(index);
-            gauge::StrobeFace {
+            gauge::GaugeFace {
                 column: Some(index),
                 title: name,
                 cents: if playable {
