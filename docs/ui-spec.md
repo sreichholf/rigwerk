@@ -330,12 +330,15 @@ auto-mute) keys on `Screen::Tuner`.
   *Outputs and the metronome are muted while you tune* (today's *Output
   muted by tuner*).
 - The note, very large, its octave, the target and the heard frequency.
-- The ±50 cent scale with the in-tune band and its centre, or the strobe.
+- The ±50 cent needle with the in-tune band and its centre, or the strobe:
+  three discs seen from the front, sliding sideways (flat to the left,
+  sharp to the right).
 - Cents and the state: *tune up*, *tune down*, *in tune*, *centered*
   (within the centre band).
 - With a tuning: one cell per string with its note, target Hz, cents, a
-  mark and the state, and *4 / 6 in tune*.  The string being played is
-  underlined in the accent.  The harmonic marker of today's rows is a small
+  mark and the state, and *4 / 6 in tune*.  The string the face is
+  following is underlined in its pitch colour.  A pinned string has an
+  accent border.  The harmonic marker of today's rows is a small
   *H* on the cell.  Chromatic shows *Pick a tuning to see each string*.
 - Level and confidence: a thin bar under the scale.
 - Bottom bar: *Tuning* (Chromatic and the 20 tunings, grouped Guitar,

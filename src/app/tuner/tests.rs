@@ -191,6 +191,113 @@ fn every_preset_round_trips_by_id() {
     );
 }
 
+fn cue(sounding: bool, ghost: bool, cents: f32) -> Cue {
+    Cue {
+        sounding,
+        ghost,
+        cents,
+    }
+}
+
+#[test]
+fn the_furthest_sounding_string_wins_over_the_lowest() {
+    let cues = [
+        cue(true, false, -2.0),
+        cue(true, false, 12.0),
+        cue(true, false, 4.0),
+    ];
+    assert_eq!(choose_string(&cues, cues.len(), None, None), Some(1));
+}
+
+#[test]
+fn a_sounding_follow_target_is_kept() {
+    let cues = [cue(true, false, -2.0), cue(true, false, 12.0)];
+    assert_eq!(choose_string(&cues, cues.len(), None, Some(0)), Some(0));
+}
+
+#[test]
+fn a_silent_follow_target_gives_way_to_the_furthest() {
+    let cues = [
+        cue(false, false, -2.0),
+        cue(true, false, 4.0),
+        cue(true, false, -12.0),
+    ];
+    assert_eq!(choose_string(&cues, cues.len(), None, Some(0)), Some(2));
+}
+
+#[test]
+fn a_pin_overrides_the_follow_target_until_it_is_tapped_again() {
+    let mut tuner = TunerState::new(&Preferences::default(), true);
+    assert_eq!(
+        tuner.follow_face(),
+        StringFace {
+            string: Some(0),
+            pinned: false,
+            following: Some(0),
+        }
+    );
+    tuner.toggle_pin(3);
+    assert_eq!(
+        tuner.follow_face(),
+        StringFace {
+            string: Some(3),
+            pinned: true,
+            following: Some(0),
+        }
+    );
+    tuner.toggle_pin(3);
+    assert_eq!(
+        tuner.follow_face(),
+        StringFace {
+            string: Some(0),
+            pinned: false,
+            following: Some(0),
+        }
+    );
+}
+
+#[test]
+fn tapping_the_followed_string_clears_the_pin() {
+    let mut tuner = TunerState::new(&Preferences::default(), true);
+    tuner.follow_face();
+    tuner.toggle_pin(4);
+    tuner.toggle_pin(0);
+    assert!(tuner.pinned.is_none());
+    assert_eq!(tuner.follow_face().string, Some(0));
+    assert!(!tuner.follow_face().pinned);
+}
+
+#[test]
+fn a_silent_pin_still_owns_the_face() {
+    let cues = [cue(false, false, 0.0), cue(true, false, 9.0)];
+    assert_eq!(choose_string(&cues, cues.len(), Some(0), Some(1)), Some(0));
+}
+
+#[test]
+fn a_ghost_is_never_the_face() {
+    let cues = [
+        cue(true, true, 40.0),
+        cue(true, false, 3.0),
+        cue(false, false, 1.0),
+    ];
+    assert_eq!(choose_string(&cues, cues.len(), None, None), Some(1));
+    assert_eq!(choose_string(&cues, cues.len(), Some(0), Some(1)), Some(1));
+    assert_eq!(choose_string(&cues, cues.len(), None, Some(0)), Some(1));
+}
+
+#[test]
+fn set_preset_forgets_the_pin_and_the_follow() {
+    let mut tuner = TunerState::new(&Preferences::default(), true);
+    tuner.follow_face();
+    tuner.toggle_pin(2);
+    assert!(tuner.pinned.is_some());
+    assert!(tuner.following.is_some());
+    tuner.set_preset(crate::audio::tuning_index("eb-standard"));
+    assert!(tuner.pinned.is_none());
+    assert!(tuner.following.is_none());
+    assert_eq!(tuner.follow_face().string, None);
+}
+
 #[test]
 fn screenshot_uses_the_drop_c_demo() {
     let preferences = Preferences {

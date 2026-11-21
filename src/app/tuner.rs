@@ -1,6 +1,8 @@
 //! The tuner page's state: persisted settings, the throttled analysis poll and
-//! the auto-mute rule.  All DSP lives in [`crate::audio::tuner`]; this module
-//! only decides when it runs and with which settings.
+//! the auto-mute rule.  The pinned string and the one the All-strings face
+//! follows are screen state only; they are not written to preferences.  All
+//! DSP lives in [`crate::audio::tuner`]; this module only decides when it
+//! runs and with which settings.
 
 use crate::app::LogTone;
 use std::time::{Duration, Instant};
@@ -65,6 +67,63 @@ impl TunerListen {
     }
 }
 
+/// The string the big All-strings readout follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StringFace {
+    pub(crate) string: Option<usize>,
+    /// True when `string` is the user's pin rather than the follow rule.
+    pub(crate) pinned: bool,
+    /// The string the follow rule is holding, whether or not a pin covers it.
+    pub(crate) following: Option<usize>,
+}
+
+/// One string, as the face choice sees it.  Copied off the frame so the
+/// choice can update [`TunerState`] without holding that borrow.
+#[derive(Clone, Copy)]
+struct Cue {
+    sounding: bool,
+    ghost: bool,
+    cents: f32,
+}
+
+/// The string the All-strings face shows.
+///
+/// A pin wins while that index still exists in the tuning and the row is
+/// not a ghost.  Otherwise the followed string stays while it sounds and is
+/// not a ghost.  Otherwise the sounding non-ghost string with the largest
+/// |cents| wins, and a tie keeps the lower index.  A ghost is never returned.
+fn choose_string(
+    cues: &[Cue],
+    tuning_len: usize,
+    pinned: Option<usize>,
+    following: Option<usize>,
+) -> Option<usize> {
+    if let Some(index) = pinned {
+        if index < tuning_len && cues.get(index).is_none_or(|cue| !cue.ghost) {
+            return Some(index);
+        }
+    }
+    if let Some(index) = following {
+        if cues
+            .get(index)
+            .is_some_and(|cue| cue.sounding && !cue.ghost)
+        {
+            return Some(index);
+        }
+    }
+    let mut best: Option<(usize, f32)> = None;
+    for (index, cue) in cues.iter().enumerate() {
+        if !cue.sounding || cue.ghost || !cue.cents.is_finite() {
+            continue;
+        }
+        let abs = cue.cents.abs();
+        if best.is_none_or(|(_, best_abs)| abs > best_abs) {
+            best = Some((index, abs));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
 pub(crate) struct TunerState {
     /// Index into [`TUNINGS`]; `None` is chromatic and has no string rows.
     pub(crate) tuning: Option<usize>,
@@ -74,6 +133,12 @@ pub(crate) struct TunerState {
     pub(crate) listen: TunerListen,
     pub(crate) auto_mute: bool,
     pub(crate) tolerance: TunerTolerance,
+    /// The string the user pinned on the All-strings face.  Screen state only.
+    pinned: Option<usize>,
+    /// The string All strings is following.  Kept while it sounds.  Screen
+    /// state only: a preset change clears it, and it is not written to
+    /// preferences.
+    following: Option<usize>,
     analysis: TunerAnalysis,
     /// Interleaved L/R copy of the latest tap window.
     scratch: Vec<f32>,
@@ -127,6 +192,8 @@ impl TunerState {
                 preferences.tuner_auto_mute
             },
             tolerance: TunerTolerance::from_u8(preferences.tuner_tolerance),
+            pinned: None,
+            following: None,
             analysis: TunerAnalysis::new(),
             scratch: vec![0.0; TAP_COPY_FRAMES * 2],
             last_poll: Instant::now(),
@@ -158,10 +225,56 @@ impl TunerState {
             return;
         }
         self.tuning = index;
+        self.pinned = None;
+        self.following = None;
         if index.is_none() {
             self.listen = TunerListen::Single;
         }
         self.analysis.clear();
+    }
+
+    /// The string the All-strings face shows.  A pin wins while that string
+    /// still exists and is not a ghost.  Otherwise the followed string stays
+    /// while it sounds and is not a ghost, and only then does the sounding
+    /// non-ghost string furthest from its target take over.  The follow
+    /// target is remembered here, so a later call does not hop while it
+    /// still sounds.  Single-note listen does not call this.
+    pub(crate) fn follow_face(&mut self) -> StringFace {
+        let tuning_len = self
+            .preset()
+            .map(|tuning| tuning.strings.len())
+            .unwrap_or(0);
+        let cues: Vec<Cue> = self
+            .analysis
+            .frame()
+            .strings
+            .iter()
+            .map(|row| Cue {
+                sounding: row.sounding,
+                ghost: row.harmonic_of.is_some(),
+                cents: row.cents,
+            })
+            .collect();
+        if self.pinned.is_some_and(|index| index >= tuning_len) {
+            self.pinned = None;
+        }
+        self.following = choose_string(&cues, tuning_len, None, self.following);
+        let string = choose_string(&cues, tuning_len, self.pinned, self.following);
+        StringFace {
+            pinned: self.pinned.is_some() && string == self.pinned,
+            string,
+            following: self.following,
+        }
+    }
+
+    /// Pins `index`, or clears the pin when `index` is already pinned or is
+    /// the string the face is following.  Not persisted.
+    pub(crate) fn toggle_pin(&mut self, index: usize) {
+        if self.pinned == Some(index) || self.following == Some(index) {
+            self.pinned = None;
+        } else {
+            self.pinned = Some(index);
+        }
     }
 
     /// The A4 reference, kept inside the range the page can show.

@@ -184,16 +184,18 @@ output mode changes.
 
 The tuner is a full screen: *Tuner* in the title bar, or **Ctrl+T**; Esc
 or Ctrl+T goes back. It shows the note very large, its octave, the target
-and the heard frequency, and a needle or a strobe with ±50 cents and the
-in-tune band. Level and confidence run underneath.
+and the heard frequency, a needle over ±50 cents, or a strobe of three
+discs seen from the front. Flat slides the discs left and sharp slides
+them right. Level and confidence run underneath.
 
 Pick Chromatic, or one of the 20 tunings (6, 7 and 8-string guitar; 4, 5
 and 6-string bass). A tuning shows one cell per string with its note,
-target frequency and cents, and reads every string from a single strum;
-the string being played is underlined. The bottom bar sets the tuning, A4,
-the in-tune tolerance (±3, ±5 or ±10 cents), the input channel (L, R or
-Sum), *Listen* (single note or all strings), *Mute while tuning* and the
-display (needle or strobe).
+target frequency, cents and a mark, and reads every string from a single
+strum. All strings keeps one string on the big face while it sounds: the
+furthest sounding string, or the one you pin. The bottom bar sets the
+tuning, A4, the in-tune tolerance (±3, ±5 or ±10 cents), the input
+channel (L, R or Sum), *Listen* (single note or all strings), *Mute while
+tuning* and the display (needle or strobe).
 
 *Mute while tuning* silences the outputs and the metronome while the tuner
 is open. Without a running bridge the tuner asks you to start it.
