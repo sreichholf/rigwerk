@@ -53,6 +53,9 @@ jobs:
             libgl1-mesa-dev \
             pkg-config \
             ninja-build \
+            meson \
+            libsndfile1-dev \
+            libsamplerate0-dev \
             xvfb \
             libx11-xcb-dev \
             libxcb-util-dev \
@@ -121,6 +124,25 @@ jobs:
         env:
           RIGWERK_VST3_FIXTURES: ${{ github.workspace }}/.vst3-fixtures/plugins
         run: xvfb-run -a cargo test --locked vst3_fixture_opens_and_closes -- --nocapture
+
+      # The LV2 repository's example bundles the lv2_fixture tests load,
+      # built by the script and cached per runner OS and script revision
+      # (which pins the LV2 tag).  Linux only: the script is POSIX and the
+      # fixtures are not built on Windows yet.
+      - uses: actions/cache@v5
+        with:
+          path: .lv2-fixtures/plugins
+          key: lv2-fixtures-${{ runner.os }}-${{ hashFiles('scripts/lv2-fixtures.sh') }}
+
+      - name: Build LV2 fixtures
+        timeout-minutes: 10
+        run: bash scripts/lv2-fixtures.sh .lv2-fixtures
+
+      - name: LV2 fixture tests
+        timeout-minutes: 10
+        env:
+          RIGWERK_LV2_FIXTURES: ${{ github.workspace }}/.lv2-fixtures/plugins
+        run: cargo test --locked lv2_fixture -- --nocapture
 
   windows:
     name: Windows

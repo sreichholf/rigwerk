@@ -13,7 +13,8 @@ edges.
 
 - **Any input to any output**, across clocks and sample rates, with drift
   correction.
-- **Up to four paths**, each with EQ, VST3/CLAP effects and a noise gate.
+- **Up to four paths**, each with EQ, VST3/CLAP/LV2 effects and a noise
+  gate.
   Paths stay time-aligned on every output.  An effects return runs one
   reverb or delay on every path's sends.
 - **NAM blocks.** Load Neural Amp Modeler `.nam` captures straight into a

@@ -148,9 +148,11 @@ and each strip shows a thin meter.
 ![The output sheet](screenshots/output-sheet.png)
 
 The effects group opens the **effect browser** from its dashed *+ Add
-effect* row, or from an empty chain, and the browser lists VST3 and CLAP
-plugins found in the standard folders (and in `CLAP_PATH` or
-`RIGWERK_CLAP_PATH` for CLAP).
+effect* row, or from an empty chain, and the browser lists VST3, CLAP and
+LV2 effects found in the standard folders. `CLAP_PATH` or
+`RIGWERK_CLAP_PATH` adds CLAP folders; `LV2_PATH` replaces the default
+LV2 folders and `RIGWERK_LV2_PATH` adds another. LV2 effects use RigWerk's
+parameter panel: phase 1 does not open their X11 or Windows UIs.
 Search by name, maker, format or category; a prefix match ranks first,
 then favourites and recently used effects. ↑/↓ chooses, Enter adds,
 Shift+Enter adds and opens the editor. *Add from path* and *Rescan* are in

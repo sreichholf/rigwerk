@@ -24,8 +24,8 @@ use lv2_sys::{
 
 use crate::audio::clap::StateSave;
 use crate::audio::plugins::{
-    param_transfer, AudioThreadScope, LoadedPlugin, Lv2Failure, Outcome, ParamOut, PluginPref,
-    PluginShared, Restore, Saved, MAX_STATE_BLOB,
+    lv2_fixture, param_transfer, AudioThreadScope, LoadedPlugin, Lv2Failure, Outcome, ParamOut,
+    PluginFormat, PluginPref, PluginShared, PluginState, Restore, Saved, MAX_BLOCK, MAX_STATE_BLOB,
 };
 
 use super::host::{used_uris, HostFeatures, SATISFIED, SUPPORTED};
@@ -2789,7 +2789,6 @@ fn a_non_pod_state_value_is_dropped_from_the_blob() {
 /// The statuses a save got for values that must not be stored.
 static NON_POD_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
 static NATIVE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
-static ZERO_SIZE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
 static NULL_VALUE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
 
 unsafe extern "C" fn odd_values_save(
@@ -2820,10 +2819,6 @@ unsafe extern "C" fn odd_values_save(
                 int,
                 pod_flag() | native_flag(),
             ) as i32,
-            Ordering::Relaxed,
-        );
-        ZERO_SIZE_STATUS.store(
-            store_value(store, handle, gain, &[], int, pod_flag()) as i32,
             Ordering::Relaxed,
         );
         NULL_VALUE_STATUS.store(
@@ -2864,11 +2859,6 @@ fn a_bad_state_value_gets_the_status_that_says_why() {
         NATIVE_STATUS.load(Ordering::Relaxed),
         status_bits(LV2_STATE_ERR_BAD_FLAGS),
         "a native value must be refused as bad flags"
-    );
-    assert_eq!(
-        ZERO_SIZE_STATUS.load(Ordering::Relaxed),
-        LV2_STATE_ERR_UNKNOWN as i32,
-        "a zero-sized value must be refused"
     );
     assert_eq!(
         NULL_VALUE_STATUS.load(Ordering::Relaxed),
@@ -2919,6 +2909,103 @@ fn an_empty_state_blob_saves_and_restores() {
         host.as_ptr()
     ));
     assert_eq!(EMPTY_RESTORES.load(Ordering::Relaxed), 1);
+}
+
+/// What the empty-value restore read: size, type, flags, and whether the
+/// pointer was null.
+static EMPTY_RETRIEVED: Mutex<Option<(usize, u32, u32, bool)>> = Mutex::new(None);
+
+unsafe extern "C" fn empty_value_save(
+    _instance: LV2_Handle,
+    store: LV2_State_Store_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(store) = store else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    // A null pointer with size 0 is what a plugin's empty default can look
+    // like; it must be stored, not refused.
+    unsafe {
+        store(
+            handle,
+            map.map(STATE_NAME_KEY),
+            ptr::null(),
+            0,
+            map.map(STATE_ATOM_STRING),
+            pod_flag(),
+        )
+    }
+}
+
+unsafe extern "C" fn empty_value_restore(
+    _instance: LV2_Handle,
+    retrieve: LV2_State_Retrieve_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(retrieve) = retrieve else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    let (mut size, mut type_, mut flags) = (usize::MAX, 0u32, 0u32);
+    let value = unsafe {
+        retrieve(
+            handle,
+            map.map(STATE_NAME_KEY),
+            &mut size,
+            &mut type_,
+            &mut flags,
+        )
+    };
+    if value.is_null() {
+        return LV2_STATE_ERR_UNKNOWN;
+    }
+    let Ok(mut slot) = EMPTY_RETRIEVED.lock() else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    *slot = Some((size, type_, flags, value.is_null()));
+    LV2_STATE_SUCCESS
+}
+
+#[test]
+fn an_empty_state_value_saves_and_restores() {
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(empty_value_save),
+        restore: Some(empty_value_restore),
+    };
+    let bytes =
+        state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save an empty value");
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        1,
+        "the empty value was not stored"
+    );
+    // The record ends in a zero value length.
+    assert_eq!(&bytes[bytes.len() - 4..], &0u32.to_le_bytes());
+
+    *EMPTY_RETRIEVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    assert!(state::restore(
+        ptr::null_mut(),
+        &interface,
+        &bytes,
+        host.as_ptr()
+    ));
+    let (size, type_, flags, null) = EMPTY_RETRIEVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("the empty value was not retrieved");
+    assert_eq!(size, 0);
+    assert_eq!(type_, urid::global().map(STATE_ATOM_STRING));
+    assert_eq!(flags, pod_flag());
+    assert!(!null, "an empty value must not look absent");
 }
 
 /// A blob with the same key twice must restore the later value.
@@ -3201,6 +3288,321 @@ fn an_lv2_instance_saves_through_its_state_interface() {
     }
 }
 
+// Real LV2 plugins: the LV2 repository's examples, built by
+// `scripts/lv2-fixtures.sh` (see `crate::audio::plugins::fixtures`).  Each
+// test goes through `Lv2Instance::load` with the preference a browser add
+// would save, not through a fake descriptor, so it covers the binary, the
+// parsed ports and the host features together.  With `RIGWERK_LV2_FIXTURES`
+// unset they return at once.
+
+const EG_AMP_URI: &str = "http://lv2plug.in/plugins/eg-amp";
+const EG_PARAMS_URI: &str = "http://lv2plug.in/plugins/eg-params";
+
+/// The block the fixture tests process: well under [`MAX_BLOCK`].
+const FIXTURE_BLOCK: usize = 64;
+
+/// The saved effect a browser add would store for fixture `name`, or `None`
+/// when the fixtures are not configured.
+fn fixture_pref(name: &str, uri: &str) -> Option<PluginPref> {
+    let path = lv2_fixture(name)?;
+    Some(PluginPref {
+        path: path.to_string_lossy().into_owned(),
+        format: PluginFormat::Lv2,
+        class_id: Some(uri.to_owned()),
+        name: name.to_owned(),
+        ..PluginPref::default()
+    })
+}
+
+#[test]
+fn lv2_fixture_loads_processes_and_reads_eg_amps_gain() {
+    let Some(pref) = fixture_pref("eg-amp", EG_AMP_URI) else {
+        return;
+    };
+    let bundle = PathBuf::from(&pref.path);
+    let shared = Arc::new(PluginShared::new(0));
+    let mut loaded = Lv2Instance::load(
+        &bundle,
+        EG_AMP_URI,
+        48_000,
+        MAX_BLOCK,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load eg-amp");
+
+    let gain = loaded
+        .views
+        .iter()
+        .find(|view| view.id == symbol_id("gain"))
+        .expect("eg-amp's gain control");
+    assert!(
+        gain.display.contains("dB"),
+        "the gain panel shows {:?}, not dB",
+        gain.display
+    );
+
+    // A unity impulse: eg-amp's 0 dB default passes it through.
+    let mut left = vec![0.0f32; FIXTURE_BLOCK];
+    left[0] = 1.0;
+    let mut right = left.clone();
+    loaded
+        .processor
+        .process(&mut left, &mut right)
+        .expect("process eg-amp");
+    assert!(
+        left.iter().chain(&right).all(|sample| sample.is_finite()),
+        "the output is not finite"
+    );
+    assert!((left[0] - 1.0).abs() < 1e-6, "unity gain wrote {}", left[0]);
+    assert!(
+        left[1..].iter().all(|sample| sample.abs() < 1e-9),
+        "an impulse spread past its frame"
+    );
+
+    // 0.0 normalized is the gain minimum (-90 dB), at which eg-amp's
+    // `DB_CO` writes silence.
+    let index = loaded
+        .ids
+        .index_of(symbol_id("gain"))
+        .expect("the gain's range index");
+    assert!(loaded.out.push(index, 0.0), "queue the gain minimum");
+    let mut left = vec![0.0f32; FIXTURE_BLOCK];
+    left[0] = 1.0;
+    let mut right = left.clone();
+    loaded
+        .processor
+        .process(&mut left, &mut right)
+        .expect("process the gain minimum");
+    assert!(
+        left.iter().chain(&right).all(|sample| sample.abs() < 1e-6),
+        "the minimum gain is not silent: {:?}",
+        &left[..4]
+    );
+}
+
+#[test]
+fn lv2_fixture_saves_and_restores_eg_params_state() {
+    let Some(pref) = fixture_pref("eg-params", EG_PARAMS_URI) else {
+        return;
+    };
+    let bundle = PathBuf::from(&pref.path);
+    let shared = Arc::new(PluginShared::new(0));
+    let loaded = Lv2Instance::load(
+        &bundle,
+        EG_PARAMS_URI,
+        48_000,
+        MAX_BLOCK,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load eg-params");
+
+    let StateSave::Saved(bytes) = loaded.instance.save_state() else {
+        panic!("eg-params has a state interface but saved nothing");
+    };
+    assert_eq!(&bytes[..8], b"RWL2ST01", "the blob has no magic");
+    assert_eq!(
+        u32::from_le_bytes(bytes[8..12].try_into().expect("the version")),
+        1
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        9,
+        "eg-params saved a different number of properties"
+    );
+
+    // A session restore: the saved blob reopens and the load reports it
+    // current.  eg-params has only atom ports, so the browser does not list
+    // it; loading it directly is what covers state, mapPath and the blob.
+    let mut restored = pref.clone();
+    restored.state = Some(PluginState::capture(&bytes, &[]));
+    let reloaded = Lv2Instance::load(
+        &bundle,
+        EG_PARAMS_URI,
+        48_000,
+        MAX_BLOCK,
+        &Restore::from_pref(&restored),
+        &shared,
+    )
+    .expect("reload eg-params with its saved state");
+    assert!(
+        reloaded.state_current,
+        "the restored blob was not reported current"
+    );
+
+    // The browser filter on a real bundle: eg-amp has an audio input and
+    // output, eg-params has neither.
+    let amp = lv2_fixture("eg-amp").expect("eg-amp is built with eg-params");
+    assert_eq!(
+        scan_bundle(&amp).expect("scan eg-amp").len(),
+        1,
+        "eg-amp is not listed"
+    );
+    assert!(
+        scan_bundle(&bundle).expect("scan eg-params").is_empty(),
+        "eg-params without audio ports was listed"
+    );
+}
+
+const EG_SAMPLER_URI: &str = "http://lv2plug.in/plugins/eg-sampler";
+
+/// Appends one atom (`type_`, `body`) at frame 0 to the input sequence `seq`,
+/// which a block's re-arm left empty, padding to 8 bytes as `atom.h` asks.
+fn push_event(seq: *mut lv2_sys::LV2_Atom_Sequence, type_: u32, body: &[u8]) {
+    let padded = body.len().div_ceil(8) * 8;
+    unsafe {
+        let used = (*seq).atom.size as usize;
+        let start = (seq as *mut u8).add(8 + used);
+        let event = start as *mut lv2_sys::LV2_Atom_Event;
+        (*event).time.frames = 0;
+        (*event).body.size = body.len() as u32;
+        (*event).body.type_ = type_;
+        let data = start.add(std::mem::size_of::<lv2_sys::LV2_Atom_Event>());
+        ptr::copy_nonoverlapping(body.as_ptr(), data, body.len());
+        ptr::write_bytes(data.add(body.len()), 0, padded - body.len());
+        (*seq).atom.size += (std::mem::size_of::<lv2_sys::LV2_Atom_Event>() + padded) as u32;
+    }
+}
+
+/// The body of a `patch:Set` object for eg-sampler's `eg:sample` to `path`.
+fn sample_set_body(path: &str) -> Vec<u8> {
+    let map = urid::global();
+    let urid = |uri: &CStr| map.map(uri).to_ne_bytes();
+    let mut body = Vec::new();
+    body.extend(0u32.to_ne_bytes());
+    body.extend(urid(c"http://lv2plug.in/ns/ext/patch#Set"));
+    // patch:property = eg:sample, as an atom:URID.
+    body.extend(urid(c"http://lv2plug.in/ns/ext/patch#property"));
+    body.extend(0u32.to_ne_bytes());
+    body.extend(4u32.to_ne_bytes());
+    body.extend(urid(c"http://lv2plug.in/ns/ext/atom#URID"));
+    body.extend(urid(c"http://lv2plug.in/plugins/eg-sampler#sample"));
+    body.extend([0u8; 4]);
+    // patch:value = the path, as an atom:Path with its NUL.
+    let mut value = path.as_bytes().to_vec();
+    value.push(0);
+    body.extend(urid(c"http://lv2plug.in/ns/ext/patch#value"));
+    body.extend(0u32.to_ne_bytes());
+    body.extend((value.len() as u32).to_ne_bytes());
+    body.extend(urid(c"http://lv2plug.in/ns/ext/atom#Path"));
+    let padded = value.len().div_ceil(8) * 8;
+    value.resize(padded, 0);
+    body.extend(value);
+    body
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// eg-sampler requires `state:loadDefaultState` and `worker:schedule`: the
+/// load restores its default sample, a `patch:Set` from `run` loads another
+/// through the worker thread, and the saved state names it and restores.
+/// It has no audio input, so it is loaded directly, as eg-params is.
+#[test]
+fn lv2_fixture_loads_a_sample_through_eg_samplers_worker() {
+    let Some(pref) = fixture_pref("eg-sampler", EG_SAMPLER_URI) else {
+        return;
+    };
+    let _serial = worker_tests();
+    let bundle = PathBuf::from(&pref.path);
+    let shared = Arc::new(PluginShared::new(0));
+    let mut loaded = Lv2Instance::load(
+        &bundle,
+        EG_SAMPLER_URI,
+        48_000,
+        FIXTURE_BLOCK,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load eg-sampler");
+    let StateSave::Saved(bytes) = loaded.instance.save_state() else {
+        panic!("eg-sampler saved nothing");
+    };
+    assert!(
+        contains(&bytes, b"click.wav"),
+        "the default state did not load click.wav"
+    );
+
+    // Another sample, so the change is visible in the saved state.
+    let dir = std::env::temp_dir().join(format!("rigwerk-eg-sampler-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the sample folder");
+    let other = dir.join("other.wav");
+    std::fs::copy(bundle.join("click.wav"), &other).expect("copy the sample");
+
+    let processor = &mut loaded.processor;
+    let control = processor
+        .buffers
+        .slots
+        .iter()
+        .position(|slot| slot.input && matches!(slot.buffer, Buffer::Atom(_)))
+        .expect("eg-sampler's control port");
+    processor.buffers.reset_atoms();
+    let sequence = processor
+        .buffers
+        .atom(control)
+        .expect("the control sequence");
+    push_event(
+        sequence,
+        urid::global().map(c"http://lv2plug.in/ns/ext/atom#Object"),
+        &sample_set_body(&other.to_string_lossy()),
+    );
+    // The run that reads the message schedules the load.
+    unsafe { (processor.run)(processor.handle, FIXTURE_BLOCK as u32) };
+    let rings = Arc::clone(&loaded.instance.core._rings);
+    for _ in 0..2000 {
+        if rings.response_pending() {
+            break;
+        }
+        loaded.instance.service_worker();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(rings.response_pending(), "the worker sent no response");
+    // The next block delivers it, and the plugin swaps the sample in.
+    let mut left = vec![0.0f32; FIXTURE_BLOCK];
+    let mut right = left.clone();
+    loaded
+        .processor
+        .process(&mut left, &mut right)
+        .expect("process eg-sampler");
+    assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
+    let StateSave::Saved(bytes) = loaded.instance.save_state() else {
+        panic!("eg-sampler saved nothing after the change");
+    };
+    assert!(
+        contains(&bytes, b"other.wav"),
+        "the sample the worker loaded is not in the state"
+    );
+
+    // A session restore loads the saved sample, not the default.
+    let mut restored = pref.clone();
+    restored.state = Some(PluginState::capture(&bytes, &[]));
+    drop(loaded);
+    let reloaded = Lv2Instance::load(
+        &bundle,
+        EG_SAMPLER_URI,
+        48_000,
+        FIXTURE_BLOCK,
+        &Restore::from_pref(&restored),
+        &shared,
+    )
+    .expect("reload eg-sampler with its saved state");
+    assert!(reloaded.state_current, "the saved state was not current");
+    let StateSave::Saved(again) = reloaded.instance.save_state() else {
+        panic!("the reloaded eg-sampler saved nothing");
+    };
+    assert!(
+        contains(&again, b"other.wav"),
+        "the restore lost the sample"
+    );
+    drop(reloaded);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(registered_for_test(), 0, "eg-sampler stayed registered");
+}
+
 // A fake plugin that keeps the bundle path `instantiate` gave it, as LV2
 // allows, and reads it again in `cleanup`.
 static KEPT_PATH: AtomicUsize = AtomicUsize::new(0);
@@ -3250,6 +3652,7 @@ fn the_bundle_path_outlives_the_plugin() {
         &params_bundle(),
         params_table(),
         &descriptor,
+        None,
         None,
         48_000.0,
         64,
@@ -3322,6 +3725,7 @@ fn the_port_buffers_outlive_cleanup() {
         &params_bundle(),
         params_table(),
         &descriptor,
+        None,
         None,
         48_000.0,
         64,
@@ -3437,6 +3841,7 @@ fn load_scheduling(descriptor: &LV2_Descriptor) -> Lv2Loaded {
         &params_bundle(),
         params_table(),
         descriptor,
+        None,
         None,
         48_000.0,
         64,
@@ -3623,4 +4028,109 @@ fn a_failing_library_descriptor_is_an_error_and_lv2_descriptor_is_the_fallback()
         Ok(Descriptors::Function(_))
     ));
     assert!(resolve(None, None, c"/b/", features.as_ptr()).is_err());
+}
+
+/// What the default-state fake's `restore` retrieved: key URI to type URI
+/// and value bytes.
+static DEFAULT_RETRIEVED: Mutex<Vec<(String, String, Vec<u8>)>> = Mutex::new(Vec::new());
+
+const DEFAULT_KEYS: [&CStr; 7] = [
+    c"http://example.com/lv2/default-state#sample",
+    c"http://example.com/lv2/default-state#gain",
+    c"http://example.com/lv2/default-state#count",
+    c"http://example.com/lv2/default-state#name",
+    c"http://example.com/lv2/default-state#mode",
+    c"http://example.com/lv2/default-state#on",
+    c"http://example.com/lv2/default-state#nested",
+];
+
+unsafe extern "C" fn default_recording_restore(
+    _instance: LV2_Handle,
+    retrieve: LV2_State_Retrieve_Function,
+    handle: *mut c_void,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let retrieve = retrieve.expect("a retrieve callback");
+    let map = urid::global();
+    let mut found = Vec::new();
+    for key in DEFAULT_KEYS {
+        let (mut size, mut type_, mut flags) = (0usize, 0u32, 0u32);
+        let value = unsafe { retrieve(handle, map.map(key), &mut size, &mut type_, &mut flags) };
+        if value.is_null() {
+            continue;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(value as *const u8, size) }.to_vec();
+        let type_uri = map
+            .uri(type_)
+            .map(|uri| uri.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        found.push((key.to_string_lossy().into_owned(), type_uri, bytes));
+    }
+    *DEFAULT_RETRIEVED.lock().expect("the record") = found;
+    LV2_STATE_SUCCESS
+}
+
+/// `state:loadDefaultState`: the bundle's `state:state` restores as the atoms
+/// lilv makes of it.  A value with no atom form (a nested blank node) is
+/// left out, and a plugin that does not ask for its default gets none.
+#[test]
+fn a_default_state_restores_as_atoms() {
+    let bundle = testdata("default-state.lv2");
+    let (store, _) = read_bundle(&bundle).expect("read the bundle");
+    assert!(state::default_state(&store, "http://example.com/lv2/no-default").is_none());
+    let default = state::default_state(&store, "http://example.com/lv2/default-state")
+        .expect("a default state");
+    let interface = LV2_State_Interface {
+        save: None,
+        restore: Some(default_recording_restore),
+    };
+    let host = state_host();
+    assert!(state::restore_default(
+        ptr::null_mut(),
+        &interface,
+        &default,
+        host.as_ptr()
+    ));
+    let found = DEFAULT_RETRIEVED.lock().expect("the record").clone();
+    let value = |name: &str| {
+        found
+            .iter()
+            .find(|(key, _, _)| key.ends_with(name))
+            .map(|(_, type_, bytes)| {
+                (
+                    type_.rsplit('#').next().unwrap_or("").to_owned(),
+                    bytes.clone(),
+                )
+            })
+    };
+    let mut path = super::ttl::bundle_root(&bundle)
+        .join("click.wav")
+        .to_string_lossy()
+        .into_owned()
+        .into_bytes();
+    path.push(0);
+    assert_eq!(value("#sample"), Some(("Path".to_owned(), path)));
+    assert_eq!(
+        value("#gain"),
+        Some(("Float".to_owned(), 0.5f32.to_ne_bytes().to_vec()))
+    );
+    assert_eq!(
+        value("#count"),
+        Some(("Int".to_owned(), 3i32.to_ne_bytes().to_vec()))
+    );
+    assert_eq!(
+        value("#name"),
+        Some(("String".to_owned(), b"hello\0".to_vec()))
+    );
+    let fast = urid::global().map(c"http://example.com/lv2/default-state#fast");
+    assert_eq!(
+        value("#mode"),
+        Some(("URID".to_owned(), fast.to_ne_bytes().to_vec()))
+    );
+    assert_eq!(
+        value("#on"),
+        Some(("Bool".to_owned(), 1i32.to_ne_bytes().to_vec()))
+    );
+    assert_eq!(value("#nested"), None, "a blank node value was restored");
 }

@@ -28,6 +28,22 @@
 //! values are not part of the state; they are the saved parameters, which
 //! `Restore::params` applies on top.
 //!
+//! A zero-byte value is kept as an empty record, although `state.h` asks
+//! for at least one byte: real plugins store their default empty strings and
+//! paths that way (`eg-params` does), and refusing them fails the whole
+//! save.
+//!
+//! A plugin that lists `state:loadDefaultState` gets its `state:state` from
+//! the bundle restored at load when no saved blob was restored.  The Turtle
+//! values become atoms the way lilv (through sratom) makes them: a `file:`
+//! IRI is an `atom:Path` (absolute, which the identity `state:mapPath`
+//! hands back unchanged), another IRI an `atom:URID`, `xsd:int`/`integer`
+//! an `atom:Int`, `xsd:long` an `atom:Long`, `xsd:float`/`decimal` an
+//! `atom:Float`, `xsd:double` an `atom:Double`, `xsd:boolean` an
+//! `atom:Bool`, and a plain literal an `atom:String`.  Any other value (a
+//! blank node, another datatype, a language tag) is left out with one log
+//! line; the plugin sees that key as absent.
+//!
 //! `save` and `restore` call the plugin's `LV2_State_Interface` with the
 //! instance's feature array, so a plugin that looks `state:mapPath` or
 //! `state:freePath` up in it finds them.  `restore` is an instantiation-class
@@ -38,8 +54,8 @@ use std::ffi::{c_void, CString};
 use std::ptr;
 
 use lv2_sys::{
-    LV2_Feature, LV2_Handle, LV2_State_Flags, LV2_State_Interface, LV2_State_Status,
-    LV2_State_Status_LV2_STATE_ERR_BAD_FLAGS as LV2_STATE_ERR_BAD_FLAGS,
+    LV2_Feature, LV2_Handle, LV2_State_Flags, LV2_State_Interface, LV2_State_Retrieve_Function,
+    LV2_State_Status, LV2_State_Status_LV2_STATE_ERR_BAD_FLAGS as LV2_STATE_ERR_BAD_FLAGS,
     LV2_State_Status_LV2_STATE_ERR_BAD_TYPE as LV2_STATE_ERR_BAD_TYPE,
     LV2_State_Status_LV2_STATE_ERR_NO_FEATURE as LV2_STATE_ERR_NO_FEATURE,
     LV2_State_Status_LV2_STATE_ERR_NO_PROPERTY as LV2_STATE_ERR_NO_PROPERTY,
@@ -50,7 +66,22 @@ use lv2_sys::{
 
 use crate::audio::plugins::MAX_STATE_BLOB;
 
+use super::ttl::{self, Object, TtlStore};
 use super::urid;
+
+const STATE_STATE: &str = "http://lv2plug.in/ns/ext/state#state";
+const STATE_LOAD_DEFAULT: &str = "http://lv2plug.in/ns/ext/state#loadDefaultState";
+const LV2_REQUIRED_FEATURE: &str = "http://lv2plug.in/ns/lv2core#requiredFeature";
+const LV2_OPTIONAL_FEATURE: &str = "http://lv2plug.in/ns/lv2core#optionalFeature";
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+const ATOM_PATH: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Path";
+const ATOM_URID: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#URID";
+const ATOM_INT: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Int";
+const ATOM_LONG: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Long";
+const ATOM_FLOAT: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Float";
+const ATOM_DOUBLE: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Double";
+const ATOM_BOOL: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Bool";
+const ATOM_STRING: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#String";
 
 /// The first eight bytes of every blob.
 const MAGIC: &[u8; 8] = b"RWL2ST01";
@@ -162,9 +193,13 @@ fn encode(records: &[Record]) -> Vec<u8> {
 
 /// `LV2_State_Interface.save`'s store callback: copies one value into the
 /// sink.  A value that cannot be saved gets the status that says why — a
-/// non-POD or native value `LV2_STATE_ERR_BAD_FLAGS`, an unknown key, type or
-/// size `LV2_STATE_ERR_UNKNOWN`, a value that does not fit
+/// non-POD or native value `LV2_STATE_ERR_BAD_FLAGS`, an unknown key or type
+/// `LV2_STATE_ERR_UNKNOWN`, a value that does not fit
 /// `LV2_STATE_ERR_NO_SPACE` — and stays out of the blob.
+///
+/// A zero-byte value is stored as an empty record.  `state.h` asks plugins
+/// for at least one byte, but some store their default empty string or path
+/// anyway (`eg-params` does), and refusing that fails their whole save.
 unsafe extern "C" fn store(
     handle: *mut c_void,
     key: LV2_URID,
@@ -190,29 +225,29 @@ unsafe extern "C" fn store(
         eprintln!("[plugins] not saving an LV2 state value: its key or type is not a known URI");
         return LV2_STATE_ERR_UNKNOWN;
     };
-    if size == 0 {
-        // `state.h` requires a stored value to have bytes, so an empty map
-        // cannot tell "absent" from "empty".
-        eprintln!("[plugins] not saving an LV2 state value: it has no bytes");
-        return LV2_STATE_ERR_UNKNOWN;
-    }
     if size > MAX_STATE_BLOB {
         // Larger than a whole blob, so it can never fit; do not even make a
         // slice from it.
         return LV2_STATE_ERR_NO_SPACE;
     }
-    if value.is_null() {
-        // A null pointer with a length names no readable bytes.
-        eprintln!("[plugins] not saving an LV2 state value: it has no readable bytes");
-        return LV2_STATE_ERR_UNKNOWN;
-    }
-    // SAFETY: the plugin promises `size` readable bytes at `value`.
-    let bytes = unsafe { std::slice::from_raw_parts(value as *const u8, size) };
+    let value = if size == 0 {
+        // An empty value has no bytes to read, and `value` may even be null.
+        // Store it as empty rather than fail the plugin's whole save.
+        Vec::new()
+    } else {
+        if value.is_null() {
+            // A null pointer with a length names no readable bytes.
+            eprintln!("[plugins] not saving an LV2 state value: it has no readable bytes");
+            return LV2_STATE_ERR_UNKNOWN;
+        }
+        // SAFETY: the plugin promises `size` readable bytes at `value`.
+        unsafe { std::slice::from_raw_parts(value as *const u8, size) }.to_vec()
+    };
     let record = Record {
         key: key.to_owned(),
         type_: type_.to_owned(),
         flags,
-        value: bytes.to_vec(),
+        value,
     };
     let encoded = record.encoded_len();
     if !sink.has_room(encoded) {
@@ -248,13 +283,30 @@ pub(crate) fn restore(
     let Some(records) = decode(bytes) else {
         return false;
     };
+    restore_records(restore, handle, &records, features)
+}
+
+/// Hands `records` to the plugin's `restore`.  `false`, with one log line,
+/// when the plugin refused them.
+fn restore_records(
+    restore: unsafe extern "C" fn(
+        LV2_Handle,
+        LV2_State_Retrieve_Function,
+        *mut c_void,
+        u32,
+        *const *const LV2_Feature,
+    ) -> LV2_State_Status,
+    handle: LV2_Handle,
+    records: &Vec<RestoreRecord>,
+    features: *const *const LV2_Feature,
+) -> bool {
     // SAFETY: `handle` is the live instance, the records outlive the call,
     // and the retrieve callback only reads them.
     let status = unsafe {
         restore(
             handle,
             Some(retrieve),
-            &records as *const Vec<RestoreRecord> as *mut c_void,
+            records as *const Vec<RestoreRecord> as *mut c_void,
             0,
             features,
         )
@@ -267,6 +319,128 @@ pub(crate) fn restore(
         return false;
     }
     true
+}
+
+/// A plugin's `state:state` from its bundle, as records ready to restore.
+pub(crate) struct DefaultState {
+    records: Vec<RestoreRecord>,
+}
+
+/// The default state to load for `plugin`: its `state:state` when it lists
+/// `state:loadDefaultState` as a required or optional feature, or `None`.
+/// UI thread; the URIs are mapped here.
+pub(crate) fn default_state(store: &TtlStore, plugin: &str) -> Option<DefaultState> {
+    let wants = store
+        .iris(plugin, LV2_REQUIRED_FEATURE)
+        .into_iter()
+        .chain(store.iris(plugin, LV2_OPTIONAL_FEATURE))
+        .any(|feature| feature == STATE_LOAD_DEFAULT);
+    if !wants {
+        return None;
+    }
+    let node = store.objects(plugin, STATE_STATE).into_iter().next()?;
+    let map = urid::global();
+    let mut records = Vec::new();
+    for (key, object) in store.statements(&node) {
+        let Some((type_, flags, value)) = default_value(&object) else {
+            eprintln!("[plugins] an LV2 default state value for {key} is not supported");
+            continue;
+        };
+        let Ok(key_uri) = CString::new(key) else {
+            continue;
+        };
+        let key = map.map(&key_uri);
+        let type_ = map.map(type_);
+        if key == 0 || type_ == 0 {
+            continue;
+        }
+        records.push(RestoreRecord {
+            key,
+            type_,
+            flags,
+            value,
+        });
+    }
+    Some(DefaultState { records })
+}
+
+/// The atom type, flags and body a Turtle value restores as, or `None` for
+/// a kind lilv would build an atom for that this host does not.
+fn default_value(object: &Object) -> Option<(&'static std::ffi::CStr, u32, Vec<u8>)> {
+    let pod = u32::from(LV2_State_Flags::LV2_STATE_IS_POD);
+    let portable = pod | u32::from(LV2_State_Flags::LV2_STATE_IS_PORTABLE);
+    match object {
+        Object::Iri(iri) => match ttl::path_from_file_uri(iri) {
+            // A path names a file on this system, so it is not portable.
+            Ok(path) => {
+                let mut bytes = path.to_string_lossy().into_owned().into_bytes();
+                bytes.push(0);
+                Some((ATOM_PATH, pod, bytes))
+            }
+            Err(_) => {
+                let id = urid::global().map(&CString::new(iri.as_str()).ok()?);
+                (id != 0).then(|| (ATOM_URID, portable, id.to_ne_bytes().to_vec()))
+            }
+        },
+        Object::Blank(_) => None,
+        Object::Literal {
+            value,
+            datatype: None,
+            language: false,
+        } => {
+            let mut bytes = value.clone().into_bytes();
+            bytes.push(0);
+            Some((ATOM_STRING, portable, bytes))
+        }
+        Object::Literal {
+            value,
+            datatype: Some(datatype),
+            language: false,
+        } => {
+            let value = value.trim();
+            let (type_, bytes) = match datatype.strip_prefix(XSD)? {
+                "int" | "integer" => (ATOM_INT, value.parse::<i32>().ok()?.to_ne_bytes().to_vec()),
+                "long" => (ATOM_LONG, value.parse::<i64>().ok()?.to_ne_bytes().to_vec()),
+                "float" | "decimal" => (
+                    ATOM_FLOAT,
+                    value.parse::<f32>().ok()?.to_ne_bytes().to_vec(),
+                ),
+                "double" => (
+                    ATOM_DOUBLE,
+                    value.parse::<f64>().ok()?.to_ne_bytes().to_vec(),
+                ),
+                "boolean" => {
+                    let truth = matches!(value, "true" | "1");
+                    (ATOM_BOOL, i32::from(truth).to_ne_bytes().to_vec())
+                }
+                "string" => {
+                    let mut bytes = value.as_bytes().to_vec();
+                    bytes.push(0);
+                    (ATOM_STRING, bytes)
+                }
+                _ => return None,
+            };
+            Some((type_, portable, bytes))
+        }
+        Object::Literal { .. } => None,
+    }
+}
+
+/// Restores a plugin's default state.  Instantiation class, at load before
+/// `activate`, like [`restore`]; `false` when it has no interface that
+/// restores or the plugin refused the values.
+pub(crate) fn restore_default(
+    handle: LV2_Handle,
+    interface: *const LV2_State_Interface,
+    state: &DefaultState,
+    features: *const *const LV2_Feature,
+) -> bool {
+    let Some(restore) = (unsafe { interface.as_ref() }).and_then(|interface| interface.restore)
+    else {
+        eprintln!("[plugins] not loading an LV2 plugin's default state: it cannot restore");
+        return false;
+    };
+    restore_records(restore, handle, &state.records, features)
 }
 
 /// What a parsed record holds before its URIs are mapped: the whole blob is
@@ -395,10 +569,16 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The pointer [`retrieve`] returns for an empty value: non-null and valid
+/// for zero bytes.  An empty `Vec`'s `as_ptr` is dangling (though never
+/// dereferenced at size 0), and a null pointer would look like "absent".
+static EMPTY_VALUE: [u8; 0] = [];
+
 /// `LV2_State_Interface.restore`'s retrieve callback: the last record with
 /// `key` (a plugin that stored a key twice meant the later value), or null
 /// when the blob has none.  The value stays valid until the restore returns,
-/// because the records are not touched during it.
+/// because the records are not touched during it.  An empty record answers
+/// with [`EMPTY_VALUE`], not null, so it is distinguishable from absence.
 unsafe extern "C" fn retrieve(
     handle: *mut c_void,
     key: LV2_URID,
@@ -426,7 +606,11 @@ unsafe extern "C" fn retrieve(
             *flags = record.flags;
         }
     }
-    record.value.as_ptr() as *const c_void
+    if record.value.is_empty() {
+        EMPTY_VALUE.as_ptr() as *const c_void
+    } else {
+        record.value.as_ptr() as *const c_void
+    }
 }
 
 /// The name of a state status, for the one log line a failure gets.

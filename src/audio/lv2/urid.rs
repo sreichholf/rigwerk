@@ -59,6 +59,7 @@ pub(super) const SEEDED: &[&CStr] = &[
     c"http://lv2plug.in/ns/ext/worker#schedule",
     c"http://lv2plug.in/ns/ext/state#mapPath",
     c"http://lv2plug.in/ns/ext/state#freePath",
+    c"http://lv2plug.in/ns/ext/state#loadDefaultState",
     c"http://lv2plug.in/ns/ext/state#interface",
     c"http://lv2plug.in/ns/ext/state#threadSafeRestore",
     c"http://lv2plug.in/ns/ext/atom#Float",

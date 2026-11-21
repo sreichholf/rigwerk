@@ -8,14 +8,16 @@
 //! Supplied: `urid:map` and `urid:unmap` (the process-wide map, seeded
 //! here), `options:options` (the block bounds, the sequence size and the
 //! sample rate), `buf-size:boundedBlockLength`, `worker:schedule` when the
-//! instance has rings, and `state:mapPath`/`state:freePath` as identity
-//! paths.  There is no `buf-size:nominalBlockLength`: a plugin runs the
-//! bridge's block, which a load does not know, so no value would be true.  The
-//! loader always passes the instance's rings, so the scan's claim that
-//! `worker:schedule` is supplied holds for every load; its `schedule_work`
-//! refuses requests until the load has found the plugin's `work`.  `log:log` is not
-//! supplied: its variadic callbacks cannot be written in stable Rust.  The
-//! scan refuses a plugin that requires a feature outside [`SUPPORTED`].
+//! instance has rings, `state:mapPath`/`state:freePath` as identity paths,
+//! and `state:loadDefaultState` (no data: the load restores the bundle's
+//! `state:state`).  There is no `buf-size:nominalBlockLength`: a plugin
+//! runs the bridge's block, which a load does not know, so no value would be
+//! true.  The loader always passes the instance's rings, so the scan's claim
+//! that `worker:schedule` is supplied holds for every load; its
+//! `schedule_work` refuses requests until the load has found the plugin's
+//! `work`.  `log:log` is not supplied: its variadic callbacks cannot be
+//! written in stable Rust.  The scan refuses a plugin that requires a
+//! feature outside [`SUPPORTED`].
 //!
 //! Three core features carry no data and are met by how the host runs a
 //! plugin, so they are accepted as required but not put in the array, as
@@ -48,6 +50,7 @@ pub(crate) const SUPPORTED: &[&str] = &[
     "http://lv2plug.in/ns/ext/worker#schedule",
     "http://lv2plug.in/ns/ext/state#mapPath",
     "http://lv2plug.in/ns/ext/state#freePath",
+    "http://lv2plug.in/ns/ext/state#loadDefaultState",
     IN_PLACE_BROKEN,
     IS_LIVE,
     HARD_RT_CAPABLE,
@@ -69,6 +72,7 @@ const BOUNDED_BLOCK_LENGTH: &CStr = c"http://lv2plug.in/ns/ext/buf-size#boundedB
 const WORKER_SCHEDULE: &CStr = c"http://lv2plug.in/ns/ext/worker#schedule";
 const STATE_MAP_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#mapPath";
 const STATE_FREE_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#freePath";
+const STATE_LOAD_DEFAULT: &CStr = c"http://lv2plug.in/ns/ext/state#loadDefaultState";
 
 /// The options the host supplies in `options:options`.  A plugin that names
 /// another as `opts:requiredOption` is listed with a scan error and refuses
@@ -243,6 +247,8 @@ impl HostFeatures {
                 STATE_FREE_PATH,
                 &self.free_path as *const LV2_State_Free_Path as *mut c_void,
             );
+            // No data: the host meets it by restoring `state:state` at load.
+            push(STATE_LOAD_DEFAULT, ptr::null_mut());
         }
         self.strings = strings;
         self.features = features;
@@ -268,6 +274,7 @@ pub(super) fn used_uris() -> &'static [&'static CStr] {
         WORKER_SCHEDULE,
         STATE_MAP_PATH,
         STATE_FREE_PATH,
+        STATE_LOAD_DEFAULT,
         BUF_SIZE_MIN,
         BUF_SIZE_MAX,
         BUF_SIZE_SEQUENCE,

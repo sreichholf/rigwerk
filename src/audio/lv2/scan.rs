@@ -47,7 +47,6 @@ const FOAF_NAME: &str = "http://xmlns.com/foaf/0.1/name";
 const BUF_SIZE_FIXED: &str = "http://lv2plug.in/ns/ext/buf-size#fixedBlockLength";
 const BUF_SIZE_POWER_OF_TWO: &str = "http://lv2plug.in/ns/ext/buf-size#powerOf2BlockLength";
 const LOG_LOG: &str = "http://lv2plug.in/ns/ext/log#log";
-const STATE_LOAD_DEFAULT: &str = "http://lv2plug.in/ns/ext/state#loadDefaultState";
 const STATE_MAKE_PATH: &str = "http://lv2plug.in/ns/ext/state#makePath";
 const INSTANCE_ACCESS: &str = "http://lv2plug.in/ns/ext/instance-access";
 const DATA_ACCESS: &str = "http://lv2plug.in/ns/ext/data-access";
@@ -470,7 +469,6 @@ pub(super) fn blocked_reason(uri: &str) -> String {
         BUF_SIZE_FIXED => "Needs a fixed block length".to_owned(),
         BUF_SIZE_POWER_OF_TWO => "Needs a power-of-two block length".to_owned(),
         LOG_LOG => "Needs log:log".to_owned(),
-        STATE_LOAD_DEFAULT => "Needs state:loadDefaultState".to_owned(),
         STATE_MAKE_PATH => "Needs state:makePath".to_owned(),
         INSTANCE_ACCESS => "Needs instance-access".to_owned(),
         DATA_ACCESS => "Needs data-access".to_owned(),

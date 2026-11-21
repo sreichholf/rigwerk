@@ -21,7 +21,7 @@
 //! - `bridge`: the bridge thread that picks a path and keeps it running.
 //! - `shared`: the ring buffer, bridge buffer, meters and tuner tap both sides share.
 //! - `path`: one signal path's controls (routing, EQs, gate, effects).
-//! - `plugins`: the VST3 and CLAP chain on each path.  The slot owns each
+//! - `plugins`: the VST3, CLAP and LV2 chain on each path.  The slot owns each
 //!   plugin's processor; the UI reaches the rest through its handle and
 //!   holds views.  The audio side owns each chain's runtime and the UI
 //!   edits its model; edits cross as commands, never under a shared lock.

@@ -28,6 +28,24 @@ struct Triple {
     /// A named node's IRI, a literal's lexical value, or a blank node label.
     object: String,
     literal: bool,
+    /// A literal's datatype IRI; `None` for a plain or language-tagged one.
+    datatype: Option<String>,
+    /// Whether a literal carries a language tag.
+    language: bool,
+}
+
+/// One object as [`TtlStore::statements`] returns it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Object {
+    Iri(String),
+    Blank(String),
+    /// The lexical value, the datatype IRI of a typed literal, and whether
+    /// a language tag was given.
+    Literal {
+        value: String,
+        datatype: Option<String>,
+        language: bool,
+    },
 }
 
 /// The triples of one or more Turtle files.
@@ -57,8 +75,14 @@ impl TtlStore {
         for triple in parser.for_slice(&text) {
             let triple = triple.map_err(|error| format!("{}: {error}", path.display()))?;
             let is_literal = triple.object.is_literal();
+            let display = triple.object.to_string();
+            let (datatype, language) = if is_literal {
+                literal_suffix(&display)
+            } else {
+                (None, false)
+            };
             let object = if is_literal {
-                literal_text(&triple.object.to_string())
+                literal_text(&display)
             } else {
                 scoped(
                     iri_text(&triple.object),
@@ -75,6 +99,8 @@ impl TtlStore {
                 predicate: iri_text(&triple.predicate),
                 object,
                 literal: is_literal,
+                datatype,
+                language,
             });
         }
         Ok(())
@@ -138,6 +164,29 @@ impl TtlStore {
             .collect()
     }
 
+    /// Every predicate and object of `subject`, in file order, with each
+    /// object's kind.
+    pub(crate) fn statements(&self, subject: &str) -> Vec<(String, Object)> {
+        self.triples
+            .iter()
+            .filter(|triple| triple.subject == subject)
+            .map(|triple| {
+                let object = if triple.literal {
+                    Object::Literal {
+                        value: triple.object.clone(),
+                        datatype: triple.datatype.clone(),
+                        language: triple.language,
+                    }
+                } else if triple.object.starts_with("_:") {
+                    Object::Blank(triple.object.clone())
+                } else {
+                    Object::Iri(triple.object.clone())
+                };
+                (triple.predicate.clone(), object)
+            })
+            .collect()
+    }
+
     /// Every `rdf:type` IRI of `subject`, in file order.
     pub(crate) fn types(&self, subject: &str) -> Vec<String> {
         self.iris(subject, RDF_TYPE)
@@ -194,6 +243,31 @@ fn literal_text(text: &str) -> String {
         }
     }
     out
+}
+
+/// What follows a literal's closing quote in the parser's display form: the
+/// datatype IRI of `"v"^^<iri>`, and whether `"v"@tag` has a language tag.
+fn literal_suffix(text: &str) -> (Option<String>, bool) {
+    let mut chars = text.char_indices();
+    if !matches!(chars.next(), Some((_, '"'))) {
+        return (None, false);
+    }
+    let mut escaped = false;
+    for (index, character) in chars {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            let rest = &text[index + 1..];
+            let datatype = rest
+                .strip_prefix("^^<")
+                .and_then(|rest| rest.strip_suffix('>'))
+                .map(str::to_owned);
+            return (datatype, rest.starts_with('@'));
+        }
+    }
+    (None, false)
 }
 
 fn push_hex(out: &mut String, chars: &mut std::str::Chars<'_>, digits: u32) {

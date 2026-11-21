@@ -2,7 +2,8 @@
 # System packages, a Rust toolchain new enough for eframe 0.37 (MSRV 1.95),
 # and a warm crates.io cache. Must exit. PipeWire itself is started by start.sh.
 # CMake, Ninja, xvfb and the VSTGUI libraries are for the VST3 fixtures
-# (scripts/vst3-fixtures.sh).
+# (scripts/vst3-fixtures.sh); Meson, Ninja, libsndfile and libsamplerate
+# build the LV2 fixtures (scripts/lv2-fixtures.sh).
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -30,6 +31,9 @@ sudo apt-get install -y --no-install-recommends \
   cmake \
   git \
   ninja-build \
+  meson \
+  libsndfile1-dev \
+  libsamplerate0-dev \
   xvfb \
   libx11-xcb-dev \
   libxcb-util-dev \

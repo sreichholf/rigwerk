@@ -97,7 +97,7 @@ impl Capture {
 /// announced at setup and ignore the smaller `numSamples` passed later, so a
 /// big 4096-frame announcement makes them write past those buffers and can
 /// take the whole app down (Eye Scream Man does exactly this).  512 frames is
-/// the size every VST3/CLAP effect can be expected to handle, and longer
+/// the size every VST3/CLAP/LV2 effect can be expected to handle, and longer
 /// bridge blocks are split into chunks of this size below.
 pub(crate) const MAX_BLOCK: usize = 512;
 

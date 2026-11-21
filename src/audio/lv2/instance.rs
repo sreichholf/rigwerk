@@ -213,11 +213,13 @@ impl Lv2Instance {
         let descriptor = module
             .descriptor_for_uri(plugin_uri)
             .ok_or_else(|| format!("The LV2 binary does not contain {plugin_uri}."))?;
+        let default_state = state::default_state(&store, plugin_uri);
         Self::load_descriptor(
             bundle,
             table,
             descriptor,
             Some(module),
+            default_state.as_ref(),
             rate,
             max_block,
             restore,
@@ -228,13 +230,16 @@ impl Lv2Instance {
     /// The load from a resolved descriptor on: instantiate, connect, restore,
     /// activate, the zero-frame run and the worker.  UI thread.  `module`
     /// keeps the descriptor's library loaded; `None` only for the fake
-    /// descriptors the tests build without a binary.
+    /// descriptors the tests build without a binary.  `default_state` is the
+    /// bundle's `state:state` for a plugin that asks for it, restored when no
+    /// saved blob was.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn load_descriptor(
         bundle: &Path,
         mut table: PortTable,
         descriptor: *const LV2_Descriptor,
         module: Option<ModuleHandle>,
+        default_state: Option<&state::DefaultState>,
         rate: f64,
         max_block: usize,
         restore: &Restore<'_>,
@@ -354,6 +359,19 @@ impl Lv2Instance {
             Some(bytes) => state::restore(handle, state_interface, bytes, core._features.as_ptr()),
             None => false,
         };
+        // `state:loadDefaultState`: the bundle's default state stands in for
+        // a saved one, also when the saved blob did not load.  It is not the
+        // saved state, so it does not make the load current.
+        if !state_loaded {
+            if let Some(default_state) = default_state {
+                state::restore_default(
+                    handle,
+                    state_interface,
+                    default_state,
+                    core._features.as_ptr(),
+                );
+            }
+        }
         let restored = restore.params(false);
         for (id, value) in &restored {
             let Some(index) = ids.index_of(*id) else {

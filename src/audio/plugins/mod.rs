@@ -62,6 +62,8 @@ pub(crate) fn clamp_latency(latency: u32) -> u32 {
     }
 }
 
+#[cfg(test)]
+pub(crate) use pref::PluginState;
 pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
 #[cfg(test)]
@@ -87,6 +89,6 @@ pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
 pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};
 
 #[cfg(test)]
-pub(crate) use fixtures::vst3_fixture;
+pub(crate) use fixtures::{lv2_fixture, vst3_fixture};
 #[cfg(test)]
 pub(crate) use slot::{deferred_slot_count, tracked_slots_alive};

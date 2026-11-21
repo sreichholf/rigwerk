@@ -2,4 +2,5 @@
 /shots/
 *.log
 /.vst3-fixtures/
+/.lv2-fixtures/
 /.nam-null/
