@@ -315,6 +315,23 @@ fn a_uri_that_is_not_a_file_is_refused() {
     assert!(path_from_file_uri("file:///bad%zz.ttl").is_err());
 }
 
+/// RFC 8089: an empty authority, `localhost` and no authority at all all
+/// name the local machine.  Another host is still refused.
+#[test]
+fn a_localhost_file_uri_names_the_same_path() {
+    let local = path_from_file_uri("file:///lv2/amp.lv2/amp.so").expect("an empty authority");
+    for uri in [
+        "file://localhost/lv2/amp.lv2/amp.so",
+        "file://LocalHost/lv2/amp.lv2/amp.so",
+        "file:/lv2/amp.lv2/amp.so",
+    ] {
+        assert_eq!(path_from_file_uri(uri).as_ref(), Ok(&local), "{uri}");
+    }
+    assert!(path_from_file_uri("file://localhost").is_err());
+    assert!(path_from_file_uri("file://localhost.example/lv2/amp.so").is_err());
+    assert!(path_from_file_uri("file:lv2/amp.so").is_err());
+}
+
 #[test]
 fn a_store_appends_files_and_answers_by_subject_and_predicate() {
     let bundle = testdata("example.lv2");
