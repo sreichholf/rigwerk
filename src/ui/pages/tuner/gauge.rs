@@ -3,6 +3,11 @@
 //! ±1 cent.  Disc speed eases toward the cents reading, and the pattern is
 //! the integral of that speed, so a new reading cannot jump the discs.  Each
 //! disc is clipped to its own band so a slide cannot spill.
+//!
+//! All strings draws one strobe per string.  The discs are the same three.
+//! A face is scaled by its width over the row, both taken from the window
+//! this frame, so the column shows the full strobe's bar count and the row
+//! stays on the screen.
 
 use std::f32::consts::PI;
 
@@ -138,6 +143,41 @@ impl StrobeMotion {
     }
 }
 
+/// One strobe the row paints.  `column` is `None` for the single full-width
+/// face.  A string face carries its index, which keys that face's motion.
+pub(super) struct StrobeFace {
+    pub(super) column: Option<usize>,
+    pub(super) title: &'static str,
+    pub(super) cents: f32,
+    pub(super) state: TuneState,
+    pub(super) valid: bool,
+    pub(super) followed: bool,
+    pub(super) pinned: bool,
+}
+
+/// Width of one face in a row of `count` with `gap` between them.  Zero when
+/// the row has nothing to divide.  The faces then sum with the gaps to the
+/// span, so the row is the window width it was given.
+pub(super) fn strobe_column_width(span: f32, count: usize, gap: f32) -> f32 {
+    if count == 0 || !span.is_finite() || !gap.is_finite() || span <= 0.0 || gap < 0.0 {
+        return 0.0;
+    }
+    let gaps = gap * count.saturating_sub(1) as f32;
+    ((span - gaps) / count as f32).max(0.0)
+}
+
+/// Scale that fits the reference discs to a face of `face_width` inside a
+/// row of `row_width`.  The full face is 1.  A column is its width over the
+/// row, both measured from the window this frame, so it shows the full
+/// strobe's bar count and stays inside the row.  A width that cannot be
+/// divided stays at 1.
+pub(super) fn strobe_scale(face_width: f32, row_width: f32) -> f32 {
+    if !face_width.is_finite() || !row_width.is_finite() || face_width <= 0.0 || row_width <= 0.0 {
+        return 1.0;
+    }
+    (face_width / row_width).clamp(0.0, 1.0)
+}
+
 /// The empty panel both faces draw into.
 fn panel(ui: &mut egui::Ui) -> Rect {
     let colours = crate::ui::theme::palette(ui.ctx());
@@ -162,25 +202,96 @@ pub(super) fn strobe(
     valid: bool,
     colours: &Palette,
 ) {
-    let rect = panel(ui);
+    let span = ui.available_width().max(0.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(span, PANEL_H), Sense::hover());
+    paint_strobe(
+        ui,
+        rect,
+        strobe_scale(span, span),
+        &StrobeFace {
+            column: None,
+            title: "STROBE",
+            cents,
+            state,
+            valid,
+            followed: false,
+            pinned: false,
+        },
+        colours,
+    );
+}
+
+/// One strobe per string, across the width the page has this frame.  The
+/// gap matches the string cells, so a face sits on its cell.
+pub(super) fn strobes(ui: &mut egui::Ui, faces: &[StrobeFace], colours: &Palette) {
+    if faces.is_empty() {
+        return;
+    }
+    let span = ui.available_width().max(0.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(span, PANEL_H), Sense::hover());
+    let gap = super::STRING_COLUMN_GAP;
+    let column = strobe_column_width(span, faces.len(), gap);
+    let scale = strobe_scale(column, span);
+    let mut moving = false;
+    for (index, face) in faces.iter().enumerate() {
+        let left = rect.left() + index as f32 * (column + gap);
+        let width = column.min((rect.right() - left).max(0.0));
+        let face_rect = Rect::from_min_size(
+            egui::pos2(left, rect.top()),
+            Vec2::new(width, rect.height()),
+        );
+        if paint_strobe(ui, face_rect, scale, face, colours) {
+            moving = true;
+        }
+    }
+    if moving {
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Paints one face.  Returns whether its discs are still moving.  The row
+/// asks for the next frame once, after every face has stepped.
+fn paint_strobe(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    scale: f32,
+    face: &StrobeFace,
+    colours: &Palette,
+) -> bool {
     let painter = ui.painter();
-    let color = if valid {
-        state_colour(colours, state, cents)
+    let color = if face.valid {
+        state_colour(colours, face.state, face.cents)
     } else {
         colours.text3
     };
+    let footer = face.column.is_none();
+    let (border, width) = if face.pinned {
+        (colours.accent, 1.5)
+    } else if face.followed {
+        (color, 1.5)
+    } else {
+        (colours.line, 1.0)
+    };
+    painter.rect_filled(rect, CornerRadius::same(10), colours.well);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(10),
+        Stroke::new(width, border),
+        egui::StrokeKind::Inside,
+    );
+    let inset = if footer { 14.0 } else { 8.0 };
     painter.text(
-        egui::pos2(rect.left() + 14.0, rect.top() + 12.0),
+        egui::pos2(rect.left() + inset, rect.top() + 12.0),
         Align2::LEFT_CENTER,
-        "STROBE",
+        face.title,
         FontId::new(ts(8.5), FontFamily::Proportional),
         colours.text3,
     );
     painter.text(
-        egui::pos2(rect.right() - 14.0, rect.top() + 12.0),
+        egui::pos2(rect.right() - inset, rect.top() + 12.0),
         Align2::RIGHT_CENTER,
-        if valid {
-            format!("{} ¢", signed_cents(cents))
+        if face.valid {
+            format!("{} ¢", signed_cents(face.cents))
         } else {
             "—".to_owned()
         },
@@ -190,19 +301,29 @@ pub(super) fn strobe(
 
     let bands = Rect::from_min_max(
         egui::pos2(rect.left() + 1.0, rect.top() + 22.0),
-        egui::pos2(rect.right() - 1.0, rect.bottom() - 20.0),
+        egui::pos2(
+            rect.right() - 1.0,
+            rect.bottom() - if footer { 20.0 } else { 6.0 },
+        ),
     );
     let gap = 6.0;
     let height = ((bands.height() - gap * (DISCS.len() - 1) as f32) / DISCS.len() as f32).max(0.0);
-    let motion_id = ui.scope_id().with("strobe_motion");
+    let motion_id = match face.column {
+        Some(index) => ui.scope_id().with(("strobe", index)),
+        None => ui.scope_id().with("strobe_motion"),
+    };
     let mut motion = ui
         .data(|data| data.get_temp::<StrobeMotion>(motion_id))
         .unwrap_or_default();
-    motion.step(cents, valid, ui.input(|input| input.time));
-    if motion.moving(cents, valid) {
-        ui.ctx().request_repaint();
-    }
+    motion.step(face.cents, face.valid, ui.input(|input| input.time));
+    let moving = motion.moving(face.cents, face.valid);
+    let phase = motion.phase;
     ui.data_mut(|data| data.insert_temp(motion_id, motion));
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
     for (index, (on, space, gear)) in DISCS.iter().copied().enumerate() {
         let top = bands.top() + index as f32 * (height + gap);
         let disc = Rect::from_min_max(
@@ -212,25 +333,32 @@ pub(super) fn strobe(
         paint_disc(
             painter,
             disc,
-            on,
-            space,
-            motion.phase * gear,
+            on * scale,
+            space * scale,
+            phase * gear * scale,
             color,
             colours.well,
         );
     }
 
-    painter.text(
-        egui::pos2(rect.center().x, rect.bottom() - 10.0),
-        Align2::CENTER_CENTER,
-        "Flat moves left, sharp moves right",
-        FontId::new(ts(8.0), FontFamily::Proportional),
-        colours.text3,
-    );
+    if footer {
+        painter.text(
+            egui::pos2(rect.center().x, rect.bottom() - 10.0),
+            Align2::CENTER_CENTER,
+            "Flat moves left, sharp moves right",
+            FontId::new(ts(8.0), FontFamily::Proportional),
+            colours.text3,
+        );
+    }
+    if moving && footer {
+        ui.ctx().request_repaint();
+    }
+    moving
 }
 
 /// One disc: vertical segments of `on` pixels, a gap of `space`, then the
-/// still edge shade.  `offset` is in pixels and already carries the sign.
+/// still edge shade.  `offset` is in pixels and already carries the sign
+/// and the face's scale, so a column crosses a bar as fast as the full face.
 fn paint_disc(
     painter: &egui::Painter,
     disc: Rect,
