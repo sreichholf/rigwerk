@@ -12,9 +12,9 @@
 //! description into the port table, the control ranges and the buffers,
 //! `module` keeps one library loaded per binary, the URID map (`urid`) is one
 //! process-wide table that answers from the audio thread without a lock,
-//! `host` owns the feature array an instance receives, and `worker` holds the
-//! byte rings a worker request crosses.  State save and restore live in
-//! `state` in a later commit.
+//! `host` owns the feature array an instance receives, `worker` holds the
+//! byte rings a worker request crosses, and `state` turns the plugin's keyed
+//! state properties into the blob the preferences store.
 
 mod host;
 mod instance;
@@ -22,6 +22,7 @@ mod module;
 mod ports;
 mod processor;
 mod scan;
+mod state;
 mod ttl;
 mod urid;
 mod worker;

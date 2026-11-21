@@ -177,6 +177,26 @@ fn restore_ignores_the_snapshot_when_the_state_did_not_load() {
 }
 
 #[test]
+fn an_lv2_blob_never_skips_the_saved_control_values() {
+    // LV2 state holds no control ports, so a restored blob cannot stand in
+    // for a saved parameter: the LV2 load applies every saved value with
+    // `params(false)`, never the blob's snapshot rule.
+    let pref = PluginPref {
+        format: PluginFormat::Lv2,
+        params: vec![param(1, 0.5)],
+        state: Some(PluginState::capture(&[7], &[param(1, 0.5)])),
+        ..PluginPref::default()
+    };
+    let restore = Restore::from_pref(&pref);
+    assert_eq!(restore.state, Some(vec![7]));
+    assert_eq!(restore.params(false), vec![(1, Some(0.5))]);
+    assert!(
+        restore.params(true).is_empty(),
+        "the snapshot rule would skip a saved gain the LV2 blob does not hold"
+    );
+}
+
+#[test]
 fn only_a_deferred_capture_keeps_the_slot_stale() {
     assert!(Capture::Deferred.leaves_stale());
     assert!(!Capture::Failed.leaves_stale());

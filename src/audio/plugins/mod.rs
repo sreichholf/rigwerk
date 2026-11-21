@@ -75,7 +75,7 @@ pub(crate) use link::{
 };
 #[cfg(test)]
 pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
-pub(crate) use load::{Restore, MAX_BLOCK};
+pub(crate) use load::{Restore, MAX_BLOCK, MAX_STATE_BLOB};
 pub(crate) use model::{ChainModel, ReloadPlan};
 #[cfg(test)]
 pub(crate) use pause::PAUSE_STALL;

@@ -9,14 +9,14 @@
 //! `cleanup`, and only then unloads the library.
 //!
 //! LV2 splits its C API by threading class.  `instantiate`, `activate`,
-//! `deactivate`, `cleanup` and (later) `state.restore` are instantiation-class
-//! calls: they run on the UI thread, never while a block is inside `run`.
+//! `deactivate`, `cleanup` and `state.restore` are instantiation-class calls:
+//! they run on the UI thread, never while a block is inside `run`.
 //! `connect_port`, `run` and the worker's `work_response`/`end_run` are
 //! audio-class: `connect_port` is done here at load, before the processor is
 //! handed to a slot and before any `run` can have started; `run` is the
-//! processor's.  `state.save` (commit 4) is a UI call that may overlap `run`.
-//! There is no restart: LV2 has no call that asks for one, and a new sample
-//! rate loads a new instance.
+//! processor's.  `state.save` is a UI call that may overlap `run`, so a
+//! capture needs no pause.  There is no restart: LV2 has no call that asks
+//! for one, and a new sample rate loads a new instance.
 //!
 //! The instance's values are native per range.  Restored values are written
 //! straight into the control buffers before activation, so the plugin sees
@@ -24,12 +24,13 @@
 //! after activation updates the control outputs and the latency report
 //! without processing audio.
 
-use std::ffi::CString;
+use std::ffi::{c_char, CString};
 use std::path::Path;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use lv2_sys::{LV2_Descriptor, LV2_Handle};
+use lv2_sys::{LV2_Descriptor, LV2_Handle, LV2_STATE__interface, LV2_State_Interface};
 
 use crate::audio::clap::StateSave;
 use crate::audio::plugins::{
@@ -40,6 +41,7 @@ use super::host::HostFeatures;
 use super::module::{self, ModuleHandle};
 use super::ports::{Lv2Range, PortBuffers, PortTable};
 use super::scan;
+use super::state;
 use super::worker::WorkerRings;
 
 /// What both halves of one plugin point into.  Fields drop in declaration
@@ -127,24 +129,19 @@ pub(crate) struct Lv2Instance {
     pub(super) ranges: Arc<[Lv2Range]>,
     /// One native value per range, as the panel and the plugin last agreed.
     pub(super) values: Vec<f32>,
-    /// Read by the state work in commit 4.
-    #[allow(dead_code)]
-    pub(super) ids: Arc<ParamIds>,
-    /// Kept for the restart and state work in commit 4.
-    #[allow(dead_code)]
-    pub(super) sample_rate: f64,
-    /// Kept for the restart and state work in commit 4.
-    #[allow(dead_code)]
-    pub(super) max_block: usize,
     pub(super) shared: Arc<PluginShared>,
+    /// The plugin's state extension, valid for as long as the instance (the
+    /// descriptor promises that).  Null when the plugin has none.
+    state: *const LV2_State_Interface,
     /// Last: the handle outlives everything above that points into it.
     pub(super) core: Arc<Lv2Core>,
 }
 
-// SAFETY: the instance only makes LV2's main-thread calls (`activate`,
-// `cleanup` through the core's drop) and, through
-// `reread_latency_if_changed`, reads atomics.  It is reached only through the
-// UI-only lock of its `PluginHandle`, one thread at a time.
+// SAFETY: the instance only makes LV2's UI-thread calls (`activate`, the
+// state extension's `save` and `restore`, `deactivate` and `cleanup` through
+// the core's drop) and, through `reread_latency_if_changed`, reads atomics.
+// It is reached only through the UI-only lock of its `PluginHandle`, one
+// thread at a time.
 unsafe impl Send for Lv2Instance {}
 
 /// What a load hands to `LoadedPlugin`: the two halves and the UI side's
@@ -247,6 +244,19 @@ impl Lv2Instance {
         if handle.is_null() {
             return Err("The LV2 plugin could not be instantiated.".to_owned());
         }
+        // The extension is per plugin, valid for the instance's lifetime.
+        // SAFETY: `descriptor` points into the module the core keeps loaded,
+        // and the URI is the null-terminated one the header names.
+        let state_interface = unsafe {
+            let extension_data = (*descriptor).extension_data;
+            match extension_data {
+                Some(extension_data) => {
+                    let data = extension_data(LV2_STATE__interface.as_ptr() as *const c_char);
+                    data as *const LV2_State_Interface
+                }
+                None => ptr::null(),
+            }
+        };
         // From here an early return deactivates and cleans the instance up
         // through the core's drop, then unloads the module.
         let core = Arc::new(Lv2Core {
@@ -276,12 +286,18 @@ impl Lv2Instance {
         let ids = Arc::clone(&table.ids);
         let mut native: Vec<f32> = ranges.iter().map(|range| range.default as f32).collect();
 
-        // Restored controls go straight into the buffers before activation,
-        // so no block can see the old values.  The state blob is restored in
-        // commit 4; until then every saved control is applied on top of the
-        // defaults.
-        let state_loaded = false;
-        let restored = restore.params(state_loaded);
+        // The state blob goes in first, then the saved controls on top.  LV2
+        // state holds no control ports, so every saved value still applies
+        // when the blob loaded: `params` is asked for the full list, not the
+        // blob's snapshot rule.  Both are before activation, so no block can
+        // see the defaults in between.  A blob the plugin cannot take is
+        // logged once by `state::restore`; the saved parameters still
+        // describe the effect.
+        let state_loaded = match restore.state.as_deref() {
+            Some(bytes) => state::restore(handle, state_interface, bytes, core._features.as_ptr()),
+            None => false,
+        };
+        let restored = restore.params(false);
         for (id, value) in &restored {
             let Some(index) = ids.index_of(*id) else {
                 continue;
@@ -298,10 +314,8 @@ impl Lv2Instance {
         let mut instance = Self {
             ranges: Arc::clone(&ranges),
             values: native,
-            ids: Arc::clone(&ids),
-            sample_rate: rate,
-            max_block: block,
             shared: Arc::clone(shared),
+            state: state_interface,
             core: Arc::clone(&core),
         };
         instance.activate();
@@ -351,7 +365,7 @@ impl Lv2Instance {
             from_audio,
             ids,
             views,
-            state_current: state_loaded && restored.is_empty(),
+            state_current: state_loaded,
             undelivered: Vec::new(),
             instance,
         })
@@ -460,7 +474,7 @@ impl Lv2Instance {
     }
 
     /// The native value of a normalized one at `index` of the table.
-    #[allow(dead_code)] // Used by the state work in commit 4.
+    #[allow(dead_code)] // For the direct control write from a pause.
     pub(crate) fn native(&self, index: usize, value: f64) -> Option<(u32, f64)> {
         let range = self.ranges.get(index)?;
         Some((range.id, range.denormalise(value)))
@@ -474,11 +488,22 @@ impl Lv2Instance {
             .any(|range| range.id == id && range.read_only)
     }
 
-    /// The plugin's state, once commit 4 adds the state extension.  Until
-    /// then every LV2 plugin saves nothing: [`StateSave::Unavailable`] keeps
-    /// its parameters as the only description.
-    pub(crate) fn save_state(&mut self) -> StateSave {
-        StateSave::Unavailable
+    /// Captures the plugin's state into the blob the preferences store.  UI
+    /// thread; `state.h` lets `save` overlap `run`, so no pause is needed.  A
+    /// plugin without a state interface saves nothing, and so does a failed
+    /// save: [`StateSave::Unavailable`] keeps its parameters as the only
+    /// description.
+    pub(crate) fn save_state(&self) -> StateSave {
+        if self.state.is_null() {
+            return StateSave::Unavailable;
+        }
+        match state::save(self.core.handle, self.state, self.core._features.as_ptr()) {
+            Ok(bytes) => StateSave::Saved(bytes),
+            Err(error) => {
+                eprintln!("[plugins] {error}");
+                StateSave::Unavailable
+            }
+        }
     }
 
     pub(crate) fn has_editor(&self) -> bool {
@@ -491,7 +516,6 @@ impl Lv2Instance {
     /// An instance with no plugin behind it, for the handle-level tests.
     pub(super) fn for_test(
         ranges: Arc<[Lv2Range]>,
-        ids: Arc<ParamIds>,
         values: Vec<f32>,
         shared: Arc<PluginShared>,
         core: Arc<Lv2Core>,
@@ -499,12 +523,16 @@ impl Lv2Instance {
         Self {
             ranges,
             values,
-            ids,
-            sample_rate: 48_000.0,
-            max_block: 8,
             shared,
+            state: ptr::null(),
             core,
         }
+    }
+
+    /// Points the instance at a fake state extension, for the tests that
+    /// exercise [`Lv2Instance::save_state`] without a binary.
+    pub(super) fn set_state_interface_for_test(&mut self, interface: *const LV2_State_Interface) {
+        self.state = interface;
     }
 }
 

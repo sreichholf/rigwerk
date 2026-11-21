@@ -71,7 +71,7 @@ pub(crate) fn captured_state(bytes: &[u8], params: &[PluginParamPref]) -> Captur
 }
 
 /// The largest state blob kept in the preferences file.
-const MAX_STATE_BLOB: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_STATE_BLOB: usize = 8 * 1024 * 1024;
 
 /// The outcome of [`super::PluginHandle::capture_state`].
 #[derive(Debug)]

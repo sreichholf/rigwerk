@@ -1,20 +1,27 @@
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lv2_sys::{
     LV2_Descriptor, LV2_Feature, LV2_Handle,
-    LV2_Options_Context_LV2_OPTIONS_INSTANCE as LV2_OPTIONS_INSTANCE, LV2_Worker_Schedule,
-    LV2_Worker_Status_LV2_WORKER_ERR_NO_SPACE as LV2_WORKER_ERR_NO_SPACE,
+    LV2_Options_Context_LV2_OPTIONS_INSTANCE as LV2_OPTIONS_INSTANCE, LV2_State_Flags,
+    LV2_State_Interface, LV2_State_Retrieve_Function, LV2_State_Status,
+    LV2_State_Status_LV2_STATE_ERR_BAD_FLAGS as LV2_STATE_ERR_BAD_FLAGS,
+    LV2_State_Status_LV2_STATE_ERR_NO_FEATURE as LV2_STATE_ERR_NO_FEATURE,
+    LV2_State_Status_LV2_STATE_ERR_NO_SPACE as LV2_STATE_ERR_NO_SPACE,
+    LV2_State_Status_LV2_STATE_ERR_UNKNOWN as LV2_STATE_ERR_UNKNOWN,
+    LV2_State_Status_LV2_STATE_SUCCESS as LV2_STATE_SUCCESS, LV2_State_Store_Function,
+    LV2_Worker_Schedule, LV2_Worker_Status_LV2_WORKER_ERR_NO_SPACE as LV2_WORKER_ERR_NO_SPACE,
     LV2_Worker_Status_LV2_WORKER_ERR_UNKNOWN as LV2_WORKER_ERR_UNKNOWN,
     LV2_Worker_Status_LV2_WORKER_SUCCESS as LV2_WORKER_SUCCESS,
 };
 
+use crate::audio::clap::StateSave;
 use crate::audio::plugins::{
     param_transfer, AudioThreadScope, LoadedPlugin, Lv2Failure, Outcome, ParamOut, PluginPref,
-    PluginShared, Restore, Saved,
+    PluginShared, Restore, Saved, MAX_STATE_BLOB,
 };
 
 use super::host::{used_uris, HostFeatures, SATISFIED, SUPPORTED};
@@ -25,6 +32,7 @@ use super::ports::{
 };
 use super::processor::Lv2Processor;
 use super::scan::{read_bundle, scan_bundle};
+use super::state;
 use super::ttl::{file_uri, lexical, path_from_file_uri, TtlStore};
 use super::urid;
 use super::worker::{schedule_struct, WorkerRings, RING_BYTES};
@@ -39,6 +47,13 @@ fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src/audio/lv2/testdata")
         .join(name)
+}
+
+/// A state status as the `i32` the tests store it in: the type is `u32` on
+/// Linux and `i32` on Windows.
+#[allow(clippy::unnecessary_cast)]
+fn status_bits(status: LV2_State_Status) -> i32 {
+    status as i32
 }
 
 #[test]
@@ -1545,13 +1560,15 @@ fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
         .iter()
         .map(|range| buffers.control(range.slot).to_bits())
         .collect();
-    let instance = Lv2Instance::for_test(
+    // A fake state extension, so the capture below has a blob to store.
+    let interface = state_interface();
+    let mut instance = Lv2Instance::for_test(
         Arc::clone(&ranges),
-        Arc::clone(&ids),
         values,
         Arc::clone(&shared),
         Arc::clone(&core),
     );
+    instance.set_state_interface_for_test(&interface);
     let processor = Lv2Processor {
         buffers,
         ranges,
@@ -1630,10 +1647,912 @@ fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
     assert_eq!(level_view.display, "0.75");
     assert!(!handle.service(), "nothing moved in the next frame");
 
+    // An LV2 blob holds no control values, so its snapshot must be empty:
+    // every saved parameter is applied on top of a restored blob.
+    handle.capture_state();
+    let (_, captured) = handle.saved();
+    let captured = captured.expect("the fake state interface saved a blob");
+    assert!(
+        captured.params.is_empty(),
+        "an LV2 blob claimed control values it does not hold"
+    );
+
     // A reset returns the instance's own values to the defaults too.
     handle.reset_parameters().expect("reset");
     let default = table.ranges[gain].normalise(table.ranges[gain].default);
     assert!((handle.lv2_parameters_for_test()[gain].value - default).abs() < 1e-9);
+}
+
+// The fake state extension the state tests drive.  It has no plugin behind it:
+// `save` stores two POD properties, one non-POD property and one under a URID
+// the map never handed out; `restore` reads two back and asks for an absent
+// key.  Statics, because an `extern "C"` function pointer cannot capture.
+const STATE_GAIN_KEY: &CStr = c"http://rigwerk.test/state/gain";
+const STATE_NAME_KEY: &CStr = c"http://rigwerk.test/state/name";
+const STATE_FILE_KEY: &CStr = c"http://rigwerk.test/state/file";
+const STATE_MISSING_KEY: &CStr = c"http://rigwerk.test/state/missing";
+const STATE_DUPLICATE_KEY: &CStr = c"http://rigwerk.test/state/duplicate";
+const STATE_ATOM_INT: &CStr = c"http://lv2plug.in/ns/ext/atom#Int";
+const STATE_ATOM_STRING: &CStr = c"http://lv2plug.in/ns/ext/atom#String";
+const STATE_ATOM_PATH: &CStr = c"http://lv2plug.in/ns/ext/atom#Path";
+const STATE_MAP_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#mapPath";
+const STATE_FREE_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#freePath";
+/// A URID the map never handed out.
+const STATE_UNKNOWN_URID: u32 = 0xDEAD_BEEF;
+
+/// The feature array a real load passes to the state calls.
+fn state_host() -> Box<HostFeatures> {
+    HostFeatures::new(48_000.0, 8, ATOM_CAPACITY, None)
+}
+
+/// Whether `uri` is in the null-terminated feature array `features`.
+fn feature_present(features: *const *const LV2_Feature, uri: &CStr) -> bool {
+    if features.is_null() {
+        return false;
+    }
+    for index in 0..32 {
+        // SAFETY: a null-terminated array, as every LV2 call gets.
+        let feature = unsafe { *features.add(index) };
+        if feature.is_null() {
+            return false;
+        }
+        // SAFETY: every feature in the array names its URI with a C string.
+        if unsafe { CStr::from_ptr((*feature).URI) } == uri {
+            return true;
+        }
+    }
+    false
+}
+
+/// What the last fake save saw of its own call, for the tests that assert it.
+static SAVE_FLAGS: AtomicU32 = AtomicU32::new(0);
+static SAVE_SAW_MAP_PATH: AtomicBool = AtomicBool::new(false);
+static SAVE_SAW_FREE_PATH: AtomicBool = AtomicBool::new(false);
+static RESTORE_SAW_MAP_PATH: AtomicBool = AtomicBool::new(false);
+static RESTORE_SAW_FREE_PATH: AtomicBool = AtomicBool::new(false);
+
+fn pod_flag() -> u32 {
+    u32::from(LV2_State_Flags::LV2_STATE_IS_POD)
+}
+
+fn native_flag() -> u32 {
+    u32::from(LV2_State_Flags::LV2_STATE_IS_NATIVE)
+}
+
+/// The unwrapped `store` callback type the fake save calls.
+type StoreFn = unsafe extern "C" fn(
+    lv2_sys::LV2_State_Handle,
+    u32,
+    *const c_void,
+    usize,
+    u32,
+    u32,
+) -> LV2_State_Status;
+
+unsafe fn store_value(
+    store: StoreFn,
+    handle: lv2_sys::LV2_State_Handle,
+    key: u32,
+    value: &[u8],
+    type_: u32,
+    flags: u32,
+) -> LV2_State_Status {
+    // SAFETY: the fake's caller passes a live store callback and its handle.
+    unsafe {
+        store(
+            handle,
+            key,
+            value.as_ptr() as *const c_void,
+            value.len(),
+            type_,
+            flags,
+        )
+    }
+}
+
+unsafe extern "C" fn fake_state_save(
+    _instance: LV2_Handle,
+    store: LV2_State_Store_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    flags: u32,
+    features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    SAVE_FLAGS.store(flags, Ordering::Relaxed);
+    SAVE_SAW_MAP_PATH.store(feature_present(features, STATE_MAP_PATH), Ordering::Relaxed);
+    SAVE_SAW_FREE_PATH.store(
+        feature_present(features, STATE_FREE_PATH),
+        Ordering::Relaxed,
+    );
+    let Some(store) = store else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    let pod = pod_flag();
+    let int = map.map(STATE_ATOM_INT);
+    unsafe {
+        store_value(
+            store,
+            handle,
+            map.map(STATE_GAIN_KEY),
+            &42i32.to_le_bytes(),
+            int,
+            pod,
+        );
+        store_value(
+            store,
+            handle,
+            map.map(STATE_NAME_KEY),
+            b"RigWerk",
+            map.map(STATE_ATOM_STRING),
+            pod,
+        );
+        // Not plain data: a pointer or a handle would not survive the save.
+        store_value(
+            store,
+            handle,
+            map.map(STATE_FILE_KEY),
+            b"ir.wav",
+            map.map(STATE_ATOM_PATH),
+            0,
+        );
+        // A key no one mapped: the host cannot name it in the blob.
+        store_value(
+            store,
+            handle,
+            STATE_UNKNOWN_URID,
+            &7i32.to_le_bytes(),
+            int,
+            pod,
+        );
+    }
+    LV2_STATE_SUCCESS
+}
+
+/// What [`fake_state_restore`] read, for the test to assert.
+#[derive(Default)]
+struct RestoredState {
+    gain: Vec<u8>,
+    gain_size: usize,
+    gain_type: u32,
+    gain_flags: u32,
+    name: Vec<u8>,
+    absent_is_null: bool,
+    null_out_pointers_ok: bool,
+}
+
+static RESTORED: Mutex<Option<RestoredState>> = Mutex::new(None);
+
+unsafe extern "C" fn fake_state_restore(
+    _instance: LV2_Handle,
+    retrieve: LV2_State_Retrieve_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    RESTORE_SAW_MAP_PATH.store(feature_present(features, STATE_MAP_PATH), Ordering::Relaxed);
+    RESTORE_SAW_FREE_PATH.store(
+        feature_present(features, STATE_FREE_PATH),
+        Ordering::Relaxed,
+    );
+    let Some(retrieve) = retrieve else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    let mut state = RestoredState::default();
+    let (mut size, mut type_, mut flags) = (0usize, 0u32, 0u32);
+    let value = unsafe {
+        retrieve(
+            handle,
+            map.map(STATE_GAIN_KEY),
+            &mut size,
+            &mut type_,
+            &mut flags,
+        )
+    };
+    if value.is_null() {
+        return LV2_STATE_ERR_UNKNOWN;
+    }
+    // SAFETY: the host promises `size` readable bytes at the returned pointer.
+    state.gain = unsafe { std::slice::from_raw_parts(value as *const u8, size) }.to_vec();
+    state.gain_size = size;
+    state.gain_type = type_;
+    state.gain_flags = flags;
+
+    let value = unsafe {
+        retrieve(
+            handle,
+            map.map(STATE_NAME_KEY),
+            &mut size,
+            &mut type_,
+            &mut flags,
+        )
+    };
+    if value.is_null() {
+        return LV2_STATE_ERR_UNKNOWN;
+    }
+    // SAFETY: as above.
+    state.name = unsafe { std::slice::from_raw_parts(value as *const u8, size) }.to_vec();
+
+    let absent = unsafe {
+        retrieve(
+            handle,
+            map.map(STATE_MISSING_KEY),
+            &mut size,
+            &mut type_,
+            &mut flags,
+        )
+    };
+    state.absent_is_null = absent.is_null();
+
+    // The out-pointers are optional in the retrieve signature.
+    let value = unsafe {
+        retrieve(
+            handle,
+            map.map(STATE_GAIN_KEY),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    state.null_out_pointers_ok = !value.is_null();
+
+    let Ok(mut slot) = RESTORED.lock() else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    *slot = Some(state);
+    LV2_STATE_SUCCESS
+}
+
+fn state_interface() -> LV2_State_Interface {
+    LV2_State_Interface {
+        save: Some(fake_state_save),
+        restore: Some(fake_state_restore),
+    }
+}
+
+/// Counts calls to a restore that must never run on a refused blob.
+static COUNTED_RESTORES: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn counted_restore(
+    _instance: LV2_Handle,
+    _retrieve: LV2_State_Retrieve_Function,
+    _handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    COUNTED_RESTORES.fetch_add(1, Ordering::Relaxed);
+    LV2_STATE_SUCCESS
+}
+
+fn counted_interface() -> LV2_State_Interface {
+    LV2_State_Interface {
+        save: None,
+        restore: Some(counted_restore),
+    }
+}
+
+#[test]
+fn an_lv2_state_blob_round_trips_through_save_and_restore() {
+    let host = state_host();
+    let interface = state_interface();
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    assert_eq!(&bytes[..8], b"RWL2ST01");
+    assert_eq!(
+        u32::from_le_bytes(bytes[8..12].try_into().expect("the version")),
+        1
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        2,
+        "the non-POD value and the unknown-key value were dropped"
+    );
+    assert!(
+        !bytes
+            .windows(STATE_FILE_KEY.to_bytes().len())
+            .any(|window| window == STATE_FILE_KEY.to_bytes()),
+        "the non-POD key reached the blob"
+    );
+
+    assert!(state::restore(
+        ptr::null_mut(),
+        &interface,
+        &bytes,
+        host.as_ptr()
+    ));
+    let restored = RESTORED
+        .lock()
+        .expect("the fake's restored state")
+        .take()
+        .expect("a restore");
+    assert_eq!(restored.gain, 42i32.to_le_bytes());
+    assert_eq!(restored.gain_size, 4);
+    assert_eq!(restored.gain_type, urid::global().map(STATE_ATOM_INT));
+    assert_eq!(restored.gain_flags, pod_flag(), "the flags round-trip");
+    assert_eq!(restored.name, b"RigWerk");
+    assert!(
+        restored.absent_is_null,
+        "a key the blob does not hold returns null"
+    );
+    assert!(
+        restored.null_out_pointers_ok,
+        "retrieve rejected null out-pointers"
+    );
+}
+
+#[test]
+fn the_state_calls_get_the_instance_features() {
+    let host = state_host();
+    let interface = state_interface();
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    assert!(
+        SAVE_SAW_MAP_PATH.load(Ordering::Relaxed),
+        "state:mapPath was missing from the save features"
+    );
+    assert!(
+        SAVE_SAW_FREE_PATH.load(Ordering::Relaxed),
+        "state:freePath was missing from the save features"
+    );
+    assert_ne!(
+        SAVE_FLAGS.load(Ordering::Relaxed) & pod_flag(),
+        0,
+        "the save did not ask for POD values"
+    );
+
+    assert!(state::restore(
+        ptr::null_mut(),
+        &interface,
+        &bytes,
+        host.as_ptr()
+    ));
+    assert!(
+        RESTORE_SAW_MAP_PATH.load(Ordering::Relaxed),
+        "state:mapPath was missing from the restore features"
+    );
+    assert!(
+        RESTORE_SAW_FREE_PATH.load(Ordering::Relaxed),
+        "state:freePath was missing from the restore features"
+    );
+}
+
+#[test]
+fn an_lv2_state_blob_from_an_unknown_version_is_refused() {
+    let host = state_host();
+    let interface = state_interface();
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    let counted = counted_interface();
+    let before = COUNTED_RESTORES.load(Ordering::Relaxed);
+
+    let mut wrong_magic = bytes.clone();
+    wrong_magic[0] = b'X';
+    assert!(
+        !state::restore(ptr::null_mut(), &counted, &wrong_magic, host.as_ptr()),
+        "a blob with a foreign magic was accepted"
+    );
+
+    let mut wrong_version = bytes.clone();
+    wrong_version[8..12].copy_from_slice(&2u32.to_le_bytes());
+    assert!(
+        !state::restore(ptr::null_mut(), &counted, &wrong_version, host.as_ptr()),
+        "a blob from a newer layout was accepted"
+    );
+
+    let mut huge_count = bytes.clone();
+    huge_count[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(
+        !state::restore(ptr::null_mut(), &counted, &huge_count, host.as_ptr()),
+        "an impossible record count was accepted"
+    );
+
+    let mut huge_key = bytes.clone();
+    huge_key[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(
+        !state::restore(ptr::null_mut(), &counted, &huge_key, host.as_ptr()),
+        "a key longer than the blob was accepted"
+    );
+
+    assert_eq!(
+        COUNTED_RESTORES.load(Ordering::Relaxed),
+        before,
+        "the plugin's restore ran on a blob it cannot read"
+    );
+}
+
+#[test]
+fn a_truncated_lv2_state_blob_is_refused_without_a_panic() {
+    let host = state_host();
+    let interface = state_interface();
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    let counted = counted_interface();
+    let before = COUNTED_RESTORES.load(Ordering::Relaxed);
+    for cut in [0, 3, 8, 12, 15, bytes.len() - 1] {
+        assert!(
+            !state::restore(ptr::null_mut(), &counted, &bytes[..cut], host.as_ptr()),
+            "a blob cut at {cut} bytes was accepted"
+        );
+    }
+    assert_eq!(
+        COUNTED_RESTORES.load(Ordering::Relaxed),
+        before,
+        "the plugin's restore ran on a blob it cannot read"
+    );
+}
+
+#[test]
+fn trailing_bytes_after_a_complete_record_are_refused() {
+    let host = state_host();
+    let interface = state_interface();
+    let mut bytes =
+        state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    bytes.push(0);
+    assert!(
+        !state::restore(ptr::null_mut(), &interface, &bytes, host.as_ptr()),
+        "a blob with bytes past its last record was accepted"
+    );
+}
+
+#[test]
+fn a_rejected_blob_does_not_add_uris_to_the_process_map() {
+    let host = state_host();
+    let interface = state_interface();
+    // A URI with the same length as the fake's gain key, so it can replace it
+    // in a saved blob, and one nothing has mapped yet.
+    let fresh = c"http://rigwerk.test/state/xain";
+    assert_eq!(fresh.to_bytes().len(), STATE_GAIN_KEY.to_bytes().len());
+    assert!(!urid::global().contains_for_test(fresh));
+
+    let mut bytes =
+        state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    let start = bytes
+        .windows(fresh.to_bytes().len())
+        .position(|window| window == STATE_GAIN_KEY.to_bytes())
+        .expect("the gain key in the blob");
+    bytes[start..start + fresh.to_bytes().len()].copy_from_slice(fresh.to_bytes());
+    // A complete record, but the blob as a whole does not parse.
+    bytes.push(0);
+
+    assert!(!state::restore(
+        ptr::null_mut(),
+        &interface,
+        &bytes,
+        host.as_ptr()
+    ));
+    assert!(
+        !urid::global().contains_for_test(fresh),
+        "a refused blob mapped a URI"
+    );
+}
+
+#[test]
+fn a_non_pod_state_value_is_dropped_from_the_blob() {
+    let host = state_host();
+    let interface = state_interface();
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    // Only the two POD values, gain and name, are in the blob.
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        2
+    );
+    assert!(
+        !bytes
+            .windows(b"ir.wav".len())
+            .any(|window| window == b"ir.wav"),
+        "the non-POD value's bytes reached the blob"
+    );
+}
+
+/// The statuses a save got for values that must not be stored.
+static NON_POD_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
+static NATIVE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
+static ZERO_SIZE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
+static NULL_VALUE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
+
+unsafe extern "C" fn odd_values_save(
+    _instance: LV2_Handle,
+    store: LV2_State_Store_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(store) = store else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    let int = map.map(STATE_ATOM_INT);
+    let gain = map.map(STATE_GAIN_KEY);
+    let name = map.map(STATE_NAME_KEY);
+    unsafe {
+        NON_POD_STATUS.store(
+            store_value(store, handle, gain, b"ir.wav", int, 0) as i32,
+            Ordering::Relaxed,
+        );
+        NATIVE_STATUS.store(
+            store_value(
+                store,
+                handle,
+                gain,
+                &1i32.to_le_bytes(),
+                int,
+                pod_flag() | native_flag(),
+            ) as i32,
+            Ordering::Relaxed,
+        );
+        ZERO_SIZE_STATUS.store(
+            store_value(store, handle, gain, &[], int, pod_flag()) as i32,
+            Ordering::Relaxed,
+        );
+        NULL_VALUE_STATUS.store(
+            store(
+                handle,
+                name,
+                ptr::null(),
+                std::mem::size_of::<i32>(),
+                int,
+                pod_flag(),
+            ) as i32,
+            Ordering::Relaxed,
+        );
+    }
+    // The plugin carries on, as a plugin that ignores a failed store does.
+    LV2_STATE_SUCCESS
+}
+
+#[test]
+fn a_bad_state_value_gets_the_status_that_says_why() {
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(odd_values_save),
+        restore: None,
+    };
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        0,
+        "a value that cannot be stored reached the blob"
+    );
+    assert_eq!(
+        NON_POD_STATUS.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_BAD_FLAGS),
+        "a non-POD value must be refused as bad flags"
+    );
+    assert_eq!(
+        NATIVE_STATUS.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_BAD_FLAGS),
+        "a native value must be refused as bad flags"
+    );
+    assert_eq!(
+        ZERO_SIZE_STATUS.load(Ordering::Relaxed),
+        LV2_STATE_ERR_UNKNOWN as i32,
+        "a zero-sized value must be refused"
+    );
+    assert_eq!(
+        NULL_VALUE_STATUS.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_UNKNOWN),
+        "a null value with a length must be refused"
+    );
+}
+
+#[test]
+fn an_empty_state_blob_saves_and_restores() {
+    static EMPTY_RESTORES: AtomicU32 = AtomicU32::new(0);
+    unsafe extern "C" fn empty_save(
+        _instance: LV2_Handle,
+        _store: LV2_State_Store_Function,
+        _handle: lv2_sys::LV2_State_Handle,
+        _flags: u32,
+        _features: *const *const LV2_Feature,
+    ) -> LV2_State_Status {
+        LV2_STATE_SUCCESS
+    }
+    unsafe extern "C" fn empty_restore(
+        _instance: LV2_Handle,
+        _retrieve: LV2_State_Retrieve_Function,
+        _handle: lv2_sys::LV2_State_Handle,
+        _flags: u32,
+        _features: *const *const LV2_Feature,
+    ) -> LV2_State_Status {
+        EMPTY_RESTORES.fetch_add(1, Ordering::Relaxed);
+        LV2_STATE_SUCCESS
+    }
+
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(empty_save),
+        restore: Some(empty_restore),
+    };
+    let bytes =
+        state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save an empty state");
+    assert_eq!(bytes.len(), 16, "magic, version and count only");
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        0
+    );
+    assert!(state::restore(
+        ptr::null_mut(),
+        &interface,
+        &bytes,
+        host.as_ptr()
+    ));
+    assert_eq!(EMPTY_RESTORES.load(Ordering::Relaxed), 1);
+}
+
+/// A blob with the same key twice must restore the later value.
+static DUPLICATE_VALUE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+unsafe extern "C" fn duplicate_save(
+    _instance: LV2_Handle,
+    store: LV2_State_Store_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(store) = store else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    let key = map.map(STATE_DUPLICATE_KEY);
+    let int = map.map(STATE_ATOM_INT);
+    unsafe {
+        store_value(store, handle, key, &42i32.to_le_bytes(), int, pod_flag());
+        store_value(store, handle, key, &43i32.to_le_bytes(), int, pod_flag());
+    }
+    LV2_STATE_SUCCESS
+}
+
+unsafe extern "C" fn duplicate_restore(
+    _instance: LV2_Handle,
+    retrieve: LV2_State_Retrieve_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(retrieve) = retrieve else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let mut size = 0usize;
+    let (mut type_, mut flags) = (0u32, 0u32);
+    let value = unsafe {
+        retrieve(
+            handle,
+            urid::global().map(STATE_DUPLICATE_KEY),
+            &mut size,
+            &mut type_,
+            &mut flags,
+        )
+    };
+    if value.is_null() {
+        return LV2_STATE_ERR_UNKNOWN;
+    }
+    // SAFETY: the host promises `size` readable bytes at the returned pointer.
+    let bytes = unsafe { std::slice::from_raw_parts(value as *const u8, size) }.to_vec();
+    let Ok(mut slot) = DUPLICATE_VALUE.lock() else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    *slot = Some(bytes);
+    LV2_STATE_SUCCESS
+}
+
+#[test]
+fn a_duplicate_state_key_restores_the_last_value() {
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(duplicate_save),
+        restore: Some(duplicate_restore),
+    };
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        2,
+        "both properties are kept in the blob"
+    );
+    assert!(state::restore(
+        ptr::null_mut(),
+        &interface,
+        &bytes,
+        host.as_ptr()
+    ));
+    let value = DUPLICATE_VALUE
+        .lock()
+        .expect("the fake's duplicate value")
+        .take();
+    assert_eq!(
+        value.as_deref(),
+        Some(&43i32.to_le_bytes()[..]),
+        "the later property of a duplicate key wins"
+    );
+}
+
+/// The status [`oversized_save`] got from the store callback.
+static OVERSIZE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
+
+unsafe extern "C" fn oversized_save(
+    _instance: LV2_Handle,
+    store: LV2_State_Store_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(store) = store else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let value = vec![0u8; MAX_STATE_BLOB];
+    let map = urid::global();
+    // SAFETY: the fake's caller passes a live store callback and its handle.
+    let status = unsafe {
+        store(
+            handle,
+            map.map(STATE_GAIN_KEY),
+            value.as_ptr() as *const c_void,
+            value.len(),
+            map.map(STATE_ATOM_INT),
+            pod_flag(),
+        )
+    };
+    OVERSIZE_STATUS.store(status_bits(status), Ordering::Relaxed);
+    // A plugin that cannot fall back passes the failure on.
+    status
+}
+
+#[test]
+fn a_state_value_larger_than_the_cap_is_refused() {
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(oversized_save),
+        restore: None,
+    };
+    let error =
+        state::save(ptr::null_mut(), &interface, host.as_ptr()).expect_err("an oversized save");
+    assert!(error.contains("larger than"), "{error}");
+    assert_eq!(
+        OVERSIZE_STATUS.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_NO_SPACE),
+        "the store callback did not report the missing space"
+    );
+}
+
+/// A plugin that refuses every save, and the last status it returned.
+static REFUSED_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
+
+unsafe extern "C" fn refusing_save(
+    _instance: LV2_Handle,
+    _store: LV2_State_Store_Function,
+    _handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    REFUSED_STATUS.store(status_bits(LV2_STATE_ERR_NO_FEATURE), Ordering::Relaxed);
+    LV2_STATE_ERR_NO_FEATURE
+}
+
+#[test]
+fn a_plugin_that_handles_no_space_itself_still_saves() {
+    // The plugin sees `ERR_NO_SPACE` for one value, stores a smaller one and
+    // reports success: the host must not latch its own overflow.
+    unsafe extern "C" fn retrying_save(
+        _instance: LV2_Handle,
+        store: LV2_State_Store_Function,
+        handle: lv2_sys::LV2_State_Handle,
+        _flags: u32,
+        _features: *const *const LV2_Feature,
+    ) -> LV2_State_Status {
+        let Some(store) = store else {
+            return LV2_STATE_ERR_UNKNOWN;
+        };
+        let map = urid::global();
+        let key = map.map(STATE_GAIN_KEY);
+        let int = map.map(STATE_ATOM_INT);
+        let too_big = vec![0u8; MAX_STATE_BLOB];
+        let status = unsafe {
+            store(
+                handle,
+                key,
+                too_big.as_ptr() as *const c_void,
+                too_big.len(),
+                int,
+                pod_flag(),
+            )
+        };
+        if status != LV2_STATE_ERR_NO_SPACE {
+            return LV2_STATE_ERR_UNKNOWN;
+        }
+        let smaller = &1i32.to_le_bytes();
+        unsafe {
+            store_value(store, handle, key, smaller, int, pod_flag());
+        }
+        LV2_STATE_SUCCESS
+    }
+
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(retrying_save),
+        restore: None,
+    };
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr())
+        .expect("a plugin that fell back to a smaller value must save");
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        1
+    );
+}
+
+#[test]
+fn a_failed_save_names_the_status() {
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(refusing_save),
+        restore: None,
+    };
+    let error =
+        state::save(ptr::null_mut(), &interface, host.as_ptr()).expect_err("a refused save");
+    assert!(error.contains("ERR_NO_FEATURE"), "{error}");
+    assert_eq!(
+        REFUSED_STATUS.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_NO_FEATURE)
+    );
+}
+
+#[test]
+fn a_state_save_without_an_interface_is_an_error() {
+    let host = state_host();
+    let missing = ptr::null::<LV2_State_Interface>();
+    assert!(state::save(ptr::null_mut(), missing, host.as_ptr()).is_err());
+    let empty = LV2_State_Interface {
+        save: None,
+        restore: None,
+    };
+    assert!(state::save(ptr::null_mut(), &empty, host.as_ptr()).is_err());
+    assert!(!state::restore(
+        ptr::null_mut(),
+        missing,
+        &[0u8; 16],
+        host.as_ptr()
+    ));
+
+    // A present interface without a restore function is refused too.
+    let interface = state_interface();
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    let no_restore = LV2_State_Interface {
+        save: None,
+        restore: None,
+    };
+    assert!(!state::restore(
+        ptr::null_mut(),
+        &no_restore,
+        &bytes,
+        host.as_ptr()
+    ));
+}
+
+#[test]
+fn an_lv2_instance_saves_through_its_state_interface() {
+    let table = params_table();
+    let shared = Arc::new(PluginShared::new(0));
+    let core = Arc::new(Lv2Core::for_test(true));
+    let ranges: Arc<[super::ports::Lv2Range]> = Arc::from(table.ranges.clone().into_boxed_slice());
+    let values: Vec<f32> = table
+        .ranges
+        .iter()
+        .map(|range| range.default as f32)
+        .collect();
+    let mut instance =
+        Lv2Instance::for_test(ranges, values, Arc::clone(&shared), Arc::clone(&core));
+    assert_eq!(
+        instance.save_state(),
+        StateSave::Unavailable,
+        "a plugin without a state interface saves nothing"
+    );
+
+    let interface = state_interface();
+    instance.set_state_interface_for_test(&interface);
+    match instance.save_state() {
+        StateSave::Saved(bytes) => {
+            assert_eq!(&bytes[..8], b"RWL2ST01");
+            assert_eq!(
+                u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+                2
+            );
+        }
+        other => panic!("the state interface was not used: {other:?}"),
+    }
 }
 
 // A fake plugin that keeps the bundle path `instantiate` gave it, as LV2

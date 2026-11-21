@@ -994,8 +994,7 @@ impl PluginHandle {
     /// An LV2 plugin's frame: the control outputs the audio side reported go
     /// into the views and the instance's values, a latency change is
     /// republished, and queued values settle once the processor applied them.
-    /// LV2 has no main-thread callbacks and no flush request; a restart is
-    /// part of the state work in commit 4.
+    /// LV2 has no main-thread callbacks and no flush request.
     fn service_lv2(&self, ui: &mut UiSide) -> bool {
         let shared = &*self.0.shared;
         let UiSide {
@@ -1143,7 +1142,9 @@ impl PluginHandle {
     /// (or defaults) on top (see [`capture_snapshot`]), and the slot stays stale.
     ///
     /// The snapshot must say what the blob holds, or a restore would skip
-    /// the newer saved values.
+    /// the newer saved values.  An LV2 blob holds no control values at all,
+    /// so its snapshot is empty; the load applies every saved parameter on
+    /// top of it.
     pub(crate) fn capture_state(&self) {
         let mut ui = self.ui();
         let UiSide {
@@ -1173,8 +1174,8 @@ impl PluginHandle {
                 StateSave::Unavailable => Err(Capture::Failed),
                 StateSave::Deferred => Err(Capture::Deferred),
             },
-            // LV2 state lands in commit 4; until then a plugin has no blob
-            // and its parameters alone describe it.
+            // A plugin without a state interface (or whose save fails) has no
+            // blob; its parameters alone describe it.
             PluginInstance::Lv2(lv2) => match lv2.save_state() {
                 StateSave::Saved(bytes) => Ok(bytes),
                 StateSave::Unavailable => Err(Capture::Failed),
@@ -1183,7 +1184,15 @@ impl PluginHandle {
         };
         let capture = match bytes {
             Ok(bytes) => {
-                captured_state(&bytes, &capture_snapshot(saved, &undelivered.ids(), views))
+                // LV2's blob holds no control values: they are applied
+                // separately from the saved parameters on restore, so the
+                // snapshot is empty and never claims otherwise.
+                let snapshot: &[PluginParamPref] = if matches!(instance, PluginInstance::Lv2(_)) {
+                    &[]
+                } else {
+                    &capture_snapshot(saved, &undelivered.ids(), views)
+                };
+                captured_state(&bytes, snapshot)
             }
             Err(capture) => capture,
         };

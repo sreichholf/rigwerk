@@ -144,7 +144,6 @@ impl UridMap {
     }
 
     /// The safe form of [`Self::unmap`] for state code.
-    #[cfg_attr(not(test), allow(dead_code))] // State save and restore, next commits.
     pub(crate) fn uri(&self, id: LV2_URID) -> Option<&CStr> {
         let pointer = self.unmap(id);
         if pointer.is_null() {
