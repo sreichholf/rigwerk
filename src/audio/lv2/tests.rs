@@ -4646,3 +4646,27 @@ fn a_required_load_default_without_state_refuses_the_load() {
     );
     assert!(optional.contains("no binary"), "{optional}");
 }
+
+#[test]
+fn a_mapped_path_is_c_heap_that_free_or_free_path_releases() {
+    let host = HostFeatures::new(48000.0, 512, 8192, None, false);
+    let (map_path, free_path) = host.paths();
+    let input = CString::new("/tmp/RigWerk state/sample.wav").expect("a path");
+    unsafe {
+        let abstract_path = map_path.abstract_path.expect("abstract_path");
+        let absolute_path = map_path.absolute_path.expect("absolute_path");
+        // A plugin written to `state.h` before 1.18 frees with `free()`.
+        let by_free = abstract_path(map_path.handle, input.as_ptr());
+        assert!(!by_free.is_null());
+        assert_eq!(CStr::from_ptr(by_free), input.as_c_str());
+        libc::free(by_free.cast());
+        let by_free = absolute_path(map_path.handle, input.as_ptr());
+        assert!(!by_free.is_null());
+        libc::free(by_free.cast());
+        // One written to 1.18 frees with `state:freePath`.
+        let by_feature = absolute_path(map_path.handle, input.as_ptr());
+        assert!(!by_feature.is_null());
+        assert_eq!(CStr::from_ptr(by_feature), input.as_c_str());
+        (free_path.free_path.expect("free_path"))(free_path.handle, by_feature);
+    }
+}
