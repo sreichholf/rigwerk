@@ -49,21 +49,68 @@ fn the_display_control_lists_needle_first() {
 }
 
 #[test]
-fn the_strobe_holds_inside_one_cent_and_gears_the_rest() {
-    assert_eq!(super::gauge::strobe_offset(0.0, 4.0, 1.0), 0.0);
-    assert_eq!(super::gauge::strobe_offset(1.0, 4.0, 5.0), 0.0);
-    assert_eq!(super::gauge::strobe_offset(-1.0, 4.0, 2.0), 0.0);
-    assert!(super::gauge::strobe_offset(1.1, 1.0, 1.0) > 0.0);
-    assert!(super::gauge::strobe_offset(-1.1, 1.0, 1.0) < 0.0);
-    let gear1 = super::gauge::strobe_offset(6.0, 2.0, 1.0);
-    assert_eq!(gear1, 6.0 * 14.0 * 2.0);
-    assert_eq!(super::gauge::strobe_offset(6.0, 2.0, 5.0), gear1 * 5.0);
-    assert_eq!(super::gauge::strobe_offset(-6.0, 2.0, 1.0), -gear1);
-    assert_eq!(super::gauge::strobe_offset(80.0, 1.0, 1.0), 24.0 * 14.0);
-    assert_eq!(
-        super::gauge::strobe_offset(24.0, 1.0, 2.0),
-        24.0 * 14.0 * 2.0
-    );
+fn the_strobe_holds_inside_one_cent_and_caps_the_rest() {
+    use super::gauge::strobe_target_speed;
+    assert_eq!(strobe_target_speed(0.0, true), 0.0);
+    assert_eq!(strobe_target_speed(1.0, true), 0.0);
+    assert_eq!(strobe_target_speed(-1.0, true), 0.0);
+    assert_eq!(strobe_target_speed(1.1, false), 0.0);
+    assert_eq!(strobe_target_speed(f32::NAN, true), 0.0);
+    assert!(strobe_target_speed(1.1, true) > 0.0);
+    assert!(strobe_target_speed(-1.1, true) < 0.0);
+    assert_eq!(strobe_target_speed(6.0, true), 6.0 * 14.0);
+    assert_eq!(strobe_target_speed(-6.0, true), -6.0 * 14.0);
+    assert_eq!(strobe_target_speed(80.0, true), 24.0 * 14.0);
+}
+
+#[test]
+fn a_cents_step_eases_the_speed_and_leaves_the_pattern_put() {
+    use super::gauge::StrobeMotion;
+    let mut motion = StrobeMotion::default();
+    let mut now = 0.0;
+    for _ in 0..60 {
+        now += 1.0 / 60.0;
+        motion.step(6.0, true, now);
+    }
+    let settled = motion.speed;
+    let phase = motion.phase;
+    assert!((settled - 6.0 * 14.0).abs() < 1.0, "{settled}");
+
+    now += 1.0 / 60.0;
+    motion.step(20.0, true, now);
+    let moved = motion.phase - phase;
+    // One frame is still near the old speed.  The old placement, speed times
+    // the clock, would have relocated the pattern by hundreds of pixels.
+    assert!(moved > 0.0, "{moved}");
+    assert!(moved < super::gauge::strobe_target_speed(20.0, true) / 60.0);
+    assert!(moved < 5.0, "{moved}");
+}
+
+#[test]
+fn reversing_the_cents_coasts_through_a_stop() {
+    use super::gauge::{ease_strobe_speed, strobe_target_speed};
+    let forward = strobe_target_speed(8.0, true);
+    let back = strobe_target_speed(-8.0, true);
+    let speed = ease_strobe_speed(forward, back, 1.0 / 60.0);
+    assert!(speed > 0.0, "{speed}");
+    assert!(speed < forward, "{speed}");
+}
+
+#[test]
+fn a_centered_reading_eases_the_discs_to_a_stop() {
+    use super::gauge::StrobeMotion;
+    let mut motion = StrobeMotion::default();
+    let mut now = 0.0;
+    for _ in 0..60 {
+        now += 1.0 / 60.0;
+        motion.step(6.0, true, now);
+    }
+    assert!(motion.speed > 10.0);
+    for _ in 0..90 {
+        now += 1.0 / 60.0;
+        motion.step(0.2, true, now);
+    }
+    assert_eq!(motion.speed, 0.0);
 }
 
 #[test]
