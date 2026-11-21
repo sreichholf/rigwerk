@@ -5,7 +5,9 @@
 //! links the files that describe them.  A plugin is listed when it has an
 //! audio input and an audio output, and only when its `lv2:binary` exists
 //! with this platform's extension, so a bundle built for another system is
-//! left out as the VST3 scan leaves out one without a loadable binary.
+//! left out as the VST3 scan leaves out one without a loadable binary.  An
+//! `lv2:isSideChain` port is not a main input or output: it neither lists a
+//! plugin nor counts as a channel.
 //!
 //! The `lv2:EffectPlugin` class never decides what is listed.  A plugin that
 //! needs something RigWerk does not supply is still listed, with `scan_error`
@@ -15,23 +17,27 @@ use std::path::{Path, PathBuf};
 
 use crate::audio::plugins::MAX_AUDIO_PORTS;
 
-use super::host::SUPPORTED;
+use super::host::{SUPPLIED_OPTIONS, SUPPORTED};
 use super::ttl::{self, TtlStore};
 
 const LV2_PLUGIN: &str = "http://lv2plug.in/ns/lv2core#Plugin";
 const LV2_INPUT_PORT: &str = "http://lv2plug.in/ns/lv2core#InputPort";
 const LV2_OUTPUT_PORT: &str = "http://lv2plug.in/ns/lv2core#OutputPort";
 const LV2_AUDIO_PORT: &str = "http://lv2plug.in/ns/lv2core#AudioPort";
-const LV2_CONTROL_PORT: &str = "http://lv2plug.in/ns/lv2core#ControlPort";
 const LV2_CV_PORT: &str = "http://lv2plug.in/ns/lv2core#CVPort";
+const ATOM_ATOM_PORT: &str = "http://lv2plug.in/ns/ext/atom#AtomPort";
+const ATOM_BUFFER_TYPE: &str = "http://lv2plug.in/ns/ext/atom#bufferType";
+const ATOM_SEQUENCE: &str = "http://lv2plug.in/ns/ext/atom#Sequence";
 const LV2_CONNECTION_OPTIONAL: &str = "http://lv2plug.in/ns/lv2core#connectionOptional";
+const LV2_IS_SIDE_CHAIN: &str = "http://lv2plug.in/ns/lv2core#isSideChain";
+const LV2_PORT_PROPERTY: &str = "http://lv2plug.in/ns/lv2core#portProperty";
 const LV2_INDEX: &str = "http://lv2plug.in/ns/lv2core#index";
 const LV2_SYMBOL: &str = "http://lv2plug.in/ns/lv2core#symbol";
 const LV2_NAME: &str = "http://lv2plug.in/ns/lv2core#name";
 const LV2_BINARY: &str = "http://lv2plug.in/ns/lv2core#binary";
 const LV2_REQUIRED_FEATURE: &str = "http://lv2plug.in/ns/lv2core#requiredFeature";
 const LV2_PORT: &str = "http://lv2plug.in/ns/lv2core#port";
-const ATOM_ATOM_PORT: &str = "http://lv2plug.in/ns/ext/atom#AtomPort";
+const OPTS_REQUIRED_OPTION: &str = "http://lv2plug.in/ns/ext/options#requiredOption";
 
 const RDFS_SEE_ALSO: &str = "http://www.w3.org/2000/01/rdf-schema#seeAlso";
 const DOAP_NAME: &str = "http://usefulinc.com/ns/doap#name";
@@ -51,9 +57,9 @@ const UI_PREFIX: &str = "http://lv2plug.in/ns/extensions/ui#";
 /// The binary extension this build can open.  A bundle that only ships
 /// another platform's binary is left out, not listed with an error.
 #[cfg(target_os = "windows")]
-const PLATFORM_BINARY_EXTENSION: &str = "dll";
+pub(super) const PLATFORM_BINARY_EXTENSION: &str = "dll";
 #[cfg(not(target_os = "windows"))]
-const PLATFORM_BINARY_EXTENSION: &str = "so";
+pub(super) const PLATFORM_BINARY_EXTENSION: &str = "so";
 
 /// One discovered LV2 effect.
 #[derive(Clone, Debug)]
@@ -64,7 +70,7 @@ pub(crate) struct Lv2Candidate {
     pub(crate) name: String,
     pub(crate) vendor: String,
     pub(crate) category: String,
-    /// The number of audio input ports when that is 1 or 2.
+    /// The number of main (not side-chain) audio inputs when that is 1 or 2.
     pub(crate) channels: Option<u32>,
     /// Why the scan expects the load to fail, when it does.  The row is
     /// still listed so the browser can say what is missing.
@@ -189,13 +195,11 @@ pub(crate) fn scan_library() -> Vec<Lv2Candidate> {
     found
 }
 
-/// The effects one bundle lists.  A file the manifest needs but cannot read
-/// is an error for the whole bundle, so the caller logs one line and skips
-/// it; a `rdfs:seeAlso` that is not a file URI is ignored.
-pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<Lv2Candidate>, String> {
-    // The document's file URIs are absolute, so the bundle is compared in
-    // its absolute form while the candidate keeps the caller's path.
-    let root = std::path::absolute(bundle).unwrap_or_else(|_| bundle.to_path_buf());
+/// Parses a bundle's `manifest.ttl` and every `rdfs:seeAlso` file its plugins
+/// name, in file order, and returns the store with the plugin the manifest
+/// declares.  The loader and the scan share this so a plugin's description
+/// is assembled the same way in both.
+pub(super) fn read_bundle(bundle: &Path) -> Result<(TtlStore, Vec<String>), String> {
     let manifest = bundle.join("manifest.ttl");
     let mut store = TtlStore::new();
     store.load_file(&manifest)?;
@@ -214,6 +218,17 @@ pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<Lv2Candidate>, String> {
             loaded.push(uri);
         }
     }
+    Ok((store, plugins))
+}
+
+/// The effects one bundle lists.  A file the manifest needs but cannot read
+/// is an error for the whole bundle, so the caller logs one line and skips
+/// it; a `rdfs:seeAlso` that is not a file URI is ignored.
+pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<Lv2Candidate>, String> {
+    // The document's file URIs are absolute, so the bundle is compared in
+    // its absolute form while the candidate keeps the caller's path.
+    let root = ttl::bundle_root(bundle);
+    let (store, plugins) = read_bundle(bundle)?;
     let mut found: Vec<Lv2Candidate> = plugins
         .iter()
         .filter_map(|plugin| candidate(bundle, &root, &store, plugin))
@@ -233,9 +248,11 @@ fn candidate(bundle: &Path, root: &Path, store: &TtlStore, plugin: &str) -> Opti
         return None;
     }
     let ports = read_ports(store, plugin);
-    if !ports.iter().any(|port| port.audio && port.input)
-        || !ports.iter().any(|port| port.audio && port.output)
-    {
+    let main_inputs = ports
+        .iter()
+        .filter(|port| port.is_main() && port.input)
+        .count();
+    if main_inputs == 0 || !ports.iter().any(|port| port.is_main() && port.output) {
         return None;
     }
     let name = store
@@ -250,18 +267,21 @@ fn candidate(bundle: &Path, root: &Path, store: &TtlStore, plugin: &str) -> Opti
                 .to_owned()
         });
     let audio_inputs = ports.iter().filter(|port| port.audio && port.input).count();
-    let audio_ports = ports.iter().filter(|port| port.audio).count();
+    let audio_outputs = ports
+        .iter()
+        .filter(|port| port.audio && port.output)
+        .count();
     Some(Lv2Candidate {
         path: bundle.to_path_buf(),
         plugin_uri: plugin.to_owned(),
         name,
         vendor: vendor(store, plugin),
         category: category(store, plugin),
-        channels: match audio_inputs {
-            1 | 2 => Some(audio_inputs as u32),
+        channels: match main_inputs {
+            1 | 2 => Some(main_inputs as u32),
             _ => None,
         },
-        scan_error: scan_error(store, plugin, &ports, audio_ports),
+        scan_error: scan_error(store, plugin, &ports, audio_inputs, audio_outputs),
     })
 }
 
@@ -274,7 +294,7 @@ fn has_platform_binary(path: &Path) -> bool {
 }
 
 /// One `lv2:port` as the scan reads it.  The loader builds the port table
-/// from the same fields; the scan only needs the flags.
+/// from the same fields in `ports`; the scan only needs what decides a row.
 struct Port {
     index: Option<u32>,
     symbol: String,
@@ -282,14 +302,18 @@ struct Port {
     input: bool,
     output: bool,
     audio: bool,
-    /// Read for the loader's parameter panel (commit 3); not used to list.
-    #[allow(dead_code)]
-    control: bool,
-    /// Read for the loader's atom buffers (commit 3); not used to list.
-    #[allow(dead_code)]
-    atom: bool,
     cv: bool,
     optional: bool,
+    side_chain: bool,
+    /// Why an atom port cannot be connected, if it is one that cannot.
+    atom_unsupported: Option<String>,
+}
+
+impl Port {
+    /// An audio port of the main signal chain, not a side chain.
+    fn is_main(&self) -> bool {
+        self.audio && !self.side_chain
+    }
 }
 
 fn read_ports(store: &TtlStore, plugin: &str) -> Vec<Port> {
@@ -308,13 +332,14 @@ fn read_ports(store: &TtlStore, plugin: &str) -> Vec<Port> {
                 input: has(LV2_INPUT_PORT),
                 output: has(LV2_OUTPUT_PORT),
                 audio: has(LV2_AUDIO_PORT),
-                control: has(LV2_CONTROL_PORT),
-                atom: has(ATOM_ATOM_PORT),
                 cv: has(LV2_CV_PORT),
-                optional: store
-                    .objects(&port, LV2_CONNECTION_OPTIONAL)
-                    .iter()
-                    .any(|value| !value.eq_ignore_ascii_case("false")),
+                optional: has_property(store, &port, LV2_CONNECTION_OPTIONAL),
+                side_chain: has_property(store, &port, LV2_IS_SIDE_CHAIN),
+                atom_unsupported: if has(ATOM_ATOM_PORT) {
+                    unsupported_atom_type(store, &port)
+                } else {
+                    None
+                },
             }
         })
         .collect();
@@ -359,7 +384,8 @@ fn scan_error(
     store: &TtlStore,
     plugin: &str,
     ports: &[Port],
-    audio_ports: usize,
+    audio_inputs: usize,
+    audio_outputs: usize,
 ) -> Option<String> {
     let mut reasons = Vec::new();
     for feature in store.iris(plugin, LV2_REQUIRED_FEATURE) {
@@ -367,6 +393,7 @@ fn scan_error(
             reasons.push(blocked_reason(&feature));
         }
     }
+    reasons.extend(missing_options(store, plugin));
     if let Some(port) = ports.iter().find(|port| port.cv && !port.optional) {
         let name = port.name.trim();
         reasons.push(if name.is_empty() {
@@ -375,16 +402,70 @@ fn scan_error(
             format!("Needs the CV port {name}")
         });
     }
-    if audio_ports > MAX_AUDIO_PORTS {
+    // An optional one is connected to NULL instead.
+    for port in ports.iter().filter(|port| !port.optional) {
+        if let Some(why) = &port.atom_unsupported {
+            let name = port.name.trim();
+            let name = if name.is_empty() { &port.symbol } else { name };
+            reasons.push(format!("The atom port {name} {why}"));
+        }
+    }
+    if audio_inputs > MAX_AUDIO_PORTS || audio_outputs > MAX_AUDIO_PORTS {
         reasons.push(format!(
-            "This LV2 plugin declares more than {MAX_AUDIO_PORTS} audio ports."
+            "This LV2 plugin declares more than {MAX_AUDIO_PORTS} audio inputs or outputs."
         ));
     }
     (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
+/// Whether `node` declares `property` as a port property.  The spec writes a
+/// port property as `lv2:portProperty <property>`; the property's own IRI as
+/// a direct predicate (with `true`) is accepted too, which older bundles and
+/// some of the test fixtures use.
+pub(super) fn has_property(store: &TtlStore, node: &str, property: &str) -> bool {
+    store
+        .iris(node, LV2_PORT_PROPERTY)
+        .iter()
+        .any(|declared| declared == property)
+        || store
+            .objects(node, property)
+            .iter()
+            .any(|value| !value.eq_ignore_ascii_case("false"))
+}
+
+/// Why an atom port cannot be connected, or `None` when it lists
+/// `atom:Sequence`, the only buffer type this host supplies.  The atom spec
+/// forbids connecting a port to a type it does not list, so a port that
+/// lists none cannot be connected either.
+pub(super) fn unsupported_atom_type(store: &TtlStore, node: &str) -> Option<String> {
+    let types = store.iris(node, ATOM_BUFFER_TYPE);
+    if types.iter().any(|kind| kind == ATOM_SEQUENCE) {
+        return None;
+    }
+    Some(if types.is_empty() {
+        "declares no atom:bufferType".to_owned()
+    } else {
+        let listed: Vec<String> = types
+            .iter()
+            .map(|kind| format!("atom:{}", local_name(kind)))
+            .collect();
+        format!("only takes {}", listed.join(", "))
+    })
+}
+
+/// Why each `opts:requiredOption` the host does not supply blocks the plugin.
+/// The scan and the loader share it.
+pub(super) fn missing_options(store: &TtlStore, plugin: &str) -> Vec<String> {
+    store
+        .iris(plugin, OPTS_REQUIRED_OPTION)
+        .iter()
+        .filter(|option| !SUPPLIED_OPTIONS.contains(&option.as_str()))
+        .map(|option| format!("Needs the option {}", local_name(option)))
+        .collect()
+}
+
 /// Why a required feature is not supplied, in words the browser can show.
-fn blocked_reason(uri: &str) -> String {
+pub(super) fn blocked_reason(uri: &str) -> String {
     match uri {
         BUF_SIZE_FIXED => "Needs a fixed block length".to_owned(),
         BUF_SIZE_POWER_OF_TWO => "Needs a power-of-two block length".to_owned(),

@@ -1,9 +1,10 @@
-//! VST3 and CLAP effect chains, one per signal path.
+//! VST3, CLAP and LV2 effect chains, one per signal path.
 //!
-//! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`] or
-//! the CLAP host in [`super::clap`]; each path's chain lives on that path in
-//! [`super::shared::Shared`] so the playback callback can process it.  The UI
-//! only ever holds descriptors, never the plugin objects themselves.
+//! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`], the
+//! CLAP host in [`super::clap`] or the LV2 host in [`super::lv2`]; each path's
+//! chain lives on that path in [`super::shared::Shared`] so the playback
+//! callback can process it.  The UI only ever holds descriptors, never the
+//! plugin objects themselves.
 //!
 //! Each loaded plugin is split in two (`handle`): the processor the chain's
 //! slot runs on the audio thread, and the [`PluginHandle`] the UI reaches
@@ -70,7 +71,7 @@ pub(crate) use handle::PluginHandle;
 #[cfg(test)]
 pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
 pub(crate) use link::{
-    ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
+    ClapFailure, Lv2Failure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
 };
 #[cfg(test)]
 pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};

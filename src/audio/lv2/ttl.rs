@@ -254,7 +254,9 @@ const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
 /// The path a `file://` URI names.  Linux `/usr/...` and the Windows
 /// `file:///C:/Program Files/...` form are both accepted; a URI with a host,
-/// another scheme, or a relative path is refused.
+/// another scheme, or a relative path is refused.  `.` and `..` are resolved
+/// lexically, so a path compared against a bundle folder cannot climb out
+/// of it with `bundle/../elsewhere`.
 pub(crate) fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
     let Some(scheme) = uri.get(..5) else {
         return Err(format!("not a file URI: {uri}"));
@@ -281,7 +283,34 @@ pub(crate) fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
     } else {
         decoded
     };
-    Ok(PathBuf::from(path))
+    Ok(lexical(Path::new(&path)))
+}
+
+/// `path` with `.` dropped and each `..` removing the component before it,
+/// without touching the file system.  `..` at the root stays at the root.
+pub(crate) fn lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else if !out.has_root() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The absolute, lexically resolved form of a bundle folder, which the
+/// binaries it names must stay inside.
+pub(crate) fn bundle_root(bundle: &Path) -> PathBuf {
+    lexical(&std::path::absolute(bundle).unwrap_or_else(|_| bundle.to_path_buf()))
 }
 
 fn percent_decode(text: &str) -> Result<String, String> {

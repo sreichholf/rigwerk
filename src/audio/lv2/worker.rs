@@ -30,14 +30,11 @@ use lv2_sys::{
 /// The size of each ring, in bytes, including the length prefixes.  It is a
 /// compile-time constant so the caller can allocate one pop buffer at load
 /// and never again.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 pub(crate) const RING_BYTES: usize = 64 * 1024;
 
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 const LENGTH_BYTES: usize = 4;
 
 /// One single-producer single-consumer byte ring.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 struct MessageRing {
     /// Owns the fixed buffer.  The hot path never reads it: taking the bytes
     /// out of the `Box` would form a reference to the whole buffer, and the
@@ -70,7 +67,6 @@ unsafe impl Sync for MessageRing {}
 // makes sharing the ring sound.
 unsafe impl Send for MessageRing {}
 
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 impl MessageRing {
     fn new() -> Self {
         let mut buffer = vec![0; RING_BYTES].into_boxed_slice();
@@ -85,6 +81,7 @@ impl MessageRing {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // The worker thread (commit 5) drains it.
     fn pending(&self) -> bool {
         self.head.load(Ordering::Acquire) != self.tail.load(Ordering::Acquire)
     }
@@ -121,6 +118,7 @@ impl MessageRing {
     /// when the ring is empty.  `out` must be at least [`RING_BYTES`]: the
     /// caller allocates it once at load, so a pop never allocates and never
     /// copies more than the ring can hold.  Consumer thread only.
+    #[cfg_attr(not(test), allow(dead_code))] // The worker thread (commit 5) drains it.
     fn pop_into(&self, out: &mut [u8]) -> Option<usize> {
         debug_assert!(
             out.len() >= RING_BYTES,
@@ -178,6 +176,7 @@ unsafe fn write_wrapped(storage: *mut u8, start: usize, data: &[u8]) {
 /// # Safety
 /// `start` must be below `storage.len()`; `out.len()` must not exceed the
 /// published region, which the caller checks.
+#[cfg_attr(not(test), allow(dead_code))] // The worker thread (commit 5) reads messages.
 unsafe fn read_wrapped(storage: *const u8, start: usize, out: &mut [u8]) {
     let length = out.len();
     let first = (RING_BYTES - start).min(length);
@@ -193,9 +192,10 @@ unsafe fn read_wrapped(storage: *const u8, start: usize, out: &mut [u8]) {
 /// One instance's two worker rings.  The caller keeps the `Arc` alive for as
 /// long as the plugin holds the schedule struct that points at it;
 /// `HostFeatures` owns that `Arc` for the feature's lifetime.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 pub(crate) struct WorkerRings {
     request: MessageRing,
+    /// The worker thread (commit 5) writes it; the audio side reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
     response: MessageRing,
     /// Held while a request is being written.  The plugin normally calls
     /// `schedule_work` from `run`, but may also call it while a restore runs
@@ -204,7 +204,6 @@ pub(crate) struct WorkerRings {
     scheduling: AtomicBool,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 impl WorkerRings {
     pub(crate) fn new() -> Self {
         Self {
@@ -215,11 +214,13 @@ impl WorkerRings {
     }
 
     /// Whether the worker thread has a request to pick up.
+    #[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread in commit 5.
     pub(crate) fn request_pending(&self) -> bool {
         self.request.pending()
     }
 
     /// Whether the audio thread has a response to deliver.
+    #[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread in commit 5.
     pub(crate) fn response_pending(&self) -> bool {
         self.response.pending()
     }
@@ -240,16 +241,19 @@ impl WorkerRings {
     }
 
     /// Takes the oldest request; `out` must be at least [`RING_BYTES`].
+    #[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread in commit 5.
     pub(crate) fn pop_request(&self, out: &mut [u8]) -> Option<usize> {
         self.request.pop_into(out)
     }
 
     /// Queues one response from the worker side.
+    #[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread in commit 5.
     pub(crate) fn push_response(&self, data: &[u8]) -> bool {
         self.response.push(data)
     }
 
     /// Takes the oldest response; `out` must be at least [`RING_BYTES`].
+    #[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread in commit 5.
     pub(crate) fn pop_response(&self, out: &mut [u8]) -> Option<usize> {
         self.response.pop_into(out)
     }
@@ -257,7 +261,6 @@ impl WorkerRings {
 
 /// A `LV2_Worker_Schedule` whose handle is `rings`.  The caller keeps the
 /// `Arc` alive for as long as the plugin may use the struct.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 pub(crate) fn schedule_struct(rings: &Arc<WorkerRings>) -> LV2_Worker_Schedule {
     LV2_Worker_Schedule {
         handle: Arc::as_ptr(rings) as *mut c_void,
@@ -267,7 +270,6 @@ pub(crate) fn schedule_struct(rings: &Arc<WorkerRings>) -> LV2_Worker_Schedule {
 
 /// `worker:schedule`: copy one message into the request ring.  Audio thread
 /// only, so it never locks or allocates.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the worker thread later.
 pub(super) unsafe extern "C" fn schedule_work(
     handle: LV2_Worker_Schedule_Handle,
     size: u32,

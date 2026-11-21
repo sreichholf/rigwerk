@@ -1,20 +1,31 @@
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use lv2_sys::{
+    LV2_Descriptor, LV2_Feature, LV2_Handle,
     LV2_Options_Context_LV2_OPTIONS_INSTANCE as LV2_OPTIONS_INSTANCE, LV2_Worker_Schedule,
     LV2_Worker_Status_LV2_WORKER_ERR_NO_SPACE as LV2_WORKER_ERR_NO_SPACE,
     LV2_Worker_Status_LV2_WORKER_ERR_UNKNOWN as LV2_WORKER_ERR_UNKNOWN,
     LV2_Worker_Status_LV2_WORKER_SUCCESS as LV2_WORKER_SUCCESS,
 };
 
-use crate::audio::plugins::AudioThreadScope;
+use crate::audio::plugins::{
+    param_transfer, AudioThreadScope, LoadedPlugin, Lv2Failure, Outcome, ParamOut, PluginPref,
+    PluginShared, Restore, Saved,
+};
 
 use super::host::{used_uris, HostFeatures, SATISFIED, SUPPORTED};
-use super::scan::scan_bundle;
-use super::ttl::{file_uri, path_from_file_uri, TtlStore};
+use super::instance::{Lv2Core, Lv2Instance, Lv2Loaded};
+use super::module::{native_binary, resolve, Descriptors, Lv2Module};
+use super::ports::{
+    symbol_id, Buffer, PortBuffers, PortKind, PortTable, ScalePoint, ATOM_CAPACITY,
+};
+use super::processor::Lv2Processor;
+use super::scan::{read_bundle, scan_bundle};
+use super::ttl::{file_uri, lexical, path_from_file_uri, TtlStore};
 use super::urid;
 use super::worker::{schedule_struct, WorkerRings, RING_BYTES};
 
@@ -111,6 +122,30 @@ fn required_features_the_host_meets_without_data_are_accepted() {
     assert_eq!(found[0].scan_error, None);
 }
 
+/// `opts:requiredOption`: an option the host does not supply blocks the
+/// plugin in the scan and at load; the ones it supplies do not.
+#[test]
+fn a_required_option_the_host_does_not_supply_is_an_error() {
+    let bundle = testdata("required-option.lv2");
+    let found = scan_bundle(&bundle).expect("scan");
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].scan_error.as_deref(),
+        Some("Needs the option nominalBlockLength")
+    );
+    let error = PortTable::read(&bundle, "http://example.com/lv2/required-option", 48_000)
+        .err()
+        .expect("the loader refused the plugin");
+    assert_eq!(error, "Needs the option nominalBlockLength");
+    // satisfied.lv2 requires only options the host supplies.
+    assert!(PortTable::read(
+        &testdata("satisfied.lv2"),
+        "http://example.com/lv2/satisfied",
+        48_000
+    )
+    .is_ok());
+}
+
 #[test]
 fn a_cv_port_that_is_not_optional_is_listed_with_its_error() {
     let found = scan_bundle(&testdata("cv-port.lv2")).expect("scan");
@@ -118,6 +153,55 @@ fn a_cv_port_that_is_not_optional_is_listed_with_its_error() {
     let error = found[0].scan_error.as_deref().expect("a scan error");
     assert!(error.contains("CV port"), "{error}");
     assert!(error.contains("Vibrato"), "{error}");
+}
+
+#[test]
+fn a_file_uri_resolves_dot_segments_lexically() {
+    let path = path_from_file_uri("file:///lv2/amp.lv2/../elsewhere/./x.so").expect("a path");
+    assert_eq!(path, PathBuf::from("/lv2/elsewhere/x.so"));
+    assert_eq!(
+        lexical(std::path::Path::new("/../a/b/..")),
+        PathBuf::from("/a")
+    );
+}
+
+/// A binary named as `bundle/../elsewhere` is outside the bundle even though
+/// its text starts with the bundle's path: neither the scan nor the loader
+/// may pick it.
+#[test]
+fn a_binary_that_climbs_out_of_the_bundle_is_refused() {
+    let base = std::env::temp_dir().join(format!("rigwerk-lv2-climb-{}", std::process::id()));
+    let bundle = base.join("inside.lv2");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&bundle).expect("create the bundle");
+    std::fs::create_dir_all(&outside).expect("create the outside folder");
+    let binary = format!("x.{}", super::scan::PLATFORM_BINARY_EXTENSION);
+    std::fs::write(outside.join(&binary), b"").expect("write the outside binary");
+    let climbing = format!("{}/../outside/{binary}", file_uri(&bundle));
+    std::fs::write(
+        bundle.join("manifest.ttl"),
+        format!(
+            r#"@prefix lv2: <http://lv2plug.in/ns/lv2core#> .
+<http://example.com/lv2/climb>
+    a lv2:Plugin ;
+    lv2:binary <{climbing}> ;
+    lv2:port
+        [ a lv2:InputPort, lv2:AudioPort ; lv2:index 0 ; lv2:symbol "in" ],
+        [ a lv2:OutputPort, lv2:AudioPort ; lv2:index 1 ; lv2:symbol "out" ] .
+"#
+        ),
+    )
+    .expect("write the manifest");
+
+    let found = scan_bundle(&bundle).expect("scan");
+    let (store, _) = read_bundle(&bundle).expect("read the bundle");
+    let picked = native_binary(&store, "http://example.com/lv2/climb", &bundle);
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(
+        found.is_empty(),
+        "the scan listed a binary outside the bundle"
+    );
+    assert!(picked.is_err(), "the loader picked {picked:?}");
 }
 
 #[test]
@@ -746,4 +830,1008 @@ fn the_schedule_callback_reports_success_and_no_space() {
 
     let status = unsafe { schedule_work(schedule.handle, 4, ptr::null()) };
     assert_eq!(status, LV2_WORKER_ERR_UNKNOWN);
+}
+
+const PARAMS_URI: &str = "http://example.com/lv2/params";
+
+fn params_bundle() -> PathBuf {
+    testdata("params.lv2")
+}
+
+fn params_table() -> PortTable {
+    PortTable::read(&params_bundle(), PARAMS_URI, 48_000).expect("read params.lv2")
+}
+
+fn range_named<'a>(table: &'a PortTable, name: &str) -> &'a super::ports::Lv2Range {
+    table
+        .ranges
+        .iter()
+        .find(|range| range.name == name)
+        .unwrap_or_else(|| panic!("no range {name:?}"))
+}
+
+#[test]
+fn control_ranges_read_bounds_defaults_units_and_scale_points() {
+    let table = params_table();
+    assert_eq!(table.ranges.len(), 9, "inputs first, then the output");
+    assert!(table.ranges[..8].iter().all(|range| !range.read_only));
+    assert!(table.ranges[8].read_only, "the control output is read-only");
+
+    let gain = range_named(&table, "Gain");
+    assert_eq!((gain.min, gain.max, gain.default), (0.0, 10.0, 1.0));
+    assert_eq!(gain.unit, "dB");
+    assert_eq!(gain.step_count, 0);
+    assert!(!gain.stepped && !gain.logarithmic);
+    assert_eq!(gain.display(2.5), "2.50 dB");
+
+    let cutoff = range_named(&table, "Cutoff");
+    assert!(cutoff.logarithmic);
+    assert_eq!(
+        (cutoff.min, cutoff.max, cutoff.default),
+        (20.0, 20_000.0, 1000.0)
+    );
+    assert_eq!(cutoff.unit, "Hz");
+
+    // `lv2:sampleRate true` multiplies every bound by the sample rate.
+    let rate = range_named(&table, "Rate Scale");
+    assert_eq!(
+        (rate.min, rate.max, rate.default),
+        (4800.0, 480_000.0, 48_000.0)
+    );
+
+    let mode = range_named(&table, "Mode");
+    assert!(mode.stepped);
+    assert_eq!(mode.step_count, 3);
+    assert_eq!(mode.points.len(), 4);
+    assert_eq!(mode.display(2.0), "B");
+    assert_eq!(mode.display(2.4), "B", "the nearest scale point wins");
+    assert_eq!(
+        mode.denormalise(0.5),
+        2.0,
+        "an integer snaps to whole values"
+    );
+
+    let on = range_named(&table, "On");
+    assert!(on.stepped);
+    assert_eq!(on.step_count, 1, "a toggle has one step");
+    assert_eq!(on.denormalise(0.5), 1.0);
+    assert_eq!(on.display(1.0), "1", "no decimals without a unit");
+
+    let voices = range_named(&table, "Voices");
+    assert!(voices.stepped);
+    assert_eq!(voices.step_count, 7);
+    assert_eq!(voices.unit, "");
+    assert_eq!(voices.display(4.6), "5");
+
+    let mix = range_named(&table, "Mix");
+    assert_eq!(mix.unit, "%");
+    assert_eq!(mix.display(50.0), "50.00 %");
+
+    // A `notOnGUI` control and the latency report are not parameters.
+    assert!(table.ranges.iter().all(|range| range.name != "Hidden"));
+    assert!(table.ranges.iter().all(|range| range.name != "Latency"));
+}
+
+/// Every control input buffer starts at its `lv2:default`, scaled with the
+/// sample rate, including a `notOnGUI` one that has no panel control: a
+/// hidden "enable" that defaults to 1 must not run at 0.
+#[test]
+fn every_control_input_starts_at_its_default_even_when_hidden() {
+    let table = params_table();
+    let buffers = PortBuffers::new(&table, 4);
+    assert_eq!(buffers.control(9), 1.0, "the hidden control's default");
+    assert_eq!(buffers.control(4), 1.0, "the gain's default");
+    assert_eq!(buffers.control(5), 1000.0, "the cutoff's default");
+    assert_eq!(
+        buffers.control(6),
+        48_000.0,
+        "the sample-rate control's default is scaled"
+    );
+    assert_eq!(buffers.control(16), 4.0, "the voices' default");
+    assert_eq!(
+        buffers.control(10),
+        0.0,
+        "an output is the plugin's to write"
+    );
+}
+
+#[test]
+fn port_properties_are_read_from_the_lv2_port_property_predicate() {
+    // Every flag in the fixture is written the standard way,
+    // `lv2:portProperty <property>`; the scan and the table must agree.
+    let table = params_table();
+    assert_eq!(table.ports[15].kind, PortKind::Audio);
+    assert_eq!(
+        table.ports[17].kind,
+        PortKind::Cv,
+        "the optional CV port from lv2:portProperty lv2:connectionOptional"
+    );
+    assert!(range_named(&table, "On").stepped, "lv2:toggled");
+    assert!(range_named(&table, "Voices").stepped, "lv2:integer");
+    assert!(
+        range_named(&table, "Cutoff").logarithmic,
+        "pprops:logarithmic"
+    );
+    assert_eq!(
+        range_named(&table, "Rate Scale").min,
+        4800.0,
+        "lv2:sampleRate"
+    );
+    assert!(table.ranges.iter().all(|range| range.name != "Hidden"));
+
+    let scanned = scan_bundle(&params_bundle()).expect("scan the fixture");
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(
+        scanned[0].scan_error, None,
+        "the optional CV port needs no error"
+    );
+}
+
+#[test]
+fn linear_and_logarithmic_ranges_round_trip() {
+    let table = params_table();
+    let gain = range_named(&table, "Gain");
+    assert_eq!(gain.normalise(5.0), 0.5);
+    assert_eq!(gain.denormalise(0.5), 5.0);
+    assert_eq!(gain.denormalise(2.0), 10.0, "a value is clamped");
+
+    let cutoff = range_named(&table, "Cutoff");
+    let expected = (1000.0f64 / 20.0).ln() / (20_000.0f64 / 20.0).ln();
+    assert!((cutoff.normalise(1000.0) - expected).abs() < 1e-12);
+    let back = cutoff.denormalise(cutoff.normalise(1000.0));
+    assert!(
+        (back - 1000.0).abs() < 1e-9,
+        "the log scale round-trips: {back}"
+    );
+}
+
+#[test]
+fn parameter_ids_hash_the_symbol_and_fall_back_on_a_collision() {
+    let table = params_table();
+    assert_eq!(table.ids.id(0), Some(symbol_id("gain")));
+    assert_eq!(table.ids.index_of(symbol_id("gain")), Some(0));
+
+    // The second "gain" port keeps a distinct id: the port index.
+    let copy = range_named(&table, "Gain Copy");
+    assert_eq!(copy.id, 12, "the later collision uses its port index");
+    assert_ne!(copy.id, symbol_id("gain"));
+    assert_eq!(table.ids.index_of(copy.id), Some(5));
+
+    let mut ids: Vec<u32> = table.ranges.iter().map(|range| range.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), table.ranges.len(), "every id is unique");
+
+    // The hash is stable, not `DefaultHasher`.
+    assert_eq!(symbol_id("gain"), 458_499_838);
+}
+
+#[test]
+fn the_main_pair_is_the_first_two_audio_ports_and_the_rest_is_silent() {
+    let table = params_table();
+    let mut buffers = PortBuffers::new(&table, 4);
+    assert_eq!(buffers.audio_inputs, [0, 1]);
+    assert_eq!(buffers.audio_outputs, [2, 3]);
+    assert_eq!(table.ports[15].kind, PortKind::Audio);
+    assert!(table.ports[15].input, "the sidechain is an input");
+
+    // An auxiliary input that held a signal is cleared rather than fed.
+    match &mut buffers.slots[15].buffer {
+        Buffer::Audio(samples) => samples.fill(1.0),
+        _ => panic!("the sidechain has no audio buffer"),
+    }
+    let (left, right) = ([1.0f32, 2.0, 3.0, 4.0], [-1.0f32, -2.0, -3.0, -4.0]);
+    buffers.silence(4);
+    buffers.copy_input(&left, &right, 4);
+    match &buffers.slots[0].buffer {
+        Buffer::Audio(samples) => assert_eq!(samples, &left),
+        _ => panic!("no main input buffer"),
+    }
+    match &buffers.slots[1].buffer {
+        Buffer::Audio(samples) => assert_eq!(samples, &right),
+        _ => panic!("no second input buffer"),
+    }
+    match &buffers.slots[15].buffer {
+        Buffer::Audio(samples) => assert!(samples.iter().all(|&sample| sample == 0.0)),
+        _ => panic!("no sidechain buffer"),
+    }
+
+    match &mut buffers.slots[2].buffer {
+        Buffer::Audio(samples) => samples.copy_from_slice(&[5.0, 6.0, 7.0, 8.0]),
+        _ => panic!("no main output buffer"),
+    }
+    match &mut buffers.slots[3].buffer {
+        Buffer::Audio(samples) => samples.copy_from_slice(&[9.0, 10.0, 11.0, 12.0]),
+        _ => panic!("no second output buffer"),
+    }
+    let (mut out_left, mut out_right) = ([0.0f32; 4], [0.0f32; 4]);
+    buffers.copy_output(&mut out_left, &mut out_right, 4);
+    assert_eq!(out_left, [5.0, 6.0, 7.0, 8.0]);
+    assert_eq!(out_right, [9.0, 10.0, 11.0, 12.0]);
+}
+
+/// `lv2:isSideChain` ports are never the main pair, even when they come
+/// first: the key input hears silence and the key output is ignored, and
+/// the scan neither counts them as channels nor lists a plugin whose only
+/// input is a side chain.
+#[test]
+fn side_chain_ports_are_not_the_main_pair_or_channels() {
+    let bundle = testdata("side-chain.lv2");
+    let table = PortTable::read(&bundle, "http://example.com/lv2/keyed", 48_000)
+        .expect("read the keyed plugin");
+    assert!(table.ports[0].side_chain && table.ports[2].side_chain);
+    let mut buffers = PortBuffers::new(&table, 4);
+    assert_eq!(
+        buffers.audio_inputs,
+        [1],
+        "the key input is not a main input"
+    );
+    assert_eq!(
+        buffers.audio_outputs,
+        [3],
+        "the key output is not a main output"
+    );
+
+    buffers.silence(4);
+    buffers.copy_input(&[1.0; 4], &[3.0; 4], 4);
+    match &buffers.slots[0].buffer {
+        Buffer::Audio(samples) => assert_eq!(samples, &[0.0; 4], "the key heard the signal"),
+        _ => panic!("no key buffer"),
+    }
+    match &buffers.slots[1].buffer {
+        Buffer::Audio(samples) => assert_eq!(samples, &[2.0; 4], "the mono sum"),
+        _ => panic!("no main input buffer"),
+    }
+    match &mut buffers.slots[2].buffer {
+        Buffer::Audio(samples) => samples.fill(9.0),
+        _ => panic!("no key output buffer"),
+    }
+    match &mut buffers.slots[3].buffer {
+        Buffer::Audio(samples) => samples.fill(0.5),
+        _ => panic!("no main output buffer"),
+    }
+    let (mut left, mut right) = ([0.0f32; 4], [0.0f32; 4]);
+    buffers.copy_output(&mut left, &mut right, 4);
+    assert_eq!((left, right), ([0.5; 4], [0.5; 4]));
+
+    let listed = scan_bundle(&bundle).expect("scan the side-chain bundle");
+    assert_eq!(
+        listed.len(),
+        1,
+        "a plugin whose only input is a key was listed"
+    );
+    assert_eq!(listed[0].plugin_uri, "http://example.com/lv2/keyed");
+    assert_eq!(listed[0].channels, Some(1), "the key counted as a channel");
+}
+
+#[test]
+fn a_mono_plugin_sums_its_input_and_feeds_both_sides() {
+    let bundle = testdata("example.lv2");
+    let table = PortTable::read(&bundle, "http://example.com/lv2/tone", 48_000)
+        .expect("read the mono plugin");
+    let mut buffers = PortBuffers::new(&table, 4);
+    assert_eq!(buffers.audio_inputs, [0]);
+    assert_eq!(buffers.audio_outputs, [1]);
+
+    buffers.silence(4);
+    buffers.copy_input(&[1.0, 2.0, 3.0, 4.0], &[3.0, 4.0, 5.0, 6.0], 4);
+    match &buffers.slots[0].buffer {
+        Buffer::Audio(samples) => assert_eq!(samples, &[2.0, 3.0, 4.0, 5.0]),
+        _ => panic!("no mono input buffer"),
+    }
+
+    match &mut buffers.slots[1].buffer {
+        Buffer::Audio(samples) => samples.fill(0.75),
+        _ => panic!("no mono output buffer"),
+    }
+    let (mut left, mut right) = ([0.0f32; 4], [0.0f32; 4]);
+    buffers.copy_output(&mut left, &mut right, 4);
+    assert_eq!(left, [0.75; 4], "the mono output feeds both sides");
+    assert_eq!(right, [0.75; 4]);
+}
+
+/// The atom spec: an empty input sequence has the size of its body header,
+/// as `lv2_atom_sequence_clear` leaves it, and an output is an `atom:Chunk`
+/// sized to the space after its header before every `run`.
+#[test]
+fn atom_ports_are_rearmed_for_every_block() {
+    let table = params_table();
+    let mut buffers = PortBuffers::new(&table, 4);
+    let sequence = urid::global().map(c"http://lv2plug.in/ns/ext/atom#Sequence");
+    let chunk = urid::global().map(c"http://lv2plug.in/ns/ext/atom#Chunk");
+    let body = std::mem::size_of::<lv2_sys::LV2_Atom_Sequence_Body>() as u32;
+    buffers.reset_atoms();
+    let input = buffers.atom(13).expect("the input atom port");
+    let output = buffers.atom(14).expect("the output atom port");
+    // The output asks for 32 KiB with `rsz:minimumSize`; the input has the
+    // default capacity.
+    let output_space = body + 32_768;
+    unsafe {
+        assert_eq!((*input).atom.size, body, "an empty sequence");
+        assert_eq!((*input).atom.type_, sequence);
+        assert_eq!((*input).body.unit, 0);
+        assert_eq!((*output).atom.size, output_space, "the space to write");
+        assert_eq!((*output).atom.type_, chunk);
+        // A plugin that wrote events leaves another size and type behind.
+        (*output).atom.size = 7;
+        (*output).atom.type_ = sequence;
+        (*input).atom.size = 64;
+    }
+    buffers.reset_atoms();
+    unsafe {
+        assert_eq!((*output).atom.size, output_space);
+        assert_eq!((*output).atom.type_, chunk);
+        assert_eq!((*input).atom.size, body);
+    }
+}
+
+/// `rsz:minimumSize` counts the whole buffer, so an atom port's buffer is
+/// at least that large, never below the default capacity, and the
+/// `sequenceSize` option names the largest one.
+#[test]
+fn atom_buffers_honour_the_minimum_size() {
+    let table = params_table();
+    assert_eq!(table.ports[13].capacity, ATOM_CAPACITY);
+    assert_eq!(table.ports[14].capacity, 32_768);
+    let header = std::mem::size_of::<lv2_sys::LV2_Atom_Sequence>() as u32;
+    assert_eq!(table.sequence_size(), header + 32_768);
+    let buffers = PortBuffers::new(&table, 4);
+    match &buffers.slots[14].buffer {
+        Buffer::Atom(atom) => assert!(atom.bytes() >= 32_768, "{}", atom.bytes()),
+        _ => panic!("no atom buffer"),
+    }
+
+    let huge = PortTable::read(
+        &testdata("atom-types.lv2"),
+        "http://example.com/lv2/huge-port",
+        48_000,
+    )
+    .err()
+    .expect("a 4 GiB atom buffer");
+    assert!(huge.contains("buffer of more than"), "{huge}");
+}
+
+/// The host may only connect an atom port to a type it lists, and this host
+/// only supplies `atom:Sequence`: another type (or none) refuses the plugin
+/// at scan and load, unless the port is optional, which is connected to
+/// NULL.
+#[test]
+fn an_atom_port_that_does_not_take_a_sequence_is_refused_or_left_unconnected() {
+    let bundle = testdata("atom-types.lv2");
+    let double = PortTable::read(&bundle, "http://example.com/lv2/double-port", 48_000)
+        .err()
+        .expect("an atom:Double port");
+    assert!(double.contains("atom:Double"), "{double}");
+    let untyped = PortTable::read(&bundle, "http://example.com/lv2/untyped-port", 48_000)
+        .err()
+        .expect("an atom port without a buffer type");
+    assert!(untyped.contains("no atom:bufferType"), "{untyped}");
+
+    let optional = PortTable::read(&bundle, "http://example.com/lv2/optional-double", 48_000)
+        .expect("an optional atom:Double port");
+    assert_eq!(optional.ports[2].kind, PortKind::Other);
+    let buffers = PortBuffers::new(&optional, 4);
+    assert!(
+        !buffers.slots[2].connect,
+        "the optional port is connected to NULL"
+    );
+
+    let listed = scan_bundle(&bundle).expect("scan the atom bundle");
+    let error = |uri: &str| {
+        listed
+            .iter()
+            .find(|candidate| candidate.plugin_uri == uri)
+            .unwrap_or_else(|| panic!("{uri} is not listed"))
+            .scan_error
+            .clone()
+    };
+    assert!(error("http://example.com/lv2/double-port")
+        .is_some_and(|error| error.contains("Amount") && error.contains("atom:Double")));
+    assert!(error("http://example.com/lv2/untyped-port")
+        .is_some_and(|error| error.contains("no atom:bufferType")));
+    assert_eq!(error("http://example.com/lv2/optional-double"), None);
+}
+
+#[test]
+fn the_latency_port_is_a_control_output_and_is_read_from_its_buffer() {
+    let table = params_table();
+    assert_eq!(table.latency, Some(11));
+    let mut buffers = PortBuffers::new(&table, 4);
+    assert_eq!(buffers.latency(), 0.0);
+    buffers.set_control(11, 128.0);
+    assert_eq!(buffers.latency(), 128.0);
+}
+
+#[test]
+fn a_malformed_port_table_is_refused() {
+    let cv = PortTable::read(
+        &testdata("cv-port.lv2"),
+        "http://example.com/lv2/cv",
+        48_000,
+    )
+    .err()
+    .expect("a required CV port");
+    assert!(cv.contains("CV port"), "{cv}");
+    assert!(cv.contains("Vibrato"), "{cv}");
+
+    let fixed = PortTable::read(
+        &testdata("fixed-block.lv2"),
+        "http://example.com/lv2/fixed",
+        48_000,
+    )
+    .err()
+    .expect("an unsupported required feature");
+    assert!(fixed.contains("fixed block length"), "{fixed}");
+
+    let missing = PortTable::read(
+        &testdata("no-index.lv2"),
+        "http://example.com/lv2/no-index",
+        48_000,
+    )
+    .err()
+    .expect("a missing index");
+    assert!(missing.contains("lv2:index"), "{missing}");
+
+    let duplicate = PortTable::read(
+        &testdata("duplicate-index.lv2"),
+        "http://example.com/lv2/duplicate-index",
+        48_000,
+    )
+    .err()
+    .expect("a duplicated index");
+    assert!(duplicate.contains("twice"), "{duplicate}");
+}
+
+#[test]
+fn the_native_binary_is_the_platform_file_inside_the_bundle() {
+    let bundle = testdata("example.lv2");
+    let (store, plugins) = read_bundle(&bundle).expect("read the bundle");
+    assert_eq!(plugins.len(), 3);
+    let binary = native_binary(&store, "http://example.com/lv2/example", &bundle)
+        .expect("the platform binary");
+    let expected = if cfg!(target_os = "windows") {
+        "example.dll"
+    } else {
+        "example.so"
+    };
+    assert_eq!(
+        binary.file_name().and_then(|name| name.to_str()),
+        Some(expected)
+    );
+    assert!(
+        native_binary(
+            &store,
+            "http://example.com/lv2/example",
+            &testdata("cv-port.lv2")
+        )
+        .is_err(),
+        "a binary outside the bundle is refused"
+    );
+}
+
+static PROCESS_RUNS: AtomicU32 = AtomicU32::new(0);
+static FLUSH_RUNS: AtomicU32 = AtomicU32::new(0);
+static HANDLE_RUNS: AtomicU32 = AtomicU32::new(0);
+
+unsafe extern "C" fn process_run(_handle: LV2_Handle, frames: u32) {
+    PROCESS_RUNS.fetch_add(frames, Ordering::Relaxed);
+}
+
+unsafe extern "C" fn flush_run(_handle: LV2_Handle, frames: u32) {
+    FLUSH_RUNS.fetch_add(frames, Ordering::Relaxed);
+}
+
+unsafe extern "C" fn handle_run(_handle: LV2_Handle, frames: u32) {
+    HANDLE_RUNS.fetch_add(frames, Ordering::Relaxed);
+}
+
+fn fake_processor(
+    table: &PortTable,
+    core: Arc<Lv2Core>,
+    run: unsafe extern "C" fn(LV2_Handle, u32),
+) -> (
+    Lv2Processor,
+    crate::audio::plugins::ParamSender,
+    crate::audio::plugins::ParamReceiver,
+) {
+    let ranges: Arc<[super::ports::Lv2Range]> = Arc::from(table.ranges.clone().into_boxed_slice());
+    let ids = Arc::clone(&table.ids);
+    let buffers = PortBuffers::new(table, 8);
+    let (to_audio, from_ui) = param_transfer(ids.len());
+    let (to_ui, from_audio) = param_transfer(ids.len());
+    let reported: Vec<u32> = ranges
+        .iter()
+        .map(|range| buffers.control(range.slot).to_bits())
+        .collect();
+    let processor = Lv2Processor {
+        buffers,
+        ranges,
+        ids,
+        from_ui,
+        to_ui,
+        handle: ptr::null_mut(),
+        run,
+        reported,
+        max_block: 8,
+        core,
+    };
+    (processor, to_audio, from_audio)
+}
+
+#[test]
+fn a_queued_value_reaches_the_control_buffer_and_outputs_report_back() {
+    let table = params_table();
+    let core = Arc::new(Lv2Core::for_test(true));
+    let (mut processor, mut sender, mut from_audio) =
+        fake_processor(&table, Arc::clone(&core), process_run);
+    let gain = table.ids.index_of(symbol_id("gain")).expect("the gain");
+    let level = table.ids.index_of(symbol_id("level")).expect("the level");
+    let gain_slot = table.ranges[gain].slot;
+    let level_slot = table.ranges[level].slot;
+    let latency_slot = table.latency.expect("a latency port");
+
+    let runs = PROCESS_RUNS.load(Ordering::Relaxed);
+    assert!(sender.push(gain, 0.5, 0));
+    let (mut left, mut right) = (vec![1.0f32; 16], vec![-1.0f32; 16]);
+    processor
+        .process(&mut left, &mut right)
+        .expect("process a block");
+    assert_eq!(
+        PROCESS_RUNS.load(Ordering::Relaxed) - runs,
+        16,
+        "every frame was run"
+    );
+    assert!((processor.buffers.control(gain_slot) - 5.0).abs() < 1e-6);
+    assert_eq!(sender.applied(), 1, "a written value counts as applied");
+    match &processor.buffers.slots[0].buffer {
+        Buffer::Audio(samples) => {
+            assert_eq!(samples.len(), 8, "a buffer is one block long");
+            assert!(samples.iter().all(|&sample| sample == 1.0));
+        }
+        _ => panic!("no main input buffer"),
+    }
+
+    // A control output moves only when it changes.
+    processor.buffers.set_control(level_slot, 0.75);
+    processor
+        .process(&mut left, &mut right)
+        .expect("process another block");
+    let mut reported = Vec::new();
+    from_audio.drain(|index, value, _| reported.push((index, value)));
+    assert_eq!(reported, vec![(level, 0.75)]);
+    processor
+        .process(&mut left, &mut right)
+        .expect("a quiet block");
+    let mut again = Vec::new();
+    from_audio.drain(|index, value, _| again.push((index, value)));
+    assert!(again.is_empty(), "an unchanged output was reported again");
+
+    // The latency port is published through the shared atomics.
+    processor.buffers.set_control(latency_slot, 128.0);
+    processor
+        .process(&mut left, &mut right)
+        .expect("a block after a latency change");
+    assert_eq!(
+        f32::from_bits(core.latency_raw.load(Ordering::Acquire)),
+        128.0
+    );
+    assert!(core.latency_changed.load(Ordering::Acquire));
+}
+
+#[test]
+fn a_flush_writes_queued_values_without_running_the_plugin() {
+    let table = params_table();
+    let core = Arc::new(Lv2Core::for_test(true));
+    let (mut processor, mut sender, _from_audio) =
+        fake_processor(&table, Arc::clone(&core), flush_run);
+    let gain = table.ids.index_of(symbol_id("gain")).expect("the gain");
+    let gain_slot = table.ranges[gain].slot;
+    let runs = FLUSH_RUNS.load(Ordering::Relaxed);
+
+    assert!(sender.push(gain, 1.0, 0));
+    processor.flush_if_queued();
+    assert!((processor.buffers.control(gain_slot) - 10.0).abs() < 1e-6);
+    assert_eq!(sender.applied(), 1);
+    assert_eq!(
+        FLUSH_RUNS.load(Ordering::Relaxed),
+        runs,
+        "a flush never calls run"
+    );
+}
+
+#[test]
+fn an_inactive_lv2_instance_does_not_process() {
+    let table = params_table();
+    let core = Arc::new(Lv2Core::for_test(false));
+    let (mut processor, _sender, _from_audio) = fake_processor(&table, core, process_run);
+    let (mut left, mut right) = (vec![1.0f32; 4], vec![1.0f32; 4]);
+    assert_eq!(
+        processor.process(&mut left, &mut right),
+        Err(Lv2Failure::NotActive)
+    );
+}
+
+#[test]
+fn swapped_bounds_are_ordered_and_bad_bounds_are_refused() {
+    let bundle = testdata("bounds.lv2");
+    let table =
+        PortTable::read(&bundle, "http://example.com/lv2/swapped", 48_000).expect("swapped bounds");
+    let bounded = range_named(&table, "Bounded");
+    assert_eq!(
+        (bounded.min, bounded.max),
+        (0.0, 10.0),
+        "the bounds are ordered"
+    );
+    assert_eq!(
+        bounded.default, 10.0,
+        "the default is clamped into the range"
+    );
+    assert_eq!(bounded.denormalise(0.5), 5.0);
+    assert_eq!(bounded.normalise(f64::NAN), 0.0);
+    assert_eq!(bounded.denormalise(f64::NAN), 0.0);
+
+    let error = PortTable::read(&bundle, "http://example.com/lv2/nonfinite", 48_000)
+        .err()
+        .expect("non-finite bounds are refused");
+    assert!(error.contains("non-finite"), "{error}");
+}
+
+#[test]
+fn a_gap_in_the_port_indices_is_harmless() {
+    let table = PortTable::read(
+        &testdata("sparse.lv2"),
+        "http://example.com/lv2/sparse",
+        48_000,
+    )
+    .expect("sparse indices");
+    let indexes: Vec<u32> = table.ports.iter().map(|port| port.index).collect();
+    assert_eq!(indexes, [0, 2, 3]);
+    let buffers = PortBuffers::new(&table, 4);
+    let ports: Vec<u32> = buffers.slots.iter().map(|slot| slot.port).collect();
+    assert_eq!(ports, [0, 2, 3], "a slot keeps its declared port index");
+    assert_eq!(buffers.audio_inputs, [0]);
+    assert_eq!(buffers.audio_outputs, [1], "slot 1 is declared port 2");
+    assert_eq!(table.ranges[0].slot, 2, "the range keeps its buffer slot");
+}
+
+#[test]
+fn a_continuous_control_shows_its_value_even_with_scale_points() {
+    let range = super::ports::Lv2Range {
+        id: 1,
+        slot: 0,
+        name: "Shape".to_owned(),
+        min: 0.0,
+        max: 3.0,
+        default: 0.0,
+        stepped: false,
+        logarithmic: false,
+        read_only: false,
+        step_count: 0,
+        unit: String::new(),
+        points: vec![
+            ScalePoint {
+                value: 0.0,
+                label: "Sine".to_owned(),
+            },
+            ScalePoint {
+                value: 1.0,
+                label: "Square".to_owned(),
+            },
+        ],
+    };
+    assert_eq!(range.display(0.0), "0.00", "not the point label");
+    assert_eq!(range.display(1.0), "1.00");
+    let mut stepped = range;
+    stepped.stepped = true;
+    assert_eq!(stepped.display(1.0), "Square");
+}
+
+#[test]
+fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
+    let table = params_table();
+    let shared = Arc::new(PluginShared::new(0));
+    let core = Arc::new(Lv2Core::for_test(true));
+    let ranges: Arc<[super::ports::Lv2Range]> = Arc::from(table.ranges.clone().into_boxed_slice());
+    let ids = Arc::clone(&table.ids);
+    let values: Vec<f32> = table
+        .ranges
+        .iter()
+        .map(|range| range.default as f32)
+        .collect();
+    let buffers = PortBuffers::new(&table, 8);
+    let (to_audio, from_ui) = param_transfer(ids.len());
+    let (to_ui, from_audio) = param_transfer(ids.len());
+    let reported: Vec<u32> = ranges
+        .iter()
+        .map(|range| buffers.control(range.slot).to_bits())
+        .collect();
+    let instance = Lv2Instance::for_test(
+        Arc::clone(&ranges),
+        Arc::clone(&ids),
+        values,
+        Arc::clone(&shared),
+        Arc::clone(&core),
+    );
+    let processor = Lv2Processor {
+        buffers,
+        ranges,
+        ids: Arc::clone(&ids),
+        from_ui,
+        to_ui,
+        handle: ptr::null_mut(),
+        run: handle_run,
+        reported,
+        max_block: 8,
+        core,
+    };
+    let out = Arc::new(ParamOut::new(Arc::clone(&ids), to_audio));
+    let views = instance.parameters();
+    let loaded = Lv2Loaded {
+        instance,
+        processor,
+        out,
+        from_audio,
+        ids: Arc::clone(&ids),
+        views,
+        has_editor: false,
+        state_current: false,
+        undelivered: Vec::new(),
+    };
+    let mut plugin = LoadedPlugin::lv2(
+        loaded,
+        Arc::clone(&shared),
+        Saved {
+            params: Vec::new(),
+            state: None,
+            stale: false,
+        },
+    );
+    let handle = plugin.handle().clone();
+    let gain = ids.index_of(symbol_id("gain")).expect("the gain");
+    let gain_display = handle.set_parameter(symbol_id("gain"), 0.5).expect("set");
+    assert_eq!(gain_display.as_deref(), Some("5.00 dB"));
+
+    // The panel shows the queued value at once; a refresh must not rebuild
+    // the views from the instance's older native value.
+    handle.refresh_parameters();
+    assert!((handle.parameters()[gain].value - 0.5).abs() < 1e-9);
+    // The instance's own values follow the panel.
+    assert!((handle.lv2_parameters_for_test()[gain].value - 0.5).abs() < 1e-9);
+
+    let (mut left, mut right) = (vec![0.0f32; 8], vec![0.0f32; 8]);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    // No queued value is left, so the sync may read and keeps the value.
+    let synced = handle.sync_full().expect("nothing is queued");
+    assert!((synced[gain].value - 0.5).abs() < 1e-9);
+    assert_eq!(synced[gain].display, "5.00 dB");
+
+    // A reported control output reaches the view through `service`, which is
+    // also the arm a wrong format match would break.
+    let level = ids.index_of(symbol_id("level")).expect("the level");
+    let level_slot = table.ranges[level].slot;
+    plugin
+        .lv2_processor_for_test()
+        .buffers
+        .set_control(level_slot, 0.75);
+    assert_eq!(
+        plugin.run_for_test(&mut left, &mut right),
+        Outcome::Processed
+    );
+    assert!(handle.service(), "the reported output changed the views");
+    let level_view = handle
+        .parameters()
+        .into_iter()
+        .find(|view| view.id == symbol_id("level"))
+        .expect("the level view");
+    assert!((level_view.value - 0.75).abs() < 1e-9);
+    assert_eq!(level_view.display, "0.75");
+    assert!(!handle.service(), "nothing moved in the next frame");
+
+    // A reset returns the instance's own values to the defaults too.
+    handle.reset_parameters().expect("reset");
+    let default = table.ranges[gain].normalise(table.ranges[gain].default);
+    assert!((handle.lv2_parameters_for_test()[gain].value - default).abs() < 1e-9);
+}
+
+// A fake plugin that keeps the bundle path `instantiate` gave it, as LV2
+// allows, and reads it again in `cleanup`.
+static KEPT_PATH: AtomicUsize = AtomicUsize::new(0);
+static PATH_AT_CLEANUP: Mutex<Option<String>> = Mutex::new(None);
+static PATH_KEEPER: u8 = 0;
+
+unsafe extern "C" fn path_keeping_instantiate(
+    _descriptor: *const LV2_Descriptor,
+    _rate: f64,
+    bundle_path: *const std::ffi::c_char,
+    _features: *const *const LV2_Feature,
+) -> LV2_Handle {
+    KEPT_PATH.store(bundle_path as usize, Ordering::SeqCst);
+    &PATH_KEEPER as *const u8 as LV2_Handle
+}
+
+unsafe extern "C" fn ignored_connect(_handle: LV2_Handle, _port: u32, _data: *mut c_void) {}
+
+unsafe extern "C" fn ignored_run(_handle: LV2_Handle, _frames: u32) {}
+
+unsafe extern "C" fn path_reading_cleanup(_handle: LV2_Handle) {
+    let path = KEPT_PATH.load(Ordering::SeqCst) as *const std::ffi::c_char;
+    // SAFETY: the host keeps the path alive until after `cleanup`.
+    let text = unsafe { CStr::from_ptr(path) }
+        .to_string_lossy()
+        .into_owned();
+    *PATH_AT_CLEANUP.lock().expect("the cleanup record") = Some(text);
+}
+
+/// The bundle path a plugin was instantiated with stays valid until after
+/// `cleanup`: the core owns it, as lilv does.
+#[test]
+fn the_bundle_path_outlives_the_plugin() {
+    let descriptor = LV2_Descriptor {
+        URI: c"http://example.com/lv2/params".as_ptr(),
+        instantiate: Some(path_keeping_instantiate),
+        connect_port: Some(ignored_connect),
+        activate: None,
+        run: Some(ignored_run),
+        deactivate: None,
+        cleanup: Some(path_reading_cleanup),
+        extension_data: None,
+    };
+    let pref = PluginPref::default();
+    let shared = Arc::new(PluginShared::new(0));
+    let loaded = Lv2Instance::load_descriptor(
+        &params_bundle(),
+        params_table(),
+        &descriptor,
+        None,
+        48_000.0,
+        64,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load the fake plugin");
+    assert_eq!(
+        KEPT_PATH.load(Ordering::SeqCst),
+        loaded.instance.core._bundle_path.as_ptr() as usize,
+        "the plugin was given a path the core does not own"
+    );
+    drop(loaded);
+    let mut expected = params_bundle().to_string_lossy().into_owned();
+    expected.push(std::path::MAIN_SEPARATOR);
+    assert_eq!(
+        PATH_AT_CLEANUP.lock().expect("the cleanup record").take(),
+        Some(expected)
+    );
+}
+
+// A fake library descriptor with one plugin, which counts its cleanups.
+static LIB_CLEANUPS: AtomicU32 = AtomicU32::new(0);
+static LIB_HANDLE: u8 = 0;
+
+struct SyncDescriptor(LV2_Descriptor);
+// SAFETY: the fake descriptor is immutable and its strings are static.
+unsafe impl Sync for SyncDescriptor {}
+
+static LIB_PLUGIN: SyncDescriptor = SyncDescriptor(LV2_Descriptor {
+    URI: c"http://example.com/lv2/from-lib".as_ptr(),
+    instantiate: None,
+    connect_port: None,
+    activate: None,
+    run: None,
+    deactivate: None,
+    cleanup: None,
+    extension_data: None,
+});
+
+unsafe extern "C" fn lib_get_plugin(
+    handle: lv2_sys::LV2_Lib_Handle,
+    index: u32,
+) -> *const LV2_Descriptor {
+    assert_eq!(handle as *const u8, &LIB_HANDLE as *const u8);
+    if index == 0 {
+        &LIB_PLUGIN.0
+    } else {
+        ptr::null()
+    }
+}
+
+unsafe extern "C" fn lib_cleanup(handle: lv2_sys::LV2_Lib_Handle) {
+    assert_eq!(handle as *const u8, &LIB_HANDLE as *const u8);
+    LIB_CLEANUPS.fetch_add(1, Ordering::SeqCst);
+}
+
+struct SyncLib(lv2_sys::LV2_Lib_Descriptor);
+// SAFETY: as above; the handle is the address of a static.
+unsafe impl Sync for SyncLib {}
+
+static LIB: SyncLib = SyncLib(lv2_sys::LV2_Lib_Descriptor {
+    handle: &LIB_HANDLE as *const u8 as lv2_sys::LV2_Lib_Handle,
+    size: std::mem::size_of::<lv2_sys::LV2_Lib_Descriptor>() as u32,
+    cleanup: Some(lib_cleanup),
+    get_plugin: Some(lib_get_plugin),
+});
+
+static LIB_BUNDLE: Mutex<Option<String>> = Mutex::new(None);
+
+unsafe extern "C" fn lib_descriptor(
+    bundle_path: *const std::ffi::c_char,
+    features: *const *const LV2_Feature,
+) -> *const lv2_sys::LV2_Lib_Descriptor {
+    assert!(
+        unsafe { (*features).is_null() },
+        "the feature array is not empty"
+    );
+    *LIB_BUNDLE.lock().expect("the bundle record") = Some(
+        unsafe { CStr::from_ptr(bundle_path) }
+            .to_string_lossy()
+            .into_owned(),
+    );
+    &LIB.0
+}
+
+unsafe extern "C" fn failing_lib_descriptor(
+    _bundle_path: *const std::ffi::c_char,
+    _features: *const *const LV2_Feature,
+) -> *const lv2_sys::LV2_Lib_Descriptor {
+    ptr::null()
+}
+
+unsafe extern "C" fn plain_descriptor(_index: u32) -> *const LV2_Descriptor {
+    ptr::null()
+}
+
+/// `lv2.h`: a library may export `lv2_lib_descriptor` instead of
+/// `lv2_descriptor`.  It is preferred, its plugins are found through
+/// `get_plugin`, and its `cleanup` runs once, when the module goes.
+#[test]
+fn a_library_descriptor_is_preferred_and_cleaned_up() {
+    let features: [*const LV2_Feature; 1] = [ptr::null()];
+    let descriptors = resolve(
+        Some(lib_descriptor),
+        Some(plain_descriptor),
+        c"/bundles/lib.lv2/",
+        features.as_ptr(),
+    )
+    .expect("resolve the library descriptor");
+    assert!(matches!(descriptors, Descriptors::Library(_)));
+    assert_eq!(
+        LIB_BUNDLE
+            .lock()
+            .expect("the bundle record")
+            .take()
+            .as_deref(),
+        Some("/bundles/lib.lv2/")
+    );
+
+    let cleanups = LIB_CLEANUPS.load(Ordering::SeqCst);
+    let module = Lv2Module::for_test(descriptors);
+    let found = module
+        .descriptor_for_uri("http://example.com/lv2/from-lib")
+        .expect("the library's plugin");
+    assert_eq!(found, &LIB_PLUGIN.0 as *const LV2_Descriptor);
+    assert!(module
+        .descriptor_for_uri("http://example.com/lv2/other")
+        .is_none());
+    assert_eq!(LIB_CLEANUPS.load(Ordering::SeqCst), cleanups);
+    drop(module);
+    assert_eq!(LIB_CLEANUPS.load(Ordering::SeqCst) - cleanups, 1);
+}
+
+#[test]
+fn a_failing_library_descriptor_is_an_error_and_lv2_descriptor_is_the_fallback() {
+    let features: [*const LV2_Feature; 1] = [ptr::null()];
+    assert!(resolve(
+        Some(failing_lib_descriptor),
+        Some(plain_descriptor),
+        c"/b/",
+        features.as_ptr()
+    )
+    .is_err());
+    assert!(matches!(
+        resolve(None, Some(plain_descriptor), c"/b/", features.as_ptr()),
+        Ok(Descriptors::Function(_))
+    ));
+    assert!(resolve(None, None, c"/b/", features.as_ptr()).is_err());
 }

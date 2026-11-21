@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::super::clap::ClapInstance;
+use super::super::lv2::Lv2Instance;
 use super::super::vst3::Vst3Controller;
 use super::handle::{LoadedPlugin, Saved};
 use super::link::PluginShared;
@@ -243,9 +244,25 @@ pub(crate) fn load_plugin(
                 },
             )
         }
-        // The scan lists LV2 effects already; loading them lands with the
-        // LV2 host's module, port table and instance.
-        PluginFormat::Lv2 => Err("LV2 loading is not available yet".to_owned()),
+        PluginFormat::Lv2 => {
+            let plugin_uri = pref
+                .class_id
+                .as_deref()
+                .filter(|uri| !uri.trim().is_empty())
+                .ok_or_else(|| "The LV2 plugin URI is missing.".to_owned())?;
+            // The effect's path is the bundle folder, not the binary.
+            let path = PathBuf::from(&pref.path);
+            if !path.exists() {
+                return Err(format!("Plugin not found: {}", path.display()));
+            }
+            let shared = Arc::new(PluginShared::new(0));
+            Lv2Instance::load(&path, plugin_uri, sample_rate, MAX_BLOCK, &restore, &shared).map(
+                |loaded| {
+                    let current = loaded.state_current;
+                    (LoadedPlugin::lv2(loaded, shared, saved(current)), current)
+                },
+            )
+        }
     }
 }
 

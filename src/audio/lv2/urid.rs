@@ -216,7 +216,6 @@ pub(crate) fn seed() {
 }
 
 /// `LV2_URID_Map.map`: the handle is the process-wide map.
-#[cfg_attr(not(test), allow(dead_code))] // Reached through HostFeatures, next commits.
 pub(crate) unsafe extern "C" fn map_callback(
     _handle: LV2_URID_Map_Handle,
     uri: *const c_char,
@@ -228,7 +227,6 @@ pub(crate) unsafe extern "C" fn map_callback(
 }
 
 /// `LV2_URID_Unmap.unmap`: the handle is the process-wide map.
-#[cfg_attr(not(test), allow(dead_code))] // Reached through HostFeatures, next commits.
 pub(crate) unsafe extern "C" fn unmap_callback(
     _handle: LV2_URID_Unmap_Handle,
     urid: LV2_URID,

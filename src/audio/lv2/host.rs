@@ -61,37 +61,33 @@ const IN_PLACE_BROKEN: &str = "http://lv2plug.in/ns/lv2core#inPlaceBroken";
 const IS_LIVE: &str = "http://lv2plug.in/ns/lv2core#isLive";
 const HARD_RT_CAPABLE: &str = "http://lv2plug.in/ns/lv2core#hardRTCapable";
 
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const URID_MAP: &CStr = c"http://lv2plug.in/ns/ext/urid#map";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const URID_UNMAP: &CStr = c"http://lv2plug.in/ns/ext/urid#unmap";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const OPTIONS_OPTIONS: &CStr = c"http://lv2plug.in/ns/ext/options#options";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const BOUNDED_BLOCK_LENGTH: &CStr = c"http://lv2plug.in/ns/ext/buf-size#boundedBlockLength";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const WORKER_SCHEDULE: &CStr = c"http://lv2plug.in/ns/ext/worker#schedule";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const STATE_MAP_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#mapPath";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const STATE_FREE_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#freePath";
 
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
+/// The options the host supplies in `options:options`.  A plugin that names
+/// another as `opts:requiredOption` is listed with a scan error and refuses
+/// to load, like an unsupported required feature.
+pub(crate) const SUPPLIED_OPTIONS: &[&str] = &[
+    "http://lv2plug.in/ns/ext/buf-size#minBlockLength",
+    "http://lv2plug.in/ns/ext/buf-size#maxBlockLength",
+    "http://lv2plug.in/ns/ext/buf-size#sequenceSize",
+    "http://lv2plug.in/ns/ext/parameters#sampleRate",
+];
+
 const BUF_SIZE_MIN: &CStr = c"http://lv2plug.in/ns/ext/buf-size#minBlockLength";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const BUF_SIZE_MAX: &CStr = c"http://lv2plug.in/ns/ext/buf-size#maxBlockLength";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const BUF_SIZE_SEQUENCE: &CStr = c"http://lv2plug.in/ns/ext/buf-size#sequenceSize";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const PARAMETERS_SAMPLE_RATE: &CStr = c"http://lv2plug.in/ns/ext/parameters#sampleRate";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const ATOM_INT: &CStr = c"http://lv2plug.in/ns/ext/atom#Int";
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 const ATOM_FLOAT: &CStr = c"http://lv2plug.in/ns/ext/atom#Float";
 
 /// The features one load hands to `instantiate`, with every string, value
 /// and struct they point at.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 pub(crate) struct HostFeatures {
     /// The C strings the feature array points at.  A `CString` buffer does
     /// not move when this `Vec` reallocates.
@@ -117,16 +113,17 @@ pub(crate) struct HostFeatures {
     pointers: Vec<*const LV2_Feature>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 impl HostFeatures {
-    /// Builds the feature set for one instance.  The loader always passes
-    /// the instance's rings; `None` only exists so the feature-set tests can
+    /// Builds the feature set for one instance.  `sequence_size` is the
+    /// largest atom port buffer in bytes, header included
+    /// (`PortTable::sequence_size`).  The loader always passes the
+    /// instance's rings; `None` only exists so the feature-set tests can
     /// build the same array without `worker:schedule`.  `urid::seed` runs
     /// here so the host's URIs have the lowest ids.
     pub(crate) fn new(
         sample_rate: f64,
         max_block: usize,
-        atom_capacity: u32,
+        sequence_size: u32,
         rings: Option<Arc<WorkerRings>>,
     ) -> Box<Self> {
         urid::seed();
@@ -145,7 +142,7 @@ impl HostFeatures {
             options: Vec::new().into_boxed_slice(),
             min_block: 1,
             max_block: max_block as i32,
-            sequence_size: atom_capacity as i32,
+            sequence_size: sequence_size as i32,
             sample_rate: sample_rate as f32,
             rings,
             schedule: None,
@@ -279,7 +276,6 @@ pub(super) fn used_uris() -> &'static [&'static CStr] {
     ]
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 fn option<T>(key: LV2_URID, type_: LV2_URID, size: u32, value: *const T) -> LV2_Options_Option {
     LV2_Options_Option {
         context: LV2_Options_Context_LV2_OPTIONS_INSTANCE,
@@ -294,7 +290,6 @@ fn option<T>(key: LV2_URID, type_: LV2_URID, size: u32, value: *const T) -> LV2_
 /// `state:mapPath` identity: duplicate the absolute path and hand it out
 /// raw.  Only called by the plugin from inside a state call, on the UI
 /// thread, never from `run`, so the copy needs no lock.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 unsafe extern "C" fn map_path(
     _handle: LV2_State_Map_Path_Handle,
     path: *const c_char,
@@ -307,7 +302,6 @@ unsafe extern "C" fn map_path(
 }
 
 /// `state:freePath`: reclaim a path [`map_path`] handed out.
-#[cfg_attr(not(test), allow(dead_code))] // Wired to the loader in the next commit.
 unsafe extern "C" fn free_path(_handle: LV2_State_Free_Path_Handle, path: *mut c_char) {
     if path.is_null() {
         return;
