@@ -159,6 +159,19 @@ fn a_centered_reading_eases_the_discs_to_a_stop() {
 }
 
 #[test]
+fn the_level_readout_fits_the_reserved_column() {
+    let room = METER_VALUE_SAMPLE.chars().count();
+    for level in [-100.3, -99.2, -9.9, 0.0, 9.9, 99.2, 100.3] {
+        let text = level_readout(level);
+        assert!(
+            text.chars().count() <= room,
+            "{text} is wider than {METER_VALUE_SAMPLE}"
+        );
+    }
+    assert!(level_readout(100.3).chars().count() > level_readout(99.2).chars().count());
+}
+
+#[test]
 fn the_mark_sits_at_the_centre_and_clamps_past_fifty() {
     assert_eq!(mark_fraction(0.0), 0.0);
     assert_eq!(mark_fraction(-50.0), -1.0);
