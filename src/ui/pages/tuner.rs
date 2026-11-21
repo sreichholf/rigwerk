@@ -385,6 +385,18 @@ fn lead_reading(frame: &TunerFrame, view: &View, face: StringFace) -> Lead {
     }
 }
 
+/// Widest level the readout column holds: a signed `xxx.x` plus the unit.
+/// `100.3` and `99.2` then share one right edge.  The row stays the width
+/// of the page instead of pushing the string cells.
+const METER_VALUE_SAMPLE: &str = "-100.0 dBFS";
+
+/// Name column shared by the level and confidence rows.
+const METER_NAME_WIDTH: f32 = 88.0;
+
+fn level_readout(level_db: f32) -> String {
+    format!("{level_db:.1} dBFS")
+}
+
 /// The level and the confidence as two thin bars under the scale.
 fn level_and_confidence(ui: &mut egui::Ui, lead: &Lead, active: bool, colours: &Palette) {
     let level = if active && lead.level_db.is_finite() {
@@ -396,7 +408,7 @@ fn level_and_confidence(ui: &mut egui::Ui, lead: &Lead, active: bool, colours: &
         ui,
         "Level",
         &if active && lead.level_db.is_finite() {
-            format!("{:.1} dBFS", lead.level_db)
+            level_readout(lead.level_db)
         } else {
             "—".to_owned()
         },
@@ -427,21 +439,36 @@ fn bar(
     colour: egui::Color32,
     colours: &Palette,
 ) {
+    let value_font = font(Face::Mono, TypeRole::GridHeader);
+    let value_width = ui
+        .painter()
+        .layout_no_wrap(
+            METER_VALUE_SAMPLE.to_owned(),
+            value_font.clone(),
+            colours.text2,
+        )
+        .size()
+        .x
+        .ceil();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.allocate_ui_with_layout(
-            Vec2::new(88.0, 16.0),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                ui.label(
-                    RichText::new(name)
-                        .font(font(Face::Sans, TypeRole::GridHeader))
-                        .color(colours.text3),
-                );
-            },
+        let (name_rect, _) =
+            ui.allocate_exact_size(Vec2::new(METER_NAME_WIDTH, 16.0), Sense::hover());
+        ui.painter().text(
+            name_rect.left_center(),
+            Align2::LEFT_CENTER,
+            name,
+            font(Face::Sans, TypeRole::GridHeader),
+            colours.text3,
         );
-        let width = (ui.available_width() - 74.0).max(40.0);
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 6.0), Sense::hover());
+        // The value keeps a fixed column.  A label sized to the digits
+        // would grow the row past the page, and the string cells follow
+        // that width.
+        let gap = ui.spacing().item_spacing.x;
+        let room = ui.available_width();
+        let value_width = value_width.min((room - gap).max(0.0));
+        let bar_width = (room - gap - value_width).max(0.0);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(bar_width, 6.0), Sense::hover());
         ui.painter()
             .rect_filled(rect, CornerRadius::same(2), colours.well);
         if fraction > 0.0 {
@@ -458,10 +485,13 @@ fn bar(
             None,
             Some(value.to_owned()),
         );
-        ui.label(
-            RichText::new(value)
-                .font(font(Face::Mono, TypeRole::GridHeader))
-                .color(colours.text2),
+        let (value_rect, _) = ui.allocate_exact_size(Vec2::new(value_width, 16.0), Sense::hover());
+        ui.painter().text(
+            value_rect.right_center(),
+            Align2::RIGHT_CENTER,
+            value,
+            value_font,
+            colours.text2,
         );
     });
 }
