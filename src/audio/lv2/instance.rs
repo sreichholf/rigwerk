@@ -22,8 +22,11 @@
 //! process-wide worker thread (`worker.rs`) only once this load has
 //! registered the instance, and the core unregisters it before
 //! `deactivate`/`cleanup`, so no `work` can reach a plugin that is being torn
-//! down.  There is no restart: LV2 has no call that asks for one, and a new
-//! sample rate loads a new instance.
+//! down.  Unregistering serves the requests still queued and delivers the
+//! responses still queued through `work_response`, as `worker.h` requires;
+//! the processor is gone by then, so no `run` is inside.  There is no
+//! restart: LV2 has no call that asks for one, and a new sample rate loads a
+//! new instance.
 //!
 //! The instance's values are native per range.  Restored values are written
 //! straight into the control buffers before activation, so the plugin sees
@@ -107,7 +110,9 @@ impl Drop for Lv2Core {
     fn drop(&mut self) {
         // The worker thread must not be inside `work` when the plugin is
         // deactivated, cleaned up and its module unloaded.  `unregister`
-        // waits out an in-flight call; this runs on the UI thread.
+        // waits out an in-flight call, then serves what is queued and
+        // delivers the responses while the plugin is still active; this
+        // runs on the UI thread, and the processor is gone.
         if let Some(worker) = self.worker.get() {
             worker::unregister(worker);
         }

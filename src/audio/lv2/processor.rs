@@ -24,7 +24,9 @@
 //! buffer and calls `work_response` for each message, and after `run` it
 //! calls `end_run` when the plugin has one (even with no response).  Both
 //! are audio-class calls.  The load's zero-frame `run` delivers responses
-//! the same way, on the UI thread, before this processor exists.
+//! the same way, on the UI thread, before this processor exists, and the
+//! teardown delivers what is left on the UI thread after it is gone
+//! (`worker::unregister`).
 
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
@@ -43,7 +45,7 @@ use super::worker::{WorkerRings, RING_BYTES};
 /// makes audio-class.
 pub(crate) struct WorkerCallbacks {
     /// The instance's response ring.  The worker thread's `respond` writes
-    /// it; only this processor reads it.
+    /// it; while this processor exists, only it reads the ring.
     pub(crate) rings: Arc<WorkerRings>,
     /// The buffer one response is popped into; [`RING_BYTES`], sized at
     /// load so a block never allocates.
@@ -217,8 +219,9 @@ impl Lv2Processor {
 /// the run context.  `responses` is a whole ring, allocated at load.  A
 /// plugin without `work_response` has the response dropped rather than left
 /// in the ring, which would stall every later one.  The processor calls this
-/// before each `run`, and the load's zero-frame run calls it before
-/// `run(handle, 0)`.
+/// before each `run`, the load's zero-frame run calls it before
+/// `run(handle, 0)`, and `worker::unregister` calls it at teardown, before
+/// `deactivate`, once the processor is gone.
 pub(super) fn deliver_responses(
     handle: LV2_Handle,
     rings: &WorkerRings,

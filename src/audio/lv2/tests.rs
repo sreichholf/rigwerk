@@ -43,7 +43,7 @@ use super::ttl::{file_uri, lexical, path_from_file_uri, TtlStore};
 use super::urid;
 use super::worker::{
     hold_gate, loops_for_test, register, registered_for_test, respond, schedule_struct, unregister,
-    wake, WorkerRings, RING_BYTES,
+    wake, WorkerRings, RING_BYTES, TEARDOWN_ROUNDS,
 };
 
 const LV2_PLUGIN: &str = "http://lv2plug.in/ns/lv2core#Plugin";
@@ -4669,4 +4669,206 @@ fn a_mapped_path_is_c_heap_that_free_or_free_path_releases() {
         assert_eq!(CStr::from_ptr(by_feature), input.as_c_str());
         (free_path.free_path.expect("free_path"))(free_path.handle, by_feature);
     }
+}
+
+/// What a teardown fake's instance handle points at: the schedule feature
+/// its `work_response` answers with, as `eg-sampler` schedules the old
+/// sample's free from the response that installs the new one.
+struct TeardownPlugin {
+    schedule: LV2_Worker_Schedule,
+}
+
+/// Every call the teardown fakes saw, in order.
+static TEARDOWN_CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn teardown_log(entry: String) {
+    TEARDOWN_CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(entry);
+}
+
+unsafe fn teardown_bytes(size: u32, data: *const c_void) -> String {
+    if data.is_null() {
+        return String::new();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// `work` that answers "load" with the new sample and frees nothing back.
+unsafe extern "C" fn teardown_work(
+    _instance: LV2_Handle,
+    respond: LV2_Worker_Respond_Function,
+    handle: LV2_Worker_Respond_Handle,
+    size: u32,
+    data: *const c_void,
+) -> LV2_Worker_Status {
+    let message = unsafe { teardown_bytes(size, data) };
+    teardown_log(format!("work {message}"));
+    if message == "load" {
+        let sample = b"new sample";
+        return match respond {
+            Some(respond) => unsafe {
+                respond(
+                    handle,
+                    sample.len() as u32,
+                    sample.as_ptr() as *const c_void,
+                )
+            },
+            None => LV2_WORKER_ERR_UNKNOWN,
+        };
+    }
+    LV2_WORKER_SUCCESS
+}
+
+/// `work_response` that installs the sample and schedules the old one's free.
+unsafe extern "C" fn teardown_work_response(
+    instance: LV2_Handle,
+    size: u32,
+    body: *const c_void,
+) -> LV2_Worker_Status {
+    let message = unsafe { teardown_bytes(size, body) };
+    teardown_log(format!("response {message}"));
+    let plugin = unsafe { &*(instance as *const TeardownPlugin) };
+    let free = b"free old sample";
+    let schedule = plugin.schedule.schedule_work.expect("schedule_work");
+    unsafe {
+        schedule(
+            plugin.schedule.handle,
+            free.len() as u32,
+            free.as_ptr() as *const c_void,
+        )
+    }
+}
+
+unsafe extern "C" fn teardown_end_run(_instance: LV2_Handle) -> LV2_Worker_Status {
+    teardown_log("end_run".to_owned());
+    LV2_WORKER_SUCCESS
+}
+
+/// `worker.h`: a response `respond` accepted must reach `work_response`.
+/// The gate keeps the worker thread out, so the load request, its response
+/// and the free that response schedules are all finished by `unregister`.
+#[test]
+fn unregister_delivers_the_responses_and_serves_what_they_schedule() {
+    let _serial = worker_tests();
+    TEARDOWN_CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    let rings = Arc::new(WorkerRings::new());
+    rings.accept_requests();
+    let plugin = Box::new(TeardownPlugin {
+        schedule: schedule_struct(&rings),
+    });
+    let interface = LV2_Worker_Interface {
+        work: Some(teardown_work),
+        work_response: Some(teardown_work_response),
+        end_run: Some(teardown_end_run),
+    };
+    let handle = &*plugin as *const TeardownPlugin as LV2_Handle;
+    let instance = register(handle, &interface, Arc::clone(&rings)).expect("register");
+
+    let gate = hold_gate(&instance);
+    assert!(rings.push_request(b"load"));
+    let removing = {
+        let instance = Arc::clone(&instance);
+        std::thread::spawn(move || unregister(&instance))
+    };
+    while registered_for_test() != 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(gate);
+    removing.join().expect("unregister");
+
+    let calls = TEARDOWN_CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        calls,
+        [
+            "work load",
+            "response new sample",
+            "end_run",
+            "work free old sample"
+        ],
+        "the teardown did not finish the exchange in order"
+    );
+    assert!(!rings.request_pending());
+    assert!(!rings.response_pending());
+}
+
+/// How many `work` calls the endless fake has seen.
+static ENDLESS_WORK: AtomicU32 = AtomicU32::new(0);
+
+/// `work` that always answers.
+unsafe extern "C" fn endless_work(
+    _instance: LV2_Handle,
+    respond: LV2_Worker_Respond_Function,
+    handle: LV2_Worker_Respond_Handle,
+    _size: u32,
+    _data: *const c_void,
+) -> LV2_Worker_Status {
+    ENDLESS_WORK.fetch_add(1, Ordering::SeqCst);
+    let again = b"again";
+    match respond {
+        Some(respond) => unsafe { respond(handle, again.len() as u32, again.as_ptr().cast()) },
+        None => LV2_WORKER_ERR_UNKNOWN,
+    }
+}
+
+/// `work_response` that always schedules another request.
+unsafe extern "C" fn endless_work_response(
+    instance: LV2_Handle,
+    _size: u32,
+    _body: *const c_void,
+) -> LV2_Worker_Status {
+    let plugin = unsafe { &*(instance as *const TeardownPlugin) };
+    let schedule = plugin.schedule.schedule_work.expect("schedule_work");
+    let again = b"again";
+    unsafe {
+        schedule(
+            plugin.schedule.handle,
+            again.len() as u32,
+            again.as_ptr().cast(),
+        )
+    }
+}
+
+/// A plugin that answers every response with a new request cannot keep the
+/// teardown going forever.
+#[test]
+fn unregister_stops_a_worker_exchange_that_never_ends() {
+    let _serial = worker_tests();
+    let rings = Arc::new(WorkerRings::new());
+    rings.accept_requests();
+    let plugin = Box::new(TeardownPlugin {
+        schedule: schedule_struct(&rings),
+    });
+    let interface = LV2_Worker_Interface {
+        work: Some(endless_work),
+        work_response: Some(endless_work_response),
+        end_run: None,
+    };
+    let handle = &*plugin as *const TeardownPlugin as LV2_Handle;
+    let instance = register(handle, &interface, Arc::clone(&rings)).expect("register");
+    let gate = hold_gate(&instance);
+    let before = ENDLESS_WORK.load(Ordering::SeqCst);
+    assert!(rings.push_request(b"again"));
+    let removing = {
+        let instance = Arc::clone(&instance);
+        std::thread::spawn(move || unregister(&instance))
+    };
+    while registered_for_test() != 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(gate);
+    removing.join().expect("unregister");
+    assert_eq!(
+        ENDLESS_WORK.load(Ordering::SeqCst) - before,
+        TEARDOWN_ROUNDS as u32 + 1,
+        "the teardown did not stop after its rounds"
+    );
 }
