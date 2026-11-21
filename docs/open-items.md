@@ -30,7 +30,7 @@ plans and the code review has landed; that history is in git.
   port of a kind the host cannot use is connected to NULL, and a required
   one is a load error.  Atom ports are only connected to `atom:Sequence`;
   a required atom port that lists no such `atom:bufferType` is the same
-  load error.
+  load error.  The scan lists such a plugin with the loader's own error.
 - LV2 plugins that require a fixed or power-of-two block length, `log:log`,
   `state:makePath`, `instance-access`, `data-access`, `resize-port` or an
   option the host does not supply are listed with an error and refuse to

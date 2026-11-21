@@ -222,15 +222,9 @@ impl Lv2Instance {
             f64::from(sample_rate)
         };
         let table = PortTable::read_store(&store, &plugins, plugin_uri, rate.round() as u32)?;
+        // `read_store` already refused a required `state:loadDefaultState`
+        // with no state to load; an optional one with none omits the feature.
         let default_state = state::default_state(&store, plugin_uri);
-        // A required feature this load cannot meet must fail before
-        // instantiate.  An optional one with no state just omits the feature.
-        if default_state.is_none() && state::requires_load_default(&store, plugin_uri) {
-            return Err(
-                "The LV2 plugin requires state:loadDefaultState, but its bundle has no state:state to restore."
-                    .to_owned(),
-            );
-        }
         let binary = module::native_binary(&store, plugin_uri, bundle)?;
         let module = module::acquire_module(&binary, &trailing_separator(bundle))?;
         let descriptor = module
