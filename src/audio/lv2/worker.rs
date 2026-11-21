@@ -30,10 +30,11 @@
 //! accepted request must reach `work` and an accepted response must reach
 //! `work_response`, so it serves the queued requests and delivers the
 //! responses, in rounds, until both rings are empty (bounded by
-//! [`TEARDOWN_ROUNDS`]).  `work_response` and `end_run` are audio-class
-//! calls, not audio-thread ones; the processor is gone by then, so no `run`
-//! or other audio-class call can be inside, as at the load's zero-frame
-//! run.  The worker thread is a non-realtime context: a plugin's `work` may
+//! [`TEARDOWN_ROUNDS`]).  `work_response` is an audio-class call, not an
+//! audio-thread one; the processor is gone by then, so no `run` or other
+//! audio-class call can be inside, as at the load's zero-frame run.
+//! `end_run` is not called there: `worker.h` ties it to a `run` cycle, and
+//! no `run` precedes the teardown's deliveries.  The worker thread is a non-realtime context: a plugin's `work` may
 //! lock, allocate and read files there.
 //!
 //! The thread runs for the life of the process and is never shut down.  Its
@@ -495,12 +496,12 @@ pub(crate) fn wake(instance: &WorkerInstance) {
 /// `respond` accepted must reach `work_response`; a plugin often frees what
 /// it replaced that way (`eg-sampler` answers a loaded sample by scheduling
 /// the old one's free), so dropping either would leak.  Each round serves
-/// every queued request, then delivers every response and calls `end_run`,
-/// which `worker.h` makes the hook for "all responses for this cycle have
-/// been delivered".  A response may schedule another request, so the rounds
-/// go on until both rings are empty.  A plugin still exchanging messages
-/// after [`TEARDOWN_ROUNDS`] has the rest dropped, with one log line, and
-/// whatever they held leaks.
+/// every queued request, then delivers every response.  `end_run` is not
+/// called: `worker.h` makes it the close of a cycle "after every run()",
+/// and these rounds follow no `run`.  A response may schedule another
+/// request, so the rounds go on until both rings are empty.  A plugin still
+/// exchanging messages after [`TEARDOWN_ROUNDS`] has the rest dropped, with
+/// one log line, and whatever they held leaks.
 ///
 /// The registry lock is not held while waiting: the worker thread takes it
 /// only to copy the registry, never while it calls a plugin.
@@ -570,11 +571,6 @@ unsafe fn finish(instance: &WorkerInstance, message: &mut [u8]) {
             message,
             interface.work_response,
         );
-        if let Some(end_run) = interface.end_run {
-            // SAFETY: audio-class, and the caller guarantees no other
-            // audio-class call is inside the plugin.
-            unsafe { end_run(instance.handle) };
-        }
     }
 }
 
