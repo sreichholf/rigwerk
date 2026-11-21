@@ -195,8 +195,8 @@ and its cents above the gauge. Level and confidence run underneath.
 Pick Chromatic, or one of the 20 tunings (6, 7 and 8-string guitar; 4, 5
 and 6-string bass). A tuning shows one cell per string with its note,
 target frequency, cents and a mark, and reads every string from a single
-strum. All strings keeps one string on the big face while it sounds: the
-furthest sounding string, or the one you pin. The bottom bar sets the
+strum. The large note follows the sounding string furthest from its
+target, or the one you pin. The bottom bar sets the
 tuning, A4, the in-tune tolerance (±3, ±5 or ±10 cents), the input
 channel (L, R or Sum), *Listen* (single note or all strings), *Mute while
 tuning* and the display (needle or strobe).
