@@ -533,9 +533,9 @@ impl Lv2Instance {
     }
 
     /// Wakes the process-wide worker thread when this instance has a request
-    /// waiting, so a request waits at most one UI frame.  UI thread, once
-    /// per frame; a request the thread's timeout would find anyway is not
-    /// delayed by it.
+    /// waiting, so the request need not wait for the thread's park timeout.
+    /// UI thread, once per frame drawn.  An idle UI may not repaint; then
+    /// that timeout is what bounds the wait.
     pub(crate) fn service_worker(&self) {
         if let Some(worker) = self.core.worker.get() {
             worker::wake(worker);

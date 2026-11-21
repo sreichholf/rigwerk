@@ -10,11 +10,13 @@
 //! One thread, `rigwerk-lv2-worker`, serves every registered instance.  It
 //! takes a snapshot of the registry under the registry lock, drops the lock,
 //! and for each instance takes that instance's gate and drains its requests
-//! into one preallocated buffer.  The UI's `service` unparks it when a ring
-//! is non-empty, so a request waits at most a UI frame; while any instance is
-//! registered it also parks with a timeout as a safety net, never in a busy
-//! loop.  With none registered it parks without a timeout: [`register`]
-//! unparks it, so an idle process has no thread waking up.
+//! into one preallocated buffer.  The UI's `service` unparks it when a
+//! request is waiting, on each frame the UI draws.  An idle UI may not
+//! repaint, so that is not the bound: while any instance is registered the
+//! thread also parks for at most [`PARK_TIMEOUT`], never in a busy loop, and
+//! a request waits at most that long plus the `work` calls ahead of it.
+//! With none registered it parks without a timeout: [`register`] unparks
+//! it, so an idle process has no thread waking up.
 //!
 //! Thread rules: `work` runs on the worker thread, one call per instance at
 //! a time, never concurrently with `deactivate`/`cleanup` after
@@ -340,9 +342,9 @@ pub(super) unsafe extern "C" fn schedule_work(
 }
 
 /// How long the worker thread sits parked when no one wakes it while an
-/// instance is registered.  It is the safety net for a wake that raced a
-/// request; the UI's `service` wakes it as soon as a request exists, so this
-/// is only a fallback.
+/// instance is registered.  It bounds how long a request waits when the UI
+/// draws no frame (an idle UI may not repaint), and it is the safety net for
+/// a wake that raced a request.
 const PARK_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// One registered plugin instance, as the worker thread sees it.
@@ -459,7 +461,8 @@ pub(crate) fn register(
 }
 
 /// Wakes the worker thread when `instance` has a request waiting.  UI thread
-/// (the per-frame service) and tests; a request waits at most a UI frame.
+/// (the per-frame service) and tests.  It only shortens the wait: a frame
+/// the UI does not draw wakes nothing, and then [`PARK_TIMEOUT`] bounds it.
 pub(crate) fn wake(instance: &WorkerInstance) {
     if instance.removed.load(Ordering::Acquire) {
         return;
