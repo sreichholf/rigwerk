@@ -8,16 +8,22 @@
 //! Supplied: `urid:map` and `urid:unmap` (the process-wide map, seeded
 //! here), `options:options` (the block bounds, the sequence size and the
 //! sample rate), `buf-size:boundedBlockLength`, `worker:schedule` when the
-//! instance has rings, `state:mapPath`/`state:freePath` as identity paths,
-//! and `state:loadDefaultState` (no data: the load restores the bundle's
-//! `state:state`).  There is no `buf-size:nominalBlockLength`: a plugin
-//! runs the bridge's block, which a load does not know, so no value would be
-//! true.  The loader always passes the instance's rings, so the scan's claim
-//! that `worker:schedule` is supplied holds for every load; its
-//! `schedule_work` refuses requests until the load has found the plugin's
-//! `work`.  `log:log` is not supplied: its variadic callbacks cannot be
-//! written in stable Rust.  The scan refuses a plugin that requires a
-//! feature outside [`SUPPORTED`].
+//! instance has rings, and `state:mapPath`/`state:freePath` as identity
+//! paths.  `state:loadDefaultState` (no data) is supplied only when the
+//! bundle has a `state:state`.  A saved blob still gets the feature: that
+//! blob is the restore before `run`, and a plugin that requires the feature
+//! must see it at instantiate.  It stays in [`SUPPORTED`], so a plugin that
+//! requires it is still allowed by the scan; a required feature with no
+//! state to restore fails the load instead of instantiating without it.
+//! `buf-size:minBlockLength` is 0, because the load calls
+//! `run(handle, 0)` and the buf-size spec allows a minimum of zero.  There
+//! is no `buf-size:nominalBlockLength`: a plugin runs the bridge's block,
+//! which a load does not know, so no value would be true.  The loader
+//! always passes the instance's rings, so the scan's claim that
+//! `worker:schedule` is supplied holds for every load; its `schedule_work`
+//! refuses requests until the load has found the plugin's `work`.  `log:log`
+//! is not supplied: its variadic callbacks cannot be written in stable Rust.
+//! The scan refuses a plugin that requires a feature outside [`SUPPORTED`].
 //!
 //! Three core features carry no data and are met by how the host runs a
 //! plugin, so they are accepted as required but not put in the array, as
@@ -123,13 +129,16 @@ impl HostFeatures {
     /// largest atom port buffer in bytes, header included
     /// (`PortTable::sequence_size`).  The loader always passes the
     /// instance's rings; `None` only exists so the feature-set tests can
-    /// build the same array without `worker:schedule`.  `urid::seed` runs
-    /// here so the host's URIs have the lowest ids.
+    /// build the same array without `worker:schedule`.  `load_default` is
+    /// whether the bundle has a `state:state`: only then is
+    /// `state:loadDefaultState` in the array.  `urid::seed` runs here so
+    /// the host's URIs have the lowest ids.
     pub(crate) fn new(
         sample_rate: f64,
         max_block: usize,
         sequence_size: u32,
         rings: Option<Arc<WorkerRings>>,
+        load_default: bool,
     ) -> Box<Self> {
         urid::seed();
         // Box first: the option values and feature data point into these
@@ -145,7 +154,9 @@ impl HostFeatures {
                 unmap: Some(urid::unmap_callback),
             },
             options: Vec::new().into_boxed_slice(),
-            min_block: 1,
+            // The load calls `run(handle, 0)`, and the buf-size spec allows
+            // a minimum of zero.
+            min_block: 0,
             max_block: max_block as i32,
             sequence_size: sequence_size as i32,
             sample_rate: sample_rate as f32,
@@ -165,7 +176,7 @@ impl HostFeatures {
         });
         host.schedule = host.rings.as_ref().map(worker::schedule_struct);
         host.build_options();
-        host.build_features();
+        host.build_features(load_default);
         host
     }
 
@@ -213,7 +224,7 @@ impl HostFeatures {
         .into_boxed_slice();
     }
 
-    fn build_features(&mut self) {
+    fn build_features(&mut self, load_default: bool) {
         let mut strings: Vec<CString> = Vec::with_capacity(SUPPORTED.len());
         let mut features: Vec<LV2_Feature> = Vec::with_capacity(SUPPORTED.len());
         {
@@ -248,7 +259,10 @@ impl HostFeatures {
                 &self.free_path as *const LV2_State_Free_Path as *mut c_void,
             );
             // No data: the host meets it by restoring `state:state` at load.
-            push(STATE_LOAD_DEFAULT, ptr::null_mut());
+            // Absent when this load has no default state to restore.
+            if load_default {
+                push(STATE_LOAD_DEFAULT, ptr::null_mut());
+            }
         }
         self.strings = strings;
         self.features = features;

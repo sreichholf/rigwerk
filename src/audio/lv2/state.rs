@@ -16,10 +16,13 @@
 //! ```
 //!
 //! Only the framing is ours: the value bytes are the plugin's own, in the
-//! type it named, and are copied back unchanged.  The blob stores URIs, never
-//! the process's URIDs, so it outlives the run that wrote it; at restore every
-//! URI is mapped again.  A blob is capped at [`MAX_STATE_BLOB`], the size the
-//! preferences keep.
+//! type it named, and are copied back unchanged except a top-level
+//! `atom:URID`, which is stored as the URI and mapped again on restore.  The
+//! blob stores URIs, never the process's URIDs, so it outlives the run that
+//! wrote it; at restore every URI is mapped again.  A blob is capped at
+//! [`MAX_STATE_BLOB`], the size the preferences keep.  A value whose body
+//! contains URIDs (an `atom:Object`, a sequence, anything nested) stays
+//! opaque bytes.
 //!
 //! Only values flagged `LV2_STATE_IS_POD` are saved, deliberately: anything
 //! else is a pointer or a handle that would not survive the save.  A value
@@ -50,7 +53,7 @@
 //! call and runs at load, before `activate`.  `save` may run while `run` does,
 //! per `state.h`, so a capture needs no pause.
 
-use std::ffi::{c_void, CString};
+use std::ffi::{c_void, CStr, CString};
 use std::ptr;
 
 use lv2_sys::{
@@ -200,6 +203,11 @@ fn encode(records: &[Record]) -> Vec<u8> {
 /// A zero-byte value is stored as an empty record.  `state.h` asks plugins
 /// for at least one byte, but some store their default empty string or path
 /// anyway (`eg-params` does), and refusing that fails their whole save.
+///
+/// A top-level `atom:URID` is stored as the URI it names, not the `u32`.
+/// A value that is not four native-endian bytes, or an id the map does not
+/// know, is refused here.  The plugin's `save` decides whether that fails
+/// the whole save.  Nested atoms are not walked.
 unsafe extern "C" fn store(
     handle: *mut c_void,
     key: LV2_URID,
@@ -230,16 +238,20 @@ unsafe extern "C" fn store(
         // slice from it.
         return LV2_STATE_ERR_NO_SPACE;
     }
-    let value = if size == 0 {
+    let value = if type_.to_bytes() == ATOM_URID.to_bytes() {
+        match stored_urid(value, size) {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        }
+    } else if size == 0 {
         // An empty value has no bytes to read, and `value` may even be null.
         // Store it as empty rather than fail the plugin's whole save.
         Vec::new()
+    } else if value.is_null() {
+        // A null pointer with a length names no readable bytes.
+        eprintln!("[plugins] not saving an LV2 state value: it has no readable bytes");
+        return LV2_STATE_ERR_UNKNOWN;
     } else {
-        if value.is_null() {
-            // A null pointer with a length names no readable bytes.
-            eprintln!("[plugins] not saving an LV2 state value: it has no readable bytes");
-            return LV2_STATE_ERR_UNKNOWN;
-        }
         // SAFETY: the plugin promises `size` readable bytes at `value`.
         unsafe { std::slice::from_raw_parts(value as *const u8, size) }.to_vec()
     };
@@ -256,6 +268,34 @@ unsafe extern "C" fn store(
     sink.encoded += encoded;
     sink.records.push(record);
     LV2_STATE_SUCCESS
+}
+
+/// The bytes a top-level `atom:URID` is stored as: the URI, with no trailing
+/// NUL.  The numeric id belongs to this process.  `unmap` returning null, a
+/// null pointer, or a size other than 4 refuses the value.
+fn stored_urid(value: *const c_void, size: usize) -> Result<Vec<u8>, LV2_State_Status> {
+    if size != std::mem::size_of::<u32>() {
+        eprintln!("[plugins] not saving an LV2 state value: an atom:URID is not 4 bytes");
+        return Err(LV2_STATE_ERR_BAD_TYPE);
+    }
+    if value.is_null() {
+        eprintln!("[plugins] not saving an LV2 state value: an atom:URID has no readable bytes");
+        return Err(LV2_STATE_ERR_UNKNOWN);
+    }
+    // SAFETY: the plugin promises `size` readable bytes, and `size` is 4.
+    // Copying into an array avoids reading a `u32` that may be unaligned.
+    let mut native = [0u8; 4];
+    native.copy_from_slice(unsafe { std::slice::from_raw_parts(value as *const u8, size) });
+    let id = u32::from_ne_bytes(native);
+    let pointer = urid::global().unmap(id);
+    if pointer.is_null() {
+        eprintln!("[plugins] not saving an LV2 state value: its atom:URID is not a known URI");
+        return Err(LV2_STATE_ERR_UNKNOWN);
+    }
+    // SAFETY: a non-null `unmap` pointer is a NUL-terminated URI that lives
+    // for the process.
+    let uri = unsafe { CStr::from_ptr(pointer) };
+    Ok(uri.to_bytes().to_vec())
 }
 
 /// Restores a state blob into the plugin.  An instantiation-class call: UI
@@ -324,6 +364,16 @@ fn restore_records(
 /// A plugin's `state:state` from its bundle, as records ready to restore.
 pub(crate) struct DefaultState {
     records: Vec<RestoreRecord>,
+}
+
+/// Whether `plugin` lists `state:loadDefaultState` as `lv2:requiredFeature`.
+/// An optional listing does not count: with no state to restore, the load
+/// omits the feature instead of failing.
+pub(crate) fn requires_load_default(store: &TtlStore, plugin: &str) -> bool {
+    store
+        .iris(plugin, LV2_REQUIRED_FEATURE)
+        .iter()
+        .any(|feature| feature == STATE_LOAD_DEFAULT)
 }
 
 /// The default state to load for `plugin`: its `state:state` when it lists
@@ -513,7 +563,10 @@ fn parse(bytes: &[u8]) -> Result<Vec<DecodedRecord>, &'static str> {
     Ok(records)
 }
 
-/// Maps the URIs of an accepted blob.  UI thread; the map may insert.
+/// Maps the URIs of an accepted blob.  UI thread; the map may insert.  A
+/// top-level `atom:URID` value is the URI text and becomes the id the map
+/// returns for it now.  An empty, non-UTF8 or interior-NUL URI refuses the
+/// blob, as an unmappable key does.  Nested atoms are left as stored.
 fn map_records(records: Vec<DecodedRecord>) -> Result<Vec<RestoreRecord>, &'static str> {
     let map = urid::global();
     records
@@ -524,14 +577,33 @@ fn map_records(records: Vec<DecodedRecord>) -> Result<Vec<RestoreRecord>, &'stat
             if key == 0 || type_ == 0 {
                 return Err("a key or type URI cannot be mapped");
             }
+            let value = if record.type_.as_bytes() == ATOM_URID.to_bytes() {
+                mapped_urid(&record.value)?
+            } else {
+                record.value
+            };
             Ok(RestoreRecord {
                 key,
                 type_,
                 flags: record.flags,
-                value: record.value,
+                value,
             })
         })
         .collect()
+}
+
+/// A stored top-level `atom:URID`: URI bytes in, the current id's
+/// native-endian bytes out.
+fn mapped_urid(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if bytes.is_empty() || std::str::from_utf8(bytes).is_err() {
+        return Err("a key or type URI cannot be mapped");
+    }
+    let uri = CString::new(bytes).map_err(|_| "a key or type URI cannot be mapped")?;
+    let id = urid::global().map(&uri);
+    if id == 0 {
+        return Err("a key or type URI cannot be mapped");
+    }
+    Ok(id.to_ne_bytes().to_vec())
 }
 
 /// The forward-only reader over a blob.  Every accessor returns `None` when

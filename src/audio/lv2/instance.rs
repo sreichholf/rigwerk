@@ -14,21 +14,26 @@
 //! `connect_port`, `run` and the worker's `work_response`/`end_run` are
 //! audio-class: `connect_port` is done here at load, before the processor is
 //! handed to a slot and before any `run` can have started; `run` is the
-//! processor's.  `state.save` is a UI call that may overlap `run`, so a
-//! capture needs no pause.  The worker's `work` is called on the process-wide
-//! worker thread (`worker.rs`) only after this load registered the instance,
-//! and the core unregisters it before `deactivate`/`cleanup`, so no `work`
-//! can reach a plugin that is being torn down.  There is no restart: LV2 has
-//! no call that asks for one, and a new sample rate loads a new instance.
+//! processor's, and the load's `run(handle, 0)` delivers worker responses
+//! first.  `state.save` is a UI call that may overlap `run`, so a capture
+//! needs no pause.  Requests a restore queued are run on this thread, before
+//! `activate`, because the instance is not registered yet and no audio thread
+//! is inside `run`.  After that, the worker's `work` is called on the
+//! process-wide worker thread (`worker.rs`) only once this load has
+//! registered the instance, and the core unregisters it before
+//! `deactivate`/`cleanup`, so no `work` can reach a plugin that is being torn
+//! down.  There is no restart: LV2 has no call that asks for one, and a new
+//! sample rate loads a new instance.
 //!
 //! The instance's values are native per range.  Restored values are written
 //! straight into the control buffers before activation, so the plugin sees
 //! them from its first block and the panel shows them; the `run(handle, 0)`
-//! after activation updates the control outputs and the latency report
-//! without processing audio.  The worker is registered after that run, so a
-//! restore or the activation sequence cannot race it.
+//! after activation delivers the responses that restore's `work` queued,
+//! then updates the control outputs and the latency report without processing
+//! audio.  The worker is registered after that run.  A request `run(0)`
+//! schedules stays queued for the worker thread; it is not run inline.
 
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -132,7 +137,7 @@ impl Lv2Core {
         Self {
             handle: std::ptr::null_mut(),
             descriptor: std::ptr::null(),
-            _features: HostFeatures::new(48_000.0, 16, super::ports::ATOM_CAPACITY, None),
+            _features: HostFeatures::new(48_000.0, 16, super::ports::ATOM_CAPACITY, None, false),
             _rings: Arc::new(WorkerRings::new()),
             _bundle_path: CString::default(),
             retired: OnceLock::new(),
@@ -156,6 +161,10 @@ pub(crate) struct Lv2Instance {
     /// The plugin's state extension, valid for as long as the instance (the
     /// descriptor promises that).  Null when the plugin has none.
     state: *const LV2_State_Interface,
+    /// The worker interface's `work_response`, when it has one.  The load's
+    /// zero-frame run delivers queued responses through it before `run`.
+    worker_response:
+        Option<unsafe extern "C" fn(LV2_Handle, u32, *const c_void) -> LV2_Worker_Status>,
     /// The worker interface's `end_run`, when it has one.  Every `run` must
     /// be followed by it, including the load's zero-frame run, which does
     /// not go through the processor.
@@ -208,12 +217,20 @@ impl Lv2Instance {
             f64::from(sample_rate)
         };
         let table = PortTable::read_store(&store, &plugins, plugin_uri, rate.round() as u32)?;
+        let default_state = state::default_state(&store, plugin_uri);
+        // A required feature this load cannot meet must fail before
+        // instantiate.  An optional one with no state just omits the feature.
+        if default_state.is_none() && state::requires_load_default(&store, plugin_uri) {
+            return Err(
+                "The LV2 plugin requires state:loadDefaultState, but its bundle has no state:state to restore."
+                    .to_owned(),
+            );
+        }
         let binary = module::native_binary(&store, plugin_uri, bundle)?;
         let module = module::acquire_module(&binary, &trailing_separator(bundle))?;
         let descriptor = module
             .descriptor_for_uri(plugin_uri)
             .ok_or_else(|| format!("The LV2 binary does not contain {plugin_uri}."))?;
-        let default_state = state::default_state(&store, plugin_uri);
         Self::load_descriptor(
             bundle,
             table,
@@ -228,7 +245,8 @@ impl Lv2Instance {
     }
 
     /// The load from a resolved descriptor on: instantiate, connect, restore,
-    /// activate, the zero-frame run and the worker.  UI thread.  `module`
+    /// the worker requests that restore queued, activate, the zero-frame run
+    /// and the worker registration.  UI thread.  `module`
     /// keeps the descriptor's library loaded; `None` only for the fake
     /// descriptors the tests build without a binary.  `default_state` is the
     /// bundle's `state:state` for a plugin that asks for it, restored when no
@@ -263,8 +281,13 @@ impl Lv2Instance {
 
         let block = max_block.clamp(1, crate::audio::plugins::MAX_BLOCK);
         let rings = Arc::new(WorkerRings::new());
-        let features =
-            HostFeatures::new(rate, block, table.sequence_size(), Some(Arc::clone(&rings)));
+        let features = HostFeatures::new(
+            rate,
+            block,
+            table.sequence_size(),
+            Some(Arc::clone(&rings)),
+            default_state.is_some(),
+        );
         // The path must end in a separator, so a plugin can append a filename
         // to it.  The core owns it: a plugin may keep the pointer.
         let bundle_path = CString::new(trailing_separator(bundle))
@@ -312,8 +335,9 @@ impl Lv2Instance {
                 .is_some_and(|interface| interface.work.is_some())
         };
         // Only a plugin whose requests can reach `work` may schedule.  This is
-        // before the restore and the zero-frame run, so what they schedule
-        // waits in the ring until the worker is registered below.
+        // before the restore, so a restore can queue requests.  They are
+        // drained on this thread before activate.  A request the zero-frame
+        // run schedules waits until the worker is registered below.
         if has_work {
             rings.accept_requests();
         }
@@ -372,6 +396,27 @@ impl Lv2Instance {
                 );
             }
         }
+        // Requests the restores queued are run here, before activate and
+        // before the instance is registered, so no audio thread is inside
+        // `run` and the worker thread does not know this instance.  `work`
+        // may schedule another request, so the drain continues until the
+        // ring is empty.  Responses wait for `run_zero`.  A request `run(0)`
+        // schedules later is left in the ring.
+        if has_work && core._rings.request_pending() {
+            let mut request = vec![0u8; worker::RING_BYTES];
+            let failed = AtomicBool::new(false);
+            // SAFETY: `has_work` means the interface has `work`, the module
+            // stays loaded in `core`, and nothing else calls the plugin yet.
+            unsafe {
+                worker::drain_requests(
+                    handle,
+                    worker_interface,
+                    &core._rings,
+                    &mut request,
+                    &failed,
+                );
+            }
+        }
         let restored = restore.params(false);
         for (id, value) in &restored {
             let Some(index) = ids.index_of(*id) else {
@@ -393,6 +438,11 @@ impl Lv2Instance {
             state: state_interface,
             // SAFETY: the interface points into the module the core keeps
             // loaded until after the instance is gone.
+            worker_response: unsafe {
+                worker_interface
+                    .as_ref()
+                    .and_then(|interface| interface.work_response)
+            },
             worker_end_run: unsafe {
                 worker_interface
                     .as_ref()
@@ -455,9 +505,10 @@ impl Lv2Instance {
             worker: worker_callbacks,
             core: Arc::clone(&core),
         };
-        // The worker is registered only now: the restore and the zero-frame
-        // run are done, so no `work` can race them, and the requests they
-        // scheduled are served from here on.  A plugin without a `work`
+        // The worker is registered only now.  Requests a restore scheduled
+        // were drained on this thread, and the zero-frame run is done, so no
+        // `work` can race them.  A request `run(0)` scheduled stays in the
+        // ring and is served from here on.  A plugin without a `work`
         // function had every request refused.  The processor exists already,
         // so a failure here hands the buffers to the core like any teardown,
         // and they outlive `cleanup`; the requests queued so far go with the
@@ -510,7 +561,9 @@ impl Lv2Instance {
     /// Runs the plugin for zero frames so it updates its control outputs and
     /// latency port.  An audio-class call, made at load before the processor
     /// has the buffers; the atom ports are re-armed first, so the plugin sees
-    /// an empty input sequence and a cleared output.
+    /// an empty input sequence and a cleared output.  Worker responses a
+    /// restore's `work` queued are delivered before `run`, and `end_run`
+    /// follows it.
     pub(super) fn run_zero(&self, buffers: &mut PortBuffers) {
         // SAFETY: the descriptor belongs to the module the core keeps loaded;
         // the test fake has a null descriptor, for which this is a no-op.
@@ -521,6 +574,17 @@ impl Lv2Instance {
             return;
         };
         buffers.reset_atoms();
+        if self.core._rings.response_pending() {
+            // Allocated here, on the UI thread at load.  The processor gets
+            // its own buffer afterwards and never allocates one in `run`.
+            let mut responses = vec![0u8; worker::RING_BYTES];
+            super::processor::deliver_responses(
+                self.core.handle,
+                &self.core._rings,
+                &mut responses,
+                self.worker_response,
+            );
+        }
         // SAFETY: the ports are connected, the instance is active, and no
         // other block is inside the plugin: the processor does not exist yet.
         unsafe { run(self.core.handle, 0) };
@@ -645,6 +709,7 @@ impl Lv2Instance {
             values,
             shared,
             state: ptr::null(),
+            worker_response: None,
             worker_end_run: None,
             core,
         }

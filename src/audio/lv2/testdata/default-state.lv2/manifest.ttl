@@ -21,3 +21,11 @@
     a lv2:Plugin ;
     lv2:binary <default.so> ;
     state:state [ eg:gain "1.0"^^xsd:float ] .
+
+<http://example.com/lv2/required-default>
+    a lv2:Plugin ;
+    lv2:requiredFeature state:loadDefaultState .
+
+<http://example.com/lv2/optional-default>
+    a lv2:Plugin ;
+    lv2:optionalFeature state:loadDefaultState .

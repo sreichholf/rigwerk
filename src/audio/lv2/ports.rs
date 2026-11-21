@@ -854,12 +854,17 @@ impl PortBuffers {
             return;
         };
         for slot in &mut self.slots {
-            if !slot.connect {
-                continue;
-            }
-            let data = slot.buffer.data();
+            // An optional port of a kind this host has no buffer for must be
+            // explicitly connected to NULL: the spec does not allow leaving
+            // `connect_port` out for a declared port.
+            let data = if slot.connect {
+                slot.buffer.data()
+            } else {
+                std::ptr::null_mut()
+            };
             // SAFETY: `slot.port` is a port the bundle declares, and `data`
-            // points at storage sized for its type.
+            // points at storage sized for its type or is NULL for an
+            // optional port.
             unsafe { connect(handle, slot.port, data) };
         }
     }

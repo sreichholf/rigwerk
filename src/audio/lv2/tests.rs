@@ -11,6 +11,7 @@ use lv2_sys::{
     LV2_Options_Context_LV2_OPTIONS_INSTANCE as LV2_OPTIONS_INSTANCE, LV2_State_Flags,
     LV2_State_Interface, LV2_State_Retrieve_Function, LV2_State_Status,
     LV2_State_Status_LV2_STATE_ERR_BAD_FLAGS as LV2_STATE_ERR_BAD_FLAGS,
+    LV2_State_Status_LV2_STATE_ERR_BAD_TYPE as LV2_STATE_ERR_BAD_TYPE,
     LV2_State_Status_LV2_STATE_ERR_NO_FEATURE as LV2_STATE_ERR_NO_FEATURE,
     LV2_State_Status_LV2_STATE_ERR_NO_SPACE as LV2_STATE_ERR_NO_SPACE,
     LV2_State_Status_LV2_STATE_ERR_UNKNOWN as LV2_STATE_ERR_UNKNOWN,
@@ -24,15 +25,16 @@ use lv2_sys::{
 
 use crate::audio::clap::StateSave;
 use crate::audio::plugins::{
-    lv2_fixture, param_transfer, AudioThreadScope, LoadedPlugin, Lv2Failure, Outcome, ParamOut,
-    PluginFormat, PluginPref, PluginShared, PluginState, Restore, Saved, MAX_BLOCK, MAX_STATE_BLOB,
+    lv2_fixture, param_transfer, AudioThreadScope, LoadedPlugin, Lv2Failure, Outcome, ParamIds,
+    ParamOut, PluginFormat, PluginPref, PluginShared, PluginState, Restore, Saved, MAX_BLOCK,
+    MAX_STATE_BLOB,
 };
 
 use super::host::{used_uris, HostFeatures, SATISFIED, SUPPORTED};
 use super::instance::{Lv2Core, Lv2Instance, Lv2Loaded};
 use super::module::{native_binary, resolve, Descriptors, Lv2Module};
 use super::ports::{
-    symbol_id, Buffer, PortBuffers, PortKind, PortTable, ScalePoint, ATOM_CAPACITY,
+    symbol_id, Buffer, PortBuffers, PortInfo, PortKind, PortTable, ScalePoint, ATOM_CAPACITY,
 };
 use super::processor::{Lv2Processor, WorkerCallbacks};
 use super::scan::{read_bundle, scan_bundle};
@@ -532,7 +534,7 @@ fn feature_uris(host: &HostFeatures) -> Vec<String> {
 #[test]
 fn every_supported_feature_is_supplied() {
     let rings = Arc::new(WorkerRings::new());
-    let host = HostFeatures::new(48000.0, 512, 8192, Some(Arc::clone(&rings)));
+    let host = HostFeatures::new(48000.0, 512, 8192, Some(Arc::clone(&rings)), true);
     let found = feature_uris(&host);
     for uri in SUPPORTED.iter().filter(|uri| !SATISFIED.contains(uri)) {
         assert!(
@@ -554,18 +556,26 @@ fn every_supported_feature_is_supplied() {
     let schedule = unsafe { &*(data as *const LV2_Worker_Schedule) };
     assert_eq!(schedule.handle, Arc::as_ptr(&rings) as *mut c_void);
 
-    let without_rings = HostFeatures::new(48000.0, 512, 8192, None);
+    let without_rings = HostFeatures::new(48000.0, 512, 8192, None, false);
     assert!(
         !feature_uris(&without_rings)
             .iter()
             .any(|uri| uri.ends_with("worker#schedule")),
         "worker:schedule appeared without rings"
     );
+
+    let without_default = HostFeatures::new(48000.0, 512, 8192, Some(rings), false);
+    assert!(
+        !feature_uris(&without_default)
+            .iter()
+            .any(|uri| uri.contains("state#loadDefaultState")),
+        "state:loadDefaultState was supplied when no default state is restored"
+    );
 }
 
 #[test]
 fn host_features_stay_put_when_the_handle_moves() {
-    let host = HostFeatures::new(48000.0, 512, 8192, None);
+    let host = HostFeatures::new(48000.0, 512, 8192, None, false);
     let before = host.as_ptr();
     let moved = host;
     assert_eq!(moved.as_ptr(), before, "the feature array moved");
@@ -610,7 +620,7 @@ fn the_urid_seeds_cover_every_uri_the_host_uses() {
 
 #[test]
 fn the_host_options_carry_the_block_sizes_and_sample_rate() {
-    let host = HostFeatures::new(48000.0, 512, 8192, None);
+    let host = HostFeatures::new(48000.0, 512, 8192, None, false);
     let map = urid::global();
     let key = |uri: &CStr| map.map(uri);
     let options = host.options();
@@ -628,7 +638,8 @@ fn the_host_options_carry_the_block_sizes_and_sample_rate() {
     assert_eq!(min.subject, 0);
     assert_eq!(min.size, 4);
     assert_eq!(min.type_, int);
-    assert_eq!(unsafe { *(min.value as *const i32) }, 1);
+    // The load calls `run(0)`, so the minimum block length is zero.
+    assert_eq!(unsafe { *(min.value as *const i32) }, 0);
 
     for (uri, expected) in [
         (c"http://lv2plug.in/ns/ext/buf-size#maxBlockLength", 512),
@@ -663,7 +674,7 @@ fn the_host_options_carry_the_block_sizes_and_sample_rate() {
 
 #[test]
 fn the_state_path_callbacks_round_trip_and_free() {
-    let host = HostFeatures::new(48000.0, 512, 8192, None);
+    let host = HostFeatures::new(48000.0, 512, 8192, None, false);
     let (map_path, free_path) = host.paths();
     let input = CString::new("/tmp/RigWerk state/ir.wav").expect("a path");
     unsafe {
@@ -2077,7 +2088,7 @@ fn the_zero_frame_run_is_closed_by_end_run() {
     let core = Arc::new(Lv2Core {
         handle: ptr::null_mut(),
         descriptor: &*descriptor as *const LV2_Descriptor,
-        _features: HostFeatures::new(48_000.0, 8, ATOM_CAPACITY, None),
+        _features: HostFeatures::new(48_000.0, 8, ATOM_CAPACITY, None, false),
         _rings: Arc::new(WorkerRings::new()),
         _bundle_path: CString::default(),
         retired: OnceLock::new(),
@@ -2328,7 +2339,7 @@ const STATE_UNKNOWN_URID: u32 = 0xDEAD_BEEF;
 
 /// The feature array a real load passes to the state calls.
 fn state_host() -> Box<HostFeatures> {
-    HostFeatures::new(48_000.0, 8, ATOM_CAPACITY, None)
+    HostFeatures::new(48_000.0, 8, ATOM_CAPACITY, None, false)
 }
 
 /// Whether `uri` is in the null-terminated feature array `features`.
@@ -2622,6 +2633,256 @@ fn an_lv2_state_blob_round_trips_through_save_and_restore() {
     assert!(
         restored.null_out_pointers_ok,
         "retrieve rejected null out-pointers"
+    );
+}
+
+const STATE_URID_KEY: &CStr = c"http://rigwerk.test/state/urid";
+const STATE_URID_VALUE: &CStr = c"http://rigwerk.test/state/impulse";
+const STATE_LEVEL_KEY: &CStr = c"http://rigwerk.test/state/level";
+const STATE_ATOM_URID: &CStr = c"http://lv2plug.in/ns/ext/atom#URID";
+const STATE_ATOM_FLOAT: &CStr = c"http://lv2plug.in/ns/ext/atom#Float";
+
+static URID_BAD_SIZE: AtomicI32 = AtomicI32::new(i32::MAX);
+static URID_NULL: AtomicI32 = AtomicI32::new(i32::MAX);
+static URID_UNKNOWN: AtomicI32 = AtomicI32::new(i32::MAX);
+static URID_RESTORED: Mutex<Option<(u32, Vec<u8>)>> = Mutex::new(None);
+
+unsafe extern "C" fn urid_state_save(
+    _instance: LV2_Handle,
+    store: LV2_State_Store_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(store) = store else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    let pod = pod_flag();
+    let urid_type = map.map(STATE_ATOM_URID);
+    let id = map.map(STATE_URID_VALUE);
+    let level = 1.25f32.to_ne_bytes();
+    unsafe {
+        store_value(
+            store,
+            handle,
+            map.map(STATE_URID_KEY),
+            &id.to_ne_bytes(),
+            urid_type,
+            pod,
+        );
+        store_value(
+            store,
+            handle,
+            map.map(STATE_LEVEL_KEY),
+            &level,
+            map.map(STATE_ATOM_FLOAT),
+            pod,
+        );
+        URID_BAD_SIZE.store(
+            store_value(
+                store,
+                handle,
+                map.map(STATE_URID_KEY),
+                b"no",
+                urid_type,
+                pod,
+            ) as i32,
+            Ordering::Relaxed,
+        );
+        URID_NULL.store(
+            store(
+                handle,
+                map.map(STATE_URID_KEY),
+                ptr::null(),
+                4,
+                urid_type,
+                pod,
+            ) as i32,
+            Ordering::Relaxed,
+        );
+        URID_UNKNOWN.store(
+            store_value(
+                store,
+                handle,
+                map.map(STATE_URID_KEY),
+                &STATE_UNKNOWN_URID.to_ne_bytes(),
+                urid_type,
+                pod,
+            ) as i32,
+            Ordering::Relaxed,
+        );
+    }
+    LV2_STATE_SUCCESS
+}
+
+unsafe extern "C" fn urid_state_restore(
+    _instance: LV2_Handle,
+    retrieve: LV2_State_Retrieve_Function,
+    handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let Some(retrieve) = retrieve else {
+        return LV2_STATE_ERR_UNKNOWN;
+    };
+    let map = urid::global();
+    let (mut size, mut type_, mut flags) = (0usize, 0u32, 0u32);
+    let value = unsafe {
+        retrieve(
+            handle,
+            map.map(STATE_URID_KEY),
+            &mut size,
+            &mut type_,
+            &mut flags,
+        )
+    };
+    if value.is_null() || size != 4 {
+        return LV2_STATE_ERR_UNKNOWN;
+    }
+    let mut native = [0u8; 4];
+    // SAFETY: the host promises `size` readable bytes, and `size` is 4.
+    native.copy_from_slice(unsafe { std::slice::from_raw_parts(value as *const u8, 4) });
+    let id = u32::from_ne_bytes(native);
+    let level_ptr = unsafe {
+        retrieve(
+            handle,
+            map.map(STATE_LEVEL_KEY),
+            &mut size,
+            &mut type_,
+            &mut flags,
+        )
+    };
+    if level_ptr.is_null() {
+        return LV2_STATE_ERR_UNKNOWN;
+    }
+    // SAFETY: the host promises `size` readable bytes at the returned pointer.
+    let level = unsafe { std::slice::from_raw_parts(level_ptr as *const u8, size) }.to_vec();
+    *URID_RESTORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((id, level));
+    LV2_STATE_SUCCESS
+}
+
+/// One record's type URI and value bytes, walking the blob the state module
+/// writes.  The test owns the layout check so a URID is not compared by its
+/// numeric id.
+fn state_record<'a>(blob: &'a [u8], key: &[u8]) -> (&'a [u8], &'a [u8]) {
+    assert_eq!(&blob[..8], b"RWL2ST01");
+    assert_eq!(
+        u32::from_le_bytes(blob[8..12].try_into().expect("the version")),
+        1
+    );
+    let count = u32::from_le_bytes(blob[12..16].try_into().expect("the count")) as usize;
+    let mut offset = 16;
+    for _ in 0..count {
+        let key_len =
+            u32::from_le_bytes(blob[offset..offset + 4].try_into().expect("a key length")) as usize;
+        offset += 4;
+        let record_key = &blob[offset..offset + key_len];
+        offset += key_len;
+        let type_len =
+            u32::from_le_bytes(blob[offset..offset + 4].try_into().expect("a type length"))
+                as usize;
+        offset += 4;
+        let record_type = &blob[offset..offset + type_len];
+        offset += type_len;
+        offset += 4;
+        let value_len =
+            u32::from_le_bytes(blob[offset..offset + 4].try_into().expect("a value length"))
+                as usize;
+        offset += 4;
+        let value = &blob[offset..offset + value_len];
+        offset += value_len;
+        if record_key == key {
+            return (record_type, value);
+        }
+    }
+    panic!("no state record for {}", String::from_utf8_lossy(key));
+}
+
+#[test]
+fn a_top_level_atom_urid_is_stored_as_its_uri() {
+    let host = state_host();
+    let interface = LV2_State_Interface {
+        save: Some(urid_state_save),
+        restore: Some(urid_state_restore),
+    };
+    let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
+    assert_eq!(
+        u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
+        2,
+        "a URID the map cannot name reached the blob"
+    );
+    assert_eq!(
+        URID_BAD_SIZE.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_BAD_TYPE),
+        "an atom:URID that is not 4 bytes must be a bad type"
+    );
+    assert_eq!(
+        URID_NULL.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_UNKNOWN),
+        "a null atom:URID must be refused"
+    );
+    assert_eq!(
+        URID_UNKNOWN.load(Ordering::Relaxed),
+        status_bits(LV2_STATE_ERR_UNKNOWN),
+        "an unmapped atom:URID must be refused"
+    );
+
+    let saved_id = urid::global().map(STATE_URID_VALUE);
+    let (urid_type, urid_value) = state_record(&bytes, STATE_URID_KEY.to_bytes());
+    assert_eq!(urid_type, STATE_ATOM_URID.to_bytes());
+    assert_eq!(
+        urid_value,
+        STATE_URID_VALUE.to_bytes(),
+        "the blob kept the numeric id"
+    );
+    assert_ne!(
+        urid_value,
+        saved_id.to_ne_bytes().as_slice(),
+        "the stored value is the id from this process"
+    );
+    let (level_type, level_value) = state_record(&bytes, STATE_LEVEL_KEY.to_bytes());
+    assert_eq!(level_type, STATE_ATOM_FLOAT.to_bytes());
+    assert_eq!(level_value, 1.25f32.to_ne_bytes());
+
+    assert!(state::restore(
+        ptr::null_mut(),
+        &interface,
+        &bytes,
+        host.as_ptr()
+    ));
+    let (id, level) = URID_RESTORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("the plugin's restore ran");
+    assert_eq!(
+        id,
+        urid::global().map(STATE_URID_VALUE),
+        "restore handed back a stale id"
+    );
+    assert_eq!(level, 1.25f32.to_ne_bytes());
+
+    // A value that is not URI text refuses the whole blob, the way an
+    // unmappable key does.  The numeric id this process stored is not a URI.
+    let value = STATE_URID_VALUE.to_bytes();
+    let start = bytes
+        .windows(value.len())
+        .position(|window| window == value)
+        .expect("the stored URI");
+    let mut not_utf8 = bytes.clone();
+    not_utf8[start] = 0xff;
+    assert!(
+        !state::restore(ptr::null_mut(), &interface, &not_utf8, host.as_ptr()),
+        "a non-UTF8 atom:URID was restored"
+    );
+    let mut interior_nul = bytes.clone();
+    interior_nul[start] = 0;
+    assert!(
+        !state::restore(ptr::null_mut(), &interface, &interior_nul, host.as_ptr()),
+        "an atom:URID with an interior NUL was restored"
     );
 }
 
@@ -3603,6 +3864,43 @@ fn lv2_fixture_loads_a_sample_through_eg_samplers_worker() {
     assert_eq!(registered_for_test(), 0, "eg-sampler stayed registered");
 }
 
+/// The port an optional port of an unknown kind must be left as: NULL.  LV2
+/// does not allow the host to skip `connect_port` for a declared port.
+#[test]
+fn an_optional_port_of_an_unknown_kind_is_connected_to_null() {
+    static SEEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+    unsafe extern "C" fn connect(_handle: LV2_Handle, _port: u32, data: *mut c_void) {
+        SEEN.store(data as usize, Ordering::SeqCst);
+    }
+
+    let table = PortTable {
+        ports: vec![PortInfo {
+            index: 0,
+            kind: PortKind::Other,
+            input: true,
+            side_chain: false,
+            capacity: 0,
+            default: 0.0,
+        }],
+        ranges: Vec::new(),
+        ids: Arc::new(ParamIds::new(Vec::new())),
+        latency: None,
+    };
+    let mut buffers = PortBuffers::new(&table, 8);
+    let mut descriptor: LV2_Descriptor = unsafe { std::mem::zeroed() };
+    descriptor.connect_port = Some(connect);
+    SEEN.store(1, Ordering::SeqCst);
+    buffers.connect(
+        std::ptr::NonNull::<c_void>::dangling().as_ptr(),
+        &descriptor,
+    );
+    assert_eq!(
+        SEEN.load(Ordering::SeqCst),
+        0,
+        "the port was not connected to NULL"
+    );
+}
+
 // A fake plugin that keeps the bundle path `instantiate` gave it, as LV2
 // allows, and reads it again in `cleanup`.
 static KEPT_PATH: AtomicUsize = AtomicUsize::new(0);
@@ -3891,6 +4189,178 @@ fn a_request_scheduled_before_registration_reaches_work() {
     assert_eq!(registered_for_test(), 0);
 }
 
+/// Responses `work_response` saw during the load's zero-frame run.
+static RESTORE_RESPONSES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// How many responses were already delivered when `run(0)` started.
+static RESPONSES_BEFORE_RUN0: AtomicU32 = AtomicU32::new(u32::MAX);
+/// How many `work` calls `run(0)` itself made.  A request it schedules must
+/// stay queued.
+static WORK_DURING_RUN0: AtomicU32 = AtomicU32::new(u32::MAX);
+static RESTORE_WORK_CALLS: AtomicU32 = AtomicU32::new(0);
+
+static RESTORE_STATE_INTERFACE: LV2_State_Interface = LV2_State_Interface {
+    save: None,
+    restore: Some(restore_schedules_work),
+};
+
+static RESTORE_WORKER_INTERFACE: LV2_Worker_Interface = LV2_Worker_Interface {
+    work: Some(restore_responding_work),
+    work_response: Some(restore_work_response),
+    end_run: None,
+};
+
+unsafe extern "C" fn restore_schedules_work(
+    _instance: LV2_Handle,
+    _retrieve: LV2_State_Retrieve_Function,
+    _handle: lv2_sys::LV2_State_Handle,
+    _flags: u32,
+    _features: *const *const LV2_Feature,
+) -> LV2_State_Status {
+    let _ = schedule_kept(b"from-restore");
+    LV2_STATE_SUCCESS
+}
+
+unsafe extern "C" fn restore_responding_work(
+    _instance: LV2_Handle,
+    respond: LV2_Worker_Respond_Function,
+    handle: LV2_Worker_Respond_Handle,
+    _size: u32,
+    _data: *const c_void,
+) -> LV2_Worker_Status {
+    let call = RESTORE_WORK_CALLS.fetch_add(1, Ordering::SeqCst);
+    if call == 0 {
+        // `work` may schedule another request.  The load drain must run it
+        // before it returns, still before `run(0)`.
+        let _ = schedule_kept(b"follow-up");
+    }
+    let body: &[u8] = if call == 0 { b"loaded" } else { b"again" };
+    match respond {
+        Some(respond) => unsafe {
+            respond(handle, body.len() as u32, body.as_ptr() as *const c_void)
+        },
+        None => LV2_WORKER_ERR_UNKNOWN,
+    }
+}
+
+unsafe extern "C" fn restore_work_response(
+    _handle: LV2_Handle,
+    size: u32,
+    body: *const c_void,
+) -> LV2_Worker_Status {
+    let bytes = if body.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: the host promises `size` readable bytes for the call.
+        unsafe { std::slice::from_raw_parts(body as *const u8, size as usize) }.to_vec()
+    };
+    RESTORE_RESPONSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(bytes);
+    LV2_WORKER_SUCCESS
+}
+
+unsafe extern "C" fn restore_ordering_run(_handle: LV2_Handle, frames: u32) {
+    if frames != 0 {
+        return;
+    }
+    RESPONSES_BEFORE_RUN0.store(
+        RESTORE_RESPONSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len() as u32,
+        Ordering::SeqCst,
+    );
+    let before = RESTORE_WORK_CALLS.load(Ordering::SeqCst);
+    let _ = schedule_kept(b"from-run");
+    WORK_DURING_RUN0.store(
+        RESTORE_WORK_CALLS.load(Ordering::SeqCst) - before,
+        Ordering::SeqCst,
+    );
+}
+
+unsafe extern "C" fn restore_worker_extension(uri: *const std::ffi::c_char) -> *const c_void {
+    let uri = unsafe { CStr::from_ptr(uri) };
+    if uri == c"http://lv2plug.in/ns/ext/worker#interface" {
+        &RESTORE_WORKER_INTERFACE as *const LV2_Worker_Interface as *const c_void
+    } else if uri == c"http://lv2plug.in/ns/ext/state#interface" {
+        &RESTORE_STATE_INTERFACE as *const LV2_State_Interface as *const c_void
+    } else {
+        ptr::null()
+    }
+}
+
+/// A header-only state blob: magic, version 1, no records.  Enough for the
+/// host to call `restore`, which is what schedules the request.
+fn empty_state_blob() -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(b"RWL2ST01");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes
+}
+
+/// A restore that calls `schedule_work` is served before `run(0)`, and the
+/// response is delivered before that run.  A request `run(0)` itself
+/// schedules stays queued.
+#[test]
+fn a_restore_runs_worker_requests_before_the_zero_frame_run() {
+    let _serial = worker_tests();
+    RESTORE_WORK_CALLS.store(0, Ordering::SeqCst);
+    RESPONSES_BEFORE_RUN0.store(u32::MAX, Ordering::SeqCst);
+    WORK_DURING_RUN0.store(u32::MAX, Ordering::SeqCst);
+    RESTORE_RESPONSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+
+    let descriptor = LV2_Descriptor {
+        URI: c"http://example.com/lv2/params".as_ptr(),
+        instantiate: Some(schedule_keeping_instantiate),
+        connect_port: Some(ignored_connect),
+        activate: None,
+        run: Some(restore_ordering_run),
+        deactivate: None,
+        cleanup: None,
+        extension_data: Some(restore_worker_extension),
+    };
+    let pref = PluginPref {
+        state: Some(PluginState::capture(&empty_state_blob(), &[])),
+        ..PluginPref::default()
+    };
+    let shared = Arc::new(PluginShared::new(0));
+    let loaded = Lv2Instance::load_descriptor(
+        &params_bundle(),
+        params_table(),
+        &descriptor,
+        None,
+        None,
+        48_000.0,
+        64,
+        &Restore::from_pref(&pref),
+        &shared,
+    )
+    .expect("load the fake plugin");
+
+    assert_eq!(
+        RESPONSES_BEFORE_RUN0.load(Ordering::SeqCst),
+        2,
+        "work_response did not run before run(0)"
+    );
+    assert_eq!(
+        WORK_DURING_RUN0.load(Ordering::SeqCst),
+        0,
+        "run(0) ran a request it had just scheduled"
+    );
+    let responses = RESTORE_RESPONSES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(responses, [b"loaded".to_vec(), b"again".to_vec()]);
+    drop(loaded);
+    assert_eq!(registered_for_test(), 0);
+}
+
 /// The buffer slot of the range for `symbol`.
 fn table_slot(processor: &Lv2Processor, symbol: &str) -> usize {
     let index = processor
@@ -4133,4 +4603,46 @@ fn a_default_state_restores_as_atoms() {
         Some(("Bool".to_owned(), 1i32.to_ne_bytes().to_vec()))
     );
     assert_eq!(value("#nested"), None, "a blank node value was restored");
+}
+
+/// `state:loadDefaultState` as a required feature with no `state:state` is a
+/// load error.  The same feature listed as optional, with nothing to
+/// restore, is omitted and the load continues.
+#[test]
+fn a_required_load_default_without_state_refuses_the_load() {
+    let bundle = testdata("default-state.lv2");
+    let shared = Arc::new(PluginShared::new(0));
+    let pref = PluginPref::default();
+    let error = match Lv2Instance::load(
+        &bundle,
+        "http://example.com/lv2/required-default",
+        48_000,
+        64,
+        &Restore::from_pref(&pref),
+        &shared,
+    ) {
+        Ok(_) => panic!("a required feature with nothing to restore was instantiated"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("state:loadDefaultState") && error.contains("state:state"),
+        "{error}"
+    );
+
+    let optional = match Lv2Instance::load(
+        &bundle,
+        "http://example.com/lv2/optional-default",
+        48_000,
+        64,
+        &Restore::from_pref(&pref),
+        &shared,
+    ) {
+        Ok(_) => panic!("the optional plugin has no binary"),
+        Err(error) => error,
+    };
+    assert!(
+        !optional.contains("loadDefaultState"),
+        "an optional feature with no state failed the load: {optional}"
+    );
+    assert!(optional.contains("no binary"), "{optional}");
 }
