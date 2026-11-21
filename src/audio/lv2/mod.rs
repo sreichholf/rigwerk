@@ -15,8 +15,9 @@
 //! `host` owns the feature array an instance receives, `worker` holds the
 //! byte rings a worker request crosses and the one process-wide thread that
 //! runs `work` once an instance is registered (a restore's requests run on
-//! the UI thread before that), and `state` turns the plugin's keyed state
-//! properties into the blob the preferences store.
+//! the UI thread before that, and what is left at teardown after it), and
+//! `state` turns the plugin's keyed state properties into the blob the
+//! preferences store.
 
 mod host;
 mod instance;

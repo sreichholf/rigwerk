@@ -10,11 +10,13 @@
 //! One thread, `rigwerk-lv2-worker`, serves every registered instance.  It
 //! takes a snapshot of the registry under the registry lock, drops the lock,
 //! and for each instance takes that instance's gate and drains its requests
-//! into one preallocated buffer.  The UI's `service` unparks it when a ring
-//! is non-empty, so a request waits at most a UI frame; while any instance is
-//! registered it also parks with a timeout as a safety net, never in a busy
-//! loop.  With none registered it parks without a timeout: [`register`]
-//! unparks it, so an idle process has no thread waking up.
+//! into one preallocated buffer.  The UI's `service` unparks it when a
+//! request is waiting, on each frame the UI draws.  An idle UI may not
+//! repaint, so that is not the bound: while any instance is registered the
+//! thread also parks for at most [`PARK_TIMEOUT`], never in a busy loop, and
+//! a request waits at most that long plus the `work` calls ahead of it.
+//! With none registered it parks without a timeout: [`register`] unparks
+//! it, so an idle process has no thread waking up.
 //!
 //! Thread rules: `work` runs on the worker thread, one call per instance at
 //! a time, never concurrently with `deactivate`/`cleanup` after
@@ -23,10 +25,16 @@
 //! registered and before any `run`, so nothing else is inside the plugin
 //! then.  [`unregister`] (UI thread) marks the instance removed, takes it
 //! out of the registry and then waits on its gate, so a `work` already
-//! inside finishes before the caller may clean the plugin up; it then serves
-//! the requests still queued itself, since an accepted request must reach
-//! `work`.  The worker thread is a non-realtime context: a plugin's `work`
-//! may lock, allocate and read files there.
+//! inside finishes before the caller may clean the plugin up.  It then
+//! finishes the exchange itself, before `deactivate`: `worker.h` says an
+//! accepted request must reach `work` and an accepted response must reach
+//! `work_response`, so it serves the queued requests and delivers the
+//! responses, in rounds, until both rings are empty (bounded by
+//! [`TEARDOWN_ROUNDS`]).  `work_response` and `end_run` are audio-class
+//! calls, not audio-thread ones; the processor is gone by then, so no `run`
+//! or other audio-class call can be inside, as at the load's zero-frame
+//! run.  The worker thread is a non-realtime context: a plugin's `work` may
+//! lock, allocate and read files there.
 //!
 //! The thread runs for the life of the process and is never shut down.  Its
 //! handle is set once, so a thread that exits could not be restarted; the
@@ -38,7 +46,9 @@
 //! publishes the tail.  A message that does not fit whole is refused, never
 //! truncated.  The response ring's producer is the worker thread after
 //! registration.  At load, before that, the UI thread writes the responses
-//! for the requests it drained and reads them back before `run(0)`.
+//! for the requests it drained and reads them back before `run(0)`.  At
+//! teardown, once the processor is gone and the worker thread is out, the
+//! UI thread is both its producer and its consumer.
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
@@ -88,8 +98,10 @@ struct MessageRing {
 // has two possible producers (the audio thread and, during a restore, the
 // UI thread); `WorkerRings::scheduling` serialises them before either
 // writes, so it is still one producer at a time.  The response ring is
-// written by the worker thread, and at load by the UI thread before the
-// instance is registered, so those two writers never overlap.
+// written by the worker thread, and by the UI thread at load before the
+// instance is registered and at teardown after `unregister` shut the worker
+// thread out, so those writers never overlap.  Its reader is the processor,
+// or the UI thread when no processor exists.
 unsafe impl Sync for MessageRing {}
 
 // SAFETY: sending the ring moves the `Box` that owns the buffer with it, and
@@ -340,19 +352,20 @@ pub(super) unsafe extern "C" fn schedule_work(
 }
 
 /// How long the worker thread sits parked when no one wakes it while an
-/// instance is registered.  It is the safety net for a wake that raced a
-/// request; the UI's `service` wakes it as soon as a request exists, so this
-/// is only a fallback.
+/// instance is registered.  It bounds how long a request waits when the UI
+/// draws no frame (an idle UI may not repaint), and it is the safety net for
+/// a wake that raced a request.
 const PARK_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// One registered plugin instance, as the worker thread sees it.
 ///
-/// Thread rules: `handle` and `interface` are dereferenced only on the worker
-/// thread, inside `work`, and only while `removed` is false and the instance's
-/// `gate` is held.  The UI thread sets `removed` and then waits on `gate`
-/// before it may call `deactivate`, `cleanup` or unload the module, so a
-/// `work` already inside finishes first.  `rings` is shared with the schedule
-/// feature and the processor.
+/// Thread rules: `handle` and `interface` are dereferenced only while the
+/// instance's `gate` is held: on the worker thread, inside `work`, while
+/// `removed` is false, and in [`unregister`] on the UI thread, which sets
+/// `removed` and then waits on `gate` before it finishes the exchange.  Only
+/// then may the caller call `deactivate`, `cleanup` or unload the module, so
+/// a `work` already inside finishes first.  `rings` is shared with the
+/// schedule feature and the processor.
 pub(crate) struct WorkerInstance {
     /// The instance `work` is called on.  Kept by [`super::instance::Lv2Core`]
     /// until after [`unregister`].
@@ -459,7 +472,8 @@ pub(crate) fn register(
 }
 
 /// Wakes the worker thread when `instance` has a request waiting.  UI thread
-/// (the per-frame service) and tests; a request waits at most a UI frame.
+/// (the per-frame service) and tests.  It only shortens the wait: a frame
+/// the UI does not draw wakes nothing, and then [`PARK_TIMEOUT`] bounds it.
 pub(crate) fn wake(instance: &WorkerInstance) {
     if instance.removed.load(Ordering::Acquire) {
         return;
@@ -471,24 +485,32 @@ pub(crate) fn wake(instance: &WorkerInstance) {
     }
 }
 
-/// Takes `instance` out of the worker's reach.  UI thread, before
-/// `deactivate`/`cleanup`: once this returns, no `work` call is inside or can
-/// start, so the plugin may be cleaned up and its module unloaded.
+/// Takes `instance` out of the worker's reach and finishes its exchange.  UI
+/// thread, from the core's drop, once the processor is gone and before
+/// `deactivate`/`cleanup`: once this returns, no `work` call is inside or
+/// can start, so the plugin may be cleaned up and its module unloaded.
 ///
-/// Requests still queued are served here, under the gate: `worker.h` says a
-/// request `schedule_work` accepted must reach `work`, and a plugin often
-/// frees what it replaced that way, so dropping them would leak.  Their
-/// responses are never delivered, since no `run` follows.
+/// What is still queued is finished here, under the gate.  `worker.h` says
+/// a request `schedule_work` accepted must reach `work`, and a response
+/// `respond` accepted must reach `work_response`; a plugin often frees what
+/// it replaced that way (`eg-sampler` answers a loaded sample by scheduling
+/// the old one's free), so dropping either would leak.  Each round serves
+/// every queued request, then delivers every response and calls `end_run`,
+/// which `worker.h` makes the hook for "all responses for this cycle have
+/// been delivered".  A response may schedule another request, so the rounds
+/// go on until both rings are empty.  A plugin still exchanging messages
+/// after [`TEARDOWN_ROUNDS`] has the rest dropped, with one log line, and
+/// whatever they held leaks.
 ///
 /// The registry lock is not held while waiting: the worker thread takes it
 /// only to copy the registry, never while it calls a plugin.
 ///
 /// The UI thread is blocked for as long as the `work` call already inside
-/// takes, plus the queued requests (at most a ring's worth).  That is the
-/// price of the teardown order: a request served after this returned could
-/// reach a plugin that is being cleaned up.  `work` is meant for bounded
-/// jobs (loading or freeing a sample), so the wait is the plugin's own
-/// latency, paid once, when the effect is removed.
+/// takes, plus the queued messages.  That is the price of the teardown
+/// order: a request served after this returned could reach a plugin that
+/// is being cleaned up.  `work` is meant for bounded jobs (loading or
+/// freeing a sample), so the wait is the plugin's own latency, paid once,
+/// when the effect is removed.
 pub(crate) fn unregister(instance: &Arc<WorkerInstance>) {
     instance.removed.store(true, Ordering::Release);
     registry().retain(|registered| !Arc::ptr_eq(registered, instance));
@@ -501,11 +523,58 @@ pub(crate) fn unregister(instance: &Arc<WorkerInstance>) {
         .gate
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if instance.rings.request_pending() {
-        let mut request = vec![0u8; RING_BYTES];
-        // SAFETY: the gate is held and the core has not cleaned the plugin
-        // up yet, as in the worker thread's own call.
-        unsafe { serve(instance, &mut request) };
+    if instance.rings.request_pending() || instance.rings.response_pending() {
+        let mut message = vec![0u8; RING_BYTES];
+        // SAFETY: the gate is held, the core has neither deactivated nor
+        // cleaned the plugin up, and the processor is gone, so no `run` can
+        // be inside.
+        unsafe { finish(instance, &mut message) };
+    }
+}
+
+/// How many rounds of requests and responses [`unregister`] runs before it
+/// gives up on a plugin that keeps answering a response with a new request.
+/// `eg-sampler`'s exchange (load, then free the old sample) takes one.
+pub(super) const TEARDOWN_ROUNDS: usize = 64;
+
+/// Serves `instance`'s queued requests and delivers its responses, in
+/// rounds, until both rings are empty or [`TEARDOWN_ROUNDS`] rounds ran.
+/// `message` is a whole ring.
+///
+/// # Safety
+///
+/// The caller holds the instance's gate.  The plugin is active, neither
+/// deactivated nor cleaned up, its module is loaded, and no `run` or other
+/// audio-class call can be inside it.
+unsafe fn finish(instance: &WorkerInstance, message: &mut [u8]) {
+    // SAFETY: `register` refused a null interface, and the module the core
+    // keeps loaded owns it.
+    let interface = unsafe { &*instance.interface };
+    let mut rounds = 0;
+    loop {
+        // SAFETY: the caller's contract, which is `serve`'s.
+        unsafe { serve(instance, message) };
+        if !instance.rings.response_pending() {
+            return;
+        }
+        if rounds == TEARDOWN_ROUNDS {
+            eprintln!(
+                "[plugins] an LV2 plugin still exchanged worker messages at teardown; the rest are dropped"
+            );
+            return;
+        }
+        rounds += 1;
+        super::processor::deliver_responses(
+            instance.handle,
+            &instance.rings,
+            message,
+            interface.work_response,
+        );
+        if let Some(end_run) = interface.end_run {
+            // SAFETY: audio-class, and the caller guarantees no other
+            // audio-class call is inside the plugin.
+            unsafe { end_run(instance.handle) };
+        }
     }
 }
 

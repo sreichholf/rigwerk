@@ -326,11 +326,14 @@ pub(crate) fn file_uri(path: &Path) -> String {
 
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
-/// The path a `file://` URI names.  Linux `/usr/...` and the Windows
-/// `file:///C:/Program Files/...` form are both accepted; a URI with a host,
-/// another scheme, or a relative path is refused.  `.` and `..` are resolved
-/// lexically, so a path compared against a bundle folder cannot climb out
-/// of it with `bundle/../elsewhere`.
+/// The path a `file:` URI names.  Linux `/usr/...` and the Windows
+/// `file:///C:/Program Files/...` form are both accepted.  RFC 8089 reads an
+/// empty authority, `localhost` (case-insensitive, as every host is) and no
+/// authority at all (`file:/usr/...`) as the local machine, so those three
+/// name the same path; a URI with another host, another scheme, or a
+/// relative path is refused.  `.` and `..` are resolved lexically, so a path
+/// compared against a bundle folder cannot climb out of it with
+/// `bundle/../elsewhere`.
 pub(crate) fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
     let Some(scheme) = uri.get(..5) else {
         return Err(format!("not a file URI: {uri}"));
@@ -338,13 +341,25 @@ pub(crate) fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
     if !scheme.eq_ignore_ascii_case("file:") {
         return Err(format!("not a file URI: {uri}"));
     }
-    let Some(rest) = uri[5..].strip_prefix("//") else {
-        return Err(format!("not an absolute file URI: {uri}"));
+    let rest = &uri[5..];
+    let path = match rest.strip_prefix("//") {
+        Some(authority_and_path) => {
+            let (authority, path) = authority_and_path
+                .find('/')
+                .map_or((authority_and_path, ""), |slash| {
+                    authority_and_path.split_at(slash)
+                });
+            if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+                return Err(format!("a file URI with a host is not supported: {uri}"));
+            }
+            path
+        }
+        None => rest,
     };
-    if !rest.starts_with('/') {
-        return Err(format!("a file URI with a host is not supported: {uri}"));
+    if !path.starts_with('/') {
+        return Err(format!("not an absolute file URI: {uri}"));
     }
-    let decoded = percent_decode(rest)?;
+    let decoded = percent_decode(path)?;
     // `file:///C:/...` keeps the drive letter; the leading slash is the URI's
     // root, not part of the Windows path.
     let bytes = decoded.as_bytes();

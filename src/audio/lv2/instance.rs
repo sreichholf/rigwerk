@@ -22,8 +22,11 @@
 //! process-wide worker thread (`worker.rs`) only once this load has
 //! registered the instance, and the core unregisters it before
 //! `deactivate`/`cleanup`, so no `work` can reach a plugin that is being torn
-//! down.  There is no restart: LV2 has no call that asks for one, and a new
-//! sample rate loads a new instance.
+//! down.  Unregistering serves the requests still queued and delivers the
+//! responses still queued through `work_response`, as `worker.h` requires;
+//! the processor is gone by then, so no `run` is inside.  There is no
+//! restart: LV2 has no call that asks for one, and a new sample rate loads a
+//! new instance.
 //!
 //! The instance's values are native per range.  Restored values are written
 //! straight into the control buffers before activation, so the plugin sees
@@ -107,7 +110,9 @@ impl Drop for Lv2Core {
     fn drop(&mut self) {
         // The worker thread must not be inside `work` when the plugin is
         // deactivated, cleaned up and its module unloaded.  `unregister`
-        // waits out an in-flight call; this runs on the UI thread.
+        // waits out an in-flight call, then serves what is queued and
+        // delivers the responses while the plugin is still active; this
+        // runs on the UI thread, and the processor is gone.
         if let Some(worker) = self.worker.get() {
             worker::unregister(worker);
         }
@@ -217,15 +222,9 @@ impl Lv2Instance {
             f64::from(sample_rate)
         };
         let table = PortTable::read_store(&store, &plugins, plugin_uri, rate.round() as u32)?;
+        // `read_store` already refused a required `state:loadDefaultState`
+        // with no state to load; an optional one with none omits the feature.
         let default_state = state::default_state(&store, plugin_uri);
-        // A required feature this load cannot meet must fail before
-        // instantiate.  An optional one with no state just omits the feature.
-        if default_state.is_none() && state::requires_load_default(&store, plugin_uri) {
-            return Err(
-                "The LV2 plugin requires state:loadDefaultState, but its bundle has no state:state to restore."
-                    .to_owned(),
-            );
-        }
         let binary = module::native_binary(&store, plugin_uri, bundle)?;
         let module = module::acquire_module(&binary, &trailing_separator(bundle))?;
         let descriptor = module
@@ -533,9 +532,9 @@ impl Lv2Instance {
     }
 
     /// Wakes the process-wide worker thread when this instance has a request
-    /// waiting, so a request waits at most one UI frame.  UI thread, once
-    /// per frame; a request the thread's timeout would find anyway is not
-    /// delayed by it.
+    /// waiting, so the request need not wait for the thread's park timeout.
+    /// UI thread, once per frame drawn.  An idle UI may not repaint; then
+    /// that timeout is what bounds the wait.
     pub(crate) fn service_worker(&self) {
         if let Some(worker) = self.core.worker.get() {
             worker::wake(worker);

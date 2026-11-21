@@ -37,6 +37,11 @@ lv2-sys = "2.0.0"
 # `lilv`.  Only the sync parser is used.
 oxttl = { version = "0.2.5", default-features = false }
 libloading = "0.8"
+# The C heap that LV2 `state:mapPath` strings come from (a plugin may free
+# them with `free()`).  On Linux also the netlink uevent socket for
+# sound-card add/remove and poll() for the fds a CLAP plugin registers; no
+# libudev.
+libc = "0.2"
 nam-rs = "0.4"
 # WAV reader for cabinet impulse responses.  The UI thread is the only
 # caller; the audio callback never opens a file.
@@ -77,9 +82,6 @@ windows = { version = "0.62", features = [
 # above, so X11 and Wayland are switched back on here.
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["x11", "wayland"] }
-# Netlink uevent socket for sound-card add/remove, and poll() for the fds a
-# CLAP plugin registers. No libudev.
-libc = "0.2"
 # The X11 window a plugin editor embeds in.
 xcb = "1.7"
 # Native PipeWire client. The ALSA `pipewire` plugin is not the Linux path.

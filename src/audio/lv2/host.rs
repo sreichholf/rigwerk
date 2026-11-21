@@ -9,12 +9,14 @@
 //! here), `options:options` (the block bounds, the sequence size and the
 //! sample rate), `buf-size:boundedBlockLength`, `worker:schedule` when the
 //! instance has rings, and `state:mapPath`/`state:freePath` as identity
-//! paths.  `state:loadDefaultState` (no data) is supplied only when the
-//! bundle has a `state:state`.  A saved blob still gets the feature: that
-//! blob is the restore before `run`, and a plugin that requires the feature
-//! must see it at instantiate.  It stays in [`SUPPORTED`], so a plugin that
-//! requires it is still allowed by the scan; a required feature with no
-//! state to restore fails the load instead of instantiating without it.
+//! paths.  A mapped path is a C-heap copy, so a plugin may release it with
+//! `free()` (the contract before 1.18) or with `state:freePath`.
+//! `state:loadDefaultState` (no data) is supplied only when the bundle has a
+//! `state:state`.  A saved blob still gets the feature: that blob is the
+//! restore before `run`, and a plugin that requires the feature must see it
+//! at instantiate.  It stays in [`SUPPORTED`], so a plugin that requires it
+//! is still allowed by the scan; a required feature with no state to restore
+//! fails the load instead of instantiating without it.
 //! `buf-size:minBlockLength` is 0, because the load calls
 //! `run(handle, 0)` and the buf-size spec allows a minimum of zero.  There
 //! is no `buf-size:nominalBlockLength`: a plugin runs the bridge's block,
@@ -23,7 +25,8 @@
 //! `worker:schedule` is supplied holds for every load; its `schedule_work`
 //! refuses requests until the load has found the plugin's `work`.  `log:log`
 //! is not supplied: its variadic callbacks cannot be written in stable Rust.
-//! The scan refuses a plugin that requires a feature outside [`SUPPORTED`].
+//! A plugin that requires a feature outside [`SUPPORTED`] is still listed by
+//! the scan, with a scan error, and the loader refuses to instantiate it.
 //!
 //! Three core features carry no data and are met by how the host runs a
 //! plugin, so they are accepted as required but not put in the array, as
@@ -309,9 +312,16 @@ fn option<T>(key: LV2_URID, type_: LV2_URID, size: u32, value: *const T) -> LV2_
     }
 }
 
-/// `state:mapPath` identity: duplicate the absolute path and hand it out
-/// raw.  Only called by the plugin from inside a state call, on the UI
-/// thread, never from `run`, so the copy needs no lock.
+/// `state:mapPath` identity: hand out a copy of `path` on the C heap.
+/// Only called by the plugin from inside a state call, on the UI thread,
+/// never from `run`, so the copy needs no lock.
+///
+/// The copy comes from `malloc`, never from Rust's allocator: `state.h`
+/// before 1.18 says the caller frees the returned path "with free()", and
+/// a plugin written to it (LV2's own `eg-sampler` and `eg-params` still
+/// are) never calls `state:freePath`.  A null return is the allocation
+/// failure `malloc` reports; the plugin sees no path.  Not `strdup`:
+/// the MSVC C runtime only exports it as `_strdup`.
 unsafe extern "C" fn map_path(
     _handle: LV2_State_Map_Path_Handle,
     path: *const c_char,
@@ -319,14 +329,23 @@ unsafe extern "C" fn map_path(
     if path.is_null() {
         return ptr::null_mut();
     }
-    let owned = unsafe { CStr::from_ptr(path) }.to_owned();
-    owned.into_raw()
+    // SAFETY: the plugin passes a null-terminated string, live for the
+    // call; the copy is the string and its NUL, into a fresh allocation of
+    // exactly that size.
+    unsafe {
+        let size = CStr::from_ptr(path).to_bytes_with_nul().len();
+        let copy = libc::malloc(size).cast::<c_char>();
+        if !copy.is_null() {
+            ptr::copy_nonoverlapping(path, copy, size);
+        }
+        copy
+    }
 }
 
-/// `state:freePath`: reclaim a path [`map_path`] handed out.
+/// `state:freePath`: release a path [`map_path`] handed out, with the C
+/// `free` it was allocated for, so either way of freeing it is the same.
 unsafe extern "C" fn free_path(_handle: LV2_State_Free_Path_Handle, path: *mut c_char) {
-    if path.is_null() {
-        return;
-    }
-    drop(unsafe { CString::from_raw(path) });
+    // SAFETY: `path` came from `map_path`'s `malloc`, or is null, which
+    // `free` ignores.
+    unsafe { libc::free(path.cast()) };
 }

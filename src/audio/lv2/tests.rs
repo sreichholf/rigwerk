@@ -43,7 +43,7 @@ use super::ttl::{file_uri, lexical, path_from_file_uri, TtlStore};
 use super::urid;
 use super::worker::{
     hold_gate, loops_for_test, register, registered_for_test, respond, schedule_struct, unregister,
-    wake, WorkerRings, RING_BYTES,
+    wake, WorkerRings, RING_BYTES, TEARDOWN_ROUNDS,
 };
 
 const LV2_PLUGIN: &str = "http://lv2plug.in/ns/lv2core#Plugin";
@@ -313,6 +313,172 @@ fn a_uri_that_is_not_a_file_is_refused() {
     assert!(path_from_file_uri("plugin.ttl").is_err());
     assert!(path_from_file_uri("file://server/share/plugin.ttl").is_err());
     assert!(path_from_file_uri("file:///bad%zz.ttl").is_err());
+}
+
+/// RFC 8089: an empty authority, `localhost` and no authority at all all
+/// name the local machine.  Another host is still refused.
+#[test]
+fn a_localhost_file_uri_names_the_same_path() {
+    let local = path_from_file_uri("file:///lv2/amp.lv2/amp.so").expect("an empty authority");
+    for uri in [
+        "file://localhost/lv2/amp.lv2/amp.so",
+        "file://LocalHost/lv2/amp.lv2/amp.so",
+        "file:/lv2/amp.lv2/amp.so",
+    ] {
+        assert_eq!(path_from_file_uri(uri).as_ref(), Ok(&local), "{uri}");
+    }
+    assert!(path_from_file_uri("file://localhost").is_err());
+    assert!(path_from_file_uri("file://localhost.example/lv2/amp.so").is_err());
+    assert!(path_from_file_uri("file:lv2/amp.so").is_err());
+}
+
+const FIX_B_REFUSED: &str = "http://example.com/lv2/fix-b/";
+
+/// The error `Lv2Instance::load` gives for `uri`.  Every plugin it is used
+/// on is refused before its (empty) binary would be opened.
+fn fix_b_load_error(bundle: &std::path::Path, uri: &str) -> String {
+    let shared = Arc::new(PluginShared::new(0));
+    let pref = PluginPref::default();
+    match Lv2Instance::load(bundle, uri, 48_000, 64, &Restore::from_pref(&pref), &shared) {
+        Ok(_) => panic!("{uri} was loaded"),
+        Err(error) => error,
+    }
+}
+
+/// Every plugin the loader refuses for its Turtle is listed, and its scan
+/// error is the loader's own error, word for word.
+#[test]
+fn a_plugin_the_loader_refuses_is_listed_with_the_loaders_error() {
+    let bundle = testdata("fix-b-refused.lv2");
+    let listed = scan_bundle(&bundle).expect("scan the bundle");
+    let cases = [
+        ("untyped", "no port type RigWerk can connect"),
+        ("no-index", "no valid lv2:index"),
+        ("bad-index", "no valid lv2:index"),
+        ("duplicate-index", "the port index 1 twice"),
+        ("both-directions", "both an input and an output"),
+        ("no-direction", "neither an input nor an output"),
+        ("unreadable-bound", "unreadable"),
+        ("nonfinite-bound", "non-finite"),
+        ("unreadable-minimum-size", "unreadable rsz:minimumSize"),
+        ("huge-minimum-size", "asks for a buffer of more than"),
+        ("chunk-port", "only takes atom:Chunk"),
+        ("required-default", "state:loadDefaultState"),
+    ];
+    assert_eq!(listed.len(), cases.len() + 2, "every plugin is listed");
+    for (name, expected) in cases {
+        let uri = format!("{FIX_B_REFUSED}{name}");
+        let candidate = listed
+            .iter()
+            .find(|candidate| candidate.plugin_uri == uri)
+            .unwrap_or_else(|| panic!("{uri} is not listed"));
+        let scan_error = candidate
+            .scan_error
+            .clone()
+            .unwrap_or_else(|| panic!("{uri} has no scan error"));
+        assert!(scan_error.contains(expected), "{uri}: {scan_error}");
+        assert_eq!(fix_b_load_error(&bundle, &uri), scan_error, "{uri}");
+    }
+}
+
+/// More ports than the table takes, and more audio ports than the chain
+/// wires, are listed with the loader's error too.
+#[test]
+fn a_plugin_over_a_port_limit_is_listed_with_the_loaders_error() {
+    let base = std::env::temp_dir().join(format!("rigwerk-lv2-fix-b-{}", std::process::id()));
+    let audio = |first: u32, count: u32, direction: &str| -> Vec<String> {
+        (first..first + count)
+            .map(|index| {
+                format!(
+                    r#"[ a lv2:{direction}, lv2:AudioPort ; lv2:index {index} ; lv2:symbol "a{index}" ]"#
+                )
+            })
+            .collect()
+    };
+    let controls = |first: u32, count: u32| -> Vec<String> {
+        (first..first + count)
+            .map(|index| {
+                format!(
+                    r#"[ a lv2:InputPort, lv2:ControlPort ; lv2:index {index} ; lv2:symbol "c{index}" ]"#
+                )
+            })
+            .collect()
+    };
+    let mut many_ports = audio(0, 1, "InputPort");
+    many_ports.extend(audio(1, 1, "OutputPort"));
+    many_ports.extend(controls(2, 511));
+    let mut many_audio = audio(0, 33, "InputPort");
+    many_audio.extend(audio(33, 1, "OutputPort"));
+    for (name, ports, expected) in [
+        ("many-ports", many_ports, "more than 512 ports"),
+        (
+            "many-audio",
+            many_audio,
+            "more than 32 audio inputs or outputs",
+        ),
+    ] {
+        let bundle = base.join(format!("{name}.lv2"));
+        std::fs::create_dir_all(&bundle).expect("create the bundle");
+        let binary = format!("plugin.{}", super::scan::PLATFORM_BINARY_EXTENSION);
+        std::fs::write(bundle.join(&binary), b"").expect("write the binary");
+        let uri = format!("{FIX_B_REFUSED}{name}");
+        std::fs::write(
+            bundle.join("manifest.ttl"),
+            format!(
+                "@prefix lv2: <http://lv2plug.in/ns/lv2core#> .\n<{uri}> a lv2:Plugin ;\n    lv2:binary <{binary}> ;\n    lv2:port {} .\n",
+                ports.join(",\n        ")
+            ),
+        )
+        .expect("write the manifest");
+        let listed = scan_bundle(&bundle).expect("scan the bundle");
+        assert_eq!(listed.len(), 1, "{name} is listed");
+        let scan_error = listed[0]
+            .scan_error
+            .clone()
+            .unwrap_or_else(|| panic!("{name} has no scan error"));
+        assert!(scan_error.contains(expected), "{name}: {scan_error}");
+        assert_eq!(fix_b_load_error(&bundle, &uri), scan_error, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Every plugin-level reason is named, then the port the loader cannot
+/// connect, in the scan and at load alike.
+#[test]
+fn every_reason_a_plugin_is_refused_for_is_named() {
+    let bundle = testdata("fix-b-refused.lv2");
+    let uri = format!("{FIX_B_REFUSED}three-reasons");
+    let expected = "Needs a fixed block length; \
+        The LV2 plugin requires state:loadDefaultState, but its bundle has no state:state to restore.; \
+        The LV2 port \"Gain\" has no valid lv2:index.";
+    let listed = scan_bundle(&bundle).expect("scan the bundle");
+    let candidate = listed
+        .iter()
+        .find(|candidate| candidate.plugin_uri == uri)
+        .expect("listed");
+    assert_eq!(candidate.scan_error.as_deref(), Some(expected));
+    assert_eq!(fix_b_load_error(&bundle, &uri), expected);
+}
+
+/// An `lv2:sampleRate` bound far past a float is kept in a float's range at
+/// every rate, so whether the plugin loads never depends on the rate.
+#[test]
+fn a_scaled_bound_stays_in_a_floats_range_at_every_rate() {
+    let bundle = testdata("fix-b-refused.lv2");
+    let uri = format!("{FIX_B_REFUSED}scaled-bound");
+    let listed = scan_bundle(&bundle).expect("scan the bundle");
+    let candidate = listed
+        .iter()
+        .find(|candidate| candidate.plugin_uri == uri)
+        .expect("listed");
+    assert_eq!(candidate.scan_error, None);
+    for rate in [1, 8_000, 48_000, 768_000, u32::MAX] {
+        let table = PortTable::read(&bundle, &uri, rate).expect("accepted at every rate");
+        let range = range_named(&table, "Frequency");
+        assert_eq!(range.max, f64::from(f32::MAX), "{rate}");
+        assert_eq!(range.default, f64::from(f32::MAX), "{rate}");
+        assert!(table.ports[2].default.is_finite(), "{rate}");
+    }
 }
 
 #[test]
@@ -4645,4 +4811,230 @@ fn a_required_load_default_without_state_refuses_the_load() {
         "an optional feature with no state failed the load: {optional}"
     );
     assert!(optional.contains("no binary"), "{optional}");
+}
+
+#[test]
+fn a_mapped_path_is_c_heap_that_free_or_free_path_releases() {
+    let host = HostFeatures::new(48000.0, 512, 8192, None, false);
+    let (map_path, free_path) = host.paths();
+    let input = CString::new("/tmp/RigWerk state/sample.wav").expect("a path");
+    unsafe {
+        let abstract_path = map_path.abstract_path.expect("abstract_path");
+        let absolute_path = map_path.absolute_path.expect("absolute_path");
+        // A plugin written to `state.h` before 1.18 frees with `free()`.
+        let by_free = abstract_path(map_path.handle, input.as_ptr());
+        assert!(!by_free.is_null());
+        assert_eq!(CStr::from_ptr(by_free), input.as_c_str());
+        libc::free(by_free.cast());
+        let by_free = absolute_path(map_path.handle, input.as_ptr());
+        assert!(!by_free.is_null());
+        libc::free(by_free.cast());
+        // One written to 1.18 frees with `state:freePath`.
+        let by_feature = absolute_path(map_path.handle, input.as_ptr());
+        assert!(!by_feature.is_null());
+        assert_eq!(CStr::from_ptr(by_feature), input.as_c_str());
+        (free_path.free_path.expect("free_path"))(free_path.handle, by_feature);
+    }
+}
+
+/// What a teardown fake's instance handle points at: the schedule feature
+/// its `work_response` answers with, as `eg-sampler` schedules the old
+/// sample's free from the response that installs the new one.
+struct TeardownPlugin {
+    schedule: LV2_Worker_Schedule,
+}
+
+/// Every call the teardown fakes saw, in order.
+static TEARDOWN_CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn teardown_log(entry: String) {
+    TEARDOWN_CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(entry);
+}
+
+unsafe fn teardown_bytes(size: u32, data: *const c_void) -> String {
+    if data.is_null() {
+        return String::new();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// `work` that answers "load" with the new sample and frees nothing back.
+unsafe extern "C" fn teardown_work(
+    _instance: LV2_Handle,
+    respond: LV2_Worker_Respond_Function,
+    handle: LV2_Worker_Respond_Handle,
+    size: u32,
+    data: *const c_void,
+) -> LV2_Worker_Status {
+    let message = unsafe { teardown_bytes(size, data) };
+    teardown_log(format!("work {message}"));
+    if message == "load" {
+        let sample = b"new sample";
+        return match respond {
+            Some(respond) => unsafe {
+                respond(
+                    handle,
+                    sample.len() as u32,
+                    sample.as_ptr() as *const c_void,
+                )
+            },
+            None => LV2_WORKER_ERR_UNKNOWN,
+        };
+    }
+    LV2_WORKER_SUCCESS
+}
+
+/// `work_response` that installs the sample and schedules the old one's free.
+unsafe extern "C" fn teardown_work_response(
+    instance: LV2_Handle,
+    size: u32,
+    body: *const c_void,
+) -> LV2_Worker_Status {
+    let message = unsafe { teardown_bytes(size, body) };
+    teardown_log(format!("response {message}"));
+    let plugin = unsafe { &*(instance as *const TeardownPlugin) };
+    let free = b"free old sample";
+    let schedule = plugin.schedule.schedule_work.expect("schedule_work");
+    unsafe {
+        schedule(
+            plugin.schedule.handle,
+            free.len() as u32,
+            free.as_ptr() as *const c_void,
+        )
+    }
+}
+
+unsafe extern "C" fn teardown_end_run(_instance: LV2_Handle) -> LV2_Worker_Status {
+    teardown_log("end_run".to_owned());
+    LV2_WORKER_SUCCESS
+}
+
+/// `worker.h`: a response `respond` accepted must reach `work_response`.
+/// The gate keeps the worker thread out, so the load request, its response
+/// and the free that response schedules are all finished by `unregister`.
+#[test]
+fn unregister_delivers_the_responses_and_serves_what_they_schedule() {
+    let _serial = worker_tests();
+    TEARDOWN_CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    let rings = Arc::new(WorkerRings::new());
+    rings.accept_requests();
+    let plugin = Box::new(TeardownPlugin {
+        schedule: schedule_struct(&rings),
+    });
+    let interface = LV2_Worker_Interface {
+        work: Some(teardown_work),
+        work_response: Some(teardown_work_response),
+        end_run: Some(teardown_end_run),
+    };
+    let handle = &*plugin as *const TeardownPlugin as LV2_Handle;
+    let instance = register(handle, &interface, Arc::clone(&rings)).expect("register");
+
+    let gate = hold_gate(&instance);
+    assert!(rings.push_request(b"load"));
+    let removing = {
+        let instance = Arc::clone(&instance);
+        std::thread::spawn(move || unregister(&instance))
+    };
+    while registered_for_test() != 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(gate);
+    removing.join().expect("unregister");
+
+    let calls = TEARDOWN_CALLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        calls,
+        [
+            "work load",
+            "response new sample",
+            "end_run",
+            "work free old sample"
+        ],
+        "the teardown did not finish the exchange in order"
+    );
+    assert!(!rings.request_pending());
+    assert!(!rings.response_pending());
+}
+
+/// How many `work` calls the endless fake has seen.
+static ENDLESS_WORK: AtomicU32 = AtomicU32::new(0);
+
+/// `work` that always answers.
+unsafe extern "C" fn endless_work(
+    _instance: LV2_Handle,
+    respond: LV2_Worker_Respond_Function,
+    handle: LV2_Worker_Respond_Handle,
+    _size: u32,
+    _data: *const c_void,
+) -> LV2_Worker_Status {
+    ENDLESS_WORK.fetch_add(1, Ordering::SeqCst);
+    let again = b"again";
+    match respond {
+        Some(respond) => unsafe { respond(handle, again.len() as u32, again.as_ptr().cast()) },
+        None => LV2_WORKER_ERR_UNKNOWN,
+    }
+}
+
+/// `work_response` that always schedules another request.
+unsafe extern "C" fn endless_work_response(
+    instance: LV2_Handle,
+    _size: u32,
+    _body: *const c_void,
+) -> LV2_Worker_Status {
+    let plugin = unsafe { &*(instance as *const TeardownPlugin) };
+    let schedule = plugin.schedule.schedule_work.expect("schedule_work");
+    let again = b"again";
+    unsafe {
+        schedule(
+            plugin.schedule.handle,
+            again.len() as u32,
+            again.as_ptr().cast(),
+        )
+    }
+}
+
+/// A plugin that answers every response with a new request cannot keep the
+/// teardown going forever.
+#[test]
+fn unregister_stops_a_worker_exchange_that_never_ends() {
+    let _serial = worker_tests();
+    let rings = Arc::new(WorkerRings::new());
+    rings.accept_requests();
+    let plugin = Box::new(TeardownPlugin {
+        schedule: schedule_struct(&rings),
+    });
+    let interface = LV2_Worker_Interface {
+        work: Some(endless_work),
+        work_response: Some(endless_work_response),
+        end_run: None,
+    };
+    let handle = &*plugin as *const TeardownPlugin as LV2_Handle;
+    let instance = register(handle, &interface, Arc::clone(&rings)).expect("register");
+    let gate = hold_gate(&instance);
+    let before = ENDLESS_WORK.load(Ordering::SeqCst);
+    assert!(rings.push_request(b"again"));
+    let removing = {
+        let instance = Arc::clone(&instance);
+        std::thread::spawn(move || unregister(&instance))
+    };
+    while registered_for_test() != 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(gate);
+    removing.join().expect("unregister");
+    assert_eq!(
+        ENDLESS_WORK.load(Ordering::SeqCst) - before,
+        TEARDOWN_ROUNDS as u32 + 1,
+        "the teardown did not stop after its rounds"
+    );
 }
