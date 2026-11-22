@@ -54,9 +54,11 @@
 //! an effect's dry/wet mix delays its dry side (see `ChainRuntime::process`).
 //! A path-level chain bypass skips every effect the same way, and the total
 //! still counts.  The mixer lines the paths up per device with it (`output_map`,
-//! "Alignment").  The NAM blocks add no latency.  The cabinet adds none
-//! either: a short direct head plus partitioned overlap-save, and a delay
-//! that is the impulse itself is not reported here.
+//! "Alignment").  An oversampled NAM block adds its up/down pair's delay,
+//! read from the NAM stage and added here; a block that is not oversampling
+//! adds none.  The cabinet adds none either: a short direct head plus
+//! partitioned overlap-save, and a delay that is the impulse itself is not
+//! reported here.
 //!
 //! The plugin-chain side of [`PathControls`] (edits, publish, controls,
 //! servicing, state) is in `plugins`, with how a chain is handed between
@@ -457,6 +459,10 @@ pub(crate) struct PathControls {
     /// stores it at the start of every block; a chain edit stores the total
     /// of its links.
     latency: AtomicU32,
+    /// The whole path's latency last block: the chain's plus the delay of
+    /// each oversampled NAM block.  The mixer aligns with it, and the UI
+    /// reads it for the diagnostics line.
+    path_latency: AtomicU32,
     /// Path-level effect bypass.  The runtime loads it every block; the UI
     /// stores it.  It does not write each slot's bypass.
     chain_bypass: Arc<AtomicBool>,
@@ -560,6 +566,7 @@ impl PathControls {
             chain_home: chain.home(),
             chain: Mutex::new(chain),
             latency: AtomicU32::new(0),
+            path_latency: AtomicU32::new(0),
             chain_bypass,
             plugin_active: AtomicUsize::new(0),
             plugin_wake: AtomicBool::new(false),
@@ -605,6 +612,9 @@ impl PathControls {
         self.set_chain_bypass(previous.chain_bypassed());
         self.set_feed(previous.feed());
         self.set_sends(previous.sends());
+        // The alignment figure is measured per block; a new run measures it
+        // again.  Nothing of the old run's NAM delay carries over.
+        self.path_latency.store(0, Ordering::Relaxed);
         // A fade-out does not outlive its run.
         self.set_state(match previous.state() {
             PathState::Active => PathState::Active,

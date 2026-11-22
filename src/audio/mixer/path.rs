@@ -82,7 +82,9 @@ pub(crate) struct PathProcessor {
     pub(super) drain: Option<u32>,
     /// The chain latency (frames) read at the start of the block: what the
     /// alignment counts for this path, and what a missed chain is replaced
-    /// by.  The NAM blocks add none.  The cabinet adds none either.
+    /// by.  The plugin chain's latency plus, for each NAM block that runs an
+    /// oversampled model this block, the oversampling pair's delay.  The
+    /// cabinet adds none.
     latency: u32,
     /// The same, before clamping to [`MAX_ALIGN`] (for the report).
     pub(super) latency_raw: u32,
@@ -305,10 +307,15 @@ impl PathProcessor {
         // Applies the UI's chain edits first, so the latency read below is
         // the chain this block runs.
         let unopened = controls.begin_chain(&mut self.chain);
-        self.latency_raw = controls.latency_samples();
         self.nam.begin(controls, rate, ramp_samples);
-        self.cab.begin(controls, rate, ramp_samples);
+        // Plugin latency and NAM latency add: an oversampled block really
+        // delays its output, so this path does not delay it again.
+        self.latency_raw = controls
+            .latency_samples()
+            .saturating_add(self.nam.latency_samples());
         self.latency = self.latency_raw.min(MAX_ALIGN);
+        controls.store_path_latency(self.latency_raw);
+        self.cab.begin(controls, rate, ramp_samples);
         self.tap_fade = TAP_FADE_SECONDS * rate as f32;
         self.declick_len = (DECLICK_SECONDS * rate as f32) as u32;
         self.chain_step = 1.0 / (CHAIN_RESUME_SECONDS * rate as f32).max(1.0);
@@ -439,8 +446,10 @@ impl PathProcessor {
             // optional PRE gate, the NAM blocks that sit before the plugin
             // effects, plugin effects, the NAM blocks after them, the
             // cabinet, optional POST gate, post EQ.
-            // Built-ins are per-sample → no added latency.  The cabinet adds
-            // none either: a short direct head, then partitioned overlap-save.
+            // The EQ and the gate are per-sample; the cabinet is a short
+            // direct head then partitioned overlap-save.  Neither adds
+            // latency.  An oversampled NAM block does; its delay was read at
+            // the start of the block.
             if self.plan.pre_eq {
                 (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
             }

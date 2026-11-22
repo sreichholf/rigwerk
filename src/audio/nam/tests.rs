@@ -4,8 +4,9 @@
 //! the stage, and no command is lost or spun on.
 
 use super::{
-    estimate_load, measure_load, prepare_nam_json, slim_submodel, NamBlockControls, NamFile,
-    NamPosition, NamStack, NamStage, PreparedNam,
+    can_oversample, estimate_load, measure_load, prepare_nam_json, prepare_nam_json_at,
+    slim_submodel, NamBlockControls, NamFile, NamPosition, NamStack, NamStage, OversampleFilters,
+    PreparedNam,
 };
 use crate::audio::path::PathControls;
 
@@ -21,6 +22,39 @@ const TINY: &str = r#"{
         "head": null, "head_scale": 1.0
     },
     "weights": [1.0, 2.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+}"#;
+
+/// [`TINY`] with another copy of itself as its `condition_dsp`.
+const TINY_NESTED: &str = r#"{
+    "version": "0.5.4", "architecture": "WaveNet",
+    "config": {
+        "layers": [{
+            "input_size": 1, "condition_size": 1, "channels": 1, "head_size": 1,
+            "kernel_size": 1, "dilations": [1], "activation": "ReLU",
+            "gated": false, "head_bias": false
+        }],
+        "head": null, "head_scale": 1.0,
+        "condition_dsp": {
+            "version": "0.5.4", "architecture": "WaveNet",
+            "config": {
+                "layers": [{
+                    "input_size": 1, "condition_size": 1, "channels": 1, "head_size": 1,
+                    "kernel_size": 1, "dilations": [1], "activation": "ReLU",
+                    "gated": false, "head_bias": false
+                }],
+                "head": null, "head_scale": 1.0
+            },
+            "weights": [1.0, 2.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+        }
+    },
+    "weights": [1.0, 2.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+}"#;
+
+/// An LSTM capture with no weights: only its config is read here.
+const LSTM: &str = r#"{
+    "version": "0.5.4", "architecture": "LSTM",
+    "config": { "input_size": 1, "hidden_size": 2, "num_layers": 1 },
+    "weights": []
 }"#;
 
 fn block(id: u32) -> NamBlockControls {
@@ -123,6 +157,14 @@ fn tiny() -> PreparedNam {
     }
 }
 
+/// The docs model built at an oversampling factor.
+fn tiny_at(factor: u8) -> PreparedNam {
+    match prepare_nam_json_at(TINY, 48_000, 1.0, factor) {
+        NamFile::Ready(loaded) => loaded.prepared,
+        _ => panic!("the docs model should load at 48 kHz"),
+    }
+}
+
 fn controls(blocks: &[NamBlockControls]) -> PathControls {
     let controls = PathControls::new(48_000);
     let mut stack = NamStack::default();
@@ -164,6 +206,39 @@ fn run_all(
         all.extend(buffer.iter().map(|frame| frame[0]));
     }
     all
+}
+
+/// Runs `blocks` blocks of `frames` of a 1 kHz sine at `amplitude`, starting
+/// at global sample `from`, through both groups.  Returns the left channel
+/// end to end, and the next global sample.  A constant hides a time-base
+/// change; a tone does not.
+fn run_tone(
+    stage: &mut NamStage,
+    controls: &PathControls,
+    blocks: usize,
+    frames: usize,
+    amplitude: f32,
+    from: usize,
+) -> (Vec<f32>, usize) {
+    let sample = |index: usize| {
+        amplitude * (std::f64::consts::TAU * 1_000.0 * index as f64 / 48_000.0).sin() as f32
+    };
+    stage.reserve(frames);
+    let mut played = Vec::with_capacity(blocks * frames);
+    for block in 0..blocks {
+        stage.begin(controls, 48_000, 64.0);
+        let start = from + block * frames;
+        let mut buffer: Vec<[f32; 4]> = (0..frames)
+            .map(|index| {
+                let value = sample(start + index);
+                [value, value, 0.0, 0.0]
+            })
+            .collect();
+        stage.process(&mut buffer, frames, NamPosition::Pre);
+        stage.process(&mut buffer, frames, NamPosition::Post);
+        played.extend(buffer.iter().map(|frame| frame[0]));
+    }
+    (played, from + blocks * frames)
 }
 
 /// The largest sample-to-sample step in `samples`, and where it is.
@@ -652,7 +727,7 @@ fn a_measured_model_is_timed_and_left_ready() {
         _ => panic!("the docs model should load"),
     };
     let mut model = loaded.prepared.model;
-    let load = measure_load(&mut model, 48_000, 64);
+    let load = measure_load(&mut model, 48_000, 64, 1);
     assert!(load.mean.is_finite() && load.mean > 0.0);
     assert!(load.peak >= load.mean);
     assert!(load.share() < 1.0, "a tiny model is not a whole block");
@@ -678,14 +753,311 @@ fn the_estimate_follows_the_rate_and_not_the_buffer() {
 }
 
 #[test]
+fn a_factor_2_build_reports_its_factor_and_a_share() {
+    // The loader builds the scaled model and leaves a measurement for the
+    // sheet.  Its share of the block is about twice the unscaled one's: the
+    // exact figure is timed, so this only checks it was measured and that
+    // the build really is the factor-2 one.
+    let loaded = match super::prepare_parsed(
+        nam_rs::NamModel::from_json_str(TINY).expect("the docs model parses"),
+        "Capture",
+        48_000,
+        1.0,
+        Some(4096),
+        2,
+    ) {
+        NamFile::Ready(loaded) => loaded,
+        _ => panic!("the docs model should load"),
+    };
+    assert_eq!(loaded.prepared.factor, 2);
+    assert!(loaded.oversample, "the docs model scales");
+    let load = loaded.load.expect("a load with frames is measured");
+    assert!(load.mean > 0.0 && load.peak >= load.mean);
+}
+
+#[test]
+fn scaling_doubles_every_dilation_and_keeps_the_weights() {
+    let parsed = nam_rs::NamModel::from_json_str(TINY_NESTED).expect("the nested capture parses");
+    assert!(can_oversample(&parsed));
+    let scaled = super::oversampled(&parsed);
+    assert_eq!(
+        scaled.weights.len(),
+        parsed.weights.len(),
+        "a dilation scale leaves the weight blob alone"
+    );
+    let nam_rs::ModelConfig::WaveNet(config) = &scaled.config else {
+        panic!("a WaveNet stays one");
+    };
+    assert_eq!(config.layers[0].dilations, [2]);
+    let nested = config.condition_dsp.as_deref().expect("the nested model");
+    let nam_rs::ModelConfig::WaveNet(nested) = &nested.config else {
+        panic!("the nested model is a WaveNet");
+    };
+    assert_eq!(nested.layers[0].dilations, [2], "the nested dsp scales too");
+    nam_rs::Model::from_nam(&scaled).expect("the scaled capture still builds");
+
+    // Every entry of a longer vector doubles, not just the first.
+    let mut longer = parsed;
+    let nam_rs::ModelConfig::WaveNet(config) = &mut longer.config else {
+        panic!("a WaveNet stays one");
+    };
+    config.layers[0].dilations = vec![1, 2, 3];
+    let scaled = super::oversampled(&longer);
+    let nam_rs::ModelConfig::WaveNet(config) = &scaled.config else {
+        panic!("a WaveNet stays one");
+    };
+    assert_eq!(config.layers[0].dilations, [2, 4, 6]);
+    assert_eq!(scaled.weights.len(), longer.weights.len());
+}
+
+#[test]
+fn can_oversample_follows_the_model_shape() {
+    let wavenet = nam_rs::NamModel::from_json_str(TINY).expect("the docs model parses");
+    assert!(can_oversample(&wavenet), "a plain WaveNet scales");
+
+    let lstm = nam_rs::NamModel::from_json_str(LSTM).expect("the lstm parses");
+    assert!(!can_oversample(&lstm), "an LSTM recurs in samples");
+
+    // A layer head with a kernel above 1 is a dilation-1 conv inside
+    // nam-rs: scaling the layers alone would leave it at half its time.
+    let mut headed = wavenet.clone();
+    let nam_rs::ModelConfig::WaveNet(config) = &mut headed.config else {
+        panic!("a WaveNet stays one");
+    };
+    config.layers[0].head_kernel_size = 2;
+    assert!(!can_oversample(&headed), "a conv head has no dilation");
+
+    // The post-stack head is the same kind of conv.
+    let mut stacked = wavenet;
+    let nam_rs::ModelConfig::WaveNet(config) = &mut stacked.config else {
+        panic!("a WaveNet stays one");
+    };
+    config.post_stack_head = Some(nam_rs::PostStackHeadConfig {
+        channels: 1,
+        out_channels: 1,
+        kernel_sizes: vec![2],
+        activation: nam_rs::ActivationSpec::Named {
+            name: "ReLU".to_owned(),
+            negative_slope: None,
+        },
+    });
+    assert!(
+        !can_oversample(&stacked),
+        "a post-stack head has no dilation"
+    );
+}
+
+/// One pass through the 2x pair with fresh history.
+fn through_the_pair(filters: &OversampleFilters, input: &[f32]) -> Vec<f32> {
+    let frames = input.len();
+    let mut wide = vec![0.0; 2 * frames];
+    let mut output = vec![0.0; frames];
+    let mut up = vec![0.0; filters.taps - 1];
+    let mut down = vec![0.0; 2 * (filters.taps - 1)];
+    filters.upsample(input, &mut wide, &mut up);
+    assert!(wide.iter().all(|sample| sample.is_finite()));
+    filters.downsample(&wide, &mut output, &mut down);
+    output
+}
+
+#[test]
+fn the_pair_takes_n_in_two_n_through_and_n_out() {
+    let filters = OversampleFilters::new(48_000);
+    let frames = 512;
+    let input: Vec<f32> = (0..frames)
+        .map(|index| (index as f32 * 0.01).sin())
+        .collect();
+    let mut wide = vec![0.0; 2 * frames];
+    let mut output = vec![0.0; frames];
+    let mut up = vec![0.0; filters.taps - 1];
+    let mut down = vec![0.0; 2 * (filters.taps - 1)];
+    filters.upsample(&input, &mut wide, &mut up);
+    filters.downsample(&wide, &mut output, &mut down);
+    assert_eq!(up.len(), filters.taps - 1);
+    assert_eq!(down.len(), 2 * (filters.taps - 1));
+    assert_eq!(wide.len(), 2 * frames, "N frames become 2N");
+    assert_eq!(output.len(), frames, "and come back to N");
+    // Length is odd and 1 mod 4, so the pair's delay is a whole number of
+    // output samples: (length - 1) / 2.
+    assert_eq!(filters.delay, filters.taps - 1);
+}
+
+#[test]
+fn a_tone_comes_back_delayed_at_unity() {
+    let filters = OversampleFilters::new(48_000);
+    let delay = filters.delay;
+    let frames = 4096;
+    let rate = 48_000.0f64;
+    let input: Vec<f32> = (0..frames)
+        .map(|index| (std::f64::consts::TAU * 1_000.0 * index as f64 / rate).sin() as f32)
+        .collect();
+    let output = through_the_pair(&filters, &input);
+    let mut worst = 0.0f32;
+    for index in (4 * delay + 128)..frames {
+        worst = worst.max((output[index] - input[index - delay]).abs());
+    }
+    assert!(
+        worst < 3.2e-5,
+        "1 kHz at unity and delayed by {delay}: worst {worst:e} (about -90 dB)"
+    );
+}
+
+#[test]
+fn an_ultrasonic_tone_is_gone_before_it_folds() {
+    // 30 kHz at 96 kHz would fold to 18 kHz if the decimator let it pass.
+    let filters = OversampleFilters::new(48_000);
+    let frames = 2048;
+    let input: Vec<f32> = (0..frames)
+        .map(|index| (std::f64::consts::TAU * 30_000.0 * index as f64 / 96_000.0).sin() as f32)
+        .collect();
+    let mut output = vec![0.0; frames / 2];
+    let mut down = vec![0.0; 2 * (filters.taps - 1)];
+    filters.downsample(&input, &mut output, &mut down);
+    let peak = output
+        .iter()
+        .skip(4 * filters.delay)
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    assert!(
+        peak <= 1.1e-4,
+        "30 kHz after the downsampler: {peak:e} (about -80 dB)"
+    );
+}
+
+#[test]
+fn two_oversampled_blocks_add_both_delays_and_delay_a_bypass() {
+    let delay = OversampleFilters::new(48_000).delay;
+    let controls = controls(&[
+        NamBlockControls {
+            enabled: false,
+            ..block(0)
+        },
+        NamBlockControls {
+            enabled: false,
+            ..block(1)
+        },
+    ]);
+    let mut stage = NamStage::new(48_000);
+    stage.install_for_test(0, tiny_at(2));
+    stage.install_for_test(1, tiny_at(2));
+    assert_eq!(stage.filters.delay, delay);
+    assert_eq!(stage.latency_samples(), 2 * delay as u32, "one block each");
+
+    let (amplitude, frames) = (0.3f32, 128);
+    let (played, _) = run_tone(&mut stage, &controls, 32, frames, amplitude, 0);
+    let total = 2 * delay;
+    let tone = |index: usize| {
+        amplitude * (std::f64::consts::TAU * 1_000.0 * index as f64 / 48_000.0).sin() as f32
+    };
+    // Past the two 10 ms time-base ramps and the cold history: the rest is
+    // the input delayed by both pairs, not the undelayed input.
+    let settled = 8 * frames;
+    for (index, sample) in played.iter().enumerate().skip(settled) {
+        let want = tone(index - total);
+        assert!(
+            (sample - want).abs() < 1.0e-5,
+            "sample {index}: bypass is the input delayed by {total}, got {sample}"
+        );
+    }
+    // The time base moves over the fade, so no sample jumps by the delay.
+    let natural = amplitude * (std::f64::consts::TAU * 1_000.0 / 48_000.0) as f32;
+    let (step, at) = largest_step(&played);
+    assert!(
+        step <= natural * 2.0,
+        "the time base steps {step} at sample {at}, the tone's own is {natural}"
+    );
+}
+
+#[test]
+fn a_swap_to_oversampling_has_no_step_at_its_boundary() {
+    let controls = controls(&[block(0)]);
+    let mut stage = NamStage::new(48_000);
+    stage.install_for_test(0, tiny());
+    let (amplitude, frames) = (0.3f32, 64);
+    let (before, at) = run_tone(&mut stage, &controls, 40, frames, amplitude, 0);
+    assert_eq!(stage.latency_samples(), 0);
+    controls.queue_nam(0, tiny_at(2));
+    let (after, _) = run_tone(&mut stage, &controls, 90, frames, amplitude, at);
+    assert_eq!(
+        stage.latency_samples(),
+        stage.filters.delay as u32,
+        "the scaled block reports its delay"
+    );
+    let mut played = before;
+    played.extend(after);
+    // The tone's own biggest step, taken well past the transition: a jump
+    // of the 60-sample delay would be far larger than this.
+    let steady = largest_step(&played[60 * frames..]).0;
+    let (step, at) = largest_step(&played);
+    assert!(
+        step <= steady * 2.0,
+        "the fade steps {step} at sample {at}, the steady tone {steady}"
+    );
+}
+
+#[test]
+fn a_fade_back_to_one_keeps_the_delay_until_it_settles() {
+    let controls = controls(&[block(0)]);
+    let mut stage = NamStage::new(48_000);
+    stage.install_for_test(0, tiny_at(2));
+    let (amplitude, frames) = (0.3f32, 64);
+    let (before, at) = run_tone(&mut stage, &controls, 40, frames, amplitude, 0);
+    let delay = stage.filters.delay as u32;
+    assert_eq!(stage.latency_samples(), delay);
+    controls.queue_nam(0, tiny_at(1));
+    // The swap fades over 35 ms (1680 samples at 48 kHz): eight blocks of
+    // 64 are well inside it, and the block must still delay both sides.
+    let mut played = before;
+    let (fading, at) = run_tone(&mut stage, &controls, 8, frames, amplitude, at);
+    played.extend(fading);
+    assert_eq!(
+        stage.latency_samples(),
+        delay,
+        "the delay stays for the whole fade back"
+    );
+    // Past the fade the unscaled model is alone and the delay is gone.
+    let (after, _) = run_tone(&mut stage, &controls, 40, frames, amplitude, at);
+    played.extend(after);
+    assert_eq!(stage.latency_samples(), 0);
+    let steady = largest_step(&played[80 * frames..]).0;
+    let (step, at) = largest_step(&played);
+    assert!(
+        step <= steady * 2.0,
+        "the fade back steps {step} at sample {at}, the steady tone {steady}"
+    );
+}
+
+#[test]
+fn a_settled_bypass_keeps_its_dry_history() {
+    // A bypassed capture still counts in its group, so its dry side can start
+    // delaying without a model fade to hide a cold line.  The line must have
+    // been running all along.
+    let controls = controls(&[NamBlockControls {
+        enabled: false,
+        ..block(0)
+    }]);
+    let mut stage = NamStage::new(48_000);
+    stage.install_for_test(0, tiny());
+    let _ = run_tone(&mut stage, &controls, 8, 128, 0.3, 0);
+    let slot = stage.slot(0).expect("the block has a slot");
+    assert!(slot.dry_l.len > 0, "the block delays at this rate");
+    assert!(
+        slot.dry_l.samples.iter().any(|sample| *sample != 0.0),
+        "a settled bypass still feeds the dry line"
+    );
+}
+
+#[test]
 fn one_block_at_unity_is_the_model_run_by_hand() {
     // The null path of the migration: one block, unity trims, no level
     // match, enabled — the old single stage's math.  It must be the model
     // itself, sample for sample, within the one rounding of the wet mix
-    // (`dry + (wet - dry) * 1.0`, see `NamSlot::process_block`).
+    // (`dry + (wet - dry) * 1.0`, see `NamSlot::process_block`).  One block
+    // is a group of one: the oversampler is present but never engaged, and
+    // the block reports no added latency.
     let controls = controls(&[block(0)]);
     let mut stage = NamStage::new(48_000);
     stage.install_for_test(0, tiny());
+    assert_eq!(stage.latency_samples(), 0, "one block adds no latency");
     let reference_model = match prepare_nam_json(TINY, 48_000, 1.0) {
         NamFile::Ready(loaded) => loaded.prepared.model,
         _ => panic!("the docs model should load"),
@@ -806,7 +1178,7 @@ fn a_migrated_stage_nulls_against_the_old_build() {
             assert_eq!(expected.len(), input.len(), "{stem}-{name}: length");
             let first = migrated_at(segments, 0, &model);
             let prepared =
-                match super::prepare_nam_file(&first.model, rate, first.controls.slim, None) {
+                match super::prepare_nam_file(&first.model, rate, first.controls.slim, None, 1) {
                     NamFile::Ready(loaded) => loaded.prepared,
                     NamFile::RateMismatch { file_rate, .. } => panic!("{stem}: {file_rate} Hz"),
                     NamFile::Failed(error) => panic!("{stem}: {error}"),
