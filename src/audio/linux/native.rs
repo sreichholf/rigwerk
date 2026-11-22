@@ -44,6 +44,7 @@ use crate::audio::output::open_output;
 use crate::audio::output_map::DeviceFrame;
 use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::{ExtraOutputPlan, Shared};
+use crate::audio::thread_priority::PinOnce;
 use crate::audio::types::{DeviceItem, OutputMode, StartConfig};
 
 use super::alsa::{alsa_pcm_is_default, alsa_pcm_name};
@@ -412,6 +413,7 @@ fn run_graph(
         let data = CaptureData {
             shared: capture_shared,
             channels: AtomicU32::new(2),
+            pin: PinOnce::default(),
         };
         Some(
             stream
@@ -440,6 +442,7 @@ fn run_graph(
                     }
                 })
                 .process(|stream, data| {
+                    data.pin.run();
                     let Some(mut buffer) = stream.dequeue_buffer() else {
                         return;
                     };
@@ -485,6 +488,7 @@ fn run_graph(
         let data = PlaybackData {
             shared: Arc::clone(&shared),
             mixer,
+            pin: PinOnce::default(),
         };
         Some(
             stream
@@ -495,6 +499,7 @@ fn run_graph(
                     }
                 })
                 .process(|stream, data| {
+                    data.pin.run();
                     let Some(mut buffer) = stream.dequeue_buffer() else {
                         return;
                     };
@@ -673,11 +678,13 @@ struct Listed {
 struct CaptureData {
     shared: Arc<Shared>,
     channels: AtomicU32,
+    pin: PinOnce,
 }
 
 struct PlaybackData {
     shared: Arc<Shared>,
     mixer: OutputMixer,
+    pin: PinOnce,
 }
 
 /// Fills a dequeued playback buffer with F32LE stereo, the format
@@ -758,6 +765,7 @@ struct ExtraOutputData {
     shared: Arc<Shared>,
     slot: usize,
     mixer: ExtraOutputMixer,
+    pin: PinOnce,
 }
 
 /// Opens extra output `slot` as a stereo playback stream to `node` at the clock
@@ -793,6 +801,7 @@ fn open_node_extra_output(
             shared: Arc::clone(shared),
             slot,
             mixer,
+            pin: PinOnce::default(),
         })
         .state_changed(move |_, _, _, new| {
             if let pw::stream::StreamState::Error(_) = new {
@@ -805,6 +814,7 @@ fn open_node_extra_output(
             }
         })
         .process(|stream, data| {
+            data.pin.run();
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };

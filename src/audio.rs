@@ -63,7 +63,8 @@
 //! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
 //! - `rt_guard`: the debug allocation guard the audio callbacks hold.
-//! - `thread_priority`: real-time scheduling for cpal's Linux threads.
+//! - `thread_priority`: real-time scheduling for cpal's Linux threads, and
+//!   pinning the audio threads to the fast cores of a hybrid CPU.
 
 mod asio_panel;
 mod bridge;
@@ -100,6 +101,7 @@ pub(crate) mod rt_guard;
 mod scope;
 mod shared;
 mod thread_priority;
+pub(crate) use thread_priority::pin_worker_to_fast_cores;
 mod tuner;
 mod types;
 pub(crate) mod vst3;

@@ -183,6 +183,9 @@ impl NamLoader {
         std::thread::Builder::new()
             .name("rigwerk-nam".to_owned())
             .spawn(move || {
+                // On a hybrid CPU, measure on the cores the audio threads
+                // run on, so the figure is theirs.
+                crate::audio::pin_worker_to_fast_cores();
                 // Measured costs, by (file, rate, block size, width,
                 // factor), with the run each was taken in: a second block on
                 // the same build does not measure again, and a figure from

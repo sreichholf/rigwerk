@@ -12,6 +12,7 @@ use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::output_map::VIRTUAL_OUTPUT_NAME;
+use crate::audio::thread_priority::PinOnce;
 
 use super::{properties, MAX_FRAMES};
 
@@ -97,6 +98,8 @@ struct VirtualProcess {
     ports: [*mut c_void; 2],
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
+    /// Pins PipeWire's data thread to the fast cores on the first cycle.
+    pin: PinOnce,
 }
 
 unsafe extern "C" fn on_virtual_process(
@@ -104,6 +107,7 @@ unsafe extern "C" fn on_virtual_process(
     position: *mut spa_sys::spa_io_position,
 ) {
     let data = unsafe { &mut *(data as *mut VirtualProcess) };
+    data.pin.run();
     if position.is_null() {
         return;
     }
@@ -183,6 +187,7 @@ impl VirtualSource {
             ports: [ptr::null_mut(); 2],
             scratch_l: vec![0.0; MAX_FRAMES],
             scratch_r: vec![0.0; MAX_FRAMES],
+            pin: PinOnce::default(),
         });
         for (index, (port_name, channel)) in [("capture_FL", "FL"), ("capture_FR", "FR")]
             .iter()

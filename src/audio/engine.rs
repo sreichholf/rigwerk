@@ -951,6 +951,9 @@ impl AudioEngine {
             return;
         }
         self.reap_finished_bridge();
+        // The fast cores of a hybrid CPU, read from sysfs here, on the
+        // thread that starts the bridge: the audio threads only pin to them.
+        super::thread_priority::prepare_fast_cores();
 
         // Every start gets its own run state.  A bridge that outlived a
         // stop keeps the `Arc<Shared>` it was started with, so it can no

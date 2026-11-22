@@ -15,6 +15,7 @@ use crate::audio::mixer::OutputMixer;
 use crate::audio::output_map::MAX_EXTRA_OUTPUTS;
 use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::Shared;
+use crate::audio::thread_priority::PinOnce;
 
 use super::links::Observed;
 use super::virtual_source::VirtualOutputSlot;
@@ -44,6 +45,8 @@ struct ProcessData {
     /// loop's status text.
     seen_rate: Arc<AtomicU32>,
     seen_quantum: Arc<AtomicU64>,
+    /// Pins PipeWire's data thread to the fast cores on the first cycle.
+    pin: PinOnce,
 }
 
 /// What `state_changed` needs.  It arrives on the main loop while the
@@ -59,6 +62,7 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     // alive until after `pw_filter_destroy`; only this callback touches it
     // while the filter runs.
     let data = unsafe { &mut *(data as *mut ProcessData) };
+    data.pin.run();
     if position.is_null() {
         return;
     }
@@ -302,6 +306,7 @@ impl Filter {
             rate: 0,
             seen_rate: Arc::clone(&observed.rate),
             seen_quantum: Arc::clone(&observed.quantum),
+            pin: PinOnce::default(),
         });
         let events = |state_changed, process| {
             Box::new(pw_sys::pw_filter_events {
