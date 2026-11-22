@@ -26,15 +26,28 @@ What changed, all under `src/`:
   `e^x` (range reduction by `ln 2`, Taylor series to `x^7`), so they
   vectorize.  Within 3e-7 of the exact functions, like libm's `tanhf`.  No
   third-party approximation or coefficients: only a Cody–Waite split of
-  `ln 2` (355/512 and the rest) and `1/k!`.  Ungated layers and the
-  post-stack head activate whole rows (`apply_slice`); gated and blended
-  layers still call them per sample.
+  `ln 2` (355/512 and the rest) and `1/k!`.  Activations run over whole
+  rows (`apply_slice`).
+- `wavenet/gating.rs`: gated and blended layers run each row in passes,
+  with each activation chosen once per row, so they vectorize too.  Each
+  sample sees the same operations as before, so they are bit-identical.
+- AVX2 at run time (`conv.rs`, `activation.rs`, `gating.rs`): on an x86-64
+  CPU with AVX2 the conv tiles (16 time steps instead of 8), the
+  activations and the gating run a build compiled for AVX2.  Each call
+  checks `is_x86_feature_detected!`, which the standard library answers
+  from a cached bit after its first use.  AVX2 only, not FMA: a fused
+  multiply-add rounds once where the portable code rounds twice, so without
+  it both builds do the same operations in the same order and agree bit
+  for bit.  Other CPUs, and every other architecture, run the portable
+  build.  The AVX2 functions are `unsafe fn`, so the crate still builds on
+  its `rust-version`, 1.74.
 
 On a standard WaveNet this is about 2.6 times faster, and on a standard
 LSTM about 3.5 times, at `opt-level = 3`, which RigWerk uses for this
-crate in every profile.  At 2 the conv tiles do not vectorize and a
-WaveNet is slower than 0.4.0.
-Only the new `tanh` and `sigmoid` change the output: by at most 1.2e-5 on
+crate in every profile.  AVX2 takes a WaveNet another 1.4 to 1.6 times,
+and a gated one about twice; the LSTM, one 16-wide step per sample, gains
+nothing from it and has no AVX2 build.  At opt-level 2 the conv tiles do
+not vectorize and a WaveNet is slower than 0.4.0.  Only the new `tanh` and `sigmoid` change the output: by at most 1.2e-5 on
 a standard WaveNet driven near 0 dBFS, about −135 dBFS RMS.  The parity
 fixtures against NAM Core and the Python trainer still pass at their 1e-5.
 
@@ -42,6 +55,9 @@ fixtures against NAM Core and the Python trainer still pass at their 1e-5.
 
 All of it is written for this crate; the ideas are standard ones.
 
+- Run-time dispatch: one function body compiled twice, once with
+  `#[target_feature(enable = "avx2")]`, picked after
+  `is_x86_feature_detected!` (the Rust standard library's mechanism).
 - Conv history: a linear buffer per channel with a write cursor, and the
   history copied back to the front when a block would run past the end.
   This is the scheme of NAM Core's `RingBuffer` (`NAM/ring_buffer.cpp`,

@@ -53,12 +53,32 @@ pub(super) struct Conv1d {
     stride: usize,
     /// The column the next input goes to. Always `>= hist_len`.
     w: usize,
+    /// Run the AVX2 build of the block kernel. Set from [`avx2_available`]
+    /// when the conv is built; tests clear it to compare the two builds. The
+    /// kernel checks the CPU again before it trusts it.
+    #[cfg(target_arch = "x86_64")]
+    avx2: bool,
 }
 
 /// Output channels one tile of the block kernel computes at once.
 const TILE_OUT: usize = 4;
-/// Time steps one tile of the block kernel computes at once.
+/// Time steps one tile of the block kernel computes at once: two SSE (or
+/// NEON) registers per output in the portable build, two AVX registers in
+/// the AVX2 build.
 const TILE_T: usize = 8;
+#[cfg(target_arch = "x86_64")]
+const TILE_T_AVX2: usize = 16;
+
+/// Whether this CPU has AVX2, checked at run time so one binary runs on
+/// every x86-64 CPU. The AVX2 builds of the hot loops enable AVX2 only, not
+/// FMA: a fused multiply-add rounds once where the portable code rounds twice,
+/// so FMA would change the output. Without it both builds do the same
+/// operations in the same order and agree bit for bit.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(crate) fn avx2_available() -> bool {
+    std::is_x86_feature_detected!("avx2")
+}
 
 impl Conv1d {
     /// Dense (ungrouped) convolution — `groups = 1`.
@@ -122,6 +142,8 @@ impl Conv1d {
             hist: vec![0.0; in_ch * stride],
             stride,
             w: hist_len,
+            #[cfg(target_arch = "x86_64")]
+            avx2: avx2_available(),
         }
     }
 
@@ -229,25 +251,55 @@ impl Conv1d {
     /// Every output of a block whose first column sits at `w` in rows of
     /// length `s` of `src`.
     fn tiles(&self, src: &[f32], s: usize, w: usize, block_out: &mut [f32], n: usize) {
+        #[cfg(target_arch = "x86_64")]
+        if self.avx2 && avx2_available() {
+            // SAFETY: the CPU reports AVX2.
+            unsafe { self.tiles_avx2(src, s, w, block_out, n) };
+            return;
+        }
+        self.tiles_with::<TILE_T>(src, s, w, block_out, n);
+    }
+
+    /// [`Self::tiles`] compiled with AVX2 enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX2.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn tiles_avx2(&self, src: &[f32], s: usize, w: usize, block_out: &mut [f32], n: usize) {
+        self.tiles_with::<TILE_T_AVX2>(src, s, w, block_out, n);
+    }
+
+    #[inline(always)]
+    fn tiles_with<const T: usize>(
+        &self,
+        src: &[f32],
+        s: usize,
+        w: usize,
+        block_out: &mut [f32],
+        n: usize,
+    ) {
         let opg = self.out_per_group;
         let mut o = 0;
         while o < self.out_ch {
             // A tile never crosses a group, so all its outputs read the same inputs.
             let group_end = (o / opg + 1) * opg;
             if o + TILE_OUT <= group_end {
-                self.tile::<TILE_OUT>(o, src, s, w, block_out, n);
+                self.tile::<TILE_OUT, T>(o, src, s, w, block_out, n);
                 o += TILE_OUT;
             } else {
-                self.tile::<1>(o, src, s, w, block_out, n);
+                self.tile::<1, T>(o, src, s, w, block_out, n);
                 o += 1;
             }
         }
     }
 
-    /// Outputs `o..o + O` of the block at `w` in `src`. The partial sums stay
-    /// in registers across every tap and input channel.
+    /// Outputs `o..o + O` of the block at `w` in `src`, `T` time steps at a
+    /// time. The partial sums stay in registers across every tap and input
+    /// channel.
     #[inline(always)]
-    fn tile<const O: usize>(
+    fn tile<const O: usize, const T: usize>(
         &self,
         o: usize,
         src: &[f32],
@@ -268,19 +320,19 @@ impl Conv1d {
 
         let mut t = 0;
         while t < n {
-            let len = TILE_T.min(n - t);
-            let mut acc = [[0.0_f32; TILE_T]; O];
+            let len = T.min(n - t);
+            let mut acc = [[0.0_f32; T]; O];
             for (a, &b) in acc.iter_mut().zip(&bias) {
-                *a = [b; TILE_T];
+                *a = [b; T];
             }
             for k in 0..kernel {
                 let back = (kernel - 1 - k) * self.dilation;
                 for jl in 0..ipg {
                     let at = (in_base + jl) * s + w + t - back;
-                    let column: [f32; TILE_T] = if len == TILE_T {
-                        src[at..at + TILE_T].try_into().unwrap()
+                    let column: [f32; T] = if len == T {
+                        src[at..at + T].try_into().unwrap()
                     } else {
-                        let mut tail = [0.0; TILE_T];
+                        let mut tail = [0.0; T];
                         tail[..len].copy_from_slice(&src[at..at + len]);
                         tail
                     };
@@ -553,6 +605,69 @@ mod tests {
                 }
             }
             t0 += len;
+        }
+    }
+
+    /// The AVX2 build of the block kernel gives the portable bits: dense and
+    /// grouped convs, kernels up to 15, a 1x1 conv, and blocks that end in a
+    /// partial tile. Skipped on a CPU without AVX2, where only one build runs.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_and_portable_kernels_agree_bit_for_bit() {
+        if !avx2_available() {
+            return;
+        }
+        // (in_ch, out_ch, kernel, dilation, groups)
+        let cases = [
+            (8_usize, 8_usize, 6_usize, 239_usize, 1_usize),
+            (16, 8, 3, 512, 1),
+            (8, 8, 15, 13, 1),
+            (8, 1, 16, 1, 1),
+            (6, 4, 2, 3, 2),
+            (4, 4, 3, 7, 4),
+            (5, 7, 1, 1, 1),
+        ];
+        for (in_ch, out_ch, kernel, dilation, groups) in cases {
+            let wlen = out_ch * in_ch * kernel / groups;
+            let w: Vec<f32> = (0..wlen)
+                .map(|i| ((i * 37 % 23) as f32 - 11.0) * 0.07)
+                .collect();
+            let bias: Vec<f32> = (0..out_ch).map(|o| o as f32 * 0.1 - 0.3).collect();
+            let mut portable = Conv1d::new_grouped(
+                in_ch,
+                out_ch,
+                kernel,
+                dilation,
+                groups,
+                w.clone(),
+                Some(bias.clone()),
+            );
+            portable.avx2 = false;
+            let mut avx2 =
+                Conv1d::new_grouped(in_ch, out_ch, kernel, dilation, groups, w, Some(bias));
+            avx2.avx2 = true;
+            let mut t0 = 0;
+            for &len in [MAX_BLOCK, 37, 1, 255, MAX_BLOCK, 3, 128]
+                .iter()
+                .cycle()
+                .take(14)
+            {
+                let bin: Vec<f32> = (0..in_ch * len)
+                    .map(|i| ((t0 * in_ch + i) as f32 * 0.011).sin())
+                    .collect();
+                let mut a = vec![0.0; out_ch * len];
+                let mut b = vec![0.0; out_ch * len];
+                portable.process_block(&bin, &mut a, len);
+                avx2.process_block(&bin, &mut b, len);
+                for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "{in_ch}x{out_ch} k{kernel} d{dilation} g{groups} len{len} idx{i}"
+                    );
+                }
+                t0 += len;
+            }
         }
     }
 
