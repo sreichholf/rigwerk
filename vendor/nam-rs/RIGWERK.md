@@ -45,6 +45,10 @@ What changed, all under `src/`:
   for bit.  Other CPUs, and every other architecture, run the portable
   build.  The AVX2 functions are `unsafe fn`, so the crate still builds on
   its `rust-version`, 1.74.
+- aarch64 (`conv.rs`), still to be measured on ARM: the portable conv tile
+  is 16 time steps wide on aarch64 (8 elsewhere), chosen at compile time,
+  to use NEON's 32 vector registers.  The generated hot loop keeps all of
+  it in registers.  Every tile width gives the same bits.
 
 Against 0.4.0, a standard WaveNet runs about 2.5 times as fast in the
 portable build and about 4.3 times with AVX2 (one x86 machine, whole

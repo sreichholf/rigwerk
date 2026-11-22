@@ -62,11 +62,16 @@ pub(super) struct Conv1d {
 
 /// Output channels one tile of the block kernel computes at once.
 const TILE_OUT: usize = 4;
-/// Time steps one tile of the block kernel computes at once: two SSE (or
-/// NEON) registers per output in the portable build, two AVX registers in
-/// the AVX2 build. The summation order does not depend on the width, so
-/// every width gives the same bits.
+/// Time steps one tile of the block kernel computes at once: two SSE
+/// registers per output in the portable build, two AVX registers in the AVX2
+/// build. On aarch64, NEON has 32 vector registers where SSE has 16, so the
+/// portable tile there is four registers per output: each weight loaded and
+/// each step of index arithmetic serves twice the time steps. The summation
+/// order does not depend on the width, so every width gives the same bits.
+#[cfg(not(target_arch = "aarch64"))]
 const TILE_T: usize = 8;
+#[cfg(target_arch = "aarch64")]
+const TILE_T: usize = 16;
 #[cfg(target_arch = "x86_64")]
 const TILE_T_AVX2: usize = 16;
 
@@ -707,8 +712,8 @@ mod tests {
     }
 
     /// Every tile width gives the same bits, so the width a build picks (8,
-    /// or 16 in the AVX2 build) is a speed choice only. Checked directly on
-    /// the kernel, on every architecture.
+    /// or 16 on aarch64 and in the AVX2 build) is a speed choice only.
+    /// Checked directly on the kernel, on every architecture.
     #[test]
     fn tile_width_does_not_change_the_bits() {
         // (in_ch, out_ch, kernel, dilation, groups)
