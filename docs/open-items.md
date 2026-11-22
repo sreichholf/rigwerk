@@ -73,16 +73,21 @@ since.
   memory and load time, not as a product rule.  Blocks are ordered among
   themselves and sit before or after the plugin effects — the two places
   the built-in stage always had — not between two effects.  A capture at a
-  rate other than the output's still does not install: nothing resamples
-  it.  Each capture's load figure is measured once off the audio thread,
-  at the current rate and output step, and is not measured again when only
-  the buffer size changes; a block's runtime cost is not measured per
-  block.  A reorder dips the touched group to silence for about 20 ms
-  instead of crossfading.  The level match between two blocks uses only the
-  files' `input_level_dbu`/`output_level_dbu`; without them it is 0 dB.
-  Impedance interaction is not modelled, stacked high-gain captures alias
-  at 48 kHz, and captures that already include a boost or a cabinet double
-  up with a pedal or the Cab row.
+  rate other than the output's still does not install: nothing resamples a
+  file to another rate.  A series of two or more captures that can be
+  oversampled runs each block at twice the output rate through a fixed 2x
+  up/down pair.  What still cannot oversample is an LSTM stack (its
+  recurrence is in samples), a WaveNet with a conv head
+  (`head_kernel_size` above 1, or a post-stack head with a kernel above 1),
+  and a capture whose file rate is not the output rate.  Each capture's
+  load figure is measured once off the audio thread, at the current rate,
+  factor and output step, and is not measured again when only the buffer
+  size changes; a block's runtime cost is not measured per block.  A
+  reorder dips the touched group to silence for about 20 ms instead of
+  crossfading.  The level match between two blocks uses only the files'
+  `input_level_dbu`/`output_level_dbu`; without them it is 0 dB.
+  Impedance interaction is not modelled, and captures that already include
+  a boost or a cabinet double up with a pedal or the Cab row.
 - **VSTGUI editor reopened on Linux.**  VSTGUI's X11 run loop closes
   its xcb connection when its last editor closes, without finishing the
   cairo device for it.  If a later editor from the same loaded module

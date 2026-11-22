@@ -7,10 +7,13 @@
 //! for the block's id, and a stale answer (the block changed while the model
 //! was being built) is dropped here, where a model is safe to drop.
 //!
-//! The same path at the same sample rate on the same run is not rebuilt.
-//! Neither is a width change that keeps the same submodel; one that picks
-//! another queues a model built at it.  The folder window and the clipboard
-//! read run on the UI thread too.
+//! The same path at the same sample rate, run and dilation factor is not
+//! rebuilt.  Neither is a width change that keeps the same submodel; one
+//! that picks another queues a model built at it.  When a path's NAM series
+//! crosses into oversampling (two or more eligible captures in a row), every
+//! block of it is rebuilt at factor 2 and fades in through the same install;
+//! back at one, it is rebuilt at factor 1.  The folder window and the
+//! clipboard read run on the UI thread too.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -99,6 +102,9 @@ pub(crate) struct NamInstall {
     pub generation: u64,
     /// The submodel of a slimmable capture.  0 otherwise.
     pub submodel: usize,
+    /// 2 when the capture is built with every layer dilation doubled for an
+    /// oversampled group, 1 otherwise.
+    pub factor: u8,
 }
 
 /// One block's capture, as the loader thread builds it.
@@ -109,6 +115,8 @@ struct NamJob {
     path: String,
     rate: u32,
     slim: f32,
+    /// The dilation scale to build at: 1, or 2 for an oversampled group.
+    factor: u8,
     /// The block size to measure the capture at.
     frames: usize,
 }
@@ -137,17 +145,25 @@ impl NamLoader {
         std::thread::Builder::new()
             .name("rigwerk-nam".to_owned())
             .spawn(move || {
-                // Measured costs, by (file, rate, block size, width): a
-                // second block on the same capture does not measure again.
-                let mut measured: HashMap<(String, u32, usize, u32), NamLoad> = HashMap::new();
+                // Measured costs, by (file, rate, block size, width,
+                // factor): a second block on the same build does not
+                // measure again.
+                let mut measured: HashMap<(String, u32, usize, u32, u8), NamLoad> = HashMap::new();
                 while let Ok(job) = job_queue.recv() {
-                    let key = (job.path.clone(), job.rate, job.frames, job.slim.to_bits());
+                    let key = (
+                        job.path.clone(),
+                        job.rate,
+                        job.frames,
+                        job.slim.to_bits(),
+                        job.factor,
+                    );
                     let known = measured.get(&key).copied();
                     let mut file = prepare_nam_file(
                         &job.path,
                         job.rate,
                         job.slim,
                         known.is_none().then_some(job.frames),
+                        job.factor,
                     );
                     if let NamFile::Ready(loaded) = &mut file {
                         match known {
@@ -466,6 +482,7 @@ impl RigWerkApp {
         };
         block.model = model_path.trim().to_owned();
         block.install = NamInstall::default();
+        block.oversample = false;
         self.sync_nam_slot(slot);
     }
 
@@ -491,15 +508,20 @@ impl RigWerkApp {
         let run = self.engine.run_id();
         let generation = self.engine.path_generation(slot);
         let frames = self.nam_frames();
+        // An empty effect chain joins the Pre and Post groups into one
+        // series; a plugin between them splits it.
+        let effects_empty = self.engine.plugin_views(slot).is_empty();
+        let factors = path.nam_factors(effects_empty);
         // What to ask for, computed before anything changes.
         let mut wanted = Vec::new();
-        for block in &path.nam {
+        for (block, factor) in path.nam.iter().zip(factors) {
             let stamp = NamInstall {
                 path: block.model.clone(),
                 rate,
                 run,
                 generation,
                 submodel: slim_submodel(&block.slim_steps, block.controls.slim),
+                factor,
             };
             if stamp != block.install {
                 wanted.push((block.controls.id, block.controls.slim, stamp));
@@ -540,6 +562,7 @@ impl RigWerkApp {
                 path: stamp.path.clone(),
                 rate,
                 slim,
+                factor: stamp.factor,
                 frames,
             };
             let asked = self
@@ -603,6 +626,7 @@ impl RigWerkApp {
                 block.mismatch = false;
                 block.file_rate = loaded.file_rate;
                 block.arch = loaded.arch;
+                block.oversample = loaded.oversample;
                 block.load = loaded.load;
                 block.controls.level_in_dbu = loaded.level_in_dbu;
                 block.controls.level_out_dbu = loaded.level_out_dbu;
@@ -617,6 +641,7 @@ impl RigWerkApp {
                 block.gear = None;
                 block.slim_steps.clear();
                 block.mismatch = true;
+                block.oversample = false;
                 block.file_rate = file_rate;
                 block.arch.clear();
                 block.load = None;
@@ -628,6 +653,7 @@ impl RigWerkApp {
                 block.gear = None;
                 block.slim_steps.clear();
                 block.mismatch = false;
+                block.oversample = false;
                 block.file_rate = 0;
                 block.arch.clear();
                 block.load = None;

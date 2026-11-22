@@ -1,8 +1,78 @@
 use super::EffectKey;
 use crate::app::blank_app;
+use crate::app::paths::{NamBlock, SignalPath};
 use crate::audio::{
-    ChannelMap, OutputDeviceSettings, PathMapSettings, PathState, PluginPref, MAX_PATHS,
+    ChannelMap, NamBlockControls, NamPosition, OutputDeviceSettings, PathMapSettings, PathState,
+    PluginPref, MAX_PATHS,
 };
+
+/// A block that loaded a capture, positioned and eligible as asked.
+fn capture(id: u32, position: NamPosition, oversample: bool) -> NamBlock {
+    NamBlock {
+        controls: NamBlockControls {
+            id,
+            position,
+            ..NamBlockControls::default()
+        },
+        model: format!("/captures/{id}.nam"),
+        arch: "WaveNet".to_owned(),
+        oversample,
+        ..NamBlock::new(id)
+    }
+}
+
+#[test]
+fn a_series_oversamples_from_two_captures_and_a_plugin_splits_it() {
+    let mut path = SignalPath {
+        nam: vec![
+            capture(0, NamPosition::Pre, true),
+            capture(1, NamPosition::Post, true),
+        ],
+        ..SignalPath::default()
+    };
+    assert_eq!(
+        path.nam_factors(true),
+        [2, 2],
+        "an empty chain joins Pre and Post into one series"
+    );
+    assert_eq!(
+        path.nam_factors(false),
+        [1, 1],
+        "a plugin between them judges each side alone"
+    );
+
+    // A second capture before the effects makes that side a series of two.
+    path.nam.insert(1, capture(2, NamPosition::Pre, true));
+    assert_eq!(path.nam_factors(false), [2, 2, 1]);
+
+    // A bypassed block still counts while its model is installed.
+    path.nam[0].controls.enabled = false;
+    assert_eq!(path.nam_factors(false), [2, 2, 1]);
+
+    // An LSTM cannot scale, and a cleared or mismatched block is not there.
+    path.nam[1].oversample = false;
+    assert_eq!(path.nam_factors(false), [1, 1, 1]);
+    path.nam[1].oversample = true;
+    path.nam[1].model.clear();
+    assert_eq!(
+        path.nam_factors(true),
+        [2, 1, 2],
+        "a cleared block drops out; the Pre pair still runs"
+    );
+    path.nam[0].model.clear();
+    path.nam[2].model.clear();
+    assert_eq!(path.nam_factors(true), [1, 1, 1], "no capture is installed");
+
+    // A rate mismatch does not install, so it is not counted.
+    path.nam[0].model = "/captures/0.nam".to_owned();
+    path.nam[2].model = "/captures/2.nam".to_owned();
+    path.nam[2].mismatch = true;
+    assert_eq!(
+        path.nam_factors(true),
+        [1, 1, 1],
+        "a rate mismatch is not installed"
+    );
+}
 
 #[test]
 fn add_duplicate_and_remove_paths_in_the_app_and_the_engine() {

@@ -36,12 +36,11 @@ offset, sound like separate takes instead of a chorus.  It sits after the
 amp and the cab, so it also gives a mono NAM path a real stereo image.
 It adds no latency: the copies are only ever late.
 
-## NAM at other rates, and oversampling
+## NAM at other rates
 
-Both are in the open items: a capture at a rate other than the output's
-does not install, and stacked high-gain captures alias at 48 kHz.  Run the
-NAM group at the capture's rate, or at 2×, with a resampler inside the
-stage.  That adds latency, which goes into path alignment like a plugin's.
+A capture at a rate other than the output's does not install.  Run the
+NAM group at the capture's rate, with a resampler around it.  That adds
+latency, which goes into path alignment like a plugin's.
 
 ## Correction and delay per output
 

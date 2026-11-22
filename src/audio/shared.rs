@@ -411,26 +411,29 @@ impl Shared {
         &self.paths[slot]
     }
 
-    /// Every slot's latency as the mixer aligns it: the chain's, and for a
-    /// live return plus its wait, the slowest live path fed by the input
-    /// (each clamped to [`MAX_ALIGN`], as the mixer runs them).  See
-    /// `mixer`, "Returns".
+    /// Every slot's latency as the mixer aligns it: the path's whole chain
+    /// (plugin effects and any oversampled NAM block), and for a live return
+    /// plus its wait, the slowest live path fed by the input (each clamped
+    /// to [`MAX_ALIGN`], as the mixer runs them).  See `mixer`, "Returns".
+    /// Before a block has run, the published chain latency stands in.
     pub(crate) fn alignment_latencies(&self) -> [u32; MAX_PATHS] {
         let live = |path: &PathControls| path.state().is_live();
+        // Unclamped, so the report can flag a path past `MAX_ALIGN`.
+        let own = |path: &PathControls| path.path_latency_samples().max(path.latency_samples());
         let wait = self
             .paths
             .iter()
             .filter(|path| live(path) && !path.is_return())
-            .map(|path| path.latency_samples().min(MAX_ALIGN))
+            .map(own)
+            .map(|samples| samples.min(MAX_ALIGN))
             .max()
             .unwrap_or(0);
         std::array::from_fn(|slot| {
             let path = &self.paths[slot];
-            let own = path.latency_samples();
             if live(path) && path.is_return() {
-                own.saturating_add(wait)
+                own(path).saturating_add(wait)
             } else {
-                own
+                own(path)
             }
         })
     }

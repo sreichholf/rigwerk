@@ -34,9 +34,9 @@ use crate::app::RigWerkApp;
 use crate::audio::nam::NamLoad;
 use crate::audio::{
     low_bits, path_level_gain, sanitize_path_level, sanitize_send, EngineState, EqSettings,
-    GateSettings, MapPreset, NamBlockControls, NamBlockSettings, NamStack, OutputDeviceSettings,
-    PathFeed, PathMapSettings, PathMix, PathState, UnusedChannels, MAX_NAM_BLOCKS,
-    MAX_OUTPUT_CHANNELS, MAX_PATHS, SEND_OFF_DB,
+    GateSettings, MapPreset, NamBlockControls, NamBlockSettings, NamPosition, NamStack,
+    OutputDeviceSettings, PathFeed, PathMapSettings, PathMix, PathState, UnusedChannels,
+    MAX_NAM_BLOCKS, MAX_OUTPUT_CHANNELS, MAX_PATHS, SEND_OFF_DB,
 };
 
 /// One NAM block of a path, as the UI holds it: the controls the engine
@@ -66,6 +66,10 @@ pub(crate) struct NamBlock {
     pub(crate) gear: Option<String>,
     /// The file's architecture, for the badge and the estimate.
     pub(crate) arch: String,
+    /// Every submodel of the loaded capture is a WaveNet whose dilations
+    /// scale with a doubled rate.  The UI counts these per group to decide
+    /// whether a block runs at 1x or 2x.
+    pub(crate) oversample: bool,
     /// What the capture measured as at the running rate and block size.
     /// `None` until it is measured.
     pub(crate) load: Option<NamLoad>,
@@ -87,6 +91,7 @@ impl NamBlock {
             install: NamInstall::default(),
             gear: None,
             arch: String::new(),
+            oversample: false,
             load: None,
         }
     }
@@ -112,6 +117,7 @@ impl NamBlock {
         self.file_rate = 0;
         self.gear = None;
         self.arch.clear();
+        self.oversample = false;
         self.load = None;
         self.controls.level_in_dbu = None;
         self.controls.level_out_dbu = None;
@@ -124,13 +130,22 @@ impl NamBlock {
         }
     }
 
+    /// Whether the block's capture is installed, whether or not the block is
+    /// bypassed.  A bypassed block still counts in its group.
+    pub(crate) fn installed(&self) -> bool {
+        !self.model.trim().is_empty() && !self.mismatch && self.error.is_none()
+    }
+
     /// Whether the block runs: on, and with a capture that loaded (or is
     /// still loading).  A failed load or a rate mismatch runs nothing.
     pub(crate) fn active(&self) -> bool {
-        self.controls.enabled
-            && !self.model.trim().is_empty()
-            && !self.mismatch
-            && self.error.is_none()
+        self.controls.enabled && self.installed()
+    }
+
+    /// Whether the installed capture may run at twice the output rate: it
+    /// has a model, and every submodel of it can scale.
+    pub(crate) fn can_oversample(&self) -> bool {
+        self.installed() && self.oversample
     }
 
     /// The share of one block the block is expected to take, measured when
@@ -259,6 +274,49 @@ impl SignalPath {
     /// Whether any block runs.
     pub(crate) fn nam_active(&self) -> bool {
         self.nam.iter().any(NamBlock::active)
+    }
+
+    /// The dilation scale each block should run at, in order: 2 for every
+    /// installed capture that can be oversampled once its series holds two
+    /// or more of them, 1 otherwise.
+    ///
+    /// The `Pre` and `Post` groups are separate series.  With no effects
+    /// between them (`effects_empty`) they are one series, so a pedal before
+    /// the effects and an amp after them oversample together; one plugin
+    /// between them splits the series and each side is judged alone.  A
+    /// bypassed block still counts while its model is installed.
+    pub(crate) fn nam_factors(&self, effects_empty: bool) -> Vec<u8> {
+        let eligible: Vec<bool> = self.nam.iter().map(NamBlock::can_oversample).collect();
+        let count = |position: NamPosition| {
+            self.nam
+                .iter()
+                .zip(&eligible)
+                .filter(|(block, eligible)| **eligible && block.controls.position == position)
+                .count()
+        };
+        let pre = count(NamPosition::Pre);
+        let post = count(NamPosition::Post);
+        self.nam
+            .iter()
+            .zip(eligible)
+            .map(|(block, eligible)| {
+                if !eligible {
+                    return 1;
+                }
+                let series = if effects_empty {
+                    pre + post
+                } else if block.controls.position == NamPosition::Pre {
+                    pre
+                } else {
+                    post
+                };
+                if series >= 2 {
+                    2
+                } else {
+                    1
+                }
+            })
+            .collect()
     }
 
     /// The gear type of the last active capture before the cabinet: a

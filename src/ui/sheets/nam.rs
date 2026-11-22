@@ -67,8 +67,11 @@ impl RigWerkApp {
             RichText::new(
                 "Neural Amp Modeler profiles (.nam): WaveNet and LSTM captures, \
                  A1 and A2, including slimmable A2 files.  A profile runs at its \
-                 own sample rate and is not resampled.  Blocks run in order, and \
-                 each one is a stage of its own: stack a pedal into an amp.",
+                 own sample rate: one capture is played as it was made.  A stack \
+                 of two or more captures that can be oversampled runs them at \
+                 twice the output rate, filtered back down, so the aliases stay \
+                 out of the audio band.  Blocks run in order, and each one is a \
+                 stage of its own: stack a pedal into an amp.",
             )
             .font(font(Face::Sans, TypeRole::Secondary))
             .color(colours.text3),

@@ -52,6 +52,7 @@ fn a_loaded_capture_publishes_its_calibration_levels() {
         run: 0,
         generation: 1,
         submodel: 0,
+        factor: 1,
     };
     let (id, stamp) = (block.controls.id, block.install.clone());
     let mut loaded = match prepare_nam_json(TINY, 48_000, 1.0) {
@@ -209,6 +210,7 @@ fn the_loader_answers_a_job_off_the_ui_thread() {
         run: 1,
         generation: 1,
         submodel: 0,
+        factor: 1,
     };
     assert!(loader.request(NamJob {
         slot: 2,
@@ -217,6 +219,7 @@ fn the_loader_answers_a_job_off_the_ui_thread() {
         path: stamp.path.clone(),
         rate: 48_000,
         slim: 1.0,
+        factor: 1,
         frames: 256,
     }));
     let answer = loader
@@ -239,6 +242,7 @@ fn the_install_stamp_separates_rate_run_and_width() {
         run: 3,
         generation: 1,
         submodel: 0,
+        factor: 1,
     };
     let mut other = base.clone();
     assert_eq!(other, base);
@@ -250,6 +254,9 @@ fn the_install_stamp_separates_rate_run_and_width() {
     let mut other = base.clone();
     other.submodel = 2;
     assert_ne!(other, base);
+    let mut other = base.clone();
+    other.factor = 2;
+    assert_ne!(other, base, "a factor rebuild is a different install");
 }
 
 #[test]

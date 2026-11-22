@@ -147,6 +147,22 @@ impl PathControls {
         self.latency.load(Ordering::Acquire)
     }
 
+    /// Stores the whole path's latency for the block just begun: the chain's
+    /// plus the delay of each oversampled NAM block.  Audio side, after the
+    /// NAM stage has taken its commands.
+    pub(crate) fn store_path_latency(&self, samples: u32) {
+        self.path_latency.store(samples, Ordering::Relaxed);
+    }
+
+    /// The whole path's latency as the last block counted it; before a block
+    /// has run, the chain's published latency stands in.  UI display only:
+    /// the mixer aligns with the value it computed for its own block.
+    pub(crate) fn path_latency_samples(&self) -> u32 {
+        self.path_latency
+            .load(Ordering::Relaxed)
+            .max(self.latency_samples())
+    }
+
     /// Stores a chain latency without a plugin (screenshots only, before a
     /// bridge runs; the next chain edit or latency change replaces it).
     pub(crate) fn screenshot_latency(&self, samples: u32) {

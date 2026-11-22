@@ -6,7 +6,9 @@
 //! rendered inside its own guard: what the edit allocates is the UI's
 //! business, what the block allocates is not.
 
-use super::super::nam::{prepare_nam_json, NamBlockControls, NamFile, NamPosition, NamStack};
+use super::super::nam::{
+    prepare_nam_json, prepare_nam_json_at, NamBlockControls, NamFile, NamPosition, NamStack,
+};
 use super::super::rt_guard::RtGuard;
 use super::super::shared::Shared;
 use super::super::types::BufferMode;
@@ -28,6 +30,14 @@ const TINY: &str = r#"{
 
 fn model() -> super::super::nam::PreparedNam {
     match prepare_nam_json(TINY, 48_000, 1.0) {
+        NamFile::Ready(loaded) => loaded.prepared,
+        _ => panic!("the docs model should load"),
+    }
+}
+
+/// The docs model built for an oversampled group.
+fn scaled_model() -> super::super::nam::PreparedNam {
+    match prepare_nam_json_at(TINY, 48_000, 1.0, 2) {
         NamFile::Ready(loaded) => loaded.prepared,
         _ => panic!("the docs model should load"),
     }
@@ -99,6 +109,41 @@ fn a_block_with_nam_blocks_allocates_nothing() {
 
     for _ in 0..4 {
         render_one_block(&mut mixer, &shared, frames, &mut out);
+    }
+}
+
+#[test]
+fn oversampled_nam_blocks_allocate_and_free_nothing() {
+    let frames = 256;
+    let (mut mixer, shared) = running_mixer(frames);
+    shared.path(0).set_nam(&stack(&[0, 1]));
+    shared.path(0).queue_nam(0, scaled_model());
+    shared.path(0).queue_nam(1, scaled_model());
+    let mut out = vec![vec![0.0f32; 2]; frames];
+    // The first block takes both models and starts their warm-up; the rest
+    // run the 2x pair, a swap, and a bypass through the block paths.
+    mixer.render(&shared, frames, |index, mapped| {
+        for (channel, sample) in out[index].iter_mut().enumerate() {
+            *sample = mapped.sample(channel);
+        }
+    });
+    for _ in 0..40 {
+        render_fed(&mut mixer, &shared, frames, &mut out);
+    }
+    // Replacing one scaled model keeps the pair's history moving.
+    shared.path(0).queue_nam(1, scaled_model());
+    for _ in 0..40 {
+        render_fed(&mut mixer, &shared, frames, &mut out);
+    }
+    let mut bypassed = NamStack::default();
+    bypassed.push(NamBlockControls {
+        enabled: false,
+        ..block(0)
+    });
+    bypassed.push(block(1));
+    shared.path(0).set_nam(&bypassed);
+    for _ in 0..4 {
+        render_fed(&mut mixer, &shared, frames, &mut out);
     }
 }
 
