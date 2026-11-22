@@ -581,8 +581,9 @@ pub(crate) enum NamFile {
     Failed(String),
 }
 
-/// What one capture costs, as a share of the block period: `mean` is the
-/// average of the measured buffers, `peak` the longest one.
+/// What one capture costs, as a share of the block period: `peak` is the
+/// 95th percentile of the measured buffers and `mean` the average of the
+/// buffers up to it (see [`load_from_times`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct NamLoad {
     pub mean: f32,
@@ -832,15 +833,27 @@ fn warm_up(model: &mut nam_rs::Model) {
     }
 }
 
-/// How many buffers [`measure_load`] runs, and how many it throws away first
-/// (the first buffers pay for cache misses the steady state does not).
+/// How many buffers [`measure_load`] times, and how many it runs first
+/// without timing (the first buffers pay for cache misses the steady state
+/// does not).
 const LOAD_BUFFERS: usize = 200;
 const LOAD_WARMUP: usize = 8;
+/// The least time [`measure_load`] runs the model before it starts timing.
+/// The loader thread wakes for the job on a core that may be at its idle
+/// clock; timed from the first buffer, a capture read up to twice its cost.
+const LOAD_WARMUP_SECONDS: f64 = 0.05;
+/// The percentile of the timed buffers that is the measured peak.  The
+/// loader is not a realtime thread: the longest buffer is often a
+/// preemption, not the model.
+const LOAD_PEAK_PERCENTILE: usize = 95;
 
-/// Runs [`LOAD_BUFFERS`] buffers of a quiet sine through `model` and returns
-/// the mean and longest time as a share of the block period.  The loader
-/// thread only: this is the one place a model is timed.  The model is left
-/// reset and prewarmed, so it can go live as it is.
+/// Runs a quiet sine through `model`, at least [`LOAD_WARMUP`] buffers and
+/// [`LOAD_WARMUP_SECONDS`] untimed, then [`LOAD_BUFFERS`] timed, and returns
+/// their 95th percentile and the mean below it as a share of the block
+/// period
+/// ([`load_from_times`]).  The loader thread only: this is the one place a
+/// model is timed.  The model is left reset and prewarmed, so it can go live
+/// as it is.
 ///
 /// A factor-2 model runs `2 * frames` samples per output block, so it is
 /// timed on that many samples against the same block period: the sheet then
@@ -861,23 +874,41 @@ pub(crate) fn measure_load(
             0.1 * phase.sin()
         })
         .collect();
-    let mut total = 0.0f64;
-    let mut longest = 0.0f64;
-    for run in 0..LOAD_BUFFERS + LOAD_WARMUP {
+    let warm_until =
+        std::time::Instant::now() + std::time::Duration::from_secs_f64(LOAD_WARMUP_SECONDS);
+    let mut warm = 0;
+    while warm < LOAD_WARMUP || std::time::Instant::now() < warm_until {
+        model.process_buffer(&mut buffer);
+        warm += 1;
+    }
+    let mut times = [0.0f64; LOAD_BUFFERS];
+    for time in &mut times {
         let started = std::time::Instant::now();
         model.process_buffer(&mut buffer);
-        let elapsed = started.elapsed().as_secs_f64();
-        if run < LOAD_WARMUP {
-            continue;
-        }
-        total += elapsed;
-        longest = longest.max(elapsed);
+        *time = started.elapsed().as_secs_f64();
     }
     model.reset();
     warm_up(model);
+    load_from_times(&mut times, block_seconds)
+}
+
+/// The [`LOAD_PEAK_PERCENTILE`]th percentile of `times` (seconds per
+/// buffer, nearest rank) and the mean of the buffers up to it, as shares of
+/// `block_seconds`.  The slowest buffers above the percentile are left out
+/// of both: on the loader thread they are preemptions, which the realtime
+/// audio thread does not see.  Sorts `times`.
+fn load_from_times(times: &mut [f64], block_seconds: f64) -> NamLoad {
+    if times.is_empty() || block_seconds <= 0.0 {
+        return NamLoad::default();
+    }
+    times.sort_by(f64::total_cmp);
+    let rank = (times.len() * LOAD_PEAK_PERCENTILE).div_ceil(100).max(1);
+    let kept = &times[..rank];
+    let mean = kept.iter().sum::<f64>() / kept.len() as f64;
+    let peak = kept[kept.len() - 1];
     NamLoad {
-        mean: (total / LOAD_BUFFERS as f64 / block_seconds) as f32,
-        peak: (longest / block_seconds) as f32,
+        mean: (mean / block_seconds) as f32,
+        peak: (peak / block_seconds) as f32,
     }
 }
 

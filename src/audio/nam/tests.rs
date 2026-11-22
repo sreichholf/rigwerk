@@ -744,6 +744,36 @@ fn a_measured_model_is_timed_and_left_ready() {
 }
 
 #[test]
+fn one_slow_buffer_does_not_set_the_measured_peak() {
+    // 199 buffers of 1 ms and one preempted one of 50 ms, in a 10 ms block.
+    let mut times = [0.001; 200];
+    times[17] = 0.05;
+    let load = super::load_from_times(&mut times, 0.01);
+    // The outlier alone would read 500 %, and would lift a plain mean to
+    // 12.45 %: it is left out of both figures.
+    assert!((load.peak - 0.1).abs() < 1.0e-6, "peak {}", load.peak);
+    assert!((load.mean - 0.1).abs() < 1.0e-6, "mean {}", load.mean);
+}
+
+#[test]
+fn a_slow_tail_sets_the_measured_peak() {
+    // Every tenth buffer is slow: that is the model, not a preemption.
+    let mut times: Vec<f64> = (0..200)
+        .map(|index| if index % 10 == 0 { 0.004 } else { 0.001 })
+        .collect();
+    let load = super::load_from_times(&mut times, 0.01);
+    assert!((load.peak - 0.4).abs() < 1.0e-6, "peak {}", load.peak);
+    // The 190 fastest: 180 of 1 ms and 10 of 4 ms.
+    let mean = (180.0 * 0.001 + 10.0 * 0.004) / 190.0 / 0.01;
+    assert!(
+        (load.mean - mean as f32).abs() < 1.0e-6,
+        "mean {}",
+        load.mean
+    );
+    assert!(load.peak >= load.mean);
+}
+
+#[test]
 fn the_estimate_follows_the_rate_and_not_the_buffer() {
     let at_48k = estimate_load("WaveNet", 48_000.0).share();
     let at_96k = estimate_load("WaveNet", 96_000.0).share();

@@ -14,10 +14,15 @@
 //! block of it is rebuilt at factor 2 and fades in through the same install;
 //! back at one, it is rebuilt at factor 1.  The folder window and the
 //! clipboard read run on the UI thread too.
+//!
+//! A capture is timed once per bridge run.  One never measured is measured
+//! before its model goes live.  One measured in an earlier run goes live at
+//! once with that figure and is measured again when the loader has no
+//! install waiting, so a start never plays dry while a figure is refreshed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
@@ -108,6 +113,7 @@ pub(crate) struct NamInstall {
 }
 
 /// One block's capture, as the loader thread builds it.
+#[derive(Clone)]
 struct NamJob {
     slot: usize,
     id: u32,
@@ -126,7 +132,39 @@ struct NamDone {
     slot: usize,
     id: u32,
     stamp: NamInstall,
-    file: NamFile,
+    answer: NamAnswer,
+}
+
+/// What the loader sends back for one job.
+enum NamAnswer {
+    /// The capture, built (or why it was not).  Boxed: a figure alone is
+    /// small.
+    Built(Box<NamFile>),
+    /// A fresh figure for a capture already live, measured in this run.
+    Remeasured(NamLoad),
+}
+
+/// What the loader does about the cost of a capture it builds, from what it
+/// measured before (the figure and the run it was taken in).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NamMeasure {
+    /// Measured in this run: use it.
+    Known(NamLoad),
+    /// Measured in an earlier run: use it, and measure again once no
+    /// install waits.
+    Refresh(NamLoad),
+    /// Never measured: measure before the model goes live.
+    Now,
+}
+
+impl NamMeasure {
+    pub(crate) fn plan(cached: Option<(NamLoad, u64)>, run: u64) -> Self {
+        match cached {
+            Some((load, measured_in)) if measured_in == run => Self::Known(load),
+            Some((load, _)) => Self::Refresh(load),
+            None => Self::Now,
+        }
+    }
 }
 
 /// The thread that parses, builds, warms and measures captures.  One per
@@ -146,10 +184,26 @@ impl NamLoader {
             .name("rigwerk-nam".to_owned())
             .spawn(move || {
                 // Measured costs, by (file, rate, block size, width,
-                // factor): a second block on the same build does not
-                // measure again.
-                let mut measured: HashMap<(String, u32, usize, u32, u8), NamLoad> = HashMap::new();
-                while let Ok(job) = job_queue.recv() {
+                // factor), with the run each was taken in: a second block on
+                // the same build does not measure again, and a figure from
+                // an earlier run is refreshed (see the module docs).
+                type Key = (String, u32, usize, u32, u8);
+                let mut measured: HashMap<Key, (NamLoad, u64)> = HashMap::new();
+                // Live captures whose figure is from an earlier run.  An
+                // install always goes first.
+                let mut refresh: VecDeque<NamJob> = VecDeque::new();
+                loop {
+                    let (job, install) = match job_queue.try_recv() {
+                        Ok(job) => (job, true),
+                        Err(TryRecvError::Disconnected) => break,
+                        Err(TryRecvError::Empty) => match refresh.pop_front() {
+                            Some(job) => (job, false),
+                            None => match job_queue.recv() {
+                                Ok(job) => (job, true),
+                                Err(_) => break,
+                            },
+                        },
+                    };
                     let key = (
                         job.path.clone(),
                         job.rate,
@@ -157,31 +211,62 @@ impl NamLoader {
                         job.slim.to_bits(),
                         job.factor,
                     );
-                    let known = measured.get(&key).copied();
-                    let mut file = prepare_nam_file(
-                        &job.path,
-                        job.rate,
-                        job.slim,
-                        known.is_none().then_some(job.frames),
-                        job.factor,
-                    );
-                    if let NamFile::Ready(loaded) = &mut file {
-                        match known {
-                            Some(load) => loaded.load = Some(load),
-                            None => {
-                                if let Some(load) = loaded.load {
-                                    measured.insert(key, load);
+                    let run = job.stamp.run;
+                    let plan = NamMeasure::plan(measured.get(&key).copied(), run);
+                    let answer = if install {
+                        let now = plan == NamMeasure::Now;
+                        let mut file = prepare_nam_file(
+                            &job.path,
+                            job.rate,
+                            job.slim,
+                            now.then_some(job.frames),
+                            job.factor,
+                        );
+                        if let NamFile::Ready(loaded) = &mut file {
+                            match plan {
+                                NamMeasure::Known(load) => loaded.load = Some(load),
+                                NamMeasure::Refresh(load) => {
+                                    loaded.load = Some(load);
+                                    refresh.push_back(job.clone());
+                                }
+                                NamMeasure::Now => {
+                                    if let Some(load) = loaded.load {
+                                        measured.insert(key, (load, run));
+                                    }
                                 }
                             }
                         }
-                    }
-                    let answer = NamDone {
+                        NamAnswer::Built(Box::new(file))
+                    } else if let NamMeasure::Known(load) = plan {
+                        // Another block on the same build was measured
+                        // in this run already.
+                        NamAnswer::Remeasured(load)
+                    } else {
+                        let file = prepare_nam_file(
+                            &job.path,
+                            job.rate,
+                            job.slim,
+                            Some(job.frames),
+                            job.factor,
+                        );
+                        // Only the figure is wanted: the model built to time
+                        // was never live and is dropped here.
+                        let NamFile::Ready(loaded) = file else {
+                            continue;
+                        };
+                        let Some(load) = loaded.load else {
+                            continue;
+                        };
+                        measured.insert(key, (load, run));
+                        NamAnswer::Remeasured(load)
+                    };
+                    let done = NamDone {
                         slot: job.slot,
                         id: job.id,
                         stamp: job.stamp,
-                        file,
+                        answer,
                     };
-                    if results.send(answer).is_err() {
+                    if results.send(done).is_err() {
                         break;
                     }
                 }
@@ -602,7 +687,7 @@ impl RigWerkApp {
             slot,
             id,
             stamp,
-            file,
+            answer,
         } = done;
         let mut queue = None;
         let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) else {
@@ -617,6 +702,16 @@ impl RigWerkApp {
         if block.install != stamp {
             return;
         }
+        let file = match answer {
+            NamAnswer::Built(file) => *file,
+            NamAnswer::Remeasured(load) => {
+                block.load = Some(load);
+                if self.nam_warning.is_some() {
+                    self.check_nam_load();
+                }
+                return;
+            }
+        };
         let clear = match file {
             NamFile::Ready(loaded) => {
                 block.name = loaded.name;

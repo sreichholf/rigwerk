@@ -3,8 +3,8 @@
 //! the heavy-preset check over every path.
 
 use super::{
-    normalize_models_folder, paste_chord_edge, suggested_bypass, NamDone, NamInstall, NamJob,
-    NamLoader,
+    normalize_models_folder, paste_chord_edge, suggested_bypass, NamAnswer, NamDone, NamInstall,
+    NamJob, NamLoader, NamMeasure,
 };
 use crate::app::chain::ChainSelection;
 use crate::app::screen::Sheet;
@@ -65,7 +65,7 @@ fn a_loaded_capture_publishes_its_calibration_levels() {
         slot,
         id,
         stamp,
-        file: NamFile::Ready(loaded),
+        answer: NamAnswer::Built(Box::new(NamFile::Ready(loaded))),
     });
     // No other edit follows: the answer itself publishes the levels.
     let published = app.engine.path_nam(slot);
@@ -229,8 +229,143 @@ fn the_loader_answers_a_job_off_the_ui_thread() {
     assert_eq!((answer.slot, answer.id), (2, 7));
     assert_eq!(answer.stamp, stamp);
     assert!(
-        matches!(answer.file, NamFile::Failed(_)),
+        matches!(&answer.answer, NamAnswer::Built(file) if matches!(**file, NamFile::Failed(_))),
         "a missing file is a failure, not a panic"
+    );
+}
+
+#[test]
+fn a_figure_is_used_in_its_run_and_refreshed_in_a_later_one() {
+    let load = NamLoad {
+        mean: 0.04,
+        peak: 0.05,
+    };
+    assert_eq!(
+        NamMeasure::plan(Some((load, 3)), 3),
+        NamMeasure::Known(load)
+    );
+    assert_eq!(
+        NamMeasure::plan(Some((load, 2)), 3),
+        NamMeasure::Refresh(load)
+    );
+    assert_eq!(NamMeasure::plan(None, 3), NamMeasure::Now);
+}
+
+/// One job for `path` in `run`, and every answer the loader sends for it
+/// until it has been quiet for a moment.
+fn answers_for(loader: &NamLoader, path: &str, run: u64) -> Vec<NamAnswer> {
+    let stamp = NamInstall {
+        path: path.to_owned(),
+        rate: 48_000,
+        run,
+        generation: 1,
+        submodel: 0,
+        factor: 1,
+    };
+    assert!(loader.request(NamJob {
+        slot: 0,
+        id: 1,
+        stamp: stamp.clone(),
+        path: path.to_owned(),
+        rate: 48_000,
+        slim: 1.0,
+        factor: 1,
+        frames: 64,
+    }));
+    let mut answers = Vec::new();
+    let first = std::time::Duration::from_secs(10);
+    let quiet = std::time::Duration::from_secs(2);
+    while let Ok(done) = loader
+        .done
+        .recv_timeout(if answers.is_empty() { first } else { quiet })
+    {
+        assert_eq!(done.stamp, stamp);
+        answers.push(done.answer);
+    }
+    answers
+}
+
+fn built_load(answer: &NamAnswer) -> Option<NamLoad> {
+    match answer {
+        NamAnswer::Built(file) => match &**file {
+            NamFile::Ready(loaded) => loaded.load,
+            _ => panic!("expected a ready capture"),
+        },
+        NamAnswer::Remeasured(_) => panic!("expected a built capture"),
+    }
+}
+
+#[test]
+fn a_new_run_goes_live_with_the_old_figure_and_measures_again() {
+    let dir = std::env::temp_dir().join(format!("rigwerk-nam-runs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tiny.nam");
+    std::fs::write(&path, TINY).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let loader = NamLoader::spawn().expect("the loader thread starts");
+
+    // Never measured: measured before it goes live, and nothing follows.
+    let first = answers_for(&loader, &path, 1);
+    assert_eq!(first.len(), 1);
+    let measured = built_load(&first[0]).expect("measured before it goes live");
+
+    // A new run: live at once with that figure, then a fresh one.
+    let second = answers_for(&loader, &path, 2);
+    assert_eq!(second.len(), 2, "the build, then the new figure");
+    assert_eq!(built_load(&second[0]), Some(measured));
+    assert!(matches!(second[1], NamAnswer::Remeasured(load) if load.mean > 0.0));
+
+    // The same run again: the fresh figure, and no more measuring.
+    let third = answers_for(&loader, &path, 2);
+    assert_eq!(third.len(), 1);
+    let NamAnswer::Remeasured(fresh) = second[1] else {
+        unreachable!()
+    };
+    assert_eq!(built_load(&third[0]), Some(fresh));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_fresh_figure_reaches_its_block_and_a_stale_one_does_not() {
+    let mut app = blank_app();
+    let slot = app.path_slots()[0];
+    let index = app.add_nam_block(slot).expect("a block");
+    let block = &mut app.paths[slot].as_mut().unwrap().nam[index];
+    block.model = "/captures/amp.nam".to_owned();
+    block.install = NamInstall {
+        path: block.model.clone(),
+        rate: 48_000,
+        run: 2,
+        generation: 1,
+        submodel: 0,
+        factor: 1,
+    };
+    let (id, stamp) = (block.controls.id, block.install.clone());
+    let fresh = NamLoad {
+        mean: 0.04,
+        peak: 0.05,
+    };
+    let mut stale = stamp.clone();
+    stale.run = 1;
+    app.apply_nam_result(NamDone {
+        slot,
+        id,
+        stamp: stale,
+        answer: NamAnswer::Remeasured(NamLoad {
+            mean: 0.5,
+            peak: 0.5,
+        }),
+    });
+    assert_eq!(app.paths[slot].as_ref().unwrap().nam[index].load, None);
+    app.apply_nam_result(NamDone {
+        slot,
+        id,
+        stamp,
+        answer: NamAnswer::Remeasured(fresh),
+    });
+    assert_eq!(
+        app.paths[slot].as_ref().unwrap().nam[index].load,
+        Some(fresh)
     );
 }
 
