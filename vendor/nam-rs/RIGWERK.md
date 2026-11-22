@@ -1,0 +1,71 @@
+# nam-rs in RigWerk
+
+This is nam-rs 0.4.0 (tag `v0.4.0` of <https://github.com/OpenSauce/nam-rs>,
+MIT, see `LICENSE` and `NOTICE`) with faster kernels.  The root `Cargo.toml`
+uses it through `[patch.crates-io]`.  Drop the folder and the patch once an
+upstream release has the same speed.
+
+Everything in this folder, the changes below included, is under the
+crate's MIT license (`LICENSE`), not RigWerk's GPL, so the changes can go
+upstream as they are.  Only MIT-compatible code goes in here: no code from
+RigWerk's own tree.
+
+What changed, all under `src/`:
+
+- `wavenet/conv.rs`: the history is one linear row per input channel, so a
+  block is appended and the taps read straight out of it, with no ring
+  staging per block.  The kernel computes 4 output channels by 8 time steps
+  at once and keeps the sums in registers.  Every output adds its bias and
+  products in the per-sample order, so the result is bit-identical to 0.4.0.
+  A 1x1 convolution keeps no history and reads the block in place.
+- `lstm/cell.rs`: the gate matrix is stored transposed, so `W·[x; h]`
+  updates all gates from one column at a time.  It vectorizes and keeps the
+  summation order, so the matrix product is bit-identical; the gates then
+  use the new `tanh` and `sigmoid`.
+- `wavenet/activation.rs`: `tanh` and `sigmoid` are built on a branch-free
+  `e^x` (range reduction by `ln 2`, Taylor series to `x^7`), so they
+  vectorize.  Within 3e-7 of the exact functions, like libm's `tanhf`.  No
+  third-party approximation or coefficients: only a Cody–Waite split of
+  `ln 2` (355/512 and the rest) and `1/k!`.  Ungated layers and the
+  post-stack head activate whole rows (`apply_slice`); gated and blended
+  layers still call them per sample.
+
+On a standard WaveNet this is about 2.6 times faster, and on a standard
+LSTM about 3.5 times, at `opt-level = 3`, which RigWerk uses for this
+crate in every profile.  At 2 the conv tiles do not vectorize and a
+WaveNet is slower than 0.4.0.
+Only the new `tanh` and `sigmoid` change the output: by at most 1.2e-5 on
+a standard WaveNet driven near 0 dBFS, about −135 dBFS RMS.  The parity
+fixtures against NAM Core and the Python trainer still pass at their 1e-5.
+
+## Where the ideas come from
+
+All of it is written for this crate; the ideas are standard ones.
+
+- Conv history: a linear buffer per channel with a write cursor, and the
+  history copied back to the front when a block would run past the end.
+  This is the scheme of NAM Core's `RingBuffer` (`NAM/ring_buffer.cpp`,
+  "rewind"; MIT, already credited in `NOTICE`).  The sizing differs:
+  `hist + max(hist, MAX_BLOCK)` columns here, `2·lookback + buffer` there.
+- Conv kernel: register blocking, the micro-kernel idea of high-performance
+  matrix multiplication (Goto and van de Geijn, "Anatomy of
+  High-Performance Matrix Multiplication", ACM TOMS 34(3), 2008).  A
+  dilated convolution is one small matrix product per tap; a tile of
+  output channels by time steps is accumulated in registers over all taps
+  and input channels, then stored once.
+- LSTM: the column-oriented ("saxpy" or gaxpy) form of a matrix-vector
+  product, `y += x_k · W[:, k]` for each `k` (Golub and Van Loan, *Matrix
+  Computations*, §1.1).  Keeping `k` as the outer loop gives each gate the
+  same order of additions as the row-wise dot product, hence bit-identical.
+- `tanh` and `sigmoid`: Cody and Waite's argument reduction for `e^x`
+  (*Software Manual for the Elementary Functions*, 1980) with the Taylor
+  series, and the identities `tanh x = (e^2x − 1) / (e^2x + 1)` and
+  `σ(x) = 1 / (1 + e^−x)`.
+
+The upstream fixtures are several MB and are not committed here.
+`scripts/nam-rs-parity.sh <dir>` clones the tag, puts this `src/` in its
+place and runs upstream's checks: rustfmt, clippy, and the whole suite
+(unit tests, parity against the fixtures, real-time safety) in the two
+profiles RigWerk builds this crate with, dev and release at opt-level 3.
+The real-time safety tests' allocator check needs debug assertions, so the
+dev run is the one that proves it.

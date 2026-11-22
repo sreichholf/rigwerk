@@ -87,5 +87,6 @@ Guidelines: [`AGENTS.md`](AGENTS.md). Known gaps:
 
 [GPL-3.0-or-later](LICENSE). Bundled fonts: IBM Plex subsets (renamed
 RigWerk Sans/Mono) under the [OFL 1.1](assets/fonts/OFL.txt), and egui's
-fallback fonts (Ubuntu Font Licence, MIT). VST3 and ASIO are Steinberg
-technology with their own terms.
+fallback fonts (Ubuntu Font Licence, MIT). `vendor/nam-rs`, nam-rs with
+RigWerk's speedups, stays under its [MIT license](vendor/nam-rs/LICENSE).
+VST3 and ASIO are Steinberg technology with their own terms.

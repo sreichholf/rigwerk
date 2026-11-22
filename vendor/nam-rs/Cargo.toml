@@ -1,0 +1,17 @@
+# nam-rs 0.4.0 (https://github.com/OpenSauce/nam-rs, MIT) with faster
+# kernels, wired in through `[patch.crates-io]` in the root manifest.  What
+# changed and how to check it: RIGWERK.md.
+[package]
+name = "nam-rs"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT"
+description = "Pure-Rust, real-time-safe inference for Neural Amp Modeler (NAM) .nam models"
+repository = "https://github.com/OpenSauce/nam-rs"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

@@ -89,10 +89,18 @@ xcb = "1.7"
 pipewire = { version = "0.10", features = ["v0_3_50"] }
 
 [profile.release]
-opt-level = 2
+opt-level = 3
 
+# nam-rs with faster kernels; vendor/nam-rs/RIGWERK.md says what changed.
+[patch.crates-io]
+nam-rs = { path = "vendor/nam-rs" }
 
-# The amp model runs far slower than real time unoptimised, so a debug
-# build optimises nam-rs alone.
+# nam-rs runs at opt-level 3 in every profile, whatever the rest of the
+# build uses.  Unoptimised it is far slower than real time, and its conv
+# tiles only vectorise at 3: at 2 a standard WaveNet costs about four
+# times as much.
 [profile.dev.package.nam-rs]
+opt-level = 3
+
+[profile.release.package.nam-rs]
 opt-level = 3
