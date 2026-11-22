@@ -64,7 +64,8 @@ pub(super) struct Conv1d {
 const TILE_OUT: usize = 4;
 /// Time steps one tile of the block kernel computes at once: two SSE (or
 /// NEON) registers per output in the portable build, two AVX registers in
-/// the AVX2 build.
+/// the AVX2 build. The summation order does not depend on the width, so
+/// every width gives the same bits.
 const TILE_T: usize = 8;
 #[cfg(target_arch = "x86_64")]
 const TILE_T_AVX2: usize = 16;
@@ -318,37 +319,71 @@ impl Conv1d {
             bias.copy_from_slice(&b[o..o + O]);
         }
 
+        // Full tiles first: the column is read straight from the row, with
+        // no branch and no copy, so the sums stay in registers. The rest of
+        // the block runs in steps of 4, then 1. Each output sums its bias
+        // and products in the same order at any width, so the same bits.
+        let full = n - n % T;
         let mut t = 0;
+        while t < full {
+            self.tile_step::<O, T>(
+                o, in_base, row_len, weights, &bias, src, s, w, t, block_out, n,
+            );
+            t += T;
+        }
+        while t + 4 <= n {
+            self.tile_step::<O, 4>(
+                o, in_base, row_len, weights, &bias, src, s, w, t, block_out, n,
+            );
+            t += 4;
+        }
         while t < n {
-            let len = T.min(n - t);
-            let mut acc = [[0.0_f32; T]; O];
-            for (a, &b) in acc.iter_mut().zip(&bias) {
-                *a = [b; T];
-            }
-            for k in 0..kernel {
-                let back = (kernel - 1 - k) * self.dilation;
-                for jl in 0..ipg {
-                    let at = (in_base + jl) * s + w + t - back;
-                    let column: [f32; T] = if len == T {
-                        src[at..at + T].try_into().unwrap()
-                    } else {
-                        let mut tail = [0.0; T];
-                        tail[..len].copy_from_slice(&src[at..at + len]);
-                        tail
-                    };
-                    for (oo, a) in acc.iter_mut().enumerate() {
-                        let wt = weights[oo * row_len + jl * kernel + k];
-                        for (sum, &x) in a.iter_mut().zip(&column) {
-                            *sum += wt * x;
-                        }
+            self.tile_step::<O, 1>(
+                o, in_base, row_len, weights, &bias, src, s, w, t, block_out, n,
+            );
+            t += 1;
+        }
+    }
+
+    /// One `O` by `T` tile starting at time step `t`; `t + T <= n`.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn tile_step<const O: usize, const T: usize>(
+        &self,
+        o: usize,
+        in_base: usize,
+        row_len: usize,
+        weights: &[f32],
+        bias: &[f32; O],
+        src: &[f32],
+        s: usize,
+        w: usize,
+        t: usize,
+        block_out: &mut [f32],
+        n: usize,
+    ) {
+        debug_assert!(t + T <= n, "a tile step runs past the block");
+        let kernel = self.kernel;
+        let mut acc = [[0.0_f32; T]; O];
+        for (a, &b) in acc.iter_mut().zip(bias) {
+            *a = [b; T];
+        }
+        for k in 0..kernel {
+            let back = (kernel - 1 - k) * self.dilation;
+            for jl in 0..self.in_per_group {
+                let at = (in_base + jl) * s + w + t - back;
+                let column: &[f32; T] = src[at..at + T].try_into().unwrap();
+                for (oo, a) in acc.iter_mut().enumerate() {
+                    let wt = weights[oo * row_len + jl * kernel + k];
+                    for (sum, &x) in a.iter_mut().zip(column) {
+                        *sum += wt * x;
                     }
                 }
             }
-            for (oo, a) in acc.iter().enumerate() {
-                let row = (o + oo) * n + t;
-                block_out[row..row + len].copy_from_slice(&a[..len]);
-            }
-            t += len;
+        }
+        for (oo, a) in acc.iter().enumerate() {
+            let row = (o + oo) * n + t;
+            block_out[row..row + T].copy_from_slice(a);
         }
     }
 
@@ -667,6 +702,51 @@ mod tests {
                     );
                 }
                 t0 += len;
+            }
+        }
+    }
+
+    /// Every tile width gives the same bits, so the width a build picks (8,
+    /// or 16 in the AVX2 build) is a speed choice only. Checked directly on
+    /// the kernel, on every architecture.
+    #[test]
+    fn tile_width_does_not_change_the_bits() {
+        // (in_ch, out_ch, kernel, dilation, groups)
+        let cases = [
+            (8_usize, 8_usize, 6_usize, 239_usize, 1_usize),
+            (16, 8, 3, 512, 1),
+            (8, 1, 16, 1, 1),
+            (6, 4, 2, 3, 2),
+            (8, 8, 3, 5, 2), // grouped, full 4-output tiles in each group
+            (5, 7, 1, 1, 1),
+        ];
+        for (in_ch, out_ch, kernel, dilation, groups) in cases {
+            let wlen = out_ch * in_ch * kernel / groups;
+            let w: Vec<f32> = (0..wlen)
+                .map(|i| ((i * 37 % 23) as f32 - 11.0) * 0.07)
+                .collect();
+            let bias: Vec<f32> = (0..out_ch).map(|o| o as f32 * 0.1 - 0.3).collect();
+            let conv = Conv1d::new_grouped(in_ch, out_ch, kernel, dilation, groups, w, Some(bias));
+            for n in [1_usize, 7, 37, 128, MAX_BLOCK] {
+                // A history of `hist_len` columns, then the block.
+                let s = conv.hist_len + n;
+                let src: Vec<f32> = (0..in_ch * s)
+                    .map(|i| ((i * 7919 % 1009) as f32 / 1009.0 - 0.5) * 2.0)
+                    .collect();
+                let w0 = conv.hist_len;
+                let mut by4 = vec![0.0; out_ch * n];
+                let mut by8 = vec![0.0; out_ch * n];
+                let mut by16 = vec![0.0; out_ch * n];
+                conv.tiles_with::<4>(&src, s, w0, &mut by4, n);
+                conv.tiles_with::<8>(&src, s, w0, &mut by8, n);
+                conv.tiles_with::<16>(&src, s, w0, &mut by16, n);
+                for i in 0..out_ch * n {
+                    assert_eq!(
+                        (by4[i].to_bits(), by16[i].to_bits()),
+                        (by8[i].to_bits(), by8[i].to_bits()),
+                        "{in_ch}x{out_ch} k{kernel} d{dilation} g{groups} n{n} idx{i}"
+                    );
+                }
             }
         }
     }

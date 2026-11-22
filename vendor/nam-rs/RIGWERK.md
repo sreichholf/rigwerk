@@ -15,9 +15,13 @@ What changed, all under `src/`:
 - `wavenet/conv.rs`: the history is one linear row per input channel, so a
   block is appended and the taps read straight out of it, with no ring
   staging per block.  The kernel computes 4 output channels by 8 time steps
-  at once and keeps the sums in registers.  Every output adds its bias and
-  products in the per-sample order, so the result is bit-identical to 0.4.0.
-  A 1x1 convolution keeps no history and reads the block in place.
+  at once and keeps the sums in registers: full tiles read the input column
+  straight from the row, with no branch and no copy, and the rest of a block
+  runs in steps of 4, then 1.  (One loop for full and partial tiles made the
+  compiler keep the sums on the stack, on x86 and aarch64 alike.)  Every
+  output adds its bias and products in the per-sample order, so the result
+  is bit-identical to 0.4.0.  A 1x1 convolution keeps no history and reads
+  the block in place.
 - `lstm/cell.rs`: the gate matrix is stored transposed, so `W·[x; h]`
   updates all gates from one column at a time.  It vectorizes and keeps the
   summation order, so the matrix product is bit-identical; the gates then
@@ -42,14 +46,16 @@ What changed, all under `src/`:
   build.  The AVX2 functions are `unsafe fn`, so the crate still builds on
   its `rust-version`, 1.74.
 
-On a standard WaveNet this is about 2.6 times faster, and on a standard
-LSTM about 3.5 times, at `opt-level = 3`, which RigWerk uses for this
-crate in every profile.  AVX2 takes a WaveNet another 1.4 to 1.6 times,
-and a gated one about twice; the LSTM, one 16-wide step per sample, gains
-nothing from it and has no AVX2 build.  At opt-level 2 the conv tiles do
-not vectorize and a WaveNet is slower than 0.4.0.  Only the new `tanh` and `sigmoid` change the output: by at most 1.2e-5 on
-a standard WaveNet driven near 0 dBFS, about −135 dBFS RMS.  The parity
-fixtures against NAM Core and the Python trainer still pass at their 1e-5.
+Against 0.4.0, a standard WaveNet runs about 2.5 times as fast in the
+portable build and about 4.3 times with AVX2 (one x86 machine, whole
+model, `opt-level = 3`, which RigWerk uses for this crate in every
+profile).  A gated one gains about twice as much again from AVX2.  A
+standard LSTM runs about 3.5 times as fast; one 16-wide step per sample,
+it gains nothing from AVX2 and has no AVX2 build.  At opt-level 2 the conv
+tiles do not vectorize and a WaveNet is slower than 0.4.0.  Only the new
+`tanh` and `sigmoid` change the output: by at most 1.2e-5 on a standard
+WaveNet driven near 0 dBFS, about −135 dBFS RMS.  The parity fixtures
+against NAM Core and the Python trainer still pass at their 1e-5.
 
 ## Where the ideas come from
 
