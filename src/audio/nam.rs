@@ -762,16 +762,19 @@ pub(crate) fn measure_load(model: &mut nam_rs::Model, rate: u32, frames: usize) 
     }
 }
 
-/// The share of one block a capture will take before it is measured, from
-/// the reference: a standard WaveNet is about 12 % at 48 kHz.  A model's cost
-/// is per sample, so its share of the block follows the rate and not the
-/// buffer size.
+/// The share of one block a capture will take before it is measured.  The
+/// reference machine measured a standard WaveNet at about 12 % at 48 kHz
+/// before the vendored nam-rs kernels; they made it 2.6 times faster and a
+/// standard LSTM 3.5 times (7 % before), so about 5 % and 2 % there.  A
+/// slower machine needs more; `measure_load` replaces this once the model
+/// is loaded.  A model's cost is per sample, so its share of the block
+/// follows the rate and not the buffer size.
 pub(crate) fn estimate_load(arch: &str, rate: f64) -> NamLoad {
     let base = match arch {
-        "LSTM" => 0.07,
-        "SlimmableContainer" => 0.12,
+        "LSTM" => 0.02,
+        "SlimmableContainer" => 0.05,
         // WaveNet, and anything this build does not know: the safe guess.
-        _ => 0.12,
+        _ => 0.05,
     };
     let rate = if rate.is_finite() && rate > 0.0 {
         rate

@@ -146,13 +146,36 @@ its tests there, writes the output to `<dir>/reference` and then runs the
 new test against it.  Without `RIGWERK_NAM_REFERENCE` the test passes
 without doing anything; with it set, a missing file fails.
 `RIGWERK_NAM_CAPTURE=<file.nam>` adds a 48 kHz capture of your own.  The
-difference must be at most 1e-6 and is 0 today; the bypass case skips the
-fades, which went from 5 ms to 10 ms.  The old tree builds in
-`<dir>/target`; give the new one a target directory no other worktree
-builds into, since the test binary has the same name in every tree.
+difference must be at most 2e-5: the vendored nam-rs's vectorized `tanh`
+moves a standard WaveNet capture by up to 1.2e-5 when it is driven near
+0 dBFS (4.3e-6 on the test's signal), the synthetic one by 2e-7 and the
+ReLU one not at all.  The bypass case skips the fades, which went from
+5 ms to 10 ms.  The old tree builds in `<dir>/target`; give the new one a
+target directory no other worktree builds into, since the test binary has
+the same name in every tree.
 
 ```bash
 CARGO_TARGET_DIR=$PWD/target scripts/nam-null-test.sh .nam-null
+```
+
+### The vendored nam-rs
+
+`vendor/nam-rs` is nam-rs 0.4.0 with faster kernels, used through
+`[patch.crates-io]`; `vendor/nam-rs/RIGWERK.md` lists what changed.  The
+folder and every change in it stay MIT, like the crate, so the changes can
+go back upstream: do not copy RigWerk's GPL code into it.  Keep its
+upstream style (inline `mod tests`, its own `//!`).  `Cargo.toml` builds
+it at opt-level 3 in every profile; its conv tiles only vectorise there.
+RigWerk's `cargo test` does not run its tests, and RigWerk's `cargo fmt`
+does not reach `vendor/`.  `scripts/nam-rs-parity.sh <dir>` clones
+upstream at the tag, puts the vendored `src/` in its place and runs
+upstream's checks: rustfmt, clippy, and the whole suite in RigWerk's two
+profiles for it, dev at opt-level 3 (debug assertions on, so the real-time
+safety tests' allocator check is installed) and release at opt-level 3
+without LTO.  CI runs it on Linux.
+
+```bash
+scripts/nam-rs-parity.sh .nam-rs-parity
 ```
 
 ## When a test fails

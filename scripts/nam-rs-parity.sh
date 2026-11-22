@@ -3,8 +3,11 @@
 # its unit tests, parity against the NAM Core and Python trainer fixtures,
 # and real-time safety.
 # Clones nam-rs at the tag the vendored copy is based on into <dir>/nam-rs,
-# puts vendor/nam-rs/src in place of its src/ and runs `cargo test` there.
-# The upstream fixtures are several MB and are never committed here.
+# puts vendor/nam-rs/src in place of its src/ and runs `cargo test` there,
+# once in each of the two profiles RigWerk builds nam-rs with (Cargo.toml):
+# dev at opt-level 3 and release at opt-level 3 without LTO, not upstream's
+# own profiles.  The upstream fixtures are several MB and are never
+# committed here.
 set -euo pipefail
 
 NAM_RS_TAG=v0.4.0
@@ -37,8 +40,10 @@ cp -R "$repo/vendor/nam-rs/src" "$checkout/src"
 cd "$checkout"
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
-# The allocation check: rt_safety installs its failing allocator only with
-# debug assertions, so a release run of it would prove nothing.
-cargo test --locked --test rt_safety
-# Everything, optimised: the numbers the tiles produce once they vectorize.
-cargo test --locked --release
+# RigWerk's dev build.  Debug assertions stay on, so rt_safety's failing
+# allocator is installed: this is the run that proves the allocation check.
+CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test --locked
+# RigWerk's release build: upstream's release profile adds LTO, RigWerk's
+# does not.
+CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_PROFILE_RELEASE_LTO=false \
+  cargo test --locked --release

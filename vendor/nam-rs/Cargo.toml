@@ -1,5 +1,6 @@
-# nam-rs 0.4.0 (https://github.com/OpenSauce/nam-rs, MIT), vendored and
-# wired in through `[patch.crates-io]` in the root manifest.
+# nam-rs 0.4.0 (https://github.com/OpenSauce/nam-rs, MIT) with faster
+# kernels, wired in through `[patch.crates-io]` in the root manifest.  What
+# changed and how to check it: RIGWERK.md.
 [package]
 name = "nam-rs"
 version = "0.4.0"
