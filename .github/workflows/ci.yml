@@ -144,6 +144,12 @@ jobs:
           RIGWERK_LV2_FIXTURES: ${{ github.workspace }}/.lv2-fixtures/plugins
         run: cargo test --locked lv2_fixture -- --nocapture
 
+      # The upstream nam-rs checks (rustfmt, clippy, parity against the NAM
+      # Core fixtures, real-time safety) run against vendor/nam-rs.  Its fixtures are not committed.
+      - name: nam-rs parity tests
+        timeout-minutes: 10
+        run: bash scripts/nam-rs-parity.sh .nam-rs-parity
+
   windows:
     name: Windows
     runs-on: windows-latest

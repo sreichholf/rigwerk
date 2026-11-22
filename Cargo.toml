@@ -92,6 +92,10 @@ pipewire = { version = "0.10", features = ["v0_3_50"] }
 opt-level = 2
 
 
+# nam-rs 0.4.0, vendored so its kernels can be changed here.
+[patch.crates-io]
+nam-rs = { path = "vendor/nam-rs" }
+
 # The amp model runs far slower than real time unoptimised, so a debug
 # build optimises nam-rs alone.
 [profile.dev.package.nam-rs]
