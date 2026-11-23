@@ -67,8 +67,9 @@ since.
   blocks (about 3 s of signal), and writes a learned trim of ±12 dB.
   Match measures one path for 3.6 s, needs the path audible, and writes a
   separate match trim of ±24 dB.  Both refuse a reading more than 20 dB
-  below the target, so noise and silence cannot get a full boost.  Both measure before the device fader, so
-  the fader stays a plain volume control.  There is no true-peak meter,
+  below the target, so noise and silence cannot get a full boost.  Both
+  measure before the device fader, so the fader stays a plain volume
+  control.  There is no true-peak meter,
   and a device with more than eight channels is measured on its first
   eight only.  NAM normalization uses the file's RMS figure, not LUFS,
   and only the last running capture of a Pre or Post group is normalized.

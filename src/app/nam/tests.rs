@@ -61,6 +61,7 @@ fn a_loaded_capture_publishes_its_calibration_levels() {
     };
     loaded.level_in_dbu = Some(12.0);
     loaded.level_out_dbu = Some(-3.0);
+    loaded.loudness_db = Some(-12.0);
     app.apply_nam_result(NamDone {
         slot,
         id,
@@ -74,6 +75,7 @@ fn a_loaded_capture_publishes_its_calibration_levels() {
         .unwrap();
     assert_eq!(controls.level_in_dbu, Some(12.0));
     assert_eq!(controls.level_out_dbu, Some(-3.0));
+    assert_eq!(controls.loudness_db, Some(-12.0));
 }
 
 #[test]

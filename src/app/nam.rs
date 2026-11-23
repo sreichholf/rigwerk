@@ -508,6 +508,7 @@ impl RigWerkApp {
         let path = self.paths.get_mut(slot).and_then(Option::as_mut)?;
         let block = path.nam.get(index)?;
         let controls = controls.sanitized();
+        let normalize_changed = block.controls.normalize != controls.normalize;
         let id = block.controls.id;
         let before = path.nam_ids();
         if block.controls.position != controls.position {
@@ -522,6 +523,19 @@ impl RigWerkApp {
         path.nam[moved].controls = controls;
         self.follow_nam_blocks(slot, &before);
         self.push_paths_to_engine();
+        if normalize_changed
+            && self.device_settings().iter().any(|settings| {
+                settings
+                    .path_map
+                    .iter()
+                    .any(|map| map.match_db.abs() >= 0.05)
+            })
+        {
+            self.push_log(
+                "NAM normalization changed; match the path again because normalization happens before Match.",
+                LogTone::Amber,
+            );
+        }
         self.sync_nam_slot(slot);
         Some(moved)
     }
@@ -725,6 +739,7 @@ impl RigWerkApp {
                 block.load = loaded.load;
                 block.controls.level_in_dbu = loaded.level_in_dbu;
                 block.controls.level_out_dbu = loaded.level_out_dbu;
+                block.controls.loudness_db = loaded.loudness_db;
                 // The stamp names the submodel this build really is.
                 block.install.submodel = slim_submodel(&block.slim_steps, block.controls.slim);
                 queue = Some(loaded.prepared);

@@ -121,6 +121,7 @@ impl NamBlock {
         self.load = None;
         self.controls.level_in_dbu = None;
         self.controls.level_out_dbu = None;
+        self.controls.loudness_db = None;
     }
 
     pub(crate) fn settings(&self) -> NamBlockSettings {

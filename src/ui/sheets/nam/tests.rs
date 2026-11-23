@@ -30,6 +30,16 @@ fn bounds(tree: &egui::accesskit::TreeUpdate, name: &str) -> egui::accesskit::Re
     node_named(tree, name).bounds().expect("bounds")
 }
 
+#[test]
+fn the_nam_block_names_its_loudness_and_normalize_switch() {
+    let ctx = styled();
+    let mut app = blank_app();
+    let _ = app.add_nam_block(0).expect("a block");
+    let tree = frame(&ctx, &mut app, Vec::new());
+    let normalize = node_named(&tree, "Normalize");
+    assert_eq!(normalize.role(), egui::accesskit::Role::CheckBox);
+}
+
 fn text_field(tree: &egui::accesskit::TreeUpdate) -> &egui::accesskit::Node {
     tree.nodes
         .iter()
