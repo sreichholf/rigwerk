@@ -344,7 +344,8 @@ auto-mute) keys on `Screen::Tuner`.
   following is underlined in its pitch colour.  A pinned string has an
   accent border.  The harmonic marker of today's rows is a small
   *H* on the cell.  Chromatic shows *Pick a tuning to see each string*.
-- Level and confidence: a thin bar under the scale.
+- Level and confidence: a thin bar under the scale.  The readout is a
+  fixed column, right aligned, wide enough for a signed `xxx.x` level.
 - Bottom bar: *Tuning* (Chromatic and the 20 tunings, grouped Guitar,
   Extended, Bass), *A4* (−/+), *In tune within* (±3, ±5, ±10), *Input*
   (L, R, Sum), *Listen* (Single note, All strings), *Mute while tuning*
