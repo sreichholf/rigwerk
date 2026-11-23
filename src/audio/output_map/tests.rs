@@ -1463,6 +1463,47 @@ fn a_match_reads_the_selected_path_alone() {
     assert_eq!(controls.match_reading().1, crate::audio::SILENCE_LUFS);
 }
 
+#[test]
+fn a_match_does_not_depend_on_the_device_fader() {
+    fn matched_at(level_db: f32) -> f32 {
+        let settings = OutputDeviceSettings {
+            level_db,
+            ..OutputDeviceSettings::default()
+        };
+        let controls = DeviceControls::new();
+        controls.set(&settings);
+        controls.set_match_path(Some(0));
+        let mut mapper = DeviceMapper::new(2);
+        let mut phase = 0.0f64;
+        let step = 2.0 * std::f64::consts::PI * 1000.0 / 48_000.0;
+        for _ in 0..30 {
+            mapper.begin_paths(
+                &controls,
+                RAMP,
+                crate::audio::path::LiveSlots::main(),
+                &PathTiming::default(),
+                4_800,
+            );
+            for _ in 0..4_800 {
+                mapper.map(phase.sin() as f32 * 0.1, 0.0);
+                phase += step;
+                if phase > std::f64::consts::TAU {
+                    phase -= std::f64::consts::TAU;
+                }
+            }
+            mapper.end_block(&controls);
+        }
+        controls.match_reading().1
+    }
+
+    let unity = matched_at(0.0);
+    let fader_down = matched_at(-6.0);
+    assert!(
+        (unity - fader_down).abs() < 0.1,
+        "match read {unity:.2} at 0 dB and {fader_down:.2} at -6 dB"
+    );
+}
+
 fn learn_signal(level_db: f32, seconds: f32, amplitude: impl Fn(f64) -> f32) -> (f32, u32) {
     let settings = OutputDeviceSettings {
         level_db,

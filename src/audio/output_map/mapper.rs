@@ -1172,7 +1172,7 @@ impl DeviceMapper {
                 sum_paths(&mut self.weights, self.live, channel, &sources, matching);
             self.frame.samples[channel] = level(sum);
             if matching.is_some() {
-                *match_slot = level(selected);
+                *match_slot = learned(selected);
             }
             *learn_slot = learned(sum);
         }
@@ -1231,9 +1231,9 @@ impl DeviceMapper {
                 *sample *= mute;
             }
         }
-        // Match sees the selected path alone, after its level and the device
-        // level/trim, before the ceiling and mute.  It is a level
-        // calibration, not the stream's final loudness.
+        // Match sees the selected path alone, after the learned trim and
+        // before the fader, ceiling and mute.  Learn sees the whole device at
+        // the same point.  Neither is the stream's final loudness.
         if matching.is_some() {
             self.match_meter.push(&match_frame[..mapped]);
         }
