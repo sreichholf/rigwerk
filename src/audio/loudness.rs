@@ -39,8 +39,8 @@ const LOUDNESS_OFFSET: f64 = -0.691;
 const ABSOLUTE_GATE_LUFS: f64 = -70.0;
 const RELATIVE_GATE_LU: f64 = -10.0;
 
-/// One published set of readings for a device.  `trim_db` is the automatic
-/// loudness trim the mapper applied in that block, not a measurement.
+/// One published set of readings for a device.  `trim_db` is the output
+/// trim the mapper applied in that block, not a measurement.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoudnessReading {
     /// 400 ms window, LUFS.
@@ -49,8 +49,7 @@ pub struct LoudnessReading {
     pub short_term_lufs: f32,
     /// Gated 400 ms blocks over the last 60 s, LUFS.
     pub integrated_lufs: f32,
-    /// The automatic loudness trim in dB.  0 when automatic level is off or
-    /// the trim has not moved; a settled trim stays at its value.
+    /// The output trim in dB, as the mapper applied it: 0 at unity.
     pub trim_db: f32,
 }
 

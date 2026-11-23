@@ -475,7 +475,6 @@ fn path_entries_save_compactly_and_old_maps_load_as_path_one() {
         level_db: -6.0,
         invert: true,
         trim_ms: 1.5,
-        ..PathMapSettings::default()
     };
     let text = ron::to_string(&settings).unwrap();
     assert!(!text.contains(",map:("), "no legacy map: {text}");
@@ -1336,39 +1335,20 @@ fn from_lanes_uses_the_played_lanes_for_both() {
 }
 
 #[test]
-fn a_match_trim_adds_to_the_path_level_and_is_sanitized() {
-    let mut map = PathMapSettings {
-        level_db: -6.0,
-        match_db: 3.0,
-        ..PathMapSettings::default()
-    };
-    let expected = 10.0f32.powf(-3.0 / 20.0);
-    assert!((map.gain() - expected).abs() < 1.0e-6);
-
-    map.match_db = 100.0;
-    assert_eq!(map.sanitized().match_db, crate::audio::PATH_MATCH_MAX_DB);
-    map.match_db = f32::NAN;
-    assert_eq!(map.sanitized().match_db, 0.0);
-}
-
-#[test]
-fn a_match_trim_survives_a_save_and_stays_out_when_zero() {
-    let mut settings = OutputDeviceSettings::default();
-    settings.path_map[0].match_db = 4.5;
-    let text = ron::to_string(&settings).expect("saved");
-    assert!(text.contains("match_db:4.5"), "{text}");
-    let back: OutputDeviceSettings = ron::from_str(&text).expect("loaded");
-    assert_eq!(back.path_map[0].match_db, 4.5);
-
-    let text = ron::to_string(&OutputDeviceSettings::default()).expect("saved");
-    assert!(!text.contains("match_db"), "{text}");
+fn an_old_per_output_match_trim_loads_and_is_ignored() {
+    let settings: OutputDeviceSettings =
+        ron::from_str("(path_map:[(level_db:-2.0,invert:true,trim_ms:0.5,match_db:4.5)])")
+            .expect("a save with the removed per-output match still loads");
+    assert_eq!(settings.path_map[0].level_db, -2.0);
+    assert!(settings.path_map[0].invert);
+    assert_eq!(settings.path_map[0].trim_ms, 0.5);
 }
 
 #[test]
 fn a_non_default_loudness_setting_survives_a_save() {
     let mut settings = OutputDeviceSettings::default();
     settings.loudness.target_lufs = -20.0;
-    settings.loudness.learned_db = 3.5;
+    settings.loudness.trim_db = 3.5;
     let text = ron::to_string(&settings).expect("saved");
     let back: OutputDeviceSettings = ron::from_str(&text).expect("loaded");
     assert_eq!(back.loudness, settings.loudness);
@@ -1382,7 +1362,7 @@ fn a_non_default_loudness_setting_survives_a_save() {
     let old = r#"(level_db:0.0,loudness:(auto:true,target_lufs:-20.0))"#;
     let old: OutputDeviceSettings = ron::from_str(old).expect("old save");
     assert_eq!(old.loudness.target_lufs, -20.0);
-    assert_eq!(old.loudness.learned_db, 0.0);
+    assert_eq!(old.loudness.trim_db, 0.0);
 }
 
 #[test]
@@ -1392,18 +1372,18 @@ fn loudness_settings_are_sanitized_and_copied() {
         controls.loudness_settings().target_lufs,
         crate::audio::LOUDNESS_TARGET_DEFAULT_LUFS
     );
-    assert_eq!(controls.loudness_settings().learned_db, 0.0);
+    assert_eq!(controls.loudness_settings().trim_db, 0.0);
 
     let mut settings = OutputDeviceSettings::default();
     settings.loudness.target_lufs = 40.0;
-    settings.loudness.learned_db = 3.0;
+    settings.loudness.trim_db = 3.0;
     let controls = DeviceControls::new();
     controls.set(&settings);
     assert_eq!(
         controls.loudness_settings().target_lufs,
         crate::audio::LOUDNESS_TARGET_MAX_LUFS
     );
-    assert_eq!(controls.loudness_settings().learned_db, 3.0);
+    assert_eq!(controls.loudness_settings().trim_db, 3.0);
 
     let next = DeviceControls::new();
     next.adopt_settings_from(&controls);
@@ -1411,96 +1391,21 @@ fn loudness_settings_are_sanitized_and_copied() {
         next.loudness_settings().target_lufs,
         crate::audio::LOUDNESS_TARGET_MAX_LUFS
     );
-    assert_eq!(next.loudness_settings().learned_db, 3.0);
+    assert_eq!(next.loudness_settings().trim_db, 3.0);
 
     settings.loudness.target_lufs = f32::NAN;
-    settings.loudness.learned_db = f32::NAN;
+    settings.loudness.trim_db = f32::NAN;
     controls.set(&settings);
     assert_eq!(
         controls.loudness_settings().target_lufs,
         crate::audio::LOUDNESS_TARGET_DEFAULT_LUFS
     );
-    assert_eq!(controls.loudness_settings().learned_db, 0.0);
-    settings.loudness.learned_db = 100.0;
+    assert_eq!(controls.loudness_settings().trim_db, 0.0);
+    settings.loudness.trim_db = 100.0;
     controls.set(&settings);
     assert_eq!(
-        controls.loudness_settings().learned_db,
+        controls.loudness_settings().trim_db,
         crate::audio::LOUDNESS_TRIM_MAX_DB
-    );
-}
-
-#[test]
-fn a_match_reads_the_selected_path_alone() {
-    let controls = DeviceControls::new();
-    controls.set_match_path(Some(0));
-    let mut mapper = DeviceMapper::new(2);
-    let mut phase = 0.0f64;
-    let step = 2.0 * std::f64::consts::PI * 1000.0 / 48_000.0;
-    for _ in 0..30 {
-        mapper.begin_paths(
-            &controls,
-            RAMP,
-            crate::audio::path::LiveSlots::main(),
-            &PathTiming::default(),
-            4_800,
-        );
-        for _ in 0..4_800 {
-            mapper.map(phase.sin() as f32 * 0.1, 0.0);
-            phase += step;
-            if phase > std::f64::consts::TAU {
-                phase -= std::f64::consts::TAU;
-            }
-        }
-        mapper.end_block(&controls);
-    }
-    let (_, short_term) = controls.match_reading();
-    assert!(
-        (short_term + 23.0).abs() < 0.3,
-        "matched path read {short_term:.1} LUFS"
-    );
-
-    controls.set_match_path(None);
-    assert_eq!(controls.match_reading().1, crate::audio::SILENCE_LUFS);
-}
-
-#[test]
-fn a_match_does_not_depend_on_the_device_fader() {
-    fn matched_at(level_db: f32) -> f32 {
-        let settings = OutputDeviceSettings {
-            level_db,
-            ..OutputDeviceSettings::default()
-        };
-        let controls = DeviceControls::new();
-        controls.set(&settings);
-        controls.set_match_path(Some(0));
-        let mut mapper = DeviceMapper::new(2);
-        let mut phase = 0.0f64;
-        let step = 2.0 * std::f64::consts::PI * 1000.0 / 48_000.0;
-        for _ in 0..30 {
-            mapper.begin_paths(
-                &controls,
-                RAMP,
-                crate::audio::path::LiveSlots::main(),
-                &PathTiming::default(),
-                4_800,
-            );
-            for _ in 0..4_800 {
-                mapper.map(phase.sin() as f32 * 0.1, 0.0);
-                phase += step;
-                if phase > std::f64::consts::TAU {
-                    phase -= std::f64::consts::TAU;
-                }
-            }
-            mapper.end_block(&controls);
-        }
-        controls.match_reading().1
-    }
-
-    let unity = matched_at(0.0);
-    let fader_down = matched_at(-6.0);
-    assert!(
-        (unity - fader_down).abs() < 0.1,
-        "match read {unity:.2} at 0 dB and {fader_down:.2} at -6 dB"
     );
 }
 
@@ -1620,7 +1525,7 @@ fn a_new_device_in_a_slot_drops_an_in_progress_learn() {
 #[test]
 fn a_learned_trim_reaches_the_samples_through_the_ramp() {
     let mut settings = OutputDeviceSettings::default();
-    settings.loudness.learned_db = 6.0;
+    settings.loudness.trim_db = 6.0;
     let controls = DeviceControls::new();
     controls.set(&settings);
     let mut mapper = DeviceMapper::new(2);
@@ -1635,7 +1540,7 @@ fn a_learned_trim_reaches_the_samples_through_the_ramp() {
     assert!(loud > 0.39, "learned +6 dB should be louder: {loud}");
 
     // Clear: the learned trim ramps back to unity instead of stepping.
-    settings.loudness.learned_db = 0.0;
+    settings.loudness.trim_db = 0.0;
     controls.set(&settings);
     mapper.begin_paths(
         &controls,

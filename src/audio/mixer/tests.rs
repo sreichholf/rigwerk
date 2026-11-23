@@ -386,6 +386,107 @@ fn a_level_change_ramps_across_blocks_and_then_holds() {
 }
 
 #[test]
+fn a_match_change_ramps_the_path_output_without_a_step() {
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    let adopted = render(&mut mixer, &shared, 32);
+    assert_eq!(adopted[0], [0.5, -0.25, 0.0, 0.0]);
+
+    shared.paths[0].set_match_db(-6.0);
+    let gain = 10.0f32.powf(-6.0 / 20.0);
+    let ramp_frames = (CONTROL_RAMP_SECONDS * 48_000.0).round() as usize;
+    let first = render(&mut mixer, &shared, 100);
+    let second = render(&mut mixer, &shared, ramp_frames);
+    let joined = [first.clone(), second.clone()].concat();
+
+    assert!(first[0][0] < 0.5 && first[0][0] > 0.49);
+    let step = (first[0][0] - first[1][0]).abs();
+    let full_drop = 0.5 - 0.5 * gain;
+    assert!(step > 0.0 && step < full_drop / 50.0);
+    let settled_at = joined
+        .iter()
+        .position(|frame| frame[0] == 0.5 * gain)
+        .expect("the match ramp reaches its target");
+    assert!((settled_at as i32 - (ramp_frames as i32 - 1)).abs() <= 2);
+    assert!(joined[settled_at..]
+        .iter()
+        .all(|frame| frame[0] == 0.5 * gain && frame[1] == -0.25 * gain));
+    assert_eq!(shared.paths[0].match_db(), -6.0);
+}
+
+#[test]
+fn a_send_includes_the_senders_match_trim() {
+    use super::super::path::{PathFeed, SEND_OFF_DB};
+    let (mut mixer, shared) = two_path_mixer((0.5, -0.25), 2);
+    shared.paths[1].set_feed(PathFeed::Sends);
+    let mut sends = [SEND_OFF_DB; 4];
+    sends[1] = 0.0;
+    shared.paths[0].set_sends(sends);
+    // Adopt the two paths while the sender is still at 0 dB.
+    let _adopted = render(&mut mixer, &shared, 16);
+
+    shared.paths[0].set_match_db(-6.0);
+    let gain = 10.0f32.powf(-6.0 / 20.0);
+    // Two blocks of the 6 ms ramp settle the gain and the send tap.
+    let out = render_blocks(&mut mixer, &shared, 3);
+    // The direct path and its send are both scaled by the match: the sum is
+    // 2 × 0.5 × gain.  A send taken before the match would leave the return
+    // at full level and give 0.5 × (1 + gain).
+    let expected = 2.0 * 0.5 * gain;
+    assert!(
+        (out.last().unwrap()[0] - expected).abs() < 1.0e-6,
+        "{:?}",
+        out.last()
+    );
+    assert!((expected - 0.5 * (1.0 + gain)).abs() > 0.01);
+}
+
+#[test]
+fn the_match_meter_runs_only_while_a_measurement_is_on() {
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    // No measurement: the meter is never fed.
+    render_blocks(&mut mixer, &shared, 80);
+    assert_eq!(
+        shared.paths[0].match_measurement().0,
+        crate::audio::SILENCE_LUFS
+    );
+    assert_eq!(shared.paths[0].match_measurement().1, 0);
+
+    // The meter needs four 400 ms blocks of real signal.  The first 80
+    // blocks drained the ring, so fill it again before measuring.
+    for _ in 0..30_000 {
+        shared.push_frame(0.5, -0.25);
+    }
+    shared.paths[0].start_match_measurement();
+    render_blocks(&mut mixer, &shared, 80);
+    let (lufs, blocks) = shared.paths[0].match_measurement();
+    assert!(lufs > crate::audio::SILENCE_LUFS, "{lufs}");
+    assert!(blocks > 0, "{blocks}");
+
+    shared.paths[0].stop_match_measurement();
+    let last = shared.paths[0].match_measurement();
+    render_blocks(&mut mixer, &shared, 2);
+    assert_eq!(
+        shared.paths[0].match_measurement(),
+        last,
+        "a stopped meter keeps its last reading for the UI"
+    );
+
+    // The meter sits before the path gain: its own match must not move it,
+    // or measuring again would ratchet the trim.
+    shared.paths[0].set_match_db(6.0);
+    for _ in 0..30_000 {
+        shared.push_frame(0.5, -0.25);
+    }
+    shared.paths[0].start_match_measurement();
+    render_blocks(&mut mixer, &shared, 80);
+    let (matched_lufs, _) = shared.paths[0].match_measurement();
+    assert!(
+        (matched_lufs - lufs).abs() < 0.1,
+        "read {lufs:.2} at 0 dB and {matched_lufs:.2} at +6 dB"
+    );
+}
+
+#[test]
 fn mute_fades_out_and_a_new_level_fades_back_in() {
     let (mut mixer, shared) = steady_mixer((0.5, 0.0));
     let _adopted = render(&mut mixer, &shared, 16);

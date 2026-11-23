@@ -590,20 +590,20 @@ impl AudioEngine {
         self.shared.reset_loudness(device);
     }
 
-    /// Starts measuring one path's own loudness on an output, for the
-    /// "Match to <device>" action.
-    pub(crate) fn start_loudness_match(&self, device: usize, slot: usize) {
-        self.shared.start_loudness_match(device, slot);
+    /// Arms every live path's Match paths meter at once.
+    pub(crate) fn start_match_paths(&self) {
+        self.shared.start_match_paths();
     }
 
-    /// Stops a loudness match on an output.
-    pub(crate) fn stop_loudness_match(&self, device: usize) {
-        self.shared.stop_loudness_match(device);
+    /// Stops every path's Match paths meter.
+    pub(crate) fn stop_match_paths(&self) {
+        self.shared.stop_match_paths();
     }
 
-    /// The matched path's `(momentary, short_term)` loudness on an output.
-    pub(crate) fn loudness_match(&self, device: usize) -> Option<(f32, f32)> {
-        self.shared.loudness_match(device)
+    /// Path `slot`'s last Match paths reading: gated integrated LUFS and the
+    /// gated block count.
+    pub(crate) fn path_match_measurement(&self, slot: usize) -> (f32, u32) {
+        self.shared.path_match_measurement(slot)
     }
 
     /// Starts an output Learn on an output.
@@ -807,6 +807,13 @@ impl AudioEngine {
     #[cfg(test)]
     pub fn restore_plugins(&self, path: usize, plugins: Vec<PluginPref>) {
         self.shared.path(path).restore_plugins(plugins);
+    }
+
+    /// Publishes a Match paths reading without running a bridge, for app
+    /// tests that need a finished measurement.
+    #[cfg(test)]
+    pub(crate) fn publish_path_match_for_test(&self, slot: usize, lufs: f32, blocks: u32) {
+        self.shared.paths[slot].publish_match_measurement(lufs, blocks);
     }
 
     // `push_slot` hands a mismatched slot back so it can be dropped unlocked.

@@ -28,11 +28,14 @@
 //!   (`Shared::service_paths`), and releases the slot's plugins.
 //! - at least one path is always active.
 //!
-//! # Level, mute, solo
+//! # Level, mute, solo, match
 //!
-//! Each path has a level (dB), a mute and a solo, applied after its chain
-//! and before the master, as one ramped gain.  If any active path is
-//! soloed, only soloed paths sound.  A return is solo-safe: it keeps
+//! Each path has a level (dB), a loudness-match trim (dB), a mute and a
+//! solo, applied after its chain and before the master, as one ramped gain.
+//! The match trim makes paths switch at the same loudness; it is one value
+//! per path, so every output plays the same balance.  Sends are taken after
+//! the level and the match, so a return follows them.  If any active path
+//! is soloed, only soloed paths sound.  A return is solo-safe: it keeps
 //! sounding, and only hears the senders that still sound.
 //!
 //! # Returns
@@ -100,6 +103,20 @@ pub fn sanitize_path_level(level_db: f32) -> f32 {
     }
 }
 
+/// Range of a path's loudness-match trim, dB.  One trim per path: it makes
+/// paths switch at the same loudness on every output.
+pub const PATH_MATCH_MAX_DB: f32 = 24.0;
+
+/// A NaN match trim becomes 0 dB; the rest is clamped to
+/// ±[`PATH_MATCH_MAX_DB`].
+pub fn sanitize_path_match(match_db: f32) -> f32 {
+    if match_db.is_nan() {
+        0.0
+    } else {
+        match_db.clamp(-PATH_MATCH_MAX_DB, PATH_MATCH_MAX_DB)
+    }
+}
+
 /// What a path's chain runs on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -147,6 +164,9 @@ pub struct PathMix {
     pub cab: CabControls,
     /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
     pub level_db: f32,
+    /// Loudness-match trim, dB (±[`PATH_MATCH_MAX_DB`]), applied with the
+    /// level on every output.
+    pub match_db: f32,
     pub mute: bool,
     pub solo: bool,
     /// Skips every effect's processing without changing each effect's own
@@ -170,6 +190,7 @@ impl Default for PathMix {
             gate: GateSettings::default(),
             cab: CabControls::default(),
             level_db: 0.0,
+            match_db: 0.0,
             mute: false,
             solo: false,
             chain_bypass: false,
@@ -180,8 +201,8 @@ impl Default for PathMix {
 }
 
 impl PathMix {
-    /// Every value in range (EQ, gate, level and sends).  A NaN send is
-    /// off, not 0 dB.  A return has no solo and no sends of its own.
+    /// Every value in range (EQ, gate, level, match and sends).  A NaN
+    /// send is off, not 0 dB.  A return has no solo and no sends of its own.
     pub fn sanitized(self) -> Self {
         let is_return = self.is_return();
         Self {
@@ -189,6 +210,7 @@ impl PathMix {
             gate: self.gate.sanitized(),
             cab: self.cab.sanitized(),
             level_db: sanitize_path_level(self.level_db),
+            match_db: sanitize_path_match(self.match_db),
             solo: self.solo && !is_return,
             sends: if is_return {
                 [SEND_OFF_DB; MAX_PATHS]
@@ -401,9 +423,12 @@ pub(crate) struct PathControls {
     /// path's chain (EQ and gate state, ramps) fresh instead of carrying
     /// over whatever the slot played before.
     generation: AtomicU64,
-    /// Path level as a linear gain (`f32` bits), mute and solo.
+    /// Path level as a linear gain (`f32` bits), the loudness-match trim
+    /// and its linear gain, mute and solo.
     level_gain: AtomicU32,
     level_db: AtomicU32,
+    match_gain: AtomicU32,
+    match_db: AtomicU32,
     mute: AtomicBool,
     solo: AtomicBool,
     /// The path is a return ([`PathFeed::Sends`]).
@@ -422,6 +447,14 @@ pub(crate) struct PathControls {
     /// The gate's deepest gain reduction in the last block, dB (`f32`
     /// bits), 0 while it is open or off.  Written with the meters.
     gate_reduction_db: AtomicU32,
+    /// The Match paths measurement: a generation bumped on every start and
+    /// stop, whether it is running, and the gated integrated reading and
+    /// gated block count the audio thread publishes.  The trim only moves
+    /// when the UI applies a result; the meter never moves it.
+    match_measure_generation: AtomicU64,
+    match_measuring: AtomicBool,
+    match_integrated: AtomicU32,
+    match_blocks: AtomicU32,
     /// How long the mixer spends on this path's chain per block, ns
     /// (smoothed, and a decaying peak), and how long that block lasts, ns:
     /// its DSP budget.  Written by the mixer at the end of each block (see
@@ -546,6 +579,8 @@ impl PathControls {
             generation: AtomicU64::new(0),
             level_gain: AtomicU32::new(1.0f32.to_bits()),
             level_db: AtomicU32::new(0.0f32.to_bits()),
+            match_gain: AtomicU32::new(1.0f32.to_bits()),
+            match_db: AtomicU32::new(0.0f32.to_bits()),
             mute: AtomicBool::new(false),
             solo: AtomicBool::new(false),
             is_return: AtomicBool::new(false),
@@ -556,6 +591,10 @@ impl PathControls {
             meter_l: AtomicU32::new(0.0f32.to_bits()),
             meter_r: AtomicU32::new(0.0f32.to_bits()),
             gate_reduction_db: AtomicU32::new(0.0f32.to_bits()),
+            match_measure_generation: AtomicU64::new(0),
+            match_measuring: AtomicBool::new(false),
+            match_integrated: AtomicU32::new(super::SILENCE_LUFS.to_bits()),
+            match_blocks: AtomicU32::new(0),
             dsp: DspCell::default(),
             slot_links: Mutex::new(Arc::from(Vec::new())),
             plugin_views: Mutex::new(Arc::from(Vec::new())),
@@ -607,6 +646,7 @@ impl PathControls {
             copy_bool(to, from);
         }
         self.set_level_db(previous.level_db());
+        self.set_match_db(previous.match_db());
         copy_bool(&self.mute, &previous.mute);
         copy_bool(&self.solo, &previous.solo);
         self.set_chain_bypass(previous.chain_bypassed());
@@ -763,6 +803,7 @@ impl PathControls {
         self.set_gate(mix.gate);
         self.set_cab(mix.cab);
         self.set_level_db(mix.level_db);
+        self.set_match_db(mix.match_db);
         self.set_mute(mix.mute);
         self.set_solo(mix.solo);
         self.set_chain_bypass(mix.chain_bypass);
@@ -794,6 +835,7 @@ impl PathControls {
             gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
             cab: *self.cab.lock().unwrap_or_else(PoisonError::into_inner),
             level_db: self.level_db(),
+            match_db: self.match_db(),
             mute: self.muted(),
             solo: self.soloed(),
             chain_bypass: self.chain_bypassed(),
@@ -852,6 +894,64 @@ impl PathControls {
     /// The path level as a linear gain: exactly 1.0 at 0 dB.
     pub(crate) fn level_gain(&self) -> f32 {
         f32::from_bits(self.level_gain.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set_match_db(&self, match_db: f32) {
+        let match_db = sanitize_path_match(match_db);
+        self.match_db.store(match_db.to_bits(), Ordering::Relaxed);
+        self.match_gain
+            .store(10.0f32.powf(match_db / 20.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn match_db(&self) -> f32 {
+        f32::from_bits(self.match_db.load(Ordering::Relaxed))
+    }
+
+    /// The match trim as a linear gain: exactly 1.0 at 0 dB.
+    pub(crate) fn match_gain(&self) -> f32 {
+        f32::from_bits(self.match_gain.load(Ordering::Relaxed))
+    }
+
+    /// Arms this path's Match paths meter: the next block clears it and
+    /// starts feeding it, and the generation tells the mixer to start over.
+    pub(crate) fn start_match_measurement(&self) {
+        self.match_integrated
+            .store(super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.match_blocks.store(0, Ordering::Relaxed);
+        self.match_measuring.store(true, Ordering::Release);
+        self.match_measure_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Stops this path's Match paths meter.  The last reading stays until
+    /// the next start, so the UI can read it after it stops.
+    pub(crate) fn stop_match_measurement(&self) {
+        self.match_measuring.store(false, Ordering::Release);
+        self.match_measure_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The generation the mixer compares to know a new measurement began.
+    pub(crate) fn match_measure_generation(&self) -> u64 {
+        self.match_measure_generation.load(Ordering::Acquire)
+    }
+
+    /// Whether the Match paths meter is running.
+    pub(crate) fn match_measuring(&self) -> bool {
+        self.match_measuring.load(Ordering::Relaxed)
+    }
+
+    /// Called by the output callback at the end of each measuring block.
+    pub(crate) fn publish_match_measurement(&self, integrated_lufs: f32, blocks: u32) {
+        self.match_integrated
+            .store(integrated_lufs.to_bits(), Ordering::Relaxed);
+        self.match_blocks.store(blocks, Ordering::Relaxed);
+    }
+
+    /// The last gated integrated reading, LUFS, and its gated block count.
+    pub(crate) fn match_measurement(&self) -> (f32, u32) {
+        (
+            f32::from_bits(self.match_integrated.load(Ordering::Relaxed)),
+            self.match_blocks.load(Ordering::Relaxed),
+        )
     }
 
     pub(crate) fn set_mute(&self, mute: bool) {
