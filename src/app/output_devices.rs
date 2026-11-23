@@ -6,17 +6,21 @@
 //! [`ExtraOutputReading`] is what an extra output's own stream really runs at,
 //! from the live snapshot.
 
+use std::time::{Duration, Instant};
+
 use crate::app::chain::ChainSelection;
 use crate::app::latency::output_mode_phrase;
 use crate::app::screen::{format_ms, Sheet};
 use crate::app::settings::ExtraOutputPref;
+use crate::app::LogTone;
 use crate::app::RigWerkApp;
 #[cfg(target_os = "windows")]
 use crate::audio::VIRTUAL_OUTPUT_NAME;
 use crate::audio::{
-    low_bits, ChannelMap, EngineState, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
-    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_EXTRA_OUTPUTS,
-    MAX_OUTPUT_CHANNELS, MAX_PATHS, VIRTUAL_OUTPUT_ID,
+    low_bits, ChannelMap, EngineState, LoudnessReading, MapPreset, MixSide, OutputDeviceSettings,
+    PathMapSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB,
+    LOUDNESS_TARGET_MAX_LUFS, LOUDNESS_TARGET_MIN_LUFS, LOUDNESS_TRIM_MAX_DB, MAX_EXTRA_OUTPUTS,
+    MAX_OUTPUT_CHANNELS, MAX_PATHS, PATH_MATCH_MAX_DB, VIRTUAL_OUTPUT_ID,
 };
 
 /// At the extra output cap.
@@ -46,6 +50,9 @@ pub(crate) struct OutputDeviceRow {
     /// Safety-limiter gain reduction, dB.  0 when the device is not
     /// limiting, and when the bridge is not running.
     pub(crate) reduction_db: f32,
+    /// Loudness readings and the automatic trim.  No reading while the
+    /// bridge is stopped.
+    pub(crate) loudness: LoudnessReading,
 }
 
 /// What one extra output's own stream runs at, from the live snapshot.
@@ -59,6 +66,66 @@ pub(crate) struct ExtraOutputReading {
     pub(crate) fill: f32,
     /// The bridge buffer, in ms at the clock output's rate.
     pub(crate) bridge_buffer_ms: f32,
+}
+
+/// A "Match to <device>" measurement in progress: which path, on which
+/// output, and when it started.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LoudnessMeasurementKind {
+    Match { slot: usize },
+    Learn,
+}
+
+/// One running loudness measurement: a path Match or an output Learn.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LoudnessMeasurement {
+    pub(crate) device: usize,
+    pub(crate) kind: LoudnessMeasurementKind,
+    pub(crate) started: Instant,
+}
+
+/// How long a path is measured before its level is matched.
+const MATCH_SECONDS: f32 = 3.6;
+/// How long one output is measured before its level is learned.
+const LEARN_SECONDS: f32 = 8.0;
+/// Learn needs this many absolute-gated 400 ms blocks, about 3 s: the meter
+/// steps every 100 ms, so 27 blocks span 0.4 + 2.6 s.
+const LEARN_MIN_BLOCKS: u32 = 27;
+/// A reading more than this far under the target is noise, not program.
+const LOUDNESS_GATE_BELOW_TARGET_LU: f32 = 20.0;
+
+/// The new match trim after a path measured `short_term_lufs` against
+/// `target_lufs`.  The trim is in dB, so the difference adds directly and
+/// is clamped to its range.
+pub(crate) fn matched_trim_db(current: f32, target_lufs: f32, short_term_lufs: f32) -> f32 {
+    (current + target_lufs - short_term_lufs).clamp(-PATH_MATCH_MAX_DB, PATH_MATCH_MAX_DB)
+}
+
+/// The new output trim after an output measured `integrated_lufs`.
+pub(crate) fn learned_trim_db(current: f32, target_lufs: f32, integrated_lufs: f32) -> f32 {
+    (current + target_lufs - integrated_lufs).clamp(-LOUDNESS_TRIM_MAX_DB, LOUDNESS_TRIM_MAX_DB)
+}
+
+/// Whether a measured loudness is close enough to the target to adjust
+/// against.  Hiss and room noise are far below it and would otherwise get
+/// the full boost.
+pub(crate) fn usable_loudness(target_lufs: f32, measured_lufs: f32) -> bool {
+    measured_lufs > target_lufs - LOUDNESS_GATE_BELOW_TARGET_LU
+}
+
+/// The learned trim from a finished Learn window, or `None` when there was
+/// not enough signal above the absolute gate or the reading was too far
+/// under the target.
+pub(crate) fn learned_trim_after(
+    current: f32,
+    target_lufs: f32,
+    integrated_lufs: f32,
+    blocks: u32,
+) -> Option<f32> {
+    (blocks >= LEARN_MIN_BLOCKS
+        && integrated_lufs > crate::audio::SILENCE_LUFS
+        && usable_loudness(target_lufs, integrated_lufs))
+    .then(|| learned_trim_db(current, target_lufs, integrated_lufs))
 }
 
 /// The badge an output strip carries (`docs/ui-spec.md` §3.3).  The last
@@ -215,6 +282,11 @@ impl RigWerkApp {
             } else {
                 0.0
             },
+            loudness: if running {
+                self.snapshot.out_loudness
+            } else {
+                LoudnessReading::default()
+            },
         }];
         for (index, extra_output) in self.extra_outputs.iter().enumerate() {
             let (channels, missing) = if extra_output.virtual_output {
@@ -261,6 +333,15 @@ impl RigWerkApp {
                         .unwrap_or(0.0)
                 } else {
                     0.0
+                },
+                loudness: if running {
+                    self.snapshot
+                        .extra_output_loudness
+                        .get(index)
+                        .copied()
+                        .unwrap_or_default()
+                } else {
+                    LoudnessReading::default()
                 },
             });
         }
@@ -378,6 +459,280 @@ impl RigWerkApp {
     pub(crate) fn set_output_mute(&mut self, device: usize, mute: bool) {
         if let Some(settings) = self.device_settings_mut().nth(device) {
             settings.mute = mute;
+        }
+    }
+
+    /// Sets output `device`'s loudness target, clamped to the sheet's range.
+    pub(crate) fn set_output_loudness_target(&mut self, device: usize, target_lufs: f32) {
+        if let Some(settings) = self.device_settings_mut().nth(device) {
+            let target_lufs = if target_lufs.is_nan() {
+                crate::audio::LOUDNESS_TARGET_DEFAULT_LUFS
+            } else {
+                target_lufs.clamp(LOUDNESS_TARGET_MIN_LUFS, LOUDNESS_TARGET_MAX_LUFS)
+            };
+            settings.loudness.target_lufs = target_lufs;
+        }
+    }
+
+    /// Clears output `device`'s loudness windows and integrated history.
+    pub(crate) fn reset_output_loudness(&mut self, device: usize) {
+        self.engine.reset_loudness(device);
+    }
+
+    /// Clears path `slot`'s loudness-match trim on output `device`.
+    pub(crate) fn clear_loudness_match(&mut self, device: usize, slot: usize) {
+        if let Some(settings) = self.device_settings_mut().nth(device) {
+            settings.path_map[slot].match_db = 0.0;
+        }
+    }
+
+    /// Clears output `device`'s learned trim.  The mapper ramps it to unity.
+    pub(crate) fn clear_output_learn(&mut self, device: usize) {
+        if let Some(settings) = self.device_settings_mut().nth(device) {
+            settings.loudness.learned_db = 0.0;
+        }
+    }
+
+    /// Starts measuring path `slot` alone on output `device`, so its level
+    /// there can be matched to that device's loudness target.
+    pub(crate) fn start_loudness_match(&mut self, device: usize, slot: usize) {
+        self.cancel_loudness_measurement();
+        let Some(path) = self.paths.get(slot).and_then(Option::as_ref) else {
+            return;
+        };
+        let name = path.name.clone();
+        let mute = path.mix.mute;
+        let solo = path.mix.solo;
+        let is_return = path.mix.is_return();
+        if mute {
+            self.push_log("Make the path audible before matching it.", LogTone::Amber);
+            return;
+        }
+        if self.any_solo() && !solo && !is_return {
+            self.push_log(
+                "Another path is soloed; match this path while it can be heard.",
+                LogTone::Amber,
+            );
+            return;
+        }
+        if !self.path_reaches_device(slot, device) {
+            self.push_log("That path does not play on this output.", LogTone::Amber);
+            return;
+        }
+        if self.engine.state != EngineState::Running {
+            self.push_log("Start the bridge before matching a path.", LogTone::Amber);
+            return;
+        }
+        let device_name = self
+            .output_device_rows()
+            .get(device)
+            .map(|row| row.name.clone())
+            .unwrap_or_else(|| "this output".to_owned());
+        self.engine.start_loudness_match(device, slot);
+        self.loudness_measurement = Some(LoudnessMeasurement {
+            device,
+            kind: LoudnessMeasurementKind::Match { slot },
+            started: Instant::now(),
+        });
+        self.push_log(
+            format!("Matching {name} on {device_name}… play the path for a few seconds."),
+            LogTone::Blue,
+        );
+    }
+
+    /// Starts measuring output `device` so its learned trim can be set.
+    pub(crate) fn start_output_learn(&mut self, device: usize) {
+        self.cancel_loudness_measurement();
+        if self.engine.state != EngineState::Running {
+            self.push_log(
+                "Start the bridge before learning an output.",
+                LogTone::Amber,
+            );
+            return;
+        }
+        let Some(settings) = self.device_settings().get(device).copied() else {
+            return;
+        };
+        if settings.mute {
+            self.push_log("Unmute the output before learning it.", LogTone::Amber);
+            return;
+        }
+        let device_name = self
+            .output_device_rows()
+            .get(device)
+            .map(|row| row.name.clone())
+            .unwrap_or_else(|| "this output".to_owned());
+        self.engine.start_output_learn(device);
+        self.loudness_measurement = Some(LoudnessMeasurement {
+            device,
+            kind: LoudnessMeasurementKind::Learn,
+            started: Instant::now(),
+        });
+        self.push_log(
+            format!("Learning {device_name}… play the rig for eight seconds."),
+            LogTone::Blue,
+        );
+    }
+
+    /// Stops a running Match or Learn, if any.
+    pub(crate) fn cancel_loudness_measurement(&mut self) {
+        if let Some(request) = self.loudness_measurement.take() {
+            match request.kind {
+                LoudnessMeasurementKind::Match { .. } => {
+                    self.engine.stop_loudness_match(request.device);
+                }
+                LoudnessMeasurementKind::Learn => {
+                    self.engine.stop_output_learn(request.device);
+                }
+            }
+        }
+    }
+
+    /// Whether `slot` is being matched on `device` right now.
+    pub(crate) fn is_matching_loudness(&self, device: usize, slot: usize) -> bool {
+        self.loudness_measurement.is_some_and(|request| {
+            request.device == device
+                && matches!(request.kind, LoudnessMeasurementKind::Match { slot: other } if other == slot)
+        })
+    }
+
+    /// Whether `device` is being learned right now.
+    pub(crate) fn is_learning_loudness(&self, device: usize) -> bool {
+        self.loudness_measurement.is_some_and(|request| {
+            request.device == device && matches!(request.kind, LoudnessMeasurementKind::Learn)
+        })
+    }
+
+    /// Finishes a Match or Learn once its window has passed.  Runs once per
+    /// UI frame from [`Self::publish_engine`].
+    pub(crate) fn poll_loudness_measurement(&mut self) {
+        let Some(request) = self.loudness_measurement else {
+            return;
+        };
+        if self.engine.state != EngineState::Running {
+            self.cancel_loudness_measurement();
+            return;
+        }
+        let seconds = match request.kind {
+            LoudnessMeasurementKind::Match { .. } => MATCH_SECONDS,
+            LoudnessMeasurementKind::Learn => LEARN_SECONDS,
+        };
+        if request.started.elapsed() < Duration::from_secs_f32(seconds) {
+            return;
+        }
+        match request.kind {
+            LoudnessMeasurementKind::Match { slot } => {
+                self.finish_loudness_match(request.device, slot)
+            }
+            LoudnessMeasurementKind::Learn => self.finish_output_learn(request.device),
+        }
+    }
+
+    fn finish_loudness_match(&mut self, device: usize, slot: usize) {
+        let reading = self
+            .engine
+            .loudness_match(device)
+            .unwrap_or((crate::audio::SILENCE_LUFS, crate::audio::SILENCE_LUFS));
+        self.engine.stop_loudness_match(device);
+        self.loudness_measurement = None;
+        let short_term = reading.1;
+        if short_term <= crate::audio::SILENCE_LUFS {
+            self.push_log(
+                "No loudness reading for the path; play it and try again.",
+                LogTone::Amber,
+            );
+            return;
+        }
+        let Some(settings) = self.device_settings().get(device).copied() else {
+            return;
+        };
+        let target = settings.loudness.target_lufs;
+        if !usable_loudness(target, short_term) {
+            self.push_log(
+                "The path is too far below the target to match; play it louder and try again.",
+                LogTone::Amber,
+            );
+            return;
+        }
+        let current = settings.path_map[slot].match_db;
+        let wanted = matched_trim_db(current, target, short_term);
+        if let Some(settings) = self.device_settings_mut().nth(device) {
+            settings.path_map[slot].match_db = wanted;
+        }
+        self.push_devices_to_engine();
+        let device_name = self
+            .output_device_rows()
+            .get(device)
+            .map(|row| row.name.clone())
+            .unwrap_or_else(|| "the output".to_owned());
+        let path_name = self
+            .paths
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map(|path| path.name.clone())
+            .unwrap_or_else(|| "Path".to_owned());
+        if (wanted - (current + target - short_term)).abs() > 0.05 {
+            self.push_log(
+                format!(
+                    "{path_name} hit the match trim limit on {device_name}; adjust its level and match again."
+                ),
+                LogTone::Amber,
+            );
+        } else {
+            self.push_log(
+                format!(
+                    "{path_name} matched to {target:.1} LUFS on {device_name} (trim {wanted:+.1} dB)."
+                ),
+                LogTone::Blue,
+            );
+        }
+    }
+
+    fn finish_output_learn(&mut self, device: usize) {
+        let Some((integrated, blocks)) = self.engine.loudness_learn(device) else {
+            self.engine.stop_output_learn(device);
+            self.loudness_measurement = None;
+            self.push_log(
+                "No loudness reading for the output; play the rig and try again.",
+                LogTone::Amber,
+            );
+            return;
+        };
+        self.engine.stop_output_learn(device);
+        self.loudness_measurement = None;
+        let Some(settings) = self.device_settings().get(device).copied() else {
+            return;
+        };
+        let target = settings.loudness.target_lufs;
+        let current = settings.loudness.learned_db;
+        let Some(wanted) = learned_trim_after(current, target, integrated, blocks) else {
+            self.push_log(
+                "Too little signal, or too far below the target, to learn the output; play the rig for longer.",
+                LogTone::Amber,
+            );
+            return;
+        };
+        if let Some(settings) = self.device_settings_mut().nth(device) {
+            settings.loudness.learned_db = wanted;
+        }
+        self.push_devices_to_engine();
+        let device_name = self
+            .output_device_rows()
+            .get(device)
+            .map(|row| row.name.clone())
+            .unwrap_or_else(|| "the output".to_owned());
+        if (wanted - (current + target - integrated)).abs() > 0.05 {
+            self.push_log(
+                format!(
+                    "{device_name} hit the learned trim limit; adjust the path levels or play level and learn again."
+                ),
+                LogTone::Amber,
+            );
+        } else {
+            self.push_log(
+                format!("Learned {device_name}: {integrated:.1} LUFS, trim {wanted:+.1} dB."),
+                LogTone::Blue,
+            );
         }
     }
 

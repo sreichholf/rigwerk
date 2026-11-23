@@ -58,10 +58,14 @@ sheet.
 
 **Outputs.** The clock output first, then the extra outputs. An output
 shows which paths play on it (one dot per path), its metronome switch, its
-buffer, a limiter reduction bar, one meter per channel, and its level and
-mute. The dashed column adds another device, or the virtual output: on
-Windows that is VB-Cable, on PipeWire it is RigWerk Out. An extra output
-that fails stays silent and is retried; the clock output keeps playing.
+buffer, a limiter reduction bar, short-term loudness with its learned
+trim, one meter per channel, and its level and mute. *Learn* measures an
+output for eight seconds and saves a trim; *Match* does the same for one
+path on one output. Nothing moves on its own: the level only changes when
+a capture loads or the player presses one of those buttons. The dashed
+column adds another device, or the virtual output: on Windows that is
+VB-Cable, on PipeWire it is RigWerk Out. An extra output that fails stays
+silent and is retried; the clock output keeps playing.
 
 At the 1040 × 700 minimum the strips get denser, and the paths group
 scrolls sideways when not all four fit. Everything a narrow step hides
@@ -118,11 +122,14 @@ and each strip shows a thin meter.
   threshold for the guitar's level.
 - **NAM** edits one block: a Neural Amp Modeler `.nam` capture from the
   models folder, *Before effects* / *After effects*, input and output
-  trims, *Auto level*, and a width dial for slimmable captures.  Blocks
-  stack, e.g. a drive pedal into an amp, up to 16 per path; the fifth
-  asks once.  Each row shows its measured DSP load.  *Auto level* matches
-  a block to the one before it when both files carry calibration levels.
-  When the DSP alarm is up, the sheet points at the heaviest blocks.
+  trims, *Auto level*, *Normalize*, and a width dial for slimmable
+  captures.  Blocks stack, e.g. a drive pedal into an amp, up to 16 per
+  path; the fifth asks once.  Each row shows its measured DSP load.
+  *Auto level* matches a block to the one before it when both files carry
+  calibration levels.  *Normalize* uses the file's RMS loudness figure,
+  not LUFS, and only the last running capture of the before/after group
+  applies it.  When the DSP alarm is up, the sheet points at the heaviest
+  blocks.
 - **Cab** loads a `.wav` impulse response from a folder, with level, low
   and high cut and polarity.  It sits after the effects and the NAM
   blocks, and adds no latency.
@@ -131,10 +138,13 @@ and each strip shows a thin meter.
 - **Path** has name, colour, source (*Input* or *Sends*), its sends (to
   each return, or on a return from each path), path outputs (which of the
   path's L and R play at all, before any output), level, mute, solo,
-  duplicate, layouts and its latency on each output it plays on.
-- **Output** has the channel map grid and its presets, the metronome
-  channels, *Channels nothing plays* (mono copy or silent), and per path
-  the level here, polarity, trim and when it arrives. The alignment switch
+  duplicate, layouts, and on each output it plays on its latency and a
+  *Match* button for that output's loudness target.
+- **Output** has the loudness readings, target, *Learn*, learned trim,
+  *Clear* and *Reset*; nothing moves on its own.  The channel map grid and
+  its presets, the metronome channels,
+  *Channels nothing plays* (mono copy or silent), and per path the level
+  here, polarity, trim and when it arrives. The alignment switch
   and the bridge buffer of an extra output are here too.
 - **Scope** shows input and output overlaid, with the peaks and the sample
   count.

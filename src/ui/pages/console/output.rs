@@ -15,7 +15,7 @@ use super::{level_block, strip_detail, strip_name, strip_parts, DensityStep, Lev
 use crate::app::output_devices::OutputBadge;
 use crate::app::screen::Sheet;
 use crate::app::RigWerkApp;
-use crate::audio::{DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB};
+use crate::audio::{LoudnessReading, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{horizontal_meter, path_dot, row_info, FaderRange};
@@ -85,6 +85,7 @@ impl RigWerkApp {
         if !mini {
             strip_detail(&mut top, &buffer);
             limiter_bar(&mut top, row.reduction_db);
+            strip_detail(&mut top, &loudness_line(row.loudness));
         }
 
         let events = level_block(
@@ -160,6 +161,22 @@ impl RigWerkApp {
                 }
             }
         });
+    }
+}
+
+/// *-14.2 LUFS* from the short-term reading, or *— LUFS* until the first
+/// three seconds are in.  A non-zero automatic trim stays on the line while
+/// it is settled.
+fn loudness_line(reading: LoudnessReading) -> String {
+    let level = if reading.short_term_lufs > crate::audio::SILENCE_LUFS {
+        format!("{:.1} LUFS", reading.short_term_lufs)
+    } else {
+        "— LUFS".to_owned()
+    };
+    if reading.trim_db.abs() >= 0.1 {
+        format!("{level} · {:+.1} dB", reading.trim_db)
+    } else {
+        level
     }
 }
 

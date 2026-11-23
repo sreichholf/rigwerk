@@ -1,5 +1,6 @@
 use super::{
-    click_channels, default_click_mask, device_channel_count, loudest, OutputBadge, PlaysClick,
+    click_channels, default_click_mask, device_channel_count, learned_trim_after, learned_trim_db,
+    loudest, matched_trim_db, usable_loudness, OutputBadge, PlaysClick,
 };
 use crate::app::blank_app;
 use crate::app::devices::inventory_fingerprint;
@@ -341,6 +342,53 @@ fn output_level_and_mute_stay_in_range() {
     assert_eq!(app.clock_output.level_db, 0.0);
     app.set_output_mute(1, true);
     assert!(app.extra_outputs[0].settings.mute);
+}
+
+#[test]
+fn output_loudness_target_and_learned_trim_stay_in_range() {
+    let mut app = with_quad_output();
+    app.clear_output_learn(1);
+    assert_eq!(app.extra_outputs[0].settings.loudness.learned_db, 0.0);
+    app.set_output_loudness_target(0, 40.0);
+    assert_eq!(
+        app.clock_output.loudness.target_lufs,
+        crate::audio::LOUDNESS_TARGET_MAX_LUFS
+    );
+    app.set_output_loudness_target(0, f32::NAN);
+    assert_eq!(
+        app.clock_output.loudness.target_lufs,
+        crate::audio::LOUDNESS_TARGET_DEFAULT_LUFS
+    );
+    app.set_output_loudness_target(0, -100.0);
+    assert_eq!(
+        app.clock_output.loudness.target_lufs,
+        crate::audio::LOUDNESS_TARGET_MIN_LUFS
+    );
+}
+
+#[test]
+fn a_learn_adds_the_difference_and_refuses_a_short_window() {
+    assert_eq!(learned_trim_db(0.0, -14.0, -23.0), 9.0);
+    // Learning again after the trim has corrected the reading changes nothing.
+    assert_eq!(learned_trim_db(9.0, -14.0, -14.0), 9.0);
+    assert_eq!(learned_trim_db(0.0, -14.0, -50.0), 12.0);
+    assert_eq!(learned_trim_after(0.0, -14.0, -23.0, 26), None);
+    assert_eq!(learned_trim_after(0.0, -14.0, -23.0, 27), Some(9.0));
+    assert_eq!(
+        learned_trim_after(0.0, -14.0, crate::audio::SILENCE_LUFS, 80),
+        None
+    );
+    assert!(usable_loudness(-14.0, -33.0));
+    assert!(!usable_loudness(-14.0, -35.0));
+    assert_eq!(learned_trim_after(0.0, -14.0, -35.0, 80), None);
+}
+
+#[test]
+fn a_match_adds_the_difference_to_the_current_trim() {
+    assert_eq!(matched_trim_db(0.0, -14.0, -23.0), 9.0);
+    assert_eq!(matched_trim_db(3.0, -14.0, -20.0), 9.0);
+    assert_eq!(matched_trim_db(0.0, -14.0, -50.0), 24.0);
+    assert_eq!(matched_trim_db(0.0, -14.0, 10.0), -24.0);
 }
 
 #[test]

@@ -16,6 +16,28 @@ fn shared_with_bridge_buffer(mode: BufferMode, fixed_ms: f32) -> super::Shared {
 }
 
 #[test]
+fn a_different_device_in_an_extra_slot_bumps_its_generation() {
+    let shared = super::Shared::new(48_000);
+    let settings = [crate::audio::OutputDeviceSettings::default()];
+    let mut plan = super::ExtraOutputPlan {
+        count: 1,
+        ..Default::default()
+    };
+    plan.slots[0].device_id = "hw:A".to_owned();
+    plan.slots[0].node_name = "A".to_owned();
+    shared.set_extra_outputs(&settings, &plan, &[]);
+    let first = shared.extra_outputs[0].device_generation();
+
+    shared.set_extra_outputs(&settings, &plan, &[]);
+    assert_eq!(shared.extra_outputs[0].device_generation(), first);
+
+    plan.slots[0].device_id = "hw:B".to_owned();
+    plan.slots[0].node_name = "B".to_owned();
+    shared.set_extra_outputs(&settings, &plan, &[]);
+    assert_eq!(shared.extra_outputs[0].device_generation(), first + 1);
+}
+
+#[test]
 fn scope_lane_keeps_peak_hold_bins_in_order() {
     let shared = super::Shared::new(48_000);
     shared.set_source_rate(48_000);

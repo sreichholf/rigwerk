@@ -61,6 +61,18 @@ plans and the code review has landed; that history is in git.
 Recorded when the review fixes landed (November 2026), not re-checked
 since.
 
+- **Loudness.**  Integrated loudness is the last 60 s, not the whole run.
+  *Learn* and *Match* are one-shot; nothing follows the player.  Learn
+  measures an output for 8 s, needs at least 27 absolute-gated 400 ms
+  blocks (about 3 s of signal), and writes a learned trim of ±12 dB.
+  Match measures one path for 3.6 s, needs the path audible, and writes a
+  separate match trim of ±24 dB.  Both refuse a reading more than 20 dB
+  below the target, so noise and silence cannot get a full boost.  Both
+  measure before the device fader, so the fader stays a plain volume
+  control.  There is no true-peak meter,
+  and a device with more than eight channels is measured on its first
+  eight only.  NAM normalization uses the file's RMS figure, not LUFS,
+  and only the last running capture of a Pre or Post group is normalized.
 - **Cabinet IR.**  A cabinet impulse response is truncated to 50 ms at
   rates up to 192 kHz, and to 9600 taps above that.  The first 128 taps
   are direct; the rest is partitioned FFT convolution.

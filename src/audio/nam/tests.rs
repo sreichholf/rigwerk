@@ -157,6 +157,16 @@ fn tiny() -> PreparedNam {
     }
 }
 
+/// The docs model with a Tanh activation, so a gain before and after the
+/// model cannot cancel out.
+fn tiny_tanh() -> PreparedNam {
+    let json = TINY.replace("\"ReLU\"", "\"Tanh\"");
+    match prepare_nam_json(&json, 48_000, 1.0) {
+        NamFile::Ready(loaded) => loaded.prepared,
+        _ => panic!("the Tanh model should load at 48 kHz"),
+    }
+}
+
 /// The docs model built at an oversampling factor.
 fn tiny_at(factor: u8) -> PreparedNam {
     match prepare_nam_json_at(TINY, 48_000, 1.0, factor) {
@@ -1414,4 +1424,205 @@ fn a_block_in_the_stack_without_runtime_state_keeps_its_model_queued() {
     assert_eq!(park.len(), RUN_SLOTS, "every departed model was parked");
     let late = run(&mut stage, &controls, 40, 64, 0.2);
     assert!((late[63] - settled(0.2)).abs() < 1.0e-5);
+}
+
+#[test]
+fn normalization_uses_the_file_loudness_and_the_plugin_target() {
+    let block = NamBlockControls {
+        loudness_db: Some(-12.0),
+        normalize: true,
+        ..block(0)
+    };
+    let gains = stack_of(&[block]).normalization_gains(|_| true);
+    assert_eq!(gains[0], -6.0, "-18 dB target minus the file's -12 dB");
+
+    let off = NamBlockControls {
+        normalize: false,
+        ..block
+    };
+    assert_eq!(stack_of(&[off]).normalization_gains(|_| true)[0], 0.0);
+    let no_file = NamBlockControls {
+        loudness_db: None,
+        normalize: true,
+        ..block
+    };
+    assert_eq!(stack_of(&[no_file]).normalization_gains(|_| true)[0], 0.0);
+    assert_eq!(super::NAM_NORMALIZED_LOUDNESS_DB, -18.0);
+}
+
+#[test]
+fn normalization_clamps_and_ignores_nan_loudness() {
+    let hot = NamBlockControls {
+        loudness_db: Some(-100.0),
+        normalize: true,
+        ..block(0)
+    };
+    let quiet = NamBlockControls {
+        loudness_db: Some(100.0),
+        normalize: true,
+        ..block(1)
+    };
+    let nan = NamBlockControls {
+        loudness_db: Some(f32::NAN),
+        normalize: true,
+        ..block(2)
+    };
+    let gains = stack_of(&[hot]).normalization_gains(|_| true);
+    assert_eq!(gains[0], super::NAM_MAX_TRIM_DB);
+    let gains = stack_of(&[quiet]).normalization_gains(|_| true);
+    assert_eq!(gains[0], super::NAM_MIN_TRIM_DB);
+    let gains = stack_of(&[nan]).normalization_gains(|_| true);
+    assert_eq!(gains[0], 0.0);
+}
+
+#[test]
+fn only_the_last_running_block_of_a_group_normalizes() {
+    let pedal = NamBlockControls {
+        id: 0,
+        loudness_db: Some(-12.0),
+        normalize: true,
+        ..block(0)
+    };
+    let amp = NamBlockControls {
+        id: 1,
+        loudness_db: Some(-30.0),
+        normalize: true,
+        level_in_dbu: Some(-18.0),
+        level_out_dbu: Some(0.0),
+        ..block(1)
+    };
+    let stack = stack_of(&[pedal, amp]);
+    let gains = stack.normalization_gains(|_| true);
+    assert_eq!(gains[0], 0.0, "B is the last running block");
+    assert_eq!(gains[1], 12.0, "-18 target minus B's -30");
+
+    // B's normalization does not change its level match, so A's switch has
+    // no effect on what B hears.
+    let before = stack.level_matches(|_| true);
+    let with_a_off = NamBlockControls {
+        normalize: false,
+        ..pedal
+    };
+    let after = stack_of(&[with_a_off, amp]).level_matches(|_| true);
+    assert_eq!(before, after);
+
+    // Bypassing B moves the normalization to A.
+    let gains = stack.normalization_gains(|id| id != 1);
+    assert_eq!(gains[0], -6.0);
+    assert_eq!(gains[1], 0.0);
+}
+
+#[test]
+fn pre_and_post_normalize_independently() {
+    let pre = NamBlockControls {
+        id: 0,
+        position: NamPosition::Pre,
+        loudness_db: Some(-12.0),
+        normalize: true,
+        ..block(0)
+    };
+    let post = NamBlockControls {
+        id: 1,
+        position: NamPosition::Post,
+        loudness_db: Some(-24.0),
+        normalize: true,
+        ..block(1)
+    };
+    let gains = stack_of(&[pre, post]).normalization_gains(|_| true);
+    assert_eq!(gains[0], -6.0);
+    assert_eq!(gains[1], 6.0);
+}
+
+#[test]
+fn old_nam_controls_load_with_normalization_off_and_stay_out_of_a_save() {
+    let old =
+        r#"(id:0,enabled:true,position:pre,input_db:0.0,output_db:0.0,slim:1.0,auto_level:true)"#;
+    let controls: NamBlockControls = ron::from_str(old).expect("old controls");
+    assert!(!controls.normalize);
+    assert_eq!(controls.loudness_db, None);
+    let text = ron::to_string(&controls).expect("saved");
+    assert!(!text.contains("normalize"), "{text}");
+    assert!(!text.contains("loudness_db"), "{text}");
+
+    let normal = NamBlockControls {
+        loudness_db: Some(-12.0),
+        normalize: true,
+        ..block(7)
+    };
+    let text = ron::to_string(&normal).expect("saved");
+    let back: NamBlockControls = ron::from_str(&text).expect("loaded");
+    assert_eq!(back.loudness_db, Some(-12.0));
+    assert!(back.normalize);
+}
+
+#[test]
+fn normalization_scales_the_output_not_the_model_input() {
+    let normalized = NamBlockControls {
+        loudness_db: Some(-12.0),
+        normalize: true,
+        ..block(0)
+    };
+    let manual = NamBlockControls {
+        output_db: -6.0,
+        ..block(0)
+    };
+
+    let mut a = NamStage::new(48_000);
+    a.install_for_test(0, tiny_tanh());
+    let out_a = run_all(&mut a, &controls(&[normalized]), 20, 64, 0.8);
+
+    let mut b = NamStage::new(48_000);
+    b.install_for_test(0, tiny_tanh());
+    let out_b = run_all(&mut b, &controls(&[manual]), 20, 64, 0.8);
+
+    for (left, right) in out_a.iter().zip(&out_b) {
+        assert!(
+            (left - right).abs() < 1.0e-6,
+            "normalize on the output should match a -6 dB output trim: {left} != {right}"
+        );
+    }
+}
+
+#[test]
+fn bypassing_the_last_capture_ramps_normalization_to_the_one_before() {
+    let first = NamBlockControls {
+        id: 0,
+        loudness_db: Some(-12.0),
+        normalize: true,
+        ..block(0)
+    };
+    let last = NamBlockControls {
+        id: 1,
+        loudness_db: Some(-30.0),
+        normalize: true,
+        ..block(1)
+    };
+    let both = controls(&[first, last]);
+    let only_first = controls(&[
+        first,
+        NamBlockControls {
+            enabled: false,
+            ..last
+        },
+    ]);
+    // A fresh PathControls numbers its NAM stack from 1; the stage would
+    // ignore a second stack with the same version.  Bump it like the UI does.
+    only_first.set_nam(&NamStack::default());
+    only_first.set_nam(&only_first.nam());
+
+    let mut stage = NamStage::new(48_000);
+    stage.install_for_test(0, tiny());
+    stage.install_for_test(1, tiny());
+    let before = run_all(&mut stage, &both, 30, 64, 0.2);
+    let settled = *before.last().unwrap();
+    let after = run_all(&mut stage, &only_first, 10, 64, 0.2);
+    let ended = *after.last().unwrap();
+    let total = (ended - settled).abs();
+    assert!(total > 0.01, "the normalization target should move");
+    assert!(
+        (after[0] - settled).abs() < total * 0.2,
+        "normalization should ramp, not step: {settled} -> {} (end {})",
+        after[0],
+        ended
+    );
 }

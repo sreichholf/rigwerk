@@ -54,6 +54,12 @@
 //! dBFS, so B gets `out_A - in_B` dB.  A is the nearest block before B in
 //! the same group that runs: a bypassed block, or one without a model, passes
 //! the signal dry and is skipped.  Without the metadata the gain is 0 dB.
+//!
+//! Normalization: a capture's `loudness` metadata is plain RMS, not LUFS.
+//! Only the last running block of a position group applies it, because
+//! normalizing a middle block would change the level the next capture hears.
+//! Its gain is [`NAM_NORMALIZED_LOUDNESS_DB`] minus the file's loudness,
+//! clamped to the trim range and ramped with the output gain.
 
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
@@ -82,6 +88,12 @@ pub const NAM_MAX_MATCH_DB: f32 = 36.0;
 /// Soft limits for the trims and for [`NamBlockControls::sanitized`].
 pub const NAM_MIN_TRIM_DB: f32 = -24.0;
 pub const NAM_MAX_TRIM_DB: f32 = 24.0;
+
+/// The output loudness a normalised capture is brought to, dB RMS.  This is
+/// the fixed target in NeuralAmpModelerPlugin's Normalized output mode:
+/// `_SetOutputGain`, case 1 of `kOutputMode`, in
+/// `NeuralAmpModeler/NeuralAmpModeler.cpp`.  It is not LUFS.
+pub const NAM_NORMALIZED_LOUDNESS_DB: f32 = -18.0;
 
 /// Where a NAM block sits relative to the plugin effects.  Blocks in the same
 /// position run in stack order.
@@ -136,6 +148,13 @@ pub struct NamBlockControls {
     pub level_in_dbu: Option<f32>,
     /// The capture's analog output level at 0 dBFS, dBu.
     pub level_out_dbu: Option<f32>,
+    /// The capture's `loudness` metadata: RMS, in dBFS, not LUFS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loudness_db: Option<f32>,
+    /// Normalize this block's output from its file loudness.  Only the last
+    /// running block of a position group applies it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub normalize: bool,
 }
 
 impl Default for NamBlockControls {
@@ -150,6 +169,8 @@ impl Default for NamBlockControls {
             auto_level: true,
             level_in_dbu: None,
             level_out_dbu: None,
+            loudness_db: None,
+            normalize: false,
         }
     }
 }
@@ -165,6 +186,7 @@ impl NamBlockControls {
             auto_level: self.auto_level,
             level_in_dbu: finite_level(self.level_in_dbu),
             level_out_dbu: finite_level(self.level_out_dbu),
+            loudness_db: finite_level(self.loudness_db),
             ..self
         }
     }
@@ -367,6 +389,39 @@ impl NamStack {
         }
         matches
     }
+
+    /// The normalization gain each block applies, in dB, by stack index.
+    ///
+    /// Only the last running block of a `Pre` or `Post` group normalizes:
+    /// normalizing a middle block would change what the next capture hears
+    /// and break the level match.  `runs(id)` has the same meaning as in
+    /// [`Self::level_matches`].  A block without file loudness, or with its
+    /// switch off, gets 0 dB.
+    pub(crate) fn normalization_gains(&self, runs: impl Fn(u32) -> bool) -> [f32; MAX_NAM_BLOCKS] {
+        let mut gains = [0.0f32; MAX_NAM_BLOCKS];
+        for position in NamPosition::ALL {
+            let last = self
+                .blocks()
+                .iter()
+                .enumerate()
+                .filter(|(_, block)| block.position == position && block.enabled && runs(block.id))
+                .last();
+            let Some((index, block)) = last else {
+                continue;
+            };
+            if block.normalize {
+                if let Some(loudness) = block.loudness_db.filter(|db| db.is_finite()) {
+                    gains[index] = (NAM_NORMALIZED_LOUDNESS_DB - loudness)
+                        .clamp(NAM_MIN_TRIM_DB, NAM_MAX_TRIM_DB);
+                }
+            }
+        }
+        gains
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn finite_or(value: f32, fallback: f32) -> f32 {
@@ -614,6 +669,8 @@ pub(crate) struct LoadedNam {
     /// them.
     pub level_in_dbu: Option<f32>,
     pub level_out_dbu: Option<f32>,
+    /// The file's `loudness` metadata: RMS, dBFS, not LUFS.
+    pub loudness_db: Option<f32>,
     /// What the model measured as at this rate and block size.  `None` when
     /// the caller asked for no measurement.
     pub load: Option<NamLoad>,
@@ -749,6 +806,7 @@ fn prepare_parsed(
         arch: parsed.architecture.clone(),
         level_in_dbu: finite_level(metadata.input_level_dbu),
         level_out_dbu: finite_level(metadata.output_level_dbu),
+        loudness_db: finite_level(metadata.loudness),
         load,
         oversample,
     })
@@ -1867,18 +1925,20 @@ impl NamSlot {
         }
     }
 
-    /// Follows the published controls: trims, the level match, and the
-    /// bypass fade with its warm-up.
+    /// Follows the published controls: trims, the level match, the
+    /// normalization on the output gain, and the bypass fade with its
+    /// warm-up.
     fn follow(
         &mut self,
         controls: &NamBlockControls,
         level_db: f32,
+        normalization_db: f32,
         ramp_samples: f32,
         xfade: f32,
     ) {
         self.controls = *controls;
         let input = db_to_gain(controls.input_db);
-        let output = db_to_gain(controls.output_db);
+        let output = db_to_gain(controls.output_db + normalization_db);
         let level = db_to_gain(level_db);
         if !self.adopted {
             self.input_gain.snap(input);
@@ -2264,6 +2324,15 @@ impl NamStage {
             }
         }
         self.take_commands(controls);
+        let normalizations = {
+            let slots = &self.slots;
+            self.stack.normalization_gains(|id| {
+                slots
+                    .iter()
+                    .filter(|slot| slot.live)
+                    .any(|slot| slot.id == id && slot.has_live_model())
+            })
+        };
         let matches = {
             let slots = &self.slots;
             self.stack.level_matches(|id| {
@@ -2288,9 +2357,10 @@ impl NamStage {
         let stack = self.stack;
         for (index, block) in stack.blocks().iter().enumerate() {
             let level_db = matches.get(index).copied().unwrap_or(0.0);
+            let normalization_db = normalizations.get(index).copied().unwrap_or(0.0);
             let xfade = self.xfade;
             if let Some(slot) = self.slot_mut(block.id) {
-                slot.follow(block, level_db, ramp_samples, xfade);
+                slot.follow(block, level_db, normalization_db, ramp_samples, xfade);
             }
         }
         // A model that has heard its warm-up fades in.

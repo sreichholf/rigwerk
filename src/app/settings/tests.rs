@@ -659,6 +659,7 @@ fn output_devices() -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
         unused: UnusedChannels::Silent,
         align: false,
         click_mask: 0,
+        ..OutputDeviceSettings::default()
     };
     let extra_outputs = vec![
         ExtraOutputPref {
@@ -686,6 +687,28 @@ fn output_devices() -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
 }
 
 #[test]
+fn learned_loudness_saves_and_sanitizes() {
+    let mut settings = OutputDeviceSettings::default();
+    settings.loudness.target_lufs = -20.0;
+    settings.loudness.learned_db = 4.0;
+    let text = ron::to_string(&settings).expect("saved");
+    assert!(text.contains("learned_db:4.0"), "{text}");
+    let back: OutputDeviceSettings = ron::from_str(&text).expect("loaded");
+    assert_eq!(back.loudness, settings.loudness);
+
+    let text = ron::to_string(&OutputDeviceSettings::default()).expect("saved");
+    assert!(!text.contains("learned_db"), "{text}");
+
+    settings.loudness.learned_db = f32::NAN;
+    assert_eq!(settings.sanitized().loudness.learned_db, 0.0);
+    settings.loudness.learned_db = 100.0;
+    assert_eq!(
+        settings.sanitized().loudness.learned_db,
+        crate::audio::LOUDNESS_TRIM_MAX_DB
+    );
+}
+
+#[test]
 fn old_saves_without_output_devices_use_defaults() {
     let raw = r#"(output_id:"hw:Speaker",output_gain:-6.0,mute:true,sessions:[(name:"Old",output_id:"hw:Speaker")])"#;
     let loaded = load_preferences(Some(raw), BACKUP);
@@ -702,9 +725,16 @@ fn old_saves_without_output_devices_use_defaults() {
         // Files from before the switch existed align.
         align: true,
         click_mask: 0,
+        ..OutputDeviceSettings::default()
     };
     assert_eq!(OutputDeviceSettings::default(), today);
+    assert_eq!(today.loudness.learned_db, 0.0);
     assert_eq!(preferences.clock_output, today);
+    assert_eq!(preferences.clock_output.loudness.learned_db, 0.0);
+    assert_eq!(
+        preferences.clock_output.loudness.target_lufs,
+        crate::audio::LOUDNESS_TARGET_DEFAULT_LUFS
+    );
     assert!(preferences.extra_outputs.is_empty());
     // The master stays where it was.
     assert_eq!(preferences.output_gain, -6.0);
@@ -1151,6 +1181,7 @@ fn three_paths() -> (Vec<PathPref>, OutputDeviceSettings, Vec<ExtraOutputPref>) 
         level_db: -6.0,
         invert: true,
         trim_ms: 1.5,
+        ..crate::audio::PathMapSettings::default()
     };
     clock.path_map[2] = crate::audio::PathMapSettings::unrouted();
     let mut stream = ExtraOutputPref::virtual_output();
@@ -1691,6 +1722,7 @@ fn golden_device(level_db: f32, click_mask: u8) -> OutputDeviceSettings {
         level_db: -2.5,
         invert: true,
         trim_ms: 1.25,
+        ..crate::audio::PathMapSettings::default()
     };
     path_map[1] = crate::audio::PathMapSettings::unrouted();
     OutputDeviceSettings {
@@ -1700,6 +1732,7 @@ fn golden_device(level_db: f32, click_mask: u8) -> OutputDeviceSettings {
         path_map,
         align: false,
         click_mask,
+        ..OutputDeviceSettings::default()
     }
 }
 

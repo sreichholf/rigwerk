@@ -913,7 +913,22 @@ impl Shared {
         bridge_buffers: &[(BufferMode, f32)],
     ) {
         let count = settings.len().min(plan.count).min(MAX_EXTRA_OUTPUTS);
+        let previous = self
+            .extra_output_plan
+            .lock()
+            .map(|plan| plan.slots.clone())
+            .unwrap_or_default();
         for (index, slot) in settings.iter().take(count).enumerate() {
+            let old = &previous[index];
+            let new = &plan.slots[index];
+            if old.device_id != new.device_id
+                || old.node_name != new.node_name
+                || old.virtual_output != new.virtual_output
+            {
+                // A different device moved into this slot.  Its trim and its
+                // 60 s of loudness belong to the device that left.
+                self.extra_outputs[index].note_new_device();
+            }
             self.extra_outputs[index].set(slot);
             // PipeWire extra outputs are stereo port pairs; publish the count so
             // the UI has meters as soon as the extra output is added live.
@@ -940,6 +955,67 @@ impl Shared {
                 count,
             };
         }
+    }
+
+    /// The controls of output `device` (0 is the clock output, then the
+    /// extra outputs).
+    fn output_controls(&self, device: usize) -> Option<&DeviceControls> {
+        if device == 0 {
+            Some(&self.clock_output)
+        } else {
+            (device - 1 < self.extra_output_count()).then(|| &self.extra_outputs[device - 1])
+        }
+    }
+
+    /// Clears one output's loudness windows and integrated history (0 is
+    /// the clock output, then the extra outputs).
+    pub(crate) fn reset_loudness(&self, device: usize) {
+        if let Some(controls) = self.output_controls(device) {
+            controls.request_loudness_reset();
+        }
+    }
+
+    /// Starts measuring `slot`'s own loudness on output `device`, so the UI
+    /// can match that path to the device's target.
+    pub(crate) fn start_loudness_match(&self, device: usize, slot: usize) {
+        if let Some(controls) = self.output_controls(device) {
+            controls.set_match_path(Some(slot));
+        }
+    }
+
+    /// Stops a loudness match on output `device`.
+    pub(crate) fn stop_loudness_match(&self, device: usize) {
+        if let Some(controls) = self.output_controls(device) {
+            controls.set_match_path(None);
+        }
+    }
+
+    /// The matched path's `(momentary, short_term)` loudness on output
+    /// `device`, LUFS.
+    pub(crate) fn loudness_match(&self, device: usize) -> Option<(f32, f32)> {
+        self.output_controls(device)
+            .map(DeviceControls::match_reading)
+    }
+
+    /// Starts an output Learn on `device`.
+    pub(crate) fn start_output_learn(&self, device: usize) {
+        if let Some(controls) = self.output_controls(device) {
+            controls.start_learn();
+        }
+    }
+
+    /// Stops an output Learn on `device`.
+    pub(crate) fn stop_output_learn(&self, device: usize) {
+        if let Some(controls) = self.output_controls(device) {
+            controls.stop_learn();
+        }
+    }
+
+    /// The running Learn reading on `device`: gated integrated LUFS and the
+    /// number of absolute-gated 400 ms blocks.
+    pub(crate) fn loudness_learn(&self, device: usize) -> Option<(f32, u32)> {
+        self.output_controls(device)
+            .and_then(DeviceControls::learn_reading)
     }
 
     /// The playback bus for one generic extra output slot.
@@ -1201,6 +1277,7 @@ impl Shared {
             gate_reduction_db: std::array::from_fn(|slot| self.paths[slot].gate_reduction_db()),
             out_channels: self.clock_output.meters(),
             out_reduction_db: self.clock_output.reduction_db(),
+            out_loudness: self.clock_output.loudness(),
             output_channels: self.clock_output.channels(),
             extra_output_count: self
                 .extra_output_count
@@ -1209,6 +1286,9 @@ impl Shared {
             extra_output_channels: std::array::from_fn(|index| self.extra_outputs[index].meters()),
             extra_output_reduction_db: std::array::from_fn(|index| {
                 self.extra_outputs[index].reduction_db()
+            }),
+            extra_output_loudness: std::array::from_fn(|index| {
+                self.extra_outputs[index].loudness()
             }),
             extra_output_channel_counts: std::array::from_fn(|index| {
                 self.extra_outputs[index].channels()

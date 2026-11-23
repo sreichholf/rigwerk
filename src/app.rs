@@ -223,6 +223,8 @@ pub struct RigWerkApp {
     pub(crate) clock_output: OutputDeviceSettings,
     /// Extra output devices.  Pushed live by `push_extra_outputs_to_engine`.
     pub(crate) extra_outputs: Vec<ExtraOutputPref>,
+    /// A path Match or output Learn in progress.
+    pub(crate) loudness_measurement: Option<output_devices::LoudnessMeasurement>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
     /// Selected chain stage on the console.
@@ -622,6 +624,7 @@ impl RigWerkApp {
                 extra_outputs.truncate(crate::audio::MAX_EXTRA_OUTPUTS);
                 extra_outputs
             },
+            loudness_measurement: None,
             eq_edit: if preferences.eq_edit == 1 {
                 EqSlot::Post
             } else {
@@ -884,6 +887,7 @@ pub(crate) fn blank_app() -> RigWerkApp {
         selected_path: 0,
         clock_output: OutputDeviceSettings::default(),
         extra_outputs: Vec::new(),
+        loudness_measurement: None,
         eq_edit: EqSlot::Pre,
         chain_selected: chain::ChainSelection::PreEq,
         routing_device: 0,

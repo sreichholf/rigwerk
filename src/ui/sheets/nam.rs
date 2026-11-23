@@ -54,6 +54,18 @@ impl RigWerkApp {
         };
         let block = signal.nam.get(index).cloned();
         let count = signal.nam.len();
+        let (last_running_name, is_last_running) = match block.as_ref() {
+            Some(block) => {
+                let last = signal.nam.iter().rfind(|other| {
+                    other.controls.position == block.controls.position && other.active()
+                });
+                (
+                    last.map(|other| other.name.clone()),
+                    last.is_some_and(|other| other.controls.id == block.controls.id),
+                )
+            }
+            None => (None, false),
+        };
         let path_load: f32 = signal
             .nam
             .iter()
@@ -198,8 +210,13 @@ impl RigWerkApp {
             |block| format!("nam-{}", block.controls.id),
         );
 
-        if let Some(CatalogPick::Entry(index)) =
-            catalog_columns(ui, &salt, None, &rows, empty.as_deref(), |ui| {
+        if let Some(CatalogPick::Entry(index)) = catalog_columns(
+            ui,
+            &salt,
+            None,
+            &rows,
+            empty.as_deref(),
+            |ui| {
                 let Some(controls) = controls.as_mut() else {
                     ui.label(
                         RichText::new(
@@ -290,6 +307,38 @@ impl RigWerkApp {
                         .font(font(Face::Sans, TypeRole::Secondary))
                         .color(colours.text3),
                 );
+
+                ui.add_space(8.0);
+                let loudness = controls
+                    .loudness_db
+                    .map(|db| format!("Loudness {db:+.1} dB (file)"))
+                    .unwrap_or_else(|| "No loudness in file".to_owned());
+                ui.label(
+                    RichText::new(loudness)
+                        .font(font(Face::Mono, TypeRole::Secondary))
+                        .color(colours.text3),
+                );
+                let mut normalize = controls.normalize;
+                let enabled = controls.loudness_db.is_some() && is_last_running;
+                let hint = if controls.loudness_db.is_none() {
+                    "This capture has no loudness figure; nothing to normalize.".to_owned()
+                } else if !is_last_running {
+                    match &last_running_name {
+                        Some(name) => format!(
+                            "Normalization applies at the last running capture of this group ({name})."
+                        ),
+                        None => "Normalization applies at the last running capture of this group.".to_owned(),
+                    }
+                } else {
+                    "Normalize from the file's RMS figure, not LUFS.  It applies at the last running capture of this group.  Normalization happens before Match: match the path again after changing it.".to_owned()
+                };
+                let response = ui.add_enabled_ui(enabled, |ui| {
+                    checkbox_row(ui, "Normalize", &hint, &mut normalize, colours)
+                });
+                if response.inner {
+                    controls.normalize = normalize;
+                }
+                response.response.on_hover_text(&hint);
 
                 if overloaded {
                     ui.add_space(8.0);
@@ -407,8 +456,8 @@ impl RigWerkApp {
                         move_by = 1;
                     }
                 });
-            })
-        {
+            },
+        ) {
             chosen = Some(entries[index].path.clone());
         }
 

@@ -1,6 +1,7 @@
 //! The public vocabulary of the audio side: devices, inventory, engine
 //! state, live snapshot, bridge buffer mode and the bridge's start settings.
 
+use super::loudness::LoudnessReading;
 use super::output_map::{MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS};
 use super::path::MAX_PATHS;
 
@@ -170,6 +171,10 @@ pub struct Snapshot {
     /// Safety-limiter gain reduction on the clock output, dB.  0 when it
     /// is not limiting.
     pub out_reduction_db: f32,
+    /// Loudness of the clock output: momentary, short-term, integrated and
+    /// the automatic trim it applied.  No reading is silence at
+    /// [`super::SILENCE_LUFS`].
+    pub out_loudness: LoudnessReading,
     /// The clock output's real channel count (0 until its first block).
     pub output_channels: u32,
     /// How many extra outputs the engine currently maps (≤ [`MAX_EXTRA_OUTPUTS`]).
@@ -181,6 +186,8 @@ pub struct Snapshot {
     /// Safety-limiter gain reduction per extra output, dB.  0 when not limiting.
     /// The virtual output is one of these slots.
     pub extra_output_reduction_db: [f32; MAX_EXTRA_OUTPUTS],
+    /// Loudness per extra output, as [`Self::out_loudness`].
+    pub extra_output_loudness: [LoudnessReading; MAX_EXTRA_OUTPUTS],
     /// Each extra output's real channel count (0 until published).
     pub extra_output_channel_counts: [u32; MAX_EXTRA_OUTPUTS],
     /// Generic extra outputs that failed to open or were lost, and are being

@@ -327,6 +327,7 @@ fn sessions_carry_the_output_devices() {
         unused: UnusedChannels::Silent,
         align: false,
         click_mask: 0,
+        ..OutputDeviceSettings::default()
     };
     let extra_outputs = vec![
         ExtraOutputPref {

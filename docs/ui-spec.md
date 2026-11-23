@@ -315,6 +315,8 @@ on paths), so the faders line up across the screen.
 - Buffer: on the clock output, the output mode and its real buffer time; on
   an extra output, the bridge buffer (`auto 5.3 ms`), or *In graph*.
 - Limiter reduction bar.
+- Short-term loudness in LUFS, and the learned trim when it is not zero.
+  Learn and Match are one-shot; nothing moves on its own.
 - One meter bar per device channel (2–8; thinner when there are more), the
   level fader, M.
 - Clicking the strip anywhere else opens its output sheet (§6.2).
@@ -571,8 +573,9 @@ grid and *Stereo* / *Mono*), the sends (*Send to* each return, or on a
 return *Send from* each path, *Off* at the bottom), *Path
 outputs* L and R *(the chips that were OUT 1 / OUT 2 on Live)*, level,
 mute, solo (not on a return), *Duplicate (muted)*, *Apply layout ▸* with *Custom · edited
-from Blend clean* when the setup no longer matches one, *Remove*, and the
-path's latency on every output it plays on.
+from Blend clean* when the setup no longer matches one, *Remove*, and on
+every output it plays on its latency and a *Match* button that matches the
+path to that output's loudness target.
 
 ### 6.2 Output sheet
 
@@ -581,6 +584,10 @@ Board 7.
 - Header: name, badge, channel count, driver; *Driver panel* (ASIO);
   *Remove* (extra outputs; the clock output is changed in Setup).
 - Per-channel meters, level and M for this output.
+- Loudness: short-term, momentary and integrated LUFS, the target slider,
+  *Learn*, the learned trim, *Clear* and *Reset*.  *Learn* measures the
+  output for eight seconds and saves a trim so it reaches the target with
+  the level fader at 0 dB; nothing moves on its own.
 - The channel map grid.  Under it, the map presets this output offers,
   applied to the path chosen beside them (today's `MapPreset::for_channels`:
   mono devices get *Mono to all* and *Clear*; 2–3 channels add *Out 1/2*

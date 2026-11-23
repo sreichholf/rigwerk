@@ -1,13 +1,16 @@
 //! Realtime device mapping: controls atomics, frames and the mapper.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use super::super::delay::{DelayLine, DelayTap, MonoDelayLine, TAP_FADE_SECONDS};
 use super::super::limiter::SafetyLimiter;
+use super::super::loudness::{LoudnessMeter, LoudnessReading};
 use super::super::mixer::Ramp;
 use super::super::path::{LiveSlots, MAX_PATHS};
 use super::align::{plan_alignment, trim_frames, AlignmentPlan, AlignmentReport, MAX_ALIGN_DELAY};
-use super::types::{ChannelMap, OutputDeviceSettings, UnusedChannels, MAX_OUTPUT_CHANNELS};
+use super::types::{
+    ChannelMap, LoudnessSettings, OutputDeviceSettings, UnusedChannels, MAX_OUTPUT_CHANNELS,
+};
 use super::weights::{level_gain, path_channel_weights, routed_paths};
 
 /// What the mapper needs to align the paths in one block: each path's
@@ -35,6 +38,11 @@ pub(crate) type PathLines = [DelayLine; MAX_PATHS];
 const NOT_ROUTED: u32 = u32::MAX;
 /// "Waits for no path" in the published `waits_for`.
 const NO_PATH: u8 = u8::MAX;
+/// "No path is being matched on this device".
+const NO_MATCH: u8 = u8::MAX;
+
+/// How long a learned trim change takes to reach the audio.
+const TRIM_RAMP_SECONDS: f32 = 0.2;
 
 /// One path's channel map and signed gain (level and polarity) on one
 /// device, as the callback reads it.
@@ -100,6 +108,36 @@ pub(crate) struct DeviceControls {
     /// Safety-limiter gain reduction, dB (`f32` bits).  0 when the device
     /// is not limiting.  Published with the meters.
     reduction_db: AtomicU32,
+    /// Target and learned trim, as the mapper reads them.
+    loudness_target: AtomicU32,
+    loudness_learned: AtomicU32,
+    /// The learned trim the mapper last applied, dB (`f32` bits).
+    loudness_trim: AtomicU32,
+    /// Momentary, short-term and integrated loudness, LUFS (`f32` bits).
+    loudness_momentary: AtomicU32,
+    loudness_short_term: AtomicU32,
+    loudness_integrated: AtomicU32,
+    /// Set by the UI to clear the meter's windows and integrated history.
+    loudness_reset: AtomicBool,
+    /// Bumped when a different device moves into this output slot, so the
+    /// mapper drops the old device's trim and history.
+    device_generation: AtomicU64,
+    /// The path being matched to this device's target, or [`NO_MATCH`].
+    match_path: AtomicU8,
+    /// Bumped on every start/stop, so a new match on the same path clears
+    /// the old windows too.
+    match_generation: AtomicU64,
+    /// The selected path's own momentary and short-term loudness on this
+    /// device, and the same reading the mixer publishes.
+    match_momentary: AtomicU32,
+    match_short_term: AtomicU32,
+    /// One output Learn in progress: bumped on every start/stop, plus the
+    /// integrated reading and how many 400 ms blocks passed the absolute
+    /// gate.
+    learn_active: AtomicBool,
+    learn_generation: AtomicU64,
+    learn_integrated: AtomicU32,
+    learn_blocks: AtomicU32,
     /// The device's real channel count, published when its stream opens.
     /// 0 = unknown (bridge not running); the UI falls back to the device
     /// inventory's channel count.  ASIO opens at most 4 outputs for now;
@@ -127,6 +165,22 @@ impl DeviceControls {
             click_mask: AtomicU8::new(0),
             meters: std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits())),
             reduction_db: AtomicU32::new(0.0f32.to_bits()),
+            loudness_target: AtomicU32::new(super::types::LOUDNESS_TARGET_DEFAULT_LUFS.to_bits()),
+            loudness_learned: AtomicU32::new(0.0f32.to_bits()),
+            loudness_trim: AtomicU32::new(0.0f32.to_bits()),
+            loudness_momentary: AtomicU32::new(super::super::SILENCE_LUFS.to_bits()),
+            loudness_short_term: AtomicU32::new(super::super::SILENCE_LUFS.to_bits()),
+            loudness_integrated: AtomicU32::new(super::super::SILENCE_LUFS.to_bits()),
+            loudness_reset: AtomicBool::new(false),
+            device_generation: AtomicU64::new(0),
+            match_path: AtomicU8::new(NO_MATCH),
+            match_generation: AtomicU64::new(0),
+            match_momentary: AtomicU32::new(super::super::SILENCE_LUFS.to_bits()),
+            match_short_term: AtomicU32::new(super::super::SILENCE_LUFS.to_bits()),
+            learn_active: AtomicBool::new(false),
+            learn_generation: AtomicU64::new(0),
+            learn_integrated: AtomicU32::new(super::super::SILENCE_LUFS.to_bits()),
+            learn_blocks: AtomicU32::new(0),
             channels: AtomicU32::new(0),
             align: AtomicBool::new(true),
             applied: std::array::from_fn(|_| AtomicU32::new(NOT_ROUTED)),
@@ -155,6 +209,158 @@ impl DeviceControls {
         self.mute.store(settings.mute, Ordering::Relaxed);
         self.click_mask
             .store(settings.click_mask, Ordering::Relaxed);
+        self.set_loudness(&settings.loudness);
+    }
+
+    /// Stores the loudness target and learned trim, sanitized.
+    fn set_loudness(&self, settings: &LoudnessSettings) {
+        let settings = settings.sanitized();
+        self.loudness_target
+            .store(settings.target_lufs.to_bits(), Ordering::Relaxed);
+        self.loudness_learned
+            .store(settings.learned_db.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Reads the loudness target and learned trim.
+    pub(crate) fn loudness_settings(&self) -> LoudnessSettings {
+        LoudnessSettings {
+            target_lufs: f32::from_bits(self.loudness_target.load(Ordering::Relaxed)),
+            learned_db: f32::from_bits(self.loudness_learned.load(Ordering::Relaxed)),
+        }
+    }
+
+    /// Publishes one block's loudness reading.
+    pub(crate) fn publish_loudness(&self, reading: LoudnessReading) {
+        self.loudness_momentary
+            .store(reading.momentary_lufs.to_bits(), Ordering::Relaxed);
+        self.loudness_short_term
+            .store(reading.short_term_lufs.to_bits(), Ordering::Relaxed);
+        self.loudness_integrated
+            .store(reading.integrated_lufs.to_bits(), Ordering::Relaxed);
+        self.loudness_trim
+            .store(reading.trim_db.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The latest loudness reading.
+    pub(crate) fn loudness(&self) -> LoudnessReading {
+        LoudnessReading {
+            momentary_lufs: f32::from_bits(self.loudness_momentary.load(Ordering::Relaxed)),
+            short_term_lufs: f32::from_bits(self.loudness_short_term.load(Ordering::Relaxed)),
+            integrated_lufs: f32::from_bits(self.loudness_integrated.load(Ordering::Relaxed)),
+            trim_db: f32::from_bits(self.loudness_trim.load(Ordering::Relaxed)),
+        }
+    }
+
+    /// Clears the meter's windows and integrated history on the next block.
+    pub(crate) fn request_loudness_reset(&self) {
+        self.loudness_reset.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes a pending reset request.
+    pub(crate) fn take_loudness_reset(&self) -> bool {
+        self.loudness_reset.swap(false, Ordering::Relaxed)
+    }
+
+    /// The identity generation of the device in this slot.
+    pub(crate) fn device_generation(&self) -> u64 {
+        self.device_generation.load(Ordering::Relaxed)
+    }
+
+    /// Marks that a different device now lives in this slot.
+    pub(crate) fn note_new_device(&self) {
+        self.device_generation.fetch_add(1, Ordering::Relaxed);
+        self.stop_learn();
+        self.set_match_path(None);
+    }
+
+    /// The match generation, bumped on every start and stop.
+    pub(crate) fn match_generation(&self) -> u64 {
+        self.match_generation.load(Ordering::Relaxed)
+    }
+
+    /// The path the UI asked to match on this device, or `None`.
+    pub(crate) fn match_path(&self) -> Option<usize> {
+        match self.match_path.load(Ordering::Relaxed) {
+            NO_MATCH => None,
+            path => Some(usize::from(path)),
+        }
+    }
+
+    /// Starts matching `path` on this device, or stops with `None`.
+    pub(crate) fn set_match_path(&self, path: Option<usize>) {
+        self.match_path
+            .store(path.map_or(NO_MATCH, |path| path as u8), Ordering::Relaxed);
+        self.match_generation.fetch_add(1, Ordering::Relaxed);
+        if path.is_none() {
+            self.match_momentary
+                .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+            self.match_short_term
+                .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        } else {
+            self.stop_learn();
+        }
+    }
+
+    /// Publishes the matched path's own loudness on this device.
+    pub(crate) fn publish_match(&self, momentary_lufs: f32, short_term_lufs: f32) {
+        self.match_momentary
+            .store(momentary_lufs.to_bits(), Ordering::Relaxed);
+        self.match_short_term
+            .store(short_term_lufs.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The matched path's momentary and short-term loudness, LUFS.
+    pub(crate) fn match_reading(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.match_momentary.load(Ordering::Relaxed)),
+            f32::from_bits(self.match_short_term.load(Ordering::Relaxed)),
+        )
+    }
+
+    /// Starts an output Learn and stops any path match.
+    pub(crate) fn start_learn(&self) {
+        self.set_match_path(None);
+        self.learn_active.store(true, Ordering::Relaxed);
+        self.learn_generation.fetch_add(1, Ordering::Relaxed);
+        self.learn_integrated
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.learn_blocks.store(0, Ordering::Relaxed);
+    }
+
+    /// Stops an output Learn and clears its published reading.
+    pub(crate) fn stop_learn(&self) {
+        self.learn_active.store(false, Ordering::Relaxed);
+        self.learn_generation.fetch_add(1, Ordering::Relaxed);
+        self.learn_integrated
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.learn_blocks.store(0, Ordering::Relaxed);
+    }
+
+    /// Whether an output Learn is running.
+    pub(crate) fn learn_active(&self) -> bool {
+        self.learn_active.load(Ordering::Relaxed)
+    }
+
+    /// The Learn generation, bumped on every start and stop.
+    pub(crate) fn learn_generation(&self) -> u64 {
+        self.learn_generation.load(Ordering::Relaxed)
+    }
+
+    /// Publishes one Learn window's integrated reading and gated block count.
+    pub(crate) fn publish_learn(&self, integrated_lufs: f32, blocks: u32) {
+        self.learn_integrated
+            .store(integrated_lufs.to_bits(), Ordering::Relaxed);
+        self.learn_blocks.store(blocks, Ordering::Relaxed);
+    }
+
+    /// The Learn reading while it is running.
+    pub(crate) fn learn_reading(&self) -> Option<(f32, u32)> {
+        self.learn_active().then(|| {
+            (
+                f32::from_bits(self.learn_integrated.load(Ordering::Relaxed)),
+                self.learn_blocks.load(Ordering::Relaxed),
+            )
+        })
     }
 
     /// Copies the settings (not the meters) of a previous run.
@@ -178,6 +384,14 @@ impl DeviceControls {
             previous.click_mask.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
+        self.loudness_target.store(
+            previous.loudness_target.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.loudness_learned.store(
+            previous.loudness_learned.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
     }
 
     /// Clears the meters and the channel count for a fresh run.
@@ -186,6 +400,25 @@ impl DeviceControls {
             meter.store(0.0f32.to_bits(), Ordering::Relaxed);
         }
         self.reduction_db.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.loudness_trim
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.loudness_momentary
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.loudness_short_term
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.loudness_integrated
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.loudness_reset.store(false, Ordering::Relaxed);
+        self.match_path.store(NO_MATCH, Ordering::Relaxed);
+        self.match_momentary
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.match_short_term
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.learn_active.store(false, Ordering::Relaxed);
+        self.learn_generation.fetch_add(1, Ordering::Relaxed);
+        self.learn_integrated
+            .store(super::super::SILENCE_LUFS.to_bits(), Ordering::Relaxed);
+        self.learn_blocks.store(0, Ordering::Relaxed);
         self.channels.store(0, Ordering::Relaxed);
         self.applied_rate.store(0, Ordering::Relaxed);
     }
@@ -528,6 +761,28 @@ pub(crate) struct DeviceMapper {
     /// measurement ducks the output, so ticks already queued are silenced
     /// with the ones not yet generated.
     click_duck: Ramp,
+    /// The learned output trim, applied before the device level fader and
+    /// the ceiling.  Unity copies.
+    trim: Ramp,
+    learned_db: f32,
+    /// The published loudness, after the fader, ceiling and mute.
+    loudness: LoudnessMeter,
+    /// Output Learn: the device sum after the learned trim and before the
+    /// fader, ceiling and mute.
+    learn_meter: LoudnessMeter,
+    rate: u32,
+    block_frames: usize,
+    /// [`DeviceControls::device_generation`] as last seen.
+    device_generation: u64,
+    /// Loudness of the path being matched, alone on this device, before the
+    /// fader.
+    match_meter: LoudnessMeter,
+    /// [`DeviceControls::match_path`] as last seen.
+    match_path: Option<usize>,
+    match_generation: u64,
+    /// [`DeviceControls::learn_generation`] as last seen.
+    learn_generation: u64,
+    learn_active: bool,
     frame: DeviceFrame,
     peaks: [f32; MAX_OUTPUT_CHANNELS],
 }
@@ -555,6 +810,18 @@ impl DeviceMapper {
             click_quiet: usize::MAX,
             click_mapped: false,
             click_duck: Ramp::new(1.0),
+            trim: Ramp::new(1.0),
+            learned_db: 0.0,
+            loudness: LoudnessMeter::new(48_000),
+            learn_meter: LoudnessMeter::new(48_000),
+            rate: 48_000,
+            block_frames: 0,
+            device_generation: 0,
+            match_meter: LoudnessMeter::new(48_000),
+            match_path: None,
+            match_generation: 0,
+            learn_generation: 0,
+            learn_active: false,
             frame: DeviceFrame {
                 samples: [0.0; SLOTS],
                 record: [0.0; SLOTS],
@@ -572,6 +839,12 @@ impl DeviceMapper {
             self.channels = channels;
             self.frame.channels = channels;
             self.adopted = false;
+            self.loudness.configure(self.rate, channels);
+            self.loudness.reset();
+            self.learn_meter.configure(self.rate, channels);
+            self.learn_meter.reset();
+            self.match_meter.configure(self.rate, channels);
+            self.match_meter.reset();
         }
     }
 
@@ -626,6 +899,41 @@ impl DeviceMapper {
         self.click_mapped = frames == 0;
         self.limiter.set_rate(timing.rate);
         self.click_limiter.set_rate(timing.rate);
+        self.rate = timing.rate.max(1);
+        self.block_frames = frames;
+        self.loudness.configure(self.rate, self.channels);
+        self.learn_meter.configure(self.rate, self.channels);
+        let generation = controls.device_generation();
+        if generation != self.device_generation {
+            self.device_generation = generation;
+            self.reset_loudness();
+        }
+        if controls.take_loudness_reset() {
+            self.reset_loudness();
+        }
+        let learn_generation = controls.learn_generation();
+        if learn_generation != self.learn_generation {
+            self.learn_generation = learn_generation;
+            self.learn_meter.reset();
+        }
+        self.learn_active = controls.learn_active();
+        self.match_meter.configure(self.rate, self.channels);
+        let match_path = controls.match_path();
+        let match_generation = controls.match_generation();
+        if match_path != self.match_path || match_generation != self.match_generation {
+            self.match_path = match_path;
+            self.match_generation = match_generation;
+            self.match_meter.reset();
+        }
+        let loudness = controls.loudness_settings();
+        self.learned_db = loudness.learned_db;
+        let learned_target = 10.0f32.powf(loudness.learned_db / 20.0);
+        if self.adopted {
+            self.trim
+                .set_target(learned_target, TRIM_RAMP_SECONDS * self.rate as f32);
+        } else {
+            self.trim.snap(learned_target);
+        }
         let maps: [ChannelMap; MAX_PATHS] = std::array::from_fn(|path| controls.path_map(path));
         let mask = live.mask();
         let mut mapped = 0u32;
@@ -837,16 +1145,40 @@ impl DeviceMapper {
             sources[path] = source;
         }
         let gain = self.gain.next();
-        // Unity copies, so 0 dB never touches a sample in any FP mode.
-        let level = |value: f32| if gain == 1.0 { value } else { value * gain };
+        let trim = self.trim.next();
+        // Unity copies, so 0 dB and a settled trim never touch a sample in
+        // any FP mode.  The learned trim sits before the fader; Learn and
+        // Match measure here, so moving the fader never changes them.
+        let learned = |value: f32| if trim == 1.0 { value } else { value * trim };
+        let level = |value: f32| {
+            let value = learned(value);
+            if gain == 1.0 {
+                value
+            } else {
+                value * gain
+            }
+        };
         let mapped = self.channels.min(MAX_OUTPUT_CHANNELS);
-        for channel in 0..mapped {
-            self.frame.samples[channel] =
-                level(sum_paths(&mut self.weights, self.live, channel, &sources));
+        let matching = self.match_path.filter(|path| self.live.contains(*path));
+        let mut match_frame = [0.0f32; MAX_OUTPUT_CHANNELS];
+        let mut learn_frame = [0.0f32; MAX_OUTPUT_CHANNELS];
+        for (channel, (match_slot, learn_slot)) in match_frame
+            .iter_mut()
+            .zip(learn_frame.iter_mut())
+            .take(mapped)
+            .enumerate()
+        {
+            let (sum, selected) =
+                sum_paths(&mut self.weights, self.live, channel, &sources, matching);
+            self.frame.samples[channel] = level(sum);
+            if matching.is_some() {
+                *match_slot = learned(selected);
+            }
+            *learn_slot = learned(sum);
         }
         if self.channels > MAX_OUTPUT_CHANNELS {
-            self.frame.samples[EXTRA] =
-                level(sum_paths(&mut self.weights, self.live, EXTRA, &sources));
+            let (sum, _) = sum_paths(&mut self.weights, self.live, EXTRA, &sources, matching);
+            self.frame.samples[EXTRA] = level(sum);
         }
         // Level, then the safety ceiling, then the metronome, then mute.
         // Mute already ramps to silence, so the music limiter sees the
@@ -899,6 +1231,20 @@ impl DeviceMapper {
                 *sample *= mute;
             }
         }
+        // Match sees the selected path alone, after the learned trim and
+        // before the fader, ceiling and mute.  Learn sees the whole device at
+        // the same point.  Neither is the stream's final loudness.
+        if matching.is_some() {
+            self.match_meter.push(&match_frame[..mapped]);
+        }
+        if self.learn_active {
+            self.learn_meter.push(&learn_frame[..mapped]);
+        }
+        // Loudness sees the click-free lanes after their mute, so the
+        // metronome never moves the reading.  A device with more than
+        // MAX_OUTPUT_CHANNELS channels keeps one shared lane past the
+        // mapped ones; the meter counts the real channels only.
+        self.loudness.push(&self.frame.record[..mapped]);
         for channel in 0..mapped {
             let value = self.frame.samples[channel].abs();
             self.peaks[channel] = self.peaks[channel].max(value);
@@ -924,14 +1270,40 @@ impl DeviceMapper {
         self.mapped
     }
 
-    /// Publishes this block's per-channel peaks.
-    pub(crate) fn end_block(&self, controls: &DeviceControls) {
+    /// Clears the published meter and the Learn window.  The learned trim is
+    /// a setting and is not touched.
+    fn reset_loudness(&mut self) {
+        self.loudness.reset();
+        self.learn_meter.reset();
+    }
+
+    /// Publishes this block's per-channel peaks, loudness and any Match or
+    /// Learn reading.  Nothing moves on its own; the learned trim only ramps
+    /// when its setting changes.
+    pub(crate) fn end_block(&mut self, controls: &DeviceControls) {
+        if controls.take_loudness_reset() {
+            self.reset_loudness();
+        }
         for (meter, peak) in controls.meters.iter().zip(self.peaks) {
             meter.store(peak.to_bits(), Ordering::Relaxed);
         }
         let music = self.limiter.reduction_db();
         let tick = self.click_limiter.reduction_db();
         controls.store_reduction(music.max(tick));
+
+        if self.match_path.is_some() {
+            let matched = self.match_meter.reading(0.0);
+            controls.publish_match(matched.momentary_lufs, matched.short_term_lufs);
+        } else {
+            controls.publish_match(super::super::SILENCE_LUFS, super::super::SILENCE_LUFS);
+        }
+        if self.learn_active {
+            let (integrated, blocks) = self.learn_meter.integrated_with_blocks();
+            controls.publish_learn(integrated, blocks as u32);
+        } else {
+            controls.publish_learn(super::super::SILENCE_LUFS, 0);
+        }
+        controls.publish_loudness(self.loudness.reading(self.learned_db));
     }
 }
 
@@ -944,13 +1316,18 @@ fn sum_paths(
     live: LiveSlots,
     slot: usize,
     sources: &[[f32; 3]; MAX_PATHS],
-) -> f32 {
+    selected: Option<usize>,
+) -> (f32, f32) {
     let mut value: Option<f32> = None;
+    let mut selected_value = 0.0;
     for path in live.iter() {
         let term = blend(&mut weights[path][slot], sources[path]);
+        if selected == Some(path) {
+            selected_value = term;
+        }
         value = Some(value.map_or(term, |sum| sum + term));
     }
-    value.unwrap_or(0.0)
+    (value.unwrap_or(0.0), selected_value)
 }
 
 /// Advances one slot's three weight ramps and mixes the sources with them.
