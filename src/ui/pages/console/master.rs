@@ -49,6 +49,7 @@ impl RigWerkApp {
                 mute: Some(self.mute),
                 solo: None,
                 dim: self.mute,
+                trim_line: None,
             },
         );
         if let Some(level) = events.level {

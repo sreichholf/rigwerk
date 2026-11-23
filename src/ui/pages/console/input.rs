@@ -101,6 +101,7 @@ impl RigWerkApp {
                 mute: None,
                 solo: None,
                 dim: false,
+                trim_line: None,
             },
         );
         if let Some(gain) = events.level.take() {
