@@ -24,6 +24,72 @@ pub const VIRTUAL_OUTPUT_ID: &str = "pipewire:RigWerk Out";
 pub const DEVICE_LEVEL_MIN_DB: f32 = -36.0;
 pub const DEVICE_LEVEL_MAX_DB: f32 = 6.0;
 
+/// Loudness target range, LUFS.  -14 is the streaming target; -23 is the
+/// broadcast one.  A NaN target becomes the default.
+pub const LOUDNESS_TARGET_MIN_LUFS: f32 = -30.0;
+pub const LOUDNESS_TARGET_MAX_LUFS: f32 = -5.0;
+pub const LOUDNESS_TARGET_DEFAULT_LUFS: f32 = -14.0;
+
+/// How far a learned trim or a path match may move a device from its own
+/// level, dB.
+pub const LOUDNESS_TRIM_MAX_DB: f32 = 12.0;
+
+/// One output's loudness setting: the target Learn measures against and the
+/// trim a past Learn saved.  The trim is applied through the mapper's ramp;
+/// nothing follows the player.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoudnessSettings {
+    /// Target integrated loudness, LUFS.
+    pub target_lufs: f32,
+    /// Learned output trim, dB.  Left out of a save while 0.
+    #[serde(default, skip_serializing_if = "learned_db_is_zero")]
+    pub learned_db: f32,
+}
+
+fn learned_db_is_zero(value: &f32) -> bool {
+    *value == 0.0
+}
+
+impl Default for LoudnessSettings {
+    fn default() -> Self {
+        Self {
+            target_lufs: LOUDNESS_TARGET_DEFAULT_LUFS,
+            learned_db: 0.0,
+        }
+    }
+}
+
+impl LoudnessSettings {
+    /// Whether this is the default, so a save can leave the field out and
+    /// keep an older file's bytes unchanged.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// A NaN target becomes the default; the target is clamped to the range
+    /// the sheet offers.  A NaN learned trim becomes 0 and is clamped to
+    /// ±[`LOUDNESS_TRIM_MAX_DB`].
+    pub fn sanitized(self) -> Self {
+        let target = if self.target_lufs.is_nan() {
+            LOUDNESS_TARGET_DEFAULT_LUFS
+        } else {
+            self.target_lufs
+                .clamp(LOUDNESS_TARGET_MIN_LUFS, LOUDNESS_TARGET_MAX_LUFS)
+        };
+        let learned_db = if self.learned_db.is_nan() {
+            0.0
+        } else {
+            self.learned_db
+                .clamp(-LOUDNESS_TRIM_MAX_DB, LOUDNESS_TRIM_MAX_DB)
+        };
+        Self {
+            target_lufs: target,
+            learned_db,
+        }
+    }
+}
+
 /// One side of the stereo mix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MixSide {
@@ -200,6 +266,9 @@ pub enum UnusedChannels {
 /// The alignment trim range, ms.
 pub const PATH_TRIM_MAX_MS: f32 = 5.0;
 
+/// Range of the loudness-match trim on one path and device, dB.
+pub const PATH_MATCH_MAX_DB: f32 = 24.0;
+
 /// One signal path's place in one device's sum: its channel map, its level
 /// there, its polarity, and the alignment trim on top of the automatic
 /// alignment.
@@ -215,6 +284,14 @@ pub struct PathMapSettings {
     /// or less delay (negative) for this path on this device, on top of
     /// the automatic alignment.
     pub trim_ms: f32,
+    /// Loudness-match trim, dB (±[`PATH_MATCH_MAX_DB`]), on top of the
+    /// level and kept apart from it.
+    #[serde(default, skip_serializing_if = "match_db_is_zero")]
+    pub match_db: f32,
+}
+
+fn match_db_is_zero(value: &f32) -> bool {
+    *value == 0.0
 }
 
 impl Default for PathMapSettings {
@@ -224,6 +301,7 @@ impl Default for PathMapSettings {
             level_db: 0.0,
             invert: false,
             trim_ms: 0.0,
+            match_db: 0.0,
         }
     }
 }
@@ -253,6 +331,11 @@ impl PathMapSettings {
             } else {
                 self.trim_ms.clamp(-PATH_TRIM_MAX_MS, PATH_TRIM_MAX_MS)
             },
+            match_db: if self.match_db.is_nan() {
+                0.0
+            } else {
+                self.match_db.clamp(-PATH_MATCH_MAX_DB, PATH_MATCH_MAX_DB)
+            },
             ..self
         }
     }
@@ -266,7 +349,10 @@ impl PathMapSettings {
     /// negated when the polarity is flipped.  0 dB and normal polarity is
     /// exactly 1.0.
     pub(crate) fn gain(&self) -> f32 {
-        let gain = path_level_gain(self.level_db);
+        let mut gain = path_level_gain(self.level_db);
+        if self.match_db != 0.0 {
+            gain *= 10.0f32.powf(self.match_db / 20.0);
+        }
         if self.invert {
             -gain
         } else {
@@ -301,6 +387,9 @@ pub struct OutputDeviceSettings {
     /// (the UI's channel `n + 1`).  0 adds the tick nowhere.  Not a path
     /// setting: reordering paths leaves it alone.
     pub click_mask: u8,
+    /// Automatic loudness: target and switch.  Off until the output sheet
+    /// turns it on.
+    pub loudness: LoudnessSettings,
 }
 
 /// The saved form of [`OutputDeviceSettings`].
@@ -322,6 +411,9 @@ struct StoredDeviceSettings {
     /// Missing on older saves: the click plays nowhere.
     #[serde(default)]
     click_mask: u8,
+    /// Missing on older saves: off at -14 LUFS.
+    #[serde(default, skip_serializing_if = "LoudnessSettings::is_default")]
+    loudness: LoudnessSettings,
 }
 
 /// A legacy `map` is stored bare (not as `Some(..)`); reads it as present.
@@ -354,6 +446,7 @@ impl From<StoredDeviceSettings> for OutputDeviceSettings {
             path_map,
             align: stored.align,
             click_mask: stored.click_mask,
+            loudness: stored.loudness,
         }
     }
 }
@@ -373,6 +466,7 @@ impl From<OutputDeviceSettings> for StoredDeviceSettings {
             path_map: settings.path_map[..used].to_vec(),
             align: settings.align,
             click_mask: settings.click_mask,
+            loudness: settings.loudness,
         }
     }
 }
@@ -386,6 +480,7 @@ impl Default for OutputDeviceSettings {
             path_map: [PathMapSettings::default(); MAX_PATHS],
             align: true,
             click_mask: 0,
+            loudness: LoudnessSettings::default(),
         }
     }
 }
@@ -408,6 +503,7 @@ impl OutputDeviceSettings {
         Self {
             level_db: level_db.clamp(DEVICE_LEVEL_MIN_DB, DEVICE_LEVEL_MAX_DB),
             path_map: self.path_map.map(PathMapSettings::sanitized),
+            loudness: self.loudness.sanitized(),
             ..self
         }
     }

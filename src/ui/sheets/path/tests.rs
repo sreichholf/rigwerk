@@ -33,6 +33,18 @@ fn the_source_grid_and_the_output_chips_are_named() {
 }
 
 #[test]
+fn each_output_the_path_plays_on_offers_a_match_button() {
+    use crate::app::blank_app;
+    use crate::app::screen::Sheet;
+    use crate::ui::widgets::{accesskit_frame, node_named};
+
+    let mut app = blank_app();
+    app.open_sheet(Sheet::Path { path: 0 });
+    let tree = accesskit_frame(|ui| app.sheet_body(ui, 600.0));
+    let _ = node_named(&tree, "Match");
+}
+
+#[test]
 fn the_sheet_lists_the_sends_on_both_ends() {
     use crate::app::blank_app;
     use crate::app::screen::Sheet;

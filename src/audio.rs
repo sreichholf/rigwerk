@@ -60,6 +60,8 @@
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute, safety ceiling and channel map.
 //! - `limiter`: the per-device sample-peak ceiling after the device level.
+//! - `loudness`: ITU-R BS.1770-4 momentary, short-term and integrated metres
+//!   and the slow automatic level that uses them, one per output device.
 //! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
 //! - `rt_guard`: the debug allocation guard the audio callbacks hold.
@@ -84,6 +86,7 @@ pub(crate) use extra_output::EXTRA_OUTPUT_DRIFT_LIMIT_PPM;
 mod gate;
 mod input;
 mod limiter;
+mod loudness;
 pub(crate) mod lv2;
 mod metronome;
 mod mixer;
@@ -165,8 +168,9 @@ pub use nam::{
 pub(crate) use output_map::low_bits;
 pub use output_map::{
     AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
-    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, MAX_EXTRA_OUTPUTS,
-    MAX_OUTPUT_CHANNELS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
+    UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, LOUDNESS_TARGET_DEFAULT_LUFS,
+    LOUDNESS_TARGET_MAX_LUFS, LOUDNESS_TARGET_MIN_LUFS, LOUDNESS_TRIM_MAX_DB, MAX_EXTRA_OUTPUTS,
+    MAX_OUTPUT_CHANNELS, PATH_MATCH_MAX_DB, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 #[cfg(test)]
 pub(crate) use shared::tests::claim_main_thread;
@@ -174,6 +178,8 @@ pub(crate) use shared::tests::claim_main_thread;
 #[cfg(test)]
 pub(crate) use limiter::safety_ceiling_linear;
 pub(crate) use limiter::{SAFETY_CEILING_DB, SAFETY_GR_DB};
+pub use loudness::LoudnessReading;
+pub(crate) use loudness::SILENCE_LUFS;
 pub(crate) use metronome::{clamp_click_level_db, clamp_metronome_bpm, click_level_gain};
 pub use metronome::{
     ClickRhythm, CLICK_LEVEL_DEFAULT_DB, CLICK_LEVEL_MAX_DB, CLICK_LEVEL_MIN_DB, CLICK_RHYTHMS,

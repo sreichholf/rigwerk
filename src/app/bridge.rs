@@ -88,6 +88,7 @@ impl RigWerkApp {
             return;
         }
         self.bridge_restart_pending = false;
+        self.cancel_loudness_measurement();
         self.bridge_signature = self.current_bridge_signature();
         // The new run is rebuilt from the saved effects (their
         // preferences and state blobs), and a plugin may change a value
@@ -152,6 +153,7 @@ impl RigWerkApp {
     pub(crate) fn stop_bridge(&mut self) {
         self.bridge_restart_pending = false;
         self.bridge_signature = 0;
+        self.cancel_loudness_measurement();
         self.engine.stop();
         self.issue_state.new_run();
         #[cfg(target_os = "linux")]
@@ -219,6 +221,7 @@ impl RigWerkApp {
         self.push_devices_to_engine();
         self.engine.poll();
         self.snapshot = self.engine.snapshot();
+        self.poll_loudness_measurement();
         #[cfg(target_os = "linux")]
         {
             self.refresh_quantum_actual();

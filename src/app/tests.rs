@@ -159,6 +159,7 @@ fn save_writes_the_output_devices() {
         unused: UnusedChannels::Silent,
         align: false,
         click_mask: 0,
+        ..OutputDeviceSettings::default()
     };
     app.extra_outputs = vec![ExtraOutputPref {
         id: "hw:Phones".to_owned(),

@@ -55,6 +55,16 @@ fn the_click_row_and_presets_are_named() {
 }
 
 #[test]
+fn the_loudness_controls_are_named() {
+    let mut app = four_channel_extra();
+    let tree = accesskit_frame(|ui| app.sheet_body(ui, 600.0));
+    let target = node_named(&tree, "Loudness target");
+    assert_eq!(target.role(), eframe::egui::Role::Slider);
+    let _ = node_named(&tree, "Learn");
+    let _ = node_named(&tree, "Reset");
+}
+
+#[test]
 fn a_map_edit_writes_the_path_slot_and_keeps_the_other_paths() {
     let mut app = four_channel_extra();
     let second = app.duplicate_path(0).unwrap();

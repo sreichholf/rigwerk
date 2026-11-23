@@ -584,6 +584,43 @@ impl AudioEngine {
         self.shared.clock_output.set(settings);
     }
 
+    /// Clears one output's loudness windows and integrated history (0 is
+    /// the clock output, then the extra outputs).
+    pub fn reset_loudness(&self, device: usize) {
+        self.shared.reset_loudness(device);
+    }
+
+    /// Starts measuring one path's own loudness on an output, for the
+    /// "Match to <device>" action.
+    pub(crate) fn start_loudness_match(&self, device: usize, slot: usize) {
+        self.shared.start_loudness_match(device, slot);
+    }
+
+    /// Stops a loudness match on an output.
+    pub(crate) fn stop_loudness_match(&self, device: usize) {
+        self.shared.stop_loudness_match(device);
+    }
+
+    /// The matched path's `(momentary, short_term)` loudness on an output.
+    pub(crate) fn loudness_match(&self, device: usize) -> Option<(f32, f32)> {
+        self.shared.loudness_match(device)
+    }
+
+    /// Starts an output Learn on an output.
+    pub(crate) fn start_output_learn(&self, device: usize) {
+        self.shared.start_output_learn(device);
+    }
+
+    /// Stops an output Learn on an output.
+    pub(crate) fn stop_output_learn(&self, device: usize) {
+        self.shared.stop_output_learn(device);
+    }
+
+    /// The running Learn reading: gated integrated LUFS and gated blocks.
+    pub(crate) fn loudness_learn(&self, device: usize) -> Option<(f32, u32)> {
+        self.shared.loudness_learn(device)
+    }
+
     /// Sets extra output levels, mutes, maps, bridge buffers and the link / open plan.
     /// Live: not part of the bridge signature.
     pub fn set_extra_outputs(

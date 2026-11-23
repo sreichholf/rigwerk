@@ -135,6 +135,8 @@ impl RigWerkApp {
                         ui.add_space(8.0);
                         limiter(ui, row.reduction_db, colours);
                         ui.add_space(12.0);
+                        self.loudness_section(ui, device, &row);
+                        ui.add_space(12.0);
                         self.clock_and_paths(ui, device, &row, &settings, &mut edits);
                     },
                 );
@@ -163,6 +165,8 @@ impl RigWerkApp {
             ui.add_space(8.0);
             limiter(ui, row.reduction_db, colours);
             ui.add_space(12.0);
+            self.loudness_section(ui, device, &row);
+            ui.add_space(12.0);
             self.channel_map(ui, device, &row, &settings, &mut edits);
             ui.add_space(12.0);
             self.clock_and_paths(ui, device, &row, &settings, &mut edits);
@@ -190,6 +194,120 @@ impl RigWerkApp {
                 self.close_sheet();
             }
         }
+    }
+
+    /// The measured loudness and its automatic trim.
+    fn loudness_section(&mut self, ui: &mut egui::Ui, device: usize, row: &OutputDeviceRow) {
+        let colours = palette(ui.ctx());
+        heading(ui, "Loudness", colours);
+        let reading = row.loudness;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for (name, value) in [
+                ("Short-term", reading.short_term_lufs),
+                ("Momentary", reading.momentary_lufs),
+                ("Integrated", reading.integrated_lufs),
+            ] {
+                ui.label(
+                    RichText::new(name)
+                        .font(font(Face::Mono, TypeRole::GridHeader))
+                        .color(colours.text3),
+                );
+                ui.label(
+                    RichText::new(if value > crate::audio::SILENCE_LUFS {
+                        format!("{value:.1}")
+                    } else {
+                        "—".to_owned()
+                    })
+                    .font(font(Face::Mono, TypeRole::Secondary))
+                    .color(colours.text),
+                );
+            }
+            ui.label(
+                RichText::new("LUFS")
+                    .font(font(Face::Mono, TypeRole::GridHeader))
+                    .color(colours.text3),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().slider_width = (ui.available_width() - VALUE_W - 8.0).max(80.0);
+            ui.visuals_mut().selection.bg_fill = colours.accent;
+            let mut target = row.settings.loudness.target_lufs;
+            let response = ui
+                .add(
+                    egui::Slider::new(
+                        &mut target,
+                        crate::audio::LOUDNESS_TARGET_MIN_LUFS
+                            ..=crate::audio::LOUDNESS_TARGET_MAX_LUFS,
+                    )
+                    .show_value(false)
+                    .step_by(0.5)
+                    .handle_shape(egui::style::HandleShape::Circle)
+                    .trailing_fill(true),
+                )
+                .on_hover_text(
+                    "The output Learn target. Learn sets the trim so this output reaches it with the level fader at 0 dB.",
+                );
+            row_info(
+                &response,
+                egui::Role::Slider,
+                true,
+                "Loudness target",
+                None,
+                Some(format!("{target:.1} LUFS")),
+            );
+            if response.changed() {
+                self.set_output_loudness_target(device, target);
+            }
+            ui.allocate_ui_with_layout(
+                Vec2::new(VALUE_W, ROW_H),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    ui.set_width(VALUE_W);
+                    ui.label(
+                        RichText::new(format!("{target:.1} LUFS"))
+                            .font(font(Face::Mono, TypeRole::Secondary))
+                            .color(colours.text),
+                    );
+                },
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if self.is_learning_loudness(device) {
+                ui.label(
+                    RichText::new("Learning…")
+                        .font(font(Face::Sans, TypeRole::Secondary))
+                        .color(colours.warn),
+                );
+            } else if OutlineButton::new("Learn")
+                .show(ui)
+                .on_hover_text(
+                    "Measure this output for eight seconds and save a trim so it reaches the target with the level fader at 0 dB. Nothing moves on its own.",
+                )
+                .clicked()
+            {
+                self.start_output_learn(device);
+            }
+            let learned = row.settings.loudness.learned_db;
+            ui.label(
+                RichText::new(format!("Trim {learned:+.1} dB"))
+                    .font(font(Face::Mono, TypeRole::Secondary))
+                    .color(colours.text2),
+            );
+            if learned.abs() >= 0.05
+                && OutlineButton::new("Clear")
+                    .show(ui)
+                    .on_hover_text("Ramp this output's learned trim back to unity")
+                    .clicked()
+            {
+                self.clear_output_learn(device);
+            }
+            if OutlineButton::new("Reset").show(ui).clicked() {
+                self.reset_output_loudness(device);
+            }
+        });
     }
 
     /// The paths that play here, each with its level, polarity and trim on
@@ -314,6 +432,14 @@ impl RigWerkApp {
                         trim_ms,
                         commit: true,
                     });
+                }
+                if entry.match_db.abs() >= 0.05 {
+                    ui.label(
+                        RichText::new(format!("match {:+.1}", entry.match_db))
+                            .font(font(Face::Mono, TypeRole::GridHeader))
+                            .color(colours.text3),
+                    )
+                    .on_hover_text("Loudness-match trim on this output");
                 }
             });
         }
