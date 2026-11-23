@@ -77,6 +77,10 @@ pub(crate) struct Session {
     /// cannot be read is skipped.  Read only.
     #[serde(default, deserialize_with = "skip_unreadable", skip_serializing)]
     pub(crate) plugins: Vec<PluginPref>,
+    /// The Match paths reference and target.  Missing on older sessions:
+    /// the default target, matching the target.
+    #[serde(default, skip_serializing_if = "crate::app::match_paths::is_default")]
+    pub(crate) match_paths: crate::app::match_paths::MatchPathsSettings,
     /// The signal paths.  Sessions from before paths have none; their
     /// top-level mix fields become path 1 ([`Self::migrate_paths`]).
     pub(crate) paths: Vec<PathPref>,
@@ -131,6 +135,7 @@ impl Default for Session {
             bridge_buffer_mode: 0,
             bridge_buffer_ms: DEFAULT_BRIDGE_BUFFER_MS,
             plugins: Vec::new(),
+            match_paths: crate::app::match_paths::MatchPathsSettings::default(),
             paths: Vec::new(),
             clock_output: OutputDeviceSettings::default(),
             extra_outputs: Vec::new(),
@@ -164,6 +169,7 @@ impl Session {
             plugins: std::mem::take(&mut self.plugins),
             chain_bypass: false,
             level_db: 0.0,
+            match_db: 0.0,
             mute: false,
             solo: false,
             feed: crate::audio::PathFeed::Input,

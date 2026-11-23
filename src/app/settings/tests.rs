@@ -690,22 +690,54 @@ fn output_devices() -> (OutputDeviceSettings, Vec<ExtraOutputPref>) {
 fn learned_loudness_saves_and_sanitizes() {
     let mut settings = OutputDeviceSettings::default();
     settings.loudness.target_lufs = -20.0;
-    settings.loudness.learned_db = 4.0;
+    settings.loudness.trim_db = 4.0;
     let text = ron::to_string(&settings).expect("saved");
-    assert!(text.contains("learned_db:4.0"), "{text}");
+    assert!(text.contains("trim_db:4.0"), "{text}");
     let back: OutputDeviceSettings = ron::from_str(&text).expect("loaded");
     assert_eq!(back.loudness, settings.loudness);
 
     let text = ron::to_string(&OutputDeviceSettings::default()).expect("saved");
-    assert!(!text.contains("learned_db"), "{text}");
+    assert!(!text.contains("trim_db"), "{text}");
 
-    settings.loudness.learned_db = f32::NAN;
-    assert_eq!(settings.sanitized().loudness.learned_db, 0.0);
-    settings.loudness.learned_db = 100.0;
+    settings.loudness.trim_db = f32::NAN;
+    assert_eq!(settings.sanitized().loudness.trim_db, 0.0);
+    settings.loudness.trim_db = 100.0;
     assert_eq!(
-        settings.sanitized().loudness.learned_db,
+        settings.sanitized().loudness.trim_db,
         crate::audio::LOUDNESS_TRIM_MAX_DB
     );
+}
+
+#[test]
+fn an_old_learned_trim_loads_into_the_output_trim() {
+    let old: OutputDeviceSettings =
+        ron::from_str("(loudness:(target_lufs:-14.0,learned_db:3.5))").expect("old save");
+    assert_eq!(old.loudness.trim_db, 3.5);
+    assert_eq!(old.loudness.target_lufs, -14.0);
+}
+
+#[test]
+fn a_path_match_survives_a_save_and_stays_out_when_zero() {
+    let pref = PathPref {
+        match_db: 2.5,
+        ..PathPref::default()
+    };
+    let text = ron::to_string(&pref).expect("saved");
+    assert!(text.contains("match_db:2.5"), "{text}");
+    let back: PathPref = ron::from_str(&text).expect("loaded");
+    assert_eq!(back.match_db, 2.5);
+
+    let text = ron::to_string(&PathPref::default()).expect("saved");
+    assert!(!text.contains("match_db"), "{text}");
+}
+
+#[test]
+fn an_old_per_output_match_trim_loads() {
+    let raw = r#"(schema_version:2,clock_device:(path_map:[(level_db:-2.0,match_db:4.5)]))"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let preferences = loaded.preferences.expect("readable");
+    assert_eq!(preferences.clock_output.path_map[0].level_db, -2.0);
 }
 
 #[test]
@@ -728,9 +760,9 @@ fn old_saves_without_output_devices_use_defaults() {
         ..OutputDeviceSettings::default()
     };
     assert_eq!(OutputDeviceSettings::default(), today);
-    assert_eq!(today.loudness.learned_db, 0.0);
+    assert_eq!(today.loudness.trim_db, 0.0);
     assert_eq!(preferences.clock_output, today);
-    assert_eq!(preferences.clock_output.loudness.learned_db, 0.0);
+    assert_eq!(preferences.clock_output.loudness.trim_db, 0.0);
     assert_eq!(
         preferences.clock_output.loudness.target_lufs,
         crate::audio::LOUDNESS_TARGET_DEFAULT_LUFS
@@ -1181,7 +1213,6 @@ fn three_paths() -> (Vec<PathPref>, OutputDeviceSettings, Vec<ExtraOutputPref>) 
         level_db: -6.0,
         invert: true,
         trim_ms: 1.5,
-        ..crate::audio::PathMapSettings::default()
     };
     clock.path_map[2] = crate::audio::PathMapSettings::unrouted();
     let mut stream = ExtraOutputPref::virtual_output();
@@ -1722,7 +1753,6 @@ fn golden_device(level_db: f32, click_mask: u8) -> OutputDeviceSettings {
         level_db: -2.5,
         invert: true,
         trim_ms: 1.25,
-        ..crate::audio::PathMapSettings::default()
     };
     path_map[1] = crate::audio::PathMapSettings::unrouted();
     OutputDeviceSettings {
@@ -1818,6 +1848,7 @@ fn golden_path(name: &str) -> PathPref {
         amp: crate::audio::LegacyNamSettings::default(),
         cab: crate::audio::CabSettings::default(),
         level_db: -4.0,
+        match_db: 0.0,
         mute: true,
         solo: !is_return,
     }
@@ -1853,6 +1884,7 @@ fn golden_session() -> Session {
         bridge_buffer_mode: 2,
         bridge_buffer_ms: 6.0,
         plugins: Vec::new(),
+        match_paths: crate::app::match_paths::MatchPathsSettings::default(),
         paths: vec![golden_path("Lead")],
         clock_output: golden_device(-1.0, 0b0100),
         extra_outputs: vec![golden_extra_output(false)],
@@ -1904,6 +1936,7 @@ fn golden_preferences() -> Preferences {
         plugins: Vec::new(),
         paths: vec![golden_path("Clean"), golden_path("Drive")],
         selected_path: 1,
+        match_paths: crate::app::match_paths::MatchPathsSettings::default(),
         clock_output: golden_device(-6.0, 0b0001),
         extra_outputs: vec![golden_extra_output(false), golden_extra_output(true)],
         measured_latency: Some(measured_latency()),

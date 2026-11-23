@@ -43,6 +43,8 @@ pub(crate) enum Sheet {
     Output {
         output: usize,
     },
+    /// One loudness trim per path, measured all at once.
+    MatchPaths,
     /// Input and output overlaid, the peaks and the sample count.
     Scope,
 }
@@ -93,6 +95,7 @@ impl Sheet {
             "effect" => Self::Effect { path, index: 0 },
             "path" => Self::Path { path },
             "output" => Self::Output { output: 0 },
+            "match-paths" => Self::MatchPaths,
             "scope" => Self::Scope,
             "diagnostics" => Self::Diagnostics,
             _ => return None,
@@ -334,7 +337,7 @@ impl RigWerkApp {
             return;
         };
         let gone = match sheet {
-            Sheet::Diagnostics | Sheet::Scope => false,
+            Sheet::Diagnostics | Sheet::Scope | Sheet::MatchPaths => false,
             Sheet::Output { output } => output > self.extra_outputs.len(),
             Sheet::Effect { path, index } => {
                 self.paths.get(path).is_none_or(Option::is_none)

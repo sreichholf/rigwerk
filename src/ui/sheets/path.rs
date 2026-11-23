@@ -54,6 +54,7 @@ impl RigWerkApp {
         let colours = palette(ui.ctx());
         let colour = colours.path[path.colour as usize % colours.path.len()];
         let mut level = path.mix.level_db;
+        let mut match_db = path.mix.match_db;
         let mut enabled = path.mix.output_enabled;
         let mut routes = path.mix.routes;
         let mut mono = path.mix.mono;
@@ -232,6 +233,62 @@ impl RigWerkApp {
                         }
                     });
                     ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(
+                            RichText::new("Match")
+                                .font(font(Face::Sans, TypeRole::Secondary))
+                                .color(colours.text2),
+                        );
+                        let response = ui.add(
+                            egui::DragValue::new(&mut match_db)
+                                .speed(0.1)
+                                .range(
+                                    -crate::audio::PATH_MATCH_MAX_DB
+                                        ..=crate::audio::PATH_MATCH_MAX_DB,
+                                )
+                                .suffix(" dB"),
+                        );
+                        row_info(
+                            &response,
+                            egui::Role::Slider,
+                            true,
+                            "Path match",
+                            None,
+                            Some(level_label(match_db)),
+                        );
+                        if response.double_clicked() {
+                            match_db = 0.0;
+                        }
+                        if response.changed() || response.double_clicked() {
+                            self.set_path_match(slot, match_db);
+                        }
+                        if match_db.abs() >= 0.05
+                            && OutlineButton::new("Clear")
+                                .show(ui)
+                                .on_hover_text("Set this path's match trim back to 0 dB")
+                                .clicked()
+                        {
+                            match_db = 0.0;
+                            self.set_path_match(slot, 0.0);
+                        }
+                        if self.path_slots().len() >= 2
+                            && OutlineButton::new("Match paths…")
+                                .show(ui)
+                            .on_hover_text(
+                                "Measure the paths and set one loudness trim per path",
+                            )
+                            .clicked()
+                        {
+                            self.open_match_paths();
+                        }
+                    });
+                    note(
+                        ui,
+                        "Set by Match paths, or drag it. Applied before the fader, so the fader stays your own balance.",
+                        colours,
+                    );
+                    ui.add_space(12.0);
                     heading(ui, "On each output", colours);
                     let rows = self.output_device_rows();
                     let mut played = 0;
@@ -243,49 +300,13 @@ impl RigWerkApp {
                         let arrival = self
                             .device_alignment(device)
                             .and_then(|alignment| alignment.arrival_ms[slot]);
-                        let match_db = self
-                            .device_path_map(device, slot)
-                            .map(|map| map.match_db)
-                            .unwrap_or(0.0);
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(&row.name)
                                     .font(font(Face::Mono, TypeRole::Secondary))
                                     .color(colours.text2),
                             );
-                            if match_db.abs() >= 0.05 {
-                                ui.label(
-                                    RichText::new(format!("match {match_db:+.1} dB"))
-                                        .font(font(Face::Mono, TypeRole::GridHeader))
-                                        .color(colours.text3),
-                                )
-                                .on_hover_text("Loudness-match trim on this output");
-                            }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if self.is_matching_loudness(device, slot) {
-                                    ui.label(
-                                        RichText::new("Matching…")
-                                            .font(font(Face::Sans, TypeRole::Secondary))
-                                            .color(colours.warn),
-                                    );
-                                } else if OutlineButton::new("Match")
-                                    .show(ui)
-                                    .on_hover_text(format!(
-                                        "Match {} to {}'s loudness target",
-                                        path.name, row.name
-                                    ))
-                                    .clicked()
-                                {
-                                    self.start_loudness_match(device, slot);
-                                }
-                                if match_db.abs() >= 0.05
-                                    && OutlineButton::new("Clear")
-                                        .show(ui)
-                                        .on_hover_text("Clear this path's loudness-match trim")
-                                        .clicked()
-                                {
-                                    self.clear_loudness_match(device, slot);
-                                }
                                 ui.label(
                                     RichText::new(match arrival {
                                         Some(ms) => format_ms(ms),

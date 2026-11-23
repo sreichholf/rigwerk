@@ -62,17 +62,22 @@ Recorded when the review fixes landed (November 2026), not re-checked
 since.
 
 - **Loudness.**  Integrated loudness is the last 60 s, not the whole run.
-  *Learn* and *Match* are one-shot; nothing follows the player.  Learn
-  measures an output for 8 s, needs at least 27 absolute-gated 400 ms
-  blocks (about 3 s of signal), and writes a learned trim of ±12 dB.
-  Match measures one path for 3.6 s, needs the path audible, and writes a
-  separate match trim of ±24 dB.  Both refuse a reading more than 20 dB
-  below the target, so noise and silence cannot get a full boost.  Both
-  measure before the device fader, so the fader stays a plain volume
-  control.  There is no true-peak meter,
-  and a device with more than eight channels is measured on its first
-  eight only.  NAM normalization uses the file's RMS figure, not LUFS,
-  and only the last running capture of a Pre or Post group is normalized.
+  *Learn* is one-shot; nothing follows the player.  Learn measures an
+  output for 8 s, needs at least 27 absolute-gated 400 ms blocks (about 3 s
+  of signal), and writes an output trim of ±12 dB.  There is one match per
+  path, measured before the path fader, so it is the same on every output.
+  It is matched to a target or to another path with *Match paths*, which
+  measures every path for 4 s and proposes a ±24 dB trim.  Muted paths are
+  measured too: the meter runs before the mute, so a muted path reads what
+  it would play.  Returns are excluded by default because their loudness
+  follows their sends; layered paths are handled with the tick boxes.
+  Both Learn and Match refuse a reading more than 20 dB below the
+  reference, so noise and silence cannot get a full boost.  Both measure
+  before the fader, so the fader stays a plain volume control.  There is
+  no true-peak meter, and a device with more than eight channels is
+  measured on its first eight only.  NAM normalization uses the file's RMS
+  figure, not LUFS, and only the last running capture of a Pre or Post
+  group is normalized.
 - **Cabinet IR.**  A cabinet impulse response is truncated to 50 ms at
   rates up to 192 kHz, and to 9600 taps above that.  The first 128 taps
   are direct; the rest is partitioned FFT convolution.

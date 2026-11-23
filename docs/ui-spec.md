@@ -263,7 +263,10 @@ The home screen (boards 1, 6).  Groups in a row, each with a small label:
 group are separated by 1 pt lines.  A dashed *add* column (32 pt) follows
 Paths and Outputs.  At the limit it stays, disabled, with the reason on
 hover (*Four paths is the most*, *Four extra outputs is the most*, *A
-removed path is still fading out*).
+removed path is still fading out*).  With two or more paths, the Paths
+header ends with a *Match paths* button, right-aligned on the group edge,
+that opens the Match paths sheet (§6.7).  One path hides it: matching a
+path to itself means nothing.
 
 Every strip ends in the same row: meter and fader, value, then *M* (and *S*
 on paths), so the faders line up across the screen.
@@ -294,7 +297,9 @@ on paths), so the faders line up across the screen.
   the total (as today, `app::issues`); the strip of the path with the
   largest share carries its marker.
 - Level fader, M, S.  A muted path dims its fader and lights M.  While any
-  path is soloed, the others dim.
+  path is soloed, the others dim.  Under the fader readout, *match +2.5*
+  in the accent colour while the path's loudness match is not zero; a
+  click opens the path sheet.  Nothing is drawn at 0 dB.
 
 **Master strip**: *Master*, level fader, M.
 
@@ -315,8 +320,9 @@ on paths), so the faders line up across the screen.
 - Buffer: on the clock output, the output mode and its real buffer time; on
   an extra output, the bridge buffer (`auto 5.3 ms`), or *In graph*.
 - Limiter reduction bar.
-- Short-term loudness in LUFS, and the learned trim when it is not zero.
-  Learn and Match are one-shot; nothing moves on its own.
+- Short-term loudness in LUFS.  The output trim has its own line under the
+  fader readout, *trim +3.0*, while it is not zero; a click opens the
+  output sheet.  Learn is one-shot; nothing moves on its own.
 - One meter bar per device channel (2–8; thinner when there are more), the
   level fader, M.
 - Clicking the strip anywhere else opens its output sheet (§6.2).
@@ -572,10 +578,14 @@ control…*, or *This effect draws its own controls*, *reports no controls*,
 grid and *Stereo* / *Mono*), the sends (*Send to* each return, or on a
 return *Send from* each path, *Off* at the bottom), *Path
 outputs* L and R *(the chips that were OUT 1 / OUT 2 on Live)*, level,
-mute, solo (not on a return), *Duplicate (muted)*, *Apply layout ▸* with *Custom · edited
+mute, solo (not on a return), *Match*: a drag value in dB (±24, 0.1 dB
+steps, double-click 0), then *Clear* and the *Match paths…* link.  The
+link is hidden with only one path, as the header button is.  The caption
+says the match is set by Match paths or dragged, and applied before the
+fader.  *Duplicate (muted)*, *Apply layout ▸* with *Custom · edited
 from Blend clean* when the setup no longer matches one, *Remove*, and on
-every output it plays on its latency and a *Match* button that matches the
-path to that output's loudness target.
+every output it plays on its latency only; the per-output Match buttons
+are gone.
 
 ### 6.2 Output sheet
 
@@ -585,9 +595,12 @@ Board 7.
   *Remove* (extra outputs; the clock output is changed in Setup).
 - Per-channel meters, level and M for this output.
 - Loudness: short-term, momentary and integrated LUFS, the target slider,
-  *Learn*, the learned trim, *Clear* and *Reset*.  *Learn* measures the
-  output for eight seconds and saves a trim so it reaches the target with
-  the level fader at 0 dB; nothing moves on its own.
+  then *Output trim*: a drag value in dB (±12, 0.1 dB steps, double-click
+  0), *Learn* (or *Learning…*), *Clear* and *Reset*.  *Learn* measures the
+  output for eight seconds and saves the trim so it reaches the target with
+  the level fader at 0 dB; nothing moves on its own.  Under the row a note
+  says where the value came from: *Learned at −17.0 LUFS*, *Set by hand*
+  or *No trim*.  *Reset* clears the readings only.
 - The channel map grid.  Under it, the map presets this output offers,
   applied to the path chosen beside them (today's `MapPreset::for_channels`:
   mono devices get *Mono to all* and *Clear*; 2–3 channels add *Out 1/2*
@@ -676,6 +689,26 @@ A small window, as today: *Cable* / *Microphone*; the clock output's mix is
 muted while it measures, the test click ignores that output's mute and
 level, extra outputs keep playing; progress; then the result with
 resolution and conditions, and *Measure again*.
+
+### 6.7 Match paths
+
+*Reference*: a segmented *Target* / *A path*.  *Target* is a LUFS slider
+(−30 to −5, default −18); *A path* is one chip per path, and that path
+keeps its trim while the others are matched to it.  *Measure* reads *Play
+the rig… 4 s* with a warning-coloured progress bar while it runs and
+*Measure again* afterwards; every path, muted or not, is measured on its
+own, all at once.  A status line says *Measure first.*, *Nothing changes
+until Apply.* or *Applied: Clean +2.5 dB…*.  The results table has one row
+per path: a tick box, the path's dot and name, the measured LUFS, the
+current match, the new match, and the change (*−1.5 dB*); the reference
+row says *reference* and shows *—* for its change.  Unheard and too-quiet
+rows are unticked, disabled and say why; a muted path is still ticked, as
+the meter runs before its gain.  Returns are unticked by default with *a
+return follows its sends* and can be ticked.  *Apply* is the
+accent button, disabled when no ticked row would change, writes the ticked
+trims and leaves the sheet open; *Cancel* writes nothing.  The hint below:
+*For paths you switch between. For paths that play together, untick all
+but one, or Learn the output afterwards.*
 
 ## 7. Theme
 

@@ -57,6 +57,8 @@ fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issu
 
 /// The group labels' row.
 const LABEL_H: f32 = 20.0;
+/// Breathing room between the labels and the strip caps.
+const LABEL_GAP: f32 = 2.0;
 /// Between groups, and between a group and its add column.
 const GROUP_GAP: f32 = 12.0;
 const ADD_GAP: f32 = 8.0;
@@ -68,6 +70,8 @@ const TOGGLE_W: f32 = 28.0;
 const PAD: f32 = 8.0;
 /// The fader's own width at least, readout included.
 const FADER_MIN_W: f32 = 56.0;
+/// The trim line under the fader readout, on every strip.
+const TRIM_ROW_H: f32 = 15.0;
 
 /// What every strip shares: its height and the bottom block that holds the
 /// meter, the fader, the value and the toggles.
@@ -89,9 +93,10 @@ impl StripLayout {
         }
     }
 
-    /// The bottom block: fader, a gap, the toggles and the bottom padding.
+    /// The bottom block: fader, the trim line, a gap, the toggles and the
+    /// bottom padding.
     pub(crate) fn bottom_h(self) -> f32 {
-        self.fader_h + 6.0 + TOGGLE_H + 8.0
+        self.fader_h + TRIM_ROW_H + 6.0 + TOGGLE_H + 8.0
     }
 }
 
@@ -127,9 +132,9 @@ impl RigWerkApp {
         let outputs = self.output_device_rows().len();
         let layout_density = density(window_w, slots.len(), outputs);
         let widths = layout_density.widths;
-        let strip_h = (full.height() - LABEL_H).max(240.0);
+        let strip_h = (full.height() - LABEL_H - LABEL_GAP).max(240.0);
         let layout = StripLayout::new(strip_h, layout_density.step, self.chrome.sheet.is_some());
-        let top = full.top() + LABEL_H;
+        let top = full.top() + LABEL_H + LABEL_GAP;
 
         let mut x = full.left();
         let input_rect = Rect::from_min_size(egui::pos2(x, top), Vec2::new(widths.input, strip_h));
@@ -155,6 +160,61 @@ impl RigWerkApp {
         let label_end = group_label(ui, egui::pos2(paths_left, full.top()), &paths_label);
         if layout_density.scroll.is_some() {
             self.path_label_dots(ui, &slots, egui::pos2(label_end + 8.0, full.top()));
+        }
+        // Matching one path to itself means nothing.
+        if slots.len() >= 2 {
+            let width = 100.0;
+            // Leave a few points between the button and the path colour cap.
+            let action_h = LABEL_H - 3.0;
+            let dots = if layout_density.scroll.is_some() {
+                16.0 * slots.len() as f32
+            } else {
+                0.0
+            };
+            let after_label = label_end + 8.0 + dots + if dots > 0.0 { 8.0 } else { 0.0 };
+            let right = paths_left + paths_visible;
+            let left = (right - width).max(after_label);
+            if left + width <= right + 0.5 {
+                let rect =
+                    Rect::from_min_size(egui::pos2(left, full.top()), Vec2::new(width, action_h));
+                let mut header = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(Layout::right_to_left(Align::Center)),
+                );
+                // Right-to-left adds its item spacing before the first item;
+                // the mockup puts the button's right edge on the group edge.
+                header.spacing_mut().item_spacing.x = 0.0;
+                let text_font = font(Face::SansMedium, TypeRole::GridHeader);
+                let text_h = header.fonts_mut(|fonts| fonts.row_height(&text_font));
+                let button = egui::Button::new(
+                    RichText::new("Match paths")
+                        .font(text_font)
+                        .color(colours.text2),
+                )
+                .fill(colours.slot)
+                .stroke(Stroke::new(1.0, colours.line2))
+                .corner_radius(CornerRadius::same(3))
+                .min_size(Vec2::new(width, action_h));
+                let response = header
+                    .scope(|ui| {
+                        ui.spacing_mut().button_padding.y = ((LABEL_H - text_h) / 2.0).max(0.0);
+                        ui.add(button)
+                    })
+                    .inner
+                    .on_hover_text("Measure every path and set one loudness trim per path");
+                row_info(
+                    &response,
+                    egui::Role::Button,
+                    true,
+                    "Match paths",
+                    None,
+                    None,
+                );
+                if response.clicked() {
+                    self.open_match_paths();
+                }
+            }
         }
         group_label(ui, egui::pos2(master_rect.left(), full.top()), "Master");
         group_label(ui, egui::pos2(outputs_left, full.top()), "Outputs");
@@ -489,12 +549,27 @@ fn strip_detail(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(shown).font(text_font).color(colours.text3));
 }
 
+/// The line under a strip's fader readout: *match +2.5* or *trim −1.5*,
+/// or nothing at 0.
+pub(super) fn trim_line(prefix: &str, db: f32) -> Option<String> {
+    let tenths = (db * 10.0).round();
+    if tenths == 0.0 {
+        None
+    } else if tenths < 0.0 {
+        Some(format!("{prefix} −{:.1}", -tenths / 10.0))
+    } else {
+        Some(format!("{prefix} +{:.1}", tenths / 10.0))
+    }
+}
+
 /// What the bottom block reports.
 #[derive(Default)]
 struct LevelEvents {
     level: Option<f32>,
     mute: bool,
     solo: bool,
+    /// A click on the match or trim line under the readout.
+    trim_line: bool,
 }
 
 /// What the bottom block shows.
@@ -513,6 +588,8 @@ struct LevelBlock<'a> {
     solo: Option<bool>,
     /// Dims the fader (muted, or another path soloed).
     dim: bool,
+    /// A match or trim line under the readout; nothing is drawn when `None`.
+    trim_line: Option<&'a str>,
 }
 
 /// The bottom block every strip ends in: meter and fader side by side (the
@@ -584,8 +661,27 @@ fn level_block(ui: &mut egui::Ui, layout: StripLayout, block: &LevelBlock<'_>) -
     );
     ui.data_mut(|data| data.insert_temp(block.id, state));
 
+    if let Some(text) = block.trim_line {
+        let rect = Rect::from_min_size(
+            egui::pos2(area.left(), area.top() + layout.fader_h + 1.0),
+            Vec2::new(area.width(), TRIM_ROW_H),
+        );
+        let response = ui.interact(rect, block.id.with("trim_line"), Sense::click());
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            font(Face::Mono, TypeRole::GridHeader),
+            palette(ui.ctx()).accent,
+        );
+        row_info(&response, egui::Role::Button, true, text, None, None);
+        if response.clicked() {
+            events.trim_line = true;
+        }
+    }
+
     let toggles = Rect::from_min_size(
-        egui::pos2(area.left(), area.top() + layout.fader_h + 6.0),
+        egui::pos2(area.left(), area.top() + layout.fader_h + TRIM_ROW_H + 6.0),
         Vec2::new(area.width(), TOGGLE_H),
     );
     let mut toggle_ui = ui.new_child(

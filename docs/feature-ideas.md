@@ -78,7 +78,7 @@ An automatic level that keeps riding an output in the background, in case
 a set-once Learn is ever not enough.  It was dropped because in a live rig
 a controller can only follow the player's dynamics: it fights faders,
 lifts noise and pauses, and makes a verse and a chorus arrive at the same
-level.  Learn and Match cover the static changes instead.
+level.  Learn and Match paths cover the static changes instead.
 
 ## Loudness-matched A/B
 
@@ -86,9 +86,9 @@ Two states of one path, switched from the path sheet so the louder tone
 does not win by default.  Each state is a copy of the path's settings,
 including its effects and NAM blocks, and the switch waits for the path
 gain to reach zero or crossfades, so it does not click.  The comparison
-uses the output's short-term LUFS: each state keeps a trim learned from
-its own reading.  The routing and the device maps stay outside the A/B;
-this compares a sound, not where it plays.
+can build on the path match: each state keeps a trim learned from its own
+reading.  The routing and the device maps stay outside the A/B; this
+compares a sound, not where it plays.
 
 ## Plugin sidechain inputs
 

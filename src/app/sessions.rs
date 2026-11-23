@@ -49,6 +49,7 @@ impl RigWerkApp {
             wasapi_output_mode: Some(self.wasapi_output_mode),
             bridge_buffer_mode: bridge_buffer_to_pref(self.bridge_buffer_mode),
             bridge_buffer_ms: self.bridge_buffer_ms,
+            match_paths: self.saved_match_paths(&order),
             paths,
             clock_output,
             extra_outputs,
@@ -185,6 +186,9 @@ impl RigWerkApp {
         self.set_wasapi_output_mode(mode);
         self.bridge_buffer_mode = bridge_buffer_from_pref(session.bridge_buffer_mode);
         self.bridge_buffer_ms = session.bridge_buffer_ms;
+        self.match_paths_result = None;
+        self.match_paths_ticks.clear();
+        self.match_paths_status = None;
         // The click is not part of a session: it stays with the physical
         // device.  Each device the session uses (its clock and each extra output)
         // gets the mask that device has now, as the clock or as an extra output,
@@ -236,6 +240,8 @@ impl RigWerkApp {
         // The device maps are in the session's path order; installing maps
         // them onto the slots the paths land in.
         self.install_paths(&session.paths, clock, extra_outputs, 0);
+        self.install_match_paths(session.match_paths);
+        self.reset_output_trim_origins();
         self.apply_gains();
         self.engine
             .set_master(self.mute, self.input_channels, self.drift);
