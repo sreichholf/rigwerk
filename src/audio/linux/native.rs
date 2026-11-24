@@ -47,6 +47,7 @@ use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
 use crate::audio::output_map::DeviceFrame;
 use crate::audio::record::{push_device_frame, RecordSource};
+use crate::audio::rt_guard::RtGuard;
 use crate::audio::shared::{ExtraOutputPlan, Shared};
 use crate::audio::types::{DeviceItem, OutputMode, StartConfig};
 
@@ -892,6 +893,10 @@ pub(crate) fn capture_window(
 
 fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, stride: usize, frames: usize) {
     let _denormals = DenormalGuard::new();
+    // Nothing in this block may allocate (see `audio::rt_guard`).  The
+    // callback's buffer dequeue and window arithmetic run before this, so
+    // only RigWerk's own sample work is counted.
+    let _no_allocations = RtGuard::enter();
     let channels = channels.max(1);
     shared.note_input_block(frames);
     shared.note_input_frames(frames);

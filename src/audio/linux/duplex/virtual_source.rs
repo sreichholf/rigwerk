@@ -12,6 +12,7 @@ use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::output_map::VIRTUAL_OUTPUT_NAME;
+use crate::audio::rt_guard::RtGuard;
 
 use super::{properties, MAX_FRAMES};
 
@@ -108,6 +109,8 @@ unsafe extern "C" fn on_virtual_process(
         return;
     }
     let _denormals = DenormalGuard::new();
+    // Nothing in this cycle may allocate (see `audio::rt_guard`).
+    let _no_allocations = RtGuard::enter();
     let frames = unsafe { (*position).clock.duration as usize };
     if frames == 0 {
         return;

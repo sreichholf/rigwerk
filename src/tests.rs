@@ -12,6 +12,9 @@
 //! `clap::scan_library_isolated`, the child process, because the in-process
 //! `clap::scan_library` loads every bundle into this process.  The last test
 //! here covers the binary's own `--clap-scan` arguments.
+//!
+//! A third check pins the allocation guard at the entry point of each audio
+//! callback a normal test cannot enter on every platform.
 
 use std::path::{Path, PathBuf};
 
@@ -558,5 +561,49 @@ fn clap_scan_arguments_are_parsed_or_refused() {
                 .map(std::ffi::OsString::from)
         ),
         (false, None)
+    );
+}
+
+/// The files whose audio callback must hold `RtGuard`: ASIO's dispatch (the
+/// silence and panic paths included), the duplex filter, the native capture,
+/// the virtual source, the sink monitor, and both mixer renders.
+const GUARDED_CALLBACKS: &[&str] = &[
+    "src/audio/win/asio/callback.rs",
+    "src/audio/linux/duplex/filter.rs",
+    "src/audio/linux/native.rs",
+    "src/audio/linux/duplex/virtual_source.rs",
+    "src/audio/linux/sink_monitor.rs",
+    "src/audio/mixer/mod.rs",
+    "src/audio/extra_output/mixer.rs",
+];
+
+/// A tripwire for the entry points a normal test cannot enter on every
+/// platform.  A test's own `RtGuard` is the outermost one, and `RtGuard`
+/// counts only the outermost, so a test that drives the code under a guard
+/// still reads zero when the callback's own guard is gone; `audio/mixer`'s
+/// and `extra_output`'s counted blocks have the same blind spot.  This check
+/// is file-level on purpose: following a signature to its closing brace would
+/// be a fragile indirection for the same evidence.
+#[test]
+fn every_audio_callback_holds_the_allocation_guard() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src"), root, &mut files);
+    let mut missing = Vec::new();
+    for &callback in GUARDED_CALLBACKS {
+        let Some((_, path)) = files.iter().find(|(file, _)| file.as_str() == callback) else {
+            missing.push(format!("{callback}: no such source file"));
+            continue;
+        };
+        let source = std::fs::read_to_string(path).expect("read source");
+        // A prose line may name the guard without entering it.
+        if boundary_lines(&source, &["RtGuard::enter()"]).is_empty() {
+            missing.push(format!("{callback}: no `RtGuard::enter()`"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "an audio callback enters no allocation guard (AGENTS.md, Audio thread):\n{}",
+        missing.join("\n")
     );
 }

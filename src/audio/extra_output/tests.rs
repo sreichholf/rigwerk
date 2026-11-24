@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use super::super::output::write_frame;
 use super::super::output_map::OutputDeviceSettings;
+use super::super::rt_guard::RtGuard;
 use super::super::shared::{ExtraOutputLink, ExtraOutputPlan, Shared};
 use super::super::types::BufferMode;
 use super::mixer::ExtraOutputMixer;
@@ -62,6 +63,105 @@ fn extra_output_mixer_plays_the_device_frames_from_its_ring() {
     // After priming through a deep bridge buffer, the ring's frames play as is:
     // the clock side already mapped them.
     assert_eq!(*out.last().unwrap(), [0.5, -0.25]);
+}
+
+/// Renders one extra output block into a buffer the caller owns, and asserts
+/// that the block allocated and freed nothing.  The buffer is outside the
+/// guard, as in `audio/mixer/rt_tests.rs`: writing a test's own output is not
+/// the audio thread's allocation.  A release build counts nothing, so the two
+/// reads are 0 == 0 there: the zeros are evidence in a debug test run.
+fn render_one_block(
+    mixer: &mut ExtraOutputMixer,
+    shared: &Shared,
+    frames: usize,
+    out: &mut [Vec<f32>],
+) {
+    let guard = RtGuard::enter();
+    mixer.render(shared, frames, |index, mapped| {
+        for (channel, sample) in out[index].iter_mut().enumerate() {
+            *sample = mapped.sample(channel);
+        }
+    });
+    assert_eq!(
+        guard.allocations(),
+        0,
+        "the block allocated on the audio thread"
+    );
+    assert_eq!(guard.frees(), 0, "the block freed on the audio thread");
+    drop(guard);
+}
+
+#[test]
+fn an_extra_output_block_allocates_and_frees_nothing() {
+    let frames = 128;
+    let shared = one_extra_output(2, 100.0);
+    // The drift loop steers every block, and the rate switch below rebuilds
+    // the resampler's kernel (`FrameResampler::configure`) inside a counted
+    // block: not only the ring read.
+    shared.drift_enabled.store(true, Ordering::Relaxed);
+    let bus = shared.extra_output_bus(0);
+    // Enough to leave priming on the first block and run dry later, so the
+    // dropout fade is counted too.
+    for _ in 0..bus.target_frames() + 6 * frames {
+        bus.push_lanes(&[0.25, -0.25]);
+    }
+    let mut mixer = ExtraOutputMixer::new(0, 48_000, 2);
+    let mut out = vec![vec![0.0f32; 2]; frames];
+    render_one_block(&mut mixer, &shared, frames, &mut out);
+    assert!(
+        out.iter().any(|frame| frame[0] > 0.0),
+        "the block played the prepared ring"
+    );
+    assert_eq!(
+        bus.source_rate.load(Ordering::Relaxed),
+        48_000,
+        "no rate change yet"
+    );
+    // The clock output redraws at 96 kHz: the next counted block reconfigures
+    // the resampler, which must reuse the storage `new` reserved.
+    shared.output_rate.store(96_000, Ordering::Relaxed);
+    render_one_block(&mut mixer, &shared, frames, &mut out);
+    assert_eq!(
+        bus.source_rate.load(Ordering::Relaxed),
+        96_000,
+        "the counted block took the new clock rate"
+    );
+    // 96 kHz source into a 48 kHz device burns two ring frames per output
+    // frame, so the ring runs dry well inside this loop.
+    for _ in 0..40 {
+        render_one_block(&mut mixer, &shared, frames, &mut out);
+    }
+    assert!(
+        bus.dropouts.load(Ordering::Relaxed) >= 1,
+        "the blocks ran the ring dry"
+    );
+}
+
+#[test]
+fn an_extra_output_dropout_bump_allocates_and_frees_nothing() {
+    let frames = 128;
+    let shared = one_extra_output(2, 10.0);
+    let bus = shared.extra_output_bus(0);
+    // Auto raises the target after a dropout; that bump has to run inside the
+    // counted block like the rest of the block does.
+    bus.set_bridge_buffer(BufferMode::Auto, 10.0);
+    let target = bus.target_frames();
+    for _ in 0..target + 4 * frames {
+        bus.push_lanes(&[0.25, -0.25]);
+    }
+    let mut mixer = ExtraOutputMixer::new(0, 48_000, 2);
+    let mut out = vec![vec![0.0f32; 2]; frames];
+    let mut blocks = 0;
+    while bus.dropouts.load(Ordering::Relaxed) == 0 {
+        render_one_block(&mut mixer, &shared, frames, &mut out);
+        blocks += 1;
+        assert!(blocks < 16, "the ring ran dry");
+    }
+    assert_eq!(
+        bus.target_frames(),
+        target + 256,
+        "the dropout bump ran inside a counted block"
+    );
 }
 
 #[test]

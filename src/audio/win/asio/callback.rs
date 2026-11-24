@@ -27,6 +27,7 @@ use azo::sys::SampleType;
 use crate::audio::input::InputStage;
 use crate::audio::mixer::OutputMixer;
 use crate::audio::record::{push_device_frame, RecordSource};
+use crate::audio::rt_guard::RtGuard;
 use crate::audio::shared::Shared;
 
 use super::samples::{read_asio_sample, write_asio_sample};
@@ -124,6 +125,10 @@ impl AsioCallbackContext {
     /// (that aborts the process), so it is caught here: the output buffers
     /// are silenced and the context is never processed again.
     fn dispatch(&mut self, buffer_index: c_long) {
+        // Every path counts: a failed session's silence, a caught panic and
+        // the normal switch.  Nothing in this callback may allocate (see
+        // `audio::rt_guard`).
+        let _no_allocations = RtGuard::enter();
         if self.signal.failed.load(Ordering::Relaxed) {
             self.silence(buffer_index);
             return;
@@ -153,6 +158,9 @@ impl AsioCallbackContext {
     fn process(&mut self, buffer_index: c_long) {
         // Input gain and the whole output chain run with flush-to-zero; the
         // driver's own code on this thread gets its mode back afterwards.
+        // The allocation guard is `dispatch`'s, which also covers the silence
+        // path; the input tests call `process_input` directly and so run
+        // outside it.
         let _denormals = crate::audio::denormal::DenormalGuard::new();
         self.signal.callbacks.fetch_add(1, Ordering::Relaxed);
         let index = buffer_index.clamp(0, 1) as usize;

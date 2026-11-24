@@ -67,7 +67,8 @@
 //!   and the slow automatic level that uses them, one per output device.
 //! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
-//! - `rt_guard`: the debug allocation guard the audio callbacks hold.
+//! - `rt_guard`: the debug allocation guard; every callback's sample body
+//!   runs inside one, and ASIO's silence path is covered through `dispatch`.
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
 
 mod asio_panel;
