@@ -2,8 +2,6 @@
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
-#[cfg(any(target_os = "linux", test))]
-use super::linux::alsa::alsa_pcm_is_direct;
 #[cfg(target_os = "linux")]
 use super::linux::alsa::alsa_pcm_is_placeholder;
 #[cfg(any(target_os = "linux", test))]
@@ -504,7 +502,7 @@ fn input_side(device: &cpal::Device) -> Side {
 fn hide_redundant_alsa_aliases(devices: &mut Vec<DeviceItem>) {
     let direct_cards: std::collections::HashSet<String> = devices
         .iter()
-        .filter(|device| pcm_is_direct(&device.id))
+        .filter(|device| alsa_pcm_is_direct(&device.id))
         .filter_map(|device| alsa_card_key(&device.id))
         .collect();
     if direct_cards.is_empty() {
@@ -521,21 +519,30 @@ fn hide_redundant_alsa_aliases(devices: &mut Vec<DeviceItem>) {
     });
 }
 
-fn pcm_name(device_id: &str) -> &str {
+/// The PCM part of a cpal ALSA id (`ALSA:hw:CARD=0,DEV=0` -> `hw:CARD=0,DEV=0`).
+///
+/// This is the only copy of the id grammar; `linux::alsa` re-exports it,
+/// because this file is the copy that compiles on every platform.
+pub(crate) fn alsa_pcm_name(device_id: &str) -> &str {
+    // cpal prints the host in lower case (`alsa:hw:CARD=0,DEV=0`), while other
+    // backends and older versions use the display spelling (`ALSA:...`).
     match device_id.split_once(':') {
         Some((host, pcm)) if host.eq_ignore_ascii_case("alsa") => pcm.trim(),
         _ => device_id.trim(),
     }
 }
 
-fn pcm_is_direct(device_id: &str) -> bool {
-    let pcm = pcm_name(device_id);
+/// Whether a cpal ALSA id names a physical PCM rather than a virtual plugin.
+/// `hw:` bypasses every conversion; `plughw:` still goes straight to the card
+/// but lets ALSA convert formats.  Both are the low-latency ALSA side.
+pub(crate) fn alsa_pcm_is_direct(device_id: &str) -> bool {
+    let pcm = alsa_pcm_name(device_id);
     pcm.starts_with("hw:") || pcm.starts_with("plughw:")
 }
 
 /// `hw:CARD=GP5,DEV=0` and `front:CARD=GP5` share the key `GP5`.
 fn alsa_card_key(device_id: &str) -> Option<String> {
-    let pcm = pcm_name(device_id);
+    let pcm = alsa_pcm_name(device_id);
     let (_, args) = pcm.split_once(':')?;
     for part in args.split([',', ':']) {
         let part = part.trim();
@@ -553,7 +560,7 @@ fn alsa_card_key(device_id: &str) -> Option<String> {
 }
 
 fn pcm_plugin(device_id: &str) -> String {
-    let pcm = pcm_name(device_id);
+    let pcm = alsa_pcm_name(device_id);
     pcm.split(':')
         .next()
         .unwrap_or(pcm)

@@ -128,6 +128,28 @@ fn a_card_that_only_has_sysdefault_is_kept() {
 }
 
 #[test]
+fn the_alsa_id_grammar_is_shared_and_pins_its_edges() {
+    // The host prefix is matched case-insensitively and the PCM is trimmed.
+    assert_eq!(
+        super::alsa_pcm_name("ALSA:hw:CARD=0,DEV=0"),
+        "hw:CARD=0,DEV=0"
+    );
+    assert_eq!(
+        super::alsa_pcm_name("alsa: plughw:CARD=0,DEV=0 "),
+        "plughw:CARD=0,DEV=0"
+    );
+    // Anything without the ALSA host prefix is passed through, trimmed.
+    assert_eq!(super::alsa_pcm_name("wasapi:{spk}"), "wasapi:{spk}");
+    assert_eq!(super::alsa_pcm_name(" hw:0 "), "hw:0");
+    // Direct means the PCM starts with hw:/plughw:, not that it contains one.
+    assert!(super::alsa_pcm_is_direct("plughw:CARD=X"));
+    assert!(!super::alsa_pcm_is_direct("ALSA:dmix:hw:0"));
+    assert!(!super::alsa_pcm_is_direct("ALSA:default"));
+    // A bare host spelling is not a PCM plugin, so it has no tag.
+    assert_eq!(super::device_pcm_tag("ALSA"), None);
+}
+
+#[test]
 fn direct_alsa_and_jack_are_low_latency() {
     let direct = device("ALSA:hw:CARD=0,DEV=0", "ALSA");
     assert!(is_low_latency_device(&direct, "PIPEWIRE"));
