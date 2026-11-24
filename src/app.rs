@@ -41,8 +41,9 @@ use crate::app::devices::{inventory_fingerprint, restore_extra_output};
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
     bridge_buffer_from_pref, bridge_buffer_to_pref, load_preferences, page_from_key, page_key,
-    preferences_backup_key, resolved_wasapi_output_mode, store_preferences, unique_sessions,
-    ExtraOutputPref, Preferences, Session, PREFERENCES_KEY, PREFERENCES_SCHEMA,
+    resolved_wasapi_output_mode, store_preferences, store_preferences_backup, unique_sessions,
+    ExtraOutputPref, Preferences, Session, PREFERENCES_BACKUP_KEY, PREFERENCES_KEY,
+    PREFERENCES_SCHEMA,
 };
 use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
@@ -329,8 +330,13 @@ pub struct RigWerkApp {
     /// Filter typed into the configure panel.
     pub(crate) plugin_param_filter: String,
     /// A copy of stored preferences that could not be fully read, written
-    /// under its own key on the next save so that save cannot lose it.
+    /// under [`PREFERENCES_BACKUP_KEY`] at the start of the next save so that
+    /// save cannot lose it.
     preferences_backup: Option<(String, String)>,
+    /// The layout number the stored file declared (`PREFERENCES_SCHEMA` when
+    /// nothing usable was stored).  Above it, a newer build wrote the file:
+    /// this session then writes only the backup and never the primary.
+    stored_schema_version: u32,
     /// The last measured loopback and the conditions it was made under
     /// (persisted; see `app::latency` for staleness).
     pub(crate) measured_latency: Option<latency::MeasuredLatency>,
@@ -396,8 +402,20 @@ impl RigWerkApp {
     }
 
     /// Writes preferences.  The frame's `save` forwards here.  A startup
-    /// scan still in flight does not overwrite the stored devices.
+    /// scan still in flight does not overwrite the stored devices, but the
+    /// damaged-settings copy is written first either way.  When the load could
+    /// read a newer build's layout number, the primary file is left
+    /// byte-identical and only the copy is saved; a file too damaged to yield
+    /// a number is replaced, with its original text kept in that copy.
     pub(crate) fn save_to(&mut self, storage: &mut dyn eframe::Storage) {
+        // Before the gate: a quit while the first scan still runs must keep
+        // the original text a damaged load could not read.
+        store_preferences_backup(storage, &mut self.preferences_backup);
+        // A newer build's layout is not this build's to write: leave the
+        // stored file byte-identical and save nothing else this session.
+        if self.stored_schema_version > PREFERENCES_SCHEMA {
+            return;
+        }
         // Placeholder rows must not overwrite the real stored pair while the
         // first scan is still running.
         if self.startup.is_some() {
@@ -497,7 +515,7 @@ impl RigWerkApp {
             // Neither saved nor read: a launch starts with the click stopped.
             metronome_running: false,
         };
-        store_preferences(storage, &preferences, &mut self.preferences_backup);
+        store_preferences(storage, &preferences);
     }
 }
 
@@ -604,6 +622,7 @@ impl RigWerkApp {
             ui_scale: 1.0,
             plugin_param_filter: String::new(),
             preferences_backup: None,
+            stored_schema_version: PREFERENCES_SCHEMA,
             measured_latency: None,
             calibration: calibration::CalibrationUi::default(),
             #[cfg(target_os = "linux")]
@@ -621,17 +640,21 @@ impl RigWerkApp {
     /// Writes stored settings into an app from [`Self::base`]: the start page,
     /// the devices, the rates and gains, the mixer settings and the tuner.
     ///
+    /// `stored_schema_version` is the number the loaded file declared, which
+    /// is kept so a save can tell whether a newer build wrote it.
+    ///
     /// The device restore reads `self.devices.inventory`, and the screenshot flag
     /// picks the page, the tuner demo and whether the bridge may start, so
     /// `new` sets both before this runs.  `blank_app` never calls it, so a
     /// test starts from the base and leaves the engine untouched.
-    fn apply_preferences(&mut self, preferences: &Preferences) {
+    fn apply_preferences(&mut self, preferences: &Preferences, stored_schema_version: u32) {
         // Every field is named so a new preference is a compile error until it
         // has a destination here.  The `_name` bindings are deliberate: those
         // fields belong to `new` or `save_to`, not to the running app.
         let Preferences {
-            // Checked in `load_preferences`; never mirrored on the app.
-            schema_version: _schema_version,
+            // Read from the file and passed beside it; the value in memory is
+            // this build's number already.
+            schema_version: _,
             // Bound unused; read through `preferences` below.
             auto_start_bridge: _,
             sessions: _,
@@ -781,6 +804,7 @@ impl RigWerkApp {
         self.sessions = sessions;
         self.auto_start_bridge = preferences.auto_start_bridge && !screenshot;
         self.measured_latency = preferences.measured_latency.clone();
+        self.stored_schema_version = stored_schema_version;
     }
 
     pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
@@ -795,13 +819,7 @@ impl RigWerkApp {
             cc.storage
                 .and_then(|storage| storage.get_string(PREFERENCES_KEY))
         };
-        let backup_key = preferences_backup_key(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs())
-                .unwrap_or_default(),
-        );
-        let loaded = load_preferences(raw_preferences.as_deref(), &backup_key);
+        let loaded = load_preferences(raw_preferences.as_deref(), PREFERENCES_BACKUP_KEY);
         let preferences = loaded.preferences.clone().unwrap_or_default();
         // The screenshot path is a headless check, not a practice session.
         // Keep real drivers closed there even if auto-start was left on.
@@ -817,7 +835,7 @@ impl RigWerkApp {
             path,
             requested: false,
         });
-        app.apply_preferences(&preferences);
+        app.apply_preferences(&preferences, loaded.stored_schema_version);
         app.preferences_backup = loaded.backup;
         app.startup = Some(StartupGate {
             preferences: preferences.clone(),

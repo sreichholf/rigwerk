@@ -4,7 +4,9 @@ use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use super::path_pref::{default_path_name, sanitize_paths, PathPref};
-use super::serde_util::{skip_unreadable, skip_unreadable_option};
+use super::serde_util::{
+    placeholder_unreadable, skip_unreadable, skip_unreadable_option, Placeholder,
+};
 use super::session::Session;
 use crate::app::appearance::{sanitize_ui_size, ThemeChoice, UI_SIZE_DEFAULT};
 use crate::app::latency::MeasuredLatency;
@@ -25,7 +27,10 @@ pub(crate) const PREFERENCES_SCHEMA: u32 = 2;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct Preferences {
-    /// See [`PREFERENCES_SCHEMA`]; missing (older saves) reads as 0.
+    /// See [`PREFERENCES_SCHEMA`]; missing (older saves) reads as 0.  A save
+    /// always writes this build's number: a file from a newer build is read
+    /// but never saved over while its layout number is readable (see
+    /// [`load_preferences`]).
     #[serde(default)]
     pub(crate) schema_version: u32,
     pub(crate) auto_start_bridge: bool,
@@ -109,6 +114,14 @@ pub(crate) struct Preferences {
     /// The signal paths, in order.  Files from before paths existed have
     /// none: their top-level mix fields load as path 1 (see
     /// [`Self::path_prefs`]).  New files write only this.
+    ///
+    /// A path that cannot be read keeps its slot as a muted “Unreadable path
+    /// N” with every send off: the slot is silent, and so is a send that
+    /// pointed at it.  The list does not renumber.  The routing records
+    /// beside this field (each device's `path_map`, each path's `sends`) are
+    /// saved separately and are not repaired here: a damaged one still costs
+    /// the whole file.
+    #[serde(deserialize_with = "placeholder_unreadable")]
     pub(crate) paths: Vec<PathPref>,
     /// The path the console, sheets and browser edit (a position in `paths`).
     pub(crate) selected_path: usize,
@@ -822,14 +835,17 @@ pub(crate) fn page_from_key(key: &str) -> Page {
         _ => Page::Console,
     }
 }
-/// How many entries the stored lists held before unreadable ones were
-/// dropped, so the loss can be reported.
+/// How many entries the stored lists held, readable or not, so a loss can be
+/// reported.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct StoredCounts {
     sessions: Vec<IgnoredAny>,
     plugins: Vec<IgnoredAny>,
     followers: Vec<IgnoredAny>,
+    /// One per stored path, so a path that is not even a struct still keeps
+    /// the other paths' effect counts in place.
+    #[serde(deserialize_with = "placeholder_unreadable")]
     paths: Vec<StoredPathCounts>,
     /// Present when a measurement was stored, readable or not.
     measured_latency: Option<IgnoredAny>,
@@ -840,6 +856,31 @@ struct StoredCounts {
 #[serde(default)]
 struct StoredPathCounts {
     plugins: Vec<IgnoredAny>,
+}
+
+/// The marker name [`placeholder_unreadable`] writes on a path it replaced.
+/// No path RigWerk writes carries it, and it lives only between the parse and
+/// the scan in [`load_preferences`], which renames the path for its position.
+const UNREADABLE_PATH_SENTINEL: &str = "\u{0}unreadable path";
+
+impl Placeholder for PathPref {
+    /// Muted, with the default's every send off: a live default path would be
+    /// a doubled copy of the input where a damaged path used to be, and a
+    /// return would come back as an input.  The name marks the slot for the
+    /// load and is replaced before anything reads it.
+    fn placeholder() -> Self {
+        Self {
+            name: UNREADABLE_PATH_SENTINEL.to_owned(),
+            mute: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl Placeholder for StoredPathCounts {
+    fn placeholder() -> Self {
+        Self::default()
+    }
 }
 
 /// "1 saved session(s) and 2 plugin effect(s)": only the lists that lost
@@ -871,28 +912,42 @@ fn skipped_summary(
 pub(crate) struct LoadedPreferences {
     /// `None` when nothing was stored or the text could not be read at all.
     pub(crate) preferences: Option<Preferences>,
-    /// `(key, original text)` to keep beside the preferences on the next
-    /// save, set whenever the next save would lose something that was
-    /// stored: an unreadable file, skipped entries, or a newer layout.
+    /// `(key, original text)` to keep under [`PREFERENCES_BACKUP_KEY`] at the
+    /// start of the next save, set whenever a save would lose something that
+    /// was stored: an unreadable file, skipped or replaced entries, or a file
+    /// from a newer build (which is never overwritten).
     pub(crate) backup: Option<(String, String)>,
+    /// The layout number the stored file declared.  Above
+    /// [`PREFERENCES_SCHEMA`] a newer build wrote it, so the app writes the
+    /// backup and never the primary for the rest of the session.
+    pub(crate) stored_schema_version: u32,
     /// What went wrong, for the app log.
     pub(crate) notices: Vec<String>,
 }
 
-/// The key a copy of damaged preferences is kept under.  The time makes it
-/// unique, so a later failure never replaces an earlier copy.
-pub(crate) fn preferences_backup_key(unix_secs: u64) -> String {
-    format!("{PREFERENCES_KEY}-backup-{unix_secs}")
-}
+/// The one key a copy of settings that could not be read whole is kept under.
+/// eframe storage cannot list its keys, so a key per load would leave every
+/// damaged load's full text behind with nothing able to prune it.  A later
+/// damaged load overwrites this copy: it is one backup, not a history.
+pub(crate) const PREFERENCES_BACKUP_KEY: &str = "rigwerk-preferences-backup";
 
 /// Parses the stored preferences (eframe keeps them as RON), tolerating
 /// damaged entries.  Never loses data silently: whatever the next save would
 /// drop is returned as a backup together with a notice for the log.
+///
+/// `backup_key` is where [`store_preferences_backup`] writes that copy; the
+/// app passes [`PREFERENCES_BACKUP_KEY`].
+///
+/// A file from a newer build is read through the field defaults and left
+/// alone: its layout number is returned beside it, and the app then saves
+/// only the copy.  The value here always carries this build's number, so a
+/// migration keyed on it is never told it is looking at a newer layout.
 pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPreferences {
     let Some(raw) = raw else {
         return LoadedPreferences {
             preferences: None,
             backup: None,
+            stored_schema_version: PREFERENCES_SCHEMA,
             notices: Vec::new(),
         };
     };
@@ -903,15 +958,31 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
             return LoadedPreferences {
                 preferences: None,
                 backup,
+                stored_schema_version: PREFERENCES_SCHEMA,
                 notices: vec![format!(
                     "Saved settings could not be read ({error}); starting from defaults. \
-                     The original is kept in the settings file as “{backup_key}”."
+                     The original is kept as “{backup_key}”; a later damaged load replaces it."
                 )],
             };
         }
     };
     let mut notices = Vec::new();
+    // The stored file's number is kept beside the value; the value itself is
+    // this build's from here on, so a migration keyed on it is never told it
+    // is looking at a newer layout.
+    let stored_schema_version = preferences.schema_version;
+    preferences.schema_version = PREFERENCES_SCHEMA;
     let counts: StoredCounts = ron::from_str(raw).unwrap_or_default();
+    // The reader marks the paths it replaced with a name RigWerk never
+    // writes, so the same parse tells the load which slots it filled.  Name
+    // them for their saved position; they stay muted, with every send off.
+    let mut replaced_paths = 0usize;
+    for (position, path) in preferences.paths.iter_mut().enumerate() {
+        if path.name == UNREADABLE_PATH_SENTINEL {
+            path.name = format!("Unreadable path {}", position + 1);
+            replaced_paths += 1;
+        }
+    }
     // List lengths before sanitizing: an extra output the cap drops is not an
     // unreadable entry, and the duplicate virtual out is dropped on purpose.
     let sessions_loaded = preferences.sessions.len();
@@ -947,34 +1018,46 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
              “{backup_key}”."
         ));
     }
-    if preferences.schema_version > PREFERENCES_SCHEMA {
+    if replaced_paths > 0 {
         notices.push(format!(
-            "Settings were saved by a newer RigWerk (layout {}); what this version does not \
-             know is kept in the original, saved as “{backup_key}”.",
-            preferences.schema_version
+            "{replaced_paths} saved signal path(s) could not be read; each keeps its slot as a \
+             muted “Unreadable path” with every send off, so the path and any send aimed at it \
+             are silent. The original settings are kept as “{backup_key}”."
+        ));
+    }
+    if stored_schema_version > PREFERENCES_SCHEMA {
+        notices.push(format!(
+            "Settings were saved by a newer RigWerk (layout {stored_schema_version}); this \
+             version keeps a copy as “{backup_key}” and leaves the original untouched, so \
+             changes made in this session will not be saved."
         ));
     }
     // Layout 1 without `paths` is migrated by `sanitize_preferences`; the
-    // other field defaults cover older layouts.
-    preferences.schema_version = PREFERENCES_SCHEMA;
+    // other field defaults cover older layouts.  A newer file is not saved
+    // back over at all, so the value never leaves this build's layout.
     LoadedPreferences {
         preferences: Some(preferences),
         backup: if notices.is_empty() { None } else { backup },
+        stored_schema_version,
         notices,
     }
 }
 
-/// Writes the preferences, first keeping any backup the load asked for so
-/// the original text is never overwritten unseen.  The backup is written
-/// once, then cleared.
-pub(crate) fn store_preferences(
+/// Keeps the text a load could not read whole under the key it chose.  The
+/// app calls this at the start of every save, before the startup scan's gate,
+/// so a quit while that scan still runs cannot drop the copy.  Written once,
+/// then cleared; a later damaged load overwrites it.
+pub(crate) fn store_preferences_backup(
     storage: &mut dyn eframe::Storage,
-    preferences: &Preferences,
     backup: &mut Option<(String, String)>,
 ) {
     if let Some((key, raw)) = backup.take() {
         storage.set_string(&key, raw);
     }
+}
+
+/// Writes the preferences.
+pub(crate) fn store_preferences(storage: &mut dyn eframe::Storage, preferences: &Preferences) {
     // Only `paths` is written: anything still held in the legacy mix fields
     // (preferences or a session from before paths) moves there first.
     let mut preferences = preferences.clone();

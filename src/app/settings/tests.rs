@@ -10,7 +10,7 @@ use crate::audio::{
     MAX_EXTRA_OUTPUTS, MAX_NAM_BLOCKS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
-const BACKUP: &str = "rigwerk-preferences-backup-1";
+const BACKUP: &str = PREFERENCES_BACKUP_KEY;
 
 /// eframe's file storage in memory: the same key/string interface, and
 /// `set_value` writes RON into it exactly as the app's autosave does.
@@ -67,7 +67,7 @@ fn plugin(path: &str, format: PluginFormat) -> PluginPref {
 
 fn stored(preferences: &Preferences) -> String {
     let mut storage = MemoryStorage::default();
-    store_preferences(&mut storage, preferences, &mut None);
+    store_preferences(&mut storage, preferences);
     eframe::Storage::get_string(&storage, PREFERENCES_KEY).expect("stored")
 }
 
@@ -554,7 +554,76 @@ fn corrupt_session_is_skipped_and_the_rest_kept() {
         "{}",
         loaded.notices[0]
     );
+    // A skipped session is not a path slot: only the path notice names paths.
+    assert!(
+        !loaded.notices[0].contains("signal path"),
+        "{}",
+        loaded.notices[0]
+    );
     // The skipped entries would vanish on the next save: keep the original.
+    assert_eq!(loaded.backup, Some((BACKUP.to_owned(), raw.to_owned())));
+}
+
+#[test]
+fn an_unreadable_path_keeps_its_slot_muted_and_the_routing_index() {
+    let raw = r#"(
+        paths:[
+            (name:"Main",level_db:-2.0,sends:[-60.0,-6.0,-60.0]),
+            (name:12,level_db:"hot"),
+            (name:"FX",level_db:-9.0,sends:[-3.0,-60.0,-60.0])
+        ],
+        clock_device:(path_map:[(level_db:-1.0),(level_db:-7.0),(level_db:-11.0)])
+    )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("1 saved signal path") && notice.contains("muted")),
+        "{:?}",
+        loaded.notices
+    );
+    // A replacement is still a change: keep the original.
+    assert_eq!(loaded.backup, Some((BACKUP.to_owned(), raw.to_owned())));
+
+    let preferences = loaded.preferences.expect("the rest still loads");
+    assert_eq!(preferences.paths.len(), 3, "the path keeps its slot");
+    assert_eq!(preferences.paths[0].name, "Main");
+    assert_eq!(preferences.paths[0].level_db, -2.0);
+    assert_eq!(preferences.paths[2].name, "FX");
+    assert_eq!(preferences.paths[2].level_db, -9.0);
+
+    // The replacement is silent, not a second live input at 0 dB: it is
+    // muted, sends nothing, and is named so it cannot read as "Main".
+    let placeholder = &preferences.paths[1];
+    assert!(placeholder.mute, "a damaged path must not be audible");
+    assert!(placeholder.sends.is_empty(), "a damaged path sends nothing");
+    assert_eq!(placeholder.name, "Unreadable path 2");
+    assert_eq!(placeholder.feed, crate::audio::PathFeed::Input);
+    // Sanitized like any other path: default gain and settings, in range.
+    let mut expected = PathPref {
+        name: "Unreadable path 2".to_owned(),
+        mute: true,
+        ..PathPref::default()
+    };
+    expected.sanitize(1);
+    assert_eq!(*placeholder, expected);
+
+    // The list keeps its slots: the third path's device map is still the
+    // third entry, and the first path's send still targets slot 2.
+    assert_eq!(preferences.clock_output.path_map[2].level_db, -11.0);
+    assert_eq!(
+        preferences.paths[0].sends,
+        vec![crate::audio::SEND_OFF_DB, -6.0, crate::audio::SEND_OFF_DB]
+    );
+}
+
+#[test]
+fn a_file_that_does_not_parse_still_falls_back_whole() {
+    let raw = r#"(paths:[(name:"Main"),sample_rate:"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.preferences.is_none(), "no half-read preferences");
+    assert_eq!(loaded.notices.len(), 1);
     assert_eq!(loaded.backup, Some((BACKUP.to_owned(), raw.to_owned())));
 }
 
@@ -593,8 +662,10 @@ fn unreadable_preferences_are_kept_not_overwritten() {
     assert_eq!(loaded.notices.len(), 1);
     assert!(loaded.notices[0].contains(BACKUP));
 
-    // The app's autosave with the defaults it fell back to.
-    store_preferences(&mut storage, &Preferences::default(), &mut loaded.backup);
+    // The app's first save: the copy goes in before the preferences, and the
+    // preferences are the defaults it fell back to.
+    store_preferences_backup(&mut storage, &mut loaded.backup);
+    store_preferences(&mut storage, &Preferences::default());
     assert_eq!(storage.0.get(BACKUP).map(String::as_str), Some(raw));
     let saved = storage.0.get(PREFERENCES_KEY).expect("saved");
     assert!(load_preferences(Some(saved), BACKUP).preferences.is_some());
@@ -604,19 +675,53 @@ fn unreadable_preferences_are_kept_not_overwritten() {
     storage
         .0
         .insert(BACKUP.to_owned(), "moved by the user".to_owned());
-    store_preferences(&mut storage, &Preferences::default(), &mut loaded.backup);
+    store_preferences_backup(&mut storage, &mut loaded.backup);
+    store_preferences(&mut storage, &Preferences::default());
     assert_eq!(storage.0[BACKUP], "moved by the user");
 }
 
 #[test]
-fn newer_layout_keeps_a_copy() {
+fn one_backup_copy_is_kept_not_a_history() {
+    let first = r#"(session_name:"First",sample_rate:"#;
+    let second = r#"(session_name:"Second",sample_rate:"#;
+    let mut storage = MemoryStorage::default();
+    let mut first_load = load_preferences(Some(first), BACKUP);
+    store_preferences_backup(&mut storage, &mut first_load.backup);
+    assert_eq!(storage.0.get(BACKUP).map(String::as_str), Some(first));
+
+    // A later damaged load replaces the one copy rather than adding another.
+    let mut second_load = load_preferences(Some(second), BACKUP);
+    store_preferences_backup(&mut storage, &mut second_load.backup);
+    assert_eq!(storage.0.get(BACKUP).map(String::as_str), Some(second));
+    // One copy, one key: a per-load key would leave the first copy behind.
+    assert_eq!(storage.0.len(), 1);
+}
+
+#[test]
+fn a_newer_layout_is_read_but_never_stamped_down() {
     let raw = r#"(schema_version:99,session_name:"Future",some_new_field:[1,2])"#;
-    let loaded = load_preferences(Some(raw), BACKUP);
+    let mut loaded = load_preferences(Some(raw), BACKUP);
     let preferences = loaded.preferences.expect("readable");
     assert_eq!(preferences.session_name, "Future");
-    assert_eq!(preferences.schema_version, PREFERENCES_SCHEMA);
+    assert_eq!(
+        preferences.schema_version, PREFERENCES_SCHEMA,
+        "the value in memory is this build's, never the file's newer number"
+    );
+    assert_eq!(loaded.stored_schema_version, 99);
     assert_eq!(loaded.notices.len(), 1);
+    assert!(
+        loaded.notices[0].contains("will not be saved"),
+        "{}",
+        loaded.notices[0]
+    );
     assert!(loaded.backup.is_some());
+
+    // The copy is byte-identical and is in storage before any preferences
+    // save, so a quit while the startup scan still runs keeps it.
+    let mut storage = MemoryStorage::default();
+    store_preferences_backup(&mut storage, &mut loaded.backup);
+    assert_eq!(storage.0.get(BACKUP).map(String::as_str), Some(raw));
+    assert!(loaded.backup.is_none());
 }
 
 #[test]
@@ -1343,9 +1448,11 @@ fn a_one_path_session_round_trips() {
 #[test]
 fn paths_are_capped_and_sanitized_on_load() {
     let raw = r#"(paths:[(name:"",level_db:NaN,colour:9),(level_db:99.0),(),(),(name:"Fifth")],selected_path:7)"#;
-    let preferences = load_preferences(Some(raw), BACKUP)
-        .preferences
-        .expect("readable");
+    let loaded = load_preferences(Some(raw), BACKUP);
+    // RON's `()` is an empty path, not damage: no notice, no backup.
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    assert!(loaded.backup.is_none());
+    let preferences = loaded.preferences.expect("readable");
     assert_eq!(preferences.paths.len(), crate::audio::MAX_PATHS);
     assert_eq!(preferences.paths[0].name, "Main");
     assert_eq!(preferences.paths[0].level_db, 0.0);
@@ -1354,6 +1461,13 @@ fn paths_are_capped_and_sanitized_on_load() {
         preferences.paths[1].level_db,
         crate::audio::PATH_LEVEL_MAX_DB
     );
+    // The unit rows are ordinary default paths, not "Unreadable path" slots.
+    for position in 2..4 {
+        let mut expected = PathPref::default();
+        expected.sanitize(position);
+        assert_eq!(preferences.paths[position], expected);
+        assert!(!preferences.paths[position].mute);
+    }
     assert_eq!(preferences.selected_path, 3);
 }
 

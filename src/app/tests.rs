@@ -7,7 +7,9 @@ use eframe::App;
 use crate::ui::widgets::{run_frame, test_input};
 
 use super::settings::ExtraOutputPref;
-use super::settings::{load_preferences, Preferences, Session, PREFERENCES_KEY};
+use super::settings::{
+    load_preferences, Preferences, Session, PREFERENCES_BACKUP_KEY, PREFERENCES_KEY,
+};
 use super::startup::{restore_saved_devices, StartupGate};
 use super::{blank_app, repaint_interval, ACTIVE_REPAINT, IDLE_REPAINT};
 use crate::audio::{
@@ -57,9 +59,63 @@ fn save_text(app: &mut super::RigWerkApp) -> (String, Preferences) {
     let mut storage = MemoryStorage::default();
     app.save(&mut storage);
     let raw = eframe::Storage::get_string(&storage, PREFERENCES_KEY).expect("preferences file");
-    let loaded = load_preferences(Some(&raw), "rigwerk-preferences-backup-test");
+    let loaded = load_preferences(Some(&raw), PREFERENCES_BACKUP_KEY);
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     (raw, loaded.preferences.expect("saved preferences"))
+}
+
+#[test]
+fn a_damaged_load_writes_its_backup_while_the_startup_scan_runs() {
+    let original = r#"(session_name:"Saved",sample_rate:"#;
+    let mut app = blank_app();
+    app.preferences_backup = Some((PREFERENCES_BACKUP_KEY.to_owned(), original.to_owned()));
+    app.startup = Some(StartupGate {
+        preferences: Preferences::default(),
+    });
+    let mut storage = MemoryStorage::default();
+    app.save(&mut storage);
+    // Written before the gate returns, so a quit during the first scan keeps
+    // it; the placeholder device rows are still not saved.
+    assert_eq!(
+        eframe::Storage::get_string(&storage, PREFERENCES_BACKUP_KEY).as_deref(),
+        Some(original)
+    );
+    assert_eq!(
+        eframe::Storage::get_string(&storage, PREFERENCES_KEY),
+        None,
+        "the startup scan has not finished, so the primary is not written"
+    );
+}
+
+#[test]
+fn a_file_from_a_newer_build_is_never_overwritten() {
+    let newer = r#"(schema_version:99,session_name:"Future",some_new_field:[1,2])"#;
+    let loaded = load_preferences(Some(newer), PREFERENCES_BACKUP_KEY);
+    assert_eq!(loaded.stored_schema_version, 99);
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("will not be saved")),
+        "{:?}",
+        loaded.notices
+    );
+    let mut app = blank_app();
+    app.stored_schema_version = loaded.stored_schema_version;
+    app.preferences_backup = loaded.backup;
+    let mut storage = MemoryStorage::default();
+    eframe::Storage::set_string(&mut storage, PREFERENCES_KEY, newer.to_owned());
+    app.save(&mut storage);
+    // The primary stays byte-identical and the copy sits beside it: this
+    // session may change anything, but none of it is written back.
+    assert_eq!(
+        eframe::Storage::get_string(&storage, PREFERENCES_KEY).as_deref(),
+        Some(newer)
+    );
+    assert_eq!(
+        eframe::Storage::get_string(&storage, PREFERENCES_BACKUP_KEY).as_deref(),
+        Some(newer)
+    );
 }
 
 /// Saved ASIO and output ids are absent. The window shows the fallback devices.
