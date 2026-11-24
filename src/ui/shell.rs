@@ -61,7 +61,7 @@ impl RigWerkApp {
                 )
                 .on_hover_text("About RigWerk");
             if response.clicked() {
-                self.show_about = true;
+                self.open_about();
             }
             if ui
                 .add(
@@ -77,7 +77,7 @@ impl RigWerkApp {
                 .on_hover_text("About RigWerk")
                 .clicked()
             {
-                self.show_about = true;
+                self.open_about();
             }
             self.session_button(ui);
             self.bridge_control(ui);

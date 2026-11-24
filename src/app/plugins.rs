@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::app::paths::EffectKey;
+use crate::app::screen::Drawer;
 use crate::app::RigWerkApp;
 use crate::audio::clap::{self, ClapCandidate};
 use crate::audio::lv2::{self, Lv2Candidate};
@@ -291,8 +292,6 @@ pub(crate) struct PluginBrowser {
     pub(crate) search: String,
     pub(crate) path_input: String,
     pub(crate) notice: Option<(String, std::time::Instant)>,
-    /// The browser drawer is open (`Drawer::Browser`).
-    pub(crate) open: bool,
     /// Path slot new effects are added to.
     pub(crate) path: usize,
     /// Index in that path's chain.  The length means after the last effect.
@@ -323,7 +322,6 @@ impl Default for PluginBrowser {
             search: String::new(),
             path_input: String::new(),
             notice: None,
-            open: false,
             path: 0,
             position: 0,
             filter: EffectFilter::All,
@@ -668,12 +666,13 @@ fn screenshot_library() -> Vec<PluginCandidate> {
 impl RigWerkApp {
     /// Opens the effect browser for `path`, inserting at `position` (the
     /// chain length means after the last effect).  The search field is
-    /// focused on the next frame.
+    /// focused on the next frame.  This is the one place that opens the
+    /// browser: its open state is `Drawer::Browser`, so the drawer is the
+    /// only flag and every reader asks that.
     pub(crate) fn open_effect_browser(&mut self, path: usize, position: usize) {
         let _ = self.select_path(path);
         let count = self.engine.plugin_views(self.selected_path).len();
-        self.plugin_browser.open = true;
-        self.chrome.drawer = Some(crate::app::screen::Drawer::Browser);
+        self.chrome.drawer = Some(Drawer::Browser);
         self.plugin_browser.path = self.selected_path;
         self.plugin_browser.position = position.min(count);
         self.plugin_browser.focus_search = true;
@@ -915,7 +914,7 @@ impl RigWerkApp {
         }
         let candidates = candidates_from_path(&path);
         if let Some(candidate) = candidates.first() {
-            if self.plugin_browser.open {
+            if self.chrome.drawer == Some(Drawer::Browser) {
                 let extra = candidates.len().saturating_sub(1);
                 if self.add_listed_effect(&candidate.clone(), false) && extra > 0 {
                     self.plugin_browser.notice = Some((

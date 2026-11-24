@@ -236,8 +236,7 @@ pub(crate) const SHEET_MAX: f32 = 4096.0;
 
 impl RigWerkApp {
     pub(crate) fn open_diagnostics(&mut self) {
-        self.chrome.sheet = Some(Sheet::Diagnostics);
-        self.chrome.drawer = None;
+        self.open_sheet(Sheet::Diagnostics);
     }
 
     pub(crate) fn open_issues(&mut self) {
@@ -263,19 +262,26 @@ impl RigWerkApp {
         self.chrome.output_device_filter.clear();
     }
 
-    /// Closes the drawer.  The effect browser closes with it.
+    /// Closes the drawer.  That is also how the effect browser closes: the
+    /// drawer is its only open state.
     pub(crate) fn close_drawer(&mut self) {
         self.chrome.drawer = None;
-        self.plugin_browser.open = false;
     }
 
     pub(crate) fn close_sheet(&mut self) {
         self.chrome.sheet = None;
     }
 
-    /// Opens `sheet` in place of the one that is open, and closes a drawer.
-    /// A stage or path sheet selects its path and marks its stage, so the
-    /// Mixer and the console show the same selection.  A path that is gone
+    /// Opens About in place of the sheet that may be open: both are `Middle`
+    /// windows, so only one of them can be up.
+    pub(crate) fn open_about(&mut self) {
+        self.close_sheet();
+        self.show_about = true;
+    }
+
+    /// Opens `sheet` in place of the one that is open, and closes a drawer or
+    /// About.  A stage or path sheet selects its path and marks its stage, so
+    /// the Mixer and the console show the same selection.  A path that is gone
     /// opens nothing.
     pub(crate) fn open_sheet(&mut self, sheet: Sheet) {
         if let Some(path) = sheet.path() {
@@ -298,6 +304,7 @@ impl RigWerkApp {
         self.chrome.follow_stage = true;
         self.chrome.sheet = Some(sheet);
         self.close_drawer();
+        self.show_about = false;
     }
 
     /// The stage sheet ‹ (`forward` false) or › opens: the stage before or
@@ -368,14 +375,19 @@ impl RigWerkApp {
         self.open_sheet(sheet);
     }
 
-    /// Esc closes the innermost overlay, then leaves the tuner.
+    /// Esc closes the innermost overlay, then leaves the tuner.  The drawer
+    /// is a `Foreground` area over the `Middle` windows, so it closes first;
+    /// then the one `Middle` window that can be up, About or the sheet, since
+    /// opening either closes the other.  The calibration window is not here:
+    /// it consumes its own Escape in the window itself (`ui/calibration.rs`),
+    /// before this runs.
     pub(crate) fn close_innermost(&mut self) -> bool {
-        if self.calibration.open {
-            self.calibration.open = false;
-            return true;
-        }
         if self.chrome.drawer.is_some() {
             self.close_drawer();
+            return true;
+        }
+        if self.show_about {
+            self.show_about = false;
             return true;
         }
         if self.chrome.sheet.is_some() {
