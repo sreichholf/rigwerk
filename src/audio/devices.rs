@@ -774,35 +774,38 @@ fn low_latency_rank(backend: &str) -> u8 {
     }
 }
 
-/// The shared answer to "does this device belong on the low-latency tab?".
-/// ASIO is low latency on Windows.  On Linux, PipeWire is the default backend,
-/// JACK is the dedicated graph, and direct ALSA hardware PCMs are the
-/// exclusive fallback.  PulseAudio and other virtual plugins stay on the
-/// system side.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn is_low_latency_device(device: &DeviceItem, low_latency_label: &str) -> bool {
-    if device.asio_clsid.is_some() {
-        return true;
-    }
-    if pipewire::is_pipewire_device(device) {
-        return true;
-    }
-    if device.backend.eq_ignore_ascii_case("JACK") {
-        return true;
-    }
-    if device.backend.eq_ignore_ascii_case("ALSA") && alsa_pcm_is_direct(&device.id) {
-        return true;
-    }
-    // The label names the low-latency group ("ALSA" when no PipeWire or JACK
-    // endpoint was found). It must not pull pulse, default, or sysdefault
-    // onto that side.
-    let _ = low_latency_label;
-    false
+/// The decision both targets share: an ASIO driver, or a backend the target's
+/// low-latency group claims.  `in_platform_group` is that second input; only
+/// the way each target resolves it differs.
+fn low_latency_decision(device: &DeviceItem, in_platform_group: bool) -> bool {
+    device.asio_clsid.is_some() || in_platform_group
 }
 
-#[cfg(not(any(target_os = "linux", test)))]
+/// On Linux, PipeWire is the default backend, JACK is the dedicated graph, and
+/// direct ALSA hardware PCMs are the exclusive fallback.  PulseAudio and other
+/// virtual plugins stay on the system side.  The label names the group after
+/// the fact ("ALSA" when no PipeWire or JACK endpoint was found), so it must
+/// not pull pulse, default, or sysdefault onto that side.
+#[cfg(target_os = "linux")]
 pub(crate) fn is_low_latency_device(device: &DeviceItem, low_latency_label: &str) -> bool {
-    device.asio_clsid.is_some() || device.backend.eq_ignore_ascii_case(low_latency_label)
+    let _ = low_latency_label;
+    low_latency_decision(
+        device,
+        pipewire::is_pipewire_device(device)
+            || device.backend.eq_ignore_ascii_case("JACK")
+            || (device.backend.eq_ignore_ascii_case("ALSA") && alsa_pcm_is_direct(&device.id)),
+    )
+}
+
+/// Off Linux the label names the low-latency group ("ASIO" on Windows) and the
+/// backend is matched against it.  The other system hosts (WASAPI,
+/// DirectSound, MME) stay on the system side.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn is_low_latency_device(device: &DeviceItem, low_latency_label: &str) -> bool {
+    low_latency_decision(
+        device,
+        device.backend.eq_ignore_ascii_case(low_latency_label),
+    )
 }
 
 pub(crate) fn pick_output_config(
