@@ -1,5 +1,9 @@
-//! Opening the playback side: exclusive or REAL-style WASAPI when asked,
-//! otherwise a normal cpal stream, both fed by the shared mixer.
+//! Opening the playback side: the platform's own clock output when it has one,
+//! and the shared cpal stream fed by the mixer behind it.
+//!
+//! What each platform tries there lives in its own folder: `win/output` owns
+//! the WASAPI exclusive and REAL-style attempt and Windows' "device in use"
+//! answer, `linux/alsa` owns the period and the mode line Linux asks for.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -9,27 +13,23 @@ use cpal::{BufferSize, FromSample, Sample, SizedSample};
 
 use super::devices::pick_output_config;
 #[cfg(target_os = "linux")]
-use super::linux::alsa::smallest_output_buffer;
+use super::linux::alsa;
 use super::mixer::OutputMixer;
 use super::output_map::DeviceFrame;
 use super::record::{push_device_frame, RecordSource};
 use super::shared::Shared;
 use super::thread_priority::PromoteOnce;
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 use super::types::OutputMode;
 #[cfg(target_os = "windows")]
-use super::win::wasapi;
-
+use super::win::output as win_output;
 #[cfg(target_os = "windows")]
-#[derive(Clone, Copy, Debug)]
-enum RefuseKind {
-    Exclusive,
-    RealStyle,
-}
+use super::win::wasapi;
 
 /// What `open_output` hands back: the live stream plus the rate and channel
 /// count it really runs at.
 pub(crate) struct OpenedOutput {
-    _stream: OutputStream,
+    pub(crate) _stream: OutputStream,
     pub(crate) rate: u32,
     pub(crate) channels: usize,
 }
@@ -50,7 +50,9 @@ pub(crate) enum OutputStream {
 /// On Windows, `exclusive` tries WASAPI exclusive mode first (clock output
 /// only).  On refuse it falls back to shared cpal with `buffer_frames` — not
 /// REAL-style.  `real_style` opens IAudioClient3 at the driver's smallest
-/// shared engine step; on refuse it also falls back to shared cpal.
+/// shared engine step; on refuse it also falls back to shared cpal.  On Linux
+/// the same switch asks ALSA for its smallest usable period instead of the
+/// manual output buffer.
 pub(crate) fn open_output(
     output_id: &str,
     sample_rate: u32,
@@ -63,61 +65,19 @@ pub(crate) fn open_output(
         .parse()
         .map_err(|error| format!("Output device id: {error}"))?;
 
-    // Only the Windows exclusive / REAL-style attempts can fill this in.
+    // A platform with a clock output of its own opens that first, and says
+    // what it fell back from when the attempt is refused.
     #[cfg(target_os = "windows")]
-    let mut refused: Option<(RefuseKind, String)> = None;
-    #[cfg(target_os = "windows")]
-    if exclusive {
-        if id.host() == cpal::HostId::Wasapi {
-            match wasapi::open_exclusive(id.id(), sample_rate, Arc::clone(shared)) {
-                Ok((stream, info)) => {
-                    shared.set_output(
-                        info.rate,
-                        info.step_frames,
-                        OutputMode::Exclusive,
-                        info.describe(sample_rate),
-                    );
-                    return Ok(OpenedOutput {
-                        _stream: OutputStream::Exclusive(stream),
-                        rate: info.rate,
-                        channels: info.channels,
-                    });
-                }
-                Err(reason) => refused = Some((RefuseKind::Exclusive, reason)),
-            }
-        } else {
-            refused = Some((
-                RefuseKind::Exclusive,
-                format!("{} has no exclusive mode", id.host()),
-            ));
-        }
-    } else if real_style {
-        if id.host() == cpal::HostId::Wasapi {
-            match wasapi::open(id.id(), sample_rate, Arc::clone(shared)) {
-                Ok((stream, info)) => {
-                    shared.set_output(
-                        info.rate,
-                        info.step_frames,
-                        OutputMode::RealStyle,
-                        info.describe(sample_rate),
-                    );
-                    return Ok(OpenedOutput {
-                        _stream: OutputStream::Real(stream),
-                        rate: info.rate,
-                        channels: info.channels,
-                    });
-                }
-                Err(reason) => refused = Some((RefuseKind::RealStyle, reason)),
-            }
-        } else {
-            refused = Some((
-                RefuseKind::RealStyle,
-                format!("{} has no adjustable engine step", id.host()),
-            ));
-        }
-    }
+    let refusal = match win_output::attempt(&id, sample_rate, shared, real_style, exclusive) {
+        win_output::Attempt::Opened(opened) => return Ok(opened),
+        win_output::Attempt::Refused(reason) => reason,
+    };
     #[cfg(not(target_os = "windows"))]
-    let _ = (real_style, exclusive);
+    let _ = exclusive;
+    // A host with neither a clock output nor a period of its own keeps the
+    // neutral open below.
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let _ = real_style;
 
     let host = cpal::host_from_id(id.host()).map_err(|error| format!("Output host: {error}"))?;
     let device = host
@@ -126,47 +86,18 @@ pub(crate) fn open_output(
     let config = pick_output_config(&device, sample_rate)?;
     let channels = config.channels() as usize;
     let rate = config.sample_rate();
-    // On Linux the same switch asks ALSA for its smallest usable period
-    // instead of the manual output buffer.  Other platforms keep the buffer.
+    // What the shared stream asks for and the mode it then runs in: the
+    // platform owns both, because a refused request is a platform's answer.
     #[cfg(target_os = "linux")]
-    let requested = if real_style {
-        smallest_output_buffer(&config, 32)
-    } else {
-        clamp_output_buffer(&config, buffer_frames)
-    };
+    let requested = alsa::requested_output_buffer(&config, buffer_frames, real_style);
     #[cfg(not(target_os = "linux"))]
     let requested = clamp_output_buffer(&config, buffer_frames);
-    // What runs: a refused fixed buffer is the plain stream, whatever was
-    // asked for, and so is a refused Windows attempt.
     #[cfg(target_os = "linux")]
-    let (asked, plain) = (
-        if real_style {
-            OutputMode::LowLatency
-        } else {
-            OutputMode::Standard
-        },
-        OutputMode::Standard,
-    );
-    #[cfg(not(target_os = "linux"))]
-    let (asked, plain) = (OutputMode::Shared, OutputMode::Shared);
-    #[cfg(target_os = "linux")]
-    let mode = |note: &str| {
-        if real_style {
-            format!("Low latency · ALSA smallest period{note}")
-        } else {
-            format!("Standard output{note}")
-        }
-    };
-    #[cfg(not(target_os = "linux"))]
-    let mode = |note: &str| match &refused {
-        Some((RefuseKind::Exclusive, reason)) => {
-            format!("Standard output{note} · Exclusive refused: {reason}")
-        }
-        Some((RefuseKind::RealStyle, reason)) => {
-            format!("Standard output{note} · Shared, smallest buffer refused: {reason}")
-        }
-        None => format!("Standard output{note}"),
-    };
+    let describe = |fixed_buffer: bool| alsa::describe(real_style, fixed_buffer);
+    #[cfg(target_os = "windows")]
+    let describe = |fixed_buffer: bool| win_output::describe(refusal.as_deref(), fixed_buffer);
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let describe = |_: bool| (OutputMode::Shared, "Standard output".to_owned());
     let stream = match make_output_stream(
         &device,
         config,
@@ -175,18 +106,15 @@ pub(crate) fn open_output(
         Some(requested),
     ) {
         Ok(stream) => {
-            shared.set_output(rate, requested as u32, asked, mode(""));
+            let (mode, line) = describe(true);
+            shared.set_output(rate, requested as u32, mode, line);
             stream
         }
         Err(error) => {
             // A host or driver that cannot give us a fixed small buffer still
             // gets to play; the buffer request simply does not apply.
-            shared.set_output(
-                rate,
-                0,
-                plain,
-                mode(" · fixed buffer refused, driver default"),
-            );
+            let (mode, line) = describe(false);
+            shared.set_output(rate, 0, mode, line);
             make_output_stream(&device, config, channels, Arc::clone(shared), None).map_err(
                 |fallback| {
                     explain_output_error(format!("{error}; fallback failed too: {fallback}"))
@@ -204,18 +132,18 @@ pub(crate) fn open_output(
     })
 }
 
-/// Windows' "device in use" answer (AUDCLNT_E_DEVICE_IN_USE, 0x8889000A) as
-/// cpal prints it.  Measured: with ASIO4ALL as the input, the Realtek card it
-/// drives refused every shared output stream with exactly this code.
-pub(crate) const DEVICE_IN_USE: &str = "-2004287478";
+/// What the mode line carries when the fixed buffer was refused and the stream
+/// runs at whatever the driver defaults to.
+pub(crate) const FIXED_BUFFER_REFUSED: &str = " · fixed buffer refused, driver default";
 
+/// Turns a Windows "device in use" answer into a sentence; every other error
+/// is passed through as it came.
 pub(crate) fn explain_output_error(error: String) -> String {
-    if error.contains(DEVICE_IN_USE) {
-        "This output is in use: another driver or app has taken the sound card for itself"
-            .to_owned()
-    } else {
-        error
+    #[cfg(target_os = "windows")]
+    if let Some(explained) = win_output::explain_device_in_use(&error) {
+        return explained.to_owned();
     }
+    error
 }
 
 pub(crate) fn clamp_output_buffer(config: &cpal::SupportedStreamConfig, frames: usize) -> usize {
