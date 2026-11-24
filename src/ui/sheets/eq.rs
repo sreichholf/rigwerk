@@ -455,18 +455,9 @@ impl Edit<'_> {
     }
 
     fn paint_curve(&self, painter: &egui::Painter, plot: Plot, colours: &Palette) {
-        const STEPS: usize = 240;
-        let sample = |db: &dyn Fn(f32) -> f32| -> Vec<egui::Pos2> {
-            (0..=STEPS)
-                .map(|step| {
-                    let hz = CURVE_MIN_HZ * (Plot::span() * step as f32 / STEPS as f32).exp();
-                    egui::pos2(plot.x_of(hz), plot.y_of(db(hz)))
-                })
-                .collect()
-        };
         let clipped = painter.with_clip_rect(plot.rect.expand(2.0));
         let eq = *self.eq;
-        let points = sample(&|hz| eq.response_db(hz, self.rate));
+        let points = sample(plot, |hz| eq.response_db(hz, self.rate));
         let colour = if eq.enabled {
             self.path
         } else {
@@ -478,7 +469,7 @@ impl Edit<'_> {
                 if !band.on || band.gain_db.abs() < 0.01 {
                     continue;
                 }
-                let trace = sample(&|hz| eq.band_response_db(index, hz, self.rate));
+                let trace = sample(plot, |hz| eq.band_response_db(index, hz, self.rate));
                 let stroke = if index == *self.selected {
                     Stroke::new(1.5, with_alpha(colours.accent, 170))
                 } else {
@@ -754,11 +745,30 @@ fn paint_grid(painter: &egui::Painter, plot: Plot, colours: &Palette) {
     }
 }
 
+/// The curve across the plot, `db` read at each point.  Generic, so a curve
+/// is one specialised loop and not a call through a `dyn Fn` per point.  The
+/// `Vec` is the shape's own: `Shape::line` takes it, so a caller cannot hand
+/// a buffer back in.
+fn sample(plot: Plot, db: impl Fn(f32) -> f32) -> Vec<egui::Pos2> {
+    const STEPS: usize = 240;
+    (0..=STEPS)
+        .map(|step| {
+            let hz = CURVE_MIN_HZ * (Plot::span() * step as f32 / STEPS as f32).exp();
+            egui::pos2(plot.x_of(hz), plot.y_of(db(hz)))
+        })
+        .collect()
+}
+
 /// A fill from the curve to 0 dB that fades towards the line.
 fn fill_to_zero(points: &[egui::Pos2], zero_y: f32, colour: Color32) -> egui::Shape {
     let top = with_alpha(colour, 56);
     let bottom = with_alpha(colour, 0);
+    // One quad per curve segment: four vertices and six indices each, so a
+    // 241-point curve is 960 and 1440 and each list grows exactly once.
+    let quads = points.len().saturating_sub(1);
     let mut mesh = Mesh::default();
+    mesh.vertices.reserve(quads * 4);
+    mesh.indices.reserve(quads * 6);
     for pair in points.windows(2) {
         let (left, right) = (pair[0], pair[1]);
         let base = mesh.vertices.len() as u32;
