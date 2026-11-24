@@ -35,7 +35,7 @@ use crate::audio::plugins::{on_audio_thread, PluginShared, RESTART_ACTIVATION};
 pub(super) const HOST_NAME: &[u8] = b"RigWerk\0";
 pub(super) const HOST_VENDOR: &[u8] = b"RigWerk\0";
 pub(super) const HOST_URL: &[u8] = b"https://rigwerk.local\0";
-pub(super) const HOST_VERSION: &[u8] = b"0.8.0\0";
+pub(super) const HOST_VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
 pub(super) struct TimerEntry {
     pub(super) id: u32,
