@@ -75,7 +75,9 @@ fn running_mixer(frames: usize) -> (OutputMixer, Shared) {
 
 /// Renders one block into a buffer the caller already owns, and asserts that
 /// the block allocated and freed nothing.  The buffer is outside the guard: writing a
-/// test's own output is not the audio thread's allocation.
+/// test's own output is not the audio thread's allocation.  A release build
+/// counts nothing, so the two reads below are 0 == 0 there: the zeros are
+/// evidence in a debug test run.
 fn render_one_block(mixer: &mut OutputMixer, shared: &Shared, frames: usize, out: &mut [Vec<f32>]) {
     let guard = RtGuard::enter();
     mixer.render(shared, frames, |index, mapped| {
