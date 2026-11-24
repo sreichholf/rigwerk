@@ -13,6 +13,7 @@ use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MIN};
 use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
 use crate::audio::{AsioPanelSide, EngineState};
+use crate::ui::brand;
 use crate::ui::theme::{font, palette, Face, TypeRole};
 use crate::ui::widgets::OutlineButton;
 
@@ -51,6 +52,17 @@ impl RigWerkApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.set_height(32.0);
+            let mark = brand::texture(ui.ctx(), brand::Mark::Compact);
+            let response = ui
+                .add(
+                    egui::Image::new(egui::load::SizedTexture::new(mark.id(), Vec2::splat(24.0)))
+                        .sense(egui::Sense::click())
+                        .alt_text("About RigWerk"),
+                )
+                .on_hover_text("About RigWerk");
+            if response.clicked() {
+                self.show_about = true;
+            }
             if ui
                 .add(
                     egui::Button::new(

@@ -12,6 +12,7 @@ use egui::{Align2, Margin, RichText, Vec2};
 use crate::app::appearance::UI_SIZE_DEFAULT;
 use crate::app::screenshot;
 use crate::app::{Page, RigWerkApp};
+use crate::ui::brand;
 use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
 use crate::ui::theme::{
@@ -149,7 +150,7 @@ impl eframe::App for RigWerkApp {
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-                .fixed_size(Vec2::new(420.0, 340.0))
+                .fixed_size(Vec2::new(460.0, 460.0))
                 .frame(
                     egui::Frame::new()
                         .fill(CARD)
@@ -158,8 +159,24 @@ impl eframe::App for RigWerkApp {
                         .inner_margin(Margin::same(16)),
                 )
                 .show(&ctx, |ui| {
-                    ui.set_max_width(388.0);
-                    ui.heading("RigWerk");
+                    ui.set_max_width(428.0);
+                    ui.horizontal(|ui| {
+                        let mark = brand::texture(ui.ctx(), brand::Mark::Full);
+                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                            mark.id(),
+                            Vec2::splat(84.0),
+                        )));
+                        ui.add_space(2.0);
+                        ui.vertical(|ui| {
+                            ui.add_space(16.0);
+                            ui.heading("RigWerk");
+                            ui.label(
+                                RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                                    .color(DIM),
+                            );
+                        });
+                    });
+                    ui.add_space(10.0);
                     ui.label(
                         RichText::new(
                             "An independent-clock audio bridge. Capture and playback keep their own rates; a short ring absorbs the drift. Extra outputs can follow the finished mix.",
@@ -180,14 +197,6 @@ impl eframe::App for RigWerkApp {
                         )
                         .size(ts(10.0))
                         .color(MUTED),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(format!(
-                            "Version {}",
-                            env!("CARGO_PKG_VERSION")
-                        ))
-                        .color(DIM),
                     );
                     ui.add_space(8.0);
                     if ui
