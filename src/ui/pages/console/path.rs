@@ -50,7 +50,7 @@ impl RigWerkApp {
 
         self.path_name(&mut top, slot, &path.name);
         if layout.sheet_open {
-            let [left, right] = self.meter_paths[slot];
+            let [left, right] = self.meters.path_levels[slot];
             horizontal_meter(&mut top, left.max(right), &format!("{} meter", path.name));
         }
 
@@ -118,7 +118,7 @@ impl RigWerkApp {
             layout,
             &LevelBlock {
                 id: egui::Id::unique(("console_path_meter", slot)),
-                levels: &self.meter_paths[slot],
+                levels: &self.meters.path_levels[slot],
                 level_db: path.mix.level_db,
                 range: FaderRange {
                     min_db: PATH_LEVEL_MIN_DB,

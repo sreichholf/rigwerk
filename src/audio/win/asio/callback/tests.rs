@@ -69,7 +69,8 @@ fn a_stereo_input_pushes_the_driver_frames_and_publishes_the_peaks() {
         vec![(1.0, -0.25), (-0.5, 1.5), (0.25, -1.0)]
     );
     assert_eq!(peaks(&shared), (0.0, 1.5));
-    // `process_input` counts the block once, before the frame loop.
+    // The block's frames are counted: one add for the block and one per frame
+    // give the same total.
     assert_eq!(shared.snapshot().input_frames, 3);
 }
 

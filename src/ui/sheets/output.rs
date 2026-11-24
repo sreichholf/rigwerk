@@ -55,13 +55,15 @@ impl RigWerkApp {
         let buffer = self.output_buffer_line(device);
         let levels: Vec<f32> = match row.extra_output_index {
             None => self
-                .meter_out_channels
+                .meters
+                .out_channels
                 .iter()
                 .take(row.channels)
                 .copied()
                 .collect(),
             Some(index) => self
-                .meter_extra_output_channels
+                .meters
+                .extra_output_channels
                 .get(index)
                 .map(|levels| levels.iter().take(row.channels).copied().collect())
                 .unwrap_or_default(),

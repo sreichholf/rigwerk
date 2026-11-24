@@ -17,6 +17,7 @@ pub(crate) mod issues;
 pub(crate) mod latency;
 pub(crate) mod layouts;
 pub(crate) mod match_paths;
+pub(crate) mod meters;
 pub(crate) mod nam;
 pub(crate) mod output_devices;
 pub(crate) mod paths;
@@ -46,8 +47,7 @@ use crate::app::settings::{
 use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
     self, AudioEngine, BufferMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
-    OutputDeviceSettings, Snapshot, WasapiOutputMode, MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS,
-    MAX_PATHS,
+    OutputDeviceSettings, Snapshot, WasapiOutputMode, MAX_EXTRA_OUTPUTS, MAX_PATHS,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,29 +259,7 @@ pub struct RigWerkApp {
     pub(crate) issue_state: crate::app::issues::IssueState,
     /// Where the next Plugins-page add should land (`None` = append).
     pub(crate) plugin_effect_at: Option<usize>,
-    pub(crate) meter_in_l: f32,
-    pub(crate) meter_in_r: f32,
-    pub(crate) meter_out_l: f32,
-    pub(crate) meter_out_r: f32,
-    pub(crate) peak_in_l: f32,
-    pub(crate) peak_in_r: f32,
-    pub(crate) peak_out_l: f32,
-    pub(crate) peak_out_r: f32,
-    /// Smoothed meter and peak per clock-device channel, from
-    /// [`Snapshot::out_channels`].
-    pub(crate) meter_out_channels: [f32; MAX_OUTPUT_CHANNELS],
-    pub(crate) peak_out_channels: [f32; MAX_OUTPUT_CHANNELS],
-    /// Smoothed meter and peak per extra output channel, from
-    /// [`Snapshot::extra_output_channels`].
-    pub(crate) meter_extra_output_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
-    pub(crate) peak_extra_output_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
-    /// Per path slot (L, R): after the path's chain, level, mute and solo,
-    /// before the master.  Smoothed and peak-held like the other meters.
-    pub(crate) meter_paths: [[f32; 2]; MAX_PATHS],
-    pub(crate) peak_paths: [[f32; 2]; MAX_PATHS],
-    /// Decimated capture/playback waveform for the Live scope.
-    pub(crate) scope_in: Vec<f32>,
-    pub(crate) scope_out: Vec<f32>,
+    pub(crate) meters: meters::Meters,
     pub(crate) snapshot: Snapshot,
     /// Linux: PipeWire quantum compared with the ALSA period.  Recomputed at
     /// startup, when the output changes and once the bridge reports its real
@@ -331,7 +309,6 @@ pub struct RigWerkApp {
     pub(crate) frames: u64,
     pub(crate) show_about: bool,
     pub(crate) auto_start_bridge: bool,
-    pub(crate) last_meter_tick: Instant,
     pub(crate) inventory_fingerprint: u64,
     pub(crate) last_device_scan: Instant,
     pub(crate) device_scan: Option<mpsc::Receiver<Inventory>>,
@@ -612,22 +589,7 @@ impl RigWerkApp {
             routing_last_layout: None,
             issue_state: Default::default(),
             plugin_effect_at: None,
-            meter_in_l: 0.0,
-            meter_in_r: 0.0,
-            meter_out_l: 0.0,
-            meter_out_r: 0.0,
-            peak_in_l: 0.0,
-            peak_in_r: 0.0,
-            peak_out_l: 0.0,
-            peak_out_r: 0.0,
-            meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
-            peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
-            meter_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
-            meter_paths: [[0.0; 2]; MAX_PATHS],
-            peak_paths: [[0.0; 2]; MAX_PATHS],
-            peak_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
-            scope_in: vec![0.0; audio::SCOPE_LEN],
-            scope_out: vec![0.0; audio::SCOPE_LEN],
+            meters: meters::Meters::new(),
             snapshot: Snapshot::default(),
             #[cfg(target_os = "linux")]
             quantum: None,
@@ -655,7 +617,6 @@ impl RigWerkApp {
             frames: 0,
             show_about: false,
             auto_start_bridge: false,
-            last_meter_tick: Instant::now(),
             inventory_fingerprint: 0,
             last_device_scan: Instant::now(),
             device_scan: None,

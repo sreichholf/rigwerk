@@ -52,11 +52,18 @@ impl RigWerkApp {
         ui.add_space(6.0);
 
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, TRACE_H), Sense::hover());
-        draw(ui, rect, &self.scope_in, &self.scope_out, active, colours);
+        draw(
+            ui,
+            rect,
+            &self.meters.scope_in,
+            &self.meters.scope_out,
+            active,
+            colours,
+        );
 
         ui.add_space(8.0);
-        let peak_in = amp_to_db(self.peak_in_l.max(self.peak_in_r));
-        let peak_out = amp_to_db(self.peak_out_l.max(self.peak_out_r));
+        let peak_in = amp_to_db(self.meters.peak_in_l.max(self.meters.peak_in_r));
+        let peak_out = amp_to_db(self.meters.peak_out_l.max(self.meters.peak_out_r));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 24.0;
             stat(ui, "Peak in", &format!("{peak_in:.1} dBFS"), colours);
