@@ -247,7 +247,10 @@ impl Lv2Instance {
     /// the worker requests that restore queued, activate, the zero-frame run
     /// and the worker registration.  UI thread.  `module`
     /// keeps the descriptor's library loaded; `None` only for the fake
-    /// descriptors the tests build without a binary.  `default_state` is the
+    /// descriptors the tests build without a binary.  The descriptor itself
+    /// must outlive the loaded instance — its `Drop` calls `cleanup` through
+    /// the pointer — so a fake must live at least as long as the instance,
+    /// not merely as long as this call.  `default_state` is the
     /// bundle's `state:state` for a plugin that asks for it, restored when no
     /// saved blob was.
     #[allow(clippy::too_many_arguments)]

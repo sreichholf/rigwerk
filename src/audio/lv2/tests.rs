@@ -4321,7 +4321,12 @@ fn load_scheduling(descriptor: &LV2_Descriptor) -> Lv2Loaded {
 #[test]
 fn schedule_work_refuses_a_plugin_without_a_worker() {
     let _serial = worker_tests();
-    let loaded = load_scheduling(&scheduling_descriptor(None));
+    // The descriptor must outlive the loaded instance: the core keeps the
+    // pointer, and its `Drop` calls `cleanup` through it.  A temporary here
+    // leaves the core pointing at a dead stack slot, which only crashes in
+    // a release build.
+    let descriptor = scheduling_descriptor(None);
+    let loaded = load_scheduling(&descriptor);
     assert_eq!(
         ZERO_RUN_STATUS.load(Ordering::SeqCst),
         i64::from(LV2_WORKER_ERR_UNKNOWN),
@@ -4338,8 +4343,11 @@ fn schedule_work_refuses_a_plugin_without_a_worker() {
 #[test]
 fn a_request_scheduled_before_registration_reaches_work() {
     let _serial = worker_tests();
+    // See `schedule_work_refuses_a_plugin_without_a_worker`: the descriptor
+    // is borrowed for the whole life of the instance, not just the load.
+    let descriptor = scheduling_descriptor(Some(worker_extension));
     let calls = WORK_CALLS.load(Ordering::SeqCst);
-    let loaded = load_scheduling(&scheduling_descriptor(Some(worker_extension)));
+    let loaded = load_scheduling(&descriptor);
     assert_eq!(
         ZERO_RUN_STATUS.load(Ordering::SeqCst),
         i64::from(LV2_WORKER_SUCCESS),
