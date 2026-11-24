@@ -7,6 +7,11 @@
 //! `app`, `ui`, `egui` or `eframe`, and `app` names no `ui`.  `tests.rs` files
 //! are exempt, so `app/tests.rs` and `app/appearance/tests.rs` still name
 //! `crate::ui`.
+//!
+//! One gate reads a single file: the browser must reach CLAP through
+//! `clap::scan_library_isolated`, the child process, because the in-process
+//! `clap::scan_library` loads every bundle into this process.  The last test
+//! here covers the binary's own `--clap-scan` arguments.
 
 use std::path::{Path, PathBuf};
 
@@ -483,5 +488,75 @@ fn a_layer_does_not_name_the_one_above_it() {
         hits.is_empty(),
         "a layer names the one above it (AGENTS.md, Separation):\n{}",
         hits.join("\n")
+    );
+}
+
+/// CLAP is the one scan that runs third-party code, so the browser must reach
+/// it through the child process: the in-process `clap::scan_library` calls a
+/// bundle's `init` in this process.  `app/plugins.rs` has its own
+/// `scan_library` for the whole library, which is why the two call names are
+/// counted apart.
+#[test]
+fn the_browser_scans_clap_in_a_child_process() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/plugins.rs");
+    let source = std::fs::read_to_string(&path).expect("read the plugin scan");
+    let calls = boundary_lines(
+        &source,
+        &["clap::scan_library_isolated", "clap::scan_library"],
+    );
+    let in_process: Vec<String> = calls
+        .iter()
+        .filter(|(_, name)| *name == "clap::scan_library")
+        .map(|(line, _)| format!("src/app/plugins.rs:{line}"))
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .any(|(_, name)| *name == "clap::scan_library_isolated"),
+        "the browser no longer scans CLAP in the child process"
+    );
+    assert!(
+        in_process.is_empty(),
+        "the browser scans CLAP in this process (AGENTS.md, audio thread):\n{}",
+        in_process.join("\n")
+    );
+}
+
+/// One `--clap-scan` table row: the argv, and the file and limit expected.
+type ClapScanCase<'a> = (&'a [&'a str], Option<(&'a str, u64)>);
+
+/// `--clap-scan` takes a file and a limit and nothing else.  A missing path, a
+/// missing or unusable limit, or a negative one leaves `main` to exit 2; a
+/// trailing argument is ignored rather than read as part of the limit.
+#[test]
+fn clap_scan_arguments_are_parsed_or_refused() {
+    let cases: &[ClapScanCase] = &[
+        (
+            &["rigwerk", "--clap-scan", "/tmp/scan.ron", "1500"],
+            Some(("/tmp/scan.ron", 1500)),
+        ),
+        (&["rigwerk", "--clap-scan"], None),
+        (&["rigwerk", "--clap-scan", "/tmp/scan.ron"], None),
+        (&["rigwerk", "--clap-scan", "/tmp/scan.ron", "-1"], None),
+        (&["rigwerk", "--clap-scan", "/tmp/scan.ron", "soon"], None),
+        (
+            &["rigwerk", "--clap-scan", "/tmp/scan.ron", "900", "extra"],
+            Some(("/tmp/scan.ron", 900)),
+        ),
+    ];
+    for &(argv, expected) in cases {
+        let (requested, scan) = crate::parse_clap_scan(argv.iter().map(std::ffi::OsString::from));
+        assert!(requested, "{argv:?}");
+        let seen = scan.map(|(path, limit)| (path.display().to_string(), limit.as_millis() as u64));
+        let wanted = expected.map(|(path, limit)| (path.to_owned(), limit));
+        assert_eq!(seen, wanted, "{argv:?}");
+    }
+    assert_eq!(
+        crate::parse_clap_scan(
+            ["--screenshot", "shot.png"]
+                .iter()
+                .map(std::ffi::OsString::from)
+        ),
+        (false, None)
     );
 }

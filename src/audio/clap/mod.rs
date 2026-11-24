@@ -31,7 +31,10 @@ pub(crate) use host::{
 };
 pub(crate) use instance::{ClapInstance, ClapLoaded};
 pub(crate) use processor::ClapProcessor;
-pub(crate) use scan::{scan_bundle, scan_library, scan_roots, ClapCandidate};
+pub(crate) use scan::{
+    scan_bundle, scan_library, scan_library_isolated, scan_roots, write_scan_file, ClapCandidate,
+    CHILD_EXIT_ABANDONED, CHILD_EXIT_UNWRITABLE,
+};
 
 use std::ffi::{c_char, CStr};
 

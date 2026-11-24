@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap_sys::ext::audio_ports::{
     CLAP_AUDIO_PORTS_RESCAN_CHANNEL_COUNT, CLAP_AUDIO_PORTS_RESCAN_IN_PLACE_PAIR,
@@ -21,7 +22,11 @@ use super::host::{
 use super::instance::ClapInstance;
 use super::module::{module_key, EntryInit, ModuleRegistry};
 use super::ports::{port_layout, PortBuffers, PortInfo, PortLayout, MAX_PORT_CHANNELS};
-use super::scan::{contained, scan_bundle, scan_bundles, scan_module, PANIC_WHILE_READ};
+use super::scan::{
+    contained, decode_scan, encode_scan, failure_rows, resolve, scan_bundle, scan_bundles,
+    scan_library_isolated, scan_module, wire_candidates, write_scan_file, ClapCandidate,
+    ScanFailure, PANIC_WHILE_READ,
+};
 use super::state::{StateReader, StateWriter};
 use crate::audio::plugins::{
     ClapFailure, LoadedPlugin, Outcome, PluginHandle, PluginPref, PluginShared, Restore, Saved,
@@ -1645,6 +1650,269 @@ fn a_panic_while_a_bundle_is_read_becomes_a_scan_error() {
         silent.expect_err("a payload without text still reports"),
         PANIC_WHILE_READ
     );
+}
+
+/// The `--clap-scan` file a child writes and a parent reads: every field the
+/// browser uses survives the trip, including a path with a space and a
+/// non-ASCII character, and re-encoding the decoded rows gives the same text.
+#[test]
+fn the_scan_file_round_trips_every_row() {
+    let rows = vec![
+        ClapCandidate {
+            path: PathBuf::from("/usr/lib/clap/Gain.clap"),
+            plugin_id: "com.example.gain".to_owned(),
+            name: "Gain".to_owned(),
+            vendor: "Example".to_owned(),
+            category: "audio-effect".to_owned(),
+            features: vec!["audio-effect".to_owned()],
+            scan_error: None,
+        },
+        ClapCandidate {
+            path: PathBuf::from("Plug-ins/Nice Amp Ünïcode.clap"),
+            plugin_id: "org.nice.amp".to_owned(),
+            name: "Nice Amp".to_owned(),
+            vendor: String::new(),
+            category: "audio-effect · stereo".to_owned(),
+            features: vec!["audio-effect".to_owned(), "stereo".to_owned()],
+            scan_error: None,
+        },
+        ClapCandidate {
+            path: PathBuf::from("/usr/lib/clap/Broken.clap"),
+            plugin_id: String::new(),
+            name: "Broken".to_owned(),
+            vendor: String::new(),
+            category: "CLAP effect".to_owned(),
+            features: Vec::new(),
+            scan_error: Some("CLAP load failed: not a library".to_owned()),
+        },
+    ];
+    let text = encode_scan(rows.clone()).expect("encode the scan");
+    let back = decode_scan(&text).expect("decode the scan");
+    assert_eq!(back.len(), rows.len());
+    for (before, after) in rows.iter().zip(&back) {
+        assert_eq!(after.path, before.path, "path");
+        assert_eq!(after.plugin_id, before.plugin_id, "plugin id");
+        assert_eq!(after.name, before.name, "name");
+        assert_eq!(after.vendor, before.vendor, "vendor");
+        assert_eq!(after.category, before.category, "category");
+        assert_eq!(after.features, before.features, "features");
+        assert_eq!(after.scan_error, before.scan_error, "scan error");
+    }
+    assert_eq!(
+        encode_scan(back).expect("encode again"),
+        text,
+        "the whole row survives, not only the fields checked above"
+    );
+    assert!(text.contains("Ünïcode"), "{text}");
+}
+
+/// A file tagged with another version is refused whole: the parent never reads
+/// its fields with this build's meanings.
+#[test]
+fn a_scan_file_from_another_version_is_rejected() {
+    let row = "(path:\"x.clap\",plugin_id:\"id\",name:\"X\",vendor:\"\",\
+               category:\"CLAP effect\",features:[],scan_error:None)";
+    let current = format!("(version:1,candidates:[{row}])");
+    assert_eq!(
+        decode_scan(&current).expect("version 1 decodes").len(),
+        1,
+        "the fixture is valid, so the refusals below are about the version"
+    );
+    assert!(decode_scan(&format!("(version:2,candidates:[{row}])")).is_none());
+    assert!(decode_scan(&format!("(version:0,candidates:[{row}])")).is_none());
+    // Text that is not the wire format at all is no result either.
+    assert!(decode_scan("not ron").is_none());
+    assert!(decode_scan("").is_none());
+}
+
+/// A path with no UTF-8 encoding: a raw byte on Unix, an unpaired surrogate on
+/// Windows.
+#[cfg(unix)]
+fn odd_bundle_path() -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    PathBuf::from(OsString::from_vec(b"/usr/lib/clap/\xff.clap".to_vec()))
+}
+
+#[cfg(windows)]
+fn odd_bundle_path() -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    // A lone high surrogate: `Path::to_str` rejects it, and no RON string can
+    // carry it.
+    PathBuf::from(OsString::from_wide(&[
+        0xD800, 0x002E, 0x0063, 0x006C, 0x0061, 0x0070,
+    ]))
+}
+
+/// RON carries a path as text.  A bundle whose path is not valid UTF-8 cannot
+/// cross as itself, so it becomes one error row; failing the whole file would
+/// hide every other bundle in the scan.
+#[test]
+fn a_bundle_path_that_is_not_utf8_becomes_a_row_not_a_failed_scan() {
+    let rows = wire_candidates(vec![ClapCandidate {
+        path: odd_bundle_path(),
+        plugin_id: "com.example.odd".to_owned(),
+        name: "Odd".to_owned(),
+        vendor: String::new(),
+        category: "audio-effect".to_owned(),
+        features: vec!["audio-effect".to_owned()],
+        scan_error: None,
+    }]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "Odd", "the row still says which bundle");
+    assert!(rows[0].plugin_id.is_empty(), "there is no id to load");
+    assert!(rows[0].features.is_empty());
+    assert!(rows[0].path.to_str().is_some(), "the path can be encoded");
+    let error = rows[0].scan_error.as_deref().expect("a reason");
+    assert!(error.contains("UTF-8"), "{error}");
+    assert!(encode_scan(rows).is_ok(), "the rest of the scan survives");
+}
+
+/// The child creates its result with `create_new`, so it can never clobber a
+/// path, and what it writes is exactly what the parent decodes.
+#[test]
+fn write_scan_file_creates_once_and_writes_a_decodable_scan() {
+    let dir = std::env::temp_dir().join(format!("rigwerk-clap-wire-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the test folder");
+    let path = dir.join("result.ron");
+    let _ = std::fs::remove_file(&path);
+    let row = || ClapCandidate {
+        path: PathBuf::from("Plug-ins/Write Test.clap"),
+        plugin_id: "com.example.write".to_owned(),
+        name: "Write Test".to_owned(),
+        vendor: "Example".to_owned(),
+        category: "audio-effect".to_owned(),
+        features: vec!["audio-effect".to_owned()],
+        scan_error: None,
+    };
+    write_scan_file(&path, vec![row()]).expect("write the result");
+    let text = std::fs::read_to_string(&path).expect("read the result");
+    let back = decode_scan(&text).expect("the parent decodes it");
+    assert_eq!(
+        encode_scan(back).expect("encode the decoded rows"),
+        encode_scan(wire_candidates(vec![row()])).expect("encode the expected rows"),
+        "the file holds exactly the rows the child meant to send"
+    );
+    // A second child must not replace a file the parent is about to read.
+    assert!(
+        write_scan_file(&path, vec![row()]).is_err(),
+        "create_new refuses an existing path"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("still there"),
+        text,
+        "the refused write left the file alone"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The parent's spawn is not tested here: under `cargo test` the running binary
+// is the test harness, and `--clap-scan` would be taken by libtest rather than
+// by `main`.  Only a real `rigwerk` launch exercises the child; the row mapping
+// it falls back to is pure and is what this test covers.
+
+/// A scan that gives nothing back reports one row per root, with no plugin id
+/// and the cause, so the browser can say where CLAP was looked for.
+#[test]
+fn a_failed_isolated_scan_reports_one_row_per_root() {
+    let roots = vec![
+        PathBuf::from("/usr/lib/clap"),
+        PathBuf::from("AppData/Local/Programs/Common/CLAP"),
+    ];
+    let cases = [
+        (ScanFailure::TimedOut, "did not finish in time"),
+        (
+            ScanFailure::Abandoned,
+            "abandoned a plugin that would not return",
+        ),
+        (ScanFailure::Unwritable, "could not write its result"),
+        (
+            ScanFailure::Exited("exit code: 7".to_owned()),
+            "ended unexpectedly (exit code: 7)",
+        ),
+        (ScanFailure::Spawn, "could not be started"),
+        (ScanFailure::Unreadable, "produced no readable result"),
+        (ScanFailure::NoTime, "ran out of time before it could start"),
+    ];
+    for (cause, fragment) in cases {
+        let rows = failure_rows(&roots, &cause);
+        assert_eq!(rows.len(), roots.len(), "{cause:?}");
+        for (row, root) in rows.iter().zip(&roots) {
+            assert_eq!(row.path.as_path(), root.as_path(), "{cause:?}");
+            assert_eq!(row.name, root.display().to_string(), "{cause:?}");
+            assert!(row.plugin_id.is_empty(), "{cause:?}");
+            assert!(row.features.is_empty(), "{cause:?}");
+            let error = row.scan_error.as_deref().expect("a reason");
+            assert!(error.contains(fragment), "{cause:?}: {error}");
+        }
+    }
+}
+
+/// A result passes through untouched and a failure becomes the rows, so the
+/// two arms of `scan_library_isolated` cannot be swapped unnoticed.
+#[test]
+fn resolve_passes_a_scan_through_and_turns_a_failure_into_rows() {
+    let roots = vec![PathBuf::from("/usr/lib/clap")];
+    let found = vec![ClapCandidate {
+        path: PathBuf::from("/usr/lib/clap/Gain.clap"),
+        plugin_id: "com.example.gain".to_owned(),
+        name: "Gain".to_owned(),
+        vendor: String::new(),
+        category: "audio-effect".to_owned(),
+        features: vec!["audio-effect".to_owned()],
+        scan_error: None,
+    }];
+    let passed = resolve(Ok(found), &roots);
+    assert_eq!(passed.len(), 1, "the scan's own rows, not the roots");
+    assert_eq!(passed[0].plugin_id, "com.example.gain");
+    assert!(passed[0].scan_error.is_none());
+    let failed = resolve(Err(ScanFailure::Spawn), &roots);
+    assert_eq!(failed.len(), roots.len());
+    assert_eq!(failed[0].path, roots[0], "the root stands in for the scan");
+    assert!(failed[0].plugin_id.is_empty());
+    let error = failed[0].scan_error.as_deref().expect("the cause");
+    assert!(error.contains("could not be started"), "{error}");
+}
+
+/// A zero budget is the one arm that must not reach the spawn: the rows name
+/// every scan root with the "ran out of time" cause, which is a different
+/// sentence from any a child that was actually started can produce.
+#[test]
+fn a_zero_budget_reports_the_roots_without_starting_a_child() {
+    let roots = super::scan_roots();
+    let rows = scan_library_isolated(Duration::ZERO);
+    assert_eq!(rows.len(), roots.len());
+    for (row, root) in rows.iter().zip(&roots) {
+        assert_eq!(&row.path, root);
+        assert!(row.plugin_id.is_empty());
+        assert!(row.features.is_empty());
+        let error = row.scan_error.as_deref().expect("a reason");
+        assert!(
+            error.contains("ran out of time before it could start"),
+            "{error}"
+        );
+    }
+}
+
+/// The child's result folder is this scan's alone: on Unix its mode has no
+/// group or other bits, so a predictable file name inside it cannot be read
+/// or pre-created by another user.
+#[cfg(unix)]
+#[test]
+fn a_scan_result_folder_is_private_to_this_user() {
+    use super::scan::scan_result_dir;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = scan_result_dir().expect("a folder for the result");
+    let mode = std::fs::metadata(&dir)
+        .expect("stat the folder")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "mode {mode:o}");
+    std::fs::remove_dir(&dir).expect("remove the folder");
 }
 
 #[test]

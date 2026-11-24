@@ -23,11 +23,23 @@ const RECENT_LIMIT: usize = 10;
 /// scan still silent after this holds a bundle that will never answer, and
 /// the user needs Rescan back.
 ///
-/// This only unlatches the button.  A hung `clap_entry.init` still holds the
-/// process-wide CLAP module lock (`audio/clap/module.rs`), so the stuck
-/// thread never returns, a later scan blocks on that lock, and a CLAP load
-/// on the UI thread blocks behind it.  Only a subprocess can recover those.
+/// This is the scan's own budget ([`scan_library`]) and not only the
+/// browser's: VST3 and LV2 run in this process and CLAP runs in a child
+/// bounded by what is left of it, so a hung `clap_entry.init` or an abort in
+/// a bundle neither holds the process-wide module lock nor ends the app.  A
+/// VST3 or LV2 bundle that hangs still leaves the scan thread stuck, and the
+/// browser's deadline only unlatches the button.
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long the browser keeps waiting past [`SCAN_TIMEOUT`].  The child is
+/// killed at the deadline and its failure rows still have to reach the
+/// channel; without the grace the browser would drop the receiver first and
+/// show its generic "stopped waiting" notice instead of the rows.
+const SCAN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Time kept back from the CLAP child's budget so this process can kill it,
+/// read its result and send the rows before the scan's own deadline passes.
+const CLAP_SAVE_RESERVE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One effect in the favourites or the recent list.  The path, the format,
 /// the class and the name together name it: two classes in one bundle stay
@@ -355,21 +367,25 @@ impl PluginBrowser {
         self.start_scan_with(scan_library);
     }
 
-    /// Starts `scan` on its own thread and arms the deadline.  A test passes
-    /// a body that does no I/O, so the suite never reads (and loads) the
-    /// plugins installed on the machine; [`start_scan`] passes the real scan.
-    fn start_scan_with(&mut self, scan: fn() -> Vec<PluginCandidate>) {
+    /// Starts `scan` on its own thread and arms the deadline.  The scan gets
+    /// its own budget, computed before the thread starts, so each step can see
+    /// how much time is left instead of assuming the browser's deadline covers
+    /// it.  A test passes a body that does no I/O, so the suite never reads
+    /// (and loads) the plugins installed on the machine; [`start_scan`] passes
+    /// the real scan.
+    fn start_scan_with(&mut self, scan: fn(std::time::Instant) -> Vec<PluginCandidate>) {
         if self.receiver.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
         self.scanning = true;
-        self.scan_deadline = Some(std::time::Instant::now() + SCAN_TIMEOUT);
+        let deadline = std::time::Instant::now() + SCAN_TIMEOUT;
+        self.scan_deadline = Some(deadline + SCAN_GRACE);
         let spawned = thread::Builder::new()
             .name("rigwerk-plugin-scan".to_owned())
             .spawn(move || {
-                let _ = tx.send(scan());
+                let _ = tx.send(scan(deadline));
             });
         if spawned.is_err() {
             self.stop_waiting();
@@ -391,16 +407,25 @@ impl PluginBrowser {
     }
 }
 
-fn scan_library() -> Vec<PluginCandidate> {
+/// The whole library, with `deadline` as the scan's own budget.
+///
+/// CLAP runs last, after the two in-process formats: it is the only part that
+/// runs third-party code, and it is bounded by what is left of the budget once
+/// VST3 and LV2 have had their turn.  The browser sorts the rows, so the order
+/// here does not matter.
+fn scan_library(deadline: std::time::Instant) -> Vec<PluginCandidate> {
     let mut candidates = Vec::new();
     for path in vst3::find_bundles(&vst3::search_roots()) {
         candidates.extend(candidates_from_bundle(&path));
     }
-    for candidate in clap::scan_library() {
-        candidates.push(candidate_from_clap(candidate));
-    }
     for candidate in lv2::scan_library() {
         candidates.push(candidate_from_lv2(candidate));
+    }
+    let remaining = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .saturating_sub(CLAP_SAVE_RESERVE);
+    for candidate in clap::scan_library_isolated(remaining) {
+        candidates.push(candidate_from_clap(candidate));
     }
     candidates.sort_by_cached_key(|candidate| candidate.name.to_lowercase());
     candidates.dedup_by(|a, b| {
