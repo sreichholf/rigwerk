@@ -1,5 +1,16 @@
 //! The bridge thread: picks the path for the chosen devices (ASIO or
 //! system on either side), opens both sides and keeps them running.
+//!
+//! `select` decides which backend runs and nothing else: the order it asks
+//! in is the precedence, so a backend never gets a device an earlier one
+//! claimed.  Each arm of `Backend::run` only calls its backend.
+//!
+//! The clock target is still set in `run_bridge`, before dispatch, on
+//! purpose: only the ASIO output and ASIO duplex paths set it themselves, so
+//! the native PipeWire path, the ASIO input path and cpal rely on that line.
+//!
+//! The arms are gated to the platforms that have them; see "Backend
+//! selection" in `docs/open-items.md`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,26 +38,32 @@ pub(crate) fn rate_path(input: u32, output: u32) -> String {
     }
 }
 
-pub(crate) fn run_bridge(
-    config: StartConfig,
-    shared: Arc<Shared>,
-    stop: Arc<AtomicBool>,
-) -> Result<(), String> {
-    shared.set_target_frames(initial_target(config.buffer_size));
+/// Which backend a start goes to.  The variant carries the selection's
+/// result, so `run` dispatches without reading `config` again.
+#[derive(Debug, PartialEq, Eq)]
+enum Backend {
+    #[cfg(target_os = "windows")]
+    AsioOutput(u128),
+    #[cfg(target_os = "windows")]
+    AsioInput(u128),
+    #[cfg(target_os = "linux")]
+    LinuxNative,
+    Cpal,
+}
+
+/// The backend `config` selects.  Its order is the precedence: ASIO output
+/// first (one driver can carry both directions), then ASIO input, then a
+/// native `pipewire:` id on either side, then cpal.
+fn select(config: &StartConfig) -> Backend {
     #[cfg(target_os = "windows")]
     if let Some(output_clsid) = config.output_asio_clsid {
-        return run_asio_output_bridge(
-            &config,
-            output_clsid,
-            Arc::clone(&shared),
-            Arc::clone(&stop),
-        );
+        return Backend::AsioOutput(output_clsid);
     }
     #[cfg(target_os = "windows")]
     if let Some(clsid) = config.asio_clsid {
         // The ASIO driver owns the clock.  Ask it for its real rate first and
         // let the output follow or convert from that rate.
-        return run_asio_bridge(&config, clsid, Arc::clone(&shared), Arc::clone(&stop));
+        return Backend::AsioInput(clsid);
     }
 
     // A `pipewire:{node.name}` id is a real PipeWire source or sink. The
@@ -59,14 +76,52 @@ pub(crate) fn run_bridge(
         .is_some_and(super::linux::native::is_native_id)
         || super::linux::native::is_native_id(&config.output_id)
     {
-        return super::linux::native::run(&config, shared, stop);
+        return Backend::LinuxNative;
     }
+    Backend::Cpal
+}
 
+impl Backend {
+    fn run(
+        self,
+        config: &StartConfig,
+        shared: Arc<Shared>,
+        stop: Arc<AtomicBool>,
+    ) -> Result<(), String> {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::AsioOutput(output_clsid) => {
+                run_asio_output_bridge(config, output_clsid, shared, stop)
+            }
+            #[cfg(target_os = "windows")]
+            Self::AsioInput(clsid) => run_asio_bridge(config, clsid, shared, stop),
+            #[cfg(target_os = "linux")]
+            Self::LinuxNative => super::linux::native::run(config, shared, stop),
+            Self::Cpal => run_cpal(config, shared, stop),
+        }
+    }
+}
+
+pub(crate) fn run_bridge(
+    config: StartConfig,
+    shared: Arc<Shared>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    shared.set_target_frames(initial_target(config.buffer_size));
+    select(&config).run(&config, shared, stop)
+}
+
+/// cpal capture and playback as two independent streams.
+fn run_cpal(
+    config: &StartConfig,
+    shared: Arc<Shared>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
     // Settle the input first.  A device that cannot run at the requested rate
     // opens at its own; the output then converts from that real rate instead
     // of playing the input too fast or too slow.
     shared.set_status("Opening input…");
-    let input_device = open_input_device(&config)?;
+    let input_device = open_input_device(config)?;
     let input_config = pick_input_config(&input_device, config.sample_rate)?;
     let input_rate = input_config.sample_rate();
     let input_channels = input_config.channels() as usize;
@@ -104,7 +159,7 @@ pub(crate) fn run_bridge(
     ));
 
     // Generic extra outputs: own cpal streams, synced live from the plan.
-    // PipeWire duplex never reaches this path; ASIO / native PW return above.
+    // PipeWire duplex never reaches this path; ASIO / native PW never do.
     let mut extra_outputs = ExtraOutputOutputs::new(config.output_buffer, output.rate);
     extra_outputs.sync(&shared);
 
@@ -117,3 +172,6 @@ pub(crate) fn run_bridge(
     drop(output);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -131,3 +131,9 @@ since.
   seconds, so a large offset at start, or a Minimum bridge buffer, can
   have a dropout once before it has learned the offset.  A large bridge buffer cut
   pops the excess, which the resampler turns into a short crossfade.
+- **Backend selection.**  `audio/bridge.rs` names one arm per backend, but
+  the arms are gated to the platform that has them: ASIO only on Windows,
+  native PipeWire only on Linux.  A backend has no arm to return an error
+  from on another target, so a backend id from another platform falls
+  through to that target's fallback instead, and its arm cannot be exercised
+  there.
