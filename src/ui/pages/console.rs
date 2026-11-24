@@ -55,10 +55,10 @@ fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issu
     }
 }
 
-/// The group labels' row.
-const LABEL_H: f32 = 20.0;
+/// The group labels' row, and the margin above the strips.
+const LABEL_H: f32 = 26.0;
 /// Breathing room between the labels and the strip caps.
-const LABEL_GAP: f32 = 2.0;
+const LABEL_GAP: f32 = 6.0;
 /// Between groups, and between a group and its add column.
 const GROUP_GAP: f32 = 12.0;
 const ADD_GAP: f32 = 8.0;
@@ -164,8 +164,9 @@ impl RigWerkApp {
         // Matching one path to itself means nothing.
         if slots.len() >= 2 {
             let width = 100.0;
-            // Leave a few points between the button and the path colour cap.
-            let action_h = LABEL_H - 3.0;
+            // The label row less a margin above and below, so the button
+            // keeps clear of the path colour caps underneath it.
+            let button_h = LABEL_H - 6.0;
             let dots = if layout_density.scroll.is_some() {
                 16.0 * slots.len() as f32
             } else {
@@ -176,7 +177,7 @@ impl RigWerkApp {
             let left = (right - width).max(after_label);
             if left + width <= right + 0.5 {
                 let rect =
-                    Rect::from_min_size(egui::pos2(left, full.top()), Vec2::new(width, action_h));
+                    Rect::from_min_size(egui::pos2(left, full.top()), Vec2::new(width, LABEL_H));
                 let mut header = ui.new_child(
                     UiBuilder::new()
                         .max_rect(rect)
@@ -185,7 +186,7 @@ impl RigWerkApp {
                 // Right-to-left adds its item spacing before the first item;
                 // the mockup puts the button's right edge on the group edge.
                 header.spacing_mut().item_spacing.x = 0.0;
-                let text_font = font(Face::SansMedium, TypeRole::GridHeader);
+                let text_font = font(Face::SansMedium, TypeRole::Secondary);
                 let text_h = header.fonts_mut(|fonts| fonts.row_height(&text_font));
                 let button = egui::Button::new(
                     RichText::new("Match paths")
@@ -195,10 +196,10 @@ impl RigWerkApp {
                 .fill(colours.slot)
                 .stroke(Stroke::new(1.0, colours.line2))
                 .corner_radius(CornerRadius::same(3))
-                .min_size(Vec2::new(width, action_h));
+                .min_size(Vec2::new(width, button_h));
                 let response = header
                     .scope(|ui| {
-                        ui.spacing_mut().button_padding.y = ((LABEL_H - text_h) / 2.0).max(0.0);
+                        ui.spacing_mut().button_padding.y = ((button_h - text_h) / 2.0).max(0.0);
                         ui.add(button)
                     })
                     .inner
@@ -327,7 +328,7 @@ impl RigWerkApp {
     /// Step 5: a dot per path after the *Paths* label; a click scrolls that
     /// path into view.
     fn path_label_dots(&mut self, ui: &mut egui::Ui, slots: &[usize], at: egui::Pos2) {
-        let rect = Rect::from_min_size(at, Vec2::new(16.0 * slots.len() as f32, LABEL_H - 4.0));
+        let rect = Rect::from_min_size(at, Vec2::new(16.0 * slots.len() as f32, LABEL_H));
         let mut dots = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect)
@@ -417,17 +418,19 @@ fn console_reason(reason: &'static str) -> &'static str {
     }
 }
 
-/// A group's small label at `at`.  Returns where it ends.
+/// A group's small label at `at`, centred in the label row.  Returns where
+/// it ends.
 fn group_label(ui: &egui::Ui, at: egui::Pos2, text: &str) -> f32 {
     let colours = palette(ui.ctx());
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),
-        font(Face::SansMedium, TypeRole::Secondary),
+        font(Face::SansMedium, TypeRole::Body),
         colours.text3,
     );
     let width = galley.size().x;
+    let y = at.y + (LABEL_H - galley.size().y) / 2.0;
     ui.painter()
-        .galley(egui::pos2(at.x, at.y + 2.0), galley, colours.text3);
+        .galley(egui::pos2(at.x, y), galley, colours.text3);
     at.x + width
 }
 
