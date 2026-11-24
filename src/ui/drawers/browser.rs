@@ -446,8 +446,11 @@ fn effect_row(
     );
     palette_focus(ui, &response, rect);
     let pointer = response.interact_pointer_pos();
-    let response =
-        response.on_hover_text("Enter adds this effect. Shift+Enter also opens its editor.");
+    let response = response.on_hover_text(if candidate.scan_error.is_some() {
+        "Enter shows why this bundle cannot be added."
+    } else {
+        "Enter adds this effect. Shift+Enter also opens its editor."
+    });
     let on_star = pointer.is_some_and(|pos| star.contains(pos));
     if star_response.clicked() || (on_star && response.clicked()) {
         return Some(RowAction::Favourite);

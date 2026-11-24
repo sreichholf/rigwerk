@@ -1,4 +1,7 @@
-//! CLAP bundle discovery and descriptor scanning.
+//! CLAP bundle discovery and descriptor scanning.  Unlike VST3 and LV2,
+//! listing a CLAP bundle loads its module and calls the bundle's own `init`
+//! in this process, so this is the only scan that runs third-party code
+//! just to say what a bundle holds.
 
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
@@ -16,16 +19,20 @@ pub(crate) fn fixed_string(buffer: &[c_char]) -> String {
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
-/// One discovered CLAP plugin.
+/// One discovered CLAP plugin, or one bundle that could not be read.
 #[derive(Clone, Debug)]
 pub(crate) struct ClapCandidate {
     pub(crate) path: PathBuf,
+    /// The plugin id, empty on a bundle that could not be read.
     pub(crate) plugin_id: String,
     pub(crate) name: String,
     pub(crate) vendor: String,
     pub(crate) category: String,
     /// The descriptor's features as declared (`category` joins them).
     pub(crate) features: Vec<String>,
+    /// Why the bundle could not be read.  Set only on a row that exists to
+    /// report the failure; a readable bundle leaves it `None`.
+    pub(crate) scan_error: Option<String>,
 }
 
 /// Standard CLAP locations, plus `CLAP_PATH` and `RIGWERK_CLAP_PATH`.
@@ -69,6 +76,12 @@ pub(crate) fn scan_library() -> Vec<ClapCandidate> {
     for root in scan_roots() {
         collect_bundles(&root, 0, &mut bundles);
     }
+    scan_bundles(bundles)
+}
+
+/// Lists the effects in `bundles`, keeping one row for a bundle that cannot
+/// be read.  Split from the root walk so a test can scan a folder it filled.
+pub(super) fn scan_bundles(mut bundles: Vec<PathBuf>) -> Vec<ClapCandidate> {
     bundles.sort();
     bundles.dedup();
 
@@ -76,7 +89,10 @@ pub(crate) fn scan_library() -> Vec<ClapCandidate> {
     for bundle in bundles {
         match scan_bundle(&bundle) {
             Ok(mut candidates) => found.append(&mut candidates),
-            Err(error) => eprintln!("[audio-bridge] skipping {}: {error}", bundle.display()),
+            // Kept as a row rather than skipped: a bundle that cannot be
+            // read has no descriptor, so this is the only thing the browser
+            // can show for it.
+            Err(error) => found.push(unreadable_bundle(&bundle, error)),
         }
     }
     found.sort_by_cached_key(|candidate| candidate.name.to_lowercase());
@@ -86,12 +102,61 @@ pub(crate) fn scan_library() -> Vec<ClapCandidate> {
     found
 }
 
+/// The row for a bundle whose module did not load or panicked.
+fn unreadable_bundle(bundle: &Path, error: String) -> ClapCandidate {
+    ClapCandidate {
+        path: bundle.to_path_buf(),
+        plugin_id: String::new(),
+        name: bundle
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("CLAP plugin")
+            .to_owned(),
+        vendor: String::new(),
+        category: "CLAP effect".to_owned(),
+        features: Vec::new(),
+        scan_error: Some(error),
+    }
+}
+
 /// Lists the effects in one bundle.  The scan shares the module with any
 /// loaded instance of it: a module already in use is neither initialised
 /// again nor deinitialised when the scan finishes.
+///
+/// A Rust panic thrown while the bundle is read is contained and reported
+/// as a failed bundle, with the panic's own text after that sentence when it
+/// has one.  Dropping the handle runs the bundle's `deinit`; a panic there
+/// cannot unwind the scan, so the rows already found are still returned.
+/// A panic the module turns into `abort` at its `extern "C"` boundary cannot
+/// be caught here: the process ends before the unwind reaches this frame,
+/// and only a subprocess could survive that.
 pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<ClapCandidate>, String> {
-    let module = acquire_module(bundle)?;
-    Ok(scan_module(bundle, &module))
+    // `acquire_module` calls the bundle's `init`; `scan_module` calls its
+    // factory and descriptors; dropping the handle calls `deinit`.  Each
+    // step runs inside `contained`, so a host-side panic becomes a scan
+    // error instead of an unwind that loses the rows already found.
+    let module = contained(|| acquire_module(bundle))??;
+    let found = contained(|| scan_module(bundle, &module));
+    let _ = contained(move || drop(module));
+    found
+}
+
+/// The sentence a contained panic reports, used as the prefix of the error
+/// and on its own when the payload carries no text.
+pub(super) const PANIC_WHILE_READ: &str = "The bundle panicked while it was read.";
+
+/// Runs third-party code and turns a Rust panic into a scan error.
+pub(super) fn contained<T>(work: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|payload| {
+        let text = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        match text {
+            Some(text) if !text.is_empty() => format!("{PANIC_WHILE_READ} {text}"),
+            _ => PANIC_WHILE_READ.to_owned(),
+        }
+    })
 }
 
 pub(super) fn scan_module(bundle: &Path, module: &ClapModule) -> Vec<ClapCandidate> {
@@ -156,6 +221,7 @@ pub(super) fn candidate_from_descriptor(
         vendor,
         category,
         features,
+        scan_error: None,
     })
 }
 

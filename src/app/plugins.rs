@@ -18,6 +18,17 @@ use crate::audio::{PluginFormat, PluginPref};
 /// How many recently used effects are kept.
 const RECENT_LIMIT: usize = 10;
 
+/// How long a scan may run before the browser gives up on it.  A library of
+/// several hundred bundles finishes in seconds even with cold caches, so a
+/// scan still silent after this holds a bundle that will never answer, and
+/// the user needs Rescan back.
+///
+/// This only unlatches the button.  A hung `clap_entry.init` still holds the
+/// process-wide CLAP module lock (`audio/clap/module.rs`), so the stuck
+/// thread never returns, a later scan blocks on that lock, and a CLAP load
+/// on the UI thread blocks behind it.  Only a subprocess can recover those.
+const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// One effect in the favourites or the recent list.  The path, the format,
 /// the class and the name together name it: two classes in one bundle stay
 /// distinct.
@@ -238,9 +249,10 @@ pub(crate) struct PluginCandidate {
     /// (or, for LV2, when there are more than two inputs).
     pub(crate) channels: Option<u32>,
     /// What went wrong reading this candidate, when the scan could still
-    /// list it: a VST3 `moduleinfo.json` it could not read or parse, or an
-    /// LV2 plugin that needs an unsupported feature, a non-optional CV port,
-    /// or more audio ports than the host supplies.
+    /// list it: a VST3 `moduleinfo.json` it could not read or parse, an LV2
+    /// plugin that needs an unsupported feature, a non-optional CV port, or
+    /// more audio ports than the host supplies, or a CLAP bundle whose
+    /// module could not be loaded or panicked.
     pub(crate) scan_error: Option<String>,
 }
 
@@ -257,8 +269,13 @@ fn declared_channels(tags: &[String]) -> Option<u32> {
 
 pub(crate) struct PluginBrowser {
     pub(crate) library: Vec<PluginCandidate>,
+    /// A scan is running and not yet given up on.  True only while
+    /// `receiver` is `Some`; [`PluginBrowser::stop_waiting`] is the only
+    /// place that clears it.
     pub(crate) scanning: bool,
     pub(crate) receiver: Option<mpsc::Receiver<Vec<PluginCandidate>>>,
+    /// When a running scan is given up on if no result has arrived.
+    pub(crate) scan_deadline: Option<std::time::Instant>,
     pub(crate) search: String,
     pub(crate) path_input: String,
     pub(crate) notice: Option<(String, std::time::Instant)>,
@@ -290,6 +307,7 @@ impl Default for PluginBrowser {
             library: Vec::new(),
             scanning: false,
             receiver: None,
+            scan_deadline: None,
             search: String::new(),
             path_input: String::new(),
             notice: None,
@@ -334,17 +352,42 @@ fn push_folder(folders: &mut Vec<String>, path: &std::path::Path) {
 
 impl PluginBrowser {
     pub(crate) fn start_scan(&mut self) {
-        if self.scanning {
+        self.start_scan_with(scan_library);
+    }
+
+    /// Starts `scan` on its own thread and arms the deadline.  A test passes
+    /// a body that does no I/O, so the suite never reads (and loads) the
+    /// plugins installed on the machine; [`start_scan`] passes the real scan.
+    fn start_scan_with(&mut self, scan: fn() -> Vec<PluginCandidate>) {
+        if self.receiver.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        self.scanning = true;
         self.receiver = Some(rx);
-        let _ = thread::Builder::new()
+        self.scanning = true;
+        self.scan_deadline = Some(std::time::Instant::now() + SCAN_TIMEOUT);
+        let spawned = thread::Builder::new()
             .name("rigwerk-plugin-scan".to_owned())
             .spawn(move || {
-                let _ = tx.send(scan_library());
+                let _ = tx.send(scan());
             });
+        if spawned.is_err() {
+            self.stop_waiting();
+            self.notice = Some((
+                "Could not start the plugin scan.".to_owned(),
+                std::time::Instant::now(),
+            ));
+        }
+    }
+
+    /// Stops waiting for the scan.  The only place `scanning`, `receiver`
+    /// and `scan_deadline` are cleared, so no path can leave the browser
+    /// waiting forever, and dropping the receiver is what discards a result
+    /// the thread sends after that.  Safe to call with no scan running.
+    pub(crate) fn stop_waiting(&mut self) {
+        self.receiver = None;
+        self.scanning = false;
+        self.scan_deadline = None;
     }
 }
 
@@ -373,12 +416,14 @@ fn candidate_from_clap(candidate: ClapCandidate) -> PluginCandidate {
     PluginCandidate {
         path: candidate.path,
         format: PluginFormat::Clap,
-        class_id: Some(candidate.plugin_id),
+        // A bundle that could not be read has no plugin id; its row exists
+        // only to show `scan_error`, so it must not look loadable.
+        class_id: Some(candidate.plugin_id).filter(|id| !id.trim().is_empty()),
         name: candidate.name,
         vendor: candidate.vendor,
         category: candidate.category,
         channels: declared_channels(&candidate.features),
-        scan_error: None,
+        scan_error: candidate.scan_error,
     }
 }
 
@@ -497,6 +542,18 @@ fn candidates_from_bundle(path: &Path) -> Vec<PluginCandidate> {
         });
     }
     found
+}
+
+/// Why the browser cannot add or favourite this row, or `None` when it can.
+/// A row with a `scan_error` exists only to report it; a CLAP row with no id
+/// has nothing to open.  The VST3 fallback row is the one row without a class
+/// id that still loads: its module names its audio class at load time.
+fn row_problem(candidate: &PluginCandidate) -> Option<String> {
+    if let Some(error) = &candidate.scan_error {
+        return Some(error.clone());
+    }
+    (candidate.format == PluginFormat::Clap && candidate.class_id.is_none())
+        .then(|| "That CLAP bundle lists no plugin to open.".to_owned())
 }
 
 /// One effect the screenshot column can show when nothing was scanned.
@@ -620,6 +677,12 @@ impl RigWerkApp {
         candidate: &PluginCandidate,
         open_editor: bool,
     ) -> bool {
+        // A row that reports a scan error cannot load, so repeating the
+        // reason beats replacing it with a load error from the id or path.
+        if let Some(problem) = row_problem(candidate) {
+            self.plugin_browser.notice = Some((problem, std::time::Instant::now()));
+            return false;
+        }
         let path = self.plugin_browser.path;
         if self
             .paths
@@ -670,9 +733,14 @@ impl RigWerkApp {
             .position(|have| have.same(&id))
         {
             self.plugin_browser.favourites.remove(index);
-        } else {
-            self.plugin_browser.favourites.push(id);
+            return;
         }
+        // A favourite of a row that cannot load would never match again.
+        if let Some(problem) = row_problem(candidate) {
+            self.plugin_browser.notice = Some((problem, std::time::Instant::now()));
+            return;
+        }
+        self.plugin_browser.favourites.push(id);
     }
 
     fn remember_recent(&mut self, candidate: &PluginCandidate) {
@@ -738,14 +806,21 @@ impl RigWerkApp {
     }
 
     pub(crate) fn poll_plugin_scan(&mut self) {
-        let Some(receiver) = &self.plugin_browser.receiver else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(library) => {
+        let received = self
+            .plugin_browser
+            .receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match received {
+            // No scan in flight.  Clearing here too keeps Rescan from ever
+            // latching, whatever state the fields were left in.
+            None => self.plugin_browser.stop_waiting(),
+            // A result that has arrived is applied even after the deadline: a
+            // slow scan on a network or antivirus-scanned drive is healthy,
+            // and its rows are worth more than a fresh start.
+            Some(Ok(library)) => {
                 self.plugin_browser.library = library;
-                self.plugin_browser.scanning = false;
-                self.plugin_browser.receiver = None;
+                self.plugin_browser.stop_waiting();
                 self.push_log(
                     format!(
                         "Found {} plugin{} (VST3, CLAP and LV2).",
@@ -759,15 +834,28 @@ impl RigWerkApp {
                     LogTone::Teal,
                 );
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.plugin_browser.scanning = false;
-                self.plugin_browser.receiver = None;
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.plugin_browser.stop_waiting();
                 self.plugin_browser.notice = Some((
                     "The plugin scan stopped unexpectedly.".to_owned(),
                     std::time::Instant::now(),
                 ));
             }
-            Err(mpsc::TryRecvError::Empty) => {}
+            // Only a scan that is still silent is abandoned; the deadline is
+            // what lets the user scan again after a bundle never returns.
+            Some(Err(mpsc::TryRecvError::Empty)) => {
+                let deadline_passed = self
+                    .plugin_browser
+                    .scan_deadline
+                    .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+                if deadline_passed {
+                    self.plugin_browser.stop_waiting();
+                    self.plugin_browser.notice = Some((
+                        "The plugin scan stopped waiting; a bundle is not answering.".to_owned(),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
         }
     }
 

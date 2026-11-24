@@ -1,6 +1,6 @@
 use super::{
     candidate_from_clap, candidates_from_bundle, category_tag, declared_channels, position_phrase,
-    sanitize_effect_ids, visible_effects, EffectFilter, EffectId, PluginCandidate,
+    sanitize_effect_ids, visible_effects, EffectFilter, EffectId, PluginCandidate, SCAN_TIMEOUT,
 };
 use crate::audio::vst3::TestBundles;
 use crate::audio::PluginFormat;
@@ -184,6 +184,7 @@ fn a_clap_candidate_reads_its_channels_from_its_features() {
             .iter()
             .map(|feature| (*feature).to_owned())
             .collect(),
+        scan_error: None,
     };
     let mono = candidate_from_clap(candidate(&["audio-effect", "mono"]));
     assert_eq!(mono.channels, Some(1));
@@ -191,6 +192,119 @@ fn a_clap_candidate_reads_its_channels_from_its_features() {
     assert_eq!(mono.category, "audio-effect · mono");
     let open = candidate_from_clap(candidate(&["audio-effect", "distortion"]));
     assert_eq!(open.channels, None);
+}
+
+#[test]
+fn an_unreadable_clap_bundle_keeps_its_row_and_reason() {
+    let broken = crate::audio::clap::ClapCandidate {
+        path: "Broken.clap".into(),
+        plugin_id: String::new(),
+        name: "Broken".to_owned(),
+        vendor: String::new(),
+        category: "CLAP effect".to_owned(),
+        features: Vec::new(),
+        scan_error: Some("CLAP load failed: not a plugin".to_owned()),
+    };
+    let row = candidate_from_clap(broken);
+    assert_eq!(row.class_id, None, "there is no id to open it with");
+    assert_eq!(
+        row.scan_error.as_deref(),
+        Some("CLAP load failed: not a plugin")
+    );
+}
+
+#[test]
+fn a_scan_that_never_answers_stops_waiting_at_the_deadline() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = crate::app::blank_app();
+    app.plugin_browser.scanning = true;
+    app.plugin_browser.receiver = Some(rx);
+    // The deadline is now, so the next poll is already past it: the state a
+    // bundle that hangs in its `init` leaves behind.
+    app.plugin_browser.scan_deadline = Some(std::time::Instant::now());
+    app.poll_plugin_scan();
+    assert!(!app.plugin_browser.scanning, "Rescan works again");
+    assert!(app.plugin_browser.receiver.is_none());
+    assert_eq!(app.plugin_browser.scan_deadline, None);
+    let notice = &app.plugin_browser.notice.as_ref().expect("notice").0;
+    assert!(notice.contains("stopped waiting"), "{notice}");
+    // The hung thread has nowhere to send its result: a late one is dropped.
+    assert!(tx.send(vec![listed("Late", "", "Delay")]).is_err());
+    app.poll_plugin_scan();
+    assert!(app.plugin_browser.library.is_empty());
+}
+
+#[test]
+fn a_finished_scan_is_applied_and_clears_the_wait() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = crate::app::blank_app();
+    app.plugin_browser.scanning = true;
+    app.plugin_browser.receiver = Some(rx);
+    app.plugin_browser.scan_deadline = Some(std::time::Instant::now() + SCAN_TIMEOUT);
+    tx.send(vec![listed("Amp", "Rig", "Amp")]).expect("send");
+    app.poll_plugin_scan();
+    assert_eq!(app.plugin_browser.library.len(), 1);
+    assert!(!app.plugin_browser.scanning);
+    assert!(app.plugin_browser.receiver.is_none());
+    assert_eq!(app.plugin_browser.scan_deadline, None);
+}
+
+#[test]
+fn a_result_that_already_arrived_is_applied_past_the_deadline() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = crate::app::blank_app();
+    app.plugin_browser.scanning = true;
+    app.plugin_browser.receiver = Some(rx);
+    app.plugin_browser.scan_deadline = Some(std::time::Instant::now());
+    tx.send(vec![listed("Slow", "Rig", "Delay")]).expect("send");
+    app.poll_plugin_scan();
+    assert_eq!(app.plugin_browser.library.len(), 1, "a slow scan answered");
+    assert!(!app.plugin_browser.scanning);
+    let notice = app.plugin_browser.notice.as_ref().map(|notice| &notice.0);
+    assert!(!notice.is_some_and(|notice| notice.contains("not answering")));
+}
+
+#[test]
+fn start_scan_arms_one_deadline_and_refuses_a_second_scan() {
+    let mut browser = super::PluginBrowser::default();
+    let before = std::time::Instant::now();
+    // An empty body: the suite must not read, or load, the machine's plugins.
+    browser.start_scan_with(Vec::new);
+    let armed = browser.scan_deadline.expect("the deadline is armed");
+    let after = std::time::Instant::now();
+    assert!(browser.scanning);
+    assert!(browser.receiver.is_some());
+    assert!(
+        armed >= before + SCAN_TIMEOUT && armed <= after + SCAN_TIMEOUT,
+        "one timeout from the moment the scan started"
+    );
+    browser.start_scan_with(Vec::new);
+    assert_eq!(
+        browser.scan_deadline,
+        Some(armed),
+        "a scan is not restarted"
+    );
+    browser.stop_waiting();
+}
+
+#[test]
+fn a_row_that_could_not_be_read_cannot_be_added_or_favourited() {
+    let mut app = three_effects();
+    app.open_effect_browser(0, 0);
+    let mut broken = listed("Broken", "Rig", "Delay");
+    broken.scan_error = Some("Could not read the bundle.".to_owned());
+    assert!(!app.add_listed_effect(&broken, false));
+    let notice = &app.plugin_browser.notice.as_ref().expect("notice").0;
+    assert_eq!(notice, "Could not read the bundle.", "the row's own reason");
+    app.toggle_favourite(&broken);
+    assert!(app.plugin_browser.favourites.is_empty());
+    // A CLAP row with no id has nothing to open, even without an error.
+    let mut no_id = listed("No id", "", "Delay");
+    no_id.format = PluginFormat::Clap;
+    no_id.path = PathBuf::from("No id.clap");
+    assert!(!app.add_listed_effect(&no_id, false));
+    let notice = &app.plugin_browser.notice.as_ref().expect("notice").0;
+    assert!(notice.contains("no plugin"), "{notice}");
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
