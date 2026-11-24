@@ -6,7 +6,7 @@
 use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Vec2};
 
-use super::{level_block, menu_entry, strip_parts, LevelBlock, StripLayout};
+use super::{level_block, menu_entry, strip_parts, trim_line, LevelBlock, StripLayout};
 use crate::app::screen::{format_ms, Sheet};
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
@@ -112,6 +112,7 @@ impl RigWerkApp {
         });
 
         let any_solo = self.any_solo();
+        let match_line = trim_line("match", path.mix.match_db);
         let events = level_block(
             &mut bottom,
             layout,
@@ -129,6 +130,7 @@ impl RigWerkApp {
                 // A return is solo-safe and has no solo.
                 solo: (!path.mix.is_return()).then_some(path.mix.solo),
                 dim: !Self::mix_audible(&path.mix, any_solo),
+                trim_line: match_line.as_deref(),
             },
         );
         if let Some(level) = events.level {
@@ -148,7 +150,7 @@ impl RigWerkApp {
             None,
             None,
         );
-        if strip.clicked() {
+        if events.trim_line || strip.clicked() {
             self.open_sheet(Sheet::Path { path: slot });
         }
     }

@@ -60,6 +60,15 @@ fn the_loudness_controls_are_named() {
     let tree = accesskit_frame(|ui| app.sheet_body(ui, 600.0));
     let target = node_named(&tree, "Loudness target");
     assert_eq!(target.role(), eframe::egui::Role::Slider);
+    let trim = tree
+        .nodes
+        .iter()
+        .find(|(_, node)| {
+            node.label() == Some("Output trim") && node.role() == eframe::egui::Role::Slider
+        })
+        .map(|(_, node)| node)
+        .expect("the Output trim slider");
+    assert_eq!(trim.role(), eframe::egui::Role::Slider);
     let _ = node_named(&tree, "Learn");
     let _ = node_named(&tree, "Reset");
 }

@@ -172,7 +172,7 @@ pub struct Snapshot {
     /// is not limiting.
     pub out_reduction_db: f32,
     /// Loudness of the clock output: momentary, short-term, integrated and
-    /// the automatic trim it applied.  No reading is silence at
+    /// the output trim it applied.  No reading is silence at
     /// [`super::SILENCE_LUFS`].
     pub out_loudness: LoudnessReading,
     /// The clock output's real channel count (0 until its first block).

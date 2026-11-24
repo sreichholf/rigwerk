@@ -33,7 +33,7 @@ fn the_source_grid_and_the_output_chips_are_named() {
 }
 
 #[test]
-fn each_output_the_path_plays_on_offers_a_match_button() {
+fn the_path_sheet_has_one_match_control_and_needs_two_paths_for_the_link() {
     use crate::app::blank_app;
     use crate::app::screen::Sheet;
     use crate::ui::widgets::{accesskit_frame, node_named};
@@ -41,7 +41,24 @@ fn each_output_the_path_plays_on_offers_a_match_button() {
     let mut app = blank_app();
     app.open_sheet(Sheet::Path { path: 0 });
     let tree = accesskit_frame(|ui| app.sheet_body(ui, 600.0));
-    let _ = node_named(&tree, "Match");
+    let match_value = node_named(&tree, "Path match");
+    assert_eq!(match_value.role(), eframe::egui::Role::Slider);
+    let names: Vec<String> = tree
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.label().map(str::to_owned))
+        .collect();
+    assert!(!names.iter().any(|name| name == "Match paths…"));
+    assert!(
+        !tree.nodes.iter().any(|(_, node)| {
+            node.role() == eframe::egui::Role::Button && node.label() == Some("Match")
+        }),
+        "the per-output Match buttons are gone"
+    );
+
+    app.duplicate_path(0).expect("a second path");
+    let tree = accesskit_frame(|ui| app.sheet_body(ui, 600.0));
+    let _ = node_named(&tree, "Match paths…");
 }
 
 #[test]

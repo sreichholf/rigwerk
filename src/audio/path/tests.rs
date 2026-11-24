@@ -1,5 +1,31 @@
-use super::PathControls;
+use super::{PathControls, PathMix, PATH_MATCH_MAX_DB};
 use crate::audio::LockStats;
+
+#[test]
+fn a_path_match_is_clamped_and_a_nan_becomes_zero() {
+    let control = PathControls::new(48_000);
+    control.set_match_db(100.0);
+    assert_eq!(control.match_db(), PATH_MATCH_MAX_DB);
+    control.set_match_db(-100.0);
+    assert_eq!(control.match_db(), -PATH_MATCH_MAX_DB);
+    control.set_match_db(f32::NAN);
+    assert_eq!(control.match_db(), 0.0);
+    assert_eq!(control.match_gain(), 1.0);
+}
+
+#[test]
+fn the_path_mix_sanitizes_its_match() {
+    let mix = PathMix {
+        match_db: f32::INFINITY,
+        ..PathMix::default()
+    };
+    assert_eq!(mix.sanitized().match_db, PATH_MATCH_MAX_DB);
+    let mix = PathMix {
+        match_db: f32::NAN,
+        ..PathMix::default()
+    };
+    assert_eq!(mix.sanitized().match_db, 0.0);
+}
 
 #[test]
 fn a_path_with_no_effects_does_not_count_a_chain_attempt() {

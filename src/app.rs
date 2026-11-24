@@ -16,6 +16,7 @@ pub(crate) mod driver_check;
 pub(crate) mod issues;
 pub(crate) mod latency;
 pub(crate) mod layouts;
+pub(crate) mod match_paths;
 pub(crate) mod nam;
 pub(crate) mod output_devices;
 pub(crate) mod paths;
@@ -218,13 +219,27 @@ pub struct RigWerkApp {
     pub(crate) path_order: Vec<usize>,
     /// The path slot the console, the sheets and the browser edit.
     pub(crate) selected_path: usize,
+    /// Where each output's trim came from, clock output first then the extra
+    /// outputs.  Runtime only.
+    pub(crate) output_trim_origins: [output_devices::OutputTrimOrigin; MAX_EXTRA_OUTPUTS + 1],
     /// Level, mute and per-path channel maps of the clock output (the
     /// selected output), pushed to the engine every frame.
     pub(crate) clock_output: OutputDeviceSettings,
     /// Extra output devices.  Pushed live by `push_extra_outputs_to_engine`.
     pub(crate) extra_outputs: Vec<ExtraOutputPref>,
-    /// A path Match or output Learn in progress.
+    /// An output Learn or Match paths measurement in progress.
     pub(crate) loudness_measurement: Option<output_devices::LoudnessMeasurement>,
+    /// The Match paths target and the last loaded reference position, saved
+    /// with the session.
+    pub(crate) match_paths: match_paths::MatchPathsSettings,
+    /// The reference path as a live slot.  Saved as a position.
+    pub(crate) match_paths_reference: Option<usize>,
+    /// The last Match paths measurement, while the sheet offers to apply it.
+    pub(crate) match_paths_result: Option<match_paths::MatchPathsResult>,
+    /// The sheet's tick boxes, one per row of [`Self::match_paths_result`].
+    pub(crate) match_paths_ticks: Vec<bool>,
+    /// What the sheet says after Apply or after a failed measurement.
+    pub(crate) match_paths_status: Option<String>,
     /// Last EQ slot shown in the inspector (also persisted as `eq_edit`).
     pub(crate) eq_edit: EqSlot,
     /// Selected chain stage on the console.
@@ -486,6 +501,7 @@ impl RigWerkApp {
             output_buffer: self.output_buffer,
             bridge_buffer_mode: bridge_buffer_to_pref(self.bridge_buffer_mode),
             bridge_buffer_ms: self.bridge_buffer_ms,
+            match_paths: self.saved_match_paths(&order),
             paths,
             selected_path,
             clock_output,
@@ -613,6 +629,7 @@ impl RigWerkApp {
             paths: std::array::from_fn(|_| None),
             path_order: Vec::new(),
             selected_path: 0,
+            output_trim_origins: [output_devices::OutputTrimOrigin::None; MAX_EXTRA_OUTPUTS + 1],
             clock_output: preferences.clock_output.sanitized(),
             extra_outputs: {
                 let mut extra_outputs: Vec<_> = preferences
@@ -625,6 +642,11 @@ impl RigWerkApp {
                 extra_outputs
             },
             loudness_measurement: None,
+            match_paths: preferences.match_paths.sanitized(),
+            match_paths_reference: None,
+            match_paths_result: None,
+            match_paths_ticks: Vec::new(),
+            match_paths_status: None,
             eq_edit: if preferences.eq_edit == 1 {
                 EqSlot::Post
             } else {
@@ -741,6 +763,8 @@ impl RigWerkApp {
             extra_outputs,
             preferences.selected_path,
         );
+        app.install_match_paths(preferences.match_paths);
+        app.reset_output_trim_origins();
         app.apply_bridge_buffer();
         if !screenshot_mode {
             app.begin_plugin_scan();
@@ -885,9 +909,15 @@ pub(crate) fn blank_app() -> RigWerkApp {
         paths: std::array::from_fn(|slot| (slot == 0).then(paths::SignalPath::default)),
         path_order: vec![0],
         selected_path: 0,
+        output_trim_origins: [output_devices::OutputTrimOrigin::None; MAX_EXTRA_OUTPUTS + 1],
         clock_output: OutputDeviceSettings::default(),
         extra_outputs: Vec::new(),
         loudness_measurement: None,
+        match_paths: match_paths::MatchPathsSettings::default(),
+        match_paths_reference: None,
+        match_paths_result: None,
+        match_paths_ticks: Vec::new(),
+        match_paths_status: None,
         eq_edit: EqSlot::Pre,
         chain_selected: chain::ChainSelection::PreEq,
         routing_device: 0,

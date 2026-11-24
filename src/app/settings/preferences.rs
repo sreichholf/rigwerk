@@ -112,6 +112,10 @@ pub(crate) struct Preferences {
     pub(crate) paths: Vec<PathPref>,
     /// The path the console, sheets and browser edit (a position in `paths`).
     pub(crate) selected_path: usize,
+    /// The Match paths reference and target.  Missing on older saves: the
+    /// target at -18 LUFS, matching the target.
+    #[serde(default, skip_serializing_if = "crate::app::match_paths::is_default")]
+    pub(crate) match_paths: crate::app::match_paths::MatchPathsSettings,
     /// Level, mute and channel map of the clock output (`output_id`).
     #[serde(rename = "clock_device")]
     pub(crate) clock_output: OutputDeviceSettings,
@@ -265,6 +269,7 @@ impl Default for Preferences {
             plugins: Vec::new(),
             paths: Vec::new(),
             selected_path: 0,
+            match_paths: crate::app::match_paths::MatchPathsSettings::default(),
             clock_output: OutputDeviceSettings::default(),
             extra_outputs: Vec::new(),
             measured_latency: None,
@@ -316,6 +321,7 @@ impl Preferences {
             plugins: self.plugins.clone(),
             chain_bypass: false,
             level_db: 0.0,
+            match_db: 0.0,
             mute: false,
             solo: false,
             feed: crate::audio::PathFeed::Input,
@@ -713,6 +719,7 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.selected_path = preferences
         .selected_path
         .min(preferences.paths.len().saturating_sub(1));
+    preferences.match_paths = preferences.match_paths.sanitized();
     preferences.clock_output = preferences.clock_output.sanitized();
     sanitize_extra_outputs(&mut preferences.extra_outputs);
     // A measurement that cannot describe a real path is dropped; the app
@@ -777,6 +784,7 @@ pub(crate) fn sanitize_session(session: &mut Session) {
     if !session.paths.is_empty() {
         sanitize_paths(&mut session.paths);
     }
+    session.match_paths = session.match_paths.sanitized();
     session.clock_output = session.clock_output.sanitized();
     sanitize_extra_outputs(&mut session.extra_outputs);
 }

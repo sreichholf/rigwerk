@@ -11,7 +11,9 @@ use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Stroke, Vec2};
 
 use super::StripLayout;
-use super::{level_block, strip_detail, strip_name, strip_parts, DensityStep, LevelBlock};
+use super::{
+    level_block, strip_detail, strip_name, strip_parts, trim_line, DensityStep, LevelBlock,
+};
 use crate::app::output_devices::OutputBadge;
 use crate::app::screen::Sheet;
 use crate::app::RigWerkApp;
@@ -88,6 +90,7 @@ impl RigWerkApp {
             strip_detail(&mut top, &loudness_line(row.loudness));
         }
 
+        let trim_line = trim_line("trim", row.settings.loudness.trim_db);
         let events = level_block(
             &mut bottom,
             layout,
@@ -104,6 +107,7 @@ impl RigWerkApp {
                 mute: Some(row.settings.mute),
                 solo: None,
                 dim: row.settings.mute,
+                trim_line: trim_line.as_deref(),
             },
         );
         if let Some(level) = events.level {
@@ -120,7 +124,7 @@ impl RigWerkApp {
             None,
             None,
         );
-        if strip.clicked() {
+        if events.trim_line || strip.clicked() {
             self.open_sheet(Sheet::Output { output: device });
         }
     }
@@ -165,18 +169,12 @@ impl RigWerkApp {
 }
 
 /// *-14.2 LUFS* from the short-term reading, or *— LUFS* until the first
-/// three seconds are in.  A non-zero automatic trim stays on the line while
-/// it is settled.
+/// three seconds are in.  The output trim has its own line under the fader.
 fn loudness_line(reading: LoudnessReading) -> String {
-    let level = if reading.short_term_lufs > crate::audio::SILENCE_LUFS {
+    if reading.short_term_lufs > crate::audio::SILENCE_LUFS {
         format!("{:.1} LUFS", reading.short_term_lufs)
     } else {
         "— LUFS".to_owned()
-    };
-    if reading.trim_db.abs() >= 0.1 {
-        format!("{level} · {:+.1} dB", reading.trim_db)
-    } else {
-        level
     }
 }
 

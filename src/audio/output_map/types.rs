@@ -30,8 +30,7 @@ pub const LOUDNESS_TARGET_MIN_LUFS: f32 = -30.0;
 pub const LOUDNESS_TARGET_MAX_LUFS: f32 = -5.0;
 pub const LOUDNESS_TARGET_DEFAULT_LUFS: f32 = -14.0;
 
-/// How far a learned trim or a path match may move a device from its own
-/// level, dB.
+/// How far an output trim may move a device from its own level, dB.
 pub const LOUDNESS_TRIM_MAX_DB: f32 = 12.0;
 
 /// One output's loudness setting: the target Learn measures against and the
@@ -42,12 +41,13 @@ pub const LOUDNESS_TRIM_MAX_DB: f32 = 12.0;
 pub struct LoudnessSettings {
     /// Target integrated loudness, LUFS.
     pub target_lufs: f32,
-    /// Learned output trim, dB.  Left out of a save while 0.
-    #[serde(default, skip_serializing_if = "learned_db_is_zero")]
-    pub learned_db: f32,
+    /// Output trim, dB: learned by Learn or set by hand.  Left out of a save
+    /// while 0.  Older saves called it `learned_db`.
+    #[serde(alias = "learned_db", default, skip_serializing_if = "trim_db_is_zero")]
+    pub trim_db: f32,
 }
 
-fn learned_db_is_zero(value: &f32) -> bool {
+fn trim_db_is_zero(value: &f32) -> bool {
     *value == 0.0
 }
 
@@ -55,7 +55,7 @@ impl Default for LoudnessSettings {
     fn default() -> Self {
         Self {
             target_lufs: LOUDNESS_TARGET_DEFAULT_LUFS,
-            learned_db: 0.0,
+            trim_db: 0.0,
         }
     }
 }
@@ -68,7 +68,7 @@ impl LoudnessSettings {
     }
 
     /// A NaN target becomes the default; the target is clamped to the range
-    /// the sheet offers.  A NaN learned trim becomes 0 and is clamped to
+    /// the sheet offers.  A NaN output trim becomes 0 and is clamped to
     /// ±[`LOUDNESS_TRIM_MAX_DB`].
     pub fn sanitized(self) -> Self {
         let target = if self.target_lufs.is_nan() {
@@ -77,15 +77,15 @@ impl LoudnessSettings {
             self.target_lufs
                 .clamp(LOUDNESS_TARGET_MIN_LUFS, LOUDNESS_TARGET_MAX_LUFS)
         };
-        let learned_db = if self.learned_db.is_nan() {
+        let trim_db = if self.trim_db.is_nan() {
             0.0
         } else {
-            self.learned_db
+            self.trim_db
                 .clamp(-LOUDNESS_TRIM_MAX_DB, LOUDNESS_TRIM_MAX_DB)
         };
         Self {
             target_lufs: target,
-            learned_db,
+            trim_db,
         }
     }
 }
@@ -266,9 +266,6 @@ pub enum UnusedChannels {
 /// The alignment trim range, ms.
 pub const PATH_TRIM_MAX_MS: f32 = 5.0;
 
-/// Range of the loudness-match trim on one path and device, dB.
-pub const PATH_MATCH_MAX_DB: f32 = 24.0;
-
 /// One signal path's place in one device's sum: its channel map, its level
 /// there, its polarity, and the alignment trim on top of the automatic
 /// alignment.
@@ -284,14 +281,6 @@ pub struct PathMapSettings {
     /// or less delay (negative) for this path on this device, on top of
     /// the automatic alignment.
     pub trim_ms: f32,
-    /// Loudness-match trim, dB (±[`PATH_MATCH_MAX_DB`]), on top of the
-    /// level and kept apart from it.
-    #[serde(default, skip_serializing_if = "match_db_is_zero")]
-    pub match_db: f32,
-}
-
-fn match_db_is_zero(value: &f32) -> bool {
-    *value == 0.0
 }
 
 impl Default for PathMapSettings {
@@ -301,7 +290,6 @@ impl Default for PathMapSettings {
             level_db: 0.0,
             invert: false,
             trim_ms: 0.0,
-            match_db: 0.0,
         }
     }
 }
@@ -331,11 +319,6 @@ impl PathMapSettings {
             } else {
                 self.trim_ms.clamp(-PATH_TRIM_MAX_MS, PATH_TRIM_MAX_MS)
             },
-            match_db: if self.match_db.is_nan() {
-                0.0
-            } else {
-                self.match_db.clamp(-PATH_MATCH_MAX_DB, PATH_MATCH_MAX_DB)
-            },
             ..self
         }
     }
@@ -349,10 +332,7 @@ impl PathMapSettings {
     /// negated when the polarity is flipped.  0 dB and normal polarity is
     /// exactly 1.0.
     pub(crate) fn gain(&self) -> f32 {
-        let mut gain = path_level_gain(self.level_db);
-        if self.match_db != 0.0 {
-            gain *= 10.0f32.powf(self.match_db / 20.0);
-        }
+        let gain = path_level_gain(self.level_db);
         if self.invert {
             -gain
         } else {

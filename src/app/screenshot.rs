@@ -120,6 +120,9 @@ impl RigWerkApp {
         self.frames += 1;
         if self.frames == 1 && self.screenshot.is_some() {
             self.apply_screenshot_routing();
+            if std::env::var("RIGWERK_MATCH_PATHS").is_ok_and(|value| value.trim() == "1") {
+                self.screenshot_match_paths();
+            }
             self.open_sheet_for_screenshot();
             if screenshot_start() {
                 self.start_bridge();
@@ -178,6 +181,49 @@ impl RigWerkApp {
             });
         }
         ctx.request_repaint();
+    }
+
+    /// Test hook for a filled Match paths sheet in screenshots:
+    /// `RIGWERK_MATCH_PATHS=1` shows the result a measurement would produce.
+    /// Nothing is applied and no bridge runs.
+    fn screenshot_match_paths(&mut self) {
+        use crate::app::match_paths::{MatchPathRow, MatchPathsResult};
+        let target = crate::app::match_paths::MATCH_PATHS_TARGET_DEFAULT_LUFS;
+        let readings = [-20.5, -16.0, -22.0, -14.5];
+        let rows = self
+            .path_slots()
+            .into_iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let current_db = self.paths[slot]
+                    .as_ref()
+                    .map_or(0.0, |path| path.mix.match_db);
+                let measured_lufs = readings[index.min(readings.len() - 1)];
+                let new_db = (target - measured_lufs).clamp(
+                    -crate::audio::PATH_MATCH_MAX_DB,
+                    crate::audio::PATH_MATCH_MAX_DB,
+                );
+                MatchPathRow {
+                    slot,
+                    measured_lufs,
+                    blocks: 40,
+                    current_db,
+                    new_db,
+                    change_db: new_db - current_db,
+                    reason: None,
+                    ticked: true,
+                    clamped: false,
+                }
+            })
+            .collect();
+        self.match_paths_result = Some(MatchPathsResult {
+            rows,
+            reference_lufs: target,
+            reference_path: None,
+        });
+        self.match_paths_ticks =
+            vec![true; self.match_paths_result.as_ref().map_or(0, |r| r.rows.len())];
+        self.match_paths_status = None;
     }
 
     /// Test hook for screenshots of Signal Routing:

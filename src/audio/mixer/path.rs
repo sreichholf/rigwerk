@@ -10,6 +10,7 @@ use super::super::delay::{
 };
 use super::super::eq::{EqSlot, Equalizer};
 use super::super::gate::{GateKey, GateSlot, NoiseGate};
+use super::super::loudness::LoudnessMeter;
 use super::super::nam::{NamPosition, NamStage};
 use super::super::path::{DspTime, PathControls, PathState};
 use super::super::plugins::{ChainLease, MAX_ALIGN};
@@ -65,7 +66,14 @@ pub(crate) struct PathProcessor {
     /// The slot generation this chain was started for.  A different one in
     /// the controls means the slot was (re)activated: start fresh.
     generation: u64,
-    /// Path level, mute, solo and the removal fade as one gain.
+    /// The Match paths meter: after the post EQ, before the path gain, so a
+    /// mute, a solo or the trim itself never changes what it hears.  It is
+    /// fed only while a measurement runs.
+    match_meter: LoudnessMeter,
+    /// [`PathControls::match_measure_generation`] as last seen.
+    match_generation: u64,
+    match_active: bool,
+    /// Path level, match, mute, solo and the removal fade as one gain.
     pub(super) gain: Ramp,
     /// That gain per frame of this block ([`Self::fill_gains`]), so a
     /// send can take the path after its level before the sum reads it.
@@ -213,6 +221,9 @@ impl PathProcessor {
             controls_adopted: false,
             plan: BlockPlan::default(),
             generation: 0,
+            match_meter: LoudnessMeter::new(rate),
+            match_generation: 0,
+            match_active: false,
             gain: Ramp::new(1.0),
             gains: Vec::new(),
             is_return: false,
@@ -242,6 +253,9 @@ impl PathProcessor {
         self.drain = None;
         self.dsp_block_ns = 0;
         self.dsp = DspMeter::default();
+        self.match_meter.configure(rate, 2);
+        self.match_meter.reset();
+        self.match_active = false;
     }
 
     /// Parks the chain runtime for a path that is not live, so the UI can
@@ -321,6 +335,13 @@ impl PathProcessor {
         self.chain_step = 1.0 / (CHAIN_RESUME_SECONDS * rate as f32).max(1.0);
         self.follow_eq(controls, rate);
         self.follow_gate(controls, rate);
+        let match_generation = controls.match_measure_generation();
+        self.match_meter.configure(rate, 2);
+        if match_generation != self.match_generation {
+            self.match_generation = match_generation;
+            self.match_meter.reset();
+        }
+        self.match_active = controls.match_measuring();
         let adopted = self.controls_adopted;
         let wanted = controls.is_return();
         if !adopted || self.gain.is_settled_at(0.0) {
@@ -334,7 +355,13 @@ impl PathProcessor {
         // return is solo-safe.
         let soloed_out = any_solo && !controls.soloed() && !self.is_return;
         let silent = self.fading || controls.muted() || soloed_out || unopened || switching;
-        let gain = if silent { 0.0 } else { controls.level_gain() };
+        // Level and match are one ramped gain, so a match trim never steps.
+        // Sends read this gain, so a return follows its senders' matches.
+        let gain = if silent {
+            0.0
+        } else {
+            controls.level_gain() * controls.match_gain()
+        };
         if adopted {
             self.gain.set_target(gain, ramp_samples);
         } else if fade_in {
@@ -616,8 +643,15 @@ impl PathProcessor {
             if self.plan.post_eq {
                 (out[0], out[1]) = self.eq[EqSlot::Post.index()].process(out[0], out[1]);
             }
+            if self.match_active {
+                self.match_meter.push(&out[..2]);
+            }
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
+        }
+        if self.match_active {
+            let (integrated, blocks) = self.match_meter.integrated_with_blocks();
+            controls.publish_match_measurement(integrated, blocks as u32);
         }
         controls.store_meters(peak_l, peak_r);
         controls.store_gate_reduction(self.gate.take_reduction_db());

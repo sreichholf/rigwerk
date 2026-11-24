@@ -48,6 +48,9 @@ pub(crate) struct PathPref {
     pub(crate) chain_bypass: bool,
     /// Path level, dB.
     pub(crate) level_db: f32,
+    /// Loudness-match trim, dB.  One value per path; omitted while 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) match_db: f32,
     pub(crate) mute: bool,
     pub(crate) solo: bool,
     /// What the chain runs on.  Omitted for a path fed by the input, which
@@ -63,6 +66,10 @@ pub(crate) struct PathPref {
 
 fn is_input(feed: &PathFeed) -> bool {
     *feed == PathFeed::Input
+}
+
+fn is_zero(value: &f32) -> bool {
+    *value == 0.0
 }
 
 impl Default for PathPref {
@@ -112,6 +119,7 @@ impl PathPref {
             plugins,
             chain_bypass: mix.chain_bypass,
             level_db: mix.level_db,
+            match_db: mix.match_db,
             mute: mix.mute,
             solo: mix.solo,
             feed: mix.feed,
@@ -158,6 +166,7 @@ impl PathPref {
             gate: self.gate,
             cab: self.cab.controls(),
             level_db: self.level_db,
+            match_db: self.match_db,
             mute: self.mute,
             solo: self.solo,
             chain_bypass: self.chain_bypass,
@@ -187,6 +196,7 @@ impl PathPref {
         self.gate = mix.gate;
         self.cab = CabSettings::from_controls(mix.cab, self.cab.file.clone()).sanitized();
         self.level_db = mix.level_db;
+        self.match_db = mix.match_db;
         self.solo = mix.solo;
         if self.feed == PathFeed::Sends {
             self.sends.clear();

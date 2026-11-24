@@ -524,15 +524,14 @@ impl RigWerkApp {
         self.follow_nam_blocks(slot, &before);
         self.push_paths_to_engine();
         if normalize_changed
-            && self.device_settings().iter().any(|settings| {
-                settings
-                    .path_map
-                    .iter()
-                    .any(|map| map.match_db.abs() >= 0.05)
-            })
+            && self
+                .paths
+                .get(slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|path| path.mix.match_db.abs() >= 0.05)
         {
             self.push_log(
-                "NAM normalization changed; match the path again because normalization happens before Match.",
+                "NAM normalization changed; match the paths again because normalization happens before the match.",
                 LogTone::Amber,
             );
         }

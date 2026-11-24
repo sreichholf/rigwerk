@@ -48,6 +48,7 @@ shot() {
 | `cab-sheet.png` | `RIGWERK_SHEET=cab shot cab-sheet.png` | the cab sheet on Room |
 | `eq-sheet.png` | `RIGWERK_SHEET=eq shot eq-sheet.png` | the Pre EQ sheet on Room |
 | `output-sheet.png` | `RIGWERK_SHEET=output shot output-sheet.png` | the clock output's sheet |
+| `match-paths.png` | `RIGWERK_ROUTING_SETUP=showcase RIGWERK_MATCH_PATHS=1 RIGWERK_SHEET=match-paths shot match-paths.png` | the Match paths sheet after a measurement |
 | `browser.png` | `RIGWERK_DRAWER=browser shot browser.png` | the effect browser |
 | `tuner.png` | `RIGWERK_PAGE=tuner shot tuner.png` | the tuner screen |
 | `setup.png` | `RIGWERK_PAGE=setup shot setup.png` | Setup |

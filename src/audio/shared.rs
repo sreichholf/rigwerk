@@ -11,7 +11,7 @@
 //! the writer runs off the audio thread.
 //!
 //! Everything a path owns (routing, mono, channel enable, EQs, gate, NAM,
-//! plugin chain, level, mute, solo) lives in [`PathControls`], one per path slot in
+//! plugin chain, level, match, mute, solo) lives in [`PathControls`], one per path slot in
 //! [`Shared::paths`].  Paths are added, duplicated and removed here, live
 //! (see the `path` module docs).  The older accessors (`set_eq`, `set_mix`,
 //! ...) act on path 0 and are kept for tests.
@@ -975,26 +975,27 @@ impl Shared {
         }
     }
 
-    /// Starts measuring `slot`'s own loudness on output `device`, so the UI
-    /// can match that path to the device's target.
-    pub(crate) fn start_loudness_match(&self, device: usize, slot: usize) {
-        if let Some(controls) = self.output_controls(device) {
-            controls.set_match_path(Some(slot));
+    /// Arms every live path's Match paths meter at once.
+    pub(crate) fn start_match_paths(&self) {
+        for path in &self.paths {
+            if path.state() == PathState::Active {
+                path.start_match_measurement();
+            }
         }
     }
 
-    /// Stops a loudness match on output `device`.
-    pub(crate) fn stop_loudness_match(&self, device: usize) {
-        if let Some(controls) = self.output_controls(device) {
-            controls.set_match_path(None);
+    /// Stops every path's Match paths meter.  The readings stay until the
+    /// next start, so the UI can collect them first.
+    pub(crate) fn stop_match_paths(&self) {
+        for path in &self.paths {
+            path.stop_match_measurement();
         }
     }
 
-    /// The matched path's `(momentary, short_term)` loudness on output
-    /// `device`, LUFS.
-    pub(crate) fn loudness_match(&self, device: usize) -> Option<(f32, f32)> {
-        self.output_controls(device)
-            .map(DeviceControls::match_reading)
+    /// Path `slot`'s last Match paths reading: gated integrated LUFS and the
+    /// gated block count.
+    pub(crate) fn path_match_measurement(&self, slot: usize) -> (f32, u32) {
+        self.paths[slot.min(MAX_PATHS - 1)].match_measurement()
     }
 
     /// Starts an output Learn on `device`.

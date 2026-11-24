@@ -170,7 +170,7 @@ pub use output_map::{
     AlignmentReport, ChannelMap, MapPreset, MixSide, OutputDeviceSettings, PathMapSettings,
     UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, LOUDNESS_TARGET_DEFAULT_LUFS,
     LOUDNESS_TARGET_MAX_LUFS, LOUDNESS_TARGET_MIN_LUFS, LOUDNESS_TRIM_MAX_DB, MAX_EXTRA_OUTPUTS,
-    MAX_OUTPUT_CHANNELS, PATH_MATCH_MAX_DB, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
+    MAX_OUTPUT_CHANNELS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 #[cfg(test)]
 pub(crate) use shared::tests::claim_main_thread;
@@ -189,8 +189,9 @@ pub use output_map::PATH_TRIM_MAX_MS;
 pub(crate) use path::path_level_gain;
 pub(crate) use path::PathState;
 pub use path::{
-    sanitize_path_level, sanitize_send, DspTime, LockStats, PathFeed, PathMix, PluginLockReport,
-    MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, SEND_OFF_DB,
+    sanitize_path_level, sanitize_path_match, sanitize_send, DspTime, LockStats, PathFeed, PathMix,
+    PluginLockReport, MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_MATCH_MAX_DB,
+    SEND_OFF_DB,
 };
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;

@@ -846,6 +846,9 @@ impl RigWerkApp {
         }
         let removed = self.paths[slot].take();
         self.clear_sends_to(slot);
+        if self.match_paths_reference == Some(slot) {
+            self.match_paths_reference = None;
+        }
         self.path_order.retain(|&other| other != slot);
         if self.selected_path == slot {
             let next = self.selected_slot();
@@ -855,6 +858,13 @@ impl RigWerkApp {
             self.push_log(format!("Removed path {}.", removed.name), LogTone::Amber);
         }
         true
+    }
+
+    /// Sets path `slot`'s loudness-match trim; the mixer ramps it in.
+    pub(crate) fn set_path_match(&mut self, slot: usize, match_db: f32) {
+        if let Some(path) = self.paths.get_mut(slot).and_then(Option::as_mut) {
+            path.mix.match_db = crate::audio::sanitize_path_match(match_db);
+        }
     }
 
     pub(crate) fn set_path_level(&mut self, slot: usize, level_db: f32) {

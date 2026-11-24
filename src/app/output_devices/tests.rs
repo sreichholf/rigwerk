@@ -1,6 +1,6 @@
 use super::{
     click_channels, default_click_mask, device_channel_count, learned_trim_after, learned_trim_db,
-    loudest, matched_trim_db, usable_loudness, OutputBadge, PlaysClick,
+    loudest, usable_loudness, OutputBadge, PlaysClick,
 };
 use crate::app::blank_app;
 use crate::app::devices::inventory_fingerprint;
@@ -345,10 +345,24 @@ fn output_level_and_mute_stay_in_range() {
 }
 
 #[test]
-fn output_loudness_target_and_learned_trim_stay_in_range() {
+fn output_loudness_target_and_output_trim_stay_in_range() {
     let mut app = with_quad_output();
     app.clear_output_learn(1);
-    assert_eq!(app.extra_outputs[0].settings.loudness.learned_db, 0.0);
+    assert_eq!(app.extra_outputs[0].settings.loudness.trim_db, 0.0);
+    app.set_output_trim(0, 40.0);
+    assert_eq!(
+        app.clock_output.loudness.trim_db,
+        crate::audio::LOUDNESS_TRIM_MAX_DB
+    );
+    app.set_output_trim(0, f32::NAN);
+    assert_eq!(
+        app.clock_output.loudness.trim_db,
+        crate::audio::LOUDNESS_TRIM_MAX_DB,
+        "a NaN leaves the value alone"
+    );
+    app.set_output_trim(0, -3.0);
+    assert_eq!(app.clock_output.loudness.trim_db, -3.0);
+    assert_eq!(app.output_trim_origin(0), super::OutputTrimOrigin::Hand);
     app.set_output_loudness_target(0, 40.0);
     assert_eq!(
         app.clock_output.loudness.target_lufs,
@@ -381,14 +395,6 @@ fn a_learn_adds_the_difference_and_refuses_a_short_window() {
     assert!(usable_loudness(-14.0, -33.0));
     assert!(!usable_loudness(-14.0, -35.0));
     assert_eq!(learned_trim_after(0.0, -14.0, -35.0, 80), None);
-}
-
-#[test]
-fn a_match_adds_the_difference_to_the_current_trim() {
-    assert_eq!(matched_trim_db(0.0, -14.0, -23.0), 9.0);
-    assert_eq!(matched_trim_db(3.0, -14.0, -20.0), 9.0);
-    assert_eq!(matched_trim_db(0.0, -14.0, -50.0), 24.0);
-    assert_eq!(matched_trim_db(0.0, -14.0, 10.0), -24.0);
 }
 
 #[test]

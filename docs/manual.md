@@ -28,7 +28,8 @@ the scope; and the input gain. A click on the device opens Setup › Input.
   before the effects, the effects, NAM blocks after them, the cab, the
   gate (when after), Post EQ;
 - its latency and DSP load;
-- level, mute and solo.
+- level, mute and solo, and a *match* line under the fader when its
+  loudness-match trim is not zero.  A click opens the path sheet.
 
 **Effects return.** A path whose source is *Sends* runs its chain on the
 other paths' sends instead of the input, so one reverb or delay serves
@@ -58,14 +59,30 @@ sheet.
 
 **Outputs.** The clock output first, then the extra outputs. An output
 shows which paths play on it (one dot per path), its metronome switch, its
-buffer, a limiter reduction bar, short-term loudness with its learned
-trim, one meter per channel, and its level and mute. *Learn* measures an
-output for eight seconds and saves a trim; *Match* does the same for one
-path on one output. Nothing moves on its own: the level only changes when
-a capture loads or the player presses one of those buttons. The dashed
-column adds another device, or the virtual output: on Windows that is
-VB-Cable, on PipeWire it is RigWerk Out. An extra output that fails stays
-silent and is retried; the clock output keeps playing.
+buffer, a limiter reduction bar, short-term loudness, one meter per
+channel, and its level and mute. A small *trim* line under the fader shows
+the output trim when it is not zero; a click opens the output sheet.
+*Learn* measures an output for eight seconds and saves that trim, which
+hits a delivery level on this output. The trim can also be dragged by
+hand. Nothing moves on its own: the level only changes when a capture
+loads, the player presses *Learn*, or drags the trim. The dashed column
+adds another device, or the virtual output: on Windows that is VB-Cable,
+on PipeWire it is RigWerk Out. An extra output that fails stays silent and
+is retried; the clock output keeps playing.
+
+**Match paths.** A path's loudness compared with the other paths is the
+same on every output, so the match is one trim per path, not one per
+output. *Match paths* at the right of the *Paths* header measures every
+path on its own at once; with only one path there is nothing to match, so
+the button is hidden. Pick a target (default −18 LUFS) or one path as
+the reference; choose *Apply* and the ticked trims ramp in together.
+Every path is measured, muted or not: the meter sits before the mute and
+the fader, so a muted path reads what it would play. Paths without a
+usable reading, or more than 20 dB under the reference, are unticked with
+the reason, and returns are unticked because they follow their sends. A
+*match* line under a path's fader shows its trim; a click opens the path
+sheet, where the same trim can be dragged. With one path, both the header
+button and the path sheet link are hidden.
 
 At the 1040 × 700 minimum the strips get denser, and the paths group
 scrolls sideways when not all four fit. Everything a narrow step hides
@@ -137,12 +154,16 @@ and each strip shows a thin meter.
   *Reset to defaults* and *Remove*.
 - **Path** has name, colour, source (*Input* or *Sends*), its sends (to
   each return, or on a return from each path), path outputs (which of the
-  path's L and R play at all, before any output), level, mute, solo,
-  duplicate, layouts, and on each output it plays on its latency and a
-  *Match* button for that output's loudness target.
-- **Output** has the loudness readings, target, *Learn*, learned trim,
-  *Clear* and *Reset*; nothing moves on its own.  The channel map grid and
-  its presets, the metronome channels,
+  path's L and R play at all, before any output), level, mute, solo, and
+  *Match*: a drag value in dB (±24) with *Clear* and a *Match paths…* link.
+  The match is applied before the path fader, so the fader stays your own
+  balance.  On each output it plays on, the sheet shows its latency only;
+  duplicate, layouts and remove are below.
+- **Output** has the loudness readings, target, *Output trim* (a drag value
+  in dB, ±12, or *Learn*), *Clear* and *Reset*, with a note saying whether
+  the trim was learned (and at what loudness), set by hand, or absent;
+  nothing moves on its own.  *Reset* clears the readings only.  The channel
+  map grid and its presets, the metronome channels,
   *Channels nothing plays* (mono copy or silent), and per path the level
   here, polarity, trim and when it arrives. The alignment switch
   and the bridge buffer of an extra output are here too.

@@ -1,4 +1,4 @@
-use super::{console_reason, strip_rects, strips_width};
+use super::{console_reason, strip_rects, strips_width, trim_line};
 use crate::app::blank_app;
 use crate::app::screen::Sheet;
 use crate::ui::widgets::{accesskit_frame, node_named};
@@ -59,6 +59,95 @@ fn every_strip_names_its_controls() {
     ] {
         let _ = node_named(&tree, name);
     }
+}
+
+#[test]
+fn the_paths_header_hides_match_paths_with_one_path() {
+    use crate::ui::widgets::run_frame;
+    let mut app = blank_app();
+    let ctx = eframe::egui::Context::default();
+    ctx.enable_accesskit();
+    let input = eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(1200.0, 700.0),
+        )),
+        ..Default::default()
+    };
+    let output = run_frame(&ctx, input, |ui| app.console_page(ui));
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .expect("accesskit tree");
+    let names: Vec<String> = tree
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.label().map(str::to_owned))
+        .collect();
+    assert!(!names.iter().any(|name| name == "Match paths"));
+}
+
+#[test]
+fn the_paths_header_offers_match_paths_at_the_normal_width() {
+    use crate::ui::widgets::run_frame;
+    let mut app = blank_app();
+    app.duplicate_path(0).expect("a second path");
+    let ctx = eframe::egui::Context::default();
+    ctx.enable_accesskit();
+    let input = eframe::egui::RawInput {
+        screen_rect: Some(eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(1200.0, 700.0),
+        )),
+        ..Default::default()
+    };
+    let output = run_frame(&ctx, input, |ui| app.console_page(ui));
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .expect("accesskit tree");
+    let _ = node_named(&tree, "Match paths");
+}
+
+#[test]
+fn the_trim_line_shows_only_when_the_trim_is_not_zero() {
+    assert_eq!(trim_line("match", 0.0), None);
+    assert_eq!(trim_line("match", 2.5).as_deref(), Some("match +2.5"));
+    assert_eq!(trim_line("trim", -1.5).as_deref(), Some("trim −1.5"));
+}
+
+#[test]
+fn a_path_match_shows_on_its_strip() {
+    let mut app = blank_app();
+    app.set_path_match(0, 2.5);
+    let tree = accesskit_frame(|ui| app.console_page(ui));
+    let _ = node_named(&tree, "match +2.5");
+
+    app.set_path_match(0, 0.0);
+    let tree = accesskit_frame(|ui| app.console_page(ui));
+    let names: Vec<String> = tree
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.label().map(str::to_owned))
+        .collect();
+    assert!(!names.iter().any(|name| name == "match +2.5"));
+}
+
+#[test]
+fn an_output_trim_shows_on_its_strip() {
+    let mut app = blank_app();
+    app.set_output_trim(0, 3.0);
+    let tree = accesskit_frame(|ui| app.console_page(ui));
+    let _ = node_named(&tree, "trim +3.0");
+
+    app.clear_output_learn(0);
+    let tree = accesskit_frame(|ui| app.console_page(ui));
+    let names: Vec<String> = tree
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.label().map(str::to_owned))
+        .collect();
+    assert!(!names.iter().any(|name| name == "trim +3.0"));
 }
 
 #[test]

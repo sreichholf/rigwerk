@@ -11,6 +11,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod effect;
 pub(crate) mod eq;
 pub(crate) mod gate;
+pub(crate) mod match_paths;
 pub(crate) mod nam;
 pub(crate) mod output;
 pub(crate) mod path;
@@ -38,6 +39,7 @@ impl RigWerkApp {
             Sheet::Nam { .. } => "NAM".to_owned(),
             Sheet::Cab { .. } => "Cab".to_owned(),
             Sheet::Path { .. } => "Path".to_owned(),
+            Sheet::MatchPaths => "Match paths".to_owned(),
             Sheet::Effect { path, index } => self
                 .engine
                 .plugin_views(path)
@@ -188,6 +190,7 @@ impl RigWerkApp {
                 Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
                 Sheet::Path { path } => self.path_sheet(ui, path),
                 Sheet::Output { output } => self.output_sheet(ui, output),
+                Sheet::MatchPaths => self.match_paths_sheet(ui),
                 Sheet::Scope => self.scope_sheet(ui),
                 Sheet::Nam { .. } | Sheet::Cab { .. } => {
                     unreachable!("the NAM and cab sheets fill the body above")
