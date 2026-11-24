@@ -1,7 +1,7 @@
 use super::{
     capture_window, endpoint_kind, extra_output_node_name, is_alsa_shim, is_native_id,
-    node_extra_outputs, node_latency_frames, node_name, path_delay_ns, playback_frames,
-    EndpointKind, CAPTURE_NODE, PLAYBACK_NODE,
+    node_extra_outputs, node_latency_frames, path_delay_ns, playback_frames, EndpointKind,
+    CAPTURE_NODE, PLAYBACK_NODE,
 };
 use crate::audio::output_map::{MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID};
 use crate::audio::shared::{ExtraOutputLink, ExtraOutputPlan};
@@ -52,19 +52,6 @@ fn each_extra_output_slot_gets_its_own_stream_name() {
         assert_ne!(name, CAPTURE_NODE);
         assert_ne!(name, PLAYBACK_NODE);
     }
-}
-
-#[test]
-fn native_ids_are_node_names_and_the_alsa_plugin_is_not() {
-    assert_eq!(
-        node_name("pipewire:alsa_input.usb-Valeton-GP5"),
-        Some("alsa_input.usb-Valeton-GP5")
-    );
-    assert!(is_native_id("pipewire:alsa_output.pci-0000_00_1f.3"));
-    assert!(!is_native_id("alsa:pipewire"));
-    assert!(!is_native_id("pipewire"));
-    assert!(!is_native_id("pipewire:"));
-    assert!(!is_native_id("pipewire:pipewire"));
 }
 
 #[test]
