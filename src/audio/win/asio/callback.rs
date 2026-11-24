@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use azo::sys::SampleType;
 
+use crate::audio::input::InputStage;
 use crate::audio::mixer::OutputMixer;
 use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::shared::Shared;
@@ -193,9 +194,7 @@ impl AsioCallbackContext {
         let Some(input) = self.input.as_ref() else {
             return;
         };
-        let gain = self.shared.input_gain();
-        let enabled_l = self.shared.input_enabled[0].load(Ordering::Relaxed);
-        let enabled_r = self.shared.input_enabled[1].load(Ordering::Relaxed);
+        let mut stage = InputStage::new(&self.shared);
         let Some(left_ptr) = input
             .buffers
             .first()
@@ -212,8 +211,6 @@ impl AsioCallbackContext {
             .zip(input.types.get(1))
             .map(|(buffer, sample_type)| (buffer[index].cast::<u8>(), *sample_type));
 
-        let mut peak_l = 0.0f32;
-        let mut peak_r = 0.0f32;
         self.shared.note_input_frames(self.frames);
         for frame in 0..self.frames {
             let raw_left = unsafe { read_asio_sample(left_ptr, frame, left_type) };
@@ -223,23 +220,10 @@ impl AsioCallbackContext {
                 },
                 None => raw_left,
             };
-            // Raw, before gain: a calibration must see the driver's level.
-            self.shared.capture_calibration(raw_left, raw_right);
-            let mut left = raw_left * gain;
-            let mut right = raw_right * gain;
-            self.shared.tap_frame(left, right);
-            if !enabled_l {
-                left = 0.0;
-            }
-            if !enabled_r {
-                right = 0.0;
-            }
-            peak_l = peak_l.max(left.abs());
-            peak_r = peak_r.max(right.abs());
+            let (left, right) = stage.frame(&self.shared, raw_left, raw_right);
             self.shared.push_frame(left, right);
         }
-        self.shared.in_l.store(peak_l.to_bits(), Ordering::Relaxed);
-        self.shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
+        stage.publish(&self.shared);
     }
 }
 
@@ -423,3 +407,6 @@ pub(crate) fn dispatch_output(buffer_index: c_long) {
     }
     unsafe { (*pointer).dispatch(buffer_index) };
 }
+
+#[cfg(test)]
+mod tests;
