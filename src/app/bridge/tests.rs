@@ -17,7 +17,7 @@ fn bridge_ms(
 /// is opened; the engine stays Idle until a test sets its state.
 fn latency_app() -> RigWerkApp {
     let mut app = crate::app::blank_app();
-    app.use_asio_input = false;
+    app.devices.use_asio_input = false;
     app.output_gain = 0.0;
     app.low_latency_output = false;
     app.wasapi_output_mode = crate::audio::WasapiOutputMode::Shared;
@@ -250,4 +250,20 @@ fn console_levels_are_clamped_and_switches_stored() {
     app.set_input_channel(1, false);
     assert_eq!(app.input_channels, [true, false]);
     app.set_input_channel(5, false);
+}
+
+#[test]
+fn a_push_over_the_placeholder_inventory_keeps_a_saved_extra_output_id() {
+    let mut app = crate::app::blank_app();
+    app.devices.inventory = crate::audio::placeholder_inventory();
+    app.extra_outputs
+        .push(crate::app::settings::ExtraOutputPref {
+            id: "alsa:hw:Quad".to_owned(),
+            backend: "ALSA".to_owned(),
+            name: "System speakers".to_owned(),
+            ..Default::default()
+        });
+    app.push_extra_outputs_to_engine();
+    assert_eq!(app.extra_outputs[0].id, "alsa:hw:Quad");
+    assert_eq!(app.extra_outputs[0].backend, "ALSA");
 }

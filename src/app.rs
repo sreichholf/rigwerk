@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::app::devices::{inventory_fingerprint, HeldDevice};
+use crate::app::devices::{inventory_fingerprint, restore_extra_output};
 use crate::app::screenshot::ScreenshotJob;
 use crate::app::settings::{
     bridge_buffer_from_pref, bridge_buffer_to_pref, load_preferences, page_from_key, page_key,
@@ -165,11 +165,8 @@ pub struct RigWerkApp {
     /// Tuner settings, the analysis behind the current frame and the
     /// auto-mute rule.
     pub(crate) tuner: tuner::TunerState,
-    pub(crate) inventory: Inventory,
-    pub(crate) asio_idx: usize,
-    pub(crate) input_idx: usize,
-    pub(crate) output_idx: usize,
-    pub(crate) use_asio_input: bool,
+    /// The scanned device lists, the selection, and the scan plumbing.
+    pub(crate) devices: devices::Devices,
     pub(crate) sample_rate: u32,
     pub(crate) buffer_size: usize,
     pub(crate) input_gain: f32,
@@ -206,9 +203,6 @@ pub struct RigWerkApp {
     /// Output side rate (0 follows the input) and buffer.
     pub(crate) output_rate: u32,
     pub(crate) output_buffer: usize,
-    /// Which output list is shown: the low-latency driver's (ASIO) or the
-    /// system's.  Follows the selected output unless that list is empty.
-    pub(crate) output_tab_low_latency: bool,
     pub(crate) bridge_buffer_mode: BufferMode,
     /// Fixed bridge buffer size in milliseconds.
     pub(crate) bridge_buffer_ms: f32,
@@ -309,10 +303,6 @@ pub struct RigWerkApp {
     pub(crate) frames: u64,
     pub(crate) show_about: bool,
     pub(crate) auto_start_bridge: bool,
-    pub(crate) inventory_fingerprint: u64,
-    pub(crate) last_device_scan: Instant,
-    pub(crate) device_scan: Option<mpsc::Receiver<Inventory>>,
-    pub(crate) manual_scan: bool,
     pub(crate) bridge_signature: u64,
     /// A settings change asked for a new bridge while the old one was still
     /// releasing its device; start again as soon as the engine is Idle.
@@ -347,19 +337,6 @@ pub struct RigWerkApp {
     /// The calibration panel: open, what it is doing, and how the loop is
     /// closed.  Not persisted.
     pub(crate) calibration: calibration::CalibrationUi,
-    /// Stored low-latency input kept when startup did not find it.
-    asio_held: Option<HeldDevice>,
-    /// Stored system input kept when startup did not find it.
-    input_held: Option<HeldDevice>,
-    /// Stored output kept when startup did not find it.
-    output_held: Option<HeldDevice>,
-    /// Consecutive scans that did not list the selected input. One miss is
-    /// not an unplug: a busy device fails a probe the same way a missing one
-    /// does. The bridge stops only after a second miss.
-    input_misses: u8,
-    /// Consecutive scans that did not list the selected output.  Above 0,
-    /// the clock output's strip and sheet read missing.
-    output_misses: u8,
     /// Planned ALSA period for one output setting, so the UI does not ask
     /// the device again on every frame.
     #[cfg(target_os = "linux")]
@@ -433,13 +410,15 @@ impl RigWerkApp {
         // An id match, a legacy name match, and a side with nothing stored
         // write the live device.
         let (asio_name, asio_id, asio_backend) =
-            persisted_identity(self.asio_held.as_ref(), Some(self.selected_asio()));
+            persisted_identity(self.devices.asio_held.as_ref(), Some(self.selected_asio()));
         let (input_name, input_id, input_backend) = persisted_identity(
-            self.input_held.as_ref(),
-            self.inventory.inputs.get(self.input_idx),
+            self.devices.input_held.as_ref(),
+            self.devices.inventory.inputs.get(self.devices.input_idx),
         );
-        let (output_name, output_id, output_backend) =
-            persisted_identity(self.output_held.as_ref(), Some(self.selected_output()));
+        let (output_name, output_id, output_backend) = persisted_identity(
+            self.devices.output_held.as_ref(),
+            Some(self.selected_output()),
+        );
         let (paths, order) = self.saved_paths();
         let selected_path = self.saved_selected_path(&order);
         let (clock_output, extra_outputs) = self.saved_devices(&order);
@@ -450,7 +429,7 @@ impl RigWerkApp {
             session_name: self.session_name.clone(),
             page: page_key(self.page).to_owned(),
             eq_edit: self.eq_edit.index() as u8,
-            output_tab_low_latency: self.output_tab_low_latency,
+            output_tab_low_latency: self.devices.output_tab_low_latency,
             selected_session: self.selected_session,
             asio_name,
             asio_id,
@@ -461,7 +440,7 @@ impl RigWerkApp {
             output_name,
             output_id,
             output_backend,
-            use_asio_input: self.use_asio_input,
+            use_asio_input: self.devices.use_asio_input,
             sample_rate: self.sample_rate,
             buffer_size: self.buffer_size,
             input_gain: self.input_gain,
@@ -540,11 +519,7 @@ impl RigWerkApp {
             last_page: Page::Console,
             engine: AudioEngine::new(48_000),
             tuner: tuner::TunerState::new(&Preferences::default(), false),
-            inventory: Inventory::default(),
-            asio_idx: 0,
-            input_idx: 0,
-            output_idx: 0,
-            use_asio_input: true,
+            devices: devices::Devices::new(),
             sample_rate: 48_000,
             buffer_size: 128,
             input_gain: 0.0,
@@ -566,7 +541,6 @@ impl RigWerkApp {
             wasapi_output_mode: WasapiOutputMode::RealStyle,
             output_rate: 0,
             output_buffer: 128,
-            output_tab_low_latency: false,
             bridge_buffer_mode: BufferMode::Auto,
             bridge_buffer_ms: 10.0,
             // `new` installs the saved paths over this.
@@ -617,10 +591,6 @@ impl RigWerkApp {
             frames: 0,
             show_about: false,
             auto_start_bridge: false,
-            inventory_fingerprint: 0,
-            last_device_scan: Instant::now(),
-            device_scan: None,
-            manual_scan: false,
             bridge_signature: 0,
             bridge_restart_pending: false,
             driver_checked: false,
@@ -636,11 +606,6 @@ impl RigWerkApp {
             preferences_backup: None,
             measured_latency: None,
             calibration: calibration::CalibrationUi::default(),
-            asio_held: None,
-            input_held: None,
-            output_held: None,
-            input_misses: 0,
-            output_misses: 0,
             #[cfg(target_os = "linux")]
             period_cache: None,
             #[cfg(target_os = "linux")]
@@ -656,7 +621,7 @@ impl RigWerkApp {
     /// Writes stored settings into an app from [`Self::base`]: the start page,
     /// the devices, the rates and gains, the mixer settings and the tuner.
     ///
-    /// The device restore reads `self.inventory`, and the screenshot flag
+    /// The device restore reads `self.devices.inventory`, and the screenshot flag
     /// picks the page, the tuner demo and whether the bridge may start, so
     /// `new` sets both before this runs.  `blank_app` never calls it, so a
     /// test starts from the base and leaves the engine untouched.
@@ -742,7 +707,7 @@ impl RigWerkApp {
             last_click_mask: _,
         } = preferences;
         let screenshot = self.screenshot.is_some();
-        let restored = restore_saved_devices(&self.inventory, preferences);
+        let restored = restore_saved_devices(&self.devices.inventory, preferences);
         let wasapi_output_mode = resolved_wasapi_output_mode(preferences);
         // Rates, buffers, gains and the bridge buffer were checked in
         // `load_preferences` (`validate_bridge_settings`). The defaults
@@ -750,13 +715,13 @@ impl RigWerkApp {
         self.page = restored_page(preferences, screenshot);
         self.last_page = self.page;
         self.tuner = tuner::TunerState::new(preferences, screenshot);
-        self.asio_idx = restored.asio_idx;
-        self.input_idx = restored.input_idx;
-        self.output_idx = restored.output_idx;
-        self.asio_held = restored.asio_held;
-        self.input_held = restored.input_held;
-        self.output_held = restored.output_held;
-        self.use_asio_input = preferences.use_asio_input;
+        self.devices.asio_idx = restored.asio_idx;
+        self.devices.input_idx = restored.input_idx;
+        self.devices.output_idx = restored.output_idx;
+        self.devices.asio_held = restored.asio_held;
+        self.devices.input_held = restored.input_held;
+        self.devices.output_held = restored.output_held;
+        self.devices.use_asio_input = preferences.use_asio_input;
         self.sample_rate = preferences.sample_rate;
         self.buffer_size = preferences.buffer_size;
         self.input_gain = preferences.input_gain;
@@ -782,7 +747,7 @@ impl RigWerkApp {
         self.wasapi_output_mode = wasapi_output_mode;
         self.output_rate = preferences.output_rate;
         self.output_buffer = preferences.output_buffer;
-        self.output_tab_low_latency = preferences.output_tab_low_latency;
+        self.devices.output_tab_low_latency = preferences.output_tab_low_latency;
         self.bridge_buffer_mode = bridge_buffer_from_pref(preferences.bridge_buffer_mode);
         self.bridge_buffer_ms = preferences.bridge_buffer_ms;
         self.clock_output = preferences.clock_output.sanitized();
@@ -794,6 +759,8 @@ impl RigWerkApp {
             .collect();
         extra_outputs.truncate(crate::audio::MAX_EXTRA_OUTPUTS);
         self.extra_outputs = extra_outputs;
+        // The inventory is still the placeholder here; the first real scan
+        // adopts the saved ids in `finish_startup_scan`.
         self.match_paths = preferences.match_paths.sanitized();
         let eq_edit = if preferences.eq_edit == 1 {
             EqSlot::Post
@@ -844,8 +811,8 @@ impl RigWerkApp {
         // arrives on the scan thread; restore and auto-start wait for it.
         // The restore reads these rows, and the page and the auto-start read
         // the screenshot flag, so both go in before the preferences do.
-        app.inventory = audio::placeholder_inventory();
-        app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
+        app.devices.inventory = audio::placeholder_inventory();
+        app.devices.inventory_fingerprint = inventory_fingerprint(&app.devices.inventory);
         app.screenshot = screenshot.map(|path| ScreenshotJob {
             path,
             requested: false,
@@ -894,26 +861,29 @@ impl RigWerkApp {
             return;
         };
         let scan_notes = fresh.notes.clone();
-        self.inventory = fresh;
-        self.inventory_fingerprint = inventory_fingerprint(&self.inventory);
+        self.devices.inventory = fresh;
+        self.devices.inventory_fingerprint = inventory_fingerprint(&self.devices.inventory);
         crate::app::settings::rematch_windows_virtual_output(
             &mut self.extra_outputs,
-            &self.inventory.outputs,
+            &self.devices.inventory.outputs,
         );
-        let restored = restore_saved_devices(&self.inventory, &gate.preferences);
-        self.asio_idx = restored.asio_idx;
-        self.input_idx = restored.input_idx;
-        self.output_idx = restored.output_idx;
-        self.asio_held = restored.asio_held;
-        self.input_held = restored.input_held;
-        self.output_held = restored.output_held;
+        for extra_output in &mut self.extra_outputs {
+            restore_extra_output(&self.devices.inventory.outputs, extra_output);
+        }
+        let restored = restore_saved_devices(&self.devices.inventory, &gate.preferences);
+        self.devices.asio_idx = restored.asio_idx;
+        self.devices.input_idx = restored.input_idx;
+        self.devices.output_idx = restored.output_idx;
+        self.devices.asio_held = restored.asio_held;
+        self.devices.input_held = restored.input_held;
+        self.devices.output_held = restored.output_held;
 
-        let low_label = self.inventory.low_latency_label.clone();
+        let low_label = self.devices.inventory.low_latency_label.clone();
         self.push_log(
             format!("{low_label} or system input: the chosen output opens independently."),
             LogTone::Teal,
         );
-        if self.inventory.asio.iter().all(|driver| driver.demo) {
+        if self.devices.inventory.asio.iter().all(|driver| driver.demo) {
             self.push_log(
                 format!("Demo driver loaded — connect a {low_label} input to start."),
                 LogTone::Amber,

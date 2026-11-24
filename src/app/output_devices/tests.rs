@@ -36,7 +36,7 @@ fn click_chips_stop_at_the_native_pipewire_stereo_stream() {
 #[test]
 fn a_pipewire_labelled_extra_output_keeps_its_open_channel_count() {
     let mut app = blank_app();
-    app.inventory.outputs.push(DeviceItem {
+    app.devices.inventory.outputs.push(DeviceItem {
         id: "alsa:pipewire".to_owned(),
         name: "PipeWire Sound Server".to_owned(),
         backend: "PIPEWIRE".to_owned(),
@@ -75,14 +75,20 @@ fn output(id: &str, name: &str) -> DeviceItem {
 #[test]
 fn a_clock_output_the_scan_missed_reads_missing() {
     let mut app = blank_app();
-    app.inventory.outputs.push(output("hw:Speaker", "Studio"));
-    app.inventory.outputs.push(output("hw:Phones", "Phones"));
-    app.output_idx = 0;
-    app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
+    app.devices
+        .inventory
+        .outputs
+        .push(output("hw:Speaker", "Studio"));
+    app.devices
+        .inventory
+        .outputs
+        .push(output("hw:Phones", "Phones"));
+    app.devices.output_idx = 0;
+    app.devices.inventory_fingerprint = inventory_fingerprint(&app.devices.inventory);
     app.engine.state = EngineState::Running;
     assert!(!app.output_device_rows()[0].missing);
 
-    let mut gone = app.inventory.clone();
+    let mut gone = app.devices.inventory.clone();
     gone.outputs.remove(0);
     app.apply_inventory(gone.clone());
     let rows = app.output_device_rows();
@@ -99,10 +105,13 @@ fn a_clock_output_the_scan_missed_reads_missing() {
 #[test]
 fn a_clock_output_back_in_the_scan_is_not_missing() {
     let mut app = blank_app();
-    app.inventory.outputs.push(output("hw:Speaker", "Studio"));
-    app.output_idx = 0;
-    app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
-    let present = app.inventory.clone();
+    app.devices
+        .inventory
+        .outputs
+        .push(output("hw:Speaker", "Studio"));
+    app.devices.output_idx = 0;
+    app.devices.inventory_fingerprint = inventory_fingerprint(&app.devices.inventory);
+    let present = app.devices.inventory.clone();
     let mut gone = present.clone();
     gone.outputs.clear();
     app.apply_inventory(gone);
@@ -114,16 +123,23 @@ fn a_clock_output_back_in_the_scan_is_not_missing() {
 #[test]
 fn a_clock_output_chosen_after_a_miss_is_not_missing() {
     let mut app = blank_app();
-    app.inventory.outputs.push(output("hw:Speaker", "Studio"));
-    app.inventory.outputs.push(output("hw:Phones", "Phones"));
-    app.output_idx = 0;
-    app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
-    let mut gone = app.inventory.clone();
+    app.devices
+        .inventory
+        .outputs
+        .push(output("hw:Speaker", "Studio"));
+    app.devices
+        .inventory
+        .outputs
+        .push(output("hw:Phones", "Phones"));
+    app.devices.output_idx = 0;
+    app.devices.inventory_fingerprint = inventory_fingerprint(&app.devices.inventory);
+    let mut gone = app.devices.inventory.clone();
     gone.outputs.remove(0);
     app.apply_inventory(gone);
     assert!(app.output_device_rows()[0].missing);
 
-    app.output_idx = app
+    app.devices.output_idx = app
+        .devices
         .inventory
         .outputs
         .iter()
@@ -177,11 +193,14 @@ fn a_extra_output_reading_needs_a_running_bridge_and_a_stream() {
 /// The blank app with a four-channel extra output (device 1).
 fn with_quad_output() -> crate::app::RigWerkApp {
     let mut app = blank_app();
-    app.inventory.outputs.push(output("alsa:hw:Main", "Main"));
-    app.output_idx = 0;
+    app.devices
+        .inventory
+        .outputs
+        .push(output("alsa:hw:Main", "Main"));
+    app.devices.output_idx = 0;
     let mut quad = output("alsa:hw:Quad", "Quad");
     quad.channels = 4;
-    app.inventory.outputs.push(quad);
+    app.devices.inventory.outputs.push(quad);
     app.extra_outputs.push(ExtraOutputPref {
         id: "alsa:hw:Quad".to_owned(),
         backend: "ALSA".to_owned(),
@@ -301,7 +320,8 @@ fn strips_badge_the_clock_and_the_extra_outputs() {
     app.snapshot.extra_output_missing[0] = true;
     assert_eq!(app.output_badge(1), OutputBadge::Missing);
     assert!(OutputBadge::Missing.warns());
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .retain(|device| device.id != "alsa:hw:Quad");
     app.snapshot.extra_output_missing[0] = false;
@@ -526,4 +546,60 @@ fn a_map_edit_writes_one_slot_and_logs_what_committed() {
         custom_label(app.routing_last_layout),
         "Custom · edited from Single path"
     );
+}
+
+#[test]
+fn a_reenumerated_extra_output_row_is_found_by_backend_and_name() {
+    let mut app = blank_app();
+    let mut quad = output("alsa:hw:Quad", "Quad");
+    quad.channels = 4;
+    app.devices.inventory.outputs.push(quad);
+    app.extra_outputs.push(ExtraOutputPref {
+        id: "alsa:hw:Old".to_owned(),
+        backend: "ALSA".to_owned(),
+        name: "Quad".to_owned(),
+        ..ExtraOutputPref::default()
+    });
+    let rows = app.output_device_rows();
+    let row = &rows[1];
+    assert_eq!(row.extra_output_index, Some(0));
+    assert!(!row.missing);
+    assert_eq!(row.channels, 4);
+    assert_eq!(row.click_channels, 4);
+}
+
+#[test]
+fn a_missing_extra_output_row_reads_missing_and_keeps_its_id() {
+    let mut app = blank_app();
+    app.devices
+        .inventory
+        .outputs
+        .push(output("alsa:hw:Quad", "Quad"));
+    app.extra_outputs.push(ExtraOutputPref {
+        id: "alsa:hw:Gone".to_owned(),
+        backend: "ALSA".to_owned(),
+        name: "Guitar out".to_owned(),
+        ..ExtraOutputPref::default()
+    });
+    let rows = app.output_device_rows();
+    assert!(rows[1].missing);
+    assert_eq!(app.extra_outputs[0].id, "alsa:hw:Gone");
+}
+
+#[test]
+fn a_scan_adopts_the_reenumerated_extra_output_id() {
+    let mut app = blank_app();
+    app.extra_outputs.push(ExtraOutputPref {
+        id: "alsa:hw:Old".to_owned(),
+        backend: "ALSA".to_owned(),
+        name: "Quad".to_owned(),
+        ..ExtraOutputPref::default()
+    });
+    let mut fresh = app.devices.inventory.clone();
+    let mut quad = output("alsa:hw:Quad", "Quad");
+    quad.channels = 4;
+    fresh.outputs.push(quad);
+    assert!(app.apply_inventory(fresh));
+    assert_eq!(app.extra_outputs[0].id, "alsa:hw:Quad");
+    assert_eq!(app.extra_outputs[0].backend, "ALSA");
 }

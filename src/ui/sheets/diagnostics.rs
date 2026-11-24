@@ -311,10 +311,10 @@ impl RigWerkApp {
             lines.push(COUNTS_CAPTION.to_owned());
         }
         lines.push("Scan notes:".to_owned());
-        if self.inventory.notes.is_empty() {
+        if self.devices.inventory.notes.is_empty() {
             lines.push("None.".to_owned());
         } else {
-            for note in &self.inventory.notes {
+            for note in &self.devices.inventory.notes {
                 lines.push(format!("- {note}"));
             }
         }
@@ -691,10 +691,10 @@ impl RigWerkApp {
             group(ui, width, |ui| {
                 ui.label(kicker("SCAN NOTES", &colours));
                 ui.add_space(6.0);
-                if self.inventory.notes.is_empty() {
+                if self.devices.inventory.notes.is_empty() {
                     ui.label(sans("No scan notes.", colours.text2, TypeRole::Body));
                 } else {
-                    for note in &self.inventory.notes {
+                    for note in &self.devices.inventory.notes {
                         ui.add(
                             egui::Label::new(sans(note, colours.warn, TypeRole::Control)).wrap(),
                         );

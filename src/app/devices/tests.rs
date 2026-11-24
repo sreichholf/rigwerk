@@ -1,6 +1,9 @@
-use super::{restore_device, restore_input, DeviceRestore, InputGroup};
-use crate::app::settings::load_preferences;
-use crate::audio::DeviceItem;
+use super::{
+    extra_output_index, restore_device, restore_extra_output, restore_input, DeviceRestore,
+    InputGroup,
+};
+use crate::app::settings::{load_preferences, ExtraOutputPref};
+use crate::audio::{DeviceItem, VIRTUAL_OUTPUT_NAME};
 
 fn item(id: &str, name: &str, backend: &str) -> DeviceItem {
     DeviceItem {
@@ -142,4 +145,99 @@ fn preferences_without_device_ids_load_and_match_by_name() {
     );
     assert_eq!(preset_output.index(), Some(0));
     assert!(preset_output.matched_by_name());
+}
+
+fn extra(id: &str, backend: &str, name: &str) -> ExtraOutputPref {
+    ExtraOutputPref {
+        id: id.to_owned(),
+        backend: backend.to_owned(),
+        name: name.to_owned(),
+        ..ExtraOutputPref::default()
+    }
+}
+
+#[test]
+fn an_extra_output_id_match_wins_over_a_same_name_row() {
+    let outputs = vec![
+        item("asio-out:abc", "Speakers", "ASIO"),
+        item("wasapi:{spk}", "Studio", "WASAPI"),
+    ];
+    let mut saved = extra("wasapi:{spk}", "WASAPI", "Speakers");
+    let restore = restore_extra_output(&outputs, &mut saved);
+    assert_eq!(restore, DeviceRestore::ById(1));
+    assert_eq!(extra_output_index(&outputs, &saved), Some(1));
+    assert_eq!(saved.id, "wasapi:{spk}");
+    assert_eq!(saved.backend, "WASAPI");
+    assert_eq!(saved.name, "Studio", "an id match refreshes the label");
+}
+
+#[test]
+fn a_reenumerated_extra_output_id_is_taken_from_the_name_match() {
+    let outputs = vec![item("wasapi:{new}", "Speakers", "WASAPI")];
+    let mut saved = extra("wasapi:{old}", "WASAPI", "Speakers");
+    let restore = restore_extra_output(&outputs, &mut saved);
+    assert!(restore.matched_by_name());
+    assert_eq!(restore.index(), Some(0));
+    assert_eq!(saved.id, "wasapi:{new}");
+    assert_eq!(saved.backend, "WASAPI");
+}
+
+#[test]
+fn a_same_name_extra_output_on_another_backend_follows_restore_device() {
+    let outputs = vec![
+        item("wasapi:{spk}", "Speakers", "WASAPI"),
+        item("alsa:hw:Other", "Speakers (extra)", "ALSA"),
+    ];
+    let mut saved = extra("alsa:hw:Gone", "ALSA", "Speakers");
+    let decided = restore_device(&outputs, &saved.id, &saved.backend, &saved.name);
+    let restore = restore_extra_output(&outputs, &mut saved);
+    assert_eq!(restore, decided);
+    assert_eq!(
+        decided,
+        DeviceRestore::ByName {
+            index: 0,
+            saved_id_missing: true,
+        }
+    );
+    assert_eq!(saved.id, "wasapi:{spk}");
+    assert_eq!(saved.backend, "WASAPI");
+}
+
+#[test]
+fn a_missing_extra_output_keeps_its_saved_identity() {
+    let outputs = vec![item("wasapi:{spk}", "Speakers", "WASAPI")];
+    let mut saved = extra("asio:{gone}", "ASIO", "Guitar out");
+    let restore = restore_extra_output(&outputs, &mut saved);
+    assert_eq!(restore, DeviceRestore::Missing);
+    assert_eq!(extra_output_index(&outputs, &saved), None);
+    assert_eq!(saved.id, "asio:{gone}");
+    assert_eq!(saved.backend, "ASIO");
+    assert_eq!(saved.name, "Guitar out");
+}
+
+#[test]
+fn restore_leaves_a_virtual_extra_output_untouched() {
+    let outputs = vec![item("wasapi:{spk}", VIRTUAL_OUTPUT_NAME, "WASAPI")];
+    let mut saved = extra("wasapi:{gone}", "WASAPI", VIRTUAL_OUTPUT_NAME);
+    saved.virtual_output = true;
+    let restore = restore_extra_output(&outputs, &mut saved);
+    assert!(restore.matched_by_name());
+    assert_eq!(saved.id, "wasapi:{gone}");
+    assert_eq!(saved.backend, "WASAPI");
+    assert_eq!(saved.name, VIRTUAL_OUTPUT_NAME);
+}
+
+/// The placeholder inventory is painted before the first scan, and its demo
+/// row is named "System speakers".  A saved extra output with that name must
+/// not adopt `demo:output`, and the preview row is not its device.
+#[test]
+fn a_placeholder_output_never_adopts_a_saved_extra_output() {
+    let outputs = crate::audio::placeholder_inventory().outputs;
+    let mut saved = extra("alsa:hw:Quad", "ALSA", "System speakers");
+    let restore = restore_extra_output(&outputs, &mut saved);
+    assert!(restore.matched_by_name(), "{restore:?}");
+    assert_eq!(saved.id, "alsa:hw:Quad");
+    assert_eq!(saved.backend, "ALSA");
+    assert_eq!(saved.name, "System speakers");
+    assert_eq!(extra_output_index(&outputs, &saved), None);
 }

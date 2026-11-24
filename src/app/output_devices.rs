@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use crate::app::chain::ChainSelection;
+use crate::app::devices::extra_output_index;
 use crate::app::latency::output_mode_phrase;
 use crate::app::screen::{format_ms, Sheet};
 use crate::app::settings::ExtraOutputPref;
@@ -269,7 +270,7 @@ impl RigWerkApp {
         // A missed scan keeps the clock output selected (see
         // `hold_unconfirmed_devices`), so it is still in the inventory.  The
         // miss counter is what says the scan did not see it.
-        let clock_missing = !output.demo && self.output_misses > 0;
+        let clock_missing = !output.demo && self.devices.output_misses > 0;
         let mut rows = vec![OutputDeviceRow {
             name: output.name.clone(),
             backend: output.backend.clone(),
@@ -296,11 +297,8 @@ impl RigWerkApp {
             let (channels, missing) = if extra_output.virtual_output {
                 (2, false)
             } else {
-                let found = self
-                    .inventory
-                    .outputs
-                    .iter()
-                    .find(|device| device.id == extra_output.id);
+                let found = extra_output_index(&self.devices.inventory.outputs, extra_output)
+                    .and_then(|index| self.devices.inventory.outputs.get(index));
                 let channels = if self.engine.state == EngineState::Running {
                     let count = self
                         .snapshot
@@ -1116,6 +1114,7 @@ impl RigWerkApp {
             #[cfg(target_os = "windows")]
             {
                 let Some(cable) = self
+                    .devices
                     .inventory
                     .outputs
                     .iter()
@@ -1150,6 +1149,7 @@ impl RigWerkApp {
                 return;
             }
             let Some(device) = self
+                .devices
                 .inventory
                 .outputs
                 .iter()

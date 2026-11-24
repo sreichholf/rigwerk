@@ -393,15 +393,15 @@ impl RigWerkApp {
         let colours = palette(ui.ctx());
         let accent = colours.accent;
         panel(ui, "Input", section, Some(SetupSection::Devices), |ui| {
-            let low_inputs = DeviceGroup::all(&self.inventory.asio);
-            let system_inputs = DeviceGroup::all(&self.inventory.inputs);
-            let selected_system = if self.use_asio_input {
+            let low_inputs = DeviceGroup::all(&self.devices.inventory.asio);
+            let system_inputs = DeviceGroup::all(&self.devices.inventory.inputs);
+            let selected_system = if self.devices.use_asio_input {
                 usize::MAX
             } else {
-                self.input_idx
+                self.devices.input_idx
             };
-            let selected_direct = if self.use_asio_input {
-                self.asio_idx
+            let selected_direct = if self.devices.use_asio_input {
+                self.devices.asio_idx
             } else {
                 usize::MAX
             };
@@ -418,13 +418,13 @@ impl RigWerkApp {
             self.chrome.input_device_filter = filter;
             if let Some((index, name, from_direct)) = picked {
                 if from_direct {
-                    self.asio_idx = index;
-                    self.use_asio_input = true;
+                    self.devices.asio_idx = index;
+                    self.devices.use_asio_input = true;
                     self.accept_asio_device();
                     self.push_log(format!("Input set to {name}."), LogTone::Teal);
                 } else {
-                    self.input_idx = index;
-                    self.use_asio_input = false;
+                    self.devices.input_idx = index;
+                    self.devices.use_asio_input = false;
                     self.accept_input_device();
                     self.push_log(format!("Input set to {name}."), LogTone::Blue);
                 }
@@ -451,10 +451,10 @@ impl RigWerkApp {
 
         panel(ui, "Clock output", section, None, |ui| {
             let low_outputs =
-                DeviceGroup::subset(&self.inventory.outputs, &self.output_indices(true));
+                DeviceGroup::subset(&self.devices.inventory.outputs, &self.output_indices(true));
             let system_outputs =
-                DeviceGroup::subset(&self.inventory.outputs, &self.output_indices(false));
-            let selected = self.output_idx;
+                DeviceGroup::subset(&self.devices.inventory.outputs, &self.output_indices(false));
+            let selected = self.devices.output_idx;
             let mut filter = std::mem::take(&mut self.chrome.output_device_filter);
             let picked = device_lists(
                 ui,
@@ -467,8 +467,8 @@ impl RigWerkApp {
             );
             self.chrome.output_device_filter = filter;
             if let Some((index, name, from_direct)) = picked {
-                self.output_tab_low_latency = from_direct;
-                self.output_idx = index;
+                self.devices.output_tab_low_latency = from_direct;
+                self.devices.output_idx = index;
                 self.accept_output_device();
                 self.push_log(format!("Clock output set to {name}."), LogTone::Blue);
             }

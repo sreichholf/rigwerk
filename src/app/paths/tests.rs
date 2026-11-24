@@ -258,16 +258,19 @@ fn preview_meters_sum_every_path() {
 fn a_new_extra_output_copies_the_clock_outputs_paths() {
     let mut app = blank_app();
     // Extra outputs need a PipeWire clock output.
-    app.inventory.outputs.push(crate::audio::DeviceItem {
-        id: "pipewire:alsa_output.usb".to_owned(),
-        name: "Interface".to_owned(),
-        backend: "PipeWire".to_owned(),
-        channels: 2,
-        demo: false,
-        preferred: false,
-        asio_clsid: None,
-    });
-    app.output_idx = 0;
+    app.devices
+        .inventory
+        .outputs
+        .push(crate::audio::DeviceItem {
+            id: "pipewire:alsa_output.usb".to_owned(),
+            name: "Interface".to_owned(),
+            backend: "PipeWire".to_owned(),
+            channels: 2,
+            demo: false,
+            preferred: false,
+            asio_clsid: None,
+        });
+    app.devices.output_idx = 0;
     let second = app.add_path().unwrap();
     app.add_extra_output_device(crate::audio::VIRTUAL_OUTPUT_ID);
     let extra_output = app.extra_outputs.last().expect("added");
@@ -360,7 +363,7 @@ fn apply_click_pair_routes_music_to_one_and_two_and_the_click_to_three_and_four(
     use crate::audio::{DeviceItem, MapPreset, UnusedChannels};
 
     let mut app = blank_app();
-    app.inventory.outputs.push(DeviceItem {
+    app.devices.inventory.outputs.push(DeviceItem {
         id: "hw:Out".to_owned(),
         name: "Out".to_owned(),
         backend: "ALSA".to_owned(),

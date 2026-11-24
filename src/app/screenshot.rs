@@ -353,6 +353,7 @@ impl RigWerkApp {
             .chain(self.extra_outputs.iter().map(|extra| extra.id.clone()))
             .collect();
         let more: Vec<String> = self
+            .devices
             .inventory
             .outputs
             .iter()
@@ -376,6 +377,7 @@ impl RigWerkApp {
     fn apply_screenshot_showcase(&mut self) {
         self.begin_plugin_scan();
         let extra_output = self
+            .devices
             .inventory
             .outputs
             .iter()

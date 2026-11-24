@@ -67,6 +67,7 @@ impl RigWerkApp {
         let has_virtual = self.extra_outputs.iter().any(|extra| extra.virtual_output);
         #[cfg(target_os = "windows")]
         let vb_cable = self
+            .devices
             .inventory
             .outputs
             .iter()
@@ -75,7 +76,8 @@ impl RigWerkApp {
         let mut candidates: Vec<(String, String, String, bool)> = {
             #[cfg(target_os = "linux")]
             {
-                self.inventory
+                self.devices
+                    .inventory
                     .outputs
                     .iter()
                     .filter_map(|device| {
@@ -94,7 +96,8 @@ impl RigWerkApp {
             }
             #[cfg(target_os = "windows")]
             {
-                self.inventory
+                self.devices
+                    .inventory
                     .outputs
                     .iter()
                     .filter_map(|device| {

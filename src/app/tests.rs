@@ -43,14 +43,14 @@ fn item(id: &str, name: &str, backend: &str, preferred: bool) -> DeviceItem {
 }
 
 fn install(app: &mut super::RigWerkApp, preferences: &Preferences) {
-    let restored = restore_saved_devices(&app.inventory, preferences);
-    app.asio_idx = restored.asio_idx;
-    app.input_idx = restored.input_idx;
-    app.output_idx = restored.output_idx;
-    app.asio_held = restored.asio_held;
-    app.input_held = restored.input_held;
-    app.output_held = restored.output_held;
-    app.use_asio_input = preferences.use_asio_input;
+    let restored = restore_saved_devices(&app.devices.inventory, preferences);
+    app.devices.asio_idx = restored.asio_idx;
+    app.devices.input_idx = restored.input_idx;
+    app.devices.output_idx = restored.output_idx;
+    app.devices.asio_held = restored.asio_held;
+    app.devices.input_held = restored.input_held;
+    app.devices.output_held = restored.output_held;
+    app.devices.use_asio_input = preferences.use_asio_input;
 }
 
 fn save_text(app: &mut super::RigWerkApp) -> (String, Preferences) {
@@ -65,16 +65,20 @@ fn save_text(app: &mut super::RigWerkApp) -> (String, Preferences) {
 /// Saved ASIO and output ids are absent. The window shows the fallback devices.
 fn absent_studio() -> super::RigWerkApp {
     let mut app = blank_app();
-    app.inventory
+    app.devices
+        .inventory
         .asio
         .push(item("asio:other", "Other interface", "ASIO", false));
-    app.inventory
+    app.devices
+        .inventory
         .inputs
         .push(item("hw:Mic", "Mic", "ALSA", false));
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("default-out", "Speakers", "WASAPI", true));
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("phones", "Headphones", "WASAPI", false));
     let preferences = Preferences {
@@ -93,7 +97,7 @@ fn absent_studio() -> super::RigWerkApp {
 #[test]
 fn finish_startup_scan_restores_saved_devices_and_clears_the_gate() {
     let mut app = blank_app();
-    app.inventory = audio::placeholder_inventory();
+    app.devices.inventory = audio::placeholder_inventory();
     app.startup = Some(StartupGate {
         preferences: Preferences {
             asio_name: Some("Focusrite USB".to_owned()),
@@ -226,7 +230,7 @@ fn save_keeps_an_output_id_the_scan_did_not_find() {
     assert_eq!(app.selected_output().id, "default-out");
     assert_eq!(app.selected_asio().id, "asio:other");
     assert!(
-        app.input_held.is_none(),
+        app.devices.input_held.is_none(),
         "an empty input is not a stored identity"
     );
     let (raw, saved) = save_text(&mut app);
@@ -247,10 +251,12 @@ fn save_keeps_an_output_id_the_scan_did_not_find() {
 #[test]
 fn a_successful_restore_saves_the_current_device() {
     let mut app = blank_app();
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("default-out", "Speakers", "WASAPI", true));
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("hw:Speaker", "Studio", "ALSA", false));
     install(
@@ -262,7 +268,7 @@ fn a_successful_restore_saves_the_current_device() {
             ..Preferences::default()
         },
     );
-    assert!(app.output_held.is_none());
+    assert!(app.devices.output_held.is_none());
     assert_eq!(app.selected_output().id, "hw:Speaker");
     assert_ne!(app.selected_output().id, "default-out");
     let (raw, saved) = save_text(&mut app);
@@ -277,10 +283,12 @@ fn a_successful_restore_saves_the_current_device() {
 #[test]
 fn a_legacy_name_match_gains_an_id_on_save() {
     let mut app = blank_app();
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("default-out", "System Default", "WASAPI", true));
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("wasapi:{spk}", "Speakers", "WASAPI", false));
     install(
@@ -292,7 +300,7 @@ fn a_legacy_name_match_gains_an_id_on_save() {
             ..Preferences::default()
         },
     );
-    assert!(app.output_held.is_none());
+    assert!(app.devices.output_held.is_none());
     assert_eq!(app.selected_output().id, "wasapi:{spk}");
     let (raw, saved) = save_text(&mut app);
     assert!(raw.contains("wasapi:{spk}"), "{raw}");
@@ -305,7 +313,8 @@ fn a_legacy_name_match_gains_an_id_on_save() {
 #[test]
 fn a_same_name_device_does_not_replace_a_stored_id() {
     let mut app = blank_app();
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("wasapi:{spk}", "Speakers", "WASAPI", true));
     install(
@@ -319,7 +328,10 @@ fn a_same_name_device_does_not_replace_a_stored_id() {
     );
     assert_eq!(app.selected_output().id, "wasapi:{spk}");
     assert_eq!(
-        app.output_held.as_ref().map(|held| held.id.as_str()),
+        app.devices
+            .output_held
+            .as_ref()
+            .map(|held| held.id.as_str()),
         Some("asio-out:studio")
     );
     let (raw, saved) = save_text(&mut app);
@@ -335,9 +347,9 @@ fn an_explicit_output_pick_replaces_the_held_identity() {
     let mut app = absent_studio();
     let (_, kept) = save_text(&mut app);
     assert_eq!(kept.output_id, "asio-out:studio");
-    app.output_idx = 1;
+    app.devices.output_idx = 1;
     app.accept_output_device();
-    assert!(app.output_held.is_none());
+    assert!(app.devices.output_held.is_none());
     let (_, saved) = save_text(&mut app);
     assert_eq!(saved.output_id, "phones");
     assert_eq!(saved.output_name.as_deref(), Some("Headphones"));
@@ -349,7 +361,7 @@ fn an_explicit_output_pick_replaces_the_held_identity() {
 #[test]
 fn a_session_that_finds_the_output_may_be_saved() {
     let mut app = absent_studio();
-    assert!(app.output_held.is_some());
+    assert!(app.devices.output_held.is_some());
     app.sessions.push(Session {
         name: "Phones".to_owned(),
         input: "Other interface".to_owned(),
@@ -361,8 +373,8 @@ fn a_session_that_finds_the_output_may_be_saved() {
         ..Session::default()
     });
     app.apply_session(0);
-    assert!(app.output_held.is_none());
-    assert!(app.asio_held.is_none());
+    assert!(app.devices.output_held.is_none());
+    assert!(app.devices.asio_held.is_none());
     assert_eq!(app.selected_output().id, "phones");
     assert_eq!(app.selected_asio().id, "asio:other");
     let (_, saved) = save_text(&mut app);
@@ -386,11 +398,14 @@ fn a_session_that_misses_the_device_keeps_the_stored_id() {
     });
     app.apply_session(0);
     assert_eq!(
-        app.output_held.as_ref().map(|held| held.id.as_str()),
+        app.devices
+            .output_held
+            .as_ref()
+            .map(|held| held.id.as_str()),
         Some("asio-out:studio")
     );
     assert_eq!(
-        app.asio_held.as_ref().map(|held| held.id.as_str()),
+        app.devices.asio_held.as_ref().map(|held| held.id.as_str()),
         Some("asio:focusrite")
     );
     assert_eq!(app.selected_output().id, "default-out");
@@ -406,19 +421,22 @@ fn a_session_that_misses_the_device_keeps_the_stored_id() {
 #[test]
 fn nothing_stored_saves_the_selected_device() {
     let mut app = blank_app();
-    app.inventory
+    app.devices
+        .inventory
         .asio
         .push(item("asio:other", "Other interface", "ASIO", false));
-    app.inventory
+    app.devices
+        .inventory
         .inputs
         .push(item("hw:Mic", "Mic", "ALSA", false));
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("default-out", "Speakers", "WASAPI", true));
     install(&mut app, &Preferences::default());
-    assert!(app.asio_held.is_none());
-    assert!(app.input_held.is_none());
-    assert!(app.output_held.is_none());
+    assert!(app.devices.asio_held.is_none());
+    assert!(app.devices.input_held.is_none());
+    assert!(app.devices.output_held.is_none());
     let (_, saved) = save_text(&mut app);
     assert_eq!(saved.asio_id, "asio:other");
     assert_eq!(saved.input_id, "hw:Mic");
@@ -452,14 +470,15 @@ fn the_activity_log_keeps_hundreds_of_entries() {
 #[test]
 fn a_scan_failure_is_kept_when_the_device_list_does_not_change() {
     let mut app = blank_app();
-    app.inventory_fingerprint = super::devices::inventory_fingerprint(&app.inventory);
-    let mut failed = app.inventory.clone();
+    app.devices.inventory_fingerprint =
+        super::devices::inventory_fingerprint(&app.devices.inventory);
+    let mut failed = app.devices.inventory.clone();
     failed
         .notes
         .push("ASIO registry scan: registry unavailable".to_owned());
     assert!(!app.apply_inventory(failed));
     assert_eq!(
-        app.inventory.notes.as_slice(),
+        app.devices.inventory.notes.as_slice(),
         ["ASIO registry scan: registry unavailable"]
     );
     assert_eq!(
@@ -470,7 +489,7 @@ fn a_scan_failure_is_kept_when_the_device_list_does_not_change() {
         1
     );
 
-    let again = app.inventory.clone();
+    let again = app.devices.inventory.clone();
     assert!(!app.apply_inventory(again.clone()));
     assert_eq!(
         app.log
@@ -483,7 +502,7 @@ fn a_scan_failure_is_kept_when_the_device_list_does_not_change() {
     let mut cleared = again;
     cleared.notes.clear();
     assert!(!app.apply_inventory(cleared));
-    assert!(app.inventory.notes.is_empty());
+    assert!(app.devices.inventory.notes.is_empty());
     assert!(app
         .log
         .iter()
@@ -493,14 +512,18 @@ fn a_scan_failure_is_kept_when_the_device_list_does_not_change() {
 #[test]
 fn a_device_change_still_records_a_scan_note() {
     let mut app = blank_app();
-    app.inventory_fingerprint = super::devices::inventory_fingerprint(&app.inventory);
-    let mut fresh = app.inventory.clone();
+    app.devices.inventory_fingerprint =
+        super::devices::inventory_fingerprint(&app.devices.inventory);
+    let mut fresh = app.devices.inventory.clone();
     fresh
         .outputs
         .push(item("default-out", "Speakers", "WASAPI", true));
     fresh.notes.push("ASIO registry scan: boom".to_owned());
     assert!(app.apply_inventory(fresh));
-    assert_eq!(app.inventory.notes.as_slice(), ["ASIO registry scan: boom"]);
+    assert_eq!(
+        app.devices.inventory.notes.as_slice(),
+        ["ASIO registry scan: boom"]
+    );
     assert!(app
         .log
         .iter()
@@ -514,13 +537,15 @@ fn a_device_change_still_records_a_scan_note() {
 #[test]
 fn one_missed_scan_does_not_stop_the_bridge() {
     let mut app = blank_app();
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(item("hw:Speaker", "Studio", "ALSA", false));
-    app.output_idx = 0;
+    app.devices.output_idx = 0;
     app.bridge_signature = 7;
-    app.inventory_fingerprint = super::devices::inventory_fingerprint(&app.inventory);
-    let mut gone = app.inventory.clone();
+    app.devices.inventory_fingerprint =
+        super::devices::inventory_fingerprint(&app.devices.inventory);
+    let mut gone = app.devices.inventory.clone();
     gone.outputs.clear();
     assert!(!app.apply_inventory(gone.clone()));
     assert_eq!(app.bridge_signature, 7);
