@@ -16,7 +16,8 @@ serde = { version = "1", features = ["derive"] }
 # entry can be skipped (and an unreadable file kept) instead of lost.
 ron = "0.12"
 cpal = "0.18"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# PNG for screenshots, ICO for the embedded window and About icon.
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 # Preset-guided per-string spectra for the tuner.
 rustfft = "6"
 # The raw VST3 bindings (COM pointers, interfaces, `Class`) that RigWerk's own

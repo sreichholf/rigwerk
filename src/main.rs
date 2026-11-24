@@ -142,6 +142,7 @@ fn main() -> eframe::Result<()> {
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([size.x, size.y])
+        .with_icon(ui::brand::window_icon())
         .with_title("RigWerk - independent audio bridge");
     if screenshot_mode {
         viewport = viewport

@@ -1,6 +1,7 @@
 //! Everything drawn on screen: theme, shared widgets, the window shell and
 //! one file per page.
 
+pub(crate) mod brand;
 pub(crate) mod calibration;
 pub(crate) mod drawers;
 pub(crate) mod fonts;
