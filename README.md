@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/rigwerk-pedal.svg" alt="RigWerk" width="120">
+</p>
+
 # RigWerk
 
 Run an audio interface through effects and out to any other device, even
@@ -41,6 +45,13 @@ The full tour of every screen is in the [manual](docs/manual.md).
 Channel map, per-path level, polarity and timing on one output.
 
 ![The output sheet](docs/screenshots/output-sheet.png)
+
+### Match paths
+
+Each path is measured after its chain and brought to the same loudness
+before its fader.
+
+![The Match paths sheet](docs/screenshots/match-paths.png)
 
 ### Tuner
 
