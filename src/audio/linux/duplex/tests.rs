@@ -26,7 +26,7 @@ fn duplex_bridge_runs_against_a_live_daemon() {
         output_rate: None,
         output_buffer: 128,
         asio_wrapper: false,
-        real_style_output: false,
+        low_latency_request: false,
         exclusive_output: false,
         pipewire_low_latency: false,
     };

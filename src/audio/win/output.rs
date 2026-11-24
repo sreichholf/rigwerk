@@ -22,18 +22,19 @@ pub(crate) enum Attempt {
     Refused(Option<String>),
 }
 
-/// Tries the WASAPI clock output `exclusive` or `real_style` asked for, and
+/// Tries the WASAPI clock output `exclusive` or `low_latency` asked for, and
 /// returns it when it opened.
 ///
-/// `exclusive` asks for WASAPI exclusive mode and `real_style` for
-/// IAudioClient3 at the driver's smallest shared engine step, in that order;
-/// neither is retried.  A refusal is a `Refused` carrying the reason, so the
-/// shared stream that follows can say what it fell back from.
+/// `exclusive` asks for WASAPI exclusive mode and `low_latency` for
+/// IAudioClient3 at the driver's smallest shared engine step (Windows'
+/// REAL-style attempt), in that order; neither is retried.  A refusal is a
+/// `Refused` carrying the reason, so the shared stream that follows can say
+/// what it fell back from.
 pub(crate) fn attempt(
     id: &cpal::DeviceId,
     sample_rate: u32,
     shared: &Arc<Shared>,
-    real_style: bool,
+    low_latency: bool,
     exclusive: bool,
 ) -> Attempt {
     if exclusive {
@@ -59,7 +60,7 @@ pub(crate) fn attempt(
             }
             Err(reason) => Attempt::Refused(Some(format!(" · Exclusive refused: {reason}"))),
         }
-    } else if real_style {
+    } else if low_latency {
         if id.host() != cpal::HostId::Wasapi {
             return Attempt::Refused(Some(format!(
                 " · Shared, smallest buffer refused: {} has no adjustable engine step",

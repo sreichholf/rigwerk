@@ -62,7 +62,7 @@ pub(crate) fn run_asio_bridge(
         config.output_rate.unwrap_or(asio_rate),
         &shared,
         config.output_buffer,
-        config.real_style_output,
+        config.low_latency_request,
         config.exclusive_output,
     ) {
         Ok(opened) => opened,

@@ -387,18 +387,26 @@ pub struct StartConfig {
     pub buffer_size: usize,
     /// Output side rate; `None` follows whatever rate the input really runs at.
     pub output_rate: Option<u32>,
-    /// Output side buffer in frames, used whenever the output is not running
-    /// REAL-style or exclusive (ASIO playback, or a WASAPI driver that refused).
+    /// Output side buffer in frames for a normal shared stream: what a stream
+    /// asks for when no low-latency request is made, and on Windows what the
+    /// fallback after a refused request asks for.  A refused fixed buffer is
+    /// retried at the driver's default instead; see
+    /// [`Self::low_latency_request`].
     pub output_buffer: usize,
     /// A wrapper driver (ASIO4ALL and friends) does not name its hardware, so
     /// playback errors get an extra hint about sharing one sound card.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub asio_wrapper: bool,
-    /// REAL-style output: open WASAPI outputs through IAudioClient3 at the
-    /// smallest engine step the driver allows.  If the driver refuses, the
-    /// output falls back to a normal shared stream with `output_buffer`.
-    /// Ignored when [`Self::exclusive_output`] is set.
-    pub real_style_output: bool,
+    /// Ask the clock output for the lowest latency the backend can open.  On
+    /// Windows that is WASAPI's IAudioClient3 at the smallest shared engine
+    /// step the driver allows (REAL-style); on Linux it is ALSA's smallest
+    /// usable period, opened as the shared stream's fixed buffer.  A refusal
+    /// falls back to the shared cpal stream, at `output_buffer` on Windows and
+    /// at ALSA's requested period on Linux; when that stream does not open at
+    /// the requested buffer, it is retried once at the driver's default, and
+    /// only a second failure is an error.  Ignored when
+    /// [`Self::exclusive_output`] is set; ASIO playback ignores both.
+    pub low_latency_request: bool,
     /// WASAPI exclusive mode for the clock output only.  On refuse, falls back
     /// to shared cpal with `output_buffer` (not REAL-style).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

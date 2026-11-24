@@ -15,7 +15,7 @@ fn plain() -> StartConfig {
         output_rate: None,
         output_buffer: 128,
         asio_wrapper: false,
-        real_style_output: false,
+        low_latency_request: false,
         exclusive_output: false,
         pipewire_low_latency: false,
     }
@@ -27,7 +27,7 @@ fn plain() -> StartConfig {
 fn system_devices_fall_back_to_cpal() {
     let mut config = plain();
     config.output_rate = Some(44_100);
-    config.real_style_output = true;
+    config.low_latency_request = true;
     config.exclusive_output = true;
     assert_eq!(select(&config), Backend::Cpal);
 }

@@ -109,7 +109,7 @@ impl RigWerkApp {
         let pipewire_low_latency = self.low_latency_output && audio::is_pipewire_device(&output);
         #[cfg(not(target_os = "linux"))]
         let pipewire_low_latency = false;
-        let (real_style_output, exclusive_output) = self.output_start_flags();
+        let (low_latency_request, exclusive_output) = self.output_start_flags();
         let config = StartConfig {
             asio_clsid: input.asio_clsid,
             input_id: if input.asio_clsid.is_some() {
@@ -124,7 +124,7 @@ impl RigWerkApp {
             output_rate: (self.output_rate > 0).then_some(self.output_rate),
             output_buffer: self.output_buffer,
             asio_wrapper: input.asio_clsid.is_some() && is_wrapper_driver(&input),
-            real_style_output,
+            low_latency_request,
             exclusive_output,
             pipewire_low_latency,
         };
@@ -633,11 +633,14 @@ impl RigWerkApp {
             .set_bridge_buffer(self.bridge_buffer_mode, self.bridge_buffer_ms);
     }
 
-    /// `(real_style_output, exclusive_output)` for [`StartConfig`].
+    /// `(low_latency_request, exclusive_output)` for [`StartConfig`].
     ///
-    /// An ASIO clock ignores the WASAPI mode and the low-latency flag.
-    /// On Windows the mode enum decides; elsewhere low latency is the
-    /// real-style flag and exclusive stays off.  Both persisted fields stay.
+    /// An ASIO clock ignores the WASAPI mode and every low-latency request.
+    /// On Windows the mode enum decides; on Linux the one `low_latency_output`
+    /// preference drives both this request and `pipewire_low_latency` (the
+    /// PipeWire quantum ask, which additionally needs `is_pipewire_device`),
+    /// and ALSA reads the request as its smallest period.  Exclusive stays off
+    /// away from Windows.  Both persisted fields stay.
     pub(crate) fn output_start_flags(&self) -> (bool, bool) {
         if self.selected_output().asio_clsid.is_some() {
             return (false, false);
