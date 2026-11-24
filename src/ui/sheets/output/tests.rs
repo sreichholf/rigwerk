@@ -55,6 +55,25 @@ fn the_click_row_and_presets_are_named() {
 }
 
 #[test]
+fn the_bridge_buffer_slider_pins_its_range() {
+    use crate::app::settings::{bridge_buffer_to_pref, BRIDGE_BUFFER_MS_MAX, BRIDGE_BUFFER_MS_MIN};
+    use crate::audio::BufferMode;
+
+    let mut app = four_channel_extra();
+    app.extra_outputs[0].bridge_buffer_mode = bridge_buffer_to_pref(BufferMode::Fixed);
+    let tree = accesskit_frame(|ui| app.sheet_body(ui, 600.0));
+    let slider = node_named(&tree, "Bridge buffer");
+    assert_eq!(
+        slider.min_numeric_value(),
+        Some(f64::from(BRIDGE_BUFFER_MS_MIN))
+    );
+    assert_eq!(
+        slider.max_numeric_value(),
+        Some(f64::from(BRIDGE_BUFFER_MS_MAX))
+    );
+}
+
+#[test]
 fn the_loudness_controls_are_named() {
     let mut app = four_channel_extra();
     let tree = accesskit_frame(|ui| app.sheet_body(ui, 600.0));

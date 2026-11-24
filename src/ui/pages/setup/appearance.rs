@@ -9,7 +9,7 @@ use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
 use crate::ui::pages::setup::{hint, panel};
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{segmented, TextField};
+use crate::ui::widgets::{segmented, styled_slider, SliderStyle, TextField};
 
 impl RigWerkApp {
     pub(super) fn setup_start(&mut self, ui: &mut egui::Ui) {
@@ -32,6 +32,7 @@ impl RigWerkApp {
 
     pub(super) fn setup_appearance(&mut self, ui: &mut egui::Ui) {
         panel(ui, "Appearance", None, None, |ui| {
+            let colours = palette(ui.ctx());
             hint(ui, "Theme");
             ui.add_space(4.0);
             let mut theme = match self.theme {
@@ -55,10 +56,24 @@ impl RigWerkApp {
             hint(ui, "Size");
             ui.add_space(4.0);
             let mut percent = (self.ui_size * 100.0).round();
-            if ui
-                .add(egui::Slider::new(&mut percent, 80.0..=150.0).suffix(" %"))
-                .changed()
-            {
+            let response = styled_slider(
+                ui,
+                &mut percent,
+                80.0,
+                150.0,
+                0.0,
+                SliderStyle::named(colours.accent, "Size")
+                    .format(|value| {
+                        if value.fract().abs() < 0.05 {
+                            format!("{value:.0} %")
+                        } else {
+                            format!("{value:.1} %")
+                        }
+                    })
+                    .unit(" %")
+                    .editable(),
+            );
+            if response.changed() {
                 self.set_ui_size(ui.ctx(), percent / 100.0);
             }
         });
@@ -122,3 +137,6 @@ impl RigWerkApp {
         });
     }
 }
+
+#[cfg(test)]
+mod tests;

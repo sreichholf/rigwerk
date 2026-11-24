@@ -9,7 +9,9 @@ use crate::app::RigWerkApp;
 use crate::audio::{LOUDNESS_TARGET_MAX_LUFS, LOUDNESS_TARGET_MIN_LUFS, SILENCE_LUFS};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{row_info, segmented, OutlineButton};
+use crate::ui::widgets::{
+    format_db, row_info, segmented, styled_slider, OutlineButton, SliderStyle,
+};
 
 const COLUMN_GAP: f32 = 24.0;
 const MIN_TWO_COLUMNS_W: f32 = 760.0;
@@ -102,29 +104,20 @@ impl RigWerkApp {
             let mut target = self.match_paths.target_lufs;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                ui.spacing_mut().slider_width = (ui.available_width() - 80.0 - 8.0).max(80.0);
-                ui.visuals_mut().selection.bg_fill = colours.accent;
-                let response = ui
-                    .add(
-                        egui::Slider::new(
-                            &mut target,
-                            LOUDNESS_TARGET_MIN_LUFS..=LOUDNESS_TARGET_MAX_LUFS,
-                        )
-                        .show_value(false)
-                        .step_by(0.5)
-                        .handle_shape(egui::style::HandleShape::Circle)
-                        .trailing_fill(true),
-                    )
-                    .on_hover_text(
-                        "Every ticked path is brought to this loudness with the level fader at 0 dB.",
-                    );
-                row_info(
-                    &response,
-                    egui::Role::Slider,
-                    true,
-                    "Reference loudness",
-                    None,
-                    Some(format!("{target:.1} LUFS")),
+                let slider_w = (ui.available_width() - 80.0 - 8.0).max(80.0);
+                let reading = format!("{target:.1} LUFS");
+                styled_slider(
+                    ui,
+                    &mut target,
+                    LOUDNESS_TARGET_MIN_LUFS,
+                    LOUDNESS_TARGET_MAX_LUFS,
+                    0.5,
+                    SliderStyle::named(colours.accent, "Reference loudness")
+                        .value(reading)
+                        .width(slider_w),
+                )
+                .on_hover_text(
+                    "Every ticked path is brought to this loudness with the level fader at 0 dB.",
                 );
                 ui.label(
                     RichText::new(format!("{target:.1} LUFS"))
@@ -297,12 +290,12 @@ impl RigWerkApp {
                             .color(colours.text),
                     );
                     ui.label(
-                        RichText::new(db_label(row.current_db))
+                        RichText::new(format_db(row.current_db, 1))
                             .font(font(Face::Mono, TypeRole::Secondary))
                             .color(colours.text2),
                     );
                     ui.label(
-                        RichText::new(db_label(row.new_db))
+                        RichText::new(format_db(row.new_db, 1))
                             .font(font(Face::Mono, TypeRole::Secondary))
                             .color(if ticked && changed {
                                 colours.accent_text
@@ -312,10 +305,8 @@ impl RigWerkApp {
                     );
                     let change = if is_reference {
                         "—".to_owned()
-                    } else if row.change_db.abs() < 0.05 {
-                        "0.0 dB".to_owned()
                     } else {
-                        db_label(row.change_db)
+                        format_db(row.change_db, 1)
                     };
                     ui.horizontal(|ui| {
                         ui.label(
@@ -402,17 +393,6 @@ fn measured_label(lufs: f32) -> String {
         format!("{lufs:.1} LUFS")
     } else {
         "—".to_owned()
-    }
-}
-
-fn db_label(db: f32) -> String {
-    let tenths = (db * 10.0).round();
-    if tenths == 0.0 {
-        "0.0 dB".to_owned()
-    } else if tenths < 0.0 {
-        format!("−{:.1} dB", -tenths / 10.0)
-    } else {
-        format!("+{:.1} dB", tenths / 10.0)
     }
 }
 

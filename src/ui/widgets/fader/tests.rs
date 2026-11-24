@@ -1,8 +1,8 @@
 use super::{
-    db_at_travel, drag_delta_db, fader, fader_height, format_level, parse_level, scroll_delta_db,
-    travel_at_db, FaderRange,
+    db_at_travel, drag_delta_db, fader, fader_height, parse_level, scroll_delta_db, travel_at_db,
+    FaderRange,
 };
-use crate::ui::widgets::{node_named, run_frame, test_input};
+use crate::ui::widgets::{format_db, node_named, run_frame, test_input};
 use eframe::egui;
 
 fn near(actual: f32, expected: f32) {
@@ -56,15 +56,15 @@ fn travel_and_level_invert_each_other() {
 
 #[test]
 fn the_readout_uses_the_spec_forms() {
-    assert_eq!(format_level(0.0), "0.0");
-    assert_eq!(format_level(-0.02), "0.0");
-    assert_eq!(format_level(-4.0), "−4.0 dB");
-    assert_eq!(format_level(6.0), "6.0 dB");
-    assert_eq!(format_level(f32::NEG_INFINITY), "−∞");
-    assert_eq!(format_level(-120.0), "−∞");
+    assert_eq!(format_db(0.0, 1), "0.0 dB");
+    assert_eq!(format_db(-0.02, 1), "0.0 dB");
+    assert_eq!(format_db(-4.0, 1), "−4.0 dB");
+    assert_eq!(format_db(6.0, 1), "+6.0 dB");
+    assert_eq!(format_db(f32::NEG_INFINITY, 1), "−∞");
+    assert_eq!(format_db(-120.0, 1), "−∞");
     assert_eq!(parse_level("−4.0 dB"), Some(-4.0));
     assert_eq!(parse_level("-4"), Some(-4.0));
-    assert_eq!(parse_level("0.0"), Some(0.0));
+    assert_eq!(parse_level("0.0 dB"), Some(0.0));
     assert_eq!(parse_level("−∞"), Some(f32::NEG_INFINITY));
     assert_eq!(parse_level("nope"), None);
 }

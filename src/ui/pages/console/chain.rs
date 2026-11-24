@@ -21,8 +21,8 @@ use crate::audio::{GateSlot, NamPosition, MAX_EFFECTS};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{
-    add_effect_row, chain_event, chain_row, effects_header, ChainEvent, ChainMark, ChainRow,
-    EffectDrag, NamDrag, CHAIN_ROW_H,
+    add_effect_row, chain_event, chain_row, effects_header, format_db, ChainEvent, ChainMark,
+    ChainRow, EffectDrag, NamDrag, CHAIN_ROW_H,
 };
 
 /// A row and the gap under it.
@@ -121,7 +121,7 @@ impl RigWerkApp {
         };
         let show_curve = matches!(step, DensityStep::Normal | DensityStep::CompactOutputs);
         let open = self.chrome.sheet;
-        let gate_text = format!("{:.0} dB", mix.gate.threshold_db).replace('-', "−");
+        let gate_text = format_db(mix.gate.threshold_db, 0);
         let top = ui.cursor().top();
         let views = self.engine.plugin_views(slot);
         let count = views.len();

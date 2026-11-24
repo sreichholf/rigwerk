@@ -127,7 +127,7 @@ pub(crate) fn vertical_meter(
         .map(linear_to_db)
         .collect();
     paint_vertical(ui, rect, &bars, &live, state, show_scale);
-    let value = super::fader::format_level(loudest);
+    let value = super::format_db(loudest, 1);
     row_info(&response, egui::Role::Meter, true, label, None, Some(value));
     response
 }
@@ -243,7 +243,7 @@ pub(crate) fn horizontal_meter(ui: &mut egui::Ui, level: f32, label: &str) -> eg
         true,
         label,
         None,
-        Some(super::fader::format_level(db)),
+        Some(super::format_db(db, 1)),
     );
     response
 }

@@ -23,20 +23,13 @@ use crate::app::RigWerkApp;
 use crate::audio::{NamPosition, MAX_NAM_BLOCKS, NAM_MAX_TRIM_DB, NAM_MIN_TRIM_DB, NAM_SOFT_LIMIT};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{row_info, segmented, OutlineButton, TextField, CONTROL_H};
+use crate::ui::widgets::{
+    format_db, row_info, segmented, styled_slider, OutlineButton, SliderStyle, TextField, CONTROL_H,
+};
 
 const LABEL_W: f32 = 96.0;
 const VALUE_W: f32 = 72.0;
 const ROW_H: f32 = 28.0;
-
-fn db_label(db: f32) -> String {
-    let tenths = (db * 10.0).round();
-    if tenths < 0.0 {
-        format!("−{:.1} dB", -tenths / 10.0)
-    } else {
-        format!("{:.1} dB", tenths.abs() / 10.0)
-    }
-}
 
 fn percent(share: f32) -> String {
     format!("{:.0} %", share * 100.0)
@@ -311,7 +304,7 @@ impl RigWerkApp {
                 ui.add_space(8.0);
                 let loudness = controls
                     .loudness_db
-                    .map(|db| format!("Loudness {db:+.1} dB (file)"))
+                    .map(|db| format!("Loudness {} (file)", format_db(db, 1)))
                     .unwrap_or_else(|| "No loudness in file".to_owned());
                 ui.label(
                     RichText::new(loudness)
@@ -632,7 +625,13 @@ fn slider_row(
 ) {
     let width = ui.available_width();
     let slider_w = (width - LABEL_W - VALUE_W - 16.0).max(80.0);
-    ui.visuals_mut().selection.bg_fill = colours.accent;
+    let show = |value: f32| {
+        if decibels {
+            format_db(value, 1)
+        } else {
+            format!("{value:.2}")
+        }
+    };
     ui.allocate_ui_with_layout(
         Vec2::new(width, ROW_H),
         Layout::left_to_right(Align::Center),
@@ -652,29 +651,18 @@ fn slider_row(
                     .on_hover_text(hint);
                 },
             );
-            ui.spacing_mut().slider_width = slider_w;
-            let response = ui
-                .add(
-                    egui::Slider::new(value, range)
-                        .show_value(false)
-                        .step_by(f64::from(step))
-                        .handle_shape(egui::style::HandleShape::Circle)
-                        .trailing_fill(true),
-                )
-                .on_hover_text(hint);
-            let text = if decibels {
-                db_label(*value)
-            } else {
-                format!("{value:.2}")
-            };
-            row_info(
-                &response,
-                egui::Role::Slider,
-                true,
-                name,
-                None,
-                Some(text.clone()),
-            );
+            styled_slider(
+                ui,
+                value,
+                *range.start(),
+                *range.end(),
+                step,
+                SliderStyle::named(colours.accent, name)
+                    .value(show(*value))
+                    .width(slider_w),
+            )
+            .on_hover_text(hint);
+            let text = show(*value);
             ui.allocate_ui_with_layout(
                 Vec2::new(VALUE_W, ROW_H),
                 Layout::right_to_left(Align::Center),

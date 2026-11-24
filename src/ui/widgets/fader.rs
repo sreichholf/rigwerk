@@ -15,7 +15,9 @@ use egui::{Align, CornerRadius, FontId, Layout, Rect, Sense, Stroke, Vec2};
 
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{palette_focus, row_info};
+use crate::ui::widgets::{format_db, palette_focus, row_info};
+
+use super::slider::{key_steps, slider_access};
 
 /// Inclusive dB range.  Unity (0.0) is the double-click value when it lies
 /// inside the range.
@@ -41,25 +43,6 @@ const NEAR_UNITY_DB: f32 = 12.0;
 /// Height of a strip fader: `clamp(strip_height × 0.3, 140, 300)`.
 pub(crate) const fn fader_height(strip_height: f32) -> f32 {
     (strip_height * 0.3).clamp(140.0, 300.0)
-}
-
-/// The level as the fader prints it.  Unity is `0.0`, off is `−∞`, and
-/// every other finite value carries one decimal and `dB`.
-pub(crate) fn format_level(db: f32) -> String {
-    if db.is_nan() || db == f32::NEG_INFINITY || db <= -120.0 {
-        return "−∞".to_owned();
-    }
-    if !db.is_finite() {
-        return format_level(120.0);
-    }
-    if db.abs() < 0.05 {
-        return "0.0".to_owned();
-    }
-    if db < 0.0 {
-        format!("−{:.1} dB", db.abs())
-    } else {
-        format!("{db:.1} dB")
-    }
 }
 
 /// A typed level.  Accepts the printed form, a hyphen, and `−∞`.
@@ -110,7 +93,7 @@ pub(crate) fn fader(
     *value_db = value_db.clamp(min, max);
 
     let readout_font = font(Face::Mono, TypeRole::GridHeader);
-    let text = format_level(*value_db);
+    let text = format_db(*value_db, 1);
     let text_w = measure(ui, &text, &readout_font);
     let width = text_w.max(CAP_W).max(36.0);
     let height = height.max(READOUT_H + 24.0);
@@ -156,7 +139,7 @@ pub(crate) fn fader(
             &mut editing,
         );
         if editing {
-            let seed = format_level(*value_db);
+            let seed = format_db(*value_db, 1);
             ui.ctx().data_mut(|data| data.insert_temp(edit_id, seed));
         }
     }
@@ -181,11 +164,12 @@ pub(crate) fn fader(
     slider_access(
         ui,
         &response,
-        *value_db,
-        min,
-        max,
         label,
-        &format_level(*value_db),
+        f64::from(*value_db),
+        f64::from(min),
+        f64::from(max),
+        f64::from(NEAR_DB_PER_PT),
+        &format_db(*value_db, 1),
     );
     response.on_hover_text(
         "Drag to change the level. Shift drags finely, the wheel steps 0.5 dB, and a double-click sets 0.0. Double-click the value to type one.",
@@ -259,7 +243,7 @@ fn edit_value(
     let mut text = ui
         .ctx()
         .data(|data| data.get_temp::<String>(edit_id))
-        .unwrap_or_else(|| format_level(*value_db));
+        .unwrap_or_else(|| format_db(*value_db, 1));
     let opened = ui
         .ctx()
         .data(|data| data.get_temp::<bool>(edit_id.with("open")))
@@ -312,39 +296,7 @@ fn edit_value(
 }
 
 fn keys(ui: &egui::Ui, response: &egui::Response, value_db: &mut f32, min: f32, max: f32) -> bool {
-    if !response.has_focus() {
-        return false;
-    }
-    ui.memory_mut(|memory| {
-        memory.set_focus_lock_filter(
-            response.id,
-            egui::EventFilter {
-                horizontal_arrows: true,
-                vertical_arrows: true,
-                ..Default::default()
-            },
-        );
-    });
-    let (steps, fine, set_value) = ui.input(|input| {
-        use egui::accesskit::{Action, ActionData};
-        let down =
-            input.num_presses(egui::Key::ArrowDown) + input.num_presses(egui::Key::ArrowLeft);
-        let up = input.num_presses(egui::Key::ArrowUp) + input.num_presses(egui::Key::ArrowRight);
-        let access = input.num_accesskit_action_requests(response.id, Action::Increment) as i32
-            - input.num_accesskit_action_requests(response.id, Action::Decrement) as i32;
-        let set_value = input
-            .accesskit_action_requests(response.id, Action::SetValue)
-            .filter_map(|request| match request.data {
-                Some(ActionData::NumericValue(value)) => Some(value),
-                _ => None,
-            })
-            .last();
-        (
-            up as i32 - down as i32 + access,
-            input.modifiers.shift,
-            set_value,
-        )
-    });
+    let (steps, fine, set_value) = key_steps(ui, response, true);
     let mut changed = false;
     if steps != 0 {
         let step = if fine { FINE_DB_PER_PT } else { NEAR_DB_PER_PT };
@@ -503,47 +455,12 @@ fn paint(
         painter.text(
             readout.center(),
             egui::Align2::CENTER_CENTER,
-            format_level(value_db),
+            format_db(value_db, 1),
             readout_font.clone(),
             colours.text,
         );
     }
     palette_focus(ui, response, rect);
-}
-
-fn slider_access(
-    ui: &egui::Ui,
-    response: &egui::Response,
-    value_db: f32,
-    min: f32,
-    max: f32,
-    label: &str,
-    text: &str,
-) {
-    let enabled = ui.is_enabled();
-    let numeric = f64::from(value_db);
-    response.widget_info({
-        let label = label.to_owned();
-        let text = text.to_owned();
-        move || {
-            let mut info = egui::WidgetInfo::slider(enabled, numeric, label.clone());
-            info.current_text_value = Some(text.clone());
-            info
-        }
-    });
-    ui.ctx().accesskit_node_builder(response.id, |builder| {
-        use egui::accesskit::Action;
-        builder.set_min_numeric_value(f64::from(min));
-        builder.set_max_numeric_value(f64::from(max));
-        builder.set_numeric_value_step(f64::from(NEAR_DB_PER_PT));
-        builder.add_action(Action::SetValue);
-        if value_db < max {
-            builder.add_action(Action::Increment);
-        }
-        if value_db > min {
-            builder.add_action(Action::Decrement);
-        }
-    });
 }
 
 #[cfg(test)]

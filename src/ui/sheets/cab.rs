@@ -20,16 +20,9 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{row_info, segmented, styled_slider, OutlineButton, TextField, CONTROL_H};
-
-fn db_label(db: f32) -> String {
-    let tenths = (db * 10.0).round();
-    if tenths < 0.0 {
-        format!("−{:.1} dB", -tenths / 10.0)
-    } else {
-        format!("{:.1} dB", tenths.abs() / 10.0)
-    }
-}
+use crate::ui::widgets::{
+    format_db, row_info, segmented, styled_slider, OutlineButton, SliderStyle, TextField, CONTROL_H,
+};
 
 fn hz_label(hz: f32) -> String {
     if hz <= 0.0 {
@@ -258,7 +251,7 @@ fn value_slider(
     let shown = if hertz {
         hz_label(*value)
     } else {
-        db_label(*value)
+        format_db(*value, 1)
     };
     ui.horizontal(|ui| {
         let label = ui.label(
@@ -289,7 +282,7 @@ fn value_slider(
         *range.start(),
         *range.end(),
         step,
-        (colours.accent, name),
+        SliderStyle::named(colours.accent, name).value(shown),
     )
     .on_hover_text(hint);
 }

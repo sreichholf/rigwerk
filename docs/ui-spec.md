@@ -114,7 +114,7 @@ reads.
 ### 2.2 Units and formats
 
 - Levels: `−4.0 dB`, one decimal, the real minus sign `−`.  Unity reads
-  `0.0` on faders.  Off is `−∞`.
+  `0.0 dB` on faders.  Off is `−∞`.
 - Times: one decimal below 10 ms (`1.3 ms`), none from 10 ms (`13 ms`);
   trims two decimals (`+0.25 ms`).
 - Buffer sizes: `64 samples` in settings, `64 smp` in the status bar.
@@ -421,7 +421,7 @@ Right: time and preferences.
   near the floor.
 - Meter colours: `meter` up to −6 dBFS, `meter_hot` to −1, `error` above.
   Peak hold 1.5 s as a 2 pt line.  A clip latches red until clicked.
-- Drag 0.1 dB per pt near unity, Shift for fine, double-click for 0.0,
+- Drag 0.1 dB per pt near unity, Shift for fine, double-click for `0.0 dB`,
   scroll ±0.5 dB.  Double-click the value to type one.
 - Fader height: `clamp(strip_height × 0.3, 140, 300)` pt.
 

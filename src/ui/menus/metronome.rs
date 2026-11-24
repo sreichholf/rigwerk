@@ -8,6 +8,7 @@ use crate::audio::{
     CLICK_LEVEL_MAX_DB, CLICK_LEVEL_MIN_DB, CLICK_RHYTHMS, METRONOME_BPM_MAX, METRONOME_BPM_MIN,
 };
 use crate::ui::theme::{font, palette, Face, TypeRole};
+use crate::ui::widgets::{format_db, styled_slider, SliderStyle};
 
 impl RigWerkApp {
     /// Tempo and rhythm.  A click starts or stops; the arrow opens the menu.
@@ -87,10 +88,25 @@ impl RigWerkApp {
                 .font(font(Face::Sans, TypeRole::Secondary))
                 .color(colours.text3),
         );
-        if ui
-            .add(egui::Slider::new(&mut bpm, METRONOME_BPM_MIN..=METRONOME_BPM_MAX).suffix(" BPM"))
-            .changed()
-        {
+        let response = styled_slider(
+            ui,
+            &mut bpm,
+            METRONOME_BPM_MIN,
+            METRONOME_BPM_MAX,
+            0.0,
+            SliderStyle::named(colours.accent, "Tempo")
+                .format(|value| {
+                    if value.fract().abs() < 0.05 {
+                        format!("{value:.0} BPM")
+                    } else {
+                        format!("{value:.1} BPM")
+                    }
+                })
+                .unit(" BPM")
+                .width(200.0)
+                .editable(),
+        );
+        if response.changed() {
             self.set_metronome_bpm(bpm);
         }
         ui.label(
@@ -116,14 +132,23 @@ impl RigWerkApp {
                 .font(font(Face::Sans, TypeRole::Secondary))
                 .color(colours.text3),
         );
-        if ui
-            .add(
-                egui::Slider::new(&mut level, CLICK_LEVEL_MIN_DB..=CLICK_LEVEL_MAX_DB)
-                    .suffix(" dB"),
-            )
-            .changed()
-        {
+        let response = styled_slider(
+            ui,
+            &mut level,
+            CLICK_LEVEL_MIN_DB,
+            CLICK_LEVEL_MAX_DB,
+            0.0,
+            SliderStyle::named(colours.accent, "Click level")
+                .format(|value| format_db(value, 1))
+                .unit(" dB")
+                .width(200.0)
+                .editable(),
+        );
+        if response.changed() {
             self.set_metronome_level_db(level);
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
