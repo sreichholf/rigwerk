@@ -26,15 +26,12 @@ use super::super::rt_guard::RtGuard;
 use super::super::shared::Shared;
 use super::bus::{carries_record, ring_lanes};
 
-/// Same drift gains as [`super::super::mixer::OutputMixer`].
-pub(crate) const DRIFT_LIMIT_PPM: f32 = 500.0;
-const DRIFT_LIMIT_RATIO: f32 = DRIFT_LIMIT_PPM * 1e-6;
-const DRIFT_FILTER_SECONDS: f32 = 0.5;
-const DRIFT_KP: f32 = 0.06;
-const DRIFT_KI: f32 = 0.0012;
-/// A target step this large (seconds of ring) saturates the proportional
-/// term on its own, so closing it may wind the integral to its limit.
-const DRIFT_STEP_SECONDS: f32 = DRIFT_LIMIT_RATIO / DRIFT_KP;
+/// The shared loop's limit, re-exported for the Live Issues strip.
+pub(crate) use super::super::mixer::drift::DRIFT_LIMIT_PPM;
+
+use super::super::mixer::drift::{
+    DRIFT_FILTER_SECONDS, DRIFT_KI, DRIFT_KP, DRIFT_LIMIT_RATIO, DRIFT_STEP_SECONDS,
+};
 
 const SILENCE: LaneFrame = [0.0; super::super::output_map::FRAME_LANES];
 
@@ -328,3 +325,6 @@ impl ExtraOutputMixer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

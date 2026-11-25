@@ -20,8 +20,10 @@ const PASSBAND_FRACTION: f64 = 0.45;
 /// The fastest source rate the kernel storage is sized for in advance, so
 /// that a rate change up to it never allocates.
 const PREALLOCATED_SOURCE_RATE: u32 = 192_000;
-/// The most the ratio may be trimmed by drift steering.
-const MAX_CORRECTION_PPM: f32 = 500.0;
+/// The most the ratio may be trimmed by drift steering.  The drift loop's own
+/// limit lives in `audio/mixer/drift.rs` and must not exceed this clamp, which
+/// a compile-time assertion there checks.
+pub(crate) const MAX_CORRECTION_PPM: f32 = 500.0;
 
 /// The kernel length for a rate pair.
 ///
