@@ -100,3 +100,4 @@ make ducking and keyed effects work.
 
 A built-in reverb, delay or modulation.  Plugins cover them well, and
 an effects return makes one instance serve every path.
+
