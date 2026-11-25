@@ -11,7 +11,9 @@
 //! too: the UI sets it, and the bridge thread that owns the driver takes it
 //! between callbacks.  A recording of the frame one endpoint is about to
 //! play lives here too ([`super::record`]): the callbacks only push, and
-//! the writer runs off the audio thread.
+//! the writer runs off the audio thread.  A callback that caught a failure
+//! records it here as one code: the sample thread cannot build the message,
+//! so the snapshot words it and the app stops the run.
 //!
 //! Everything a path owns (routing, mono, channel enable, EQs, gate, NAM,
 //! plugin chain, level, match, mute, solo) lives in [`PathControls`], one per path slot in
@@ -27,6 +29,53 @@ use std::time::Duration;
 
 /// Sentinel for [`Shared::path_delay_ns`]: no PipeWire path delay sampled yet.
 const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
+
+/// Why a real-time callback stopped the run.  Stored as one byte on
+/// [`Shared`]: the callback may not format a message, so [`Shared::snapshot`]
+/// words it.  The first cause wins, so a later symptom does not relabel it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallbackFailure {
+    /// A callback's sample body panicked.
+    Panic,
+    /// A block could not be read as whole interleaved frames: a partial
+    /// frame, or no channels.
+    BadBlock,
+}
+
+impl CallbackFailure {
+    /// The one-byte encoding the atomic holds.  0 is no failure.
+    fn code(self) -> u8 {
+        match self {
+            Self::Panic => 1,
+            Self::BadBlock => 2,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Panic),
+            2 => Some(Self::BadBlock),
+            _ => None,
+        }
+    }
+
+    /// The sentence [`Shared::snapshot`] publishes as the run's error.
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Panic => "A real-time audio callback panicked (most likely inside a plugin)",
+            Self::BadBlock => {
+                "A real-time audio callback received a malformed block (a partial frame or no channels)"
+            }
+        }
+    }
+}
+
+/// Whether `error` is one of the sentences a callback failure publishes
+/// through [`Shared::snapshot`].  `app` uses it to tell a callback failure
+/// from a lost device by the error text alone, so the wording stays here.
+pub(crate) fn is_callback_failure_message(error: &str) -> bool {
+    error == CallbackFailure::Panic.message() || error == CallbackFailure::BadBlock.message()
+}
 
 use super::cab::CabPark;
 #[cfg(test)]
@@ -178,6 +227,11 @@ pub(crate) struct Shared {
     pub(crate) status: Mutex<String>,
     pub(crate) error: Mutex<Option<String>>,
     pub(crate) device_lost: AtomicBool,
+    /// Set by a real-time callback that caught a failure.  The callback
+    /// cannot build the message under the no-allocation rule, so
+    /// [`Self::snapshot`] words it and reports the run as lost; the app then
+    /// stops the bridge.
+    callback_failure: AtomicU8,
     /// The rate frames are pushed into the ring at.  Outputs convert from this
     /// rate to their own, so an input that could not take the requested rate
     /// no longer plays back at the wrong speed and pitch.
@@ -299,6 +353,7 @@ impl Shared {
             status: Mutex::new("Waiting".to_owned()),
             error: Mutex::new(None),
             device_lost: AtomicBool::new(false),
+            callback_failure: AtomicU8::new(0),
             source_rate: AtomicU32::new(0),
             output_rate: AtomicU32::new(0),
             output_step_frames: AtomicU32::new(0),
@@ -684,6 +739,7 @@ impl Shared {
         self.tap_head.store(0, Ordering::Relaxed);
         self.set_status("Starting bridge");
         self.device_lost.store(false, Ordering::Relaxed);
+        self.callback_failure.store(0, Ordering::Relaxed);
         if let Ok(mut error) = self.error.lock() {
             *error = None;
         }
@@ -1240,6 +1296,31 @@ impl Shared {
         self.set_error(text);
     }
 
+    /// Records a failure a real-time callback caught.  One relaxed
+    /// compare-exchange, so a callback may call it, and the first cause is
+    /// the one [`Self::snapshot`] shows.
+    pub(crate) fn note_callback_failure(&self, failure: CallbackFailure) {
+        let _ = self.callback_failure.compare_exchange(
+            0,
+            failure.code(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// The failure this run's callback caught, if any.  Callbacks read it
+    /// before their block so a broken chain is not driven every callback.
+    pub(crate) fn callback_failure(&self) -> Option<CallbackFailure> {
+        CallbackFailure::from_code(self.callback_failure.load(Ordering::Relaxed))
+    }
+
+    /// Forgets a caught failure.  Only for a run whose streams are gone: the
+    /// flag is what keeps a panicked callback out of the chain while the
+    /// bridge is still tearing down.
+    pub(crate) fn clear_callback_failure(&self) {
+        self.callback_failure.store(0, Ordering::Relaxed);
+    }
+
     pub(crate) fn input_gain(&self) -> f32 {
         f32::from_bits(self.input_gain.load(Ordering::Relaxed))
     }
@@ -1387,8 +1468,14 @@ impl Shared {
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {
-        let error = self.error.lock().ok().and_then(|error| error.clone());
-        let device_lost = self.device_lost.load(Ordering::Relaxed);
+        let failure = self.callback_failure();
+        let error = self
+            .error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
+            .or_else(|| failure.map(|failure| failure.message().to_owned()));
+        let device_lost = self.device_lost.load(Ordering::Relaxed) || failure.is_some();
         // A callback mid-block when the bridge failed may store its beat
         // after `set_error`, and a stopping bridge keeps mixing until its
         // teardown ends; a bridge that is not running shows no beat.

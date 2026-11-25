@@ -1,5 +1,6 @@
 use std::sync::atomic::Ordering;
 
+use super::CallbackFailure;
 use crate::audio::{BufferMode, ClickRhythm, OutputMode};
 
 const FOUR_FOUR: u8 = ClickRhythm::FourFour as u8;
@@ -13,6 +14,78 @@ fn shared_with_bridge_buffer(mode: BufferMode, fixed_ms: f32) -> super::Shared {
     shared.note_input_block(128);
     shared.note_output_block(480);
     shared
+}
+
+/// A caught callback panic reaches the screens as a lost run, with a message
+/// the audio thread could not have built itself.
+#[test]
+fn a_failed_callback_publishes_a_message_and_a_lost_device() {
+    let shared = super::Shared::new(48_000);
+    assert_eq!(shared.callback_failure(), None);
+
+    shared.note_callback_failure(CallbackFailure::Panic);
+
+    let snapshot = shared.snapshot();
+    assert_eq!(shared.callback_failure(), Some(CallbackFailure::Panic));
+    assert!(snapshot.device_lost);
+    assert_eq!(
+        snapshot.error.as_deref(),
+        Some(CallbackFailure::Panic.message())
+    );
+    // A fresh run must not inherit the failure.
+    shared.reset();
+    let snapshot = shared.snapshot();
+    assert!(!snapshot.device_lost);
+    assert_eq!(snapshot.error, None);
+    assert_eq!(shared.callback_failure(), None);
+}
+
+/// A block that does not divide into frames is not a plugin panic; the log
+/// must say what actually went wrong.
+#[test]
+fn a_malformed_block_is_not_reported_as_a_panic() {
+    let shared = super::Shared::new(48_000);
+
+    shared.note_callback_failure(CallbackFailure::BadBlock);
+
+    let snapshot = shared.snapshot();
+    assert!(snapshot.device_lost);
+    assert_eq!(
+        snapshot.error.as_deref(),
+        Some(CallbackFailure::BadBlock.message())
+    );
+    assert_ne!(
+        CallbackFailure::BadBlock.message(),
+        CallbackFailure::Panic.message()
+    );
+    assert!(!CallbackFailure::BadBlock.message().contains("panicked"));
+}
+
+/// A later symptom does not relabel the cause that stopped the run.
+#[test]
+fn the_first_failure_is_the_one_shown() {
+    let shared = super::Shared::new(48_000);
+    shared.note_callback_failure(CallbackFailure::Panic);
+    shared.note_callback_failure(CallbackFailure::BadBlock);
+
+    assert_eq!(shared.callback_failure(), Some(CallbackFailure::Panic));
+    assert_eq!(
+        shared.snapshot().error.as_deref(),
+        Some(CallbackFailure::Panic.message())
+    );
+}
+
+/// An error a callback already published wins over the failure wording.
+#[test]
+fn an_existing_error_keeps_its_text() {
+    let shared = super::Shared::new(48_000);
+    shared.set_error("Output device disconnected: unplugged");
+    shared.note_callback_failure(CallbackFailure::Panic);
+
+    assert_eq!(
+        shared.snapshot().error.as_deref(),
+        Some("Output device disconnected: unplugged")
+    );
 }
 
 #[test]

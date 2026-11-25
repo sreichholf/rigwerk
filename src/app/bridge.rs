@@ -248,6 +248,13 @@ impl RigWerkApp {
             && self.device_alert.is_none()
             && self.bridge_signature != 0
         {
+            // A callback failure arrives as `device_lost` too, but the device
+            // is fine and telling the person to reconnect it would be wrong.
+            let callback_failed = self
+                .snapshot
+                .error
+                .as_deref()
+                .is_some_and(audio::is_callback_failure_message);
             let reason = self
                 .snapshot
                 .error
@@ -257,13 +264,23 @@ impl RigWerkApp {
             self.engine.clear_error();
             self.bridge_signature = 0;
             self.bridge_restart_pending = false;
-            self.push_log(
-                "A bridge device was disconnected — bridge stopped.",
-                LogTone::Red,
-            );
-            self.alert_lost_device(format!(
-                "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
-            ));
+            if callback_failed {
+                self.push_log(
+                    "A real-time audio callback failed - bridge stopped.",
+                    LogTone::Red,
+                );
+                self.alert_lost_device(format!(
+                    "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open."
+                ));
+            } else {
+                self.push_log(
+                    "A bridge device was disconnected — bridge stopped.",
+                    LogTone::Red,
+                );
+                self.alert_lost_device(format!(
+                    "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
+                ));
+            }
         }
         output_muted
     }

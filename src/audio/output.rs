@@ -15,8 +15,9 @@ use super::devices::pick_output_config;
 use super::linux::alsa;
 use super::mixer::OutputMixer;
 use super::output_map::DeviceFrame;
+use super::panic_guard::contain;
 use super::record::{push_device_frame, RecordSource};
-use super::shared::Shared;
+use super::shared::{CallbackFailure, Shared};
 use super::thread_priority::PromoteOnce;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 use super::types::OutputMode;
@@ -157,6 +158,25 @@ pub(crate) fn clamp_output_buffer(config: &cpal::SupportedStreamConfig, frames: 
     }
 }
 
+/// How many whole interleaved frames one output block holds.  `None` when the
+/// block does not end on a frame boundary, or has no channels: a partial frame
+/// has no whole-frame count, so the loop that writes
+/// `data[index * channels..(index + 1) * channels]` would leave its tail
+/// unwritten, and a zero channel count would divide by zero.  The caller
+/// refuses such a block instead of playing a partly written buffer.
+///
+/// The refusal is the chain's failure, not the device's, so it stops the run on
+/// an extra output too.  The rule that an extra output never stops the bridge
+/// covers a device that goes away, not a bad block.
+pub(crate) fn block_frames(samples: usize, channels: usize) -> Option<usize> {
+    if channels == 0 {
+        return None;
+    }
+    let frames = samples / channels;
+    // No `%`: a block is whole only when every sample belongs to a frame.
+    (frames * channels == samples).then_some(frames)
+}
+
 pub(crate) fn make_output_stream(
     device: &cpal::Device,
     config: cpal::SupportedStreamConfig,
@@ -180,6 +200,21 @@ pub(crate) fn make_output_stream(
         cpal::SampleFormat::I64 => build_output::<i64>(device, stream_config, channels, shared),
         cpal::SampleFormat::U64 => build_output::<u64>(device, stream_config, channels, shared),
         other => Err(format!("Unsupported output sample format: {other:?}")),
+    }
+}
+
+/// Runs one interleaved output block's sample body.  A caught panic silences
+/// the block and marks the run failed, so a stream that cannot be trusted
+/// plays nothing rather than the half-written mix.  Both cpal output callbacks
+/// go through this, and `output/tests` fails if the guard is removed here.
+pub(crate) fn render_or_silence<T: Sample>(
+    shared: &Shared,
+    block: &mut [T],
+    render: impl FnOnce(&mut [T]),
+) {
+    if contain(|| render(block)) {
+        block.fill(T::EQUILIBRIUM);
+        shared.note_callback_failure(CallbackFailure::Panic);
     }
 }
 
@@ -227,22 +262,39 @@ where
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
                 // cpal's stream thread starts at normal priority on Linux.
                 promote.run();
-                let frames = data.len() / channels;
+                let Some(frames) = block_frames(data.len(), channels) else {
+                    // A block with no channel or a partial frame cannot be
+                    // written frame by frame: its whole-frame count is
+                    // unknown and its tail would stay unwritten.  Silence it
+                    // and publish the failure.  This stops the run even on an
+                    // extra output: the sample path failed, not the device.
+                    data.fill(T::EQUILIBRIUM);
+                    mix_shared.note_callback_failure(CallbackFailure::BadBlock);
+                    return;
+                };
+                if mix_shared.callback_failure().is_some() {
+                    // A previous callback failed; the app is stopping this
+                    // run, and the chain must not be driven again.
+                    data.fill(T::EQUILIBRIUM);
+                    return;
+                }
                 // The block the host hands over is the step the device really
                 // runs at, whatever buffer was asked for.
                 mix_shared.note_output_step(frames as u32);
-                mixer.render(&mix_shared, frames, |index, mapped| {
-                    // The frame write_frame is about to convert: channel map,
-                    // level, limiter, mute and the calibration duck.
-                    if channels > 0 {
-                        push_device_frame(
-                            &mix_shared.recorder,
-                            RecordSource::Clock,
-                            mapped,
-                            channels,
-                        );
-                    }
-                    write_frame(&mut data[index * channels..(index + 1) * channels], mapped);
+                render_or_silence(&mix_shared, data, |block| {
+                    mixer.render(&mix_shared, frames, |index, mapped| {
+                        // The frame write_frame is about to convert: channel map,
+                        // level, limiter, mute and the calibration duck.
+                        if channels > 0 {
+                            push_device_frame(
+                                &mix_shared.recorder,
+                                RecordSource::Clock,
+                                mapped,
+                                channels,
+                            );
+                        }
+                        write_frame(&mut block[index * channels..(index + 1) * channels], mapped);
+                    });
                 });
             },
             move |error| {

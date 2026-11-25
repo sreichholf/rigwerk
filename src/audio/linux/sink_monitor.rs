@@ -5,7 +5,8 @@
 //! It is its own PipeWire client on its own thread and main loop, opened
 //! and closed by the engine (the UI thread), never by a bridge callback.
 //! The process callback only folds the block's peak into an atomic and
-//! counts the block: no allocation, no lock, no logging.  The stream is
+//! counts the block: no allocation, no lock, no logging.  A panic is caught
+//! there and leaves the reading stale rather than unwinding into PipeWire.  The stream is
 //! passive and asks for the low quantum, so it neither keeps the sink
 //! awake nor raises the graph block.  A native sink is targeted by name;
 //! the ALSA `pipewire` shim plays to the default sink, so that is the one
@@ -21,6 +22,7 @@ use ::pipewire as pw;
 use pw::spa;
 use pw::spa::pod::Pod;
 
+use crate::audio::panic_guard::contain;
 use crate::audio::rt_guard::RtGuard;
 
 use super::native::{ensure_init, is_alsa_shim, node_name};
@@ -38,14 +40,33 @@ pub(crate) struct MonitorMeter {
     peak: AtomicU32,
     /// Blocks seen since the stream opened.
     blocks: AtomicU64,
+    /// Set when the process callback caught a panic.  The reading then stays
+    /// stale (`None`), which is what a monitor that stopped flowing reports.
+    failed: AtomicBool,
 }
 
 impl MonitorMeter {
-    /// Folds one block's peak in (the audio thread's side).
+    /// Folds one block's peak in (the audio thread's side).  A meter whose
+    /// callback already panicked publishes nothing: the reading goes stale
+    /// instead of counting further blocks.
     pub(crate) fn note_block(&self, peak: f32) {
+        if self.failed.load(Ordering::Relaxed) {
+            return;
+        }
         let peak = if peak.is_finite() { peak.abs() } else { 0.0 };
         self.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
         self.blocks.fetch_add(1, Ordering::Release);
+    }
+
+    /// Marks the callback as failed.  One relaxed store, safe on the audio
+    /// thread; the reader sees those blocks stop and the reading go stale.
+    pub(crate) fn note_failure(&self) {
+        self.failed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the process callback already panicked.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
     }
 }
 
@@ -184,24 +205,33 @@ pub(crate) fn run(
     let _listener = stream
         .add_local_listener_with_user_data(meter)
         .process(|stream, meter| {
+            if meter.failed() {
+                return;
+            }
             // The whole block is counted, the chunk scan included (see
-            // `audio::rt_guard`).
-            let _no_allocations = RtGuard::enter();
-            let Some(mut buffer) = stream.dequeue_buffer() else {
-                return;
-            };
-            let datas = buffer.datas_mut();
-            let Some(data) = datas.first_mut() else {
-                return;
-            };
-            let (offset, size) = {
-                let chunk = data.chunk();
-                (chunk.offset(), chunk.size())
-            };
-            let Some(bytes) = data.data() else {
-                return;
-            };
-            meter.note_block(chunk_peak(bytes, offset, size));
+            // `audio::rt_guard`).  A panic must not unwind into PipeWire's
+            // callback; it stops the reading instead of the process.
+            let panicked = contain(|| {
+                let _no_allocations = RtGuard::enter();
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
+                let datas = buffer.datas_mut();
+                let Some(data) = datas.first_mut() else {
+                    return;
+                };
+                let (offset, size) = {
+                    let chunk = data.chunk();
+                    (chunk.offset(), chunk.size())
+                };
+                let Some(bytes) = data.data() else {
+                    return;
+                };
+                meter.note_block(chunk_peak(bytes, offset, size));
+            });
+            if panicked {
+                meter.note_failure();
+            }
         })
         .register()
         .map_err(|error| format!("PipeWire sink monitor listener: {error}"))?;
