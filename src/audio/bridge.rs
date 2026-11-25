@@ -143,7 +143,7 @@ fn run_cpal(
         config.output_rate.unwrap_or(input_rate),
         &shared,
         config.output_buffer,
-        config.real_style_output,
+        config.low_latency_request,
         config.exclusive_output,
     )?;
     // `open_output` already published `output.rate`.  The UI thread reloads

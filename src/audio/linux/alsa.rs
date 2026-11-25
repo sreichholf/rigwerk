@@ -33,8 +33,9 @@ pub(crate) fn smallest_output_buffer(config: &cpal::SupportedStreamConfig, floor
     }
 }
 
-/// What the shared cpal stream asks the driver for: Low latency asks for the
-/// smallest period the card allows, anything else for the manual buffer.
+/// What the shared cpal stream asks the driver for: the low-latency request
+/// (`StartConfig::low_latency_request`) takes the smallest period the card
+/// allows, anything else the manual buffer.
 pub(crate) fn requested_output_buffer(
     config: &cpal::SupportedStreamConfig,
     buffer_frames: usize,
@@ -49,7 +50,7 @@ pub(crate) fn requested_output_buffer(
 
 /// The mode the bridge publishes and the line it shows for the shared stream.
 /// A refused fixed buffer runs at the driver's default, which is the standard
-/// mode even when Low latency asked for the smallest period.
+/// mode even when the low-latency request asked for the smallest period.
 pub(crate) fn describe(low_latency: bool, fixed_buffer: bool) -> (OutputMode, String) {
     let note = if fixed_buffer {
         ""

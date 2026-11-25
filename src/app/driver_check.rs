@@ -51,6 +51,44 @@ pub(crate) struct DriverCheck {
     pub(crate) manual: bool,
 }
 
+/// What a stand-alone output check will probe: the selected output, and the
+/// settings that target's `probe_output` needs.  It is the only part that
+/// differs before the thread starts; the thread and its logging are shared.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct ProbePlan {
+    id: String,
+    name: String,
+    /// Linux: the rate the notes read the step against.
+    #[cfg(target_os = "linux")]
+    asked_rate: u32,
+    /// Linux: what the low-latency switch asks of the graph.
+    #[cfg(target_os = "linux")]
+    low_latency: bool,
+    /// Linux: the normal output buffer, in frames.
+    #[cfg(target_os = "linux")]
+    buffer_frames: usize,
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl ProbePlan {
+    /// Runs the check this target can do without opening a stream.
+    fn probe(&self) -> Result<DriverActual, String> {
+        #[cfg(target_os = "windows")]
+        {
+            probe_output(&self.id)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            probe_output(
+                &self.id,
+                self.asked_rate,
+                self.low_latency,
+                self.buffer_frames,
+            )
+        }
+    }
+}
+
 /// Where a person changes a device's rate outside RigWerk.
 fn system_rate_settings() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -260,14 +298,21 @@ impl RigWerkApp {
     }
 
     /// Whether the stand-alone check can read the selected output now: the
-    /// bridge is not running and the output is a real ALSA / PipeWire or
-    /// WASAPI device (ASIO reads its own driver while it runs).
+    /// bridge is not running and [`Self::driver_probe_plan`] has a check for
+    /// it (a real ALSA / PipeWire or WASAPI device; ASIO reads its own driver
+    /// while it runs).
     pub(crate) fn output_driver_checkable(&self) -> bool {
-        let output = self.selected_output();
-        self.engine.state != EngineState::Running
-            && !output.demo
-            && output.asio_clsid.is_none()
-            && (cfg!(target_os = "linux") || output.backend.eq_ignore_ascii_case("WASAPI"))
+        if self.engine.state == EngineState::Running {
+            return false;
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            self.driver_probe_plan().is_some()
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            false
+        }
     }
 
     /// Whether the clock output asks for a smaller step than its buffer:
@@ -509,71 +554,43 @@ impl RigWerkApp {
         }
     }
 
-    /// Checks the selected output's driver on its own thread.  It only asks
-    /// Windows which engine steps the driver allows; no stream is opened, so
-    /// this is safe before the bridge runs and costs no audio.
-    pub(crate) fn start_output_driver_check(&mut self, manual: bool) {
+    /// The stand-alone check this target can run for the selected output, or
+    /// None when that output has nothing to probe without opening it: a demo
+    /// row, an ASIO driver (it reads itself while it runs), or a Windows
+    /// backend that is not WASAPI.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn driver_probe_plan(&self) -> Option<ProbePlan> {
+        let output = self.selected_output();
+        if output.demo || output.asio_clsid.is_some() {
+            return None;
+        }
         #[cfg(target_os = "windows")]
         {
-            if matches!(
-                self.engine.state,
-                EngineState::Running | EngineState::Starting | EngineState::Stopping
-            ) {
-                if manual {
-                    self.push_log(
-                        "Stop the bridge before checking its output driver.",
-                        LogTone::Amber,
-                    );
-                }
-                return;
-            }
-            let (demo, asio, wasapi, id, name) = {
-                let output = self.selected_output();
-                (
-                    output.demo,
-                    output.asio_clsid.is_some(),
-                    output.backend.eq_ignore_ascii_case("WASAPI"),
-                    output.id.clone(),
-                    output.name.clone(),
-                )
-            };
-            if demo || asio || !wasapi || self.driver_probe_job.is_some() {
-                return;
-            }
-            let (sender, receiver) = mpsc::channel();
-            let log_name = name.clone();
-            let spawned = thread::Builder::new()
-                .name("rigwerk-driver-check".to_owned())
-                .spawn(move || {
-                    let result = probe_output(&id);
-                    let _ = sender.send(DriverCheck {
-                        device_id: id,
-                        name,
-                        result,
-                        manual,
-                    });
-                });
-            match spawned {
-                Ok(_) => {
-                    if manual {
-                        self.push_log(
-                            format!("Checking {log_name}'s output driver…"),
-                            LogTone::Blue,
-                        );
-                    }
-                    self.driver_probe_job = Some(receiver);
-                }
-                Err(error) => {
-                    if manual {
-                        self.push_log(
-                            format!("Could not start the driver check: {error}"),
-                            LogTone::Amber,
-                        );
-                    }
-                }
+            if !output.backend.eq_ignore_ascii_case("WASAPI") {
+                return None;
             }
         }
-        #[cfg(target_os = "linux")]
+        Some(ProbePlan {
+            id: output.id.clone(),
+            name: output.name.clone(),
+            #[cfg(target_os = "linux")]
+            asked_rate: if self.output_rate == 0 {
+                self.sample_rate
+            } else {
+                self.output_rate
+            },
+            #[cfg(target_os = "linux")]
+            low_latency: self.low_latency_output,
+            #[cfg(target_os = "linux")]
+            buffer_frames: self.output_buffer,
+        })
+    }
+
+    /// Checks the selected output's driver on its own thread.  It only asks
+    /// the target's driver API which engine steps the output allows; no stream
+    /// is opened, so this is safe before the bridge runs and costs no audio.
+    pub(crate) fn start_output_driver_check(&mut self, manual: bool) {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
             if matches!(
                 self.engine.state,
@@ -587,35 +604,21 @@ impl RigWerkApp {
                 }
                 return;
             }
-            let (demo, asio, id, name, asked_rate, low_latency, buffer_frames) = {
-                let output = self.selected_output();
-                let asked_rate = if self.output_rate == 0 {
-                    self.sample_rate
-                } else {
-                    self.output_rate
-                };
-                (
-                    output.demo,
-                    output.asio_clsid.is_some(),
-                    output.id.clone(),
-                    output.name.clone(),
-                    asked_rate,
-                    self.low_latency_output,
-                    self.output_buffer,
-                )
-            };
-            if demo || asio || self.driver_probe_job.is_some() {
+            if self.driver_probe_job.is_some() {
                 return;
             }
+            let Some(plan) = self.driver_probe_plan() else {
+                return;
+            };
             let (sender, receiver) = mpsc::channel();
-            let log_name = name.clone();
+            let log_name = plan.name.clone();
             let spawned = thread::Builder::new()
                 .name("rigwerk-driver-check".to_owned())
                 .spawn(move || {
-                    let result = probe_output(&id, asked_rate, low_latency, buffer_frames);
+                    let result = plan.probe();
                     let _ = sender.send(DriverCheck {
-                        device_id: id,
-                        name,
+                        device_id: plan.id,
+                        name: plan.name,
                         result,
                         manual,
                     });
@@ -696,7 +699,7 @@ impl RigWerkApp {
     /// runs once at launch, again when another output is chosen, and after
     /// the device list changes.
     pub(crate) fn watch_output_driver(&mut self) {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
             if self.driver_probe_job.is_some() {
                 return;
@@ -710,52 +713,13 @@ impl RigWerkApp {
             ) {
                 return;
             }
-            let (demo, asio, wasapi, id) = {
-                let output = self.selected_output();
-                (
-                    output.demo,
-                    output.asio_clsid.is_some(),
-                    output.backend.eq_ignore_ascii_case("WASAPI"),
-                    output.id.clone(),
-                )
-            };
-            if demo || asio || !wasapi {
+            let Some(plan) = self.driver_probe_plan() else {
                 return;
-            }
+            };
             if self
                 .driver_probe
                 .as_ref()
-                .is_some_and(|check| check.device_id == id)
-            {
-                return;
-            }
-            self.start_output_driver_check(false);
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if self.driver_probe_job.is_some() {
-                return;
-            }
-            if matches!(
-                self.engine.state,
-                EngineState::Preview
-                    | EngineState::Starting
-                    | EngineState::Running
-                    | EngineState::Stopping
-            ) {
-                return;
-            }
-            let (demo, asio, id) = {
-                let output = self.selected_output();
-                (output.demo, output.asio_clsid.is_some(), output.id.clone())
-            };
-            if demo || asio {
-                return;
-            }
-            if self
-                .driver_probe
-                .as_ref()
-                .is_some_and(|check| check.device_id == id)
+                .is_some_and(|check| check.device_id == plan.id)
             {
                 return;
             }

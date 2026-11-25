@@ -312,7 +312,7 @@ pub(crate) fn run(
             output_rate,
             &shared,
             config.output_buffer,
-            config.real_style_output,
+            config.low_latency_request,
             false,
         )?;
         output_channels = output.channels;

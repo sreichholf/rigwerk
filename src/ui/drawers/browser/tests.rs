@@ -162,7 +162,7 @@ fn enter_adds_the_chosen_effect_and_leaves_the_browser_open() {
         .map(|view| view.name.clone())
         .collect();
     assert_eq!(names, ["Room"]);
-    assert!(app.plugin_browser.open);
+    assert_eq!(app.chrome.drawer, Some(crate::app::screen::Drawer::Browser));
     assert_eq!(app.plugin_browser.position, 1);
     assert!(app.plugin_editor.is_none());
 }
@@ -194,7 +194,7 @@ fn shift_enter_adds_and_opens_the_controls() {
     let _ = run_frame(&ctx, input, |ui| app.effect_browser(ui));
     assert_eq!(app.engine.plugin_views(0).len(), 1);
     // Opening the effect's controls is a sheet, so the browser drawer closes.
-    assert!(!app.plugin_browser.open);
+    assert_eq!(app.chrome.drawer, None);
     assert!(app.plugin_editor.is_some());
 }
 

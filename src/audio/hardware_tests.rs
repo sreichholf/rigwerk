@@ -145,7 +145,7 @@ fn hardware_bridge() {
         output_rate: None,
         output_buffer: 128,
         asio_wrapper: input.name.to_lowercase().contains("asio4all"),
-        real_style_output: true,
+        low_latency_request: true,
         exclusive_output: false,
         pipewire_low_latency: false,
     });

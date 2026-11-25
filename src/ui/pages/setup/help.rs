@@ -117,7 +117,7 @@ impl RigWerkApp {
                 )
                 .clicked()
             {
-                self.show_about = true;
+                self.open_about();
             }
         });
     }

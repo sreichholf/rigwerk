@@ -576,7 +576,6 @@ fn the_browser_adds_at_the_position_and_stays_open() {
     added.path = PathBuf::from(format!("{}b", crate::audio::TEST_PATH));
     app.open_effect_browser(0, 1);
     assert_eq!(app.chrome.drawer, Some(crate::app::screen::Drawer::Browser));
-    assert!(app.plugin_browser.open);
     assert!(app.add_listed_effect(&added, false));
     let names: Vec<_> = app
         .engine
@@ -585,7 +584,11 @@ fn the_browser_adds_at_the_position_and_stays_open() {
         .map(|view| view.name.clone())
         .collect();
     assert_eq!(names, ["A", "B", "C"]);
-    assert!(app.plugin_browser.open);
+    assert_eq!(
+        app.chrome.drawer,
+        Some(crate::app::screen::Drawer::Browser),
+        "an add leaves the browser open"
+    );
     assert_eq!(app.plugin_browser.position, 2);
     assert_eq!(app.plugin_browser.recent.len(), 1);
     let notice = &app.plugin_browser.notice.as_ref().expect("notice").0;
@@ -697,7 +700,6 @@ fn the_browser_opens_in_the_drawer() {
     let mut app = three_effects();
     app.open_effect_browser(0, 3);
     assert_eq!(app.chrome.drawer, Some(Drawer::Browser));
-    assert!(app.plugin_browser.open);
     app.close_drawer();
-    assert!(!app.plugin_browser.open);
+    assert_eq!(app.chrome.drawer, None);
 }

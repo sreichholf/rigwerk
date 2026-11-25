@@ -48,17 +48,20 @@ pub(crate) enum OutputStream {
 /// Opens the playback side.
 ///
 /// On Windows, `exclusive` tries WASAPI exclusive mode first (clock output
-/// only).  On refuse it falls back to shared cpal with `buffer_frames` — not
-/// REAL-style.  `real_style` opens IAudioClient3 at the driver's smallest
-/// shared engine step; on refuse it also falls back to shared cpal.  On Linux
-/// the same switch asks ALSA for its smallest usable period instead of the
-/// manual output buffer.
+/// only).  On refuse it falls back to shared cpal with `buffer_frames`, not
+/// REAL-style.  `low_latency` asks the platform's clock output for the lowest
+/// latency it can open: IAudioClient3 at the driver's smallest shared engine
+/// step on Windows, ALSA's smallest usable period on Linux.  A refusal falls
+/// back to the shared cpal stream (at `buffer_frames` on Windows, at ALSA's
+/// requested period on Linux); when that stream does not open at the
+/// requested buffer, it is retried once at the driver's default, and only a
+/// second failure is an error.
 pub(crate) fn open_output(
     output_id: &str,
     sample_rate: u32,
     shared: &Arc<Shared>,
     buffer_frames: usize,
-    real_style: bool,
+    low_latency: bool,
     exclusive: bool,
 ) -> Result<OpenedOutput, String> {
     let id: cpal::DeviceId = output_id
@@ -68,7 +71,7 @@ pub(crate) fn open_output(
     // A platform with a clock output of its own opens that first, and says
     // what it fell back from when the attempt is refused.
     #[cfg(target_os = "windows")]
-    let refusal = match win_output::attempt(&id, sample_rate, shared, real_style, exclusive) {
+    let refusal = match win_output::attempt(&id, sample_rate, shared, low_latency, exclusive) {
         win_output::Attempt::Opened(opened) => return Ok(opened),
         win_output::Attempt::Refused(reason) => reason,
     };
@@ -77,7 +80,7 @@ pub(crate) fn open_output(
     // A host with neither a clock output nor a period of its own keeps the
     // neutral open below.
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    let _ = real_style;
+    let _ = low_latency;
 
     let host = cpal::host_from_id(id.host()).map_err(|error| format!("Output host: {error}"))?;
     let device = host
@@ -89,11 +92,11 @@ pub(crate) fn open_output(
     // What the shared stream asks for and the mode it then runs in: the
     // platform owns both, because a refused request is a platform's answer.
     #[cfg(target_os = "linux")]
-    let requested = alsa::requested_output_buffer(&config, buffer_frames, real_style);
+    let requested = alsa::requested_output_buffer(&config, buffer_frames, low_latency);
     #[cfg(not(target_os = "linux"))]
     let requested = clamp_output_buffer(&config, buffer_frames);
     #[cfg(target_os = "linux")]
-    let describe = |fixed_buffer: bool| alsa::describe(real_style, fixed_buffer);
+    let describe = |fixed_buffer: bool| alsa::describe(low_latency, fixed_buffer);
     #[cfg(target_os = "windows")]
     let describe = |fixed_buffer: bool| win_output::describe(refusal.as_deref(), fixed_buffer);
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]

@@ -287,16 +287,16 @@ impl RigWerkApp {
         if self.selected_output().asio_clsid.is_some() {
             return OutputMode::Asio;
         }
-        let (real_style, exclusive) = self.output_start_flags();
+        let (low_latency, exclusive) = self.output_start_flags();
         if cfg!(target_os = "windows") {
             if exclusive {
                 OutputMode::Exclusive
-            } else if real_style {
+            } else if low_latency {
                 OutputMode::RealStyle
             } else {
                 OutputMode::Shared
             }
-        } else if real_style {
+        } else if low_latency {
             OutputMode::LowLatency
         } else {
             OutputMode::Standard

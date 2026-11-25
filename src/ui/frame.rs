@@ -392,3 +392,6 @@ fn take_chord(input: &mut egui::InputState, modifiers: egui::Modifiers, key: egu
     });
     pressed
 }
+
+#[cfg(test)]
+mod tests;

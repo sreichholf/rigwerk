@@ -159,3 +159,59 @@ fn sheet_keys_name_every_sheet() {
     assert_eq!(Sheet::from_key("diagnostics", 0), Some(Sheet::Diagnostics));
     assert_eq!(Sheet::from_key("mixer", 0), None);
 }
+
+/// The status bar's *Log* button and the issues' action both call
+/// `open_diagnostics`, so About cannot stay up behind the sheet.  Escape then
+/// has one `Middle` window to close, and it is the sheet the user can see.
+#[test]
+fn the_log_action_leaves_one_middle_window_that_escape_closes() {
+    let mut app = crate::app::blank_app();
+    app.show_about = true;
+    app.open_diagnostics();
+    assert!(!app.show_about, "Log closes About");
+    assert_eq!(app.chrome.sheet, Some(Sheet::Diagnostics));
+    assert!(app.close_innermost());
+    assert_eq!(
+        app.chrome.sheet, None,
+        "Escape closes the sheet that was up, not About"
+    );
+    assert!(!app.show_about);
+    assert!(!app.close_innermost());
+}
+
+/// A drawer is a `Foreground` area, so it closes before the `Middle` window
+/// beneath it.
+#[test]
+fn escape_closes_the_drawer_over_about_first() {
+    let mut app = crate::app::blank_app();
+    app.show_about = true;
+    app.open_issues();
+    assert!(app.chrome.drawer.is_some());
+    assert!(app.close_innermost());
+    assert!(app.chrome.drawer.is_none(), "the drawer is over About");
+    assert!(app.show_about, "About is still up");
+    assert!(app.close_innermost());
+    assert!(!app.show_about);
+}
+
+#[test]
+fn escape_closes_a_lone_about() {
+    let mut app = crate::app::blank_app();
+    app.show_about = true;
+    assert!(app.close_innermost());
+    assert!(!app.show_about);
+    assert!(!app.close_innermost());
+}
+
+#[test]
+fn opening_a_sheet_and_opening_about_close_each_other() {
+    let mut app = crate::app::blank_app();
+    app.show_about = true;
+    app.open_diagnostics();
+    assert!(!app.show_about, "only one Middle window is up");
+    assert_eq!(app.chrome.sheet, Some(Sheet::Diagnostics));
+
+    app.open_about();
+    assert_eq!(app.chrome.sheet, None, "About closes the sheet");
+    assert!(app.show_about);
+}
