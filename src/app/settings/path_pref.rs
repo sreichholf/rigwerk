@@ -60,8 +60,32 @@ pub(crate) struct PathPref {
     /// The send to each path, dB, by that path's position in the saved
     /// list.  Omitted while every send is off.  [`Self::mix`] does not read
     /// it: slots are not positions, so the app maps it (`install_paths`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// An entry that does not parse, or is written as RON's `()`, keeps its
+    /// index off, so the length and every later send still point at the path
+    /// they were saved for.
+    #[serde(
+        default,
+        deserialize_with = "stored_sends",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub(crate) sends: Vec<f32>,
+}
+
+/// The value an unreadable send keeps until the clamp site turns it off.
+/// [`sanitize_send`] already reads NaN as off (not 0 dB), and it is the mark
+/// the load counts before sanitizing.  No saved file contains it.
+fn unreadable_send() -> f32 {
+    f32::NAN
+}
+
+/// Reads the sends by path position.  A bad entry, or one written as RON's
+/// `()`, keeps its index as [`unreadable_send`]; [`PathPref::sanitize`] then
+/// turns it into [`SEND_OFF_DB`].
+fn stored_sends<'de, D>(deserializer: D) -> Result<Vec<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::audio::serde_util::read_or_placeholder(deserializer, unreadable_send, unreadable_send)
 }
 
 fn is_input(feed: &PathFeed) -> bool {
