@@ -22,13 +22,12 @@ use crate::audio::{PathFeed, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, SEND_OFF_DB};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole, PATH_COLOUR_NAMES};
 use crate::ui::widgets::{
-    chip, format_db, heading, level_row, row_info, segmented, styled_slider, SliderStyle, TextField,
+    chip, format_db, heading, level_row, row_info, segmented, styled_slider, SliderStyle,
+    TextField, ROW_H, VALUE_W,
 };
 
 use crate::ui::widgets::OutlineButton;
 
-const ROW_H: f32 = 28.0;
-const VALUE_W: f32 = 80.0;
 const COLUMN_GAP: f32 = 24.0;
 
 impl RigWerkApp {
