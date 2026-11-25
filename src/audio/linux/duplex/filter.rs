@@ -15,6 +15,7 @@ use crate::audio::input::InputStage;
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output_map::MAX_EXTRA_OUTPUTS;
 use crate::audio::record::{push_device_frame, RecordSource};
+use crate::audio::rt_guard::RtGuard;
 use crate::audio::shared::Shared;
 
 use super::links::Observed;
@@ -66,6 +67,11 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     // Flush-to-zero for the whole cycle, as in the other audio callbacks;
     // `render_direct` re-asserts it around the chain.
     let _denormals = DenormalGuard::new();
+    // Nothing in this cycle may allocate: the input staging, the mix and the
+    // output copies all run under this guard.  `render_direct_devices` enters
+    // its own nested one, which keeps the count on this outermost block (see
+    // `audio::rt_guard`).
+    let _no_allocations = RtGuard::enter();
     // SAFETY: PipeWire passes a valid position for this cycle.
     let clock = unsafe { &(*position).clock };
     let frames = clock.duration as usize;

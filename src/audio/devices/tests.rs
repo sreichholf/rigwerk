@@ -1,4 +1,4 @@
-use super::{dedup_devices, is_low_latency_device};
+use super::{dedup_devices, is_low_latency_device, low_latency_decision};
 use crate::audio::DeviceItem;
 
 fn device(id: &str, backend: &str) -> DeviceItem {
@@ -57,12 +57,47 @@ fn same_name_on_different_backends_both_remain() {
 }
 
 #[test]
+fn the_low_latency_decision_is_asio_or_the_platform_group() {
+    let mut asio = device("asio:abc", "ASIO");
+    asio.asio_clsid = Some(1);
+    let system = device("wasapi:{spk}", "WASAPI");
+    let direct = device("ALSA:hw:CARD=0,DEV=0", "ALSA");
+    // An ASIO driver belongs there even when the platform group does not claim
+    // its backend.
+    assert!(low_latency_decision(&asio, false));
+    assert!(low_latency_decision(&asio, true));
+    // A backend the platform group claims does too, without an ASIO driver.
+    assert!(low_latency_decision(&direct, true));
+    assert!(low_latency_decision(&system, true));
+    // Neither input: a plain system device stays on the system side.
+    assert!(!low_latency_decision(&direct, false));
+    assert!(!low_latency_decision(&system, false));
+}
+
+#[test]
+fn an_asio_driver_is_low_latency_on_every_target() {
+    let mut asio = device("asio:abc", "ASIO");
+    asio.asio_clsid = Some(1);
+    assert!(is_low_latency_device(&asio, "ASIO"));
+    assert!(is_low_latency_device(&asio, "PIPEWIRE"));
+}
+
+#[test]
+fn a_plain_system_device_is_not_low_latency_on_every_target() {
+    let system = device("wasapi:{spk}", "WASAPI");
+    assert!(!is_low_latency_device(&system, "ASIO"));
+    assert!(!is_low_latency_device(&system, "PIPEWIRE"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn pipewire_is_the_low_latency_backend() {
     let pipewire = device("ALSA:pipewire", "ALSA");
     assert!(is_low_latency_device(&pipewire, "PIPEWIRE"));
     assert!(is_low_latency_device(&pipewire, "ALSA"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn virtual_alsa_pcms_other_than_pipewire_stay_on_the_system_side() {
     for id in ["ALSA:pulse", "ALSA:sysdefault:CARD=0"] {
@@ -75,6 +110,19 @@ fn virtual_alsa_pcms_other_than_pipewire_stay_on_the_system_side() {
             "{id} with an ALSA label"
         );
     }
+}
+
+/// A row with the low-latency backend but no ASIO driver behind it is the one
+/// input the two bodies answer differently.  The Linux body ignores the label
+/// and answers `false` here, so this fails if a `test` arm ever puts that body
+/// back into a Windows build.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_off_linux_body_claims_the_low_latency_backend_by_label() {
+    let by_label = device("asio-out:abc", "ASIO");
+    assert!(is_low_latency_device(&by_label, "ASIO"));
+    let system = device("wasapi:{spk}", "WASAPI");
+    assert!(!is_low_latency_device(&system, "ASIO"));
 }
 
 #[test]
@@ -113,6 +161,9 @@ fn two_pipewire_nodes_with_one_description_show_the_node_name() {
         super::device_choice_label(&devices[0], &devices),
         "USB Audio · alsa_input.usb-a"
     );
+    // A native PipeWire node is low latency on Linux; off Linux the label is
+    // what the body matches, so this row stays on the system side.
+    #[cfg(target_os = "linux")]
     assert!(is_low_latency_device(&devices[0], "ALSA"));
 }
 
@@ -163,6 +214,7 @@ fn the_native_id_grammar_is_shared_and_pins_its_edges() {
     assert!(!super::is_native_id("pipewire:pipewire"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn direct_alsa_and_jack_are_low_latency() {
     let direct = device("ALSA:hw:CARD=0,DEV=0", "ALSA");

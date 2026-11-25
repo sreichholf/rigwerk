@@ -21,6 +21,8 @@ use ::pipewire as pw;
 use pw::spa;
 use pw::spa::pod::Pod;
 
+use crate::audio::rt_guard::RtGuard;
+
 use super::native::{ensure_init, is_alsa_shim, node_name};
 use super::pipewire::LOW_QUANTUM;
 
@@ -182,6 +184,9 @@ pub(crate) fn run(
     let _listener = stream
         .add_local_listener_with_user_data(meter)
         .process(|stream, meter| {
+            // The whole block is counted, the chunk scan included (see
+            // `audio::rt_guard`).
+            let _no_allocations = RtGuard::enter();
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };

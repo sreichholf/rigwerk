@@ -639,7 +639,8 @@ impl OutputMixer {
         // A plugin may have cleared flush-to-zero; the POST gate, post EQ
         // and the master still decay into silence and need it.  Dropped
         // before the caller's guard, so the thread's original mode still
-        // comes back last.
+        // comes back last.  No `RtGuard` here: the callers (`render_with`,
+        // `render_direct_with`) hold one around this whole block.
         let _post_denormals = DenormalGuard::new();
         mark = Instant::now();
         let mut total_ns = 0u64;
@@ -671,7 +672,8 @@ impl OutputMixer {
                     mark = self.paths[slot].add_dsp_time(mark, Instant::now());
                 }
             }
-            // The returns' effects may have cleared it again.
+            // The returns' effects may have cleared it again.  Their
+            // `finish_block` runs inside the same caller's `RtGuard`.
             let _return_denormals = DenormalGuard::new();
             mark = Instant::now();
             for slot in live.iter() {

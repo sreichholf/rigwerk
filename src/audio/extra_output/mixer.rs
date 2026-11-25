@@ -22,6 +22,7 @@ use super::super::mixer::ramp::{fade_down, fade_up, DROPOUT_FADE_SECONDS};
 use super::super::output_map::{frame_lanes, DeviceFrame};
 use super::super::resampler::FrameResampler;
 use super::super::ring::LaneFrame;
+use super::super::rt_guard::RtGuard;
 use super::super::shared::Shared;
 use super::bus::{carries_record, ring_lanes};
 
@@ -205,6 +206,8 @@ impl ExtraOutputMixer {
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
         let _denormals = DenormalGuard::new();
+        // Nothing in this block may allocate (see `audio::rt_guard`).
+        let _no_allocations = RtGuard::enter();
         self.follow_source_rate(shared);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
         let block_source_frames =

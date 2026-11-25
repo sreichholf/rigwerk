@@ -2,7 +2,7 @@ use super::{
     extra_output_index, restore_device, restore_extra_output, restore_input, DeviceRestore,
     InputGroup,
 };
-use crate::app::settings::{load_preferences, ExtraOutputPref};
+use crate::app::settings::{load_preferences, ExtraOutputPref, PREFERENCES_BACKUP_KEY};
 use crate::audio::{DeviceItem, VIRTUAL_OUTPUT_NAME};
 
 fn item(id: &str, name: &str, backend: &str) -> DeviceItem {
@@ -67,7 +67,7 @@ fn preferences_without_device_ids_load_and_match_by_name() {
         output_name:Some("Speakers"),
         sessions:[(name:"Old",input:"Analog In",output:"Speakers",rate:48000)]
     )"#;
-    let loaded = load_preferences(Some(raw), "rigwerk-preferences-backup-1");
+    let loaded = load_preferences(Some(raw), PREFERENCES_BACKUP_KEY);
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     let preferences = loaded.preferences.expect("old file loads");
     assert_eq!(preferences.asio_id, "");
