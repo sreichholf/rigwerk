@@ -77,7 +77,7 @@ pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
 #[cfg(test)]
 pub(crate) use chain::ChainRuntime;
-pub(crate) use chain::{ChainHome, ChainLease, MAX_EFFECTS};
+pub(crate) use chain::{release_slot, ChainHome, ChainLease, MAX_EFFECTS};
 pub(crate) use handle::PluginHandle;
 #[cfg(test)]
 pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
@@ -93,7 +93,7 @@ pub(crate) use pause::PAUSE_STALL;
 pub(crate) use pause::{drive_pause, PauseStep};
 #[cfg(test)]
 pub(crate) use slot::SlotControls;
-pub(crate) use slot::{drain_deferred_plugins, Slot, SlotLink};
+pub(crate) use slot::{Slot, SlotLink, SlotPark};
 #[cfg(test)]
 pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
 pub(crate) use state::StateSave;
@@ -107,4 +107,4 @@ pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};
 #[cfg(test)]
 pub(crate) use fixtures::{lv2_fixture, vst3_fixture};
 #[cfg(test)]
-pub(crate) use slot::{deferred_slot_count, tracked_slots_alive};
+pub(crate) use slot::tracked_slots_alive;

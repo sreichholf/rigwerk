@@ -9,7 +9,7 @@ use super::pref::{
     base64_decode, base64_encode, PluginFormat, PluginParamPref, PluginParamView, PluginPref,
     PluginState, PLUGIN_STATE_VERSION,
 };
-use super::slot::Slot;
+use super::slot::{Slot, SlotPark};
 use super::state::StateSave;
 use super::PluginShared;
 
@@ -533,7 +533,7 @@ fn a_rate_rebuild_restores_what_the_handle_saved_since_load() {
 
     let _main = crate::audio::claim_main_thread();
     let state_bytes = |pref: &PluginPref| pref.state.as_ref().and_then(PluginState::bytes);
-    let mut chain = ChainModel::new(48_000, Default::default());
+    let mut chain = ChainModel::new(48_000, Default::default(), SlotPark::new());
     chain.insert_clap_for_test(fake_plugin_with_state_for_test(b"one"));
     drop(chain.flush());
     let handle = chain.links()[0].plugin.clone().expect("loaded");
@@ -584,7 +584,7 @@ fn impulse(frames: usize, at: usize) -> Vec<f32> {
 #[test]
 fn a_rate_reload_keeps_the_effect_counters() {
     use super::ChainModel;
-    let mut chain = ChainModel::new(48_000, Default::default());
+    let mut chain = ChainModel::new(48_000, Default::default(), SlotPark::new());
     let home = chain.home();
     chain.insert_delay_for_test(16);
     drop(chain.flush());

@@ -88,7 +88,7 @@ use super::output_map::{DeviceControls, DeviceFrame, OutputDeviceSettings, MAX_E
 use super::path::{DspCell, DspTime, LiveSlots, PathControls, PathMix, PathState, MAX_PATHS};
 #[cfg(test)]
 use super::plugins::PluginView;
-use super::plugins::{PluginPref, MAX_ALIGN};
+use super::plugins::{PluginPref, SlotPark, MAX_ALIGN};
 use super::scope::ScopeLane;
 use super::types::{BufferMode, OutputMode, Snapshot};
 
@@ -283,17 +283,22 @@ pub(crate) struct Shared {
     /// Cabinet kernels the audio side has released.  Same lifetime as
     /// [`Self::nam_park`].
     cab_park: Arc<CabPark>,
+    /// Plugin slots the audio side has released.  Same lifetime as
+    /// [`Self::nam_park`]: the engine keeps the one park every run it starts
+    /// shares, so a bridge-thread drop of this run does not destroy them.
+    slot_park: Arc<SlotPark>,
 }
 
 impl Shared {
     pub(crate) fn new(sample_rate: u32) -> Self {
-        Self::with_park(sample_rate, NamPark::new(), CabPark::new())
+        Self::with_park(sample_rate, NamPark::new(), CabPark::new(), SlotPark::new())
     }
 
     pub(crate) fn with_park(
         sample_rate: u32,
         nam_park: Arc<NamPark>,
         cab_park: Arc<CabPark>,
+        slot_park: Arc<SlotPark>,
     ) -> Self {
         let capacity_frames = (sample_rate as usize * 2).max(4096);
         let shared = Self {
@@ -364,7 +369,12 @@ impl Shared {
             opened_output_mode: AtomicU8::new(0),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
             paths: std::array::from_fn(|_| {
-                PathControls::with_park(sample_rate, Arc::clone(&nam_park), Arc::clone(&cab_park))
+                PathControls::with_park(
+                    sample_rate,
+                    Arc::clone(&nam_park),
+                    Arc::clone(&cab_park),
+                    Arc::clone(&slot_park),
+                )
             }),
             total_dsp: DspCell::default(),
             calibration: Calibration::new(),
@@ -372,6 +382,7 @@ impl Shared {
             recorder: Arc::new(Recorder::new()),
             nam_park,
             cab_park,
+            slot_park,
         };
         shared.paths[0].set_state(PathState::Active);
         shared
@@ -383,6 +394,12 @@ impl Shared {
 
     pub(crate) fn cab_park(&self) -> &Arc<CabPark> {
         &self.cab_park
+    }
+
+    /// The park every plugin slot this run releases waits in, shared with
+    /// the engine so it outlives the run.
+    pub(crate) fn plugin_park(&self) -> &Arc<SlotPark> {
+        &self.slot_park
     }
 
     /// Copies the settings that outlive one bridge start into this fresh
@@ -675,7 +692,7 @@ impl Shared {
 
     /// Runs the plugins' main-thread work of every live path and the VST3
     /// run loop once per UI frame, then follows the device rate and drains
-    /// plugins a bridge thread deferred.
+    /// the plugin slots a bridge thread parked.
     pub(crate) fn service_plugins(&self) {
         // A reload a plugin asks for in a frame that also follows a new
         // device rate is built at that rate once.
@@ -693,10 +710,10 @@ impl Shared {
         // VST3 editors' timers and fds (Linux), whether or not one is open.
         super::vst3::service_run_loop();
         // The device may have opened at a different rate than `prepare_plugins`
-        // used.  Both the reload and any plugins a bridge thread deferred are
+        // used.  Both the reload and any plugins a bridge thread parked are
         // handled on this thread, which is the UI thread.
         self.align_plugins_to_output_rate();
-        super::plugins::drain_deferred_plugins();
+        self.slot_park.drain();
     }
 
     pub(crate) fn reset(&self) {

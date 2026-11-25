@@ -2,12 +2,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::super::model::ChainModel;
+use super::super::slot::SlotPark;
 #[cfg(debug_assertions)]
 use super::release_slot;
 use super::{ChainRuntime, RETURN_QUEUE};
 
 fn model() -> ChainModel {
-    ChainModel::new(48_000, Arc::new(AtomicBool::new(false)))
+    ChainModel::new(48_000, Arc::new(AtomicBool::new(false)), SlotPark::new())
 }
 
 fn names(runtime: &ChainRuntime) -> Vec<String> {
@@ -31,7 +32,12 @@ fn a_home_hands_its_runtime_to_one_holder_at_a_time() {
     drop(lease);
     let again = home.take().expect("parked again by the lease");
     assert!(!again.is_from(
-        &super::super::model::ChainModel::new(48_000, Arc::new(AtomicBool::new(false))).home()
+        &super::super::model::ChainModel::new(
+            48_000,
+            Arc::new(AtomicBool::new(false)),
+            SlotPark::new(),
+        )
+        .home()
     ));
 }
 
@@ -151,6 +157,10 @@ fn releasing_a_slot_inside_a_callback_is_caught() {
     use super::super::super::rt_guard::RtGuard;
     use super::super::slot::Slot;
 
+    // The counted slot is created and dropped on this thread: keeping other
+    // counted tests off it means the counter only moves for this case.
+    let _main = crate::audio::claim_main_thread();
+    let park = SlotPark::new();
     let _guard = RtGuard::enter();
-    release_slot(Box::new(Slot::tracked_for_test()));
+    release_slot(Box::new(Slot::tracked_for_test()), &park);
 }

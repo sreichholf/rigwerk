@@ -557,35 +557,57 @@ impl SlotLink {
 #[cfg(test)]
 static TRACKED_SLOTS: AtomicUsize = AtomicUsize::new(0);
 
-/// Slots whose plugins must be destroyed on the UI thread.  Filled from
-/// [`Drop`] when the dropping thread is not the recorded main thread, and
-/// emptied by [`drain_deferred_plugins`].
-static DEFERRED_PLUGIN_SLOTS: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
-
-pub(crate) fn defer_plugin_slots(slots: Vec<Slot>) {
-    if slots.is_empty() {
-        return;
-    }
-    // Only a `Drop` comes here (see `chain::release_slot`), and the owners
-    // that may drop a chain are the UI thread and the bridge, not an audio
-    // callback: `release_slot` asserts that before it reaches this lock.
-    match DEFERRED_PLUGIN_SLOTS.lock() {
-        Ok(mut queue) => queue.extend(slots),
-        Err(poison) => poison.into_inner().extend(slots),
-    }
+/// The slots one engine's runs have let go of that must not be destroyed on
+/// the thread that dropped them: a bridge thread hands them here, and the
+/// recorded main thread drains them ([`Self::drain`]).  One park per engine,
+/// shared by every run it starts, so an old bridge that defers after the
+/// engine swapped its run still has a live owner.
+pub(crate) struct SlotPark {
+    slots: Mutex<Vec<Slot>>,
 }
 
-/// Drops plugins that a bridge thread deferred.  Only the recorded main
-/// thread destroys them; any other caller leaves the queue alone.
-pub(crate) fn drain_deferred_plugins() {
-    if !super::is_main_thread() {
-        return;
+impl SlotPark {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            slots: Mutex::new(Vec::new()),
+        })
     }
-    let pending = match DEFERRED_PLUGIN_SLOTS.lock() {
-        Ok(mut queue) => std::mem::take(&mut *queue),
-        Err(poison) => std::mem::take(&mut *poison.into_inner()),
-    };
-    drop(pending);
+
+    /// Adds `slots` for the main thread to destroy.  Only a `Drop` comes
+    /// here (see `chain::release_slot`), and the owners that may drop a
+    /// chain are the UI thread and the bridge, not an audio callback:
+    /// `release_slot` asserts that before it reaches this lock.
+    pub(crate) fn defer(&self, slots: Vec<Slot>) {
+        if slots.is_empty() {
+            return;
+        }
+        match self.slots.lock() {
+            Ok(mut queue) => queue.extend(slots),
+            Err(poison) => poison.into_inner().extend(slots),
+        }
+    }
+
+    /// Drops the plugins a bridge thread deferred.  Only the recorded main
+    /// thread destroys them; any other caller leaves the queue alone.
+    pub(crate) fn drain(&self) {
+        if !super::is_main_thread() {
+            return;
+        }
+        let pending = match self.slots.lock() {
+            Ok(mut queue) => std::mem::take(&mut *queue),
+            Err(poison) => std::mem::take(&mut *poison.into_inner()),
+        };
+        drop(pending);
+    }
+
+    /// How many slots wait for [`Self::drain`].
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        match self.slots.lock() {
+            Ok(queue) => queue.len(),
+            Err(poison) => poison.into_inner().len(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -594,9 +616,4 @@ pub(crate) fn tracked_slots_alive() -> usize {
 }
 
 #[cfg(test)]
-pub(crate) fn deferred_slot_count() -> usize {
-    match DEFERRED_PLUGIN_SLOTS.lock() {
-        Ok(queue) => queue.len(),
-        Err(poison) => poison.into_inner().len(),
-    }
-}
+mod tests;

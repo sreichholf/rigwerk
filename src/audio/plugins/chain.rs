@@ -39,7 +39,7 @@ use super::pref::PluginView;
 use super::queue::{Consumer, Producer};
 #[cfg(test)]
 use super::slot::SlotLink;
-use super::slot::{defer_plugin_slots, Slot};
+use super::slot::{Slot, SlotPark};
 #[cfg(test)]
 use super::MAX_ALIGN;
 
@@ -73,10 +73,12 @@ pub(crate) enum ChainCommand {
 }
 
 /// Destroys a slot here if this thread may destroy plugins, else hands it
-/// to the deferred queue the UI thread drains.  What a queue does with the
-/// values left in it when both its ends are gone.  A debug build asserts
-/// that this is not inside an audio callback.
-pub(super) fn release_slot(slot: Box<Slot>) {
+/// to `park` for the engine's main thread to drain.  Every teardown of a
+/// slot that may have run goes through here: what a queue does with the
+/// values left in it when both its ends are gone, and what a chain edit does
+/// with the slots the runtime handed back.  A debug build asserts that this
+/// is not inside an audio callback.
+pub(crate) fn release_slot(slot: Box<Slot>, park: &SlotPark) {
     debug_assert!(
         !super::super::rt_guard::in_audio_callback(),
         "a plugin slot was released inside an audio callback: it would destroy a plugin or take the deferred-slot lock"
@@ -84,15 +86,15 @@ pub(super) fn release_slot(slot: Box<Slot>) {
     if super::may_destroy_plugins_here() {
         drop(slot);
     } else {
-        defer_plugin_slots(vec![*slot]);
+        park.defer(vec![*slot]);
     }
 }
 
 /// As [`release_slot`], for a command that never reached the runtime.
-pub(super) fn release_command(command: ChainCommand) {
+pub(super) fn release_command(command: ChainCommand, park: &SlotPark) {
     match command {
         ChainCommand::Insert { slot, .. } | ChainCommand::Replace { slot, .. } => {
-            release_slot(slot);
+            release_slot(slot, park);
         }
         ChainCommand::Remove { .. } | ChainCommand::Swap { .. } | ChainCommand::SetRate(_) => {}
     }
@@ -123,6 +125,10 @@ pub(crate) struct ChainRuntime {
     chain_bypass: Arc<AtomicBool>,
     commands: Consumer<ChainCommand>,
     returns: Producer<Box<Slot>>,
+    /// Where a slot this runtime lets go of is released when it drops on a
+    /// thread that may not destroy plugins.  The engine owns it, so the
+    /// park outlives every run.
+    slot_park: Arc<SlotPark>,
 }
 
 impl ChainRuntime {
@@ -131,6 +137,7 @@ impl ChainRuntime {
         chain_bypass: Arc<AtomicBool>,
         commands: Consumer<ChainCommand>,
         returns: Producer<Box<Slot>>,
+        slot_park: Arc<SlotPark>,
     ) -> Self {
         Self {
             slots: Vec::with_capacity(MAX_EFFECTS),
@@ -139,6 +146,7 @@ impl ChainRuntime {
             chain_bypass,
             commands,
             returns,
+            slot_park,
         }
     }
 
@@ -146,13 +154,18 @@ impl ChainRuntime {
     /// directly.  Nothing ever sends it a command.
     #[cfg(test)]
     pub(crate) fn for_test(sample_rate: u32) -> Self {
-        let (_, commands) = super::queue::queue(1, release_command);
-        let (returns, _) = super::queue::queue(1, release_slot);
+        let slot_park = SlotPark::new();
+        let command_park = Arc::clone(&slot_park);
+        let return_park = Arc::clone(&slot_park);
+        let (_, commands) =
+            super::queue::queue(1, move |command| release_command(command, &command_park));
+        let (returns, _) = super::queue::queue(1, move |slot| release_slot(slot, &return_park));
         Self::new(
             sample_rate,
             Arc::new(AtomicBool::new(false)),
             commands,
             returns,
+            slot_park,
         )
     }
 
@@ -392,16 +405,15 @@ impl ChainRuntime {
 impl Drop for ChainRuntime {
     /// The last owner may be a bridge thread that outlived its run:
     /// plugins are destroyed on the UI thread, so the slots go to the
-    /// deferred queue there (see [`release_slot`]).  Queued commands and
+    /// engine's park there (see [`release_slot`]).  Queued commands and
     /// returned slots go the same way when their queue drops.
     ///
-    /// That queue takes a process-wide lock, which no audio callback may
-    /// take.  The last owner is the UI thread or the bridge, never a
-    /// callback; [`release_slot`] says so in a debug build instead of
-    /// relying on that.
+    /// That park takes a lock, which no audio callback may take.  The last
+    /// owner is the UI thread or the bridge, never a callback;
+    /// [`release_slot`] says so in a debug build instead of relying on that.
     fn drop(&mut self) {
         for slot in self.slots.drain(..) {
-            release_slot(slot);
+            release_slot(slot, &self.slot_park);
         }
     }
 }

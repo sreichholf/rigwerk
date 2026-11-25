@@ -436,29 +436,36 @@ fn publishing_output_rate_reloads_only_on_the_main_thread() {
 fn off_thread_drop_defers_plugin_slots_until_the_main_thread() {
     let _main = claim_main_thread();
     let plugins = crate::audio::plugins::tracked_slots_alive;
-    let queued = crate::audio::plugins::deferred_slot_count;
 
     // The UI thread drops the chain immediately.
     {
         let shared = super::Shared::new(48_000);
+        let park = std::sync::Arc::clone(shared.plugin_park());
         shared.paths[0].edit_chain(|chain| chain.insert_tracked_slot_for_test());
         assert_eq!(plugins(), 1);
         drop(shared);
-        assert_eq!(plugins(), 0);
-        assert_eq!(queued(), 0);
+        assert_eq!(plugins(), 0, "the UI thread destroys the slot itself");
+        assert_eq!(park.len(), 0, "nothing was deferred");
     }
 
     let shared = super::Shared::new(48_000);
+    // The park outlives the run: the engine holds it in production, and a
+    // bridge that drops the run hands its slots to it.
+    let park = std::sync::Arc::clone(shared.plugin_park());
     shared.paths[0].edit_chain(|chain| chain.insert_tracked_slot_for_test());
     assert_eq!(plugins(), 1);
     std::thread::scope(|scope| {
         scope.spawn(move || drop(shared));
     });
-    assert_eq!(plugins(), 1, "the slot stays alive on the deferred queue");
-    assert_eq!(queued(), 1);
-    crate::audio::plugins::drain_deferred_plugins();
+    assert_eq!(
+        plugins(),
+        1,
+        "the slot stays alive in the deferring bridge's park"
+    );
+    assert_eq!(park.len(), 1);
+    park.drain();
     assert_eq!(plugins(), 0, "the main thread drops the deferred slot");
-    assert_eq!(queued(), 0);
+    assert_eq!(park.len(), 0);
 }
 
 fn missing(path: &str) -> crate::audio::PluginPref {

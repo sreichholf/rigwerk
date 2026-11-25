@@ -21,7 +21,7 @@ use super::metronome::{click_level_gain, ClickRhythm};
 use super::nam::{NamPark, NamStack, PreparedNam};
 use super::output_map::{AlignmentReport, OutputDeviceSettings, MAX_EXTRA_OUTPUTS};
 use super::path::{DspTime, PathMix, PathState, MAX_PATHS};
-use super::plugins::{PluginPref, PluginView};
+use super::plugins::{PluginPref, PluginView, SlotPark};
 use super::shared::ExtraOutputPlan;
 use super::shared::Shared;
 use super::types::{BufferMode, EngineState, Snapshot, StartConfig};
@@ -102,6 +102,10 @@ pub struct AudioEngine {
     nam_park: Arc<NamPark>,
     /// Park for cabinet kernels.  Same lifetime as [`Self::nam_park`].
     cab_park: Arc<CabPark>,
+    /// Park for the plugin slots a bridge releases.  The same park for every
+    /// run this engine starts, so an old bridge that defers after
+    /// [`Self::replace_run`] still has a live owner.
+    slot_park: Arc<SlotPark>,
     /// Bumped in [`Self::replace_run`].  The UI reinstalls captures when it
     /// changes, because a new run does not inherit a live model.
     run_id: u64,
@@ -112,10 +116,12 @@ impl AudioEngine {
         let shared = Shared::new(sample_rate);
         let nam_park = Arc::clone(shared.nam_park());
         let cab_park = Arc::clone(shared.cab_park());
+        let slot_park = Arc::clone(shared.plugin_park());
         Self {
             shared: Arc::new(shared),
             nam_park,
             cab_park,
+            slot_park,
             run_id: 1,
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
@@ -975,6 +981,7 @@ impl AudioEngine {
             self.sample_rate,
             Arc::clone(&self.nam_park),
             Arc::clone(&self.cab_park),
+            Arc::clone(&self.slot_park),
         );
         run.adopt_settings_from(&previous);
         self.shared = Arc::new(run);
@@ -1182,6 +1189,14 @@ impl AudioEngine {
         }
     }
 
+    /// Puts a bridge thread that is still running into `lingering`, as a
+    /// stop that timed out leaves it, so a test can check the start backstop
+    /// without opening a device.
+    #[cfg(test)]
+    pub(crate) fn park_lingering_for_test(&mut self, handle: JoinHandle<()>) {
+        self.lingering.push(handle);
+    }
+
     /// Joins the current run's thread if it ended, so a clean exit or a
     /// panic cannot leave it running invisibly.  Returns whether it ended.
     fn reap_current_bridge(&mut self) -> bool {
@@ -1360,17 +1375,19 @@ impl Drop for AudioEngine {
         }
         if alive {
             // A bridge that is still tearing down will drop its mixer on
-            // that thread.  That drop parks models; it must not be the
-            // last owner of the park, or the models would be destroyed
-            // there.  This clone is never dropped.
+            // that thread.  That drop parks models and plugin slots; it must
+            // not be the last owner of the parks, or they would be destroyed
+            // there.  These clones are never dropped.
             std::mem::forget(Arc::clone(&self.nam_park));
             std::mem::forget(Arc::clone(&self.cab_park));
+            std::mem::forget(Arc::clone(&self.slot_park));
         } else {
-            // Every bridge has joined, so the models and kernels they
+            // Every bridge has joined, so the models, kernels and slots they
             // parked are the only ones left, and this is the UI thread (or
             // process exit on it).
             self.nam_park.flush();
             self.cab_park.flush();
+            self.slot_park.drain();
         }
     }
 }

@@ -18,6 +18,9 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Runs for every value still queued when the last end drops.
+type Release<T> = Box<dyn Fn(T) + Send + Sync>;
+
 /// A queue counter on its own cache line, so the producer's `head` stores
 /// and the consumer's `tail` stores do not bounce one line between cores.
 #[repr(align(64))]
@@ -34,7 +37,9 @@ struct Inner<T> {
     head: Counter,
     /// Values popped, ever.  Only the consumer writes it.
     tail: Counter,
-    release: fn(T),
+    /// The caller's release hook, which may hold the owner it hands values
+    /// back to.
+    release: Release<T>,
 }
 
 // A cell is written only by the producer, before it publishes `head`, and
@@ -47,11 +52,12 @@ impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
         let head = *self.head.0.get_mut();
         let mut tail = *self.tail.0.get_mut();
+        let release = self.release.as_ref();
         while tail < head {
             let cell = self.cells[(tail & self.mask) as usize].get_mut();
             // Between `tail` and `head`: initialised, and read once.
             let value = unsafe { cell.assume_init_read() };
-            (self.release)(value);
+            release(value);
             tail += 1;
         }
     }
@@ -71,8 +77,11 @@ pub(crate) struct Consumer<T> {
 
 /// A queue for at least `capacity` values (rounded up to a power of two,
 /// at least one).  Values left in it when both ends are gone go to
-/// `release`.
-pub(crate) fn queue<T: Send>(capacity: usize, release: fn(T)) -> (Producer<T>, Consumer<T>) {
+/// `release`, which may hold an owner they must be handed back to.
+pub(crate) fn queue<T: Send>(
+    capacity: usize,
+    release: impl Fn(T) + Send + Sync + 'static,
+) -> (Producer<T>, Consumer<T>) {
     let capacity = capacity.max(1).next_power_of_two();
     let inner = Arc::new(Inner {
         cells: (0..capacity)
@@ -81,7 +90,7 @@ pub(crate) fn queue<T: Send>(capacity: usize, release: fn(T)) -> (Producer<T>, C
         mask: capacity as u64 - 1,
         head: Counter(AtomicU64::new(0)),
         tail: Counter(AtomicU64::new(0)),
-        release,
+        release: Box::new(release),
     });
     (
         Producer {
