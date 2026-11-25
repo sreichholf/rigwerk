@@ -5,9 +5,18 @@ Defaults for coding agents (and humans) working on RigWerk.
 The MSRV is Rust 1.95.0 (`rust-toolchain.toml`). Leave that pin unless the
 dependency that forced it changes. The license is GPL-3.0-or-later.
 
-`docs/open-items.md` lists what is known to be missing or limited.  The
-finished plans, mockups and code review are in git history only; do not
-restore them as open work.
+## Docs
+
+- `docs/ui-spec.md` is the live UI layout spec and glossary; the glossary
+  test in `src/tests.rs` mirrors the unambiguous words of the banned-word
+  column of section 2.1.
+- `docs/manual.md` is the user manual.
+- `docs/feature-ideas.md` holds live ideas, not planned work.
+- `docs/screenshots/README.md` is the screenshot set.
+- `docs/open-items.md` lists what is known to be missing or limited.
+
+The finished plans and mockups, and the code review (also issue #117), are
+history only; do not restore them as open work.
 
 ## Start from master
 
