@@ -45,8 +45,9 @@ use crate::app::settings::{
 };
 use crate::app::startup::{persisted_identity, restore_saved_devices, StartupGate};
 use crate::audio::{
-    self, AudioEngine, BufferMode, EngineState, EqSlot, Inventory, OutputDeviceSettings, Snapshot,
-    WasapiOutputMode, MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS, MAX_PATHS,
+    self, AudioEngine, BufferMode, EngineState, EqSettings, EqSlot, GateSettings, Inventory,
+    OutputDeviceSettings, Snapshot, WasapiOutputMode, MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS,
+    MAX_PATHS,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -528,8 +529,17 @@ impl RigWerkApp {
             effect_recent: self.plugin_browser.recent.clone(),
             sheet_height: self.chrome.sheet_height,
             last_click_mask: self.last_click_mask,
-            // The legacy mix fields are not written.
-            ..Preferences::default()
+            // The legacy mix fields are read from old saves and never written,
+            // so these keep the defaults.
+            output_channels: [true, true],
+            mono: false,
+            routes: [[true, false, false, false], [false, true, false, false]],
+            eq: EqSettings::default(),
+            eq_post: EqSettings::default(),
+            gate: GateSettings::default(),
+            plugins: Vec::new(),
+            // Neither saved nor read: a launch starts with the click stopped.
+            metronome_running: false,
         };
         store_preferences(storage, &preferences, &mut self.preferences_backup);
     }
