@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::{push_device_frame, RecordPhase, RecordSource, RecordStatus, Recorder, RECORD_SECONDS};
+use super::{
+    push_device_frame, RecordPhase, RecordRing, RecordSource, RecordStatus, Recorder,
+    RECORD_SECONDS,
+};
 use crate::audio::output_map::DeviceFrame;
 
 const IEEE_FLOAT_GUID: [u8; 16] = [
@@ -112,8 +115,38 @@ fn finish(recorder: &Recorder) -> RecordStatus {
     wait_phase(recorder, RecordPhase::Idle)
 }
 
+/// No writer thread, so these are the only producer and consumer.  This is
+/// the deterministic pin on the overrun path: a full ring refuses, and the
+/// refused frame never reaches the queue.
 #[test]
-fn a_full_ring_records_exactly_those_frames() {
+fn a_full_ring_refuses_the_next_frame_and_keeps_the_rest_in_order() {
+    let rate = 8u32;
+    let capacity = rate as usize * RECORD_SECONDS as usize;
+    assert_eq!(RECORD_SECONDS, 5);
+    assert_eq!(capacity, 40);
+
+    let ring = RecordRing::new(rate, 1);
+    assert_eq!(ring.capacity, capacity as u64);
+
+    let mut pushed = Vec::with_capacity(capacity);
+    for index in 0..capacity {
+        let sample = index as f32;
+        assert!(ring.push(&[sample]), "frame {index} refused before full");
+        pushed.push(sample);
+    }
+    assert!(!ring.push(&[capacity as f32]), "a full ring accepted");
+
+    let mut drained = Vec::with_capacity(capacity);
+    let mut frame = [0.0f32; 1];
+    while ring.pop(&mut frame[..1]) {
+        drained.push(frame[0]);
+    }
+    assert_eq!(drained, pushed);
+    assert!(!ring.pop(&mut frame[..1]));
+}
+
+#[test]
+fn a_full_ring_accounts_for_every_frame() {
     let rate = 8u32;
     let capacity = rate as usize * RECORD_SECONDS as usize;
     assert_eq!(RECORD_SECONDS, 5);
@@ -124,32 +157,52 @@ fn a_full_ring_records_exactly_those_frames() {
     assert!(recorder.arm(temp.wav(), rate, 1, RecordSource::Clock));
     wait_phase(&recorder, RecordPhase::Recording);
 
-    let mut pushed = Vec::with_capacity(capacity);
-    for index in 0..capacity {
+    // Twice the ring.  The writer drains while this burst runs, so which
+    // frames it accepts depends on timing; only the accounting and the
+    // order are fixed.
+    let total = 2 * capacity;
+    let mut pushed = Vec::with_capacity(total);
+    for index in 0..total {
         let sample = index as f32;
         recorder.push(RecordSource::Clock, &[sample]);
         pushed.push(sample);
     }
-    // The next frame must not block, and it must not land in the file.
-    recorder.push(RecordSource::Clock, &[42.0]);
     let live = recorder.status();
     assert_eq!(live.phase, RecordPhase::Recording);
-    assert_eq!(live.frames, capacity as u64);
-    assert_eq!(live.overruns, 1);
     assert_eq!(live.rate, rate);
     assert_eq!(live.channels, 1);
+    assert_eq!(live.frames + live.overruns, total as u64, "{live:?}");
 
     let done = finish(&recorder);
-    assert_eq!(done.frames, capacity as u64);
-    assert_eq!(done.overruns, 1);
     assert!(done.error.is_none(), "{done:?}");
+    assert_eq!(done.frames, live.frames);
+    assert_eq!(done.overruns, live.overruns);
+    assert_eq!(done.rate, rate);
+    assert_eq!(done.channels, 1);
+    // Every push is either kept or counted, and never both.
+    assert_eq!(done.frames + done.overruns, total as u64, "{done:?}");
 
     let wav = read_wav(&temp.wav());
     assert_eq!(wav.rate, rate);
     assert_eq!(wav.channels, 1);
     assert_eq!(wav.mask, 0x1);
-    assert_eq!(wav.data_size as usize, pushed.len() * 4);
-    assert_eq!(wav.samples, pushed);
+    // The file holds every accepted frame, once, in push order: a dropped
+    // frame is absent, not reordered, repeated, or replaced by a later one.
+    assert_eq!(wav.samples.len(), done.frames as usize);
+    // Frame 0 is always accepted: the burst starts while the status is
+    // Recording and nothing has been pushed yet, so the ring is empty.
+    assert_eq!(wav.samples.first(), Some(&0.0));
+    let mut previous = None;
+    for &sample in &wav.samples {
+        let index = sample as usize;
+        assert!(index < total, "not a pushed frame: {sample}");
+        assert_eq!(sample, pushed[index], "not a pushed frame: {sample}");
+        assert!(
+            previous.is_none_or(|previous| index > previous),
+            "repeated or out of order: frame {index} after {previous:?}"
+        );
+        previous = Some(index);
+    }
 }
 
 #[test]
