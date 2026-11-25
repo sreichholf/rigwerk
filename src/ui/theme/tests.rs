@@ -2,8 +2,8 @@ use eframe::egui;
 use egui::Color32;
 
 use super::{
-    font, hover_cursor, palette, ts, type_size, Face, Palette, TypeRole, AMBER, CARD, DARK, DIM,
-    LIGHT, MUTED, PATH_COLOUR_NAMES, TEAL, TEXT,
+    font, hex, hover_cursor, palette, ts, type_size, Face, Palette, TypeRole, DARK, LIGHT,
+    PATH_COLOUR_NAMES,
 };
 
 fn channel(c: u8) -> f64 {
@@ -27,29 +27,98 @@ fn contrast(foreground: Color32, background: Color32) -> f64 {
 }
 
 #[test]
-fn dim_clears_wcag_aa_on_card_and_stays_quieter_than_muted() {
-    assert_eq!((CARD.r(), CARD.g(), CARD.b()), (0x1a, 0x19, 0x18));
-    assert_eq!((DIM.r(), DIM.g(), DIM.b()), (0x94, 0x8e, 0x83));
-    assert_ne!(DIM, MUTED);
-    assert_ne!(DIM, TEXT);
-    assert!(DIM.r() < MUTED.r() && DIM.g() < MUTED.g() && DIM.b() < MUTED.b());
-    assert!(TEXT.r() > MUTED.r() && TEXT.g() > MUTED.g() && TEXT.b() > MUTED.b());
+fn quiet_text_reads_on_a_panel_and_stays_quieter_than_body_text() {
+    for (theme, p) in palettes() {
+        let on_strip = contrast(p.text3, p.strip);
+        assert!(
+            on_strip >= 4.5,
+            "{theme}: text3 on strip is {on_strip:.3}:1, below WCAG AA 4.5:1"
+        );
+        let on_slot = contrast(p.text3, p.slot);
+        assert!(
+            on_slot >= 4.5,
+            "{theme}: text3 on slot is {on_slot:.3}:1, below WCAG AA 4.5:1"
+        );
+        assert!(
+            on_strip < contrast(p.text2, p.strip),
+            "{theme}: text3 stays quieter than text2"
+        );
+        assert!(
+            contrast(p.text2, p.strip) < contrast(p.text, p.strip),
+            "{theme}: text2 stays quieter than text"
+        );
+    }
 
-    let on_card = contrast(DIM, CARD);
-    assert!(
-        on_card >= 4.5,
-        "DIM on CARD is {on_card:.3}:1, below WCAG AA 4.5:1"
-    );
-    let on_raised = contrast(DIM, DARK.slot);
-    assert!(
-        on_raised >= 4.5,
-        "DIM on a slot is {on_raised:.3}:1, below WCAG AA 4.5:1"
-    );
-    assert!(on_card < contrast(MUTED, CARD));
-    assert!(contrast(MUTED, CARD) < contrast(TEXT, CARD));
-
+    // The blue-grey the quiet token replaced, on the panel it was drawn on.
     let previous = Color32::from_rgb(89, 102, 122);
-    assert!(contrast(previous, CARD) < 4.5);
+    assert!(contrast(previous, DARK.strip) < 4.5);
+}
+
+#[test]
+fn every_token_is_the_value_the_spec_prints() {
+    let tokens: [(&str, Color32, u32, Color32, u32); 21] = [
+        ("bg", DARK.bg, 0x121211, LIGHT.bg, 0xe9e6df),
+        ("bar", DARK.bar, 0x0d0d0c, LIGHT.bar, 0xf4f2ed),
+        ("strip", DARK.strip, 0x1a1918, LIGHT.strip, 0xfbfaf7),
+        ("slot", DARK.slot, 0x222120, LIGHT.slot, 0xefede8),
+        ("well", DARK.well, 0x0f0f0e, LIGHT.well, 0xe4e1da),
+        ("sheet", DARK.sheet, 0x1c1b19, LIGHT.sheet, 0xfdfcfa),
+        ("line", DARK.line, 0x2a2825, LIGHT.line, 0xdcd8cf),
+        ("line2", DARK.line2, 0x3a3733, LIGHT.line2, 0xc9c4b9),
+        ("text", DARK.text, 0xebe7df, LIGHT.text, 0x1d1c1a),
+        ("text2", DARK.text2, 0xb0aa9f, LIGHT.text2, 0x55514a),
+        ("text3", DARK.text3, 0x948e83, LIGHT.text3, 0x6b665d),
+        ("led_off", DARK.led_off, 0x7d776e, LIGHT.led_off, 0x857f73),
+        ("accent", DARK.accent, 0xff8f40, LIGHT.accent, 0xc55a0c),
+        (
+            "accent_text",
+            DARK.accent_text,
+            0xffb27a,
+            LIGHT.accent_text,
+            0xa8480a,
+        ),
+        (
+            "accent_bg",
+            DARK.accent_bg,
+            0x2a1a0e,
+            LIGHT.accent_bg,
+            0xfbeee2,
+        ),
+        ("warn", DARK.warn, 0xffcc4d, LIGHT.warn, 0x7a5700),
+        ("error", DARK.error, 0xff5a4a, LIGHT.error, 0xd93a2b),
+        (
+            "error_text",
+            DARK.error_text,
+            0xff5a4a,
+            LIGHT.error_text,
+            0xb8291c,
+        ),
+        ("ok_text", DARK.ok_text, 0x9cc48a, LIGHT.ok_text, 0x446b33),
+        ("meter", DARK.meter, 0xcfc8bb, LIGHT.meter, 0x4a463f),
+        (
+            "meter_hot",
+            DARK.meter_hot,
+            0xffcc4d,
+            LIGHT.meter_hot,
+            0x7a5700,
+        ),
+    ];
+    for (name, dark, dark_hex, light, light_hex) in tokens {
+        assert_eq!(dark, hex(dark_hex), "dark `{name}`");
+        assert_eq!(light, hex(light_hex), "light `{name}`");
+    }
+    let paths = [
+        ("Blue", 0x7fb2d6, 0x3f7fae),
+        ("Violet", 0xc49bd8, 0x8d5bb0),
+        ("Green", 0x9cc48a, 0x5f8f4a),
+        ("Rose", 0xe39aa6, 0xb5566a),
+    ];
+    assert_eq!(paths.len(), DARK.path.len());
+    for (index, (name, dark, light)) in paths.into_iter().enumerate() {
+        assert_eq!(DARK.path[index], hex(dark), "dark path `{name}`");
+        assert_eq!(LIGHT.path[index], hex(light), "light path `{name}`");
+    }
+    assert_eq!(PATH_COLOUR_NAMES, paths.map(|(name, _, _)| name));
 }
 
 fn palettes() -> [(&'static str, &'static Palette); 2] {
@@ -88,6 +157,7 @@ fn text_tokens_read_on_every_text_surface() {
             ("accent_text", p.accent_text),
             ("warn", p.warn),
             ("error_text", p.error_text),
+            ("ok_text", p.ok_text),
         ];
         let surfaces = [
             ("bg", p.bg),
@@ -165,16 +235,6 @@ fn every_path_colour_has_its_name_in_order() {
 }
 
 #[test]
-fn the_old_constants_are_the_dark_tokens() {
-    assert_eq!(TEXT, DARK.text);
-    assert_eq!(MUTED, DARK.text2);
-    assert_eq!(DIM, DARK.text3);
-    assert_eq!(CARD, DARK.strip);
-    assert_eq!(TEAL, DARK.accent);
-    assert_eq!(AMBER, DARK.warn);
-}
-
-#[test]
 fn the_type_scale_is_the_spec_and_ts_is_unchanged() {
     let scale = [
         (TypeRole::GridHeader, 11.0),
@@ -185,6 +245,7 @@ fn the_type_scale_is_the_spec_and_ts_is_unchanged() {
         (TypeRole::Heading, 18.0),
         (TypeRole::TunerString, 22.0),
         (TypeRole::TunerCents, 44.0),
+        (TypeRole::TunerNote, 104.0),
     ];
     for (role, size) in scale {
         assert_eq!(type_size(role), size, "{role:?}");

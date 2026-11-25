@@ -12,6 +12,7 @@ use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
 use crate::audio::output_map::VIRTUAL_OUTPUT_NAME;
+use crate::audio::panic_guard::contain;
 use crate::audio::rt_guard::RtGuard;
 
 use super::{properties, MAX_FRAMES};
@@ -90,6 +91,53 @@ impl VirtualOutputSlot {
         }
         0
     }
+
+    #[cfg(test)]
+    pub(super) fn generation(&self) -> u64 {
+        self.gen.load(Ordering::Relaxed)
+    }
+
+    /// Publishes an empty generation.  The panic path uses it when the cycle
+    /// may not have opened a write at all, so the reader plays silence instead
+    /// of repeating the last good buffer.
+    pub(super) fn publish_empty(&self) {
+        self.begin_write();
+        self.end_write(0);
+    }
+}
+
+/// One RigWerk Out write in flight.  Dropping it without [`Self::finish`]
+/// closes the generation with zero frames, which is the panic path: the
+/// reader then plays silence instead of spinning on an odd generation, and
+/// the last good buffer is not replayed as if it were current.
+pub(super) struct VirtualWrite<'a> {
+    slot: &'a VirtualOutputSlot,
+    finished: bool,
+}
+
+impl<'a> VirtualWrite<'a> {
+    /// Opens the seqlock for one cycle.
+    pub(super) fn begin(slot: &'a VirtualOutputSlot) -> Self {
+        slot.begin_write();
+        Self {
+            slot,
+            finished: false,
+        }
+    }
+
+    /// Publishes `frames` and closes the generation exactly once.
+    pub(super) fn finish(mut self, frames: usize) {
+        self.slot.end_write(frames);
+        self.finished = true;
+    }
+}
+
+impl Drop for VirtualWrite<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.slot.end_write(0);
+        }
+    }
 }
 
 /// Process data for the RigWerk Out virtual source filter.
@@ -108,13 +156,22 @@ unsafe extern "C" fn on_virtual_process(
     if position.is_null() {
         return;
     }
-    let _denormals = DenormalGuard::new();
-    // Nothing in this cycle may allocate (see `audio::rt_guard`).
-    let _no_allocations = RtGuard::enter();
     let frames = unsafe { (*position).clock.duration as usize };
     if frames == 0 {
         return;
     }
+    // A panic must not unwind into PipeWire's own callback (Rust panics
+    // across `extern "C"` abort the process).  This source has no status
+    // channel of its own; silence is the whole answer here.
+    if contain(|| unsafe { process_virtual(data, frames) }) {
+        unsafe { silence_ports(data, frames) };
+    }
+}
+
+unsafe fn process_virtual(data: &mut VirtualProcess, frames: usize) {
+    let _denormals = DenormalGuard::new();
+    // Nothing in this cycle may allocate (see `audio::rt_guard`).
+    let _no_allocations = RtGuard::enter();
     let buffer = |port: *mut c_void| unsafe {
         pw_sys::pw_filter_get_dsp_buffer(port, frames as u32) as *mut f32
     };
@@ -143,6 +200,19 @@ unsafe extern "C" fn on_virtual_process(
         }
         if !out_r.is_null() {
             unsafe { *out_r.add(index) = right };
+        }
+    }
+}
+
+/// Zeroes both output ports of this cycle after a caught panic.
+unsafe fn silence_ports(data: &VirtualProcess, frames: usize) {
+    let buffer = |port: *mut c_void| unsafe {
+        pw_sys::pw_filter_get_dsp_buffer(port, frames as u32) as *mut f32
+    };
+    for port in data.ports {
+        let out = buffer(port);
+        if !out.is_null() {
+            unsafe { ptr::write_bytes(out, 0, frames) };
         }
     }
 }

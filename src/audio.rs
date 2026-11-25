@@ -69,6 +69,9 @@
 //!   and the slow automatic level that uses them, one per output device.
 //! - `delay`: the delay lines and taps behind the latency alignment.
 //! - `denormal`: flush-to-zero for the audio callbacks.
+//! - `panic_guard`: the panic containment every backend callback runs
+//!   through, the PipeWire listeners included, so no unwind reaches the
+//!   host's C callback.
 //! - `rt_guard`: the debug allocation guard; every callback's sample body
 //!   runs inside one, and ASIO's silence path is covered through `dispatch`.
 //! - `thread_priority`: real-time scheduling for cpal's Linux threads.
@@ -98,6 +101,7 @@ mod metronome;
 mod mixer;
 mod output;
 mod output_map;
+mod panic_guard;
 mod path;
 mod plugins;
 pub(crate) use plugins::mark_main_thread;
@@ -208,7 +212,7 @@ pub(crate) use plugins::MAX_ALIGN;
 pub(crate) use plugins::MAX_EFFECTS;
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
-pub(crate) use shared::{ExtraOutputLink, ExtraOutputPlan, SCOPE_LEN};
+pub(crate) use shared::{is_callback_failure_message, ExtraOutputLink, ExtraOutputPlan, SCOPE_LEN};
 pub(crate) use tuner::{
     cents_to_ratio, note_name, octave, tuning_index, TuneState, TunerAnalysis, TunerChannel,
     TunerFrame, TunerTolerance, Tuning, TuningGroup, DEFAULT_PRESET_ID, TAP_COPY_FRAMES, TUNINGS,

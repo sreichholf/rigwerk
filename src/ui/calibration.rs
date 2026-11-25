@@ -17,9 +17,7 @@ use crate::app::latency::{utc_stamp, LoopbackKind};
 use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
-use crate::ui::theme::{
-    font, with_alpha, TypeRole, AMBER, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
-};
+use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
 use crate::ui::widgets::{micro_label, mono, progress_line};
 
 impl RigWerkApp {
@@ -29,6 +27,10 @@ impl RigWerkApp {
         if !self.calibration.open {
             return;
         }
+        let colours = palette(ctx);
+        // A quiet button's frame and label are the same token; the accent's
+        // two differ, because `accent` is a fill and `accent_text` reads.
+        let quiet = colours.text2;
         let mut close = false;
         let mut start = false;
         let mut cancel = false;
@@ -65,8 +67,8 @@ impl RigWerkApp {
             .default_width(520.0)
             .frame(
                 egui::Frame::new()
-                    .fill(CARD)
-                    .stroke(Stroke::new(1.0, BORDER))
+                    .fill(colours.strip)
+                    .stroke(Stroke::new(1.0, colours.line2))
                     .corner_radius(CornerRadius::same(14))
                     .inner_margin(Margin::same(18))
                     .shadow(egui::epaint::Shadow {
@@ -80,12 +82,15 @@ impl RigWerkApp {
                 ui.set_width(520.0);
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, CornerRadius::same(9), with_alpha(TEAL, 14));
+                    ui.painter().rect_filled(
+                        rect,
+                        CornerRadius::same(9),
+                        with_alpha(colours.accent, 14),
+                    );
                     ui.painter().rect_stroke(
                         rect,
                         CornerRadius::same(9),
-                        Stroke::new(1.0, with_alpha(TEAL, 38)),
+                        Stroke::new(1.0, with_alpha(colours.accent, 38)),
                         egui::StrokeKind::Inside,
                     );
                     ui.painter().text(
@@ -93,14 +98,14 @@ impl RigWerkApp {
                         Align2::CENTER_CENTER,
                         "RT",
                         FontId::new(ts(9.0), FontFamily::Monospace),
-                        TEAL,
+                        colours.accent_text,
                     );
                     ui.add_space(2.0);
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new("Measure the loopback")
                                 .size(ts(14.0))
-                                .color(TEXT)
+                                .color(colours.text)
                                 .strong(),
                         );
                         ui.label(
@@ -108,11 +113,11 @@ impl RigWerkApp {
                                 "Plays a short click, hears it come back, and reports the loopback's delay.",
                             )
                             .size(ts(10.0))
-                            .color(MUTED),
+                            .color(colours.text2),
                         );
                     });
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        if small_button(ui, "Close", MUTED) {
+                        if small_button(ui, "Close", quiet, quiet) {
                             close = true;
                         }
                     });
@@ -120,7 +125,7 @@ impl RigWerkApp {
                 ui.add_space(12.0);
 
                 // How the loop is closed.
-                ui.label(micro_label("LOOPBACK", DIM));
+                ui.label(micro_label("LOOPBACK", colours.text3));
                 ui.add_space(4.0);
                 ui.add_enabled_ui(!measuring, |ui| {
                     ui.horizontal(|ui| {
@@ -143,7 +148,7 @@ impl RigWerkApp {
                 ui.add_space(5.0);
                 ui.add(
                     egui::Label::new(
-                        RichText::new(loopback.advice()).size(ts(10.5)).color(MUTED),
+                        RichText::new(loopback.advice()).size(ts(10.5)).color(colours.text2),
                     )
                     .wrap(),
                 );
@@ -151,45 +156,44 @@ impl RigWerkApp {
 
                 // The exact rig this measures, and whether it may run.
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(12, 16, 25))
-                    .stroke(Stroke::new(1.0, BORDER))
+                    .fill(colours.bg)
+                    .stroke(Stroke::new(1.0, colours.line2))
                     .corner_radius(CornerRadius::same(9))
                     .inner_margin(Margin::symmetric(12, 9))
                     .show(ui, |ui| {
                         ui.set_width(496.0);
-                        condition_row(ui, "INPUT", &format!(
+                        let input = format!(
                             "{} · {:.1} kHz · {} smp",
                             conditions.input_name,
                             conditions.input_rate as f32 / 1000.0,
                             conditions.input_buffer
-                        ));
-                        condition_row(ui, "OUTPUT", &format!(
-                            "{} · {:.1} kHz · {} smp{}",
+                        );
+                        condition_row(ui, "INPUT", &input, colours);
+                        let live_step = output_step
+                            .map(|(frames, ms)| format!(" (live step {frames}, {ms:.1} ms)"))
+                            .unwrap_or_default();
+                        let output = format!(
+                            "{} · {:.1} kHz · {} smp{live_step}",
                             conditions.output_name,
                             conditions.output_rate as f32 / 1000.0,
-                            conditions.output_step,
-                            output_step
-                                .map(|(frames, ms)| format!(" (live step {frames}, {ms:.1} ms)"))
-                                .unwrap_or_default()
-                        ));
-                        condition_row(ui, "MODE", &conditions.output_mode.to_uppercase());
+                            conditions.output_step
+                        );
+                        condition_row(ui, "OUTPUT", &output, colours);
+                        condition_row(ui, "MODE", &conditions.output_mode.to_uppercase(), colours);
                         let resolution = (conditions.input_buffer as f32
                             / conditions.input_rate.max(1) as f32)
                             .max(conditions.output_step as f32 / conditions.output_rate.max(1) as f32)
                             * 1000.0;
-                        condition_row(
-                            ui,
-                            "RESOLUTION",
-                            &format!(
-                                "±{resolution:.1} ms (one driver block; the stamps are taken at the callback)"
-                            ),
+                        let resolution_note = format!(
+                            "±{resolution:.1} ms (one driver block; the stamps are taken at the callback)"
                         );
+                        condition_row(ui, "RESOLUTION", &resolution_note, colours);
                     });
                 ui.add_space(12.0);
 
                 if measuring {
                     let percent = format!("{}%", (progress * 100.0).round() as i32);
-                    progress_line(ui, "CAPTURE", &percent, progress, AMBER);
+                    progress_line(ui, "CAPTURE", &percent, progress, colours.warn);
                     ui.add_space(6.0);
                     ui.add(
                         egui::Label::new(
@@ -197,21 +201,21 @@ impl RigWerkApp {
                                 "The mix on the main output is muted while it measures. The click ignores that output's mute and fader, so a muted output still plays it. Extra outputs keep playing. Keep the loopback connected.",
                             )
                             .size(ts(10.5))
-                            .color(AMBER),
+                            .color(colours.warn),
                         )
                         .wrap(),
                     );
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        if panel_button(ui, "Cancel", MUTED) {
+                        if panel_button(ui, "Cancel", quiet, quiet) {
                             cancel = true;
                         }
                     });
                 } else {
                     if let CalibrationPhase::Failed { reason } = &phase {
                         egui::Frame::new()
-                            .fill(with_alpha(AMBER, 10))
-                            .stroke(Stroke::new(1.0, with_alpha(AMBER, 45)))
+                            .fill(with_alpha(colours.warn, 10))
+                            .stroke(Stroke::new(1.0, with_alpha(colours.warn, 45)))
                             .corner_radius(CornerRadius::same(9))
                             .inner_margin(Margin::symmetric(12, 9))
                             .show(ui, |ui| {
@@ -219,12 +223,12 @@ impl RigWerkApp {
                                 ui.label(
                                     RichText::new("The measurement did not finish")
                                         .size(ts(11.0))
-                                        .color(AMBER)
+                                        .color(colours.warn)
                                         .strong(),
                                 );
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(reason).size(ts(10.5)).color(MUTED),
+                                        RichText::new(reason).size(ts(10.5)).color(colours.text2),
                                     )
                                     .wrap(),
                                 );
@@ -238,6 +242,7 @@ impl RigWerkApp {
                             stale.as_deref(),
                             budget.estimate_ms,
                             budget.estimate_gap.as_deref(),
+                            colours,
                         );
                         ui.add_space(12.0);
                     }
@@ -247,19 +252,21 @@ impl RigWerkApp {
                         } else {
                             "Measure"
                         };
-                        if panel_button(ui, label, TEAL) {
+                        if panel_button(ui, label, colours.accent, colours.accent_text) {
                             start = true;
                         }
                         ui.add_space(6.0);
-                        if panel_button(ui, "Close", MUTED) {
+                        if panel_button(ui, "Close", quiet, quiet) {
                             close = true;
                         }
                     });
                     if let Some(reason) = blocker.as_deref() {
                         ui.add_space(8.0);
                         ui.add(
-                            egui::Label::new(RichText::new(reason).size(ts(10.0)).color(DIM))
-                                .wrap(),
+                            egui::Label::new(
+                                RichText::new(reason).size(ts(10.0)).color(colours.text3),
+                            )
+                            .wrap(),
                         );
                     } else {
                         ui.add_space(8.0);
@@ -270,7 +277,7 @@ impl RigWerkApp {
                                  fader, so a muted output still plays it.",
                             )
                             .size(ts(10.0))
-                            .color(DIM),
+                            .color(colours.text3),
                         );
                     }
                 }
@@ -301,13 +308,18 @@ fn measured_summary(
     stale: Option<&str>,
     estimate_ms: f32,
     estimate_gap: Option<&str>,
+    colours: &Palette,
 ) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{:.1}", measured.latency_ms))
                 .family(FontFamily::Monospace)
                 .size(ts(28.0))
-                .color(if stale.is_some() { AMBER } else { GREEN }),
+                .color(if stale.is_some() {
+                    colours.warn
+                } else {
+                    colours.ok_text
+                }),
         );
         ui.vertical(|ui| {
             ui.add_space(6.0);
@@ -317,7 +329,7 @@ fn measured_summary(
                     measured.loopback.label()
                 ))
                 .size(ts(11.0))
-                .color(TEXT),
+                .color(colours.text),
             );
             ui.label(
                 RichText::new(format!(
@@ -328,17 +340,19 @@ fn measured_summary(
                     utc_stamp(measured.measured_at)
                 ))
                 .size(ts(10.0))
-                .color(MUTED),
+                .color(colours.text2),
             );
         });
     });
     ui.add_space(6.0);
     ui.add(
-        egui::Label::new(
-            RichText::new(measured.summary(stale))
-                .size(ts(10.0))
-                .color(if stale.is_some() { AMBER } else { MUTED }),
-        )
+        egui::Label::new(RichText::new(measured.summary(stale)).size(ts(10.0)).color(
+            if stale.is_some() {
+                colours.warn
+            } else {
+                colours.text2
+            },
+        ))
         .wrap(),
     );
     ui.add_space(4.0);
@@ -353,7 +367,7 @@ fn measured_summary(
                 ),
             })
             .size(ts(10.0))
-            .color(DIM),
+            .color(colours.text3),
         )
         .wrap(),
     );
@@ -362,42 +376,49 @@ fn measured_summary(
         egui::Label::new(
             RichText::new(crate::app::budget::LEGS_NOTE)
                 .size(ts(9.5))
-                .color(DIM),
+                .color(colours.text3),
         )
         .wrap(),
     );
 }
 
-fn condition_row(ui: &mut egui::Ui, label: &str, value: &str) {
+fn condition_row(ui: &mut egui::Ui, label: &str, value: &str, colours: &Palette) {
     ui.horizontal(|ui| {
-        ui.add_sized([64.0, 14.0], egui::Label::new(mono(label, DIM, 8.5)));
-        ui.add(egui::Label::new(RichText::new(value).size(ts(10.5)).color(TEXT)).wrap());
+        ui.add_sized(
+            [64.0, 14.0],
+            egui::Label::new(mono(label, colours.text3, 8.5)),
+        );
+        ui.add(egui::Label::new(RichText::new(value).size(ts(10.5)).color(colours.text)).wrap());
     });
 }
 
-fn small_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
+/// A small panel button.  `frame` tints its fill and border, `text` labels it:
+/// the accent's two tokens differ, because `accent` is a fill and
+/// `accent_text` reads on the light theme.
+fn small_button(ui: &mut egui::Ui, label: &str, frame: Color32, text: Color32) -> bool {
     ui.add(
         egui::Button::new(
             RichText::new(label)
                 .font(font(Face::Sans, TypeRole::Control))
-                .color(color),
+                .color(text),
         )
-        .fill(with_alpha(color, 14))
-        .stroke(Stroke::new(1.0, with_alpha(color, 45)))
+        .fill(with_alpha(frame, 14))
+        .stroke(Stroke::new(1.0, with_alpha(frame, 45)))
         .corner_radius(CornerRadius::same(7)),
     )
     .clicked()
 }
 
-fn panel_button(ui: &mut egui::Ui, label: &str, color: Color32) -> bool {
+/// The panel's larger button.  `frame` and `text` as [`small_button`].
+fn panel_button(ui: &mut egui::Ui, label: &str, frame: Color32, text: Color32) -> bool {
     ui.add(
         egui::Button::new(
             RichText::new(label)
                 .font(font(Face::Sans, TypeRole::Control))
-                .color(color),
+                .color(text),
         )
-        .fill(with_alpha(color, 14))
-        .stroke(Stroke::new(1.0, with_alpha(color, 45)))
+        .fill(with_alpha(frame, 14))
+        .stroke(Stroke::new(1.0, with_alpha(frame, 45)))
         .corner_radius(CornerRadius::same(8))
         .min_size(Vec2::new(110.0, 30.0)),
     )
@@ -410,5 +431,5 @@ pub(super) fn hinted_loopback_tab(ui: &mut egui::Ui, label: &str, selected: bool
         "Cable" => LoopbackKind::Cable.advice(),
         _ => LoopbackKind::Microphone.advice(),
     };
-    crate::ui::widgets::hinted_tab(ui, label, selected, TEAL, hint)
+    crate::ui::widgets::hinted_tab(ui, label, selected, hint)
 }

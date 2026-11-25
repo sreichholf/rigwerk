@@ -262,7 +262,7 @@ fn readout(
     };
     let letter = painter.layout_no_wrap(
         name,
-        egui::FontId::new(104.0, Face::MonoMedium.family()),
+        font(Face::MonoMedium, TypeRole::TunerNote),
         tint(colours.text),
     );
     let letter_width = letter.size().x;

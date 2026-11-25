@@ -15,6 +15,12 @@
 //!
 //! A third check pins the allocation guard at the entry point of each audio
 //! callback a normal test cannot enter on every platform.
+//!
+//! A fourth check reads the same walk for the light theme: the surfaces that
+//! once drew the dark tokens (`ui/calibration.rs`, the shell windows in
+//! `ui/frame.rs`, the tab and progress helpers in `ui/widgets/mod.rs`) and the
+//! tuner's note, which named a raw `FontId::new`, name none of them and
+//! invent no colour literal.
 
 use std::path::{Path, PathBuf};
 
@@ -605,5 +611,152 @@ fn every_audio_callback_holds_the_allocation_guard() {
         missing.is_empty(),
         "an audio callback enters no allocation guard (AGENTS.md, Audio thread):\n{}",
         missing.join("\n")
+    );
+}
+
+/// The files the light theme used to miss, with the names each one must not
+/// use besides [`DARK_ONLY`].  They drew the dark tokens (`CARD`, `TEAL`, …)
+/// straight from `theme.rs`, so they stayed dark under the light palette
+/// (finding U8).  They read [`crate::ui::theme::palette`] now.
+const PALETTE_ONLY: &[(&str, &[&str])] = &[
+    ("src/ui/calibration.rs", &[]),
+    ("src/ui/frame.rs", &[]),
+    // The note is sized by the type scale now, so a literal point size is as
+    // retired here as a dark token.
+    ("src/ui/pages/tuner.rs", &["FontId::new"]),
+    ("src/ui/widgets/mod.rs", &[]),
+];
+
+/// The retired dark constants, and the constructors that invent a colour no
+/// theme has a token for.  Both were the same bug: a control drawn with a
+/// fixed value instead of the palette.
+///
+/// `from_black_alpha` is not on the list: the measure window's shadow is
+/// black in both themes, and a tint that follows the palette goes through
+/// [`crate::ui::theme::with_alpha`].
+const DARK_ONLY: &[&str] = &[
+    "DARK",
+    "CARD",
+    "BORDER_SOFT",
+    "BORDER",
+    "TEXT",
+    "MUTED",
+    "DIM",
+    "TEAL",
+    "AMBER",
+    "GREEN",
+    "from_rgb",
+    "from_rgba_unmultiplied",
+    "from_rgba_premultiplied",
+    "from_gray",
+    "from_white_alpha",
+];
+
+/// The code part of `line`, without its comments.  `depth` carries an open
+/// `/* … */` across lines, and block comments nest as Rust's do.  String
+/// literals are not lexed, so a `//` inside one ends the line early: that can
+/// hide a name, never invent one.
+fn code_only(line: &str, depth: &mut usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if *depth > 0 {
+            if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                *depth += 1;
+                index += 2;
+            } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                *depth -= 1;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            break;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            *depth += 1;
+            index += 2;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// The 1-based lines of `source` that use one of `names`, with the name each
+/// used.  The match is case-sensitive and whole-name: `text` is a field and
+/// `text3` is a token, while `TEXT` is the retired constant.
+fn dark_only_lines<'a>(source: &str, names: &[&'a str]) -> Vec<(usize, &'a str)> {
+    let continues = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let mut depth = 0;
+    let mut out = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let code = code_only(line, &mut depth);
+        for &name in names {
+            let used = code.match_indices(name).any(|(at, _)| {
+                !continues(code[..at].chars().next_back())
+                    && !continues(code[at + name.len()..].chars().next())
+            });
+            if used {
+                out.push((index + 1, name));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_light_theme_surfaces_read_the_palette() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src"), root, &mut files);
+    let mut seen = 0;
+    let mut hits = Vec::new();
+    for (file, path) in files {
+        let Some(entry) = PALETTE_ONLY.iter().find(|entry| entry.0 == file.as_str()) else {
+            continue;
+        };
+        seen += 1;
+        let source = std::fs::read_to_string(&path).expect("read source");
+        let mut names = DARK_ONLY.to_vec();
+        names.extend_from_slice(entry.1);
+        for (line, name) in dark_only_lines(&source, &names) {
+            hits.push(format!("{file}:{line}: {name}"));
+        }
+    }
+    assert_eq!(
+        seen,
+        PALETTE_ONLY.len(),
+        "PALETTE_ONLY names a file the walk did not find"
+    );
+    assert!(
+        hits.is_empty(),
+        "these surfaces must read the palette (finding U8):\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn a_dark_token_scan_is_case_sensitive_and_skips_comments() {
+    let source = "// CARD and TEXT in prose\n\
+         let a = colours.text3;\n\
+         let b = DARK.strip;  // the old card\n\
+         /* CARD\n\
+            spans lines */\n\
+         let c = egui::Color32::from_rgb(1, 2, 3);\n";
+    assert_eq!(
+        dark_only_lines(source, DARK_ONLY),
+        [(3, "DARK"), (6, "from_rgb")]
+    );
+
+    // A file's own names are checked the same way; the tuner's is the note.
+    let note = "    let big = egui::FontId::new(104.0, family);\n";
+    assert_eq!(
+        dark_only_lines(note, &["FontId::new"]),
+        [(1, "FontId::new")]
     );
 }

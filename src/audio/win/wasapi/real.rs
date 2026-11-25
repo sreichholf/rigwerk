@@ -9,8 +9,9 @@
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::write_frame;
+use crate::audio::panic_guard::contain;
 use crate::audio::record::{push_device_frame, RecordSource};
-use crate::audio::shared::Shared;
+use crate::audio::shared::{CallbackFailure, Shared};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
@@ -456,17 +457,30 @@ unsafe fn run(
         };
         let samples =
             std::slice::from_raw_parts_mut(data.cast::<f32>(), frames as usize * channels);
-        mixer.render(&shared, frames as usize, |index, mapped| {
-            if channels > 0 {
-                push_device_frame(&shared.recorder, RecordSource::Clock, mapped, channels);
-            }
-            write_frame(
-                &mut samples[index * channels..(index + 1) * channels],
-                mapped,
-            );
+        // This thread is the real-time callback for the device; a panic here
+        // must not end it silently while the app still says Running.
+        let panicked = contain(|| {
+            mixer.render(&shared, frames as usize, |index, mapped| {
+                if channels > 0 {
+                    push_device_frame(&shared.recorder, RecordSource::Clock, mapped, channels);
+                }
+                write_frame(
+                    &mut samples[index * channels..(index + 1) * channels],
+                    mapped,
+                );
+            });
         });
+        if panicked {
+            // The voice is untrustworthy: release the buffer as silence and
+            // let the app stop the run.
+            shared.note_callback_failure(CallbackFailure::Panic);
+            samples.fill(0.0);
+        }
         if let Err(error) = session.render.ReleaseBuffer(frames, 0) {
             report_failure(&shared, &error);
+            break;
+        }
+        if panicked {
             break;
         }
     }

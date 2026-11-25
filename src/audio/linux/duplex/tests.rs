@@ -1,3 +1,80 @@
+use super::virtual_source::{VirtualOutputSlot, VirtualWrite};
+
+/// The panic path closes the seqlock with zero frames and an even generation,
+/// so RigWerk Out reads silence instead of spinning on an abandoned write.
+#[test]
+fn an_abandoned_virtual_write_publishes_silence_with_an_even_generation() {
+    let slot = VirtualOutputSlot::new();
+    {
+        let write = VirtualWrite::begin(&slot);
+        slot.write_frame(0, 1.0, 1.0);
+        assert_eq!(slot.generation() % 2, 1, "the write is in flight");
+        drop(write);
+    }
+
+    assert_eq!(slot.generation() % 2, 0);
+    let mut left = [9.0; 4];
+    let mut right = [9.0; 4];
+    assert_eq!(slot.read(&mut left, &mut right, 4), 0);
+    assert_eq!(left, [9.0; 4], "nothing was published");
+}
+
+/// A finished write is the only path that publishes frames.
+#[test]
+fn a_finished_virtual_write_publishes_its_frames() {
+    let slot = VirtualOutputSlot::new();
+    {
+        let write = VirtualWrite::begin(&slot);
+        slot.write_frame(0, 0.5, -0.5);
+        write.finish(1);
+    }
+
+    assert_eq!(slot.generation() % 2, 0);
+    let mut left = [0.0; 4];
+    let mut right = [0.0; 4];
+    assert_eq!(slot.read(&mut left, &mut right, 4), 1);
+    assert_eq!((left[0], right[0]), (0.5, -0.5));
+}
+
+/// An abandoned write must not leave the previous buffer looking current:
+/// RigWerk Out plays silence instead of repeating stale audio.
+#[test]
+fn an_abandoned_write_does_not_replay_the_previous_buffer() {
+    let slot = VirtualOutputSlot::new();
+    {
+        let write = VirtualWrite::begin(&slot);
+        slot.write_frame(0, 0.5, -0.5);
+        write.finish(1);
+    }
+    {
+        let _write = VirtualWrite::begin(&slot);
+        slot.write_frame(0, 1.0, 1.0);
+    }
+
+    let mut left = [0.0; 4];
+    let mut right = [0.0; 4];
+    assert_eq!(slot.read(&mut left, &mut right, 4), 0);
+}
+
+/// The panic path's empty publication clears a buffer that was finished
+/// before the panic, so the reader sees silence and not the last good block.
+#[test]
+fn an_empty_publication_clears_the_last_buffer() {
+    let slot = VirtualOutputSlot::new();
+    {
+        let write = VirtualWrite::begin(&slot);
+        slot.write_frame(0, 0.5, -0.5);
+        write.finish(1);
+    }
+
+    slot.publish_empty();
+
+    assert_eq!(slot.generation() % 2, 0);
+    let mut left = [0.0; 4];
+    let mut right = [0.0; 4];
+    assert_eq!(slot.read(&mut left, &mut right, 4), 0);
+}
+
 /// Runs the real bridge entry point against a live PipeWire daemon.
 /// Set `RIGWERK_PW_SOURCE` and `RIGWERK_PW_SINK` to node names (any node
 /// with audio output ports works as the source, e.g. a `pw-cat` tone)

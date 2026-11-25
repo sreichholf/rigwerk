@@ -9,7 +9,8 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{BufferSize, FromSample, Sample, SizedSample};
 
 use super::denormal::DenormalGuard;
-use super::shared::Shared;
+use super::panic_guard::contain;
+use super::shared::{CallbackFailure, Shared};
 use super::thread_priority::PromoteOnce;
 use super::types::StartConfig;
 
@@ -83,6 +84,49 @@ impl InputStage {
     pub(crate) fn publish(&self, shared: &Shared) {
         shared.in_l.store(self.peak_l.to_bits(), Ordering::Relaxed);
         shared.in_r.store(self.peak_r.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// The whole frames in one interleaved cpal block.  A trailing chunk shorter
+/// than `channels` is not a frame: the loop reads whole frames only, so a
+/// short tail cannot be indexed as a stereo pair.  A zero channel count has
+/// no frames.
+pub(crate) fn whole_frames(samples: usize, channels: usize) -> usize {
+    samples.checked_div(channels).unwrap_or(0)
+}
+
+/// Runs one interleaved capture block: every whole frame through
+/// [`InputStage`], then the block's peaks and counters.  A caught panic marks
+/// the run failed and leaves the counters and the tap untouched, so a block
+/// that did not play is not counted as delivered.
+pub(crate) fn input_block<T>(data: &[T], channels: usize, shared: &Shared)
+where
+    T: Sample,
+    f32: FromSample<T>,
+{
+    let frames = whole_frames(data.len(), channels);
+    let panicked = contain(|| {
+        let mut stage = InputStage::new(shared);
+        for frame in data.chunks_exact(channels) {
+            let raw_left = f32::from_sample(frame[0]);
+            let raw_right = if channels > 1 {
+                f32::from_sample(frame[1])
+            } else {
+                raw_left
+            };
+            let (left, right) = stage.frame(shared, raw_left, raw_right);
+            shared.push_frame(left, right);
+        }
+        stage.publish(shared);
+        // The counts follow the delivery: a body that panicked put nothing in
+        // the ring, so this block did not arrive.
+        shared.note_input_block(frames);
+        shared.note_input_frames(frames);
+    });
+    if panicked {
+        // No output buffer to silence on the capture side; the flag is what
+        // stops the run.
+        shared.note_callback_failure(CallbackFailure::Panic);
     }
 }
 
@@ -169,22 +213,12 @@ where
                 let _denormals = DenormalGuard::new();
                 // Nothing in this callback may allocate (see `rt_guard`).
                 let _no_allocations = super::rt_guard::RtGuard::enter();
-                // The ring has to hold at least one whole input block, or
-                // the output drops out between two deliveries.
-                gain_shared.note_input_block(data.len() / channels);
-                gain_shared.note_input_frames(data.len() / channels);
-                let mut stage = InputStage::new(&gain_shared);
-                for frame in data.chunks(channels) {
-                    let raw_left = f32::from_sample(frame[0]);
-                    let raw_right = if channels > 1 {
-                        f32::from_sample(frame[1])
-                    } else {
-                        raw_left
-                    };
-                    let (left, right) = stage.frame(&gain_shared, raw_left, raw_right);
-                    gain_shared.push_frame(left, right);
+                if gain_shared.callback_failure().is_some() {
+                    // A previous callback failed; the app is stopping this
+                    // run, and the chain must not be driven again.
+                    return;
                 }
-                stage.publish(&gain_shared);
+                input_block(data, channels, &gain_shared);
             },
             move |error| {
                 if matches!(

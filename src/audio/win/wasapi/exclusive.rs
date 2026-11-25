@@ -6,8 +6,9 @@
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::write_frame;
+use crate::audio::panic_guard::contain;
 use crate::audio::record::{push_device_frame, RecordSource};
-use crate::audio::shared::Shared;
+use crate::audio::shared::{CallbackFailure, Shared};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
@@ -529,6 +530,22 @@ fn report_failure(shared: &Shared, error: &windows::core::Error) {
     }
 }
 
+/// Writes silence across a whole exclusive buffer, in the endpoint's format.
+unsafe fn silence_exclusive(dest: *mut u8, kind: SampleKind, samples: usize) {
+    match kind {
+        SampleKind::F32 => {
+            std::slice::from_raw_parts_mut(dest.cast::<f32>(), samples).fill(0.0);
+        }
+        SampleKind::I16 => {
+            std::slice::from_raw_parts_mut(dest.cast::<i16>(), samples).fill(0);
+        }
+        // `I24In32` keeps its sample in the high bits; all-zero bits are silence.
+        SampleKind::I32 | SampleKind::I24In32 => {
+            std::slice::from_raw_parts_mut(dest.cast::<i32>(), samples).fill(0);
+        }
+    }
+}
+
 unsafe fn write_exclusive_frame(
     dest: *mut u8,
     kind: SampleKind,
@@ -669,14 +686,27 @@ unsafe fn run(
                 break;
             }
         };
-        mixer.render(&shared, frames as usize, |index, mapped| {
-            if channels > 0 {
-                push_device_frame(&shared.recorder, RecordSource::Clock, mapped, channels);
-            }
-            write_exclusive_frame(data, kind, channels, index, mapped);
+        // This thread is the real-time callback for the device; a panic here
+        // must not end it silently while the app still says Running.
+        let panicked = contain(|| {
+            mixer.render(&shared, frames as usize, |index, mapped| {
+                if channels > 0 {
+                    push_device_frame(&shared.recorder, RecordSource::Clock, mapped, channels);
+                }
+                write_exclusive_frame(data, kind, channels, index, mapped);
+            });
         });
+        if panicked {
+            // The voice is untrustworthy: release the buffer as silence and
+            // let the app stop the run.
+            shared.note_callback_failure(CallbackFailure::Panic);
+            silence_exclusive(data, kind, frames as usize * channels);
+        }
         if let Err(error) = session.render.ReleaseBuffer(frames, 0) {
             report_failure(&shared, &error);
+            break;
+        }
+        if panicked {
             break;
         }
     }

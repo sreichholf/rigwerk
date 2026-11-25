@@ -46,9 +46,10 @@ use crate::audio::input::{make_input_stream, open_input_device, InputStage};
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
 use crate::audio::output_map::DeviceFrame;
+use crate::audio::panic_guard::contain;
 use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::rt_guard::RtGuard;
-use crate::audio::shared::{ExtraOutputPlan, Shared};
+use crate::audio::shared::{CallbackFailure, ExtraOutputPlan, Shared};
 use crate::audio::types::{DeviceItem, OutputMode, StartConfig};
 
 use super::alsa::{alsa_pcm_is_default, alsa_pcm_name};
@@ -416,8 +417,13 @@ fn run_graph(
             stream
                 .add_local_listener_with_user_data(data)
                 .state_changed(move |_, _, _, new| {
-                    if let pw::stream::StreamState::Error(message) = new {
-                        state_shared.set_device_lost(format!("PipeWire input: {message}"));
+                    let panicked = contain(|| {
+                        if let pw::stream::StreamState::Error(message) = new {
+                            state_shared.set_device_lost(format!("PipeWire input: {message}"));
+                        }
+                    });
+                    if panicked {
+                        state_shared.note_callback_failure(CallbackFailure::Panic);
                     }
                 })
                 .param_changed(|_, data, id, param| {
@@ -427,44 +433,59 @@ fn run_graph(
                     if id != spa::param::ParamType::Format.as_raw() {
                         return;
                     }
-                    let mut info = spa::param::audio::AudioInfoRaw::new();
-                    if info.parse(param).is_err() {
-                        return;
-                    }
-                    let channels = info.channels().clamp(1, 32);
-                    data.channels.store(channels, Ordering::Relaxed);
-                    let rate = info.rate();
-                    if rate > 0 {
-                        // The graph negotiated this rate: a reading, not the
-                        // request `run` published.
-                        data.shared.set_source_rate(rate);
+                    let panicked = contain(|| {
+                        let mut info = spa::param::audio::AudioInfoRaw::new();
+                        if info.parse(param).is_err() {
+                            return;
+                        }
+                        let channels = info.channels().clamp(1, 32);
+                        data.channels.store(channels, Ordering::Relaxed);
+                        let rate = info.rate();
+                        if rate > 0 {
+                            // The graph negotiated this rate: a reading, not the
+                            // request `run` published.
+                            data.shared.set_source_rate(rate);
+                        }
+                    });
+                    if panicked {
+                        data.shared.note_callback_failure(CallbackFailure::Panic);
                     }
                 })
                 .process(|stream, data| {
-                    let Some(mut buffer) = stream.dequeue_buffer() else {
-                        return;
-                    };
-                    let datas = buffer.datas_mut();
-                    if datas.is_empty() {
+                    if data.shared.callback_failure().is_some() {
                         return;
                     }
-                    let data_buf = &mut datas[0];
-                    let channels = data.channels.load(Ordering::Relaxed).max(1) as usize;
-                    let (offset, size, stride) = {
-                        let chunk = data_buf.chunk();
-                        (chunk.offset(), chunk.size(), chunk.stride())
-                    };
-                    let Some(bytes) = data_buf.data() else {
-                        return;
-                    };
-                    let window = capture_window(bytes.len(), offset, size, stride, channels);
-                    push_capture(
-                        &data.shared,
-                        &bytes[window.start..],
-                        channels,
-                        window.stride,
-                        window.frames,
-                    );
+                    let panicked = contain(|| {
+                        let Some(mut buffer) = stream.dequeue_buffer() else {
+                            return;
+                        };
+                        let datas = buffer.datas_mut();
+                        if datas.is_empty() {
+                            return;
+                        }
+                        let data_buf = &mut datas[0];
+                        let channels = data.channels.load(Ordering::Relaxed).max(1) as usize;
+                        let (offset, size, stride) = {
+                            let chunk = data_buf.chunk();
+                            (chunk.offset(), chunk.size(), chunk.stride())
+                        };
+                        let Some(bytes) = data_buf.data() else {
+                            return;
+                        };
+                        let window = capture_window(bytes.len(), offset, size, stride, channels);
+                        push_capture(
+                            &data.shared,
+                            &bytes[window.start..],
+                            channels,
+                            window.stride,
+                            window.frames,
+                        );
+                    });
+                    if panicked {
+                        // No output buffer on the capture stream; the flag is
+                        // what stops the run.
+                        data.shared.note_callback_failure(CallbackFailure::Panic);
+                    }
                 })
                 .register()
                 .map_err(|error| format!("PipeWire capture listener: {error}"))?,
@@ -491,8 +512,13 @@ fn run_graph(
             stream
                 .add_local_listener_with_user_data(data)
                 .state_changed(move |_, _, _, new| {
-                    if let pw::stream::StreamState::Error(message) = new {
-                        state_shared.set_device_lost(format!("PipeWire output: {message}"));
+                    let panicked = contain(|| {
+                        if let pw::stream::StreamState::Error(message) = new {
+                            state_shared.set_device_lost(format!("PipeWire output: {message}"));
+                        }
+                    });
+                    if panicked {
+                        state_shared.note_callback_failure(CallbackFailure::Panic);
                     }
                 })
                 .param_changed(|_, data, id, param| {
@@ -502,46 +528,81 @@ fn run_graph(
                     if id != spa::param::ParamType::Format.as_raw() {
                         return;
                     }
-                    let mut info = spa::param::audio::AudioInfoRaw::new();
-                    if info.parse(param).is_err() {
-                        return;
-                    }
-                    let rate = info.rate();
-                    if rate > 0 {
-                        // The stream negotiated this rate: a reading, not the
-                        // request `run` published.  The step stays its own
-                        // reading, marked by `note_output_step` below.
-                        data.shared.set_output_rate(rate);
+                    let panicked = contain(|| {
+                        let mut info = spa::param::audio::AudioInfoRaw::new();
+                        if info.parse(param).is_err() {
+                            return;
+                        }
+                        let rate = info.rate();
+                        if rate > 0 {
+                            // The stream negotiated this rate: a reading, not the
+                            // request `run` published.  The step stays its own
+                            // reading, marked by `note_output_step` below.
+                            data.shared.set_output_rate(rate);
+                        }
+                    });
+                    if panicked {
+                        data.shared.note_callback_failure(CallbackFailure::Panic);
                     }
                 })
                 .process(|stream, data| {
-                    let Some(mut buffer) = stream.dequeue_buffer() else {
-                        return;
-                    };
-                    let filled = fill_stereo(&mut buffer, |bytes, frames| {
-                        data.shared.note_output_step(frames as u32);
-                        data.mixer.render(&data.shared, frames, |index, mapped| {
-                            if write_stereo(bytes, index, mapped) {
-                                // Two channels, eight bytes: the clock node only.
-                                push_device_frame(
-                                    &data.shared.recorder,
-                                    RecordSource::Clock,
-                                    mapped,
-                                    2,
-                                );
-                            }
+                    // Every read on the stream, the dequeue and the delay
+                    // sample included, stays inside the guard: a binding
+                    // panic that unwinds through here would otherwise leave
+                    // the process callback.
+                    let mut buffer = None;
+                    let mut delay = None;
+                    let panicked = contain(|| {
+                        let Some(dequeued) = stream.dequeue_buffer() else {
+                            return;
+                        };
+                        buffer = Some(dequeued);
+                        let Some(block) = buffer.as_mut() else {
+                            return;
+                        };
+                        if data.shared.callback_failure().is_some() {
+                            // The run already failed; keep the graph fed with
+                            // silence until the app stops the bridge.
+                            fill_silence(block);
+                            return;
+                        }
+                        let filled = fill_stereo(block, |bytes, frames| {
+                            data.shared.note_output_step(frames as u32);
+                            data.mixer.render(&data.shared, frames, |index, mapped| {
+                                if write_stereo(bytes, index, mapped) {
+                                    // Two channels, eight bytes: the clock node only.
+                                    push_device_frame(
+                                        &data.shared.recorder,
+                                        RecordSource::Clock,
+                                        mapped,
+                                        2,
+                                    );
+                                }
+                            });
                         });
+                        if filled == 0 {
+                            return;
+                        }
+                        // Graph + device delay past this node (BT A2DP, filters, …).
+                        if let Ok(time) = stream.time() {
+                            let rate = time.rate();
+                            delay = path_delay_ns(time.delay(), rate.num, rate.denom);
+                        }
                     });
-                    if filled == 0 {
+                    if panicked {
+                        data.shared.note_callback_failure(CallbackFailure::Panic);
+                        // The interrupted render left a part-written block:
+                        // silence whatever was dequeued before the graph plays
+                        // it.
+                        if let Some(block) = buffer.as_mut() {
+                            let _ = contain(|| {
+                                fill_silence(block);
+                            });
+                        }
                         return;
                     }
-                    drop(buffer);
-                    // Graph + device delay past this node (BT A2DP, filters, …).
-                    if let Ok(time) = stream.time() {
-                        let rate = time.rate();
-                        if let Some(ns) = path_delay_ns(time.delay(), rate.num, rate.denom) {
-                            data.shared.set_path_delay_ns(ns);
-                        }
+                    if let Some(ns) = delay {
+                        data.shared.set_path_delay_ns(ns);
                     }
                 })
                 .register()
@@ -728,6 +789,12 @@ fn fill_stereo(
     frames
 }
 
+/// Silences a dequeued playback buffer for this cycle.  The panic path calls
+/// it so the graph plays silence, not whatever the interrupted render left.
+fn fill_silence(buffer: &mut pw::buffer::Buffer<'_>) -> usize {
+    fill_stereo(buffer, |bytes, frames| bytes[..frames * 8].fill(0))
+}
+
 /// Writes stereo frame `index` into `bytes`; false when it does not fit.
 fn write_stereo(bytes: &mut [u8], index: usize, mapped: &DeviceFrame) -> bool {
     let start = index * 8;
@@ -813,32 +880,64 @@ fn open_node_extra_output(
             mixer,
         })
         .state_changed(move |_, _, _, new| {
-            if let pw::stream::StreamState::Error(_) = new {
-                // Never stop the bridge for an extra output: the supervisor drops
-                // this stream and retries.
-                state_shared
-                    .extra_output_bus(slot)
-                    .missing
-                    .store(true, Ordering::Relaxed);
+            let panicked = contain(|| {
+                if let pw::stream::StreamState::Error(_) = new {
+                    // Never stop the bridge for an extra output: the supervisor drops
+                    // this stream and retries.
+                    state_shared
+                        .extra_output_bus(slot)
+                        .missing
+                        .store(true, Ordering::Relaxed);
+                }
+            });
+            if panicked {
+                state_shared.note_callback_failure(CallbackFailure::Panic);
             }
         })
         .process(|stream, data| {
-            let Some(mut buffer) = stream.dequeue_buffer() else {
-                return;
-            };
-            let slot = data.slot;
-            fill_stereo(&mut buffer, |bytes, frames| {
-                data.mixer.render(&data.shared, frames, |index, mapped| {
-                    if write_stereo(bytes, index, mapped) {
-                        push_device_frame(
-                            &data.shared.recorder,
-                            RecordSource::ExtraOutput(slot),
-                            mapped,
-                            2,
-                        );
-                    }
+            // The dequeue and the render stay inside the guard: a binding
+            // panic that unwinds through here would otherwise leave the
+            // process callback.
+            let mut buffer = None;
+            let panicked = contain(|| {
+                let Some(dequeued) = stream.dequeue_buffer() else {
+                    return;
+                };
+                buffer = Some(dequeued);
+                let Some(block) = buffer.as_mut() else {
+                    return;
+                };
+                if data.shared.callback_failure().is_some() {
+                    // The run already failed; keep the node fed with silence
+                    // until the bridge stops and this stream is dropped.
+                    fill_silence(block);
+                    return;
+                }
+                let slot = data.slot;
+                fill_stereo(block, |bytes, frames| {
+                    data.mixer.render(&data.shared, frames, |index, mapped| {
+                        if write_stereo(bytes, index, mapped) {
+                            push_device_frame(
+                                &data.shared.recorder,
+                                RecordSource::ExtraOutput(slot),
+                                mapped,
+                                2,
+                            );
+                        }
+                    });
                 });
             });
+            if panicked {
+                // A panic ends the run, not just this extra output: the app
+                // stops the bridge once it reads the flag.  Silence what the
+                // interrupted render left behind.
+                data.shared.note_callback_failure(CallbackFailure::Panic);
+                if let Some(block) = buffer.as_mut() {
+                    let _ = contain(|| {
+                        fill_silence(block);
+                    });
+                }
+            }
         })
         .register()
         .map_err(|error| format!("PipeWire extra output listener: {error}"))?;

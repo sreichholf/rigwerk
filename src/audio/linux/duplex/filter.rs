@@ -14,12 +14,13 @@ use crate::audio::denormal::DenormalGuard;
 use crate::audio::input::InputStage;
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output_map::MAX_EXTRA_OUTPUTS;
+use crate::audio::panic_guard::contain;
 use crate::audio::record::{push_device_frame, RecordSource};
 use crate::audio::rt_guard::RtGuard;
-use crate::audio::shared::Shared;
+use crate::audio::shared::{CallbackFailure, Shared};
 
 use super::links::Observed;
-use super::virtual_source::VirtualOutputSlot;
+use super::virtual_source::{VirtualOutputSlot, VirtualWrite};
 use super::{properties, MAX_FRAMES};
 
 /// The node RigWerk publishes for the duplex path.
@@ -64,6 +65,45 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     if position.is_null() {
         return;
     }
+    if data.shared.callback_failure().is_some() {
+        // A previous cycle failed; the app is stopping the run and the
+        // chain must not be driven again.
+        unsafe { silence_cycle(data, position) };
+        return;
+    }
+    // A panic must not unwind into PipeWire's own callback (Rust panics
+    // across `extern "C"` abort the process): catch it, silence this cycle
+    // and publish the failure for the app.
+    if contain(|| unsafe { process_cycle(data, position) }) {
+        data.shared.note_callback_failure(CallbackFailure::Panic);
+        unsafe { silence_cycle(data, position) };
+        // The cycle may have panicked before it opened the virtual-output
+        // write; publish an empty generation so RigWerk Out plays silence
+        // rather than repeating the last good buffer.
+        data.virtual_output.publish_empty();
+    }
+}
+
+/// Zeroes every output port of this cycle (clock, then each extra output).
+/// The panic path calls it so the graph plays silence rather than the
+/// samples the interrupted render left in the buffers.
+unsafe fn silence_cycle(data: &ProcessData, position: *mut spa_sys::spa_io_position) {
+    // SAFETY: PipeWire passes a valid position for this cycle.
+    let frames = unsafe { (*position).clock.duration as usize };
+    for slot in 0..CLOCK_OUT + MAX_EXTRA_OUTPUTS * 2 {
+        // SAFETY: a non-null DSP output buffer holds `frames` samples.
+        let out = unsafe {
+            pw_sys::pw_filter_get_dsp_buffer(data.ports[INPUT_PORTS + slot], frames as u32)
+        } as *mut f32;
+        if out.is_null() {
+            continue;
+        }
+        unsafe { ptr::write_bytes(out, 0, frames) };
+    }
+}
+
+/// One graph cycle: capture staging, the mix, and the output port copies.
+unsafe fn process_cycle(data: &mut ProcessData, position: *mut spa_sys::spa_io_position) {
     // Flush-to-zero for the whole cycle, as in the other audio callbacks;
     // `render_direct` re-asserts it around the chain.
     let _denormals = DenormalGuard::new();
@@ -123,9 +163,10 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     let mut stage = InputStage::new(shared);
     let virtual_output_active = (0..shared.extra_output_count())
         .any(|slot| shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot));
-    if virtual_output_active {
-        virtual_output.begin_write();
-    }
+    // The guard closes the seqlock even when the chain below panics; without
+    // it an abandoned write leaves the generation odd and RigWerk Out silent
+    // for the rest of the run.
+    let write = virtual_output_active.then(|| VirtualWrite::begin(virtual_output));
     // A cycle longer than the scratch runs in scratch-sized pieces, so every
     // output sample of the cycle is written.  The virtual output slot only keeps the
     // first MAX_FRAMES; device ports still get the whole cycle.
@@ -199,8 +240,8 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         written = (written + count).min(MAX_FRAMES);
         offset += count;
     }
-    if virtual_output_active {
-        virtual_output.end_write(written);
+    if let Some(write) = write {
+        write.finish(written);
     }
     stage.publish(shared);
 }
@@ -217,6 +258,16 @@ unsafe extern "C" fn on_state_changed(
     // SAFETY: `data` is the `StateData` box of the main-loop listener, alive
     // until after `pw_filter_destroy`; nothing else holds it mutably.
     let data = unsafe { &*(data as *const StateData) };
+    // This runs on the main loop but is still entered from PipeWire's C
+    // dispatch, so a panic must not cross it.
+    if contain(|| unsafe { report_state_error(data, error) }) {
+        data.error.store(true, Ordering::Relaxed);
+        data.shared.note_callback_failure(CallbackFailure::Panic);
+    }
+}
+
+/// Turns the filter's error message into the run's visible device loss.
+unsafe fn report_state_error(data: &StateData, error: *const std::os::raw::c_char) {
     let message = if error.is_null() {
         "unknown error".to_owned()
     } else {

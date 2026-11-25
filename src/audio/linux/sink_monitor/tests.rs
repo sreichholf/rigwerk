@@ -45,6 +45,25 @@ fn the_reader_keeps_the_peak_since_the_last_read_and_goes_stale() {
 }
 
 #[test]
+fn a_failed_callback_stops_publishing_and_the_reading_goes_stale() {
+    let meter = MonitorMeter::default();
+    let mut reader = MonitorReader::default();
+    let now = Instant::now();
+    meter.note_block(0.4);
+    assert_eq!(reader.read(&meter, now), Some(0.4));
+
+    meter.note_failure();
+    meter.note_block(0.9);
+
+    assert!(meter.failed());
+    assert_eq!(
+        reader.read(&meter, now + Duration::from_millis(300)),
+        None,
+        "a failed callback is a monitor that stopped flowing"
+    );
+}
+
+#[test]
 fn only_pipewire_sinks_get_a_monitor() {
     assert_eq!(
         monitor_target("pipewire:alsa_output.usb"),

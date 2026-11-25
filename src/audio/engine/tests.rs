@@ -68,6 +68,32 @@ fn the_panel_stays_unavailable_until_the_bridge_is_running() {
 }
 
 #[test]
+fn clear_error_keeps_a_callback_failure_alive_until_the_run_is_gone() {
+    use crate::audio::shared::CallbackFailure;
+
+    let mut engine = AudioEngine::new(48_000);
+    engine.shared.note_callback_failure(CallbackFailure::Panic);
+
+    // The app clears the error right after the asynchronous `stop`; the
+    // panicked run's streams may still be live, so the flag must survive it.
+    engine.clear_error();
+    assert_eq!(
+        engine.shared.callback_failure(),
+        Some(CallbackFailure::Panic)
+    );
+    assert!(
+        engine.snapshot().device_lost,
+        "the failed run is still visible"
+    );
+
+    // `finish_stop` runs only after every bridge thread has ended, which is
+    // when the streams are gone.
+    engine.stop();
+    assert_eq!(engine.shared.callback_failure(), None);
+    assert!(!engine.snapshot().device_lost);
+}
+
+#[test]
 fn the_bridge_status_is_part_of_the_snapshot() {
     let engine = AudioEngine::new(48_000);
     engine.shared.set_status("Opening independent output…");
