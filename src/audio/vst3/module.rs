@@ -6,12 +6,33 @@
 //! through the registry.  The last `Arc` to drop purges the module's
 //! run-loop entries, releases the factory, calls the exit function and only
 //! then unloads the library, in that order.  Loads and drops happen on the
-//! UI thread; the registry lock is held across both, so a load never
-//! overlaps an unload of the same binary.
+//! UI thread.
 //!
-//! That lock is held while plugin code runs (`ModuleEntry`,
-//! `setHostContext`, the releases, `ModuleExit`, the unload), so two rules
-//! keep it from deadlocking.  No COM object handed to a plugin owns an
+//! The registry map's lock only guards the lookup and the insert.  Each
+//! binary's canonical path has an entry of its own, whose lock is held
+//! across that module's load (`dlopen`/`LoadLibrary` and `ModuleEntry`) and
+//! across its release, `exit` and unload, so a slow load of one binary never
+//! blocks a load of another and a load never overlaps an unload.  Entries
+//! are never removed: one `PathBuf` and one mutex per binary ever loaded is
+//! the accepted cost, and it keeps a waiter in the entry a loader or a last
+//! release is using.
+//!
+//! One window is not closed by that.  `Weak::upgrade` returns `None` as soon
+//! as the last `Arc` reaches zero, which is before that module's `Drop`
+//! takes the entry lock.  An acquire that wins the lock in between sees "not
+//! loaded" and issues a new `ModuleEntry` before the old `ModuleExit` runs,
+//! so that exit can follow the new load.  SDK versions differ here: the
+//! counted form (the pinned 3.8 SDK) accepts a second `ModuleEntry`, so both
+//! loads proceed; the 3.6-era single-handle form refuses it, and the acquire
+//! reports an error.  Nothing is unmapped under the new module, because
+//! `dlopen`/`LoadLibrary` hands back the same mapping with another reference
+//! and the old unload only drops one.  RigWerk loads VST3 on the UI thread
+//! only, so this is reachable from parallel test threads (see
+//! `docs/open-items.md`); closing it would need a "dying" flag on the entry.
+//!
+//! Module code runs under an entry lock (`ModuleEntry()`/`ModuleExit()`,
+//! `setHostContext`, the factory and instance releases, the unload), so two
+//! rules keep it from deadlocking.  No COM object handed to a plugin owns an
 //! `Arc<Vst3Module>`, so a plugin's release can never drop the last one.
 //! The last `Arc` drops on the UI thread, never on the audio thread.  A
 //! re-entry into the registry from inside that plugin code (on the same
@@ -53,8 +74,10 @@ pub(crate) struct Vst3Module {
     exit: Option<ExitFn>,
     /// Always `Some` until `drop`, which unloads it last.
     library: Option<libloading::Library>,
-    /// The registry key: the canonical binary path.
-    key: PathBuf,
+    /// The entry this module was loaded through; its `drop` holds the
+    /// entry's lock while the module is released.  The entry only holds a
+    /// weak reference to this module, so there is no cycle.
+    entry: Arc<ModuleEntry>,
     /// Where the binary is mapped (`dladdr`), to find its run-loop entries.
     #[cfg(target_os = "linux")]
     base: usize,
@@ -64,25 +87,20 @@ impl Vst3Module {
     pub(crate) fn factory(&self) -> &ComPtr<IPluginFactory> {
         self.factory.as_ref().expect("a live module")
     }
-
-    #[cfg(test)]
-    pub(crate) fn key(&self) -> &Path {
-        &self.key
-    }
 }
 
 thread_local! {
-    /// True while this thread runs module code under the registry lock.
+    /// True while this thread runs module code under an entry lock.
     static IN_MODULE_CODE: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Marks this thread as running module code under the registry lock, for
-/// as long as it lives.
+/// Marks this thread as running module code under an entry lock, for as long
+/// as it lives.
 pub(super) struct ModuleCode(());
 
 impl ModuleCode {
-    /// Panics when the thread is already inside module code: the registry
-    /// lock is held further up the stack, and taking it would deadlock.
+    /// Panics when the thread is already inside module code: the entry lock
+    /// is held further up the stack, and taking it would deadlock.
     pub(super) fn enter() -> Self {
         assert!(
             !IN_MODULE_CODE.replace(true),
@@ -102,13 +120,13 @@ impl Drop for ModuleCode {
 impl Drop for Vst3Module {
     fn drop(&mut self) {
         let _code = ModuleCode::enter();
-        let mut modules = registry();
-        // A load that found this module dying has already replaced it.
-        if modules
-            .get(&self.key)
-            .is_some_and(|weak| std::ptr::eq(weak.as_ptr(), self))
-        {
-            modules.remove(&self.key);
+        // Held while the module is released, so no acquire can load the
+        // binary again until the unload below is done.
+        let mut state = self.entry.lock();
+        // A load that found this module dying has already replaced the weak
+        // with a newer module's; only our own weak is cleared here.
+        if std::ptr::eq(state.as_ptr(), self) {
+            *state = Weak::new();
         }
         // Run-loop handlers live in the module's code: release them while
         // it is still mapped.
@@ -122,24 +140,103 @@ impl Drop for Vst3Module {
             unsafe { exit() };
         }
         drop(self.library.take());
-        drop(modules);
+        drop(state);
     }
 }
 
-/// Loaded modules by canonical binary path.  An entry is removed by the
-/// module's own `drop`.
-static MODULES: Mutex<BTreeMap<PathBuf, Weak<Vst3Module>>> = Mutex::new(BTreeMap::new());
+/// Loaded modules by canonical binary path.  The map's lock is only held for
+/// the lookup and the insert; each path's entry has its own lock, held
+/// across its module's load and its release and unload.
+pub(super) struct ModuleRegistry {
+    modules: Mutex<BTreeMap<PathBuf, Arc<ModuleEntry>>>,
+}
 
-fn registry() -> MutexGuard<'static, BTreeMap<PathBuf, Weak<Vst3Module>>> {
-    MODULES.lock().unwrap_or_else(PoisonError::into_inner)
+/// One canonical binary path's share of the registry: a weak reference to
+/// its loaded module.  A successful upgrade is "loaded".  The entry is never
+/// removed, so a later acquire waits in it instead of loading the binary
+/// while an unload is still inside.
+struct ModuleEntry {
+    state: Mutex<Weak<Vst3Module>>,
+}
+
+static MODULES: ModuleRegistry = ModuleRegistry::new();
+
+impl ModuleEntry {
+    fn lock(&self) -> MutexGuard<'_, Weak<Vst3Module>> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl ModuleRegistry {
+    const fn new() -> Self {
+        Self {
+            modules: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<PathBuf, Arc<ModuleEntry>>> {
+        self.modules.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The entry for `key`, inserting an empty one when the table has none.
+    /// The map's lock is released before the entry's is taken.
+    fn entry(&self, key: &Path) -> Arc<ModuleEntry> {
+        let mut modules = self.lock();
+        Arc::clone(modules.entry(key.to_path_buf()).or_insert_with(|| {
+            Arc::new(ModuleEntry {
+                state: Mutex::new(Weak::new()),
+            })
+        }))
+    }
+
+    /// Hands out the loaded module for `key`, opening it with `open` first
+    /// when the entry's weak upgrade is empty.  A failed `open` leaves the
+    /// empty entry behind for the next acquire to retry in place.
+    fn acquire_with(
+        &self,
+        key: PathBuf,
+        open: impl FnOnce(&Arc<ModuleEntry>) -> Result<Vst3Module, String>,
+    ) -> Result<Arc<Vst3Module>, String> {
+        let _code = ModuleCode::enter();
+        let entry = self.entry(&key);
+        let mut state = entry.lock();
+        if let Some(module) = state.upgrade() {
+            return Ok(module);
+        }
+        // Nothing after `open` fails, so no module is dropped (and drops
+        // back into this entry) here.
+        let module = Arc::new(open(&entry)?);
+        // Once per load and before any `createInstance`, as the SDK's VSTGUI
+        // takes its run loop from it (`vstguieditor.cpp`).  A module the
+        // tests build has no factory to hand it to.
+        if let Some(factory) = module.factory.as_ref() {
+            factory::set_host_context(factory);
+        }
+        *state = Arc::downgrade(&module);
+        Ok(module)
+    }
 }
 
 /// Whether the binary under `key` is loaded through the registry.
 #[cfg(test)]
 pub(crate) fn is_loaded(key: &Path) -> bool {
-    registry()
-        .get(key)
-        .is_some_and(|weak| weak.strong_count() > 0)
+    let entry = MODULES.lock().get(key).map(Arc::clone);
+    entry.is_some_and(|entry| entry.lock().strong_count() > 0)
+}
+
+/// The registry key of a binary: its canonical path, or its absolute path
+/// when the filesystem cannot report the final one.
+fn key_of(binary: &Path) -> PathBuf {
+    std::fs::canonicalize(binary)
+        .or_else(|_| std::path::absolute(binary))
+        .unwrap_or_else(|_| binary.to_path_buf())
+}
+
+/// The registry key of the binary inside `bundle`, for the tests.  A real
+/// load gets the same key from `key_of` on the binary it opens.
+#[cfg(test)]
+pub(super) fn module_key(bundle: &Path) -> Result<PathBuf, String> {
+    binary_path(bundle).map(|binary| key_of(&binary))
 }
 
 /// The shared module for a `.vst3` bundle (or, on Windows, a legacy
@@ -147,22 +244,8 @@ pub(crate) fn is_loaded(key: &Path) -> bool {
 /// one is using it yet.
 pub(crate) fn acquire(bundle: &Path) -> Result<Arc<Vst3Module>, String> {
     let binary = binary_path(bundle)?;
-    let key = std::fs::canonicalize(&binary)
-        .or_else(|_| std::path::absolute(&binary))
-        .unwrap_or_else(|_| binary.clone());
-    let _code = ModuleCode::enter();
-    let mut modules = registry();
-    if let Some(module) = modules.get(&key).and_then(Weak::upgrade) {
-        return Ok(module);
-    }
-    // Nothing after `open` fails, so a new module is never dropped (and
-    // never takes the registry lock again) in here.
-    let module = Arc::new(open(&binary, key.clone())?);
-    // Once per load and before any `createInstance`, as the SDK's VSTGUI
-    // takes its run loop from it (`vstguieditor.cpp`).
-    factory::set_host_context(module.factory());
-    modules.insert(key, Arc::downgrade(&module));
-    Ok(module)
+    let key = key_of(&binary);
+    MODULES.acquire_with(key, |entry| open(&binary, entry))
 }
 
 /// The `Contents` folders holding a binary this build can load, its own
@@ -409,7 +492,7 @@ pub(super) fn binary_path(bundle: &Path) -> Result<PathBuf, String> {
 /// Opens a Linux module: `dlopen`, `ModuleEntry` with that handle, then
 /// `GetPluginFactory`.  All three exports and `ModuleExit` are required.
 #[cfg(target_os = "linux")]
-fn open(binary: &Path, key: PathBuf) -> Result<Vst3Module, String> {
+fn open(binary: &Path, entry: &Arc<ModuleEntry>) -> Result<Vst3Module, String> {
     use libloading::os::unix::Library;
 
     type EntryFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> bool;
@@ -428,7 +511,7 @@ fn open(binary: &Path, key: PathBuf) -> Result<Vst3Module, String> {
     // SAFETY: the signatures are the SDK's (`linuxmain.cpp`,
     // `ipluginbase.h`), and the copied pointers are only called while the
     // module keeps `library` loaded.
-    let (entry, exit, get_factory) = unsafe {
+    let (entry_fn, exit, get_factory) = unsafe {
         (
             *library
                 .get::<EntryFn>(b"ModuleEntry\0")
@@ -443,7 +526,7 @@ fn open(binary: &Path, key: PathBuf) -> Result<Vst3Module, String> {
     };
     // SAFETY: called once per load, before `GetPluginFactory`, with the
     // library's own handle.
-    if !unsafe { entry(handle) } {
+    if !unsafe { entry_fn(handle) } {
         // SAFETY: a failed entry is still paired with the exit, as the
         // SDK's `~LinuxModule` does; the SDK's own count stays balanced.
         unsafe { exit() };
@@ -460,7 +543,7 @@ fn open(binary: &Path, key: PathBuf) -> Result<Vst3Module, String> {
         factory: Some(factory),
         exit: Some(exit),
         library: Some(library.into()),
-        key,
+        entry: Arc::clone(entry),
         base: super::run_loop::module_base(get_factory as *const std::ffi::c_void),
     })
 }
@@ -468,7 +551,7 @@ fn open(binary: &Path, key: PathBuf) -> Result<Vst3Module, String> {
 /// Opens a Windows module: `LoadLibrary`, the optional `InitDll`, then
 /// `GetPluginFactory`.  `ExitDll` is optional too.
 #[cfg(target_os = "windows")]
-fn open(binary: &Path, key: PathBuf) -> Result<Vst3Module, String> {
+fn open(binary: &Path, entry: &Arc<ModuleEntry>) -> Result<Vst3Module, String> {
     type InitFn = unsafe extern "C" fn() -> bool;
 
     // SAFETY: loading runs the library's initialisers; the user chose this
@@ -515,12 +598,12 @@ fn open(binary: &Path, key: PathBuf) -> Result<Vst3Module, String> {
         factory: Some(factory),
         exit,
         library: Some(library),
-        key,
+        entry: Arc::clone(entry),
     })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn open(_binary: &Path, _key: PathBuf) -> Result<Vst3Module, String> {
+fn open(_binary: &Path, _entry: &Arc<ModuleEntry>) -> Result<Vst3Module, String> {
     Err(UNSUPPORTED.to_owned())
 }
 

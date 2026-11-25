@@ -1,13 +1,27 @@
 //! Shared CLAP module loading and the process-wide registry.
+//!
+//! CLAP 1.0/1.1 modules do not tolerate a second `init`, a `deinit` under a
+//! live instance, or `init`/`deinit` racing each other, and the OS shares one
+//! copy of a library between every `LoadLibrary`/`dlopen` of it.  Every
+//! instance and every scan of a binary therefore shares one [`ClapModule`]
+//! through the [`ModuleRegistry`], keyed by the binary's canonical path.
+//!
+//! The map's lock only guards the lookup and the insert.  Each path has its
+//! own entry, and that entry's lock is held across its module's `open`/`init`
+//! and its `deinit`/unload, so those never overlap and a slow load of one
+//! binary delays only loads of the same binary.  Entries are never removed:
+//! an entry outlives the module it opened, so a waiter always waits in the
+//! entry the loader is using.
+//!
+//! Neither lock is taken on the audio thread: a module is released when the
+//! last [`ModuleHandle`] drops, and the chain runtime hands every slot it
+//! lets go of back to the UI (see `plugins::chain`).
 
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-#[cfg(test)]
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
@@ -84,8 +98,9 @@ pub(super) struct ClapModule {
 }
 
 // SAFETY: the entry is immutable data inside the library, which the module
-// keeps loaded.  `init` and `deinit` only run under the registry lock, and
-// CLAP makes `get_factory` and the plugin factory callable from any thread.
+// keeps loaded.  `init` and `deinit` only run under the module's entry lock,
+// and CLAP makes `get_factory` and the plugin factory callable from any
+// thread.
 unsafe impl Send for ClapModule {}
 unsafe impl Sync for ClapModule {}
 
@@ -95,78 +110,92 @@ impl ClapModule {
     }
 }
 
-/// The process-wide table of loaded CLAP modules, keyed by the canonical path
-/// of the binary.  CLAP 1.0/1.1 modules do not tolerate a second `init`, a
-/// `deinit` under a live instance, or `init`/`deinit` racing each other, and
-/// the OS shares one copy of a library between every `LoadLibrary`/`dlopen`
-/// of it, so a per-instance or per-scan init is not safe.  The registry
-/// therefore holds one library and one `init` per module, and its lock is
-/// held for the whole of every `init` and every `deinit` (and the library
-/// load and unload around them), so those never overlap.
+/// The process-wide table of module entries, keyed by the canonical path of
+/// the binary.  The map's lock is only held for the lookup and the insert;
+/// everything that runs plugin code happens under one entry's own lock, so a
+/// slow `dlopen`, `init`, `deinit` or unload of one module never blocks a
+/// load or a scan of another.
 ///
-/// One lock covers every module, so a slow library load or `init` of one
-/// module delays loads and scans of others until it finishes; loads are
-/// rare and happen off the audio thread, so this is accepted for the
-/// simpler guarantee.
-///
-/// The lock is only ever taken on the UI, bridge and scan threads: a module is
-/// released when the last [`ModuleHandle`] drops, and the audio callback never
-/// drops the last reference to a plugin: the chain runtime hands every slot
-/// it lets go of back to the UI (see `plugins::chain`).
+/// An entry is never removed.  Removing it when its module was released
+/// would let a third acquire insert a fresh entry while a waiter is still
+/// opening in the old one, which is the double-`init` this registry exists
+/// to prevent.  One empty `PathBuf` and one mutex per binary ever loaded is
+/// the accepted cost.
 pub(super) struct ModuleRegistry {
-    pub(super) modules: Mutex<std::collections::BTreeMap<PathBuf, Arc<ClapModule>>>,
-    /// Test hook: how long a [`ModuleHandle`] drop lingers after releasing
-    /// the lock, to widen any window in which it still held a reference.
-    #[cfg(test)]
-    pub(super) release_pause_ms: AtomicU64,
+    modules: Mutex<BTreeMap<PathBuf, Arc<ModuleEntry>>>,
+}
+
+/// One canonical binary path's share of the registry: its loaded module and
+/// how many handles hold it.  The lock is held across that module's `open`
+/// and `init`, and across its `deinit` and unload, so those never overlap.
+struct ModuleEntry {
+    state: Mutex<EntryState>,
+}
+
+/// What one [`ModuleEntry`] holds.  `module` stays `None` after a failed
+/// `open` or `init`, so the empty entry is reused and the next acquire
+/// retries in place.
+struct EntryState {
+    module: Option<Arc<ClapModule>>,
+    /// The live [`ModuleHandle`]s for `module`.
+    users: usize,
 }
 
 /// The registry every load and scan goes through.
 pub(super) static MODULES: ModuleRegistry = ModuleRegistry::new();
 
+impl ModuleEntry {
+    fn lock(&self) -> MutexGuard<'_, EntryState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 impl ModuleRegistry {
     pub(super) const fn new() -> Self {
         Self {
-            modules: Mutex::new(std::collections::BTreeMap::new()),
-            #[cfg(test)]
-            release_pause_ms: AtomicU64::new(0),
+            modules: Mutex::new(BTreeMap::new()),
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn pause_after_release(&self) {
-        let pause = self.release_pause_ms.load(Ordering::SeqCst);
-        if pause > 0 {
-            std::thread::sleep(Duration::from_millis(pause));
-        }
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<PathBuf, Arc<ModuleEntry>>> {
+        self.modules.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(super) fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<PathBuf, Arc<ClapModule>>> {
-        self.modules
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The entry for `key`, inserting an empty one when the table has none.
+    /// The map's lock is released before the entry's is taken.
+    fn entry(&self, key: &Path) -> Arc<ModuleEntry> {
+        let mut modules = self.lock();
+        Arc::clone(modules.entry(key.to_path_buf()).or_insert_with(|| {
+            Arc::new(ModuleEntry {
+                state: Mutex::new(EntryState {
+                    module: None,
+                    users: 0,
+                }),
+            })
+        }))
     }
 
     /// Hands out the module stored under `key`, opening and initialising it
-    /// with `open` first when no one is using it.  A module whose `open`,
+    /// with `open` first when it is not loaded.  A module whose `open`,
     /// version check or `init` fails is not stored, so the next acquire tries
-    /// again from scratch.
+    /// again in place.
     pub(super) fn acquire(
-        &'static self,
+        &self,
         key: PathBuf,
         open: impl FnOnce() -> Result<OpenedModule, String>,
     ) -> Result<ModuleHandle, String> {
-        let mut modules = self.lock();
-        if let Some(module) = modules.get(&key) {
-            let module = Arc::clone(module);
+        let entry = self.entry(&key);
+        let mut state = entry.lock();
+        if let Some(module) = state.module.as_ref().map(Arc::clone) {
+            state.users += 1;
             return Ok(ModuleHandle {
-                registry: self,
-                key,
+                entry: Arc::clone(&entry),
                 module: Some(module),
             });
         }
+        // A failed return leaves the empty entry behind for the next
+        // acquire; `opened` drops here, so the library unloads, still under
+        // the entry lock.
         let opened = open()?;
         if !clap_sys::version::clap_version_is_compatible(unsafe { (*opened.entry).clap_version }) {
             return Err("This CLAP plugin uses an incompatible CLAP version.".to_owned());
@@ -180,28 +209,30 @@ impl ModuleRegistry {
             init,
             _library: opened.library,
         });
-        modules.insert(key.clone(), Arc::clone(&module));
+        state.module = Some(Arc::clone(&module));
+        state.users = 1;
         Ok(ModuleHandle {
-            registry: self,
-            key,
+            entry: Arc::clone(&entry),
             module: Some(module),
         })
     }
 
+    /// Whether `key` has a loaded module.  An entry left behind by a failed
+    /// `open` or a release does not count.
     #[cfg(test)]
     pub(super) fn holds(&self, key: &Path) -> bool {
-        self.lock().contains_key(key)
+        let entry = self.lock().get(key).map(Arc::clone);
+        entry.is_some_and(|entry| entry.lock().module.is_some())
     }
 }
 
 /// One user's share of a [`ClapModule`].  Handles are never cloned; each one
 /// comes from [`ModuleRegistry::acquire`].  Dropping the last one deinits the
-/// module and unloads its library, under the registry lock.
+/// module and unloads its library, under that module's entry lock.
 pub(super) struct ModuleHandle {
-    pub(super) registry: &'static ModuleRegistry,
-    pub(super) key: PathBuf,
+    entry: Arc<ModuleEntry>,
     /// Always `Some` until `drop`.
-    pub(super) module: Option<Arc<ClapModule>>,
+    module: Option<Arc<ClapModule>>,
 }
 
 impl std::ops::Deref for ModuleHandle {
@@ -217,29 +248,18 @@ impl Drop for ModuleHandle {
         let Some(module) = self.module.take() else {
             return;
         };
-        let mut modules = self.registry.lock();
-        // Every reference to a module is created (`acquire`) and released
-        // (here) under the lock, so the count is stable while it is held:
-        // two references (the table's and this one) mean this is the last
-        // user.  This handle's reference is released before the lock is, on
-        // every path, so a concurrent drop never counts it.
-        let last = Arc::strong_count(&module) == 2;
-        let stored = if last {
-            let stored = modules.remove(&self.key);
-            debug_assert!(stored
-                .as_ref()
-                .is_some_and(|stored| Arc::ptr_eq(stored, &module)));
-            stored
-        } else {
-            None
-        };
+        let mut state = self.entry.lock();
+        state.users -= 1;
+        if state.users == 0 {
+            // This handle and the entry's `Option` are the only references
+            // left, so this handle holds the last one.  The entry's share goes
+            // first and the drop below then runs `deinit` and the unload here,
+            // under the entry lock the next acquire of this module needs.
+            debug_assert_eq!(Arc::strong_count(&module), 2);
+            state.module = None;
+        }
         drop(module);
-        // On the last release `deinit` and the unload run here, still under
-        // the lock.
-        drop(stored);
-        drop(modules);
-        #[cfg(test)]
-        self.registry.pause_after_release();
+        drop(state);
     }
 }
 

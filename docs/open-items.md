@@ -68,7 +68,8 @@ The findings that need their own change, with the issue that tracks each:
 ## Known limits
 
 Checked against the code on 2026-11-25: the loudness, effect, NAM, cab,
-CLAP log, RT guard, ASIO and drift entries below still hold.
+CLAP log, VST3 unload window, RT guard, ASIO and drift entries below still
+hold.
 
 - **Loudness.**  Integrated loudness is the last 60 s, not the whole run.
   *Learn* is one-shot; nothing follows the player.  Learn measures an
@@ -123,6 +124,14 @@ CLAP log, RT guard, ASIO and drift entries below still hold.
   this; closing an editor by hand and reopening it later still can.
   The fix belongs upstream (`cairo_device_finish` before
   `xcb_disconnect`, as VSTGUI's Wayland path does).
+- **VST3 module unload window.**  `Weak::upgrade` in a module entry returns
+  `None` as soon as the last `Arc` reaches zero, before that module's `Drop`
+  takes the entry lock.  A load that wins the lock in between issues a new
+  `ModuleEntry` before the old `ModuleExit` runs, so that exit can follow the
+  new load.  SDK versions differ: the pinned 3.8 SDK accepts the second
+  entry, so both loads proceed, and older single-handle SDKs refuse it.
+  RigWerk loads VST3 only on the UI thread, so parallel test threads are the
+  only way to reach it; closing it needs a "dying" flag on the entry.
 - **CLAP log.**  `host_log` (`clap/host.rs`) copies the message into a fixed
   256-byte slot (`try_lock`, no allocation) on whatever thread logs, and the
   reader builds the `String`; nothing reads the slot yet, so a plugin's log

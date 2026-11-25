@@ -1,7 +1,7 @@
 use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use clap_sys::ext::audio_ports::{
@@ -1569,6 +1569,65 @@ mod fake {
             get_factory: Some(get_factory),
         };
     }
+
+    /// A third fake entry for the release/acquire overlap test, with
+    /// counters and a signal of its own so it never races the other counted
+    /// entry.
+    pub(super) mod overlap {
+        use clap_sys::entry::clap_plugin_entry;
+        use clap_sys::version::CLAP_VERSION;
+        use std::ffi::{c_char, c_void};
+        use std::ptr;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        pub(in super::super) static INITS: AtomicUsize = AtomicUsize::new(0);
+        pub(in super::super) static DEINITS: AtomicUsize = AtomicUsize::new(0);
+        pub(in super::super) static OVERLAPPED: AtomicBool = AtomicBool::new(false);
+        static INSIDE: AtomicBool = AtomicBool::new(false);
+
+        fn enter_and_wait() {
+            if INSIDE.swap(true, Ordering::SeqCst) {
+                OVERLAPPED.store(true, Ordering::SeqCst);
+            }
+            // Long enough for a racing caller to arrive.
+            std::thread::sleep(Duration::from_millis(50));
+            INSIDE.store(false, Ordering::SeqCst);
+        }
+
+        /// Waits until this entry is inside an `init` or a `deinit`.
+        pub(in super::super) fn wait_until_inside() {
+            for _ in 0..5_000 {
+                if INSIDE.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the module never entered its init or deinit");
+        }
+
+        unsafe extern "C" fn init(_path: *const c_char) -> bool {
+            INITS.fetch_add(1, Ordering::SeqCst);
+            enter_and_wait();
+            true
+        }
+
+        unsafe extern "C" fn deinit() {
+            DEINITS.fetch_add(1, Ordering::SeqCst);
+            enter_and_wait();
+        }
+
+        unsafe extern "C" fn get_factory(_id: *const c_char) -> *const c_void {
+            ptr::null()
+        }
+
+        pub(in super::super) static ENTRY: clap_plugin_entry = clap_plugin_entry {
+            clap_version: CLAP_VERSION,
+            init: Some(init),
+            deinit: Some(deinit),
+            get_factory: Some(get_factory),
+        };
+    }
 }
 
 #[test]
@@ -1960,16 +2019,14 @@ fn concurrent_acquires_init_the_module_once() {
     assert!(!REGISTRY.holds(std::path::Path::new("counted.clap")));
 }
 
+/// The last user of a module deinits it and unloads its library; while one
+/// user is left, the module keeps both.
 #[test]
-fn concurrent_last_releases_still_deinit_the_module() {
+fn the_last_release_deinits_the_module() {
     fake::reset(fake::Fail::Nothing);
     static REGISTRY: ModuleRegistry = ModuleRegistry::new();
-    // Each drop lingers after unlocking; a drop that still held its
-    // reference then would make every concurrent drop see a third
-    // reference, and none would release the module.
-    REGISTRY.release_pause_ms.store(20, Ordering::SeqCst);
     const THREADS: usize = 4;
-    let handles: Vec<_> = (0..THREADS)
+    let mut handles: Vec<_> = (0..THREADS)
         .map(|_| {
             REGISTRY
                 .acquire("released.clap".into(), || Ok(fake::opened(&fake::ENTRY)))
@@ -1977,7 +2034,11 @@ fn concurrent_last_releases_still_deinit_the_module() {
         })
         .collect();
     assert_eq!(fake::events(), ["entry.init"]);
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+    // The last handle stays here, so `deinit` runs on this thread and the
+    // thread-local log can show it.  The others go at once: a drop that
+    // miscounted the users would release the module before them.
+    let last = handles.pop().expect("the last handle");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS - 1));
     std::thread::scope(|scope| {
         for handle in handles {
             let barrier = std::sync::Arc::clone(&barrier);
@@ -1987,9 +2048,76 @@ fn concurrent_last_releases_still_deinit_the_module() {
             });
         }
     });
+    assert_eq!(fake::events(), ["entry.init"], "one user still holds it");
+    assert!(REGISTRY.holds(std::path::Path::new("released.clap")));
+    drop(last);
+    assert_eq!(fake::events(), ["entry.init", "entry.deinit"]);
+    // The entry stays: only its module is gone.
     assert!(!REGISTRY.holds(std::path::Path::new("released.clap")));
-    // `deinit` ran on whichever thread released last, so this thread's
-    // log cannot show it; the empty table is the proof it was released.
+}
+
+/// A module that takes its time to load blocks only its own entry: an
+/// acquire of another key finishes while the first `open` is still inside.
+#[test]
+fn a_slow_load_of_one_module_does_not_block_another() {
+    static REGISTRY: ModuleRegistry = ModuleRegistry::new();
+    let (opening, opened) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let slow = REGISTRY.acquire("slow.clap".into(), || {
+                opening.send(()).expect("signal the open");
+                released.recv().expect("the test releases the open");
+                Err("refused".to_owned())
+            });
+            assert!(slow.is_err());
+        });
+        // The slow open is inside its entry lock from here on.
+        opened
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the slow open started");
+        let (done, finished) = mpsc::channel();
+        scope.spawn(move || {
+            let other = REGISTRY.acquire("fast.clap".into(), || Err("missing".to_owned()));
+            done.send(other.err()).expect("report the other open");
+        });
+        let other = finished.recv_timeout(Duration::from_secs(5));
+        // Let the blocked open go before asserting, so a regression fails
+        // instead of leaving the thread behind.
+        release.send(()).expect("release the slow open");
+        let other = other.expect("a load of another module finished while one was blocked");
+        assert_eq!(other.as_deref(), Some("missing"));
+    });
+    // The failed opens left empty entries, not loaded modules.
+    assert!(!REGISTRY.holds(std::path::Path::new("slow.clap")));
+    assert!(!REGISTRY.holds(std::path::Path::new("fast.clap")));
+}
+
+/// The release of one module and a later acquire of it never overlap: the
+/// `deinit` runs under the entry lock the next `init` needs.
+#[test]
+fn a_release_and_a_reacquire_of_one_module_never_overlap() {
+    use fake::overlap::{wait_until_inside, DEINITS, ENTRY, INITS, OVERLAPPED};
+    let registry = ModuleRegistry::new();
+    let key = PathBuf::from("released-and-reacquired.clap");
+    let first = registry
+        .acquire(key.clone(), || Ok(fake::opened(&ENTRY)))
+        .expect("acquire the overlap module");
+    std::thread::scope(|scope| {
+        scope.spawn(move || drop(first));
+        // The release is inside its `deinit` from here on: the reacquire
+        // must wait for it, not load the binary under it.
+        wait_until_inside();
+        let again = registry
+            .acquire(key.clone(), || Ok(fake::opened(&ENTRY)))
+            .expect("reacquire the overlap module");
+        drop(again);
+    });
+    assert_eq!(INITS.load(Ordering::SeqCst), 2);
+    assert_eq!(DEINITS.load(Ordering::SeqCst), 2);
+    assert!(!OVERLAPPED.load(Ordering::SeqCst));
+    // The entry stays: only its module is gone.
+    assert!(!registry.holds(&key));
 }
 
 #[test]
