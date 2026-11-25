@@ -12,6 +12,7 @@ pub(crate) mod cab;
 pub(crate) mod calibration;
 pub(crate) mod chain;
 pub(crate) mod devices;
+pub(crate) mod diagnostics;
 pub(crate) mod driver_check;
 pub(crate) mod issues;
 pub(crate) mod latency;
