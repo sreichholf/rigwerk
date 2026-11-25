@@ -2,7 +2,11 @@
 //! code uses a word the glossary keeps out of the UI.  It reads the source
 //! text, not the binary, so it sees every literal, including log lines and
 //! hover text.  `tests.rs` files are not read: a test may name the old word
-//! on purpose (an old save, a rejected label).
+//! on purpose (an old save, a rejected label).  The same walk also checks the
+//! layer direction AGENTS.md states, in production files: `audio` names no
+//! `app`, `ui`, `egui` or `eframe`, and `app` names no `ui`.  `tests.rs` files
+//! are exempt, so `app/tests.rs` and `app/appearance/tests.rs` still name
+//! `crate::ui`.
 
 use std::path::{Path, PathBuf};
 
@@ -399,4 +403,85 @@ fn whole_words_only_and_placeholders_are_not_words() {
     assert!(!has_word(&readable("{follower} is missing"), "follower"));
     assert!(has_word(&readable("{{follower}}"), "follower"));
     assert!(!has_word(&readable("level {insert:>5.1} dB"), "insert"));
+}
+
+/// The layer direction AGENTS.md states ("Separation"), by prefix, for
+/// production files: a file in `src/audio/` (or `src/audio.rs`) names neither
+/// `crate::app` nor `crate::ui` and names neither `egui` nor `eframe`; a
+/// file in `src/app/` (or `src/app.rs`) names no `crate::ui`.  `app` does
+/// name `egui` for the theme and the zoom, so only `audio` lists it.
+const LAYERING: &[(&str, &[&str])] = &[
+    ("src/audio/", &["crate::app", "crate::ui", "egui", "eframe"]),
+    (
+        "src/audio.rs",
+        &["crate::app", "crate::ui", "egui", "eframe"],
+    ),
+    ("src/app/", &["crate::ui"]),
+    ("src/app.rs", &["crate::ui"]),
+];
+
+/// The 1-based lines of `source` that name one of `names`, with the name each
+/// one used.  The check counts a name anywhere on a code line, including
+/// inside a longer path or a string, and it does not strip block comments:
+/// only a line whose first characters are `//` is prose.  `audio/nam.rs`
+/// links to `crate::app::settings::PathPref` in a doc comment, and a doc link
+/// is not a reference.
+fn boundary_lines<'a>(source: &str, names: &'a [&'a str]) -> Vec<(usize, &'a str)> {
+    let mut out = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        for &name in names {
+            if has_word(line, name) {
+                out.push((index + 1, name));
+            }
+        }
+    }
+    out
+}
+
+/// Every place a file names the layer above it, as `file:line: name`.
+fn boundary_hits() -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src"), root, &mut files);
+    assert!(files.len() > 100, "found {} source files", files.len());
+    let mut hits = Vec::new();
+    for (file, path) in files {
+        let Some(layer) = LAYERING.iter().find(|(dir, _)| file.starts_with(dir)) else {
+            continue;
+        };
+        let source = std::fs::read_to_string(&path).expect("read source");
+        for (line, name) in boundary_lines(&source, layer.1) {
+            hits.push(format!("{file}:{line}: {name}"));
+        }
+    }
+    hits
+}
+
+#[test]
+fn a_comment_is_not_a_layer_reference() {
+    let source = r##"
+        //! [`PathPref`](crate::app::settings::PathPref) is a doc link.
+        /// egui in another doc comment.
+        use crate::app::settings::PathPref;
+        let ctx = egui::Context::default();
+    "##;
+    assert_eq!(
+        boundary_lines(source, &["crate::app", "crate::ui", "egui"]),
+        [(4, "crate::app"), (5, "egui")]
+    );
+}
+
+/// A residual gap: `super::super::app` is a valid path from `src/audio/*.rs`
+/// and holds none of these names, so this text check cannot see it.
+#[test]
+fn a_layer_does_not_name_the_one_above_it() {
+    let hits = boundary_hits();
+    assert!(
+        hits.is_empty(),
+        "a layer names the one above it (AGENTS.md, Separation):\n{}",
+        hits.join("\n")
+    );
 }

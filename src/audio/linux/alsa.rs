@@ -1,26 +1,13 @@
 //! Direct ALSA helpers: PCM classification and the period the bridge asks
-//! for.  These stay separate from PipeWire so the two Linux paths can be
-//! reasoned about on their own.
+//! for.  The PCM id grammar is `devices`'s; this module re-exports it for the
+//! Linux call paths.  They stay separate from PipeWire so the two Linux paths
+//! can be reasoned about on their own.
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
-/// The PCM part of a cpal ALSA id (`ALSA:hw:CARD=0,DEV=0` -> `hw:CARD=0,DEV=0`).
-pub(crate) fn alsa_pcm_name(device_id: &str) -> &str {
-    // cpal prints the host in lower case (`alsa:hw:CARD=0,DEV=0`), while other
-    // backends and older versions use the display spelling (`ALSA:...`).
-    match device_id.split_once(':') {
-        Some((host, pcm)) if host.eq_ignore_ascii_case("alsa") => pcm.trim(),
-        _ => device_id.trim(),
-    }
-}
-
-/// Whether a cpal ALSA id names a physical PCM rather than a virtual plugin.
-/// `hw:` bypasses every conversion; `plughw:` still goes straight to the card
-/// but lets ALSA convert formats.  Both are the low-latency ALSA side.
-pub(crate) fn alsa_pcm_is_direct(device_id: &str) -> bool {
-    let pcm = alsa_pcm_name(device_id);
-    pcm.starts_with("hw:") || pcm.starts_with("plughw:")
-}
+// The id grammar is `devices`'s, because that file compiles on every platform
+// while this module is Linux and tests only.
+pub(crate) use super::super::devices::{alsa_pcm_is_direct, alsa_pcm_name};
 
 pub(crate) fn alsa_pcm_is_placeholder(device_id: &str) -> bool {
     let pcm = alsa_pcm_name(device_id);

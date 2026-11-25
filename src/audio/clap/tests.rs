@@ -21,7 +21,7 @@ use super::host::{
 use super::instance::ClapInstance;
 use super::module::{module_key, EntryInit, ModuleRegistry};
 use super::ports::{port_layout, PortBuffers, PortInfo, PortLayout, MAX_PORT_CHANNELS};
-use super::scan::{scan_bundle, scan_module};
+use super::scan::{contained, scan_bundle, scan_bundles, scan_module, PANIC_WHILE_READ};
 use super::state::{StateReader, StateWriter};
 use crate::audio::plugins::{
     ClapFailure, LoadedPlugin, Outcome, PluginHandle, PluginPref, PluginShared, Restore, Saved,
@@ -34,7 +34,7 @@ use crate::audio::plugins::{
 /// save captures a blob that holds it.
 #[test]
 fn state_save_with_values_queued_marks_them_undelivered() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -77,7 +77,7 @@ fn state_save_with_values_queued_marks_them_undelivered() {
 /// next block; only after that block are the values applied.
 #[test]
 fn a_value_a_full_event_list_dropped_arrives_with_the_next_block() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -125,7 +125,7 @@ fn a_value_a_full_event_list_dropped_arrives_with_the_next_block() {
 /// next block and the second survives it, to arrive with the one after.
 #[test]
 fn two_values_a_full_event_list_kept_arrive_one_block_at_a_time() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::offer_params(true);
     fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
@@ -157,7 +157,7 @@ fn two_values_a_full_event_list_kept_arrive_one_block_at_a_time() {
 /// it is applied at once, so the next capture lists it.
 #[test]
 fn a_value_flushed_while_stopped_is_in_the_next_capture() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -176,7 +176,7 @@ fn a_value_flushed_while_stopped_is_in_the_next_capture() {
 
 #[test]
 fn a_failed_block_does_not_count_its_values_applied() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -202,7 +202,7 @@ fn a_failed_block_does_not_count_its_values_applied() {
 /// on top of the older blob.
 #[test]
 fn a_capture_with_audio_stopped_after_a_set_keeps_the_value_through_a_restore() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     let stateful = || {
         fake::reset(fake::Fail::Nothing);
         fake::set_state(b"older");
@@ -1606,6 +1606,48 @@ fn a_failed_open_is_not_cached() {
 }
 
 #[test]
+fn a_bundle_that_cannot_be_opened_becomes_a_row_and_the_scan_goes_on() {
+    // Two empty bundles: real paths, real `dlopen`, the same `Err` a broken
+    // bundle takes (on macOS a `.clap` is a folder, so a folder works there).
+    let dir = std::env::temp_dir().join(format!("rigwerk-clap-scan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the test folder");
+    let first = dir.join("First.clap");
+    let second = dir.join("Second.clap");
+    std::fs::create_dir_all(&first).expect("create the first bundle");
+    std::fs::create_dir_all(&second).expect("create the second bundle");
+    let rows = scan_bundles(vec![second.clone(), first.clone()]);
+    let names: Vec<_> = rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["First", "Second"],
+        "the scan continued past the first"
+    );
+    for row in &rows {
+        assert!(row.plugin_id.is_empty(), "there is no id to load");
+        let error = row.scan_error.as_deref().expect("why the bundle failed");
+        assert!(error.contains("CLAP load failed"), "{error}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_panic_while_a_bundle_is_read_becomes_a_scan_error() {
+    // A panic in the bundle's own `extern "C" init` aborts where it happens,
+    // so this cannot be reached through a fake entry: it exercises the
+    // unwinding `contained` does catch, which is the host-side panic that
+    // would otherwise abort the whole scan.
+    let read: Result<(), String> = contained(|| panic!("a bundle panicked"));
+    let error = read.expect_err("the panic becomes a scan error");
+    assert_eq!(error, format!("{PANIC_WHILE_READ} a bundle panicked"));
+    // A payload without text still reports, with the sentence alone.
+    let silent: Result<(), String> = contained(|| std::panic::panic_any(7u8));
+    assert_eq!(
+        silent.expect_err("a payload without text still reports"),
+        PANIC_WHILE_READ
+    );
+}
+
+#[test]
 fn concurrent_acquires_init_the_module_once() {
     use fake::counted::{DEINITS, INITS, OVERLAPPED};
     static REGISTRY: ModuleRegistry = ModuleRegistry::new();
@@ -2847,7 +2889,7 @@ fn show_hide_and_hint_requests_wait_for_the_window() {
 fn posix_fds_are_registered_once_and_polled_for_the_plugin() {
     use clap_sys::ext::posix_fd_support::{CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE};
 
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::gui::offer_fd_support();
     fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
