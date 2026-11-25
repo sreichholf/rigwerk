@@ -1489,9 +1489,9 @@ impl RigWerkApp {
             }
             IssueAction::CheckDriver => self.start_output_driver_check(true),
             IssueAction::SetOutputBuffer(frames) => {
-                self.output_buffer = frames;
+                self.set_output_buffer(frames);
                 self.push_log(
-                    format!("Output buffer set to {frames} samples."),
+                    format!("Output buffer set to {} samples.", self.output_buffer),
                     LogTone::Blue,
                 );
             }
@@ -1501,8 +1501,7 @@ impl RigWerkApp {
                 self.push_log("WASAPI clock: Shared output.", LogTone::Muted);
             }
             IssueAction::AutoBridgeBuffer => {
-                self.bridge_buffer_mode = BufferMode::Auto;
-                self.apply_bridge_buffer();
+                self.set_bridge_buffer_mode(BufferMode::Auto);
                 self.push_log("Bridge buffer: Auto.", LogTone::Amber);
             }
             IssueAction::ShowExtraOutput(extra_output) => {

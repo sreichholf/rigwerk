@@ -555,6 +555,43 @@ impl RigWerkApp {
         self.low_latency_output = matches!(mode, audio::WasapiOutputMode::RealStyle);
     }
 
+    /// The input rate, checked like a saved one.  The bridge signature carries
+    /// it, so `sync_bridge_config` re-opens the bridge on the next pass.
+    pub(crate) fn set_sample_rate(&mut self, rate: u32) {
+        self.sample_rate = crate::app::settings::sanitize_sample_rate(rate);
+    }
+
+    /// The input buffer, checked like a saved one.  `sync_bridge_config`
+    /// re-opens the bridge on the next pass.
+    pub(crate) fn set_buffer_size(&mut self, buffer: usize) {
+        self.buffer_size = crate::app::settings::sanitize_buffer_size(buffer);
+    }
+
+    /// The clock output rate (0 follows the input), checked like a saved one.
+    /// `sync_bridge_config` re-opens the bridge on the next pass.
+    pub(crate) fn set_output_rate(&mut self, rate: u32) {
+        self.output_rate = crate::app::settings::sanitize_output_rate(rate);
+    }
+
+    /// The clock output buffer, checked like a saved one.  0 means the default
+    /// buffer here, not "follow the input": only an old saved session reads it
+    /// that way.  `sync_bridge_config` re-opens the bridge on the next pass.
+    pub(crate) fn set_output_buffer(&mut self, buffer: usize) {
+        self.output_buffer = crate::app::settings::sanitize_buffer_size(buffer);
+    }
+
+    /// Turns drift correction on or off.  `publish_engine` pushes it with the
+    /// master switches on the next pass.
+    pub(crate) fn set_drift(&mut self, on: bool) {
+        self.drift = on;
+    }
+
+    /// Flips the master mute.  `publish_engine` pushes it on the next pass,
+    /// and the tuner's auto-mute stays a layer on top.
+    pub(crate) fn toggle_mute(&mut self) {
+        self.mute = !self.mute;
+    }
+
     /// Pushes the stored input and output gains.
     pub(crate) fn apply_gains(&self) {
         self.engine.set_gains(self.input_gain, self.output_gain);
@@ -641,6 +678,19 @@ impl RigWerkApp {
     pub(crate) fn apply_bridge_buffer(&self) {
         self.engine
             .set_bridge_buffer(self.bridge_buffer_mode, self.bridge_buffer_ms);
+    }
+
+    /// Stores the bridge buffer mode and pushes it now.
+    pub(crate) fn set_bridge_buffer_mode(&mut self, mode: audio::BufferMode) {
+        self.bridge_buffer_mode = mode;
+        self.apply_bridge_buffer();
+    }
+
+    /// Stores the fixed bridge buffer size, checked like a saved one, and
+    /// pushes it now.
+    pub(crate) fn set_bridge_buffer_ms(&mut self, ms: f32) {
+        self.bridge_buffer_ms = crate::app::settings::sanitize_bridge_buffer_ms(ms);
+        self.apply_bridge_buffer();
     }
 
     /// `(low_latency_request, exclusive_output)` for [`StartConfig`].

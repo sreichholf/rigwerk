@@ -42,6 +42,122 @@ fn set_wasapi_output_mode_keeps_the_legacy_bool_aligned() {
 }
 
 #[test]
+fn bridge_setters_clamp_like_a_saved_preference() {
+    use std::sync::atomic::Ordering;
+
+    let mut app = latency_app();
+
+    app.set_sample_rate(22_050);
+    assert_eq!(app.sample_rate, crate::app::settings::DEFAULT_SAMPLE_RATE);
+    let before = app.current_bridge_signature();
+    app.set_sample_rate(96_000);
+    assert_eq!(app.sample_rate, 96_000);
+    assert_ne!(
+        app.current_bridge_signature(),
+        before,
+        "the sample rate is missing from the bridge signature"
+    );
+
+    app.set_buffer_size(4_096);
+    assert_eq!(app.buffer_size, crate::app::settings::DEFAULT_BUFFER);
+    let before = app.current_bridge_signature();
+    app.set_buffer_size(100);
+    assert_eq!(app.buffer_size, 100);
+    assert_ne!(
+        app.current_bridge_signature(),
+        before,
+        "the input buffer is missing from the bridge signature"
+    );
+
+    app.set_output_rate(12_345);
+    assert_eq!(app.output_rate, crate::app::settings::DEFAULT_SAMPLE_RATE);
+    let before = app.current_bridge_signature();
+    app.set_output_rate(0);
+    assert_eq!(app.output_rate, 0);
+    assert_ne!(
+        app.current_bridge_signature(),
+        before,
+        "the clock output rate is missing from the bridge signature"
+    );
+
+    app.set_output_buffer(1);
+    assert_eq!(app.output_buffer, crate::app::settings::DEFAULT_BUFFER);
+    app.set_output_buffer(0);
+    assert_eq!(app.output_buffer, crate::app::settings::DEFAULT_BUFFER);
+    let before = app.current_bridge_signature();
+    app.set_output_buffer(256);
+    assert_eq!(app.output_buffer, 256);
+    assert_ne!(
+        app.current_bridge_signature(),
+        before,
+        "the clock output buffer is missing from the bridge signature"
+    );
+
+    app.set_bridge_buffer_ms(f32::NAN);
+    assert_eq!(
+        app.bridge_buffer_ms,
+        crate::app::settings::DEFAULT_BRIDGE_BUFFER_MS
+    );
+    app.set_bridge_buffer_ms(100.0);
+    assert_eq!(
+        app.bridge_buffer_ms,
+        crate::app::settings::BRIDGE_BUFFER_MS_MAX
+    );
+    app.set_bridge_buffer_ms(0.0);
+    assert_eq!(
+        app.bridge_buffer_ms,
+        crate::app::settings::BRIDGE_BUFFER_MS_MIN
+    );
+
+    // The clock setter pushes as it stores, unlike the rate and buffer pairs
+    // that the next `sync_bridge_config` pass re-opens the bridge with.
+    app.set_bridge_buffer_mode(crate::audio::BufferMode::Fixed);
+    assert_eq!(app.bridge_buffer_mode, crate::audio::BufferMode::Fixed);
+    assert_eq!(
+        app.engine.shared.bridge_buffer_mode(),
+        crate::audio::BufferMode::Fixed
+    );
+    app.set_bridge_buffer_ms(12.5);
+    assert_eq!(app.bridge_buffer_ms, 12.5);
+    assert_eq!(
+        f32::from_bits(
+            app.engine
+                .shared
+                .fixed_bridge_buffer_ms
+                .load(Ordering::Relaxed)
+        ),
+        12.5
+    );
+}
+
+#[test]
+fn toggle_mute_flips_and_the_frame_push_keeps_it() {
+    use std::sync::atomic::Ordering;
+
+    let mut app = latency_app();
+    app.toggle_mute();
+    assert!(app.mute);
+    app.publish_engine();
+    assert!(app.engine.shared.mute.load(Ordering::Relaxed));
+
+    app.toggle_mute();
+    assert!(!app.mute);
+    app.publish_engine();
+    assert!(!app.engine.shared.mute.load(Ordering::Relaxed));
+}
+
+#[test]
+fn set_drift_is_pushed_by_the_frame() {
+    use std::sync::atomic::Ordering;
+
+    let mut app = latency_app();
+    app.set_drift(false);
+    assert!(!app.drift);
+    app.publish_engine();
+    assert!(!app.engine.shared.drift_enabled.load(Ordering::Relaxed));
+}
+
+#[test]
 fn running_latency_uses_the_delivered_input_block() {
     let mut app = latency_app();
     app.buffer_size = 128;
