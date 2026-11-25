@@ -1,7 +1,17 @@
 # Open items
 
-What is known to be missing or limited.  Everything else from the old
-plans and the code review has landed; that history is in git.
+What is known to be missing or limited.  The rest of the old plans and the
+code review has landed; that history is in git.
+
+## Deferred from the review
+
+The findings that need their own change, with the issue that tracks each:
+
+- Resampler kernel handoff out of the output callback (#119).
+- One plugin host contract, and LV2's capabilities in it (#120).
+- Process-wide audio statics with a single-run owner (#123).
+- The last `winapi` uses moved to the `windows` crate (#124).
+- A stranded plugin pause, and the global module and slot registries (#125).
 
 ## Features
 
