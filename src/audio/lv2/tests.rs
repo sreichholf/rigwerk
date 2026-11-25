@@ -23,11 +23,10 @@ use lv2_sys::{
     LV2_Worker_Status_LV2_WORKER_SUCCESS as LV2_WORKER_SUCCESS,
 };
 
-use crate::audio::clap::StateSave;
 use crate::audio::plugins::{
     lv2_fixture, param_transfer, AudioThreadScope, LoadedPlugin, Lv2Failure, Outcome, ParamIds,
-    ParamOut, PluginFormat, PluginPref, PluginShared, PluginState, Restore, Saved, MAX_BLOCK,
-    MAX_STATE_BLOB,
+    ParamOut, PluginFormat, PluginPref, PluginShared, PluginState, Restore, Saved, StateSave,
+    MAX_BLOCK, MAX_STATE_BLOB,
 };
 
 use super::host::{used_uris, HostFeatures, SATISFIED, SUPPORTED};

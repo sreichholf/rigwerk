@@ -76,7 +76,7 @@ pub(crate) enum ChainCommand {
 /// to the deferred queue the UI thread drains.  What a queue does with the
 /// values left in it when both its ends are gone.
 pub(super) fn release_slot(slot: Box<Slot>) {
-    if super::super::clap::may_destroy_plugins_here() {
+    if super::may_destroy_plugins_here() {
         drop(slot);
     } else {
         defer_plugin_slots(vec![*slot]);

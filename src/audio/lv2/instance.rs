@@ -47,9 +47,9 @@ use lv2_sys::{
     LV2_Worker_Interface, LV2_Worker_Status,
 };
 
-use crate::audio::clap::StateSave;
 use crate::audio::plugins::{
     param_transfer, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared, Restore,
+    StateSave,
 };
 
 use super::host::HostFeatures;

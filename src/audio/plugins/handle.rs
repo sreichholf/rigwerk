@@ -21,7 +21,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use super::super::clap::{ClapInstance, ClapLoaded, ClapProcessor, StateSave};
+use super::super::clap::{ClapInstance, ClapLoaded, ClapProcessor};
 use super::super::lv2::{Lv2Instance, Lv2Loaded, Lv2Processor};
 use super::super::vst3::{
     Vst3Controller, Vst3Editor, Vst3Loaded, Vst3Processor, IO_CHANGED, LATENCY_CHANGED,
@@ -36,6 +36,7 @@ use super::load::{
 use super::pause::{drive_pause, BlockAction, PauseStep};
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginState};
 use super::slot::SlotControls;
+use super::state::StateSave;
 use super::transfer::ParamReceiver;
 
 /// The VST3 flags [`PluginHandle::service`] acts on; others are ignored.

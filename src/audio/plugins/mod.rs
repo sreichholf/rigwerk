@@ -11,6 +11,10 @@
 //! through the published effect links.  The handle keeps the views, the
 //! saved values and the state blob behind its own UI-only lock.
 //!
+//! Two things are not format-specific and live here rather than in a host:
+//! `thread` records the plugin main thread and says where a plugin may be
+//! destroyed, and `state` is the outcome CLAP and LV2 state captures return.
+//!
 //! Each chain is split the same way: the runtime the audio thread owns
 //! (`chain`) and the model the UI edits (`model`), which sends structural
 //! edits as commands through a queue (`queue`) and gets the slots the
@@ -29,6 +33,8 @@ mod pause;
 mod pref;
 mod queue;
 mod slot;
+mod state;
+mod thread;
 mod transfer;
 
 #[cfg(test)]
@@ -86,6 +92,12 @@ pub(crate) use slot::SlotControls;
 pub(crate) use slot::{drain_deferred_plugins, Slot, SlotLink};
 #[cfg(test)]
 pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
+pub(crate) use state::StateSave;
+#[cfg(test)]
+pub(crate) use thread::{claim_main_thread_for_test, MainThreadClaim};
+pub(crate) use thread::{
+    is_main_thread, mark_main_thread, may_destroy_plugins_here, recorded_main_thread,
+};
 pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};
 
 #[cfg(test)]

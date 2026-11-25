@@ -582,7 +582,7 @@ impl Shared {
     /// Runs only on the recorded main thread.  Any other caller returns
     /// without loading or destroying a plugin.
     pub(crate) fn align_plugins_to_output_rate(&self) {
-        if !super::clap::is_main_thread() {
+        if !super::plugins::is_main_thread() {
             return;
         }
         let rate = self.output_rate.load(Ordering::Relaxed);
@@ -606,7 +606,7 @@ impl Shared {
         // A reload a plugin asks for in a frame that also follows a new
         // device rate is built at that rate once.
         let rate = self.output_rate.load(Ordering::Relaxed);
-        let device_rate = (super::clap::is_main_thread() && rate != 0).then_some(rate);
+        let device_rate = (super::plugins::is_main_thread() && rate != 0).then_some(rate);
         for path in &self.paths {
             if path.state().is_live() {
                 path.service_plugins_at(device_rate);
