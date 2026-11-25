@@ -91,6 +91,13 @@ pipewire = { version = "0.10", features = ["v0_3_50"] }
 
 [profile.release]
 opt-level = 3
+# One codegen unit, so the hot non-`#[inline]` calls between `audio/mixer`,
+# `audio/path` and the plugin chain can inline: the default 16 units put them
+# in separate modules, where they cannot.  It gives up parallel codegen, and
+# what the inlining is worth here is not measured.  No LTO: the DSP kernels
+# sit inside nam-rs and never cross the crate boundary, so LTO would only
+# remove one call per block.
+codegen-units = 1
 
 # nam-rs with faster kernels; vendor/nam-rs/RIGWERK.md says what changed.
 [patch.crates-io]
