@@ -456,6 +456,10 @@ impl RigWerkApp {
             eq_edit: self.eq_edit.index() as u8,
             output_tab_low_latency: self.devices.output_tab_low_latency,
             selected_session: self.selected_session,
+            selected_session_name: self
+                .selected_session
+                .and_then(|index| self.sessions.get(index))
+                .map(|session| session.name.clone()),
             asio_name,
             asio_id,
             asio_backend,
@@ -670,6 +674,8 @@ impl RigWerkApp {
             eq_edit: _,
             output_tab_low_latency: _,
             selected_session: _,
+            // Read through `preferences` below, beside the index.
+            selected_session_name: _,
             // `restore_saved_devices` below reads these nine.
             asio_name: _,
             asio_id: _,
@@ -804,11 +810,22 @@ impl RigWerkApp {
         self.nam_folder = preferences.amp_folder.clone();
         self.cab_folder = preferences.cab_folder.clone();
         self.record_click = preferences.record_click;
-        let sessions = unique_sessions(&preferences.sessions);
+        // `selected_session` indexes the saved list, which the load can
+        // shorten: it skips an unreadable session before this point and
+        // `unique_sessions` drops a duplicate name.  Either moves the index to
+        // another session, so the stored name is what the choice follows; an
+        // older file has no name and falls back to the index.
+        self.sessions = unique_sessions(&preferences.sessions);
         self.selected_session = preferences
-            .selected_session
-            .filter(|index| *index < sessions.len());
-        self.sessions = sessions;
+            .selected_session_name
+            .as_deref()
+            .and_then(|name| self.session_named(name))
+            .or_else(|| {
+                preferences
+                    .selected_session
+                    .and_then(|index| preferences.sessions.get(index))
+                    .and_then(|session| self.session_named(&session.name))
+            });
         self.auto_start_bridge = preferences.auto_start_bridge && !screenshot;
         self.measured_latency = preferences.measured_latency.clone();
         self.stored_schema_version = stored_schema_version;

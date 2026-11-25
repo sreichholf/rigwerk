@@ -462,6 +462,34 @@ fn an_explicit_output_pick_replaces_the_held_identity() {
 }
 
 #[test]
+fn saving_the_session_choice_writes_its_name() {
+    let mut app = blank_app();
+    for name in ["Clean", "Lead"] {
+        app.sessions.push(Session {
+            name: name.to_owned(),
+            ..Session::default()
+        });
+    }
+    app.selected_session = Some(1);
+    let (raw, saved) = save_text(&mut app);
+    // The index alone moves when the load shortens the list, so the name is
+    // stored beside it.
+    assert!(
+        raw.contains(r#"selected_session_name:Some("Lead")"#),
+        "{raw}"
+    );
+    assert_eq!(saved.selected_session, Some(1));
+    assert_eq!(saved.selected_session_name.as_deref(), Some("Lead"));
+}
+
+#[test]
+fn no_session_choice_writes_no_name() {
+    let (raw, saved) = save_text(&mut blank_app());
+    assert!(!raw.contains("selected_session_name"), "{raw}");
+    assert_eq!(saved.selected_session_name, None);
+}
+
+#[test]
 fn a_session_that_finds_the_output_may_be_saved() {
     let mut app = absent_studio();
     assert!(app.devices.output_held.is_some());
