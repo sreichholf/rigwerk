@@ -129,7 +129,8 @@ pub(crate) struct Preferences {
     /// device's row that cannot be read stays off in its slot (nothing
     /// routed, at the level floor), and a send that cannot be read stays off
     /// at its index, so no other path's route or send moves.  The load
-    /// reports every replacement.
+    /// reports the replacements that keep a slot; one past a cap is dropped
+    /// deliberately and is not reported.
     #[serde(deserialize_with = "placeholder_unreadable")]
     pub(crate) paths: Vec<PathPref>,
     /// The path the console, sheets and browser edit (a position in `paths`).
@@ -875,9 +876,9 @@ struct StoredCounts {
     sessions: Vec<IgnoredAny>,
     plugins: Vec<IgnoredAny>,
     followers: Vec<IgnoredAny>,
-    /// One per stored path, so a path that is not even a struct still keeps
-    /// the other paths' effect counts in place.
-    #[serde(deserialize_with = "placeholder_unreadable")]
+    /// A path that cannot be read contributes no effects; the other paths'
+    /// counts still count.
+    #[serde(deserialize_with = "skip_unreadable")]
     paths: Vec<StoredPathCounts>,
     /// Present when a measurement was stored, readable or not.
     measured_latency: Option<IgnoredAny>,
@@ -965,12 +966,6 @@ impl Placeholder for PathPref {
             mute: true,
             ..Self::default()
         }
-    }
-}
-
-impl Placeholder for StoredPathCounts {
-    fn placeholder() -> Self {
-        Self::default()
     }
 }
 
