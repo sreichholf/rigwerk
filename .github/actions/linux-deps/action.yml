@@ -1,0 +1,69 @@
+name: Linux system libraries
+description: The apt packages the Linux build and the CodeQL Rust extractor need, with the downloaded archives cached.
+
+# The mirror is slow (minutes for ~60 MB), so the downloaded .debs are
+# cached.  Install still runs apt, so a stale cache only means a few fresh
+# downloads; autoclean drops versions the mirror no longer has, which keeps
+# the cache from growing.  One list serves the build and the extractor, so a
+# package is added once.  The key hashes this file, so editing a workflow
+# around the call keeps the cache.
+runs:
+  using: composite
+  steps:
+    - name: Restore apt archives
+      id: apt-cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ~/apt-archives
+        key: apt-${{ runner.os }}-24.04-${{ hashFiles('.github/actions/linux-deps/action.yml') }}
+        restore-keys: apt-${{ runner.os }}-24.04-
+
+    - name: Install system libraries
+      shell: bash
+      run: |
+        archives="$HOME/apt-archives"
+        mkdir -p "$archives/partial"
+        apt_opts=(-o "Dir::Cache::Archives=$archives" -o APT::Keep-Downloaded-Packages=true)
+        # man-db rebuilds its index after every install; nothing reads it.
+        sudo rm -f /var/lib/man-db/auto-update
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends "${apt_opts[@]}" \
+          libasound2-dev \
+          libpipewire-0.3-dev \
+          libclang-dev \
+          libwayland-dev \
+          libxkbcommon-dev \
+          libxkbcommon-x11-dev \
+          libxcb-render0-dev \
+          libxcb-shape0-dev \
+          libxcb-xfixes0-dev \
+          libx11-dev \
+          libxcursor-dev \
+          libxi-dev \
+          libgl1-mesa-dev \
+          pkg-config \
+          ninja-build \
+          meson \
+          libsndfile1-dev \
+          libsamplerate0-dev \
+          xvfb \
+          libx11-xcb-dev \
+          libxcb-util-dev \
+          libxcb-cursor-dev \
+          libxcb-xkb-dev \
+          libxcb-keysyms1-dev \
+          libcairo2-dev \
+          libpango1.0-dev \
+          libfreetype-dev \
+          libfontconfig1-dev \
+          libgtkmm-3.0-dev
+        sudo apt-get autoclean "${apt_opts[@]}"
+        sudo rm -rf "$archives/partial" "$archives/lock"
+        sudo chown -R "$USER" "$archives"
+
+    - name: Save apt archives
+      if: steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.apt-cache.outputs.cache-primary-key }}

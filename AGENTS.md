@@ -68,7 +68,7 @@ code and the workflows on pushes to `master`, on pull requests, and
 weekly.  Its alerts land in the repository's Security tab.
 
 System libraries are installed by `.cursor/install.sh`. The package list
-CI uses is in `.github/workflows/ci.yml`.
+CI uses is in `.github/actions/linux-deps/action.yml`.
 
 `Cargo.lock` is committed. Change it only by running Cargo. Hardware
 tests stay `#[ignore]` and only play silence.

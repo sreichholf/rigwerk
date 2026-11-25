@@ -39,23 +39,7 @@ jobs:
       # need their headers.  Only the Linux cfg is analyzed.
       - name: Install system libraries
         if: matrix.language == 'rust'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev \
-            libpipewire-0.3-dev \
-            libclang-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libx11-dev \
-            libxcursor-dev \
-            libxi-dev \
-            libgl1-mesa-dev \
-            pkg-config
+        uses: ./.github/actions/linux-deps
 
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
         if: matrix.language == 'rust'
