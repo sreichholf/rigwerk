@@ -74,6 +74,32 @@ fn a_free_inside_the_guard_is_counted_apart_from_allocations() {
     assert_eq!(guard.allocations(), 0, "a free is not an allocation");
 }
 
+/// The callback marker follows the guard: set by `enter`, still set while a
+/// nested guard is open, and cleared when the outermost one drops.  Release
+/// builds have no marker, so this is a debug claim.
+#[cfg(debug_assertions)]
+#[test]
+fn the_callback_marker_is_true_only_inside_a_guard() {
+    use super::in_audio_callback;
+
+    assert!(!in_audio_callback(), "no guard on this thread");
+    let outer = RtGuard::enter();
+    assert!(in_audio_callback());
+    {
+        let _inner = RtGuard::enter();
+        assert!(in_audio_callback());
+    }
+    assert!(
+        in_audio_callback(),
+        "the inner drop restored the outer guard's marker"
+    );
+    drop(outer);
+    assert!(
+        !in_audio_callback(),
+        "the outermost drop cleared the marker"
+    );
+}
+
 #[test]
 fn a_free_outside_the_guard_is_not_counted() {
     let guard = RtGuard::enter();
@@ -139,6 +165,10 @@ fn a_release_build_counts_no_allocations_and_no_frees() {
 #[cfg(not(debug_assertions))]
 #[test]
 fn enter_and_drop_do_not_panic_in_a_release_build() {
+    assert!(
+        !super::in_audio_callback(),
+        "a release build has no marker outside a guard"
+    );
     let outer = RtGuard::enter();
     let _buffer = allocate();
     {
@@ -146,6 +176,10 @@ fn enter_and_drop_do_not_panic_in_a_release_build() {
         let _more = allocate();
     }
     drop(outer);
+    assert!(
+        !super::in_audio_callback(),
+        "a release build has no marker after the outermost drop"
+    );
     let fresh = RtGuard::enter();
     assert_eq!(fresh.allocations(), 0);
     assert_eq!(fresh.frees(), 0);

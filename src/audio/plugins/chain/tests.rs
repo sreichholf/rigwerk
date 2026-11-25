@@ -2,6 +2,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::super::model::ChainModel;
+#[cfg(debug_assertions)]
+use super::release_slot;
 use super::{ChainRuntime, RETURN_QUEUE};
 
 fn model() -> ChainModel {
@@ -137,4 +139,18 @@ fn a_replace_keeps_the_controls_and_a_new_rate_reaches_the_runtime() {
         &controls
     ));
     assert_eq!(runtime.slot_mut_for_test(0).controls.mix(), 0.25);
+}
+
+/// A slot released inside a callback would destroy a plugin or take the
+/// deferred-slot lock on the audio thread: the last owner is the UI thread
+/// or the bridge, and a debug build asserts that at the one choke point.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a plugin slot was released inside an audio callback")]
+fn releasing_a_slot_inside_a_callback_is_caught() {
+    use super::super::super::rt_guard::RtGuard;
+    use super::super::slot::Slot;
+
+    let _guard = RtGuard::enter();
+    release_slot(Box::new(Slot::tracked_for_test()));
 }

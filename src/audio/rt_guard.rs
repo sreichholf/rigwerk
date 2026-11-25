@@ -25,8 +25,15 @@
 //! [`RtGuard::allocations`] and [`RtGuard::frees`] are 0, and
 //! [`audio_thread_allocations`] does not exist.
 //!
-//! The flag is read inside `GlobalAlloc::alloc` and `dealloc`, so it must
-//! not allocate itself: every thread-local is a `const`-initialised
+//! The same guard marks its thread as inside an audio callback for as long
+//! as it is held, and [`in_audio_callback`] reads that marker from the guard
+//! depth, so it does not depend on drop order.  A `Drop` that would take the
+//! deferred-slot lock or destroy a plugin asserts against it in a debug build
+//! (see `plugins::chain`), so the invariant those drops depend on is checked
+//! and not only documented.
+//!
+//! The flags are read inside `GlobalAlloc::alloc` and `dealloc`, so they
+//! must not allocate themselves: every thread-local is a `const`-initialised
 //! [`Cell`] with no destructor, and every access from the allocator goes
 //! through `try_with`, which is a plain load once the thread has them.
 
@@ -107,8 +114,8 @@ pub(crate) struct RtGuard {
 }
 
 impl RtGuard {
-    /// Starts counting this thread's allocations and frees.  Cheap: a few
-    /// TLS writes.
+    /// Starts counting this thread's allocations and frees, and marks the
+    /// thread as inside a callback.  Cheap: a few TLS writes.
     #[must_use]
     pub(crate) fn enter() -> Self {
         #[cfg(debug_assertions)]
@@ -152,6 +159,20 @@ impl RtGuard {
         {
             0
         }
+    }
+}
+
+/// Whether this thread is inside an audio callback: it holds an [`RtGuard`].
+/// True while any guard is held, independent of drop order, because it reads
+/// the guard depth.  A release build has no guard state and says `false`.
+pub(crate) fn in_audio_callback() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        DEPTH.try_with(|depth| depth.get() > 0).unwrap_or(false)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
     }
 }
 

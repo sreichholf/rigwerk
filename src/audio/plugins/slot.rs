@@ -566,6 +566,9 @@ pub(crate) fn defer_plugin_slots(slots: Vec<Slot>) {
     if slots.is_empty() {
         return;
     }
+    // Only a `Drop` comes here (see `chain::release_slot`), and the owners
+    // that may drop a chain are the UI thread and the bridge, not an audio
+    // callback: `release_slot` asserts that before it reaches this lock.
     match DEFERRED_PLUGIN_SLOTS.lock() {
         Ok(mut queue) => queue.extend(slots),
         Err(poison) => poison.into_inner().extend(slots),
