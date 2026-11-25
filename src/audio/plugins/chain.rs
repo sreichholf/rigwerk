@@ -74,8 +74,13 @@ pub(crate) enum ChainCommand {
 
 /// Destroys a slot here if this thread may destroy plugins, else hands it
 /// to the deferred queue the UI thread drains.  What a queue does with the
-/// values left in it when both its ends are gone.
+/// values left in it when both its ends are gone.  A debug build asserts
+/// that this is not inside an audio callback.
 pub(super) fn release_slot(slot: Box<Slot>) {
+    debug_assert!(
+        !super::super::rt_guard::in_audio_callback(),
+        "a plugin slot was released inside an audio callback: it would destroy a plugin or take the deferred-slot lock"
+    );
     if super::may_destroy_plugins_here() {
         drop(slot);
     } else {
@@ -389,6 +394,11 @@ impl Drop for ChainRuntime {
     /// plugins are destroyed on the UI thread, so the slots go to the
     /// deferred queue there (see [`release_slot`]).  Queued commands and
     /// returned slots go the same way when their queue drops.
+    ///
+    /// That queue takes a process-wide lock, which no audio callback may
+    /// take.  The last owner is the UI thread or the bridge, never a
+    /// callback; [`release_slot`] says so in a debug build instead of
+    /// relying on that.
     fn drop(&mut self) {
         for slot in self.slots.drain(..) {
             release_slot(slot);
