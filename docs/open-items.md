@@ -8,9 +8,7 @@ code review has landed; that history is in git.
 The findings that need their own change, with the issue that tracks each:
 
 - Resampler kernel handoff out of the output callback (#119).
-- Process-wide audio statics with a single-run owner (#123).
 - The last `winapi` uses moved to the `windows` crate (#124).
-- A stranded plugin pause, and the global module and slot registries (#125).
 
 ## Features
 
@@ -68,8 +66,8 @@ The findings that need their own change, with the issue that tracks each:
 ## Known limits
 
 Checked against the code on 2026-11-25: the loudness, effect, NAM, cab,
-CLAP log, VST3 unload window, RT guard, ASIO and drift entries below still
-hold.
+CLAP log, VST3 unload window, stranded plugin, RT guard, ASIO and drift
+entries below still hold.
 
 - **Loudness.**  Integrated loudness is the last 60 s, not the whole run.
   *Learn* is one-shot; nothing follows the player.  Learn measures an
@@ -141,6 +139,23 @@ hold.
   shared handle (`open_vst3_editor`, `with_clap`) and `has_editor` is a
   load-time flag; restart and latency are handled inside each host's
   `service`, not as capability methods.
+- **Stranded plugin.**  A plugin hung in `process` never drops its block
+  guard, so a pause forced by a restart or a latency change never goes
+  quiet.  The next pause the effect is asked to make fails it with a
+  message once it has stayed unquiet for `PAUSE_STRANDED` (two seconds),
+  and the pause is no longer driven.  A plugin that hangs before any pause
+  was asked for keeps reading as healthy until one is.  Its slot and
+  instance are then deliberately leaked for the rest of the process: the
+  processor is still inside `process`, so stopping, deactivating or
+  destroying it would be a second call under the one that never returned.
+  The leaked slot keeps its `ModuleHandle`, so that binary's `deinit` never
+  runs again.  Only restarting RigWerk recovers: the hung block keeps the
+  bridge from ending, and a start is refused while one lingers, so a bridge
+  restart cannot release the device.
+- **Deferred slot queue.**  It is still drained on the recorded main thread
+  only.  A slot a bridge releases is parked there and waits for the next
+  service frame or a restart; a main thread that stops draining for the
+  rest of the process leaks it.
 - **RT allocation guard.**  The counting allocator and the counts exist
   only under `debug_assertions` (`audio/rt_guard.rs`); in release
   `RtGuard` is a no-op, so a release build carries no automated evidence
@@ -148,9 +163,11 @@ hold.
 - **Stuck drivers.**  A driver that never returns from open or teardown
   leaves a parked bridge thread and an error; RigWerk asks for a restart
   but cannot release the driver.
-- **ASIO.**  Callback timing, driver stop and dispose, and reset requests
-  are compile-checked only.  `sampleRateDidChange` is ignored (some
-  drivers send it during start); only `kAsioResetRequest` ends a session.
+- **ASIO.**  Callback timing and driver stop and dispose are compile-checked
+  only.  Reset delivery and the single-session refusal have Windows unit
+  tests, but no real driver runs in them.  `sampleRateDidChange` is ignored
+  (some drivers send it during start); only `kAsioResetRequest` ends a
+  session.
 - **Resampler.**  Content between the output Nyquist and the lower rate
   minus 20 kHz (24–28 kHz for 96→48) is only partly rejected; it folds
   above the audible band.

@@ -21,7 +21,10 @@
 //! (`chain`) and the model the UI edits (`model`), which sends structural
 //! edits as commands through a queue (`queue`) and gets the slots the
 //! runtime let go of back the same way.  No lock is shared between the two
-//! sides.
+//! sides.  A slot a thread may not destroy plugins on lands in the engine's
+//! park (`slot::SlotPark`, one per engine and shared by its runs), which the
+//! recorded main thread drains; a slot whose plugin is stranded is leaked
+//! there instead of destroyed.
 
 mod audio_thread;
 mod chain;
