@@ -1,5 +1,5 @@
-//! Small controls shared by several screens: labels, buttons, tabs,
-//! meters and sliders.
+//! Small controls shared by several screens: labels, buttons, the
+//! segmented control, meters and sliders.
 //!
 //! The outline button and the text field are the plain action button and
 //! the one-line input everywhere; they share one height so they line up.
@@ -31,7 +31,7 @@ pub(crate) use dot::path_dot;
 pub(crate) use fader::{fader, fader_height, FaderRange};
 pub(crate) use meter::{horizontal_meter, vertical_meter, MeterChannel};
 pub(crate) use popover::popover;
-pub(crate) use segmented::segmented;
+pub(crate) use segmented::{segmented, segmented_hinted};
 
 pub(crate) use slider::{row_info, styled_slider, SliderStyle};
 pub(crate) use text_field::TextField;
@@ -53,6 +53,13 @@ use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
 /// them so a path and an output read the same.
 const LEVEL_ROW_H: f32 = 28.0;
 const LEVEL_VALUE_W: f32 = 80.0;
+
+// How many layouts [`text_width`] ran on this test thread, so a test can
+// check that [`fit_text`] searches rather than measuring every prefix.
+#[cfg(test)]
+thread_local! {
+    static LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Accent ring on a focused control, from the active palette.
 pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
@@ -127,48 +134,6 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter()
         .circle_filled(rect.center(), 4.0, with_alpha(color, 60));
     ui.painter().circle_filled(rect.center(), 2.2, color);
-}
-
-/// A [`tab_button`] that explains itself on hover.
-pub(crate) fn hinted_tab(ui: &mut egui::Ui, label: &str, selected: bool, hint: &str) -> bool {
-    tab_button(ui, label, selected)
-        .on_hover_text(hint)
-        .clicked()
-}
-
-/// A compact exclusive choice.  Same type size as [`segmented`] and outline
-/// buttons, so leftover calibration tabs match the rest of the chrome.  The
-/// selected tab is tinted and labelled with the accent pair, the rest with
-/// `text3` and the control border, all from the active palette.
-pub(crate) fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    let colours = palette(ui.ctx());
-    ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .font(font(Face::Sans, TypeRole::Control))
-                .color(if selected {
-                    colours.accent_text
-                } else {
-                    colours.text3
-                })
-                .strong(),
-        )
-        .fill(if selected {
-            with_alpha(colours.accent, 20)
-        } else {
-            Color32::TRANSPARENT
-        })
-        .stroke(Stroke::new(
-            1.0,
-            if selected {
-                with_alpha(colours.accent, 60)
-            } else {
-                colours.line2
-            },
-        ))
-        .corner_radius(CornerRadius::same(5))
-        .min_size(Vec2::new(0.0, 28.0)),
-    )
 }
 
 /// A labelled bar: the name on the left, a formatted value in monospace on the
@@ -262,26 +227,58 @@ pub(crate) fn level_row(
     });
 }
 
+/// The width of `text` laid out on one line in `font`.
+pub(crate) fn text_width(ui: &egui::Ui, text: &str, font: &FontId) -> f32 {
+    #[cfg(test)]
+    LAYOUTS.with(|count| count.set(count.get() + 1));
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), palette(ui.ctx()).text)
+        .size()
+        .x
+}
+
 /// `text` shortened with "…" until it fits `max_width` in `font`.
+///
+/// A longer prefix plus the ellipsis is never narrower, so the longest
+/// prefix that fits is found by binary search: one layout for the whole
+/// string and a logarithmic handful more.
 pub(crate) fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, max_width: f32) -> String {
-    let width = |candidate: &str| {
-        ui.painter()
-            .layout_no_wrap(candidate.to_owned(), font.clone(), palette(ui.ctx()).text)
-            .size()
-            .x
-    };
-    if width(text) <= max_width {
+    if text_width(ui, text, font) <= max_width {
         return text.to_owned();
     }
-    let chars: Vec<char> = text.chars().collect();
-    for keep in (0..chars.len()).rev() {
-        let mut candidate: String = chars[..keep].iter().collect();
-        candidate.push('…');
-        if width(&candidate) <= max_width {
-            return candidate;
+    // The first `low` characters fit with the ellipsis (or `low` is zero,
+    // where only the ellipsis is left); the first `high` do not.
+    let mut low = 0;
+    let mut high = text.chars().count();
+    while high - low > 1 {
+        let keep = low.midpoint(high);
+        if prefix_fits(ui, text, keep, font, max_width) {
+            low = keep;
+        } else {
+            high = keep;
         }
     }
-    "…".to_owned()
+    let mut fitted = String::with_capacity(text.len() + 3);
+    fitted.push_str(prefix(text, low));
+    fitted.push('…');
+    fitted
+}
+
+/// `text` cut to its first `keep` characters.
+fn prefix(text: &str, keep: usize) -> &str {
+    match text.char_indices().nth(keep) {
+        Some((index, _)) => &text[..index],
+        None => text,
+    }
+}
+
+/// Whether `text`'s first `keep` characters and an ellipsis fit.
+fn prefix_fits(ui: &egui::Ui, text: &str, keep: usize, font: &FontId, max_width: f32) -> bool {
+    let prefix = prefix(text, keep);
+    let mut candidate = String::with_capacity(prefix.len() + 3);
+    candidate.push_str(prefix);
+    candidate.push('…');
+    text_width(ui, &candidate, font) <= max_width
 }
 
 #[cfg(test)]

@@ -9,7 +9,6 @@
 //! failures that the live status line replaces.
 
 use crate::app::LogTone;
-use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use egui::{Color32, CornerRadius, RichText, Stroke};
@@ -17,7 +16,7 @@ use egui::{Color32, CornerRadius, RichText, Stroke};
 use crate::app::{RigWerkApp, ACTIVITY_LOG_CAP};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{engine_state_label, status_dot};
+use crate::ui::widgets::{engine_state_label, segmented, status_dot};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -183,21 +182,6 @@ fn budget_row(
     });
 }
 
-fn diagnostics_export_path() -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    let name = format!("rigwerk-diagnostics-{stamp}.txt");
-    let dir = std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Downloads"))
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Downloads"))
-        })
-        .unwrap_or_else(std::env::temp_dir);
-    dir.join(name)
-}
-
 impl RigWerkApp {
     fn bridge_status_line(&self) -> String {
         let status = self.engine_bridge_status();
@@ -323,45 +307,26 @@ impl RigWerkApp {
         lines.join("\n")
     }
 
-    pub(crate) fn write_diagnostics(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-            }
-        }
-        let text = self.diagnostics_text();
-        std::fs::write(path, text)
-            .map_err(|error| format!("Could not write {}: {error}", path.display()))
-    }
-
     fn diagnostics_tabs(&mut self, ui: &mut egui::Ui) {
         use crate::app::screen::DiagnosticsTab;
-        let colours = palette(ui.ctx());
+        // One list, so a tab cannot be labelled by one entry and drawn from
+        // another.
+        const TABS: [(&str, DiagnosticsTab); 5] = [
+            ("Log", DiagnosticsTab::Log),
+            ("Performance", DiagnosticsTab::Performance),
+            ("Latency", DiagnosticsTab::Latency),
+            ("Scan", DiagnosticsTab::Scan),
+            ("Status", DiagnosticsTab::Status),
+        ];
+        let labels = TABS.map(|(label, _)| label);
         let current = self.chrome.diagnostics_tab;
-        ui.horizontal_wrapped(|ui| {
-            for (label, tab) in [
-                ("Log", DiagnosticsTab::Log),
-                ("Performance", DiagnosticsTab::Performance),
-                ("Latency", DiagnosticsTab::Latency),
-                ("Scan", DiagnosticsTab::Scan),
-                ("Status", DiagnosticsTab::Status),
-            ] {
-                let selected = current == tab;
-                let text = sans(
-                    label,
-                    if selected {
-                        colours.accent
-                    } else {
-                        colours.text2
-                    },
-                    TypeRole::Control,
-                );
-                if ui.selectable_label(selected, text).clicked() {
-                    self.chrome.diagnostics_tab = tab;
-                }
-            }
-        });
+        let mut index = TABS
+            .iter()
+            .position(|&(_, tab)| tab == current)
+            .unwrap_or(0);
+        if segmented(ui, &mut index, &labels).changed() {
+            self.chrome.diagnostics_tab = TABS[index].1;
+        }
         ui.add_space(8.0);
     }
 
@@ -702,9 +667,9 @@ impl RigWerkApp {
                     self.push_log("Diagnostics copied to the clipboard.", LogTone::Teal);
                 }
                 if OutlineButton::new("Export").show(ui).clicked() {
-                    let path = diagnostics_export_path();
-                    match self.write_diagnostics(&path) {
-                        Ok(()) => self.push_log(
+                    let report = self.diagnostics_text();
+                    match self.save_diagnostics_report(&report) {
+                        Ok(path) => self.push_log(
                             format!("Diagnostics exported to {}.", path.display()),
                             LogTone::Teal,
                         ),
