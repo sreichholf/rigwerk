@@ -44,7 +44,7 @@ use crate::audio::extra_output::{
 };
 use crate::audio::input::{make_input_stream, open_input_device, InputStage};
 use crate::audio::mixer::OutputMixer;
-use crate::audio::output::open_output;
+use crate::audio::output::{block_chunks, open_output};
 use crate::audio::output_map::DeviceFrame;
 use crate::audio::panic_guard::contain;
 use crate::audio::record::{push_device_frame, RecordSource};
@@ -66,6 +66,8 @@ const EXTRA_OUTPUT_NODE: &str = "RigWerk Extra output";
 /// Front left / front right in `spa_audio_channel`.
 const CHANNEL_FL: u32 = 3;
 const CHANNEL_FR: u32 = 4;
+/// Stereo frames per callback chunk.  The mixer's scratch is prepared for
+/// this size; a graph quantum above it is rendered in several chunks.
 const PREPARED_BLOCK: usize = 8192;
 
 /// One registry pass. Sources are capture endpoints, sinks are playback.
@@ -568,8 +570,8 @@ fn run_graph(
                         }
                         let filled = fill_stereo(block, |bytes, frames| {
                             data.shared.note_output_step(frames as u32);
-                            data.mixer.render(&data.shared, frames, |index, mapped| {
-                                if write_stereo(bytes, index, mapped) {
+                            let mut clock = |offset: usize, index: usize, mapped: &DeviceFrame| {
+                                if write_stereo(bytes, offset + index, mapped) {
                                     // Two channels, eight bytes: the clock node only.
                                     push_device_frame(
                                         &data.shared.recorder,
@@ -578,7 +580,23 @@ fn run_graph(
                                         2,
                                     );
                                 }
-                            });
+                            };
+                            if frames <= PREPARED_BLOCK {
+                                // The quantum fits the scratch: one whole block.
+                                data.mixer.render(&data.shared, frames, |index, mapped| {
+                                    clock(0, index, mapped)
+                                });
+                                return;
+                            }
+                            // The floor follows the whole quantum, not the
+                            // prepared-size pieces rendered below.
+                            data.mixer.note_host_block(&data.shared, frames);
+                            for (offset, count) in block_chunks(frames, PREPARED_BLOCK) {
+                                data.mixer
+                                    .render_chunk(&data.shared, count, |index, mapped| {
+                                        clock(offset, index, mapped)
+                                    });
+                            }
                         });
                         if filled == 0 {
                             return;

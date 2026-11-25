@@ -231,6 +231,15 @@ pub(crate) fn write_frame<T: Sample + FromSample<f32>>(frame: &mut [T], mapped: 
 /// a default buffer hand over at most a few thousand frames.
 const PREPARED_BLOCK: usize = 8192;
 
+/// Splits one host block into prepared-size chunks, with the offset of each.
+/// A block larger than the scratch is rendered in several calls instead of
+/// growing it inside the callback.
+pub(crate) fn block_chunks(frames: usize, limit: usize) -> impl Iterator<Item = (usize, usize)> {
+    (0..frames)
+        .step_by(limit)
+        .map(move |offset| (offset, (frames - offset).min(limit)))
+}
+
 pub(crate) fn build_output<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
@@ -281,20 +290,26 @@ where
                 // The block the host hands over is the step the device really
                 // runs at, whatever buffer was asked for.
                 mix_shared.note_output_step(frames as u32);
+                // The bridge buffer floor follows the whole host block, also
+                // when it is rendered in prepared-size pieces.
+                mixer.note_host_block(&mix_shared, frames);
                 render_or_silence(&mix_shared, data, |block| {
-                    mixer.render(&mix_shared, frames, |index, mapped| {
-                        // The frame write_frame is about to convert: channel map,
-                        // level, limiter, mute and the calibration duck.
-                        if channels > 0 {
-                            push_device_frame(
-                                &mix_shared.recorder,
-                                RecordSource::Clock,
-                                mapped,
-                                channels,
-                            );
-                        }
-                        write_frame(&mut block[index * channels..(index + 1) * channels], mapped);
-                    });
+                    for (offset, count) in block_chunks(frames, PREPARED_BLOCK) {
+                        mixer.render_chunk(&mix_shared, count, |index, mapped| {
+                            // The frame write_frame is about to convert: channel map,
+                            // level, limiter, mute and the calibration duck.
+                            if channels > 0 {
+                                push_device_frame(
+                                    &mix_shared.recorder,
+                                    RecordSource::Clock,
+                                    mapped,
+                                    channels,
+                                );
+                            }
+                            let at = offset + index;
+                            write_frame(&mut block[at * channels..(at + 1) * channels], mapped);
+                        });
+                    }
                 });
             },
             move |error| {
