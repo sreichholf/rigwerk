@@ -3,6 +3,8 @@
 //! Each panel keeps a Search field, pins the In use row above a nested
 //! scroll, and filters Direct / System by label and backend (with `*`).
 
+use std::borrow::Cow;
+
 use eframe::egui;
 use egui::{Align2, CornerRadius, FontId, RichText, Sense, Stroke, Vec2};
 
@@ -230,23 +232,68 @@ fn device_group_heading(ui: &mut egui::Ui, heading: &str) {
     ui.add_space(2.0);
 }
 
+/// One panel group: every device with its position in the inventory list, and
+/// the group as the peer list `device_choice_label` compares against.  An
+/// inventory list is its own peer list, so only a tab's subset is copied.
+struct DeviceGroup<'a> {
+    rows: Vec<(usize, &'a DeviceItem)>,
+    peers: Cow<'a, [DeviceItem]>,
+}
+
+impl<'a> DeviceGroup<'a> {
+    /// A whole inventory list: nothing is copied.
+    fn all(devices: &'a [DeviceItem]) -> Self {
+        Self {
+            rows: devices.iter().enumerate().collect(),
+            peers: Cow::Borrowed(devices),
+        }
+    }
+
+    /// The devices at `indices`, which are positions in `devices`.  The rows
+    /// stay borrowed; the peer list is the subset, so it is copied once.
+    fn subset(devices: &'a [DeviceItem], indices: &[usize]) -> Self {
+        Self {
+            rows: indices
+                .iter()
+                .map(|&index| (index, &devices[index]))
+                .collect(),
+            peers: Cow::Owned(
+                indices
+                    .iter()
+                    .map(|&index| devices[index].clone())
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// The group's rows the filter keeps, in list order.  A blank filter passes
+/// every row through before any label is built, so the common case allocates
+/// nothing per device.
 pub(crate) fn filter_group<'a>(
-    devices: &'a [(usize, DeviceItem)],
+    devices: &'a [(usize, &'a DeviceItem)],
     peers: &[DeviceItem],
     skip_index: usize,
     filter: &str,
-) -> Vec<&'a (usize, DeviceItem)> {
-    devices
-        .iter()
-        .filter(|(index, device)| {
-            *index != skip_index
-                && device_matches_filter(
-                    &crate::audio::device_choice_label(device, peers),
-                    &device.backend,
-                    filter,
-                )
-        })
-        .collect()
+) -> Vec<(usize, &'a DeviceItem)> {
+    let filter = filter.trim();
+    let mut shown = Vec::with_capacity(devices.len());
+    for (index, device) in devices {
+        if *index == skip_index {
+            continue;
+        }
+        if !filter.is_empty()
+            && !device_matches_filter(
+                &crate::audio::device_choice_label(device, peers),
+                &device.backend,
+                filter,
+            )
+        {
+            continue;
+        }
+        shown.push((*index, *device));
+    }
+    shown
 }
 
 /// Search, pinned In use, then filtered Direct / System (nested scroll).
@@ -257,8 +304,8 @@ fn device_lists(
     ui: &mut egui::Ui,
     filter: &mut String,
     id_prefix: &str,
-    low: &[(usize, DeviceItem)],
-    system: &[(usize, DeviceItem)],
+    low: &DeviceGroup<'_>,
+    system: &DeviceGroup<'_>,
     selected: (usize, usize),
     accent: egui::Color32,
 ) -> Option<(usize, String, bool)> {
@@ -266,18 +313,17 @@ fn device_lists(
     device_search(ui, filter, &format!("{id_prefix}_search"));
     ui.add_space(4.0);
 
-    let low_peers: Vec<DeviceItem> = low.iter().map(|(_, device)| device.clone()).collect();
-    let system_peers: Vec<DeviceItem> = system.iter().map(|(_, device)| device.clone()).collect();
-
     let pinned = low
+        .rows
         .iter()
         .find(|(index, _)| *index == selected_direct)
-        .map(|(index, device)| (*index, device, true, low_peers.as_slice()))
+        .map(|(index, device)| (*index, device, true, low.peers.as_ref()))
         .or_else(|| {
             system
+                .rows
                 .iter()
                 .find(|(index, _)| *index == selected_system)
-                .map(|(index, device)| (*index, device, false, system_peers.as_slice()))
+                .map(|(index, device)| (*index, device, false, system.peers.as_ref()))
         });
 
     let mut picked = None;
@@ -288,8 +334,8 @@ fn device_lists(
         ui.add_space(2.0);
     }
 
-    let low_shown = filter_group(low, &low_peers, selected_direct, filter);
-    let system_shown = filter_group(system, &system_peers, selected_system, filter);
+    let low_shown = filter_group(&low.rows, &low.peers, selected_direct, filter);
+    let system_shown = filter_group(&system.rows, &system.peers, selected_system, filter);
     let scroll_rows = low_shown.len() + system_shown.len();
     let has_direct = !low_shown.is_empty();
     let has_system = !system_shown.is_empty();
@@ -300,7 +346,7 @@ fn device_lists(
             if has_direct {
                 device_group_heading(ui, "Direct");
                 for (index, device) in &low_shown {
-                    if device_row(ui, device, false, accent, &low_peers) {
+                    if device_row(ui, device, false, accent, &low.peers) {
                         picked = Some((*index, device.name.clone(), true));
                     }
                 }
@@ -311,7 +357,7 @@ fn device_lists(
             if has_system {
                 device_group_heading(ui, "System");
                 for (index, device) in &system_shown {
-                    if device_row(ui, device, false, accent, &system_peers) {
+                    if device_row(ui, device, false, accent, &system.peers) {
                         picked = Some((*index, device.name.clone(), false));
                     }
                 }
@@ -347,10 +393,8 @@ impl RigWerkApp {
         let colours = palette(ui.ctx());
         let accent = colours.accent;
         panel(ui, "Input", section, Some(SetupSection::Devices), |ui| {
-            let low_inputs: Vec<(usize, DeviceItem)> =
-                self.inventory.asio.iter().cloned().enumerate().collect();
-            let system_inputs: Vec<(usize, DeviceItem)> =
-                self.inventory.inputs.iter().cloned().enumerate().collect();
+            let low_inputs = DeviceGroup::all(&self.inventory.asio);
+            let system_inputs = DeviceGroup::all(&self.inventory.inputs);
             let selected_system = if self.use_asio_input {
                 usize::MAX
             } else {
@@ -406,16 +450,10 @@ impl RigWerkApp {
         });
 
         panel(ui, "Clock output", section, None, |ui| {
-            let low_outputs: Vec<(usize, DeviceItem)> = self
-                .output_indices(true)
-                .into_iter()
-                .map(|index| (index, self.inventory.outputs[index].clone()))
-                .collect();
-            let system_outputs: Vec<(usize, DeviceItem)> = self
-                .output_indices(false)
-                .into_iter()
-                .map(|index| (index, self.inventory.outputs[index].clone()))
-                .collect();
+            let low_outputs =
+                DeviceGroup::subset(&self.inventory.outputs, &self.output_indices(true));
+            let system_outputs =
+                DeviceGroup::subset(&self.inventory.outputs, &self.output_indices(false));
             let selected = self.output_idx;
             let mut filter = std::mem::take(&mut self.chrome.output_device_filter);
             let picked = device_lists(

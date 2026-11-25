@@ -793,7 +793,7 @@ fn probe_output(
     if crate::audio::is_native_id(id) {
         let frames = crate::audio::node_latency_frames(low_latency, buffer_frames);
         let rate = asked_rate.max(1);
-        let node = id.strip_prefix("pipewire:").unwrap_or(id);
+        let node = crate::audio::linux_node_name(id).unwrap_or(id);
         let mut notes = vec![format!(
             "This is the PipeWire sink \"{node}\". RigWerk links its own playback node to it and asks that node for {frames} frames ({:.1} ms at {}). The graph stays the clock, so other apps keep playing.",
             block_ms(frames, rate),

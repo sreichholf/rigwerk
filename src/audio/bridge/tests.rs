@@ -1,4 +1,7 @@
-use super::{select, Backend, StartConfig};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+use super::{select, Backend, Shared, StartConfig};
 
 /// A start with no ASIO driver and ordinary system device ids.
 fn plain() -> StartConfig {
@@ -19,6 +22,7 @@ fn plain() -> StartConfig {
 }
 
 /// Two system devices keep the cpal bridge, whatever the output settings are.
+/// Every target can select every arm, so this runs on each of them.
 #[test]
 fn system_devices_fall_back_to_cpal() {
     let mut config = plain();
@@ -28,7 +32,6 @@ fn system_devices_fall_back_to_cpal() {
     assert_eq!(select(&config), Backend::Cpal);
 }
 
-#[cfg(target_os = "windows")]
 #[test]
 fn an_output_asio_driver_picks_the_output_bridge() {
     let mut config = plain();
@@ -36,7 +39,6 @@ fn an_output_asio_driver_picks_the_output_bridge() {
     assert_eq!(select(&config), Backend::AsioOutput(1));
 }
 
-#[cfg(target_os = "windows")]
 #[test]
 fn an_input_asio_driver_picks_the_input_bridge() {
     let mut config = plain();
@@ -46,8 +48,16 @@ fn an_input_asio_driver_picks_the_input_bridge() {
     assert_eq!(select(&config), Backend::AsioInput(2));
 }
 
+/// A native input id does not outrank the ASIO clock on the same side.
+#[test]
+fn an_input_asio_driver_outranks_a_native_input() {
+    let mut config = plain();
+    config.asio_clsid = Some(5);
+    config.input_id = Some("pipewire:test_source".into());
+    assert_eq!(select(&config), Backend::AsioInput(5));
+}
+
 /// A native id on the far side does not outrank ASIO output either.
-#[cfg(target_os = "windows")]
 #[test]
 fn an_output_asio_driver_outranks_a_native_input() {
     let mut config = plain();
@@ -58,7 +68,6 @@ fn an_output_asio_driver_outranks_a_native_input() {
 
 /// Both sides on ASIO: the output variant still wins, and carries its own
 /// clsid.  `run_asio_output_bridge` turns the equal pair into a duplex run.
-#[cfg(target_os = "windows")]
 #[test]
 fn an_output_asio_driver_outranks_an_input_one() {
     let mut config = plain();
@@ -67,7 +76,6 @@ fn an_output_asio_driver_outranks_an_input_one() {
     assert_eq!(select(&config), Backend::AsioOutput(3));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_native_input_id_picks_the_native_client() {
     let mut config = plain();
@@ -75,7 +83,6 @@ fn a_native_input_id_picks_the_native_client() {
     assert_eq!(select(&config), Backend::LinuxNative);
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_native_output_id_picks_the_native_client() {
     let mut config = plain();
@@ -84,11 +91,48 @@ fn a_native_output_id_picks_the_native_client() {
 }
 
 /// The bare ALSA plugin id is not a native node; it stays with cpal.
-#[cfg(target_os = "linux")]
 #[test]
 fn the_alsa_pipewire_shim_is_not_native() {
     let mut config = plain();
     config.output_id = "pipewire".into();
     config.input_id = Some("alsa:pipewire".into());
     assert_eq!(select(&config), Backend::Cpal);
+}
+
+/// The id form holds on every target: a prefix with no node name names
+/// nothing, and a node called "pipewire" is the bare plugin id.
+#[test]
+fn a_pipewire_prefix_without_a_node_is_not_native() {
+    let mut config = plain();
+    config.output_id = "pipewire:".into();
+    assert_eq!(select(&config), Backend::Cpal);
+
+    config.output_id = "pipewire:pipewire".into();
+    assert_eq!(select(&config), Backend::Cpal);
+}
+
+/// The ASIO arms this platform does not build report that instead of opening
+/// anything: an arm that silently fell back would bridge on the wrong host.
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn the_asio_arms_are_not_here() {
+    let shared = Arc::new(Shared::new(48_000));
+    let stop = Arc::new(AtomicBool::new(false));
+    for backend in [Backend::AsioOutput(1), Backend::AsioInput(2)] {
+        let error = backend
+            .run(&plain(), Arc::clone(&shared), Arc::clone(&stop))
+            .unwrap_err();
+        assert!(error.contains("not available on this platform"), "{error}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_native_arm_is_not_here() {
+    let shared = Arc::new(Shared::new(48_000));
+    let stop = Arc::new(AtomicBool::new(false));
+    let error = Backend::LinuxNative
+        .run(&plain(), shared, stop)
+        .unwrap_err();
+    assert!(error.contains("not available on this platform"), "{error}");
 }

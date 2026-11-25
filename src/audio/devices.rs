@@ -415,7 +415,7 @@ fn still_listed(device: &DeviceItem, ids: &std::collections::HashSet<String>) ->
     // the registry round-trip below refreshes the list. A failed round-trip
     // leaves the previous nodes in place.
     #[cfg(target_os = "linux")]
-    if super::linux::native::is_native_id(&device.id) {
+    if is_native_id(&device.id) {
         return true;
     }
     false
@@ -595,6 +595,28 @@ pub(crate) fn device_pcm_tag(device_id: &str) -> Option<String> {
     Some(plugin)
 }
 
+/// The host prefix a native PipeWire id carries.
+pub(crate) const NATIVE_PREFIX: &str = "pipewire:";
+
+/// The node name in a native PipeWire id (`pipewire:{node.name}`).
+///
+/// This is the only copy of the native-id grammar; `linux::native` re-exports
+/// it, because this file is the copy that compiles on every platform.  The
+/// bare ALSA plugin id `alsa:pipewire` does not match.
+pub(crate) fn node_name(device_id: &str) -> Option<&str> {
+    let name = device_id.strip_prefix(NATIVE_PREFIX)?;
+    if name.is_empty() || name.eq_ignore_ascii_case("pipewire") {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Whether `device_id` names a real PipeWire source or sink.
+pub(crate) fn is_native_id(device_id: &str) -> bool {
+    node_name(device_id).is_some()
+}
+
 /// Menu text for one device. When several rows share a display name and a
 /// backend, the PCM plugin is what makes them different.
 pub(crate) fn device_choice_label(device: &DeviceItem, peers: &[DeviceItem]) -> String {
@@ -604,10 +626,8 @@ pub(crate) fn device_choice_label(device: &DeviceItem, peers: &[DeviceItem]) -> 
             && other.backend.eq_ignore_ascii_case(&device.backend)
     });
     if shared_name {
-        if let Some(node) = device.id.strip_prefix("pipewire:") {
-            if !node.is_empty() {
-                return format!("{} · {node}", device.name);
-            }
+        if let Some(node) = node_name(&device.id) {
+            return format!("{} · {node}", device.name);
         }
         if let Some(tag) = device_pcm_tag(&device.id) {
             return format!("{} · {tag}", device.name);
@@ -661,13 +681,13 @@ fn refresh_native_presence(inventory: &mut Inventory) {
         .asio
         .iter()
         .chain(inventory.inputs.iter())
-        .filter(|device| device.preferred && super::linux::native::is_native_id(&device.id))
+        .filter(|device| device.preferred && is_native_id(&device.id))
         .map(|device| device.id.clone())
         .collect();
     let preferred_outputs: std::collections::HashSet<String> = inventory
         .outputs
         .iter()
-        .filter(|device| device.preferred && super::linux::native::is_native_id(&device.id))
+        .filter(|device| device.preferred && is_native_id(&device.id))
         .map(|device| device.id.clone())
         .collect();
     for list in [
@@ -675,7 +695,7 @@ fn refresh_native_presence(inventory: &mut Inventory) {
         &mut inventory.inputs,
         &mut inventory.outputs,
     ] {
-        list.retain(|device| !super::linux::native::is_native_id(&device.id));
+        list.retain(|device| !is_native_id(&device.id));
     }
     if !nodes.sources.is_empty() {
         for list in [&mut inventory.asio, &mut inventory.inputs] {

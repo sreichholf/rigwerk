@@ -122,7 +122,7 @@ impl RigWerkApp {
                 Vec::new()
             }
         };
-        candidates.sort_by_key(|candidate| candidate.1.to_lowercase());
+        candidates.sort_by_cached_key(|candidate| candidate.1.to_lowercase());
 
         let section = if pw_clock {
             "PipeWire"

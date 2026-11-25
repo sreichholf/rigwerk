@@ -21,6 +21,10 @@
 //! `hw:` and `plughw:` are untouched: they are the exclusive ALSA path. When
 //! the server is not running, listing fails and the ALSA `pipewire` device
 //! stays in the menu so something can still be opened.
+//!
+//! The `pipewire:{node.name}` id grammar is `devices`'s; this module
+//! re-exports it, because that file is the copy that compiles on every
+//! platform.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -49,7 +53,10 @@ use crate::audio::types::{DeviceItem, OutputMode, StartConfig};
 use super::alsa::{alsa_pcm_is_default, alsa_pcm_name};
 use super::pipewire::{self, LOW_QUANTUM};
 
-const PREFIX: &str = "pipewire:";
+// The id grammar is `devices`'s, because that file compiles on every platform
+// while this module is Linux only.
+pub(crate) use super::super::devices::{is_native_id, node_name, NATIVE_PREFIX};
+
 const CAPTURE_NODE: &str = "RigWerk Capture";
 const PLAYBACK_NODE: &str = "RigWerk Playback";
 /// Extra output streams are named this plus the slot number from 1.
@@ -69,20 +76,6 @@ pub(crate) struct NativeNodes {
 pub(crate) enum EndpointKind {
     Source,
     Sink,
-}
-
-/// `pipewire:{node.name}`. The bare ALSA plugin id `alsa:pipewire` does not match.
-pub(crate) fn node_name(device_id: &str) -> Option<&str> {
-    let name = device_id.strip_prefix(PREFIX)?;
-    if name.is_empty() || name.eq_ignore_ascii_case("pipewire") {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-pub(crate) fn is_native_id(device_id: &str) -> bool {
-    node_name(device_id).is_some()
 }
 
 /// The ALSA `pipewire` plugin and a PipeWire-backed `default` PCM.
@@ -223,7 +216,7 @@ pub(crate) fn list_nodes() -> Result<NativeNodes, String> {
             continue;
         }
         let item = DeviceItem {
-            id: format!("{PREFIX}{}", node.name),
+            id: format!("{NATIVE_PREFIX}{}", node.name),
             name: node.description,
             backend: "PIPEWIRE".to_owned(),
             channels: node.channels,

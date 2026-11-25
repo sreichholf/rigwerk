@@ -9,8 +9,11 @@
 //! purpose: only the ASIO output and ASIO duplex paths set it themselves, so
 //! the native PipeWire path, the ASIO input path and cpal rely on that line.
 //!
-//! The arms are gated to the platforms that have them; see "Backend
-//! selection" in `docs/open-items.md`.
+//! Every arm exists on every target, so the table is whole everywhere; an arm
+//! whose backend is not built on this target returns an error instead of
+//! opening anything.  So a config that carries an ASIO clsid where there is no
+//! ASIO errors instead of falling through to cpal: a clsid comes from a Windows
+//! registry entry, so it cannot legitimately appear anywhere else.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -19,7 +22,7 @@ use std::time::Duration;
 
 use cpal::traits::StreamTrait;
 
-use super::devices::pick_input_config;
+use super::devices::{is_native_id, pick_input_config};
 use super::extra_output::ExtraOutputOutputs;
 use super::input::{make_input_stream, open_input_device};
 use super::output::open_output;
@@ -39,27 +42,25 @@ pub(crate) fn rate_path(input: u32, output: u32) -> String {
 }
 
 /// Which backend a start goes to.  The variant carries the selection's
-/// result, so `run` dispatches without reading `config` again.
+/// result, so `run` dispatches without reading `config` again.  Every variant
+/// exists on every target; an arm whose backend is not built there returns an
+/// error.
 #[derive(Debug, PartialEq, Eq)]
 enum Backend {
-    #[cfg(target_os = "windows")]
     AsioOutput(u128),
-    #[cfg(target_os = "windows")]
     AsioInput(u128),
-    #[cfg(target_os = "linux")]
     LinuxNative,
     Cpal,
 }
 
 /// The backend `config` selects.  Its order is the precedence: ASIO output
 /// first (one driver can carry both directions), then ASIO input, then a
-/// native `pipewire:` id on either side, then cpal.
+/// native `pipewire:` id on either side, then cpal.  It reads nothing but
+/// `config`, so it is the same table on every target.
 fn select(config: &StartConfig) -> Backend {
-    #[cfg(target_os = "windows")]
     if let Some(output_clsid) = config.output_asio_clsid {
         return Backend::AsioOutput(output_clsid);
     }
-    #[cfg(target_os = "windows")]
     if let Some(clsid) = config.asio_clsid {
         // The ASIO driver owns the clock.  Ask it for its real rate first and
         // let the output follow or convert from that rate.
@@ -69,13 +70,7 @@ fn select(config: &StartConfig) -> Backend {
     // A `pipewire:{node.name}` id is a real PipeWire source or sink. The
     // native client links RigWerk's own nodes to it. Mixed bridges still open
     // the other side through cpal.
-    #[cfg(target_os = "linux")]
-    if config
-        .input_id
-        .as_deref()
-        .is_some_and(super::linux::native::is_native_id)
-        || super::linux::native::is_native_id(&config.output_id)
-    {
+    if config.input_id.as_deref().is_some_and(is_native_id) || is_native_id(&config.output_id) {
         return Backend::LinuxNative;
     }
     Backend::Cpal
@@ -93,10 +88,25 @@ impl Backend {
             Self::AsioOutput(output_clsid) => {
                 run_asio_output_bridge(config, output_clsid, shared, stop)
             }
+            #[cfg(not(target_os = "windows"))]
+            Self::AsioOutput(_) => Err(
+                "ASIO output is not available on this platform. Pick a system output instead."
+                    .to_owned(),
+            ),
             #[cfg(target_os = "windows")]
             Self::AsioInput(clsid) => run_asio_bridge(config, clsid, shared, stop),
+            #[cfg(not(target_os = "windows"))]
+            Self::AsioInput(_) => Err(
+                "ASIO input is not available on this platform. Pick a system input instead."
+                    .to_owned(),
+            ),
             #[cfg(target_os = "linux")]
             Self::LinuxNative => super::linux::native::run(config, shared, stop),
+            #[cfg(not(target_os = "linux"))]
+            Self::LinuxNative => Err(
+                "Native PipeWire is not available on this platform. Pick a system device instead."
+                    .to_owned(),
+            ),
             Self::Cpal => run_cpal(config, shared, stop),
         }
     }

@@ -546,127 +546,67 @@ impl RigWerkApp {
 }
 
 impl RigWerkApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
-        // eframe builds the app on its UI thread, which is the thread that
-        // services CLAP plugins; record it before any plugin can load.
-        crate::audio::clap::mark_main_thread();
-        // A screenshot run must be reproducible and must never open audio
-        // hardware, so it starts from defaults instead of saved settings.
-        let raw_preferences = if screenshot.is_some() {
-            None
-        } else {
-            cc.storage
-                .and_then(|storage| storage.get_string(PREFERENCES_KEY))
-        };
-        let backup_key = preferences_backup_key(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs())
-                .unwrap_or_default(),
-        );
-        let loaded = load_preferences(raw_preferences.as_deref(), &backup_key);
-        let stored: Option<Preferences> = loaded.preferences;
-        let preferences = stored.clone().unwrap_or_default();
-        // The screenshot path is a headless check, not a practice session.
-        // Keep real drivers closed there even if auto-start was left on.
-        let screenshot_mode = screenshot.is_some();
-        // Paint the shell before hosts are probed. The first real inventory
-        // arrives on the scan thread; restore and auto-start wait for it.
-        let inventory = audio::placeholder_inventory();
-        let inventory_fingerprint = inventory_fingerprint(&inventory);
-        let restored = restore_saved_devices(&inventory, &preferences);
-        let asio_idx = restored.asio_idx;
-        let input_idx = restored.input_idx;
-        let output_idx = restored.output_idx;
-        let use_asio_input = match &stored {
-            Some(saved) => saved.use_asio_input,
-            None => true,
-        };
-        let engine = AudioEngine::new(48_000);
-        let sessions = unique_sessions(&preferences.sessions);
-        let selected_session = preferences
-            .selected_session
-            .filter(|index| *index < sessions.len());
-        let page = restored_page(&preferences, screenshot_mode);
-        let tuner = tuner::TunerState::new(&preferences, screenshot_mode);
-
-        let mut app = Self {
-            page,
-            last_page: page,
-            engine,
-            tuner,
-            inventory,
-            asio_idx,
-            input_idx,
-            output_idx,
-            use_asio_input,
-            // Rates, buffers, gains and the bridge buffer were checked in
-            // `load_preferences` (`validate_bridge_settings`). The defaults
-            // used when nothing was stored are already inside those ranges.
-            sample_rate: preferences.sample_rate,
-            buffer_size: preferences.buffer_size,
-            input_gain: preferences.input_gain,
-            output_gain: preferences.output_gain,
-            input_channels: preferences.input_channels,
-            mute: preferences.mute,
-            metronome_running: preferences.metronome_running,
-            metronome_bpm: preferences.metronome_bpm,
-            metronome_rhythm: preferences.metronome_rhythm,
-            metronome_level_db: preferences.metronome_level_db,
-            // `ui_size` was clamped in `load_preferences`.
-            theme: preferences.theme,
-            ui_size: preferences.ui_size,
-            effect_double_click: preferences.effect_double_click,
-            last_click_mask: preferences.last_click_mask,
-            chrome: screen::Chrome::at_launch(preferences.sheet_height),
+    /// The app before preferences, devices or a run: default settings, empty
+    /// device lists and no held identity.
+    ///
+    /// This is the one `RigWerkApp` literal.  `new` adds the placeholder rows
+    /// and the screenshot job before it applies the stored preferences;
+    /// `blank_app` takes the base as it is and preinstalls path 0.
+    ///
+    /// The literal retypes the defaults in [`Preferences::default`] (rate,
+    /// buffer, gains, metronome), so the two must be kept in step: a test
+    /// that stands on `blank_app` reads these values, not the preference
+    /// ones.
+    fn base() -> Self {
+        Self {
+            page: Page::Console,
+            last_page: Page::Console,
+            engine: AudioEngine::new(48_000),
+            tuner: tuner::TunerState::new(&Preferences::default(), false),
+            inventory: Inventory::default(),
+            asio_idx: 0,
+            input_idx: 0,
+            output_idx: 0,
+            use_asio_input: true,
+            sample_rate: 48_000,
+            buffer_size: 128,
+            input_gain: 0.0,
+            output_gain: -1.5,
+            input_channels: [true, true],
+            mute: false,
+            metronome_running: false,
+            metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
+            metronome_rhythm: crate::audio::ClickRhythm::FourFour,
+            metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
+            theme: appearance::ThemeChoice::System,
+            ui_size: appearance::UI_SIZE_DEFAULT,
+            effect_double_click: settings::EffectOpen::Editor,
+            last_click_mask: 0,
+            chrome: screen::Chrome::default(),
             metronome_pushed: None,
-            drift: preferences.drift,
-            low_latency_output: {
-                let mode = resolved_wasapi_output_mode(&preferences);
-                if cfg!(target_os = "windows") {
-                    matches!(mode, crate::audio::WasapiOutputMode::RealStyle)
-                } else {
-                    preferences.low_latency_output
-                }
-            },
-            wasapi_output_mode: resolved_wasapi_output_mode(&preferences),
-            output_rate: preferences.output_rate,
-            output_buffer: preferences.output_buffer,
-            output_tab_low_latency: preferences.output_tab_low_latency,
-            bridge_buffer_mode: bridge_buffer_from_pref(preferences.bridge_buffer_mode),
-            bridge_buffer_ms: preferences.bridge_buffer_ms,
-            // Filled by `install_paths` below.
+            drift: true,
+            low_latency_output: true,
+            wasapi_output_mode: WasapiOutputMode::RealStyle,
+            output_rate: 0,
+            output_buffer: 128,
+            output_tab_low_latency: false,
+            bridge_buffer_mode: BufferMode::Auto,
+            bridge_buffer_ms: 10.0,
+            // `new` installs the saved paths over this.
             paths: std::array::from_fn(|_| None),
             path_order: Vec::new(),
             selected_path: 0,
             output_trim_origins: [output_devices::OutputTrimOrigin::None; MAX_EXTRA_OUTPUTS + 1],
-            clock_output: preferences.clock_output.sanitized(),
-            extra_outputs: {
-                let mut extra_outputs: Vec<_> = preferences
-                    .extra_outputs
-                    .iter()
-                    .cloned()
-                    .map(ExtraOutputPref::sanitized)
-                    .collect();
-                extra_outputs.truncate(crate::audio::MAX_EXTRA_OUTPUTS);
-                extra_outputs
-            },
+            clock_output: OutputDeviceSettings::default(),
+            extra_outputs: Vec::new(),
             loudness_measurement: None,
-            match_paths: preferences.match_paths.sanitized(),
+            match_paths: match_paths::MatchPathsSettings::default(),
             match_paths_reference: None,
             match_paths_result: None,
             match_paths_ticks: Vec::new(),
             match_paths_status: None,
-            eq_edit: if preferences.eq_edit == 1 {
-                EqSlot::Post
-            } else {
-                EqSlot::Pre
-            },
-            chain_selected: chain::ChainSelection::from_eq_edit(if preferences.eq_edit == 1 {
-                EqSlot::Post
-            } else {
-                EqSlot::Pre
-            }),
+            eq_edit: EqSlot::Pre,
+            chain_selected: chain::ChainSelection::PreEq,
             routing_device: 0,
             routing_preset_path: None,
             routing_last_layout: None,
@@ -691,9 +631,9 @@ impl RigWerkApp {
             snapshot: Snapshot::default(),
             #[cfg(target_os = "linux")]
             quantum: None,
-            session_name: preferences.session_name.clone(),
-            record_folder: preferences.record_folder.clone(),
-            nam_folder: preferences.amp_folder.clone(),
+            session_name: "My guitar rig".to_owned(),
+            record_folder: String::new(),
+            nam_folder: String::new(),
             nam_catalog: nam::NamCatalog::default(),
             nam_rescan: true,
             native_window: None,
@@ -701,25 +641,22 @@ impl RigWerkApp {
             nam_loader: None,
             nam_confirm: None,
             nam_warning: None,
-            cab_folder: preferences.cab_folder.clone(),
+            cab_folder: String::new(),
             cab_catalog: cab::CabCatalog::default(),
             cab_rescan: true,
             cab_paste_down: false,
-            record_click: preferences.record_click,
-            sessions,
-            selected_session,
+            record_click: false,
+            sessions: Vec::new(),
+            selected_session: None,
             pending_delete: None,
             log: Vec::new(),
             started: Instant::now(),
-            screenshot: screenshot.map(|path| ScreenshotJob {
-                path,
-                requested: false,
-            }),
+            screenshot: None,
             frames: 0,
             show_about: false,
-            auto_start_bridge: preferences.auto_start_bridge && !screenshot_mode,
+            auto_start_bridge: false,
             last_meter_tick: Instant::now(),
-            inventory_fingerprint,
+            inventory_fingerprint: 0,
             last_device_scan: Instant::now(),
             device_scan: None,
             manual_scan: false,
@@ -735,12 +672,12 @@ impl RigWerkApp {
             plugin_gui: None,
             ui_scale: 1.0,
             plugin_param_filter: String::new(),
-            preferences_backup: loaded.backup,
-            measured_latency: preferences.measured_latency.clone(),
+            preferences_backup: None,
+            measured_latency: None,
             calibration: calibration::CalibrationUi::default(),
-            asio_held: restored.asio_held,
-            input_held: restored.input_held,
-            output_held: restored.output_held,
+            asio_held: None,
+            input_held: None,
+            output_held: None,
             input_misses: 0,
             output_misses: 0,
             #[cfg(target_os = "linux")]
@@ -749,12 +686,214 @@ impl RigWerkApp {
             quantum_checked_key: None,
             #[cfg(target_os = "linux")]
             quantum_live_at: Instant::now(),
-            startup: Some(StartupGate {
-                preferences: preferences.clone(),
-            }),
+            startup: None,
             #[cfg(debug_assertions)]
             rt_allocations_logged: false,
+        }
+    }
+
+    /// Writes stored settings into an app from [`Self::base`]: the start page,
+    /// the devices, the rates and gains, the mixer settings and the tuner.
+    ///
+    /// The device restore reads `self.inventory`, and the screenshot flag
+    /// picks the page, the tuner demo and whether the bridge may start, so
+    /// `new` sets both before this runs.  `blank_app` never calls it, so a
+    /// test starts from the base and leaves the engine untouched.
+    fn apply_preferences(&mut self, preferences: &Preferences) {
+        // Every field is named so a new preference is a compile error until it
+        // has a destination here.  The `_name` bindings are deliberate: those
+        // fields belong to `new` or `save_to`, not to the running app.
+        let Preferences {
+            // Checked in `load_preferences`; never mirrored on the app.
+            schema_version: _schema_version,
+            // Bound unused; read through `preferences` below.
+            auto_start_bridge: _,
+            sessions: _,
+            session_name: _,
+            page: _,
+            eq_edit: _,
+            output_tab_low_latency: _,
+            selected_session: _,
+            // `restore_saved_devices` below reads these nine.
+            asio_name: _,
+            asio_id: _,
+            asio_backend: _,
+            input_name: _,
+            input_id: _,
+            input_backend: _,
+            output_name: _,
+            output_id: _,
+            output_backend: _,
+            use_asio_input: _,
+            sample_rate: _,
+            buffer_size: _,
+            input_gain: _,
+            output_gain: _,
+            input_channels: _,
+            // Path 1 from before paths existed: `new` folds these in through
+            // `path_prefs`.
+            output_channels: _output_channels,
+            mono: _mono,
+            mute: _,
+            drift: _,
+            low_latency_output: _,
+            wasapi_output_mode: _,
+            routes: _routes,
+            output_rate: _,
+            output_buffer: _,
+            bridge_buffer_mode: _,
+            bridge_buffer_ms: _,
+            eq: _eq,
+            eq_post: _eq_post,
+            gate: _gate,
+            plugins: _plugins,
+            // `install_paths`, called by `new`.
+            paths: _paths,
+            selected_path: _selected_path,
+            match_paths: _,
+            clock_output: _,
+            extra_outputs: _,
+            measured_latency: _,
+            // `TunerState::new` reads these.
+            tuner_tuning: _,
+            tuner_reference_hz: _,
+            tuner_channel: _,
+            tuner_display: _,
+            tuner_listen: _,
+            tuner_auto_mute: _,
+            tuner_tolerance: _,
+            record_folder: _,
+            amp_folder: _,
+            cab_folder: _,
+            record_click: _,
+            metronome_running: _,
+            metronome_bpm: _,
+            metronome_rhythm: _,
+            metronome_level_db: _,
+            theme: _,
+            ui_size: _,
+            // `new` copies these into the effect browser.
+            effect_favourites: _effect_favourites,
+            effect_recent: _effect_recent,
+            // `Chrome::at_launch` below reads it.
+            sheet_height: _,
+            effect_double_click: _,
+            last_click_mask: _,
+        } = preferences;
+        let screenshot = self.screenshot.is_some();
+        let restored = restore_saved_devices(&self.inventory, preferences);
+        let wasapi_output_mode = resolved_wasapi_output_mode(preferences);
+        // Rates, buffers, gains and the bridge buffer were checked in
+        // `load_preferences` (`validate_bridge_settings`). The defaults
+        // used when nothing was stored are already inside those ranges.
+        self.page = restored_page(preferences, screenshot);
+        self.last_page = self.page;
+        self.tuner = tuner::TunerState::new(preferences, screenshot);
+        self.asio_idx = restored.asio_idx;
+        self.input_idx = restored.input_idx;
+        self.output_idx = restored.output_idx;
+        self.asio_held = restored.asio_held;
+        self.input_held = restored.input_held;
+        self.output_held = restored.output_held;
+        self.use_asio_input = preferences.use_asio_input;
+        self.sample_rate = preferences.sample_rate;
+        self.buffer_size = preferences.buffer_size;
+        self.input_gain = preferences.input_gain;
+        self.output_gain = preferences.output_gain;
+        self.input_channels = preferences.input_channels;
+        self.mute = preferences.mute;
+        self.metronome_running = preferences.metronome_running;
+        self.metronome_bpm = preferences.metronome_bpm;
+        self.metronome_rhythm = preferences.metronome_rhythm;
+        self.metronome_level_db = preferences.metronome_level_db;
+        // `ui_size` was clamped in `load_preferences`.
+        self.theme = preferences.theme;
+        self.ui_size = preferences.ui_size;
+        self.effect_double_click = preferences.effect_double_click;
+        self.last_click_mask = preferences.last_click_mask;
+        self.chrome = screen::Chrome::at_launch(preferences.sheet_height);
+        self.drift = preferences.drift;
+        self.low_latency_output = if cfg!(target_os = "windows") {
+            matches!(wasapi_output_mode, WasapiOutputMode::RealStyle)
+        } else {
+            preferences.low_latency_output
         };
+        self.wasapi_output_mode = wasapi_output_mode;
+        self.output_rate = preferences.output_rate;
+        self.output_buffer = preferences.output_buffer;
+        self.output_tab_low_latency = preferences.output_tab_low_latency;
+        self.bridge_buffer_mode = bridge_buffer_from_pref(preferences.bridge_buffer_mode);
+        self.bridge_buffer_ms = preferences.bridge_buffer_ms;
+        self.clock_output = preferences.clock_output.sanitized();
+        let mut extra_outputs: Vec<_> = preferences
+            .extra_outputs
+            .iter()
+            .cloned()
+            .map(ExtraOutputPref::sanitized)
+            .collect();
+        extra_outputs.truncate(crate::audio::MAX_EXTRA_OUTPUTS);
+        self.extra_outputs = extra_outputs;
+        self.match_paths = preferences.match_paths.sanitized();
+        let eq_edit = if preferences.eq_edit == 1 {
+            EqSlot::Post
+        } else {
+            EqSlot::Pre
+        };
+        self.eq_edit = eq_edit;
+        self.chain_selected = chain::ChainSelection::from_eq_edit(eq_edit);
+        self.session_name = preferences.session_name.clone();
+        self.record_folder = preferences.record_folder.clone();
+        self.nam_folder = preferences.amp_folder.clone();
+        self.cab_folder = preferences.cab_folder.clone();
+        self.record_click = preferences.record_click;
+        let sessions = unique_sessions(&preferences.sessions);
+        self.selected_session = preferences
+            .selected_session
+            .filter(|index| *index < sessions.len());
+        self.sessions = sessions;
+        self.auto_start_bridge = preferences.auto_start_bridge && !screenshot;
+        self.measured_latency = preferences.measured_latency.clone();
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
+        // eframe builds the app on its UI thread, which is the thread that
+        // services CLAP plugins; record it before any plugin can load.
+        crate::audio::clap::mark_main_thread();
+        // A screenshot run must be reproducible and must never open audio
+        // hardware, so it starts from defaults instead of saved settings.
+        let raw_preferences = if screenshot.is_some() {
+            None
+        } else {
+            cc.storage
+                .and_then(|storage| storage.get_string(PREFERENCES_KEY))
+        };
+        let backup_key = preferences_backup_key(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default(),
+        );
+        let loaded = load_preferences(raw_preferences.as_deref(), &backup_key);
+        let preferences = loaded.preferences.clone().unwrap_or_default();
+        // The screenshot path is a headless check, not a practice session.
+        // Keep real drivers closed there even if auto-start was left on.
+        let screenshot_mode = screenshot.is_some();
+        let mut app = Self::base();
+        // Paint the shell before hosts are probed. The first real inventory
+        // arrives on the scan thread; restore and auto-start wait for it.
+        // The restore reads these rows, and the page and the auto-start read
+        // the screenshot flag, so both go in before the preferences do.
+        app.inventory = audio::placeholder_inventory();
+        app.inventory_fingerprint = inventory_fingerprint(&app.inventory);
+        app.screenshot = screenshot.map(|path| ScreenshotJob {
+            path,
+            requested: false,
+        });
+        app.apply_preferences(&preferences);
+        app.preferences_backup = loaded.backup;
+        app.startup = Some(StartupGate {
+            preferences: preferences.clone(),
+        });
         // egui restored its own memory before this; the saved preference wins.
         // Track B: the effect browser's starred and recent effects.
         app.plugin_browser.favourites = preferences.effect_favourites.clone();
@@ -882,137 +1021,14 @@ impl RigWerkApp {
 /// An app with empty device lists and no held identity, for tests.
 #[cfg(test)]
 pub(crate) fn blank_app() -> RigWerkApp {
-    RigWerkApp {
-        page: Page::Console,
-        last_page: Page::Console,
-        engine: AudioEngine::new(48_000),
-        tuner: tuner::TunerState::new(&Preferences::default(), false),
-        inventory: Inventory::default(),
-        asio_idx: 0,
-        input_idx: 0,
-        output_idx: 0,
-        use_asio_input: true,
-        sample_rate: 48_000,
-        buffer_size: 128,
-        input_gain: 0.0,
-        output_gain: -1.5,
-        input_channels: [true, true],
-        mute: false,
-        metronome_running: false,
-        metronome_bpm: crate::audio::METRONOME_BPM_DEFAULT,
-        metronome_rhythm: crate::audio::ClickRhythm::FourFour,
-        metronome_level_db: crate::audio::CLICK_LEVEL_DEFAULT_DB,
-        theme: appearance::ThemeChoice::System,
-        ui_size: appearance::UI_SIZE_DEFAULT,
-        effect_double_click: settings::EffectOpen::Editor,
-        last_click_mask: 0,
-        chrome: screen::Chrome::default(),
-        metronome_pushed: None,
-        drift: true,
-        low_latency_output: true,
-        wasapi_output_mode: WasapiOutputMode::RealStyle,
-        output_rate: 0,
-        output_buffer: 128,
-        output_tab_low_latency: false,
-        bridge_buffer_mode: BufferMode::Auto,
-        bridge_buffer_ms: 10.0,
-        paths: std::array::from_fn(|slot| (slot == 0).then(paths::SignalPath::default)),
-        path_order: vec![0],
-        selected_path: 0,
-        output_trim_origins: [output_devices::OutputTrimOrigin::None; MAX_EXTRA_OUTPUTS + 1],
-        clock_output: OutputDeviceSettings::default(),
-        extra_outputs: Vec::new(),
-        loudness_measurement: None,
-        match_paths: match_paths::MatchPathsSettings::default(),
-        match_paths_reference: None,
-        match_paths_result: None,
-        match_paths_ticks: Vec::new(),
-        match_paths_status: None,
-        eq_edit: EqSlot::Pre,
-        chain_selected: chain::ChainSelection::PreEq,
-        routing_device: 0,
-        routing_preset_path: None,
-        routing_last_layout: None,
-        issue_state: Default::default(),
-        plugin_effect_at: None,
-        meter_in_l: 0.0,
-        meter_in_r: 0.0,
-        meter_out_l: 0.0,
-        meter_out_r: 0.0,
-        peak_in_l: 0.0,
-        peak_in_r: 0.0,
-        peak_out_l: 0.0,
-        peak_out_r: 0.0,
-        meter_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
-        peak_out_channels: [0.0; MAX_OUTPUT_CHANNELS],
-        meter_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
-        meter_paths: [[0.0; 2]; MAX_PATHS],
-        peak_paths: [[0.0; 2]; MAX_PATHS],
-        peak_extra_output_channels: [[0.0; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
-        scope_in: vec![0.0; audio::SCOPE_LEN],
-        scope_out: vec![0.0; audio::SCOPE_LEN],
-        snapshot: Snapshot::default(),
-        #[cfg(target_os = "linux")]
-        quantum: None,
-        session_name: "My guitar rig".to_owned(),
-        record_folder: String::new(),
-        nam_folder: String::new(),
-        nam_catalog: nam::NamCatalog::default(),
-        nam_rescan: false,
-        native_window: None,
-        nam_paste_down: false,
-        nam_loader: None,
-        nam_confirm: None,
-        nam_warning: None,
-        cab_folder: String::new(),
-        cab_catalog: cab::CabCatalog::default(),
-        cab_rescan: false,
-        cab_paste_down: false,
-        record_click: false,
-        sessions: Vec::new(),
-        selected_session: None,
-        pending_delete: None,
-        log: Vec::new(),
-        started: Instant::now(),
-        screenshot: None,
-        frames: 0,
-        show_about: false,
-        auto_start_bridge: false,
-        last_meter_tick: Instant::now(),
-        inventory_fingerprint: 0,
-        last_device_scan: Instant::now(),
-        device_scan: None,
-        manual_scan: false,
-        bridge_signature: 0,
-        bridge_restart_pending: false,
-        driver_checked: false,
-        device_alert: None,
-        driver_probe: None,
-        driver_probe_job: None,
-        last_output_driver: None,
-        plugin_browser: plugins::PluginBrowser::default(),
-        plugin_editor: None,
-        plugin_gui: None,
-        ui_scale: 1.0,
-        plugin_param_filter: String::new(),
-        preferences_backup: None,
-        measured_latency: None,
-        calibration: calibration::CalibrationUi::default(),
-        asio_held: None,
-        input_held: None,
-        output_held: None,
-        input_misses: 0,
-        output_misses: 0,
-        #[cfg(target_os = "linux")]
-        period_cache: None,
-        #[cfg(target_os = "linux")]
-        quantum_checked_key: None,
-        #[cfg(target_os = "linux")]
-        quantum_live_at: Instant::now(),
-        startup: None,
-        #[cfg(debug_assertions)]
-        rt_allocations_logged: false,
-    }
+    let mut app = RigWerkApp::base();
+    // Tests build their own chain: path 0 is there, slot 1 is not, and no
+    // folder is scanned until a test asks for it.
+    app.paths = std::array::from_fn(|slot| (slot == 0).then(paths::SignalPath::default));
+    app.path_order = vec![0];
+    app.nam_rescan = false;
+    app.cab_rescan = false;
+    app
 }
 
 #[cfg(test)]

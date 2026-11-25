@@ -2,6 +2,7 @@ use super::{
     device_list_scroll_height, device_matches_filter, device_row, filter_group, DEVICE_ROW_H,
     DEVICE_SCROLL_AFTER,
 };
+use crate::audio::rt_guard::RtGuard;
 use crate::audio::DeviceItem;
 use crate::ui::theme::TEAL;
 use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
@@ -132,13 +133,50 @@ fn device_matches_filter_does_not_keep_a_hidden_selected_name() {
 
 #[test]
 fn filter_group_skips_the_pinned_index_and_applies_search() {
-    let devices = vec![
-        (0, item("Valeton")),
-        (1, item("Scarlett")),
-        (2, item("Analog In")),
-    ];
-    let peers: Vec<_> = devices.iter().map(|(_, device)| device.clone()).collect();
-    let shown = filter_group(&devices, &peers, 0, "a");
-    let indices: Vec<_> = shown.iter().map(|(index, _)| *index).collect();
+    let devices = vec![item("Valeton"), item("Scarlett"), item("Analog In")];
+    let rows: Vec<(usize, &DeviceItem)> = devices.iter().enumerate().collect();
+    let shown = filter_group(&rows, &devices, 0, "a");
+    let indices: Vec<usize> = shown.iter().map(|(index, _)| *index).collect();
     assert_eq!(indices, vec![1, 2]);
+}
+
+/// The blank filter is the common case: `filter_group` allocates its result
+/// list and nothing per device.  `RtGuard` counts allocation events, not
+/// bytes, so this pins that a 50-device list costs one event like a 2-device
+/// list does: the label clone the old path made per device was one more.
+#[test]
+fn a_blank_filter_does_not_allocate_per_device() {
+    // Release builds count nothing, so the two are 0 there: a debug claim.
+    assert_eq!(allocations_for(2, ""), allocations_for(50, ""));
+}
+
+/// Whitespace takes the same pass-through: `filter_group` trims once and
+/// builds no label, instead of letting `device_matches_filter` trim per row.
+#[test]
+fn a_whitespace_filter_builds_no_label() {
+    assert_eq!(allocations_for(2, "   "), allocations_for(50, "   "));
+}
+
+/// Allocation events one `filter_group` call makes over `count` devices.  It
+/// also checks every row comes through with its own device, in list order.
+fn allocations_for(count: usize, filter: &str) -> usize {
+    let devices: Vec<DeviceItem> = (0..count)
+        .map(|index| item(&format!("Device {index}")))
+        .collect();
+    let rows: Vec<(usize, &DeviceItem)> = devices.iter().enumerate().collect();
+    let guard = RtGuard::enter();
+    let shown = filter_group(&rows, &devices, usize::MAX, filter);
+    let allocations = guard.allocations();
+    drop(guard);
+    let kept: Vec<(usize, &str)> = shown
+        .iter()
+        .map(|(index, device)| (*index, device.name.as_str()))
+        .collect();
+    let wanted: Vec<(usize, &str)> = devices
+        .iter()
+        .enumerate()
+        .map(|(index, device)| (index, device.name.as_str()))
+        .collect();
+    assert_eq!(kept, wanted);
+    allocations
 }

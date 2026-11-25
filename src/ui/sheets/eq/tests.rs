@@ -2,7 +2,9 @@ use eframe::egui;
 use egui::accesskit::Toggled;
 use egui::{pos2, vec2, Event, Modifiers, Pos2, Rect};
 
-use super::{dragged_band, hz_label, parse_value, q_hint, scrolled_q, slot_hint, Plot};
+use super::{
+    dragged_band, hz_label, parse_value, q_hint, sample, scrolled_q, slot_hint, Plot, CURVE_MIN_HZ,
+};
 use crate::app::{blank_app, RigWerkApp};
 use crate::audio::{BandKind, EqSettings, EqSlot, EQ_BANDS};
 use crate::ui::widgets::{accesskit_frame, format_db, node_named, run_frame, test_input};
@@ -197,6 +199,35 @@ fn the_plot_maps_frequency_and_gain_both_ways() {
         assert!((plot.db_at(plot.y_of(db)) - db).abs() < 1.0e-3);
     }
     assert_eq!(plot.y_of(0.0), plot.rect.center().y);
+}
+
+/// The curve is the response itself: every point sits where the plot's own
+/// mapping puts the frequency its step lands on, and the ends reach the edges.
+#[test]
+fn the_curve_points_are_the_response_on_the_plot() {
+    let plot = Plot {
+        rect: Rect::from_min_size(pos2(10.0, 20.0), vec2(600.0, 200.0)),
+    };
+    let mut eq = EqSettings::default();
+    eq.bands[1].gain_db = 6.0;
+    let points = sample(plot, |hz| eq.response_db(hz, 48_000));
+    assert_eq!(points.len(), 241);
+    assert!((points[0].x - plot.rect.left()).abs() < 0.01);
+    assert!((points[240].x - plot.rect.right()).abs() < 0.01);
+    // The middle step of a logarithmic span is the geometric mean and lands
+    // at the plot's centre.  A linear map would put 632 Hz near the left edge.
+    // 0.05 Hz is 8e-5 of 632 and 0.01 px is far below a pixel on this plot.
+    let middle = CURVE_MIN_HZ * (Plot::span() * 0.5).exp();
+    assert!(
+        (plot.hz_at(points[120].x) - middle).abs() < 0.05
+            && (points[120].x - plot.rect.center().x).abs() < 0.01,
+        "{:?}",
+        points[120]
+    );
+    for point in &points {
+        let db = eq.response_db(plot.hz_at(point.x), 48_000);
+        assert!((point.y - plot.y_of(db)).abs() < 0.5, "{point:?}");
+    }
 }
 
 #[test]

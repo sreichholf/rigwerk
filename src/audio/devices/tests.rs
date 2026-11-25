@@ -150,6 +150,20 @@ fn the_alsa_id_grammar_is_shared_and_pins_its_edges() {
 }
 
 #[test]
+fn the_native_id_grammar_is_shared_and_pins_its_edges() {
+    assert_eq!(
+        super::node_name("pipewire:alsa_input.usb-Valeton-GP5"),
+        Some("alsa_input.usb-Valeton-GP5")
+    );
+    assert!(super::is_native_id("pipewire:alsa_output.pci-0000_00_1f.3"));
+    // The ALSA plugin id and a bare prefix are not nodes.
+    assert!(!super::is_native_id("alsa:pipewire"));
+    assert!(!super::is_native_id("pipewire"));
+    assert!(!super::is_native_id("pipewire:"));
+    assert!(!super::is_native_id("pipewire:pipewire"));
+}
+
+#[test]
 fn direct_alsa_and_jack_are_low_latency() {
     let direct = device("ALSA:hw:CARD=0,DEV=0", "ALSA");
     assert!(is_low_latency_device(&direct, "PIPEWIRE"));
