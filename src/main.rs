@@ -15,6 +15,8 @@ mod tests;
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn parse_screenshot() -> Option<PathBuf> {
@@ -203,6 +205,10 @@ fn main() -> eframe::Result<()> {
     // Wayland compositors ignore client resize requests, so screenshot mode
     // drops Wayland and opens through X11/XWayland where the size sticks.
     let screenshot_mode = screenshot.is_some();
+    // A screenshot run writes its own ending here.  It starts at a sentinel
+    // no ending uses, so `main` can tell "recorded a failure" from "recorded
+    // nothing".
+    let screenshot_exit = Arc::new(AtomicI32::new(app::screenshot::NO_ENDING));
     if screenshot_mode {
         #[cfg(target_os = "linux")]
         {
@@ -242,9 +248,47 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    // The run's own deadlines are only checked while frames are drawn.
+    // Closing the window starts eframe's teardown, the app drop and the
+    // engine stop, none of which a frame bounds, and a driver can stall
+    // there.  This one thread outside the draw pass is the bound for the
+    // whole run.  The app opens no egui child viewport: sheets and drawers
+    // are panels in the root, plugin editors are native windows the app drop
+    // closes, so closing the root is every viewport there is.
+    if screenshot_mode {
+        std::thread::spawn(|| {
+            std::thread::sleep(app::screenshot::RUN_TIMEOUT);
+            eprintln!(
+                "Screenshot run did not finish within {} s.",
+                app::screenshot::RUN_TIMEOUT.as_secs()
+            );
+            std::process::exit(app::screenshot::EXIT_RUN_TIMED_OUT);
+        });
+    }
+
+    let app_exit = Arc::clone(&screenshot_exit);
+    let result = eframe::run_native(
         "RigWerk",
         options,
-        Box::new(move |cc| Ok(Box::new(app::RigWerkApp::new(cc, screenshot.clone())))),
-    )
+        Box::new(move |cc| {
+            Ok(Box::new(app::RigWerkApp::new(
+                cc,
+                screenshot.clone(),
+                app_exit.clone(),
+            )))
+        }),
+    );
+    if screenshot_mode {
+        // A recorded ending decides the status.  Without one the run never
+        // saved: a window that closed on its own counts as timed out, while a
+        // launch error keeps eframe's own report and failure.
+        let end = screenshot_exit.load(Ordering::Acquire);
+        if end != app::screenshot::NO_ENDING {
+            std::process::exit(end);
+        }
+        if result.is_ok() {
+            std::process::exit(app::screenshot::EXIT_RUN_TIMED_OUT);
+        }
+    }
+    result
 }
