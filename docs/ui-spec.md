@@ -1,30 +1,32 @@
-# UI rewrite spec
+# UI spec
 
-The plan for replacing the nine-page sidebar UI with one console, a tuner
-and a setup screen.  It is the contract for the rewrite PRs; once they have
-landed, this file is removed like the earlier plans (AGENTS.md).
+The layout spec and glossary for the console, the tuner and the setup screen.
+It is live: the UI follows it, and the glossary test in `src/tests.rs` mirrors
+section 2.1.
 
-Mockups: the "RigWerk UI concept" canvas (boards 1–7).  Where a mockup and
+Mockups: the "RigWerk UI concept" canvas (boards 1-7).  Where a mockup and
 this file disagree, this file wins.
 
 ## 0. Scope
 
-- `src/ui` is rewritten.
-- `src/app` gains the screen, sheet and drawer state, the theme and size
+The scope below is the plan the rewrite followed; the spec itself is kept.
+
+- `src/ui` was rewritten.
+- `src/app` gained the screen, sheet and drawer state, the theme and size
   preferences, issue anchors, session actions and the latency estimate in
   §3.5.  It loses no behaviour.
 - `src/audio` gets the renames in §2.4 and these additions, each a small PR
   before the UI that needs it:
-  - an `OutputMode` enum published with the opened output, so `app` stops
-    classifying mode strings (`app/latency.rs` matches `"REAL…"`,
-    `"Low latency…"` today).  This lands before any mode string is renamed,
-    or every stored measurement would read stale;
+  - an `OutputMode` enum published with the opened output, so `app` stopped
+    classifying mode strings (`app/latency.rs` now reads the output's start
+    flags and ASIO id).  This landed before any mode string was renamed, or
+    every stored measurement would have read stale;
   - the gate's gain reduction in the snapshot (for the gate sheet's meter);
   - a *paused* flag in `PluginView` (an effect restarting);
   - per extra output: its opened rate, driver buffer size and bridge-buffer
-    fill in the snapshot (today only dropouts, *missing* and
-    *at drift limit* are published).
-- `app::plugins` adds channel count and scan error to `PluginCandidate`.
+    fill in the snapshot, beside its dropouts, *missing* and *at drift
+    limit*.
+- `app::plugins` added channel count and scan error to `PluginCandidate`.
 - Not in scope: an EQ input spectrum (needs an analyser on the path; later),
   native file dialogs (no dialog crate; paths stay text fields).
 
@@ -118,8 +120,8 @@ reads.
 - Times: one decimal below 10 ms (`1.3 ms`), none from 10 ms (`13 ms`);
   trims two decimals (`+0.25 ms`).
 - Buffer sizes: `64 samples` in settings, `64 smp` in the status bar.
-- Rates: `48 kHz`, `44.1 kHz` (`rate_label` in `app/settings` prints
-  `48.0 kHz` today and changes).  Drift `+0.4 ppm`.  DSP load `61 %`.
+- Rates: `48 kHz`, `44.1 kHz` (`rate_label` in `app/settings` prints them
+  this way).  Drift `+0.4 ppm`.  DSP load `61 %`.
 - Sentence case everywhere.  Upper case only for channel numbers inside a
   grid header.
 
@@ -829,8 +831,8 @@ Nothing removes on a key: there is no undo.
 
 ## 9. Feature inventory
 
-Every control, reading and state the current UI has, and where it goes.
-The rewrite is done when every row has been checked in the running app.
+The inventory below is history: it records the old UI and where each
+control, reading and state went.  Every row was checked in the running app.
 
 ### Shell and frame
 
@@ -967,20 +969,24 @@ src/ui/
 
 ## 11. Screenshots and tests
 
+The screenshot flags and test moves below are history; the section records
+where they landed.
+
 - `RIGWERK_PAGE` takes `console`, `tuner`, `setup`.  `RIGWERK_SHEET`
   (`eq`, `gate`, `effect`, `path`, `output`, `scope`, `diagnostics`) and
   `RIGWERK_DRAWER` (`browser`, `issues`) replace `RIGWERK_MIXER_STAGE`.
   `RIGWERK_THEME` (`dark`, `light`) overrides the preference.
   `RIGWERK_SCREENSHOT_SIZE=<w>x<h>` *(new)* replaces the fixed 1440 × 1080
   (`app/screenshot.rs`).
-- README set: console (2 paths), console with 4 paths, console light, EQ
-  sheet, output sheet, browser, tuner, setup, at 1440 × 900; one console at
-  1040 × 700.  `docs/screenshots/README.md` is rewritten to match.
-- No test is deleted or weakened (AGENTS.md).  `src/ui` holds 90 tests
-  today.  Each moves with its code, or to `app` where the logic it checks
-  moves:
+- README set: console (2 paths), console with 4 paths, console light, NAM
+  sheet, cab sheet, EQ sheet, output sheet, match paths, browser, tuner,
+  setup, at 1440 x 900; one console at 1040 x 700.  The set and how to take
+  it again are in `docs/screenshots/README.md`.
+- No test is deleted or weakened (AGENTS.md).  The UI tests live in a
+  `tests.rs` beside each page and module.  Each moved with its code, or to
+  `app` where the logic it checks moved:
 
-| Tests today | Count | Moves to |
+| Old module | Count | Moved to |
 |---|---|---|
 | `pages/devices` | 2 | `pages/setup/devices` |
 | `pages/diagnostics` | 8 | `sheets/diagnostics` |
@@ -1000,16 +1006,17 @@ src/ui/
 - New tests: density steps, chain scroll keeping the selection visible,
   theme contrast, the old `page` values loading, `session_edited`,
   `heard_estimate`, the *Plays* dot rules, the metronome toggle.
-- **Glossary test** (`src/tests.rs` or `app/tests.rs`): reads the string
+- **Glossary test** (`src/tests.rs`): reads the string
   literals in `src/ui`, `src/app` and `src/audio` and fails on a banned
   word from §2.1: whole words, case-insensitive (so *patch* does not match
   *dispatch*), with an allowlist of files that may use platform terms in
-  internal strings (`audio/linux`, `audio/win`).  It lands in step 1 with a
-  second allowlist of files not yet migrated, which every later step
-  shrinks and step 8 empties.  Today the literals in `app` and `audio` use
-  *cushion* 16 times, *quantum* 37, *insert* 42 and *REAL-style* 17.
+  internal strings (`audio/linux`, `audio/win`).  It landed in step 1 with
+  a second allowlist of files not yet migrated, which the later steps
+  emptied.
 
 ## 12. Order of work
+
+The numbered steps below are history; the spec itself is kept.
 
 Each step is one or more PRs, and each leaves every feature reachable.
 
@@ -1032,12 +1039,15 @@ Each step is one or more PRs, and each leaves every feature reachable.
    `RIGWERK_THEME` shows light), because the old pages paint with dark
    constants.
 7. Tuner screen.  The old Tuner page and *Classic ▸* go.
-8. Screenshots, README, the empty allowlist, and this file removed.
+8. Screenshots, README, and the empty allowlist.
 
 AGENTS.md, README and `docs/screenshots` change in the PR that changes
 what they describe, not at the end.
 
-## 13. Decisions to confirm
+## 13. Decisions taken
+
+The decisions below were confirmed by the rewrite; the list is kept as the
+record.
 
 1. Code renames as in §2.4, stored keys unchanged, and the engine's
    internal *session* becoming *run*.

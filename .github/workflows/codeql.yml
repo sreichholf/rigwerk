@@ -70,3 +70,35 @@ jobs:
       - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4
         with:
           category: /language:${{ matrix.language }}
+
+  # Scan the Windows-only code (`audio/win`, `app/plugin_gui/win32.rs`) with a
+  # distinct category, so the Linux Rust database is kept.  The image is
+  # pinned, the checkout, toolchain and CodeQL pins match the Linux job, and
+  # the first run passed.
+  analyze-windows:
+    name: Analyze (rust, Windows)
+    # The analysis image is pinned on purpose, so an alert set does not move
+    # when GitHub rotates a runner.  The ci.yml Windows build tracks
+    # windows-latest instead.
+    runs-on: windows-2022
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Same pin as ci.yml.  rustup and cargo must be on PATH for the
+      # extractor, and Cargo.toml needs 1.95 (the MSRV).
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
+        with:
+          toolchain: 1.95.0
+
+      - uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4
+        with:
+          languages: rust
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4
+        with:
+          category: /language:rust-windows
