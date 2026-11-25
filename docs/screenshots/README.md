@@ -6,8 +6,9 @@ Run the commands from the repository root.
 
 The set in this folder is current: it shows the console, its sheets and the
 browser, the tuner screen and Setup, with two NAM blocks and a cab IR on
-Room.  It was taken on Ubuntu 24.04 with `lsp-plugins-clap` and
-`dragonfly-reverb-vst3`.  The captures are the example models of
+Room.  It was taken on Ubuntu 24.04 with the Zam plugins (`ZamCompX2`,
+`ZamVerb` and `ZaMaximX2`, from the `zam-plugins` package).  The captures
+are the example models of
 [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (`lstm.nam` and `wavenet.nam`, MIT) with their `metadata.name` set to
 *Drive Pedal* and *Crunch Amp*; the IR is a generated 2048-sample
@@ -24,9 +25,9 @@ hardware.
 ```bash
 export RIGWERK_ROUTING_SETUP=showcase RIGWERK_SCREENSHOT_START=1
 export RIGWERK_SCREENSHOT_SIZE=1440x900
-export RIGWERK_SCREENSHOT_PLUGINS="1=/usr/lib/clap/lsp-plugins-clap.clap#Compressor Stereo;\
-2=/usr/lib/vst3/DragonflyRoomReverb.vst3;\
-2=/usr/lib/clap/lsp-plugins-clap.clap#Limiter Stereo"
+export RIGWERK_SCREENSHOT_PLUGINS="1=/usr/lib/vst3/ZamCompX2.vst3;\
+2=/usr/lib/vst3/ZamVerb.vst3;\
+2=/usr/lib/vst3/ZaMaximX2.vst3"
 export RIGWERK_SCREENSHOT_NAM="2=$HOME/Music/NAM/Drive Pedal.nam;\
 2=$HOME/Music/NAM/Crunch Amp.nam"
 export RIGWERK_SCREENSHOT_CAB="2=$HOME/Music/IR/Closed Back 4x12.wav"
@@ -66,7 +67,7 @@ that is the size the console is designed at. `--screenshot <file>` renders
 the window at that size and saves it, always through X11/XWayland, because
 Wayland ignores the requested size. The plugin list matters for the console
 and the sheets: `showcase` selects Room, whose chain holds the reverb and
-delay.
+limiter.
 
 ## A PipeWire graph without hardware
 
@@ -107,18 +108,17 @@ The runtime directory must be short: PipeWire's socket path is limited to
 108 bytes. The app needs the X11 and GL packages under Xvfb (`xvfb`,
 `mesa-dri-gallium`, `libxkbcommon-x11`). On Alpine install `pipewire`,
 `pipewire-tools`, `wireplumber` and `dbus`; on Debian the equivalents in
-`.cursor/install.sh`. The plugins come from `lsp-plugins-clap` and
-`zam-plugins-vst3` (Alpine) or `lsp-plugins-clap` and
-`dragonfly-reverb-vst3` (Debian/Ubuntu). In a screenshot the tuner draws a
-fixed demo frame (Drop C, strobe, all strings, auto-mute on), not the live
-input.
+`.cursor/install.sh`. The plugins come from `zam-plugins` (Ubuntu) or
+`zam-plugins-vst3` (Alpine); a distro's equivalent VST3 compressor, reverb
+and limiter work too. In a screenshot the tuner draws a fixed demo frame
+(Drop C, strobe, all strings, auto-mute on), not the live input.
 
 Environment variables for screenshot runs:
 
 | Variable | Values |
 | --- | --- |
 | `RIGWERK_PAGE` | `console`, `tuner`, `setup` |
-| `RIGWERK_SHEET` | `eq`, `gate`, `effect` (a stand-in effect when the chain is empty), `path`, `output` (the clock output), `scope`, `diagnostics`; on the selected path, applied after the setup |
+| `RIGWERK_SHEET` | `eq`, `gate`, `nam`, `cab`, `effect` (a stand-in effect when the chain is empty), `path`, `output` (the clock output), `match-paths`, `scope`, `diagnostics`; on the selected path, applied after the setup |
 | `RIGWERK_DRAWER` | `browser`, `issues` |
 | `RIGWERK_THEME` | `dark`, `light`: wins over the saved theme for the run |
 | `RIGWERK_ROUTING_SETUP` | `showcase` (the README setup); `showcase4` (the showcase plus Drive with ten bypassed copies of the room's first effect and an empty Stream path); `drywet`, `sum3`, `blend`, `dualamp-off` (alignment off, the red warning) for the alignment and routing cases |
