@@ -42,6 +42,18 @@ pub(crate) fn diagnostics_report_path(
         .join(format!("rigwerk-diagnostics-{stamp}.txt"))
 }
 
+/// The report path for this platform.  Windows takes `USERPROFILE` first for
+/// the reason the module docs give; Unix takes `HOME` first.  Split from
+/// [`RigWerkApp::save_diagnostics_report`] so the platform order is tested.
+fn default_report_path(
+    home: Option<&OsStr>,
+    userprofile: Option<&OsStr>,
+    temp: &Path,
+    stamp: u64,
+) -> PathBuf {
+    diagnostics_report_path(home, userprofile, temp, stamp, !cfg!(windows))
+}
+
 /// Create the parent folder, then write `text` to `path` without replacing a
 /// file another export already wrote.  A taken name becomes `-1`, `-2` ...
 /// before the extension.  `owner_only` keeps the file to its owner (0600) on
@@ -86,7 +98,22 @@ fn create_new(path: &Path, text: &str, owner_only: bool) -> std::io::Result<()> 
     }
     #[cfg(not(unix))]
     let _ = owner_only;
-    options.open(path)?.write_all(text.as_bytes())
+    let file = options.open(path)?;
+    write_all_or_remove(path, file, text)
+}
+
+/// Writes `text` to `file`; a failed write removes the file at `path`, so an
+/// export that could not finish leaves no partial report behind.
+fn write_all_or_remove(path: &Path, mut file: impl Write, text: &str) -> std::io::Result<()> {
+    match file.write_all(text.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Closed before the remove, or Windows refuses to delete it.
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            Err(error)
+        }
+    }
 }
 
 /// `rigwerk-diagnostics-42-1.txt` for `rigwerk-diagnostics-42.txt`.
@@ -109,7 +136,7 @@ impl RigWerkApp {
         let home = std::env::var_os("HOME");
         let userprofile = std::env::var_os("USERPROFILE");
         let temp = std::env::temp_dir();
-        let path = diagnostics_report_path(
+        let path = default_report_path(
             home.as_deref(),
             userprofile.as_deref(),
             &temp,
@@ -117,7 +144,6 @@ impl RigWerkApp {
                 .duration_since(UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_secs())
                 .unwrap_or(0),
-            !cfg!(windows),
         );
         let owner_only = home.is_none() && userprofile.is_none();
         write_report(&path, text, owner_only)
