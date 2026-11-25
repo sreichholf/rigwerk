@@ -1,18 +1,18 @@
 name: CodeQL
 
+# A merge is what lands in the database and the Security tab; the weekly run
+# keeps it current while the repository is quiet.  A pull request runs only
+# ci.yml, so its checks stay the ones that can fail the build.
 on:
   push:
     branches: [master]
-  pull_request:
   schedule:
     - cron: "17 4 * * 1"
 
-# A new push to a pull request cancels its older runs; a stacked series
-# otherwise fills the runner queue with superseded commits.  Pushes to
-# master and scheduled runs group by commit, so none is dropped.
+# One scan of a commit at a time, whichever event asked for it.  Nothing is
+# cancelled, so a merge and the weekly run both land.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.sha }}
 
 permissions:
   contents: read

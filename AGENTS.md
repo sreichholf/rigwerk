@@ -66,8 +66,8 @@ the local one.  A `Deny` job runs cargo-deny against `deny.toml`, whose
 A pull request that only touches markdown or `docs/` runs nothing: no
 test reads those files.
 CodeQL (`.github/workflows/codeql.yml`) scans the Rust
-code and the workflows on pushes to `master`, on pull requests, and
-weekly.  Its alerts land in the repository's Security tab.
+code and the workflows on pushes to `master` and weekly, not on pull
+requests.  Its alerts land in the repository's Security tab.
 
 System libraries are installed by `.cursor/install.sh`. The package list
 CI uses is in `.github/actions/linux-deps/action.yml`.
