@@ -18,7 +18,7 @@ use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
 use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
-use crate::ui::widgets::{micro_label, mono, progress_line};
+use crate::ui::widgets::{micro_label, mono, progress_line, segmented_hinted};
 
 impl RigWerkApp {
     /// One row in the Live health card: the stored measurement, what it is
@@ -128,22 +128,13 @@ impl RigWerkApp {
                 ui.label(micro_label("LOOPBACK", colours.text3));
                 ui.add_space(4.0);
                 ui.add_enabled_ui(!measuring, |ui| {
-                    ui.horizontal(|ui| {
-                        let mut pick = self.calibration.loopback;
-                        if hinted_loopback_tab(ui, "Cable", pick == LoopbackKind::Cable) {
-                            pick = LoopbackKind::Cable;
-                        }
-                        if hinted_loopback_tab(
-                            ui,
-                            "Microphone",
-                            pick == LoopbackKind::Microphone,
-                        ) {
-                            pick = LoopbackKind::Microphone;
-                        }
-                        if pick != self.calibration.loopback {
-                            self.calibration.loopback = pick;
-                        }
-                    });
+                    let kinds = [LoopbackKind::Cable, LoopbackKind::Microphone];
+                    let hints = kinds.map(LoopbackKind::advice);
+                    let mut pick =
+                        usize::from(self.calibration.loopback == LoopbackKind::Microphone);
+                    if segmented_hinted(ui, &mut pick, &["Cable", "Microphone"], &hints).changed() {
+                        self.calibration.loopback = kinds[pick];
+                    }
                 });
                 ui.add_space(5.0);
                 ui.add(
@@ -423,13 +414,4 @@ fn panel_button(ui: &mut egui::Ui, label: &str, frame: Color32, text: Color32) -
         .min_size(Vec2::new(110.0, 30.0)),
     )
     .clicked()
-}
-
-/// One of the two loopback choices, with its explanation on hover.
-pub(super) fn hinted_loopback_tab(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
-    let hint = match label {
-        "Cable" => LoopbackKind::Cable.advice(),
-        _ => LoopbackKind::Microphone.advice(),
-    };
-    crate::ui::widgets::hinted_tab(ui, label, selected, hint)
 }

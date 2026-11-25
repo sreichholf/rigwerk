@@ -470,7 +470,7 @@ the effect browser and the issues.  Esc or a click on the scrim closes it.
 - Buttons 32 pt high (28 inside sheets), 4 pt corners: *outline*
   (default), *ghost* (title bar), *primary* (one per screen: *Done*,
   *Measure*), *danger* (only the second click of a confirm).
-- Segmented controls for 2–4 exclusive choices; toggle chips for
+- Segmented controls for exclusive choices; toggle chips for
   independent switches.
 - Dropdowns show the value and a chevron; from 8 items they have a filter.
 - Hover text on every control whose label does not say everything.  This
