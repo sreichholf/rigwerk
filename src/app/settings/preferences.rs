@@ -47,6 +47,12 @@ pub(crate) struct Preferences {
     pub(crate) output_tab_low_latency: bool,
     /// The session that was selected in the Sessions list.
     pub(crate) selected_session: Option<usize>,
+    /// That session's name.  The load skips an unreadable session and drops a
+    /// duplicate name before the index is used, so either can move it to
+    /// another session; the name is what the choice follows.  Missing on
+    /// older saves, which fall back to the index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) selected_session_name: Option<String>,
     /// Selected devices. `*_id` is [`crate::audio::DeviceItem::id`] (cpal's
     /// `DeviceId` text, or `asio:{clsid}` / `asio-out:{clsid}`) and
     /// `*_backend` is that item's backend. The name is only the display
@@ -253,6 +259,7 @@ impl Default for Preferences {
             eq_edit: 0,
             output_tab_low_latency: cfg!(target_os = "linux"),
             selected_session: None,
+            selected_session_name: None,
             asio_name: None,
             asio_id: String::new(),
             asio_backend: String::new(),

@@ -178,6 +178,91 @@ fn session_missing_fields_still_loads() {
 }
 
 #[test]
+fn a_stored_session_choice_follows_the_name_through_deduplication() {
+    // A hand-edited or older file can hold two sessions with the same name.
+    // The stored index points at the second copy, which dedupe drops.
+    let preferences = Preferences {
+        sessions: vec![session("Clean"), session("Lead"), session("clean")],
+        selected_session: Some(2),
+        ..Preferences::default()
+    };
+    let mut app = crate::app::blank_app();
+    app.apply_preferences(&preferences, PREFERENCES_SCHEMA);
+    assert_eq!(app.sessions.len(), 2);
+    assert_eq!(app.selected_session, Some(0));
+    assert_eq!(app.sessions[0].name, "Clean");
+}
+
+#[test]
+fn a_duplicate_before_the_choice_does_not_move_it_to_the_next_session() {
+    // Dedupe drops the earlier "clean", so the stored index would land one
+    // entry too far and select Verb instead of Lead.
+    let preferences = Preferences {
+        sessions: vec![
+            session("Clean"),
+            session("clean"),
+            session("Lead"),
+            session("Verb"),
+        ],
+        selected_session: Some(2),
+        ..Preferences::default()
+    };
+    let mut app = crate::app::blank_app();
+    app.apply_preferences(&preferences, PREFERENCES_SCHEMA);
+    assert_eq!(app.sessions.len(), 3);
+    assert_eq!(app.selected_session, Some(1));
+    assert_eq!(app.sessions[1].name, "Lead");
+}
+
+#[test]
+fn a_well_formed_session_choice_selects_the_same_session() {
+    let preferences = Preferences {
+        sessions: vec![session("Clean"), session("Lead")],
+        selected_session: Some(1),
+        ..Preferences::default()
+    };
+    let mut app = crate::app::blank_app();
+    app.apply_preferences(&preferences, PREFERENCES_SCHEMA);
+    assert_eq!(app.selected_session, Some(1));
+    assert_eq!(app.sessions[1].name, "Lead");
+}
+
+#[test]
+fn an_out_of_range_session_choice_selects_nothing() {
+    let preferences = Preferences {
+        sessions: vec![session("Clean")],
+        selected_session: Some(3),
+        ..Preferences::default()
+    };
+    let mut app = crate::app::blank_app();
+    app.apply_preferences(&preferences, PREFERENCES_SCHEMA);
+    assert_eq!(app.selected_session, None);
+}
+
+#[test]
+fn a_stored_session_name_survives_a_skipped_session_before_it() {
+    // The load drops the unreadable entry before `Preferences` exists, so the
+    // stored index now points at C.  The name the save wrote still finds B.
+    let b = ron::to_string(&session("B")).expect("session");
+    let c = ron::to_string(&session("C")).expect("session");
+    let raw = format!(
+        r#"(sessions:["junk",{b},{c}],selected_session:Some(1),selected_session_name:Some("B"))"#
+    );
+    let loaded = load_preferences(Some(&raw), BACKUP);
+    let preferences = loaded.preferences.expect("readable");
+    let names: Vec<_> = preferences
+        .sessions
+        .iter()
+        .map(|session| session.name.as_str())
+        .collect();
+    assert_eq!(names, ["B", "C"]);
+    let mut app = crate::app::blank_app();
+    app.apply_preferences(&preferences, PREFERENCES_SCHEMA);
+    assert_eq!(app.selected_session, Some(0));
+    assert_eq!(app.sessions[0].name, "B");
+}
+
+#[test]
 fn gate_round_trips_in_preferences_and_sessions() {
     let gate = GateSettings {
         enabled: true,
@@ -2322,6 +2407,7 @@ fn golden_preferences() -> Preferences {
         eq_edit: 1,
         output_tab_low_latency: true,
         selected_session: Some(0),
+        selected_session_name: Some("Clean".to_owned()),
         asio_name: Some("Focusrite USB ASIO".to_owned()),
         asio_id: "asio:focusrite".to_owned(),
         asio_backend: "ASIO".to_owned(),
@@ -2424,6 +2510,23 @@ fn the_golden_file_loads_and_round_trips() {
     assert_eq!(back.bridge_buffer_mode, 1);
     assert_eq!(back.bridge_buffer_ms, 8.5);
     assert_eq!(back.tuner_tuning, "drop-d");
+    assert_eq!(back.selected_session, Some(0));
+    assert_eq!(back.selected_session_name.as_deref(), Some("Clean"));
+}
+
+#[test]
+fn the_golden_file_from_before_the_session_name_still_loads() {
+    // The saved choice used to be the index alone.  Removing the name from
+    // the golden text gives exactly that file.
+    let without_name = GOLDEN.replace(r#",selected_session_name:Some("Clean")"#, "");
+    assert_ne!(without_name, GOLDEN, "the golden text has no session name");
+    let raw = without_name.strip_suffix('\n').expect("one line");
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    assert!(loaded.backup.is_none());
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.selected_session, Some(0));
+    assert_eq!(back.selected_session_name, None);
 }
 
 #[test]
