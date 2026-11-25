@@ -106,9 +106,15 @@ pub(crate) struct Palette {
     pub(crate) meter: Color32,
     /// Meter from −6 to −1 dBFS, limiter reduction.  Always `warn`.
     pub(crate) meter_hot: Color32,
-    /// Path identity by the saved colour index: Blue, Violet, Green, Rose.
+    /// Path identity by the saved colour index, in the order
+    /// [`PATH_COLOUR_NAMES`] names them.
     pub(crate) path: [Color32; crate::audio::MAX_PATHS],
 }
+
+/// The path colours by saved index, as the menu names them.  Same order as
+/// the palette's `path` array.
+pub(crate) const PATH_COLOUR_NAMES: [&str; crate::audio::MAX_PATHS] =
+    ["Blue", "Violet", "Green", "Rose"];
 
 /// `0xRRGGBB`, so the tokens read like the table in the spec.
 const fn hex(rgb: u32) -> Color32 {

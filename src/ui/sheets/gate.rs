@@ -22,7 +22,9 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{format_db, row_info, segmented, styled_slider, SliderStyle, CONTROL_H};
+use crate::ui::widgets::{
+    format_db, quiet_heading, row_info, segmented, styled_slider, SliderStyle, CONTROL_H,
+};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -342,7 +344,7 @@ fn controls(ui: &mut egui::Ui, gate: &mut GateSettings, colours: &Palette) {
 
 /// *Before effects* / *After effects*, the key and the reduction meter.
 fn side(ui: &mut egui::Ui, gate: &mut GateSettings, reduction_db: f32, colours: &Palette) {
-    heading(ui, "Position", colours);
+    quiet_heading(ui, "Position", colours);
     let mut choice = match gate.slot {
         GateSlot::Pre => 0,
         GateSlot::Post => 1,
@@ -361,7 +363,7 @@ fn side(ui: &mut egui::Ui, gate: &mut GateSettings, reduction_db: f32, colours: 
         slot_hint(GateSlot::Post)
     ));
     ui.add_space(16.0);
-    heading(ui, "Listens to", colours);
+    quiet_heading(ui, "Listens to", colours);
     let mut choice = match gate.key {
         GateKey::Signal => 0,
         GateKey::Input => 1,
@@ -380,17 +382,8 @@ fn side(ui: &mut egui::Ui, gate: &mut GateSettings, reduction_db: f32, colours: 
         key_hint(GateKey::Input)
     ));
     ui.add_space(16.0);
-    heading(ui, "Reduction", colours);
+    quiet_heading(ui, "Reduction", colours);
     reduction_meter(ui, reduction_db, gate.range_db, colours);
-}
-
-fn heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
-    ui.label(
-        RichText::new(text)
-            .font(font(Face::Sans, TypeRole::Secondary))
-            .color(colours.text3),
-    );
-    ui.add_space(4.0);
 }
 
 /// A bar that fills from the left as the gate takes level away, up to the

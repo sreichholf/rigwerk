@@ -15,7 +15,7 @@ use crate::app::{Page, RigWerkApp};
 use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::brand;
 use crate::ui::theme::{font, palette, Face, TypeRole};
-use crate::ui::widgets::OutlineButton;
+use crate::ui::widgets::{engine_state_label, OutlineButton};
 
 const DRAWER_W: f32 = 460.0;
 /// How far the sheet's resize handle reaches, above the edge and inside it.
@@ -107,7 +107,7 @@ impl RigWerkApp {
 
     fn bridge_control(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
-        let label = bridge_label(self.engine.state);
+        let label = engine_state_label(self.engine.state);
         let colour = match self.engine.state {
             EngineState::Running => colours.accent,
             EngineState::Error => colours.error,
@@ -622,17 +622,6 @@ fn bar_button<'a>(ctx: &egui::Context, label: &'a str, on: bool) -> egui::Button
     ))
     .corner_radius(CornerRadius::same(4))
     .min_size(Vec2::new(32.0, 32.0))
-}
-
-fn bridge_label(state: EngineState) -> &'static str {
-    match state {
-        EngineState::Idle => "Stopped",
-        EngineState::Starting => "Starting…",
-        EngineState::Running => "Running",
-        EngineState::Preview => "Demo",
-        EngineState::Stopping => "Stopping…",
-        EngineState::Error => "Error",
-    }
 }
 
 fn status_text(ctx: &egui::Context, text: &str) -> RichText {
