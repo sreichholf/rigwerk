@@ -157,7 +157,7 @@ impl RigWerkApp {
         };
         let mute = bar_button(ui.ctx(), label, on);
         if ui.add(mute).on_hover_text("Mute the master").clicked() {
-            self.mute = !self.mute;
+            self.toggle_mute();
         }
     }
 

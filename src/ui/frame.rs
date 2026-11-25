@@ -269,9 +269,9 @@ impl eframe::App for RigWerkApp {
 
 impl RigWerkApp {
     /// Ctrl+Shift+M toggles the master mute, the same switch as the mute
-    /// button (`self.mute`; the next `publish_engine` pass publishes it, and the
-    /// mixer ramps).  On macOS the chord is Command+Shift+M.  A second press
-    /// unmutes.  A text edit with focus keeps the key, and any modifier
+    /// button (`toggle_mute`; the next `publish_engine` pass publishes it, and
+    /// the mixer ramps).  On macOS the chord is Command+Shift+M.  A second
+    /// press unmutes.  A text edit with focus keeps the key, and any modifier
     /// other than command and shift (Alt, for one) does not count.  A held
     /// key repeats; only the first press toggles.
     pub(crate) fn handle_panic_mute(&mut self, ctx: &egui::Context) {
@@ -303,7 +303,7 @@ impl RigWerkApp {
             pressed
         });
         if pressed {
-            self.mute = !self.mute;
+            self.toggle_mute();
         }
     }
 

@@ -577,9 +577,9 @@ impl RigWerkApp {
                     }
                 });
             if rate != self.sample_rate {
-                self.sample_rate = rate;
+                self.set_sample_rate(rate);
                 self.push_log(
-                    format!("Input rate set to {}.", rate_label(rate)),
+                    format!("Input rate set to {}.", rate_label(self.sample_rate)),
                     LogTone::Blue,
                 );
             }
@@ -598,9 +598,9 @@ impl RigWerkApp {
                     }
                 });
             if buffer != self.buffer_size {
-                self.buffer_size = buffer;
+                self.set_buffer_size(buffer);
                 self.push_log(
-                    format!("Input buffer set to {buffer} samples."),
+                    format!("Input buffer set to {} samples.", self.buffer_size),
                     LogTone::Blue,
                 );
             }
@@ -634,12 +634,15 @@ impl RigWerkApp {
                     "Clock output rate. Match input follows the input. A different rate is converted.",
                 );
             if rate != self.output_rate {
-                self.output_rate = rate;
+                self.set_output_rate(rate);
                 self.push_log(
-                    if rate == 0 {
+                    if self.output_rate == 0 {
                         "Clock output rate matches the input.".to_owned()
                     } else {
-                        format!("Clock output rate set to {}.", rate_label(rate))
+                        format!(
+                            "Clock output rate set to {}.",
+                            rate_label(self.output_rate)
+                        )
                     },
                     LogTone::Blue,
                 );
@@ -659,9 +662,9 @@ impl RigWerkApp {
                     }
                 });
             if buffer != self.output_buffer {
-                self.output_buffer = buffer;
+                self.set_output_buffer(buffer);
                 self.push_log(
-                    format!("Clock output buffer set to {buffer} samples."),
+                    format!("Clock output buffer set to {} samples.", self.output_buffer),
                     LogTone::Blue,
                 );
             }
