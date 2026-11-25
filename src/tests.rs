@@ -574,6 +574,27 @@ fn clap_scan_arguments_are_parsed_or_refused() {
     );
 }
 
+/// A screenshot run's recorded ending is its process status; the exit-code
+/// table itself is pinned by `app::screenshot`'s `every_ending_has_its_own_exit_code`.
+#[test]
+fn a_recorded_screenshot_ending_is_the_process_status() {
+    use crate::app::screenshot::{EXIT_RUN_TIMED_OUT, NO_ENDING};
+
+    // Saved, viewport mismatch, save failed, capture timed out.  A launch
+    // result never overrides a recorded ending, either way.
+    for ending in [0, 1, 3, 5] {
+        assert_eq!(crate::screenshot_exit_status(ending, true), Some(ending));
+        assert_eq!(crate::screenshot_exit_status(ending, false), Some(ending));
+    }
+    // Nothing recorded: a clean close never saved, while a launch error
+    // keeps eframe's own report and failure.
+    assert_eq!(
+        crate::screenshot_exit_status(NO_ENDING, true),
+        Some(EXIT_RUN_TIMED_OUT)
+    );
+    assert_eq!(crate::screenshot_exit_status(NO_ENDING, false), None);
+}
+
 /// The files whose audio callback must hold `RtGuard`: ASIO's dispatch (the
 /// silence and panic paths included), the duplex filter, the native capture,
 /// the virtual source, the sink monitor, and both mixer renders.
