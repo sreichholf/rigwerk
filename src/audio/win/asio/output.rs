@@ -14,7 +14,7 @@ use cpal::traits::StreamTrait;
 
 use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
-    CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
+    CallbackWait, ASIO_HOST, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
 use super::duplex::run_asio_duplex_bridge;
 use super::input::prepare_asio_input;
@@ -300,16 +300,20 @@ pub(crate) fn run_asio_output_loop(
         buffer_frames.max(1) as usize,
     )
     .with_output(buffers, channel_types, mixer);
-    let registration =
-        match CallbackRegistration::install(AsioCallbackSlot::Output, Box::new(context), signal) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let _ = driver.dispose_buffers();
-                let error = format!("ASIO output callbacks: {error}");
-                let _ = ready.send(Err(error.clone()));
-                return Err(error);
-            }
-        };
+    let registration = match CallbackRegistration::install(
+        &ASIO_HOST,
+        AsioCallbackSlot::Output,
+        Box::new(context),
+        signal,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let _ = driver.dispose_buffers();
+            let error = format!("ASIO output callbacks: {error}");
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
 
     // Publish the rate before the driver starts so the UI can reload
     // plugins on its own thread before the first callback.
@@ -336,7 +340,7 @@ pub(crate) fn run_asio_output_loop(
     }
 
     let wait = wait_for_callbacks(
-        registration.signal(),
+        &registration,
         || worker_stop.load(Ordering::Relaxed) || bridge_stop.load(Ordering::Relaxed),
         || {
             let stopping =

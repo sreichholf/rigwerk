@@ -81,7 +81,7 @@ pub(crate) unsafe extern "system" fn asio_message(
     // whole bridge torn down.  The bridge thread sees the request and ends
     // the run with an explanation; the callback cannot do that itself.
     if selector == MessageSelector::RESET_REQUEST {
-        callback::note_driver_reset();
+        callback::ASIO_HOST.request_reset();
         return Bool::TRUE.0;
     }
     Bool::FALSE.0

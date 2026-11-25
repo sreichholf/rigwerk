@@ -16,7 +16,7 @@ use crate::audio::types::StartConfig;
 
 use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
-    CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
+    CallbackWait, ASIO_HOST, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
 use super::panel::service_asio_panel;
 use super::ASIO_INPUT_CALLBACKS;
@@ -127,14 +127,18 @@ pub(crate) fn run_asio_bridge(
         buffer_frames.max(1) as usize,
     )
     .with_input(buffers, channel_types);
-    let registration =
-        match CallbackRegistration::install(AsioCallbackSlot::Input, Box::new(context), signal) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let _ = driver.dispose_buffers();
-                return Err(format!("ASIO callbacks: {error}"));
-            }
-        };
+    let registration = match CallbackRegistration::install(
+        &ASIO_HOST,
+        AsioCallbackSlot::Input,
+        Box::new(context),
+        signal,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let _ = driver.dispose_buffers();
+            return Err(format!("ASIO callbacks: {error}"));
+        }
+    };
 
     shared.set_status("Waiting for ASIO clock…");
     if let Err(error) = driver.start() {
@@ -161,7 +165,7 @@ pub(crate) fn run_asio_bridge(
 
     let mut extra_outputs = ExtraOutputOutputs::new(config.output_buffer, output.rate);
     let wait = wait_for_callbacks(
-        registration.signal(),
+        &registration,
         || stop.load(Ordering::Relaxed),
         || {
             extra_outputs.sync(&shared);
@@ -314,14 +318,18 @@ pub(crate) fn prepare_asio_input(
         buffer_frames.max(1) as usize,
     )
     .with_input(buffers, channel_types);
-    let registration =
-        match CallbackRegistration::install(AsioCallbackSlot::Input, Box::new(context), signal) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let _ = driver.dispose_buffers();
-                return Err(format!("ASIO callbacks: {error}"));
-            }
-        };
+    let registration = match CallbackRegistration::install(
+        &ASIO_HOST,
+        AsioCallbackSlot::Input,
+        Box::new(context),
+        signal,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let _ = driver.dispose_buffers();
+            return Err(format!("ASIO callbacks: {error}"));
+        }
+    };
 
     Ok(PreparedAsioInput {
         driver,
@@ -363,7 +371,7 @@ impl<D: Driver> PreparedAsioInput<D> {
         ));
 
         let wait = wait_for_callbacks(
-            registration.signal(),
+            registration,
             || stop.load(Ordering::Relaxed),
             || {
                 tick();
