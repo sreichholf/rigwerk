@@ -164,7 +164,14 @@ impl RigWerkApp {
         if output.demo || !crate::audio::is_pipewire_device(&output) {
             return;
         }
-        let frames = self.snapshot.output_step_frames;
+        // The delivered block, only once it is the graph's own: a native
+        // PipeWire stream publishes the quantum it asked for before its first
+        // block, and that is not what the graph runs.
+        let frames = if self.snapshot.output_step_reported {
+            self.snapshot.output_step_frames
+        } else {
+            0
+        };
         let period = if frames > 0 {
             frames
         } else {
@@ -327,12 +334,18 @@ impl RigWerkApp {
             }
     }
 
-    /// The input driver's real rate and block size, once the bridge runs and
-    /// the first block has arrived.
+    /// The input driver's real rate and block size, once the bridge runs, the
+    /// first block has arrived and the graph has reported its rate.  A rate
+    /// the native path only asked for is not a reading: the line then says
+    /// it is still measuring.
     pub(crate) fn input_actual(&self) -> Option<DriverActual> {
         let rate = self.snapshot.input_rate;
         let frames = self.snapshot.input_block_frames;
-        if self.engine.state != EngineState::Running || rate == 0 || frames == 0 {
+        if self.engine.state != EngineState::Running
+            || !self.snapshot.input_rate_reported
+            || rate == 0
+            || frames == 0
+        {
             return None;
         }
         let asio = self.active_input().asio_clsid.is_some();
@@ -386,16 +399,26 @@ impl RigWerkApp {
         })
     }
 
-    /// The output driver's real rate and step, once the bridge runs and the
-    /// output has asked for audio.
+    /// The output driver's real rate and step, once the bridge runs and both
+    /// have been reported.  A native PipeWire stream publishes the rate and
+    /// quantum it asked for first; until the stream and its first block make
+    /// them readings, there is no driver reading to show and this falls back
+    /// to a stand-alone check or the last reading.
     pub(crate) fn output_actual(&self) -> Option<DriverActual> {
         let rate = self.snapshot.output_rate;
         let frames = self.snapshot.output_step_frames;
-        if self.engine.state != EngineState::Running || rate == 0 || frames == 0 {
-            // Stopped: prefer a fresh stand-alone check, then the last real
-            // reading from a running bridge.  A failed check is not a driver
-            // failure — the bridge itself may play fine — so it falls through
-            // instead of replacing the reading with "unavailable".
+        if self.engine.state != EngineState::Running
+            || !self.snapshot.output_rate_reported
+            || !self.snapshot.output_step_reported
+            || rate == 0
+            || frames == 0
+        {
+            // Stopped, or a running stream that has not reported its own
+            // rate and step yet: prefer a fresh stand-alone check, then the
+            // last real reading from a running bridge.  A failed check is not
+            // a driver failure — the bridge itself may play fine — so it
+            // falls through instead of replacing the reading with
+            // "unavailable".
             let selected = self.selected_output().id.as_str();
             if let Some(check) = self.driver_probe.as_ref() {
                 if check.device_id == selected {

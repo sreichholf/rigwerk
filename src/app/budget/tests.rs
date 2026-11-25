@@ -32,8 +32,13 @@ fn the_budget_adds_the_reported_parts_and_labels_their_origin() {
     app.output_rate = 48_000;
     app.snapshot.input_block_frames = 128;
     app.snapshot.input_rate = 48_000;
+    // A running cpal driver publishes both rates as readings when its
+    // streams open; a native PipeWire path only after the graph reports.
+    app.snapshot.input_rate_reported = true;
     app.snapshot.output_rate = 48_000;
+    app.snapshot.output_rate_reported = true;
     app.snapshot.output_step_frames = 128;
+    app.snapshot.output_step_reported = true;
     app.snapshot.target_frames = 256;
     app.snapshot.path_delay_ms = Some(10.0);
     app.engine.screenshot_path_latency(0, 480);
@@ -103,6 +108,41 @@ fn a_stopped_budget_labels_planned_buffers_and_leaves_out_the_unknown_part() {
         "{text}"
     );
     assert!(text.contains("(planned)"), "{text}");
+}
+
+#[test]
+fn a_measured_block_over_an_unread_rate_stays_planned() {
+    // The native path publishes the rate it asked for before the graph
+    // reports, while a block and a step can already be real.  The labels
+    // name both numbers, so they must not claim a reading yet.
+    let mut app = blank_app();
+    app.engine.state = EngineState::Running;
+    app.sample_rate = 48_000;
+    app.buffer_size = 128;
+    app.output_buffer = 128;
+    app.output_rate = 48_000;
+    app.snapshot.input_block_frames = 128;
+    app.snapshot.input_rate = 48_000;
+    app.snapshot.output_rate = 48_000;
+    app.snapshot.output_step_frames = 128;
+    app.snapshot.output_step_reported = true;
+    app.snapshot.target_frames = 256;
+    let source = |app: &crate::app::RigWerkApp, label: &str| {
+        app.latency_budget()
+            .parts
+            .into_iter()
+            .find(|part| part.label == label)
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .source
+    };
+    assert_eq!(source(&app, "INPUT BLOCK"), LatencySource::Planned);
+    assert_eq!(source(&app, "OUTPUT STEP"), LatencySource::Planned);
+
+    // Both format handlers report their rate: the labels follow.
+    app.snapshot.input_rate_reported = true;
+    app.snapshot.output_rate_reported = true;
+    assert_eq!(source(&app, "INPUT BLOCK"), LatencySource::Reported);
+    assert_eq!(source(&app, "OUTPUT STEP"), LatencySource::Reported);
 }
 
 #[test]

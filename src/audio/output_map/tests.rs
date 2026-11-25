@@ -475,6 +475,7 @@ fn path_entries_save_compactly_and_old_maps_load_as_path_one() {
         level_db: -6.0,
         invert: true,
         trim_ms: 1.5,
+        ..PathMapSettings::default()
     };
     let text = ron::to_string(&settings).unwrap();
     assert!(!text.contains(",map:("), "no legacy map: {text}");

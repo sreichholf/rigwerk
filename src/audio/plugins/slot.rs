@@ -572,7 +572,7 @@ pub(crate) fn defer_plugin_slots(slots: Vec<Slot>) {
 /// Drops plugins that a bridge thread deferred.  Only the recorded main
 /// thread destroys them; any other caller leaves the queue alone.
 pub(crate) fn drain_deferred_plugins() {
-    if !super::super::clap::is_main_thread() {
+    if !super::is_main_thread() {
         return;
     }
     let pending = match DEFERRED_PLUGIN_SLOTS.lock() {

@@ -130,6 +130,23 @@ pub(crate) fn run(
         error: Arc::new(AtomicBool::new(false)),
     };
     let virtual_feed = Arc::new(VirtualOutputSlot::new());
+    // Before the filter is created: `Filter::new` connects the node, so its
+    // first process callback can publish the graph's own rate straight away.
+    // A request never undoes a reading (see `Shared`), so a request made
+    // after that callback would be dropped and leave the mode line empty
+    // until the timer's first tick.  The request goes in first.
+    shared.note_requested_direct_rate(rate);
+    let low_latency = config.pipewire_low_latency;
+    let mode = move |rate: u32, quantum: u64| {
+        let low = if low_latency { "Low latency · " } else { "" };
+        format!("{low}PipeWire duplex node · {quantum} frames at {rate} Hz · no bridge buffer")
+    };
+    let opened = if low_latency {
+        OutputMode::LowLatency
+    } else {
+        OutputMode::Standard
+    };
+    shared.set_requested_output(rate, frames, opened, mode(rate, frames as u64));
     let filter = Rc::new(
         Filter::new(
             &core,
@@ -141,22 +158,9 @@ pub(crate) fn run(
         )
         .map_err(setup)?,
     );
-    // Only now: a fallback must not start from this path's rates.  The
-    // callback publishes the real graph rate on its first cycle, and the
-    // timer below re-publishes it, so this guess cannot stick.
-    shared.note_direct_rate(rate);
+    // Only now: a Setup failure above must not leave the fallback running as
+    // the duplex node.
     shared.direct.store(true, Ordering::Relaxed);
-    let low_latency = config.pipewire_low_latency;
-    let mode = move |rate: u32, quantum: u64| {
-        let low = if low_latency { "Low latency · " } else { "" };
-        format!("{low}PipeWire duplex node · {quantum} frames at {rate} Hz · no bridge buffer")
-    };
-    let opened = if low_latency {
-        OutputMode::LowLatency
-    } else {
-        OutputMode::Standard
-    };
-    shared.set_output(rate, frames, opened, mode(rate, frames as u64));
     shared.running.store(true, Ordering::Relaxed);
     shared.set_status(format!(
         "Bridging 2 ch · {rate} Hz · one PipeWire node (no bridge buffer)"
@@ -195,7 +199,8 @@ pub(crate) fn run(
         }
         let shared = filter_ref.shared();
         // The mode text follows the graph rate and quantum; the callback
-        // only stores them.
+        // only stores them.  These are now readings, so this re-publication
+        // is the measured one and replaces the request made above.
         let rate = seen_rate.load(Ordering::Relaxed);
         let quantum = seen_quantum.load(Ordering::Relaxed);
         if rate > 0 && (rate, quantum) != shown.get() {

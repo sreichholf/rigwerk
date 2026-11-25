@@ -415,7 +415,9 @@ impl RigWerkApp {
     /// The parts of RigWerk's own path, as `latency_ms` and the latency
     /// budget read them.  While stopped, the requested buffer and a planned
     /// bridge buffer of twice that buffer stand in, so a bridge buffer left over from the
-    /// last run is not shown.
+    /// last run is not shown.  A native PipeWire path publishes the rate and
+    /// step it asked for before the graph reports, so the half that carries
+    /// them is only `*_read` once the graph has published its own.
     pub(crate) fn latency_parts(&self) -> LatencyParts {
         let running = self.engine.state == EngineState::Running;
         let pick = |live: u32, planned: u32| if running && live > 0 { live } else { planned };
@@ -442,7 +444,9 @@ impl RigWerkApp {
             input_rate: pick(self.snapshot.input_rate, self.sample_rate).max(1),
             output_rate: pick(self.snapshot.output_rate, planned_output_rate).max(1),
             input_reported: running && self.snapshot.input_block_frames > 0,
-            output_reported: running && self.snapshot.output_step_frames > 0,
+            output_reported: running && self.snapshot.output_step_reported,
+            input_rate_reported: running && self.snapshot.input_rate_reported,
+            output_rate_reported: running && self.snapshot.output_rate_reported,
         }
     }
 
@@ -454,8 +458,14 @@ impl RigWerkApp {
     }
 
     /// The step the running output really got, in frames and milliseconds.
+    /// None until both the rate and the step are readings: a native PipeWire
+    /// stream publishes the quantum it asked for before its first block, and
+    /// that is not a step a capture or the NAM block can be sized from.
     pub(crate) fn output_step(&self) -> Option<(u32, f32)> {
         if self.engine.state != EngineState::Running {
+            return None;
+        }
+        if !self.snapshot.output_rate_reported || !self.snapshot.output_step_reported {
             return None;
         }
         let frames = self.snapshot.output_step_frames;
@@ -675,13 +685,35 @@ pub(crate) struct LatencyParts {
     pub(crate) output_step: u32,
     pub(crate) input_rate: u32,
     pub(crate) output_rate: u32,
-    /// The input block is the driver's, not the size asked for while stopped.
+    /// The input callback has delivered a block: the size is the driver's,
+    /// while its rate may still be the one asked for until
+    /// [`Self::input_rate_reported`].
     pub(crate) input_reported: bool,
-    /// The output step is the driver's, not the size asked for while stopped.
+    /// The output side has delivered a step: it is the driver's or graph's,
+    /// not the quantum asked for before a native PipeWire stream ran.
     pub(crate) output_reported: bool,
+    /// The input rate is a reading from the device or graph, not the rate
+    /// asked for before a native PipeWire stream negotiated.
+    pub(crate) input_rate_reported: bool,
+    /// The output rate is a reading from the device or graph.
+    pub(crate) output_rate_reported: bool,
 }
 
 impl LatencyParts {
+    /// The input block and the rate it is counted at are both readings.  The
+    /// block alone is not enough: the label "INPUT BLOCK: N frames at R" names
+    /// both numbers, so a measured block over a rate the native path only
+    /// asked for is still shown as planned.
+    pub(crate) fn input_read(&self) -> bool {
+        self.input_reported && self.input_rate_reported
+    }
+
+    /// The output step and the rate it is counted at are both readings, for
+    /// the same reason as [`Self::input_read`].
+    pub(crate) fn output_read(&self) -> bool {
+        self.output_reported && self.output_rate_reported
+    }
+
     /// Input block + bridge buffer at the input rate, plus the output step at the
     /// output rate.
     pub(crate) fn bridge_ms(&self) -> f32 {

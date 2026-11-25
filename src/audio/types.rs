@@ -233,13 +233,31 @@ pub struct Snapshot {
     #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
     pub status: String,
     /// The rate the input clock really delivers (0 until it is known).
+    /// [`Self::input_rate_reported`] says whether it is a reading or only
+    /// the rate asked for before the stream or graph opened.
     pub input_rate: u32,
+    /// Whether [`Self::input_rate`] came from the device or graph.  False
+    /// for a native PipeWire capture between the start and its first
+    /// negotiated format.
+    pub input_rate_reported: bool,
     /// The block size the input driver really delivers, in samples (0 until
     /// the first block arrives).
     pub input_block_frames: u32,
     /// What the output side really got: its rate and the step it is fed in.
+    /// [`Self::output_rate_reported`] says whether the rate is a reading.
     pub output_rate: u32,
+    /// Whether [`Self::output_rate`] came from the device or graph.  False
+    /// for a native PipeWire stream between the start and the format it
+    /// negotiated, and on the duplex node until its first cycle.
+    pub output_rate_reported: bool,
+    /// The step the output side got: the block its callback really feeds.
+    /// [`Self::output_step_reported`] says whether it is a reading or only
+    /// the quantum asked for before a native PipeWire stream ran.
     pub output_step_frames: u32,
+    /// Whether [`Self::output_step_frames`] came from the device or graph.
+    /// False for a native PipeWire stream between the start and its first
+    /// block, and on the duplex node until its first cycle.
+    pub output_step_reported: bool,
     /// One line on how the output runs, e.g. REAL-style or why it fell back.
     /// Display only: compare [`Self::opened_output_mode`] instead.
     pub output_mode: String,

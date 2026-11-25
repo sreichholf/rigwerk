@@ -93,6 +93,174 @@ fn set_output_lifts_the_auto_bridge_buffer_for_a_large_exclusive_step() {
 }
 
 #[test]
+fn a_requested_native_rate_is_not_a_reading_until_the_graph_reports() {
+    let shared = super::Shared::new(48_000);
+    // What the two-stream native path publishes before PipeWire negotiates.
+    shared.set_requested_source_rate(44_100);
+    shared.set_requested_output(
+        44_100,
+        128,
+        OutputMode::Standard,
+        "PipeWire node · 128 frames",
+    );
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.input_rate, 44_100);
+    assert_eq!(snapshot.output_rate, 44_100);
+    assert!(
+        !snapshot.input_rate_reported,
+        "the input rate was only asked for"
+    );
+    assert!(
+        !snapshot.output_rate_reported,
+        "the output rate was only asked for"
+    );
+    // The value and its line are published as before; only the provenance
+    // says neither is a reading yet.
+    assert_eq!(snapshot.output_step_frames, 128);
+    assert!(!snapshot.output_step_reported);
+    assert_eq!(snapshot.output_mode, "PipeWire node · 128 frames");
+    assert_eq!(snapshot.opened_output_mode, Some(OutputMode::Standard));
+
+    // A stream that opened at that rate publishes a reading.
+    shared.set_source_rate(48_000);
+    shared.set_output(48_000, 64, OutputMode::Standard, "test output");
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.input_rate, 48_000);
+    assert_eq!(snapshot.output_rate, 48_000);
+    assert!(snapshot.input_rate_reported);
+    assert!(snapshot.output_rate_reported);
+}
+
+#[test]
+fn a_requested_publication_never_downgrades_a_reading() {
+    let shared = super::Shared::new(48_000);
+    shared.set_source_rate(48_000);
+    shared.set_output(48_000, 64, OutputMode::Shared, "opened at 48 kHz");
+    shared.note_output_step(64);
+
+    // A request after the graph reported has nothing to add: it must not
+    // store its own value or clear the reading.
+    shared.set_requested_source_rate(44_100);
+    shared.set_requested_output(44_100, 256, OutputMode::Standard, "asked for 44.1 kHz");
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.input_rate, 48_000);
+    assert_eq!(snapshot.output_rate, 48_000);
+    assert_eq!(snapshot.output_step_frames, 64);
+    assert_eq!(snapshot.output_mode, "opened at 48 kHz");
+    assert_eq!(snapshot.opened_output_mode, Some(OutputMode::Shared));
+    assert!(snapshot.input_rate_reported);
+    assert!(snapshot.output_rate_reported);
+    assert!(snapshot.output_step_reported);
+
+    // The duplex pair follows the same rule.
+    shared.note_direct_rate(48_000);
+    shared.note_requested_direct_rate(44_100);
+    let snapshot = shared.snapshot();
+    assert_eq!(
+        (snapshot.input_rate, snapshot.output_rate),
+        (48_000, 48_000)
+    );
+    assert!(snapshot.input_rate_reported);
+    assert!(snapshot.output_rate_reported);
+}
+
+#[test]
+fn a_reported_step_alone_does_not_make_the_output_rate_a_reading() {
+    let shared = super::Shared::new(48_000);
+    shared.set_requested_output(
+        48_000,
+        128,
+        OutputMode::Standard,
+        "PipeWire node · 128 frames",
+    );
+    shared.note_output_step(64);
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.output_step_frames, 64);
+    assert!(snapshot.output_step_reported);
+    assert!(
+        !snapshot.output_rate_reported,
+        "the step arrived before the stream's format handler read the rate"
+    );
+
+    // The stream's own format handler publishes the rate it negotiated.
+    shared.set_output_rate(44_100);
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.output_rate, 44_100);
+    assert!(snapshot.output_rate_reported);
+    assert!(snapshot.output_step_reported, "the step reading stays");
+}
+
+#[test]
+fn the_first_graph_block_makes_the_requested_step_a_reading() {
+    let shared = super::Shared::new(48_000);
+    shared.set_requested_output(
+        48_000,
+        128,
+        OutputMode::Standard,
+        "PipeWire node · 128 frames",
+    );
+    assert!(!shared.snapshot().output_step_reported);
+    // The playback node's process callback stores the step it really gets.
+    shared.note_output_step(64);
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.output_step_frames, 64);
+    assert_eq!(snapshot.output_rate, 48_000);
+    assert!(snapshot.output_step_reported);
+    assert!(
+        !snapshot.output_rate_reported,
+        "the step is not a rate reading: the format handler publishes that"
+    );
+}
+
+#[test]
+fn a_requested_output_publication_does_not_replace_a_reported_step() {
+    let shared = super::Shared::new(48_000);
+    shared.set_requested_output(48_000, 128, OutputMode::Standard, "asked for 128 frames");
+    shared.note_output_step(64);
+    // The graph has delivered a step, so a later request has nothing to add
+    // even though its rate was never read.  Dropping the step arm of the
+    // guard would rewrite all of rate, step, mode and opened mode here.
+    shared.set_requested_output(44_100, 256, OutputMode::LowLatency, "asked for 256 frames");
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.output_rate, 48_000);
+    assert_eq!(snapshot.output_step_frames, 64);
+    assert_eq!(snapshot.output_mode, "asked for 128 frames");
+    assert_eq!(snapshot.opened_output_mode, Some(OutputMode::Standard));
+    assert!(!snapshot.output_rate_reported);
+    assert!(snapshot.output_step_reported);
+}
+
+#[test]
+fn the_duplex_node_publishes_its_graph_rate_as_a_reading() {
+    let shared = super::Shared::new(48_000);
+    shared.note_requested_direct_rate(44_100);
+    let snapshot = shared.snapshot();
+    assert_eq!(
+        (snapshot.input_rate, snapshot.output_rate),
+        (44_100, 44_100)
+    );
+    assert!(!snapshot.input_rate_reported);
+    assert!(!snapshot.output_rate_reported);
+
+    // The filter's first cycle publishes the graph's own rate.
+    shared.note_direct_rate(48_000);
+    let snapshot = shared.snapshot();
+    assert_eq!(
+        (snapshot.input_rate, snapshot.output_rate),
+        (48_000, 48_000)
+    );
+    assert!(snapshot.input_rate_reported);
+    assert!(snapshot.output_rate_reported);
+
+    // A restart must not inherit the readings a previous run published.
+    shared.reset();
+    let snapshot = shared.snapshot();
+    assert_eq!(snapshot.input_rate, 0);
+    assert!(!snapshot.input_rate_reported);
+    assert!(!snapshot.output_rate_reported);
+}
+
+#[test]
 fn minimum_bridge_buffer_is_one_block_from_each_side() {
     let shared = shared_with_bridge_buffer(BufferMode::Minimum, 10.0);
     assert_eq!(shared.target_frames(), 608);
@@ -128,14 +296,14 @@ pub(crate) fn claim_main_thread() -> MainClaim {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     MainClaim {
-        _thread: crate::audio::clap::claim_main_thread_for_test(),
+        _thread: crate::audio::plugins::claim_main_thread_for_test(),
         _serial: serial,
     }
 }
 
 pub(crate) struct MainClaim {
     // Dropped first, while `serial` is still held.
-    _thread: crate::audio::clap::MainThreadClaim,
+    _thread: crate::audio::plugins::MainThreadClaim,
     _serial: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -318,7 +486,7 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_audio_side() {
     let chain = shared.paths[0].hold_chain_for_test();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             for _ in 0..100 {
                 let views = shared.plugin_views();
                 assert_eq!(views.len(), 2);
@@ -356,7 +524,7 @@ fn structural_edits_never_wait_for_the_audio_side() {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             path.move_plugin(0, 1);
             path.remove_plugin(2);
             assert!(path.add_plugin(missing("c.vst3")).is_err());
@@ -418,7 +586,7 @@ fn mix_bypass_and_controls_never_wait_for_the_audio_side() {
     let chain = path.hold_chain_for_test();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             for step in 0..100 {
                 path.set_plugin_mix(0, step as f32 / 100.0);
                 path.set_plugin_bypass(0, step % 2 == 0);
@@ -466,7 +634,7 @@ fn capture_and_prefs_never_wait_for_the_audio_side() {
         let worker = scope.spawn(move || {
             // The fake's state is per thread, and CLAP saves only on the
             // thread that loaded it: it is loaded, saved and destroyed here.
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             path.restore_plugins(vec![missing("a.vst3")]);
             path.edit_chain(|chain| {
                 chain.insert_clap_for_test(fake_plugin_with_state_for_test(b"saved state"))
@@ -551,7 +719,7 @@ fn a_latency_change_republishes_without_the_audio_side() {
         let worker = scope.spawn(move || {
             // The fake's state is per thread: it is loaded, restarted and
             // serviced here.
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             path.edit_chain(|chain| {
                 chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64))
             });

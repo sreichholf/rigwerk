@@ -1,16 +1,18 @@
-//! CLAP host state, main-thread helpers, and host extension callbacks.
+//! CLAP host state and host extension callbacks.
 //!
 //! A plugin may call any host callback from any thread (its audio thread
 //! included), so every callback here only sets an atomic, or try-locks a
 //! list the UI services.  `request_restart`, `request_callback`,
 //! `latency.changed` and the rest leave the work to the main-thread
 //! service (`ClapInstance` behind the plugin's UI lock); none of them
-//! calls into the plugin or blocks.
+//! calls into the plugin or blocks.  The recorded main thread and the rule
+//! for where a plugin may be destroyed are format-neutral and live in
+//! `audio::plugins` (`plugins::thread`); this host only copies the id.
 
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap_sys::ext::audio_ports::{clap_host_audio_ports, CLAP_EXT_AUDIO_PORTS};
@@ -30,7 +32,9 @@ use clap_sys::host::clap_host;
 
 use super::cstring;
 use super::ports::{AUDIO_PORTS_RESCAN_ALL, AUDIO_PORTS_RESCAN_STOPS};
-use crate::audio::plugins::{on_audio_thread, PluginShared, RESTART_ACTIVATION};
+use crate::audio::plugins::{
+    on_audio_thread, recorded_main_thread, PluginShared, RESTART_ACTIVATION,
+};
 
 pub(super) const HOST_NAME: &[u8] = b"RigWerk\0";
 pub(super) const HOST_VENDOR: &[u8] = b"RigWerk\0";
@@ -41,74 +45,6 @@ pub(super) struct TimerEntry {
     pub(super) id: u32,
     pub(super) period: Duration,
     pub(super) next: Instant,
-}
-
-/// The UI thread, recorded by [`mark_main_thread`] before any plugin loads.
-/// [`HostState`] copies the id when a plugin is created.  The audio callback
-/// uses that copy; it does not lock this.
-pub(super) static MAIN_THREAD: RwLock<Option<std::thread::ThreadId>> = RwLock::new(None);
-
-pub(super) fn recorded_main_thread() -> Option<std::thread::ThreadId> {
-    match MAIN_THREAD.read() {
-        Ok(slot) => *slot,
-        Err(poison) => *poison.into_inner(),
-    }
-}
-
-/// Records the calling thread as the CLAP main thread.  Call it from the UI
-/// thread before any plugin is loaded.  A later call does not move it.
-pub(crate) fn mark_main_thread() {
-    let mut slot = MAIN_THREAD
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.is_none() {
-        *slot = Some(std::thread::current().id());
-    }
-}
-
-/// Whether this thread is the recorded UI/CLAP main thread.
-/// False until [`mark_main_thread`] has run.
-pub(crate) fn is_main_thread() -> bool {
-    recorded_main_thread().is_some_and(|id| id == std::thread::current().id())
-}
-
-/// Whether plugin instances may be destroyed on this thread.
-/// The recorded UI thread may.  Before any thread is recorded, the caller
-/// may too, so startup and tests do not leak.  Any other thread must hand
-/// the instances to the deferred queue and let the UI thread drop them.
-pub(crate) fn may_destroy_plugins_here() -> bool {
-    match recorded_main_thread() {
-        Some(id) => id == std::thread::current().id(),
-        None => true,
-    }
-}
-
-/// Points the recorded main thread at the caller for the guard's lifetime.
-/// Production records the UI thread once; tests use this so a case can run
-/// on its own thread without stealing that id from a later test.
-#[cfg(test)]
-pub(crate) struct MainThreadClaim {
-    pub(super) previous: Option<std::thread::ThreadId>,
-}
-
-#[cfg(test)]
-pub(crate) fn claim_main_thread_for_test() -> MainThreadClaim {
-    let mut slot = MAIN_THREAD
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let previous = *slot;
-    *slot = Some(std::thread::current().id());
-    MainThreadClaim { previous }
-}
-
-#[cfg(test)]
-impl Drop for MainThreadClaim {
-    fn drop(&mut self) {
-        let mut slot = MAIN_THREAD
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = self.previous;
-    }
 }
 
 /// Callback state shared with the plugin.  The plugin may call into this from
@@ -151,9 +87,9 @@ pub(crate) struct HostState {
 impl HostState {
     pub(super) fn new(shared: Arc<PluginShared>) -> Self {
         Self {
-            // Prefer the thread `mark_main_thread` recorded.  Do not publish
-            // the loader's thread: a plugin opened off the UI thread must
-            // still answer `is_main_thread` for the UI thread.
+            // Prefer the thread `plugins::thread::mark_main_thread` recorded.
+            // Do not publish the loader's thread: a plugin opened off the UI
+            // thread must still answer the thread check for the UI thread.
             main_thread: recorded_main_thread().unwrap_or_else(|| std::thread::current().id()),
             shared,
             process_requested: AtomicBool::new(false),
@@ -297,17 +233,6 @@ const GUI_HIDE: u8 = 2;
 pub(crate) enum GuiVisibility {
     Show,
     Hide,
-}
-
-/// The outcome of `ClapInstance::save_state`.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum StateSave {
-    Saved(Vec<u8>),
-    /// No state extension, or the save failed.
-    Unavailable,
-    /// Not now (values still queued, or not on the main thread); try again
-    /// at the next save.
-    Deferred,
 }
 
 pub(super) unsafe fn state<'a>(host: *const clap_host) -> Option<&'a HostState> {

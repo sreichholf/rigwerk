@@ -366,11 +366,18 @@ impl RigWerkApp {
         } else {
             self.sample_rate
         };
-        let rates = if in_rate == out_rate {
+        let mut rates = if in_rate == out_rate {
             rate_label(in_rate)
         } else {
             format!("{} → {}", rate_label(in_rate), rate_label(out_rate))
         };
+        // While the bridge runs, a rate the native PipeWire path only asked
+        // for is marked: the graph has not read its own yet.
+        if self.engine.state == EngineState::Running
+            && (!self.snapshot.input_rate_reported || !self.snapshot.output_rate_reported)
+        {
+            rates.push_str(" (asked)");
+        }
         if input.backend == output.backend {
             format!("{} · {rates}", input.backend)
         } else {
@@ -379,21 +386,33 @@ impl RigWerkApp {
     }
 
     fn buffers_line(&self) -> String {
-        let input = if self.snapshot.input_block_frames > 0 {
+        let input_read = self.snapshot.input_block_frames > 0;
+        let output_read = self.snapshot.output_step_reported;
+        let input = if input_read {
             self.snapshot.input_block_frames as usize
         } else {
             self.buffer_size
         };
+        // The published quantum is the number, even before it is a reading: a
+        // native low-latency start asks for 64 while the setting may still say
+        // 128, and the line must not print the setting and then flip.  Only
+        // the `(asked)` mark tells the two apart.
         let output = if self.snapshot.output_step_frames > 0 {
             self.snapshot.output_step_frames as usize
         } else {
             self.output_buffer
         };
-        if input == output {
+        let mut line = if input == output {
             format!("{input} smp")
         } else {
             format!("{input} / {output} smp")
+        };
+        // Same rule as the driver line: a size that is only the request is
+        // marked while the bridge runs.
+        if self.engine.state == EngineState::Running && !(input_read && output_read) {
+            line.push_str(" (asked)");
         }
+        line
     }
 
     fn status_latency(&self) -> String {

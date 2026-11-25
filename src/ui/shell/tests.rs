@@ -29,6 +29,36 @@ fn the_status_bar_names_the_issue_count_and_the_log() {
     let _ = node_named(&tree, "Log ▴");
 }
 
+#[test]
+fn the_buffer_line_shows_the_published_quantum_before_it_is_a_reading() {
+    let mut app = blank_app();
+    app.buffer_size = 64;
+    app.output_buffer = 128;
+    app.engine.state = crate::audio::EngineState::Running;
+    app.snapshot.input_block_frames = 64;
+    // The native node published the 64 it asked for while the setting still
+    // says 128: the line shows the published number and marks it, then keeps
+    // the same number once the graph reports it.
+    app.snapshot.output_step_frames = 64;
+    assert_eq!(app.buffers_line(), "64 smp (asked)");
+    app.snapshot.output_step_reported = true;
+    assert_eq!(app.buffers_line(), "64 smp");
+}
+
+#[test]
+fn the_driver_line_marks_a_rate_the_graph_has_not_reported() {
+    let mut app = blank_app();
+    app.engine.state = crate::audio::EngineState::Running;
+    // The native path asked for the rate it will run at; until the graph
+    // reports its own, the line marks the number, and one reported half is
+    // not enough.
+    assert!(app.drivers_line().ends_with(" (asked)"));
+    app.snapshot.input_rate_reported = true;
+    assert!(app.drivers_line().ends_with(" (asked)"));
+    app.snapshot.output_rate_reported = true;
+    assert!(!app.drivers_line().ends_with(" (asked)"));
+}
+
 fn sheet_frame(
     ctx: &egui::Context,
     app: &mut crate::app::RigWerkApp,

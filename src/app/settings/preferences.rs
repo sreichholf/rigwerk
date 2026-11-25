@@ -14,8 +14,9 @@ use crate::app::plugins::{sanitize_effect_ids, EffectId};
 use crate::app::screen::{SHEET_MAX, SHEET_MIN};
 use crate::app::Page;
 use crate::audio::{
-    BufferMode, DeviceItem, EqSettings, GateSettings, LegacyNamSettings, OutputDeviceSettings,
-    PluginPref, WasapiOutputMode, MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
+    sanitize_send, BufferMode, DeviceItem, EqSettings, GateSettings, LegacyNamSettings,
+    OutputDeviceSettings, PathFeed, PluginPref, WasapiOutputMode, MAX_EXTRA_OUTPUTS, MAX_PATHS,
+    SEND_OFF_DB, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
 /// 2: signal paths (`paths`, per-device `path_map`); layout 1 files load
@@ -118,9 +119,11 @@ pub(crate) struct Preferences {
     /// A path that cannot be read keeps its slot as a muted “Unreadable path
     /// N” with every send off: the slot is silent, and so is a send that
     /// pointed at it.  The list does not renumber.  The routing records
-    /// beside this field (each device's `path_map`, each path's `sends`) are
-    /// saved separately and are not repaired here: a damaged one still costs
-    /// the whole file.
+    /// beside this field are positional too and are repaired in place: a
+    /// device's row that cannot be read stays off in its slot (nothing
+    /// routed, at the level floor), and a send that cannot be read stays off
+    /// at its index, so no other path's route or send moves.  The load
+    /// reports every replacement.
     #[serde(deserialize_with = "placeholder_unreadable")]
     pub(crate) paths: Vec<PathPref>,
     /// The path the console, sheets and browser edit (a position in `paths`).
@@ -863,11 +866,70 @@ struct StoredPathCounts {
 /// the scan in [`load_preferences`], which renames the path for its position.
 const UNREADABLE_PATH_SENTINEL: &str = "\u{0}unreadable path";
 
+/// Names each replaced path for its saved position and returns how many there
+/// were.  The top-level list and every session's list use the same marker.
+/// Only lists the load kept are scanned, and only after the cap ran, so a
+/// path that was dropped is not reported as kept.
+fn name_unreadable_paths(paths: &mut [PathPref]) -> usize {
+    let mut replaced = 0;
+    for (position, path) in paths.iter_mut().enumerate() {
+        if path.name == UNREADABLE_PATH_SENTINEL {
+            path.name = format!("Unreadable path {}", position + 1);
+            replaced += 1;
+        }
+    }
+    replaced
+}
+
+/// Counts and clears the load's marker on each routing row of one device.
+/// Only devices the load kept are walked, and the row array is already capped,
+/// so neither a dropped container nor a row past the cap is reported.
+fn take_unreadable_rows(settings: &mut OutputDeviceSettings) -> usize {
+    let mut replaced = 0;
+    for row in &mut settings.path_map {
+        if row.unreadable {
+            row.unreadable = false;
+            replaced += 1;
+        }
+    }
+    replaced
+}
+
+/// The replaced sends of one path that still have a slot after the clamp site.
+/// That site clears a return's sends and drops a list whose every level is
+/// off, and sends past [`MAX_PATHS`] are truncated, so none of those keep a
+/// position.
+fn count_replaced_sends(path: &PathPref) -> usize {
+    if path.feed == PathFeed::Sends {
+        return 0;
+    }
+    let mut replaced = 0;
+    let mut any_live = false;
+    for &level in path.sends.iter().take(MAX_PATHS) {
+        if level.is_nan() {
+            replaced += 1;
+        } else if sanitize_send(level) > SEND_OFF_DB {
+            any_live = true;
+        }
+    }
+    if any_live {
+        replaced
+    } else {
+        0
+    }
+}
+
+/// The replaced sends across one path list, capped like the load caps it.
+fn count_replaced_sends_in(paths: &[PathPref]) -> usize {
+    paths.iter().take(MAX_PATHS).map(count_replaced_sends).sum()
+}
+
 impl Placeholder for PathPref {
     /// Muted, with the default's every send off: a live default path would be
     /// a doubled copy of the input where a damaged path used to be, and a
     /// return would come back as an input.  The name marks the slot for the
-    /// load and is replaced before anything reads it.
+    /// load and is replaced before anything reads it.  Session path lists use
+    /// the same value.
     fn placeholder() -> Self {
         Self {
             name: UNREADABLE_PATH_SENTINEL.to_owned(),
@@ -972,16 +1034,18 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
     // is looking at a newer layout.
     let stored_schema_version = preferences.schema_version;
     preferences.schema_version = PREFERENCES_SCHEMA;
-    let counts: StoredCounts = ron::from_str(raw).unwrap_or_default();
-    // The reader marks the paths it replaced with a name RigWerk never
-    // writes, so the same parse tells the load which slots it filled.  Name
-    // them for their saved position; they stay muted, with every send off.
-    let mut replaced_paths = 0usize;
-    for (position, path) in preferences.paths.iter_mut().enumerate() {
-        if path.name == UNREADABLE_PATH_SENTINEL {
-            path.name = format!("Unreadable path {}", position + 1);
-            replaced_paths += 1;
-        }
+    // The counts are a separate read of the same text; it only reports lists
+    // that lost entries.  A failed read is not treated as "nothing lost": the
+    // original text is kept when the counts cannot vouch for it.
+    let counts = ron::from_str::<StoredCounts>(raw);
+    let counts_unreadable = counts.is_err();
+    let counts = counts.unwrap_or_default();
+    // Sends are replaced in place by a marker the clamp site turns into "off",
+    // so they are counted here, before sanitizing, over the path lists the
+    // load actually kept.  A session dropped above is not in `sessions`.
+    let mut replaced_sends = count_replaced_sends_in(&preferences.paths);
+    for session in &preferences.sessions {
+        replaced_sends += count_replaced_sends_in(&session.paths);
     }
     // List lengths before sanitizing: an extra output the cap drops is not an
     // unreadable entry, and the duplicate virtual out is dropped on purpose.
@@ -996,6 +1060,26 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
     // Sanitizing can still drop a measurement that parsed but cannot describe
     // a real path; the measurement notice is counted after it runs.
     sanitize_preferences(&mut preferences);
+    // The path markers survive sanitizing, so the scan runs after it: paths
+    // past the cap are gone and must not be reported as kept.  A session's
+    // path list is read the same way, and only loaded sessions are left.
+    let mut replaced_paths = name_unreadable_paths(&mut preferences.paths);
+    for session in &mut preferences.sessions {
+        replaced_paths += name_unreadable_paths(&mut session.paths);
+    }
+    // Routing rows carry the load's marker until this point.  Walking the kept
+    // devices after sanitizing counts only rows that still have a position: a
+    // row in a dropped session or extra output, or past the caps, is gone.
+    let mut replaced_routes = take_unreadable_rows(&mut preferences.clock_output);
+    for extra_output in &mut preferences.extra_outputs {
+        replaced_routes += take_unreadable_rows(&mut extra_output.settings);
+    }
+    for session in &mut preferences.sessions {
+        replaced_routes += take_unreadable_rows(&mut session.clock_output);
+        for extra_output in &mut session.extra_outputs {
+            replaced_routes += take_unreadable_rows(&mut extra_output.settings);
+        }
+    }
     let skipped_sessions = counts.sessions.len().saturating_sub(sessions_loaded);
     let stored_plugins = counts.plugins.len()
         + counts
@@ -1018,11 +1102,32 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
              “{backup_key}”."
         ));
     }
-    if replaced_paths > 0 {
+    if replaced_paths > 0 || replaced_routes > 0 || replaced_sends > 0 {
+        let mut replaced = Vec::new();
+        if replaced_paths > 0 {
+            replaced.push(format!(
+                "{replaced_paths} saved signal path(s) (a muted “Unreadable path” slot with \
+                 every send off)"
+            ));
+        }
+        if replaced_routes > 0 {
+            replaced.push(format!(
+                "{replaced_routes} saved routing row(s) (off on that device)"
+            ));
+        }
+        if replaced_sends > 0 {
+            replaced.push(format!("{replaced_sends} saved send(s) (off)"));
+        }
         notices.push(format!(
-            "{replaced_paths} saved signal path(s) could not be read; each keeps its slot as a \
-             muted “Unreadable path” with every send off, so the path and any send aimed at it \
-             are silent. The original settings are kept as “{backup_key}”."
+            "Could not read {}; each keeps its position, so no path, route or send moves to \
+             another. The original settings are kept as “{backup_key}”.",
+            replaced.join(", ")
+        ));
+    }
+    if counts_unreadable {
+        notices.push(format!(
+            "The stored list sizes could not be counted, so this load cannot promise that \
+             nothing was lost. The original settings are kept as “{backup_key}”."
         ));
     }
     if stored_schema_version > PREFERENCES_SCHEMA {

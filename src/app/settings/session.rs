@@ -5,7 +5,7 @@ use super::preferences::{
     ExtraOutputPref, DEFAULT_BRIDGE_BUFFER_MS, DEFAULT_BUFFER, DEFAULT_INPUT_GAIN,
     DEFAULT_OUTPUT_GAIN, DEFAULT_SAMPLE_RATE,
 };
-use super::serde_util::skip_unreadable;
+use super::serde_util::{placeholder_unreadable, skip_unreadable};
 use crate::audio::{EqSettings, GateSettings, OutputDeviceSettings, PluginPref, WasapiOutputMode};
 
 /// A saved session.  Every field has a default, so a session saved by an older or
@@ -83,6 +83,11 @@ pub(crate) struct Session {
     pub(crate) match_paths: crate::app::match_paths::MatchPathsSettings,
     /// The signal paths.  Sessions from before paths have none; their
     /// top-level mix fields become path 1 ([`Self::migrate_paths`]).
+    ///
+    /// A path that cannot be read keeps its slot as a muted “Unreadable path”
+    /// with every send off, the same placeholder the top-level path list
+    /// uses, so one damaged path does not cost the session.
+    #[serde(deserialize_with = "placeholder_unreadable")]
     pub(crate) paths: Vec<PathPref>,
     /// Clock output level, mute and channel map.  Older sessions have none,
     /// which loads as today's output (L → 1, R → 2, mono copy on the rest).

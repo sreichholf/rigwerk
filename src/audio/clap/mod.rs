@@ -24,11 +24,7 @@ mod state;
 pub(crate) mod tests;
 
 pub(crate) use gui::{ParentWindow, ResizeHints, WindowApi};
-#[cfg(test)]
-pub(crate) use host::{claim_main_thread_for_test, MainThreadClaim};
-pub(crate) use host::{
-    is_main_thread, mark_main_thread, may_destroy_plugins_here, GuiVisibility, HostState, StateSave,
-};
+pub(crate) use host::{GuiVisibility, HostState};
 pub(crate) use instance::{ClapInstance, ClapLoaded};
 pub(crate) use processor::ClapProcessor;
 pub(crate) use scan::{

@@ -343,6 +343,11 @@ fn the_buffer_line_reads_what_the_device_opened() {
     app.snapshot.opened_output_mode = Some(crate::audio::OutputMode::LowLatency);
     app.snapshot.output_rate = 48_000;
     app.snapshot.output_step_frames = 128;
+    // A native PipeWire stream publishes the quantum it asked for before its
+    // first block: the number stays, but it is marked as the request.
+    assert_eq!(app.output_buffer_line(0), "Low latency · 2.7 ms (asked)");
+    app.snapshot.output_rate_reported = true;
+    app.snapshot.output_step_reported = true;
     assert_eq!(app.output_buffer_line(0), "Low latency · 2.7 ms");
     assert_eq!(app.output_buffer_line(1), "auto");
     app.snapshot.extra_output_rates[0] = 48_000;
