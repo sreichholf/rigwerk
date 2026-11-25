@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::path::{path_level_gain, sanitize_path_level, MAX_PATHS};
+use super::super::path::{path_level_gain, sanitize_path_level, MAX_PATHS, PATH_LEVEL_MIN_DB};
+use super::super::serde_util::read_or_placeholder;
 use super::align::{plan_alignment, trim_frames, AlignmentReport};
 use super::weights::{level_gain, path_channel_weights, routed_paths};
 
@@ -281,6 +282,11 @@ pub struct PathMapSettings {
     /// or less delay (negative) for this path on this device, on top of
     /// the automatic alignment.
     pub trim_ms: f32,
+    /// Set only between the read of a saved row that could not be parsed and
+    /// the load's scan, which counts the row and clears the flag.  Never
+    /// saved and never read by the mapper.
+    #[serde(skip)]
+    pub(crate) unreadable: bool,
 }
 
 impl Default for PathMapSettings {
@@ -290,6 +296,7 @@ impl Default for PathMapSettings {
             level_db: 0.0,
             invert: false,
             trim_ms: 0.0,
+            unreadable: false,
         }
     }
 }
@@ -308,6 +315,16 @@ impl PathMapSettings {
         Self {
             map: ChannelMap { left: 0, right: 0 },
             ..Self::default()
+        }
+    }
+
+    /// Nothing routed and at the level floor: silent even on a device whose
+    /// unused channels play the mono copy, because the device gain is 0
+    /// whatever the fallback weight.
+    pub fn silent() -> Self {
+        Self {
+            level_db: PATH_LEVEL_MIN_DB,
+            ..Self::unrouted()
         }
     }
 
@@ -348,8 +365,11 @@ impl PathMapSettings {
 ///
 /// `path_map` is indexed by path slot in memory.  Saved, it is indexed by
 /// the path's position in the saved `paths` list (the app compacts it), and
-/// trailing default entries are left out.  Files from before paths existed
-/// stored one `map`; it loads as the first path's map.
+/// trailing default entries are left out.  A saved row that cannot be read
+/// loads silent in its own position (nothing routed and at the level floor),
+/// so no other path's map moves and the default row (L → 1, R → 2) is never
+/// put where a damaged one was.  Files from before paths existed stored one
+/// `map`; it loads as the first path's map.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StoredDeviceSettings", into = "StoredDeviceSettings")]
 pub struct OutputDeviceSettings {
@@ -386,6 +406,9 @@ struct StoredDeviceSettings {
     )]
     map: Option<ChannelMap>,
     unused: UnusedChannels,
+    /// One entry per saved path, in the same order.  A row that does not
+    /// parse, or is written as the literal `()` form, keeps its position off.
+    #[serde(default, deserialize_with = "stored_path_map")]
     path_map: Vec<PathMapSettings>,
     align: bool,
     /// Missing on older saves: the click plays nowhere.
@@ -402,6 +425,28 @@ where
     D: serde::Deserializer<'de>,
 {
     ChannelMap::deserialize(deserializer).map(Some)
+}
+
+/// The row a saved routing entry that cannot be read leaves: nothing routed
+/// and at the level floor, so the path is silent on this device even where
+/// the unused channels would otherwise play its mono copy.  The flag lets the
+/// load count the row and clear the marker.
+fn unreadable_row() -> PathMapSettings {
+    PathMapSettings {
+        unreadable: true,
+        ..PathMapSettings::silent()
+    }
+}
+
+/// Reads the routing rows by path position.  A row that does not parse, or
+/// is written as the literal `()` form, keeps its slot off: dropping it would
+/// move every later path's map, and the default row would play the path on
+/// channels this device was never given.
+fn stored_path_map<'de, D>(deserializer: D) -> Result<Vec<PathMapSettings>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    read_or_placeholder(deserializer, unreadable_row, unreadable_row)
 }
 
 impl Default for StoredDeviceSettings {

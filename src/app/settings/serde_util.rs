@@ -1,4 +1,9 @@
 //! Serde helpers for tolerant preference loading.
+//!
+//! The placeholder read itself lives in `audio/serde_util`: the saved device
+//! rows need the same read, and `audio` may not reach in here.  The
+//! [`Placeholder`] values and the policy that reports a replacement stay in
+//! this layer.
 
 use serde::de::{Deserializer, IgnoredAny};
 use serde::Deserialize;
@@ -66,20 +71,5 @@ where
     D: Deserializer<'de>,
     T: Deserialize<'de> + Placeholder,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Stored<T> {
-        Good(T),
-        Empty(()),
-        Bad(IgnoredAny),
-    }
-    let entries = Vec::<Stored<T>>::deserialize(deserializer)?;
-    Ok(entries
-        .into_iter()
-        .map(|entry| match entry {
-            Stored::Good(value) => value,
-            Stored::Empty(()) => T::default(),
-            Stored::Bad(_) => T::placeholder(),
-        })
-        .collect())
+    crate::audio::serde_util::read_or_placeholder(deserializer, T::placeholder, T::default)
 }

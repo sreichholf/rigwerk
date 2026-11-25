@@ -388,6 +388,7 @@ fn apply_click_pair_routes_music_to_one_and_two_and_the_click_to_three_and_four(
         invert: true,
         trim_ms: 0.5,
         map: ChannelMap { left: 0, right: 0 },
+        ..PathMapSettings::default()
     };
     let wide = app.clock_output.path_map[0].map;
     app.apply_click_pair(0);

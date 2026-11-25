@@ -50,6 +50,8 @@
 //! - `ring`: lock-free multi-lane SPSC ring for each generic extra output.
 //! - `record`: one armed endpoint into a WAV file.  The callback only
 //!   pushes; a writer thread owns the disk.
+//! - `serde_util`: the read that keeps a damaged entry in its own slot of a
+//!   positional saved list (preferences, a device's routing rows).
 //! - `eq`: the built-in 5-band EQs before and after the plugin effects.
 //! - `gate`: the built-in noise gate (PRE or POST effects).
 //! - `nam`: the built-in Neural Amp Modeler blocks (before or after the
@@ -106,6 +108,7 @@ mod resampler;
 mod ring;
 pub(crate) mod rt_guard;
 mod scope;
+pub(crate) mod serde_util;
 mod shared;
 mod thread_priority;
 mod tuner;

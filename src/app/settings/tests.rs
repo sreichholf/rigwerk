@@ -5,9 +5,9 @@ use crate::app::appearance::ThemeChoice;
 use crate::app::latency::{LoopbackKind, MeasuredLatency};
 use crate::app::Page;
 use crate::audio::{
-    ChannelMap, EqSettings, GateKey, GateSettings, GateSlot, LegacyNamSettings, NamPosition,
-    OutputDeviceSettings, PluginFormat, PluginPref, UnusedChannels, WasapiOutputMode,
-    MAX_EXTRA_OUTPUTS, MAX_NAM_BLOCKS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
+    ChannelMap, EqSettings, GateKey, GateSettings, GateSlot, LegacyNamSettings, MixSide,
+    NamPosition, OutputDeviceSettings, PluginFormat, PluginPref, UnusedChannels, WasapiOutputMode,
+    MAX_EXTRA_OUTPUTS, MAX_NAM_BLOCKS, MAX_OUTPUT_CHANNELS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
 const BACKUP: &str = PREFERENCES_BACKUP_KEY;
@@ -615,6 +615,280 @@ fn an_unreadable_path_keeps_its_slot_muted_and_the_routing_index() {
     assert_eq!(
         preferences.paths[0].sends,
         vec![crate::audio::SEND_OFF_DB, -6.0, crate::audio::SEND_OFF_DB]
+    );
+}
+
+#[test]
+fn an_unreadable_routing_row_keeps_its_position_silent() {
+    let raw = r#"(
+        paths:[(name:"Main"),(name:"Aux"),(name:"FX")],
+        clock_device:(path_map:[(level_db:-1.0),(level_db:"hot"),(level_db:-11.0)]),
+        followers:[(settings:(path_map:[(level_db:-4.0),(level_db:-5.0)]))]
+    )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("the rest still loads");
+    assert_eq!(preferences.paths.len(), 3, "every path survives");
+    assert_eq!(
+        preferences.paths[1].name, "Aux",
+        "the paths keep their order"
+    );
+    // The rows on either side still belong to the paths at their positions.
+    assert_eq!(preferences.clock_output.path_map[0].level_db, -1.0);
+    assert_eq!(preferences.clock_output.path_map[2].level_db, -11.0);
+    // Another output's rows are untouched by the damage next door.
+    let other = &preferences.extra_outputs[0].settings.path_map;
+    assert_eq!(other[0].level_db, -4.0);
+    assert_eq!(other[1].level_db, -5.0);
+
+    // The bad row keeps its slot routed nowhere and at the level floor: the
+    // default row would play the path on channels 1/2, which this device was
+    // never given.
+    let bad = &preferences.clock_output.path_map[1];
+    assert!(bad.map.is_empty(), "{:?}", bad.map);
+    assert_eq!(
+        bad.level_db,
+        crate::audio::PATH_LEVEL_MIN_DB,
+        "the replaced row is at the level floor"
+    );
+    assert!(!bad.unreadable, "the load clears its own marker");
+    for channel in 0..MAX_OUTPUT_CHANNELS {
+        assert!(!bad.map.routes(MixSide::L, channel));
+        assert!(!bad.map.routes(MixSide::R, channel));
+    }
+
+    // The default device leaves its unused channels to the mono copy.  An
+    // unrouted row would still be heard there; this one must not be.
+    assert_eq!(preferences.clock_output.unused, UnusedChannels::MonoCopy);
+    let mut live = [false; crate::audio::MAX_PATHS];
+    live[1] = true;
+    let mut gains = [0.0; crate::audio::MAX_PATHS];
+    gains[1] = 1.0;
+    let silent = preferences
+        .clock_output
+        .settled_sum(live, gains, 2, 1.0, 1.0);
+    assert!(
+        silent.iter().all(|&sample| sample == 0.0),
+        "a replaced row must be silent, not mono-copied: {silent:?}"
+    );
+    // Without the level floor the same empty map is heard through the mono
+    // copy, so the silence above comes from the floor, not the empty map.
+    let mut heard = preferences.clock_output;
+    heard.path_map[1] = crate::audio::PathMapSettings::unrouted();
+    let played = heard.settled_sum(live, gains, 2, 1.0, 1.0);
+    assert!(
+        played.iter().any(|&sample| sample != 0.0),
+        "an unrouted 0 dB row is the mono copy: {played:?}"
+    );
+
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("1 saved routing row") && notice.contains("(off")),
+        "{:?}",
+        loaded.notices
+    );
+    assert_eq!(loaded.backup, Some((BACKUP.to_owned(), raw.to_owned())));
+}
+
+#[test]
+fn an_unreadable_send_keeps_its_index_and_its_neighbours() {
+    let raw = r#"(
+        paths:[
+            (name:"Main",sends:[-3.0,"hot",-9.0]),
+            (name:"Aux"),
+            (name:"FX")
+        ]
+    )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("the rest still loads");
+    assert_eq!(preferences.paths.len(), 3);
+    let sends = &preferences.paths[0].sends;
+    assert_eq!(sends.len(), 3, "the sends keep their length");
+    assert_eq!(sends[0], -3.0);
+    assert_eq!(
+        sends[1],
+        crate::audio::SEND_OFF_DB,
+        "the damaged send keeps its index off, not at 0 dB"
+    );
+    assert_eq!(
+        sends[2], -9.0,
+        "a good send after a bad one keeps its value"
+    );
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("1 saved send") && notice.contains("(off)")),
+        "{:?}",
+        loaded.notices
+    );
+    assert!(loaded.backup.is_some());
+}
+
+#[test]
+fn an_unreadable_session_path_keeps_the_session_and_its_paths() {
+    let raw = r#"(
+        sessions:[(
+            name:"Live set",rate:96000,buffer:64,
+            paths:[
+                (name:"Main",level_db:-2.0),
+                (name:12,level_db:"hot"),
+                (name:"FX",level_db:-9.0)
+            ]
+        )]
+    )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("the rest still loads");
+    assert_eq!(preferences.sessions.len(), 1, "the session survives");
+    let session = &preferences.sessions[0];
+    assert_eq!(session.name, "Live set");
+    assert_eq!(session.rate, 96_000);
+    assert_eq!(
+        session.paths.len(),
+        3,
+        "no session path is dropped or moved"
+    );
+    assert_eq!(session.paths[0].name, "Main");
+    assert_eq!(session.paths[0].level_db, -2.0);
+    assert_eq!(session.paths[2].name, "FX");
+    assert_eq!(session.paths[2].level_db, -9.0);
+
+    let placeholder = &session.paths[1];
+    assert!(
+        placeholder.mute,
+        "a damaged session path must not be audible"
+    );
+    assert_eq!(placeholder.name, "Unreadable path 2");
+
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("1 saved signal path") && notice.contains("muted")),
+        "{:?}",
+        loaded.notices
+    );
+}
+
+#[test]
+fn an_empty_send_entry_is_off_not_unity() {
+    let raw = r#"(
+        paths:[(name:"Main",sends:[-3.0,(),-9.0])]
+    )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("the rest still loads");
+    let sends = &preferences.paths[0].sends;
+    assert_eq!(sends.len(), 3, "the empty entry keeps its slot");
+    assert_eq!(sends[0], -3.0);
+    assert_eq!(
+        sends[1],
+        crate::audio::SEND_OFF_DB,
+        "RON's () is not a unity send"
+    );
+    assert_eq!(sends[2], -9.0);
+    assert!(
+        loaded
+            .notices
+            .iter()
+            .any(|notice| notice.contains("1 saved send") && notice.contains("(off)")),
+        "an empty send is a replacement, not a default: {:?}",
+        loaded.notices
+    );
+    assert!(loaded.backup.is_some());
+}
+
+#[test]
+fn unreadable_rows_in_a_kept_session_are_counted() {
+    let raw = r#"(
+        sessions:[(
+            name:"Live set",rate:96000,buffer:64,
+            clock_device:(path_map:[(level_db:-1.0),(level_db:"hot")]),
+            followers:[(settings:(path_map:[(level_db:"bad")]))],
+            paths:[(name:"Main",sends:[-3.0,"hot",-9.0])]
+        )]
+    )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("the rest still loads");
+    assert_eq!(preferences.sessions.len(), 1, "the session survives");
+    let session = &preferences.sessions[0];
+
+    // Both of the session's devices carry one replaced row; the count must
+    // walk the session branches too.
+    assert_eq!(session.clock_output.path_map[0].level_db, -1.0);
+    assert!(session.clock_output.path_map[1].map.is_empty());
+    assert_eq!(
+        session.clock_output.path_map[1].level_db,
+        crate::audio::PATH_LEVEL_MIN_DB
+    );
+    assert!(session.extra_outputs[0].settings.path_map[0].map.is_empty());
+    assert_eq!(
+        session.extra_outputs[0].settings.path_map[0].level_db,
+        crate::audio::PATH_LEVEL_MIN_DB
+    );
+    // The session's path send keeps its slot off, with its neighbours intact.
+    assert_eq!(
+        session.paths[0].sends,
+        vec![-3.0, crate::audio::SEND_OFF_DB, -9.0]
+    );
+
+    let notice = loaded
+        .notices
+        .iter()
+        .find(|notice| notice.contains("2 saved routing row"))
+        .unwrap_or_else(|| panic!("{:?}", loaded.notices));
+    assert!(
+        notice.contains("1 saved send"),
+        "the session's send is counted too: {notice}"
+    );
+    assert!(loaded.backup.is_some());
+}
+
+#[test]
+fn only_entries_the_load_keeps_are_reported() {
+    // The fifth row and fifth send are past the load's cap, the second
+    // follower is skipped whole, the second virtual output is dropped on
+    // purpose, and the second session cannot be read.  None of their rows or
+    // sends may be reported as kept.
+    let raw = r#"(
+        paths:[(name:"Main",sends:[(),-3.0,-4.0,-5.0,"hot"])],
+        clock_device:(path_map:[
+            (level_db:-1.0),(level_db:-2.0),(level_db:-3.0),(level_db:-4.0),(level_db:"hot")
+        ]),
+        followers:[
+            (id:"hw:A",settings:(path_map:[(level_db:"bad")])),
+            (id:7,settings:(path_map:[(level_db:"bad")])),
+            (virtual_out:true,publish:true),
+            (virtual_out:true,publish:true,settings:(path_map:[(level_db:"bad")]))
+        ],
+        sessions:[
+            (name:12,clock_device:(path_map:[(level_db:"bad")]),paths:[(name:"X",sends:["hot"])])
+        ]
+    )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("the rest still loads");
+
+    // The cap keeps four of each, and only the first four rows are stored.
+    assert_eq!(preferences.paths[0].sends.len(), crate::audio::MAX_PATHS);
+    assert_eq!(
+        preferences.paths[0].sends,
+        vec![crate::audio::SEND_OFF_DB, -3.0, -4.0, -5.0]
+    );
+    assert_eq!(preferences.clock_output.path_map[3].level_db, -4.0);
+    // One kept extra output (the skipped one and the duplicate are gone).
+    assert_eq!(preferences.extra_outputs.len(), 2);
+    let notice = loaded
+        .notices
+        .iter()
+        .find(|notice| notice.contains("1 saved routing row"))
+        .unwrap_or_else(|| panic!("{:?}", loaded.notices));
+    assert!(
+        notice.contains("1 saved send"),
+        "only the kept send is counted: {notice}"
+    );
+    assert!(
+        !notice.contains("2 saved send"),
+        "the truncated send is not reported: {notice}"
     );
 }
 
@@ -1346,6 +1620,7 @@ fn three_paths() -> (Vec<PathPref>, OutputDeviceSettings, Vec<ExtraOutputPref>) 
         level_db: -6.0,
         invert: true,
         trim_ms: 1.5,
+        ..crate::audio::PathMapSettings::default()
     };
     clock.path_map[2] = crate::audio::PathMapSettings::unrouted();
     let mut stream = ExtraOutputPref::virtual_output();
@@ -1895,6 +2170,7 @@ fn golden_device(level_db: f32, click_mask: u8) -> OutputDeviceSettings {
         level_db: -2.5,
         invert: true,
         trim_ms: 1.25,
+        ..crate::audio::PathMapSettings::default()
     };
     path_map[1] = crate::audio::PathMapSettings::unrouted();
     OutputDeviceSettings {
