@@ -56,7 +56,7 @@ impl RigWerkApp {
             self.set_master_level(level);
         }
         if events.mute {
-            self.mute = !self.mute;
+            self.toggle_mute();
         }
     }
 }

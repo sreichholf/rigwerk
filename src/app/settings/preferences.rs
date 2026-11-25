@@ -636,6 +636,28 @@ pub(crate) fn validate_bridge_settings(
     }
 }
 
+/// A live input-rate edit, checked the way a saved one is: a rate not in
+/// [`RATES`] becomes [`DEFAULT_SAMPLE_RATE`].
+pub(crate) fn sanitize_sample_rate(rate: u32) -> u32 {
+    known_rate(rate, false)
+}
+
+/// A live clock-output-rate edit; 0 still means "match the input".
+pub(crate) fn sanitize_output_rate(rate: u32) -> u32 {
+    known_rate(rate, true)
+}
+
+/// A live buffer edit, checked the way a saved one is.
+pub(crate) fn sanitize_buffer_size(buffer: usize) -> usize {
+    known_buffer(buffer, false)
+}
+
+/// A live fixed bridge-buffer edit: NaN becomes the default, the rest is
+/// clamped to the slider range.
+pub(crate) fn sanitize_bridge_buffer_ms(ms: f32) -> f32 {
+    finite_bridge_buffer(ms)
+}
+
 fn known_rate(rate: u32, allow_match_input: bool) -> u32 {
     if allow_match_input && rate == 0 {
         return 0;

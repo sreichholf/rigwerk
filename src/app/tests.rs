@@ -92,6 +92,29 @@ fn a_damaged_load_writes_its_backup_while_the_startup_scan_runs() {
 }
 
 #[test]
+fn device_and_clock_setters_are_what_the_preferences_store() {
+    let mut app = blank_app();
+    app.set_sample_rate(96_000);
+    app.set_buffer_size(64);
+    app.set_output_rate(44_100);
+    app.set_output_buffer(256);
+    app.set_drift(false);
+    app.toggle_mute();
+    app.set_bridge_buffer_mode(crate::audio::BufferMode::Fixed);
+    app.set_bridge_buffer_ms(12.5);
+
+    let (_, preferences) = save_text(&mut app);
+    assert_eq!(preferences.sample_rate, 96_000);
+    assert_eq!(preferences.buffer_size, 64);
+    assert_eq!(preferences.output_rate, 44_100);
+    assert_eq!(preferences.output_buffer, 256);
+    assert!(!preferences.drift);
+    assert!(preferences.mute);
+    assert_eq!(preferences.bridge_buffer_mode, 2);
+    assert_eq!(preferences.bridge_buffer_ms, 12.5);
+}
+
+#[test]
 fn a_file_from_a_newer_build_is_never_overwritten() {
     let newer = r#"(schema_version:99,session_name:"Future",some_new_field:[1,2])"#;
     let loaded = load_preferences(Some(newer), PREFERENCES_BACKUP_KEY);

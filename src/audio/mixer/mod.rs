@@ -101,36 +101,17 @@ use super::shared::Shared;
 
 #[cfg(test)]
 mod align_tests;
+pub(crate) mod drift;
 mod path;
 pub(crate) mod ramp;
 #[cfg(test)]
 mod rt_tests;
 
+use drift::{DRIFT_FILTER_SECONDS, DRIFT_KI, DRIFT_KP, DRIFT_LIMIT_PPM, DRIFT_LIMIT_RATIO};
 use path::{DspMeter, PathProcessor};
 
 pub(crate) use ramp::Ramp;
 use ramp::{fade_down, fade_up, CONTROL_RAMP_SECONDS, DROPOUT_FADE_SECONDS};
-
-/// The most drift steering may trim the conversion ratio.  500 ppm is under
-/// one cent of pitch.  Real clock offsets between two interfaces are a few
-/// tens of ppm, so the loop normally runs far inside this limit.
-const DRIFT_LIMIT_PPM: f32 = 500.0;
-/// The same limit in ratio units, for the integral term.
-const DRIFT_LIMIT_RATIO: f32 = DRIFT_LIMIT_PPM * 1e-6;
-/// Time constant of the low-pass on the ring-fill error.  The fill is read
-/// once per output block and jumps by a whole input block whenever the input
-/// delivers, so the raw reading carries a sawtooth of up to one input block
-/// that says nothing about the clocks.
-const DRIFT_FILTER_SECONDS: f32 = 0.5;
-/// Proportional gain, in ratio per second of filtered fill error (60 ppm per
-/// millisecond).  Low enough that the filtered block sawtooth moves the ratio
-/// by tens of ppm, not across the whole range.
-const DRIFT_KP: f32 = 0.06;
-/// Integral gain, in ratio per second² of filtered fill error.  With the
-/// proportional gain the loop is damped (about 0.87) with a settling time of
-/// a few tens of seconds: the integral learns the steady clock offset and the
-/// ratio then moves only by a few ppm.
-const DRIFT_KI: f32 = 0.0012;
 
 /// Takes the next frame from the bridge.  An empty ring returns the previous
 /// frame (so the resampler's window stays continuous) and marks the callback

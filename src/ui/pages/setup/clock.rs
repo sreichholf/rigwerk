@@ -41,7 +41,7 @@ impl RigWerkApp {
             ui.add_space(4.0);
             let mut index = usize::from(!self.drift);
             if segmented(ui, &mut index, &["On", "Off"]).changed() {
-                self.drift = index == 0;
+                self.set_drift(index == 0);
                 self.push_log(
                     if self.drift {
                         "Drift correction on."
@@ -64,7 +64,7 @@ impl RigWerkApp {
                 let mut mode = self.bridge_buffer_mode;
                 bridge_buffer_mode_picker(ui, &mut mode);
                 if mode != self.bridge_buffer_mode {
-                    self.bridge_buffer_mode = mode;
+                    self.set_bridge_buffer_mode(mode);
                     self.push_log(
                         match mode {
                             BufferMode::Auto => "Bridge buffer: Auto.".to_owned(),
@@ -75,14 +75,12 @@ impl RigWerkApp {
                         },
                         LogTone::Amber,
                     );
-                    self.apply_bridge_buffer();
                 }
                 if self.bridge_buffer_mode == BufferMode::Fixed {
                     let mut ms = self.bridge_buffer_ms;
                     let response = fixed_bridge_buffer_size(ui, &mut ms);
                     if response.changed() {
-                        self.bridge_buffer_ms = ms;
-                        self.apply_bridge_buffer();
+                        self.set_bridge_buffer_ms(ms);
                     }
                     if response.drag_stopped() || (response.changed() && !response.dragged()) {
                         self.push_log(
