@@ -5,6 +5,13 @@ on:
     branches: [master]
   pull_request:
 
+# A new push to a pull request cancels its older runs; a stacked series
+# otherwise fills the runner queue with superseded commits.  Pushes to
+# master and scheduled runs group by commit, so none is dropped.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
