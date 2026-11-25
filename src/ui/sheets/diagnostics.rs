@@ -15,10 +15,9 @@ use eframe::egui;
 use egui::{Color32, CornerRadius, RichText, Stroke};
 
 use crate::app::{RigWerkApp, ACTIVITY_LOG_CAP};
-use crate::audio::EngineState;
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::status_dot;
+use crate::ui::widgets::{engine_state_label, status_dot};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -182,17 +181,6 @@ fn budget_row(
         );
         ui.add(egui::Label::new(sans(detail, colours.text3, TypeRole::GridHeader)).wrap());
     });
-}
-
-fn engine_state_label(state: EngineState) -> &'static str {
-    match state {
-        EngineState::Preview => "Demo",
-        EngineState::Running => "Running",
-        EngineState::Starting => "Starting…",
-        EngineState::Stopping => "Stopping…",
-        EngineState::Error => "Error",
-        EngineState::Idle => "Stopped",
-    }
 }
 
 fn diagnostics_export_path() -> PathBuf {

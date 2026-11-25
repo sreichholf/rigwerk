@@ -20,9 +20,9 @@ use crate::app::screen::format_ms;
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{PathFeed, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, SEND_OFF_DB};
 use crate::ui::fonts::Face;
-use crate::ui::theme::{font, palette, Palette, TypeRole};
+use crate::ui::theme::{font, palette, Palette, TypeRole, PATH_COLOUR_NAMES};
 use crate::ui::widgets::{
-    chip, format_db, row_info, segmented, styled_slider, SliderStyle, TextField,
+    chip, format_db, heading, level_row, row_info, segmented, styled_slider, SliderStyle, TextField,
 };
 
 use crate::ui::widgets::OutlineButton;
@@ -30,10 +30,6 @@ use crate::ui::widgets::OutlineButton;
 const ROW_H: f32 = 28.0;
 const VALUE_W: f32 = 80.0;
 const COLUMN_GAP: f32 = 24.0;
-
-/// The path colours by saved index, as the menu names them.
-pub(crate) const PATH_COLOUR_NAMES: [&str; crate::audio::MAX_PATHS] =
-    ["Blue", "Violet", "Green", "Rose"];
 
 impl RigWerkApp {
     /// The path sheet body for path `slot`.
@@ -204,7 +200,15 @@ impl RigWerkApp {
                 |ui| {
                     ui.set_width(column_w);
                     heading(ui, "Level", colours);
-                    level_row(ui, &mut level, colour, colours);
+                    level_row(
+                        ui,
+                        &mut level,
+                        PATH_LEVEL_MIN_DB,
+                        PATH_LEVEL_MAX_DB,
+                        colour,
+                        "This path's level, before the master",
+                        colours,
+                    );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -456,15 +460,6 @@ fn changed_and_enter(ui: &egui::Ui, field: &egui::Response) -> bool {
     field.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
 }
 
-fn heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
-    ui.label(
-        RichText::new(text)
-            .font(font(Face::SansMedium, TypeRole::Secondary))
-            .color(colours.text3),
-    );
-    ui.add_space(3.0);
-}
-
 fn colour_row(
     ui: &mut egui::Ui,
     current: u8,
@@ -619,38 +614,6 @@ fn send_row(
         );
     });
     changed
-}
-
-fn level_row(ui: &mut egui::Ui, level: &mut f32, colour: egui::Color32, colours: &Palette) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let value_w = VALUE_W;
-        let slider_w = (ui.available_width() - value_w - 8.0).max(80.0);
-        let value_text = format_db(*level, 1);
-        styled_slider(
-            ui,
-            level,
-            PATH_LEVEL_MIN_DB,
-            PATH_LEVEL_MAX_DB,
-            0.1,
-            SliderStyle::named(colour, "Level")
-                .value(value_text.clone())
-                .width(slider_w),
-        )
-        .on_hover_text("This path's level, before the master");
-        ui.allocate_ui_with_layout(
-            Vec2::new(value_w, ROW_H),
-            Layout::right_to_left(Align::Center),
-            |ui| {
-                ui.set_width(value_w);
-                ui.label(
-                    RichText::new(format_db(*level, 1))
-                        .font(font(Face::Mono, TypeRole::Secondary))
-                        .color(colours.text),
-                );
-            },
-        );
-    });
 }
 
 #[cfg(test)]

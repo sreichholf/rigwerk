@@ -12,15 +12,11 @@ use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB};
 use crate::ui::fonts::Face;
-use crate::ui::theme::{font, palette, TypeRole};
+use crate::ui::theme::{font, palette, TypeRole, PATH_COLOUR_NAMES};
 use crate::ui::widgets::{
     chip, fit_text, horizontal_meter, popover, row_info, segmented, FaderRange, OutlineButton,
     TextField,
 };
-
-/// The path colours by saved index, as the menu names them.
-pub(crate) const PATH_COLOUR_NAMES: [&str; crate::audio::MAX_PATHS] =
-    ["Blue", "Violet", "Green", "Rose"];
 
 impl RigWerkApp {
     pub(super) fn path_strip(

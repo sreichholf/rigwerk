@@ -1,9 +1,26 @@
-use super::{node_named, nudge_slider, run_frame, styled_slider, test_input, SliderStyle};
+use super::{
+    engine_state_label, node_named, nudge_slider, run_frame, styled_slider, test_input, SliderStyle,
+};
+use crate::audio::EngineState;
 use crate::ui::theme::TEAL;
 use eframe::egui;
 
 fn near(actual: f32, expected: f32) {
     assert!((actual - expected).abs() < 1.0e-4, "{actual} != {expected}");
+}
+
+#[test]
+fn every_engine_state_reads_as_its_status_word() {
+    for (state, label) in [
+        (EngineState::Preview, "Demo"),
+        (EngineState::Running, "Running"),
+        (EngineState::Starting, "Starting…"),
+        (EngineState::Stopping, "Stopping…"),
+        (EngineState::Error, "Error"),
+        (EngineState::Idle, "Stopped"),
+    ] {
+        assert_eq!(engine_state_label(state), label, "{state:?}");
+    }
 }
 
 #[test]

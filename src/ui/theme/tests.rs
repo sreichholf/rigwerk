@@ -3,7 +3,7 @@ use egui::Color32;
 
 use super::{
     font, hover_cursor, palette, ts, type_size, Face, Palette, TypeRole, AMBER, CARD, DARK, DIM,
-    LIGHT, MUTED, TEAL, TEXT,
+    LIGHT, MUTED, PATH_COLOUR_NAMES, TEAL, TEXT,
 };
 
 fn channel(c: u8) -> f64 {
@@ -131,6 +131,35 @@ fn meter_hot_is_warn_and_no_two_paths_share_a_colour() {
             for b in &p.path[i + 1..] {
                 assert_ne!(a, b, "{theme}: two paths share a colour");
             }
+        }
+    }
+}
+
+/// The word a path colour reads as, from its own channels: the channel it
+/// carries most names it, and a blue with more red than green is the violet.
+fn path_colour_name(colour: Color32) -> &'static str {
+    let (r, g, b) = (colour.r(), colour.g(), colour.b());
+    if g > r && g > b {
+        "Green"
+    } else if r > b {
+        "Rose"
+    } else if r > g {
+        "Violet"
+    } else {
+        "Blue"
+    }
+}
+
+#[test]
+fn every_path_colour_has_its_name_in_order() {
+    for (theme, p) in palettes() {
+        assert_eq!(PATH_COLOUR_NAMES.len(), p.path.len(), "{theme}");
+        for (index, colour) in p.path.iter().enumerate() {
+            assert_eq!(
+                path_colour_name(*colour),
+                PATH_COLOUR_NAMES[index],
+                "{theme}: path colour {index} reads as the wrong name"
+            );
         }
     }
 }
