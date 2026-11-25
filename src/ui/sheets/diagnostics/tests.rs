@@ -108,6 +108,20 @@ fn a_poisoned_chain_is_named_instead_of_a_skip_rate() {
 }
 
 #[test]
+fn every_diagnostics_tab_has_a_ribbon_row() {
+    use crate::app::screen::DiagnosticsTab;
+
+    for (index, &(label, tab)) in super::TABS.iter().enumerate() {
+        assert!(!label.is_empty(), "{tab:?}");
+        assert_eq!(super::tab_index(tab), index, "{tab:?}");
+    }
+    // `tab_index` matches every variant, so a new one fails to compile until
+    // it is given a position.  Each row above must agree with that position;
+    // a variant added after `Status` needs its `TABS` row by hand.
+    assert_eq!(super::TABS.len(), DiagnosticsTab::Status as usize + 1);
+}
+
+#[test]
 fn a_zero_latency_edit_panic_is_named_in_diagnostics() {
     // The claim lets the chain's slots be destroyed here; one left for the
     // deferred queue can flake the parallel suite.
