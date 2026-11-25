@@ -1,10 +1,14 @@
 //! Starting, stopping and re-opening the bridge, and the live numbers the
 //! screens show about it.
 
+use std::sync::Arc;
+
 use crate::app::devices::is_wrapper_driver;
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
-use crate::audio::{self, EngineState, StartConfig};
+use crate::audio::{
+    self, AsioPanelSide, DspTime, EngineState, PluginLockReport, PluginView, StartConfig,
+};
 
 impl RigWerkApp {
     /// Allocations the audio callbacks made since launch (`audio::rt_guard`).
@@ -35,6 +39,68 @@ impl RigWerkApp {
                 | EngineState::Running
                 | EngineState::Stopping
         )
+    }
+
+    /// The bridge's state, for the screens' labels and enable rules.
+    pub(crate) fn engine_state(&self) -> EngineState {
+        self.engine.state
+    }
+
+    /// The live status line the running bridge last published.  Empty before
+    /// the first run.
+    pub(crate) fn engine_bridge_status(&self) -> String {
+        self.engine.bridge_status()
+    }
+
+    /// The note a graph-rate restore problem leaves behind, if any.
+    pub(crate) fn engine_quantum_note(&self) -> Option<&str> {
+        self.engine.quantum_note()
+    }
+
+    /// Every live path's chain DSP time together.  `None` while no mixer
+    /// runs.
+    pub(crate) fn engine_total_dsp_time(&self) -> Option<DspTime> {
+        self.engine.total_dsp_time()
+    }
+
+    /// Path `slot`'s chain DSP time.  `None` while no mixer runs the path.
+    pub(crate) fn engine_path_dsp_time(&self, slot: usize) -> Option<DspTime> {
+        self.engine.path_dsp_time(slot)
+    }
+
+    /// Path `slot`'s published plugin views, in chain order.
+    pub(crate) fn engine_plugin_views(&self, slot: usize) -> Arc<[PluginView]> {
+        self.engine.plugin_views(slot)
+    }
+
+    /// Path `slot`'s plugin lock counters.
+    pub(crate) fn engine_plugin_lock_report(&self, slot: usize) -> PluginLockReport {
+        self.engine.plugin_lock_report(slot)
+    }
+
+    /// Posts the request to open one ASIO side's control panel.  The bridge
+    /// thread owns the call; this only sets the flag.
+    pub(crate) fn request_asio_panel(&mut self, side: AsioPanelSide) {
+        self.engine.request_asio_panel(side);
+    }
+
+    /// Clears every path's plugin lock counters.  A poisoned chain stays
+    /// poisoned.
+    pub(crate) fn reset_plugin_lock_counters(&mut self) {
+        self.engine.reset_plugin_lock_counters();
+    }
+
+    /// The *Driver panel* state for `side`: `None` when the selected device
+    /// on that side is not ASIO, so the button does not apply.  `Some(true)`
+    /// means the running bridge has that driver open and its control panel
+    /// can be opened; `Some(false)` means the driver is selected but the
+    /// bridge is not running on it yet.
+    pub(crate) fn driver_panel(&self, side: AsioPanelSide) -> Option<bool> {
+        let clsid = match side {
+            AsioPanelSide::Input => self.active_input().asio_clsid,
+            AsioPanelSide::Output => self.selected_output().asio_clsid,
+        }?;
+        Some(self.engine.open_asio_driver(side) == Some(clsid))
     }
 
     /// The error worth showing.  While a stop is still releasing the device, a

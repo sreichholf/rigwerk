@@ -63,7 +63,7 @@ pub(crate) fn control_value(parameter: &PluginParamView) -> String {
 impl RigWerkApp {
     /// The effect sheet body for effect `index` of path `path`.
     pub(crate) fn effect_sheet(&mut self, ui: &mut egui::Ui, path: usize, index: usize) {
-        let views = self.engine.plugin_views(path);
+        let views = self.engine_plugin_views(path);
         let Some(view) = views.get(index) else {
             return;
         };
