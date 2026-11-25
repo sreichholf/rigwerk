@@ -118,16 +118,26 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/nam-rs-parity.sh .nam-rs-parity
 
+      - name: Upload nam-rs parity report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nam-rs-vendor-diff
+          path: .nam-rs-parity/nam-rs-vendor.diff
+
   # Advisories, licences, bans, and sources for the locked crates (deny.toml).
   # No build: the action's image ships cargo-deny, which reads Cargo.lock
   # through `cargo metadata`.
   deny:
     name: Deny
     runs-on: ubuntu-24.04
+    # A step timeout does not cap the job, so both are set.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        timeout-minutes: 10
         with:
           command: check
           arguments: --all-features --locked
