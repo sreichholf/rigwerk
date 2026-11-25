@@ -120,9 +120,10 @@ fn the_report_creates_its_folder_and_writes_the_report() {
     );
     assert!(!dir.0.join("Downloads").exists());
 
-    // The exported bytes are the report the sheet shows, not a literal.
-    let text = crate::app::blank_app().diagnostics_text();
-    let written = write_report(&path, &text, false).expect("write");
+    // The exported bytes are the text handed to the writer, not a literal the
+    // writer invents; the report's own wording is the sheet's (`ui`) test.
+    let text = "RigWerk diagnostics\nEngine: waiting\n";
+    let written = write_report(&path, text, false).expect("write");
     assert_eq!(written, path);
     assert_eq!(std::fs::read_to_string(&written).expect("read"), text);
 }
