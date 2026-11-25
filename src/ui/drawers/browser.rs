@@ -37,8 +37,7 @@ impl RigWerkApp {
             .map(|slot| slot.name.clone())
             .unwrap_or_else(|| "Path".to_owned());
         let names: Vec<String> = self
-            .engine
-            .plugin_views(path)
+            .engine_plugin_views(path)
             .iter()
             .map(|view| view.name.clone())
             .collect();
@@ -341,7 +340,7 @@ fn holder_names(app: &RigWerkApp, candidate: &PluginCandidate) -> Vec<String> {
     app.path_order
         .iter()
         .filter_map(|slot| {
-            let held = app.engine.plugin_views(*slot).iter().any(|view| {
+            let held = app.engine_plugin_views(*slot).iter().any(|view| {
                 view.path == wanted
                     && view.format == candidate.format
                     && view.class_id == candidate.class_id

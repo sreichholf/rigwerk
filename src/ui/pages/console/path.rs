@@ -66,7 +66,7 @@ impl RigWerkApp {
             .into_iter()
             .find(|info| info.slot == slot)
             .map_or(0.0, |info| info.latency_ms);
-        let time = self.engine.path_dsp_time(slot);
+        let time = self.engine_path_dsp_time(slot);
         let load = time.map(|time| time.avg_share() * 100.0);
         let peak = time.map(|time| time.peak_share() * 100.0);
         let marker = self.dsp_marker_path() == Some(slot);

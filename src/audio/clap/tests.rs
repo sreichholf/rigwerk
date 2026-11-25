@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,8 +16,10 @@ use clap_sys::ext::gui::{clap_gui_resize_hints, CLAP_WINDOW_API_WAYLAND, CLAP_WI
 use super::gui::{
     choose_editor_api, linux_candidates, EditorApi, ParentWindow, ResizeHints, WindowApi,
 };
+#[cfg(target_os = "linux")]
+use super::host::PENDING_UNREGISTER;
 use super::host::{
-    host_audio_ports_flag_supported, host_audio_ports_rescan, GuiVisibility, HostState,
+    host_audio_ports_flag_supported, host_audio_ports_rescan, GuiVisibility, HostState, LOG_BYTES,
 };
 use super::instance::ClapInstance;
 use super::module::{module_key, EntryInit, ModuleRegistry};
@@ -3163,6 +3165,177 @@ fn show_hide_and_hint_requests_wait_for_the_window() {
     unsafe { (gui.resize_hints_changed.expect("resize_hints_changed"))(host) };
     assert!(shared.take_gui_hints_changed());
     assert!(!shared.take_gui_hints_changed());
+}
+
+/// Sends `message` through the host's `clap_host_log` callback.
+fn log_for_test(state: &Arc<HostState>, message: &CStr) {
+    let host = super::instance::make_host(state);
+    unsafe { super::host::host_log(&host, 3, message.as_ptr()) };
+}
+
+/// The slot's message and whether writing it cut the text.
+fn last_log_for_test(state: &HostState) -> Option<(String, bool)> {
+    state.log_message()
+}
+
+/// The slot keeps the latest message whole when it fits, cuts one that is
+/// too long at a character boundary, and replaces invalid UTF-8 the way the
+/// old lossy decode did.
+#[test]
+fn a_log_message_round_trips_through_the_fixed_slot() {
+    let state = Arc::new(HostState::new(Arc::new(PluginShared::new(0))));
+    log_for_test(&state, c"a normal message");
+    assert_eq!(
+        last_log_for_test(&state),
+        Some(("a normal message".to_owned(), false))
+    );
+
+    // Exactly the capacity is whole; one byte more sets the truncation mark.
+    let exact = "x".repeat(LOG_BYTES);
+    log_for_test(&state, &CString::new(exact.as_bytes()).expect("no NUL"));
+    assert_eq!(last_log_for_test(&state), Some((exact, false)));
+    let long = "x".repeat(LOG_BYTES + 1);
+    log_for_test(&state, &CString::new(long).expect("no NUL"));
+    assert_eq!(
+        last_log_for_test(&state),
+        Some(("x".repeat(LOG_BYTES), true))
+    );
+
+    // A multi-byte character that would cross the end is left out, not cut.
+    let split = format!("{}é", "x".repeat(LOG_BYTES - 1));
+    log_for_test(&state, &CString::new(split).expect("no NUL"));
+    assert_eq!(
+        last_log_for_test(&state),
+        Some(("x".repeat(LOG_BYTES - 1), true))
+    );
+
+    // The message is not validated past the slot plus one character: a
+    // four-byte character cut by that limit is dropped whole, not U+FFFD.
+    let wide = "😀".repeat(LOG_BYTES / 4 + 1);
+    log_for_test(&state, &CString::new(wide).expect("no NUL"));
+    assert_eq!(
+        last_log_for_test(&state),
+        Some(("😀".repeat(LOG_BYTES / 4), true))
+    );
+
+    // Bytes that are not UTF-8 become U+FFFD, as the old lossy decode did.
+    log_for_test(&state, &CString::new(vec![0xFF, b'a']).expect("no NUL"));
+    assert_eq!(
+        last_log_for_test(&state),
+        Some(("\u{FFFD}a".to_owned(), false))
+    );
+}
+
+/// A lock the UI holds makes the callback drop the message, not wait for it.
+#[test]
+fn a_busy_log_slot_drops_the_message_without_waiting() {
+    let state = Arc::new(HostState::new(Arc::new(PluginShared::new(0))));
+    log_for_test(&state, c"first");
+    let held = state.last_log.lock().expect("the log slot");
+    log_for_test(&state, c"second");
+    assert_eq!(
+        held.as_ref().map(|slot| slot.text()),
+        Some("first"),
+        "the callback neither waited nor replaced the message"
+    );
+    drop(held);
+    log_for_test(&state, c"third");
+    assert_eq!(last_log_for_test(&state), Some(("third".to_owned(), false)));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_busy_fd_list_queues_an_unregister_for_the_next_service() {
+    use clap_sys::ext::posix_fd_support::CLAP_POSIX_FD_READ;
+
+    let state = Arc::new(HostState::new(Arc::new(PluginShared::new(0))));
+    let host = super::instance::make_host(&state);
+    let host: *const clap_host = &host;
+    let ext = &super::host::HOST_POSIX_FD;
+    let register = ext.register_fd.expect("register_fd");
+    let unregister = ext.unregister_fd.expect("unregister_fd");
+
+    let mut pipe = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    let [read_end, write_end] = pipe;
+    unsafe {
+        assert!(register(host, read_end, CLAP_POSIX_FD_READ));
+        assert_eq!(libc::write(write_end, b"x".as_ptr().cast(), 1), 1);
+    }
+    assert_eq!(state.ready_fds().len(), 1, "readable while registered");
+
+    let held = state.fds.lock().expect("the fd list");
+    assert!(unsafe { unregister(host, read_end) }, "queued, not refused");
+    assert!(state
+        .pending_unregister
+        .iter()
+        .any(|slot| slot.load(Ordering::Acquire) == read_end));
+    drop(held);
+
+    // The next service drains the request before it polls: nothing comes
+    // back, and the descriptor is really gone.
+    assert!(state.ready_fds().is_empty());
+    assert!(state.fds.lock().expect("the fd list").is_empty());
+    assert!(!unsafe { unregister(host, read_end) }, "already removed");
+
+    unsafe {
+        libc::close(read_end);
+        libc::close(write_end);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_unregister_queue_refuses_the_next_request() {
+    use clap_sys::ext::posix_fd_support::CLAP_POSIX_FD_READ;
+
+    let state = Arc::new(HostState::new(Arc::new(PluginShared::new(0))));
+    let host = super::instance::make_host(&state);
+    let host: *const clap_host = &host;
+    let ext = &super::host::HOST_POSIX_FD;
+    let register = ext.register_fd.expect("register_fd");
+    let unregister = ext.unregister_fd.expect("unregister_fd");
+
+    let mut pipe = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    let [read_end, write_end] = pipe;
+    unsafe {
+        assert!(register(host, read_end, CLAP_POSIX_FD_READ));
+        assert_eq!(libc::write(write_end, b"x".as_ptr().cast(), 1), 1);
+    }
+
+    let held = state.fds.lock().expect("the fd list");
+    for fd in 100..100 + PENDING_UNREGISTER as i32 {
+        assert!(unsafe { unregister(host, fd) }, "slot for {fd}");
+    }
+    assert!(
+        !unsafe { unregister(host, read_end) },
+        "a full queue refuses; it does not drop the request silently"
+    );
+    drop(held);
+
+    // The refused request was never queued, so the descriptor stays and is
+    // still polled; the eight queued ones drain without touching it.
+    assert_eq!(state.ready_fds().len(), 1);
+    assert!(state
+        .fds
+        .lock()
+        .expect("the fd list")
+        .iter()
+        .any(|&(fd, _)| fd == read_end));
+    assert!(state
+        .pending_unregister
+        .iter()
+        .all(|slot| slot.load(Ordering::Acquire) == -1));
+    assert!(
+        unsafe { unregister(host, read_end) },
+        "a later request fits"
+    );
+
+    unsafe {
+        libc::close(read_end);
+        libc::close(write_end);
+    }
 }
 
 #[cfg(target_os = "linux")]

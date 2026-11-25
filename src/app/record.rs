@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::settings::ExtraOutputPref;
 use crate::app::{LogTone, RigWerkApp};
-use crate::audio::{is_vb_cable_render, EngineState, RecordPhase, RecordSource};
+use crate::audio::{is_vb_cable_render, EngineState, RecordPhase, RecordSource, RecordStatus};
 
 /// Where an empty recordings folder lands.
 ///
@@ -255,6 +255,12 @@ fn local_stamp() -> Option<String> {
 }
 
 impl RigWerkApp {
+    /// The recording writer's latest phase, counts and error, for the *Rec*
+    /// control and its menu.
+    pub(crate) fn engine_recording_status(&self) -> RecordStatus {
+        self.engine.recording_status()
+    }
+
     /// Arm a take of whatever the endpoint is writing.  Does nothing while
     /// the bridge is not running, or while a take is already arming,
     /// recording, or finishing.  Returns immediately; the writer owns the file.

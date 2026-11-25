@@ -200,7 +200,7 @@ fn diagnostics_export_path() -> PathBuf {
 
 impl RigWerkApp {
     fn bridge_status_line(&self) -> String {
-        let status = self.engine.bridge_status();
+        let status = self.engine_bridge_status();
         if status.is_empty() {
             "Waiting".to_owned()
         } else {
@@ -213,7 +213,7 @@ impl RigWerkApp {
         self.path_infos()
             .into_iter()
             .map(|info| {
-                let dsp = dsp_text(self.engine.path_dsp_time(info.slot));
+                let dsp = dsp_text(self.engine_path_dsp_time(info.slot));
                 (info, dsp)
             })
             .collect()
@@ -223,12 +223,15 @@ impl RigWerkApp {
     pub(crate) fn diagnostics_text(&self) -> String {
         let mut lines = Vec::new();
         lines.push("RigWerk diagnostics".to_owned());
-        lines.push(format!("Engine: {}", engine_state_label(self.engine.state)));
+        lines.push(format!(
+            "Engine: {}",
+            engine_state_label(self.engine_state())
+        ));
         lines.push(format!("Bridge status: {}", self.bridge_status_line()));
         if let Some(error) = self.visible_error() {
             lines.push(format!("Shown error: Bridge error: {error}"));
         }
-        match self.engine.quantum_note() {
+        match self.engine_quantum_note() {
             Some(note) => lines.push(format!("Graph buffer: {note}")),
             None => lines.push("Graph buffer: none".to_owned()),
         }
@@ -246,8 +249,8 @@ impl RigWerkApp {
             .path_infos()
             .into_iter()
             .map(|info| {
-                let report = self.engine.plugin_lock_report(info.slot);
-                let views = self.engine.plugin_views(info.slot);
+                let report = self.engine_plugin_lock_report(info.slot);
+                let views = self.engine_plugin_views(info.slot);
                 (info, report, views)
             })
             .collect();
@@ -374,7 +377,7 @@ impl RigWerkApp {
                 ui.horizontal(|ui| {
                     ui.label(mono_line("ENGINE", colours.text3, TypeRole::GridHeader));
                     ui.label(sans(
-                        engine_state_label(self.engine.state),
+                        engine_state_label(self.engine_state()),
                         colours.text,
                         TypeRole::Control,
                     ));
@@ -403,7 +406,7 @@ impl RigWerkApp {
                         );
                     });
                 }
-                let quantum = self.engine.quantum_note().map(str::to_owned);
+                let quantum = self.engine_quantum_note().map(str::to_owned);
                 let (quantum_text, quantum_color) = match quantum.as_deref() {
                     Some(note) => (note, colours.warn),
                     None => ("No restore problem.", colours.text2),
@@ -541,7 +544,7 @@ impl RigWerkApp {
                                 colours.text2,
                                 TypeRole::GridHeader,
                             ));
-                            let time = self.engine.path_dsp_time(info.slot).unwrap_or_default();
+                            let time = self.engine_path_dsp_time(info.slot).unwrap_or_default();
                             let color = if time.peak_share() >= crate::app::issues::DSP_ERROR_SHARE
                             {
                                 colours.error_text
@@ -587,7 +590,7 @@ impl RigWerkApp {
                     .path_infos()
                     .into_iter()
                     .map(|info| {
-                        let report = self.engine.plugin_lock_report(info.slot);
+                        let report = self.engine_plugin_lock_report(info.slot);
                         (info, report)
                     })
                     .collect();
@@ -626,7 +629,7 @@ impl RigWerkApp {
                                 TypeRole::GridHeader,
                             ));
                         });
-                        let views = self.engine.plugin_views(info.slot);
+                        let views = self.engine_plugin_views(info.slot);
                         if no_effect_ran(report) {
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
@@ -669,7 +672,7 @@ impl RigWerkApp {
                 }
                 ui.add_space(6.0);
                 if OutlineButton::new("Reset all").show(ui).clicked() {
-                    self.engine.reset_plugin_lock_counters();
+                    self.reset_plugin_lock_counters();
                     self.push_log("Plugin block counters reset.", LogTone::Teal);
                 }
             });

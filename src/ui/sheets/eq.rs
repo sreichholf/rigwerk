@@ -234,7 +234,7 @@ impl RigWerkApp {
         let current = signal.mix.eqs[slot.index()];
         let colours = palette(ui.ctx());
         let path_colour = colours.path[signal.colour as usize % colours.path.len()];
-        let rate = if self.engine.state == EngineState::Running && self.snapshot.output_rate > 0 {
+        let rate = if self.engine_state() == EngineState::Running && self.snapshot.output_rate > 0 {
             self.snapshot.output_rate
         } else {
             48_000

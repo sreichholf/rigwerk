@@ -23,11 +23,11 @@ impl RigWerkApp {
     pub(crate) fn scope_sheet(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         let width = ui.available_width().max(240.0);
-        let active = self.engine.state == EngineState::Running;
+        let active = self.engine_state() == EngineState::Running;
         let ctx = ui.ctx().clone();
-        let frames = if self.engine.state == EngineState::Running {
+        let frames = if self.engine_state() == EngineState::Running {
             self.snapshot.frames
-        } else if self.engine.state == EngineState::Preview {
+        } else if self.engine_state() == EngineState::Preview {
             (ctx.input(|input| input.time) * self.sample_rate as f64) as u64
         } else {
             0

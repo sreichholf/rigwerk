@@ -92,6 +92,36 @@ pub(crate) fn engine_state_label(state: EngineState) -> &'static str {
     }
 }
 
+/// The *Driver panel* chip for one ASIO side.  `ready` is whether the
+/// running bridge has that driver open: until then the button is disabled and
+/// says why.  A click returns `true`, and the caller posts the request.
+///
+/// `ready` is true only while a live ASIO driver is open, so the enabled
+/// half of this control cannot be exercised headlessly; the caller hides the
+/// chip when the side is not ASIO at all.
+///
+/// The strings stay with the site: the input strip and the output sheet word
+/// the hint differently and the strip wants the full width.
+pub(crate) fn asio_panel_chip(
+    ui: &mut egui::Ui,
+    ready: bool,
+    label: &str,
+    full_width: bool,
+    disabled_hint: &str,
+    hint: &str,
+) -> bool {
+    let mut button = OutlineButton::new(label).enabled(ready);
+    if full_width {
+        button = button.full_width();
+    }
+    let response = button.show(ui);
+    if !ready {
+        let _ = response.on_disabled_hover_text(disabled_hint);
+        return false;
+    }
+    response.on_hover_text(hint).clicked()
+}
+
 pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
     ui.painter()

@@ -12,12 +12,12 @@ impl RigWerkApp {
     /// *Rec*, the elapsed time, and the menu of what the take contains.
     pub(crate) fn record_control(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
-        let status = self.engine.recording_status();
+        let status = self.engine_recording_status();
         let recording = matches!(
             status.phase,
             RecordPhase::Recording | RecordPhase::Arming | RecordPhase::Finishing
         );
-        let running = self.engine.state == EngineState::Running || recording;
+        let running = self.engine_state() == EngineState::Running || recording;
         let label = if recording {
             let elapsed = crate::app::record::format_elapsed(status.frames, status.rate);
             format!("Rec {elapsed}")

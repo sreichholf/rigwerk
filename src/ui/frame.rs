@@ -350,7 +350,7 @@ impl RigWerkApp {
         });
         if find {
             let path = self.selected_path;
-            let count = self.engine.plugin_views(path).len();
+            let count = self.engine_plugin_views(path).len();
             self.open_effect_browser(path, count);
         }
         if save_as {

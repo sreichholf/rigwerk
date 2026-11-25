@@ -468,3 +468,109 @@ fn a_push_over_the_placeholder_inventory_keeps_a_saved_extra_output_id() {
     assert_eq!(app.extra_outputs[0].id, "alsa:hw:Quad");
     assert_eq!(app.extra_outputs[0].backend, "ALSA");
 }
+
+#[test]
+fn the_engine_reads_follow_the_engine() {
+    use std::sync::atomic::Ordering;
+
+    use crate::audio::{AsioPanelSide, DspTime};
+
+    let mut app = crate::app::blank_app();
+    assert_eq!(app.engine_state(), EngineState::Idle);
+    app.engine.state = EngineState::Running;
+    assert_eq!(app.engine_state(), EngineState::Running);
+
+    assert_eq!(app.engine_quantum_note(), None);
+    app.engine
+        .note_quantum_failure("PipeWire quantum was not restored".to_owned());
+    assert_eq!(
+        app.engine_quantum_note(),
+        Some("PipeWire quantum was not restored")
+    );
+    assert_eq!(
+        app.engine_bridge_status(),
+        "PipeWire quantum was not restored"
+    );
+
+    // No mixer runs headlessly, so the DSP cells start empty.  This publishes
+    // the same cells a mixer would; the wrapper must read them, not a default.
+    assert_eq!(app.engine_total_dsp_time(), None);
+    assert_eq!(app.engine_path_dsp_time(0), None);
+    let time = DspTime {
+        avg_ns: 210_000,
+        peak_ns: 428_000,
+        block_ns: 10_700_000,
+    };
+    app.engine.shared.running.store(true, Ordering::Relaxed);
+    app.engine.shared.path(0).store_dsp_time(time);
+    app.engine.shared.total_dsp.store(time);
+    assert_eq!(app.engine_path_dsp_time(0), Some(time));
+    assert_eq!(app.engine_total_dsp_time(), Some(time));
+
+    assert!(app.engine_plugin_views(0).is_empty());
+    assert_eq!(app.engine_plugin_lock_report(0).chain.attempts, 0);
+    assert_eq!(app.driver_panel(AsioPanelSide::Input), None);
+    assert_eq!(app.driver_panel(AsioPanelSide::Output), None);
+}
+
+#[test]
+fn a_selected_asio_driver_makes_the_panel_wait_for_the_bridge() {
+    use crate::audio::{AsioPanelSide, DeviceItem};
+
+    let mut app = crate::app::blank_app();
+    app.devices.inventory.asio.push(DeviceItem {
+        id: "asio:test".to_owned(),
+        name: "Test ASIO".to_owned(),
+        backend: "ASIO".to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: Some(7),
+    });
+    app.devices.use_asio_input = true;
+    // Selected, but the bridge is not running on it: the panel exists and is
+    // disabled.  `Some(true)` needs a live ASIO driver, so it is not reachable
+    // headlessly.
+    assert_eq!(app.driver_panel(AsioPanelSide::Input), Some(false));
+    assert_eq!(app.driver_panel(AsioPanelSide::Output), None);
+}
+
+#[test]
+fn request_asio_panel_raises_the_engine_flag() {
+    use crate::audio::AsioPanelSide;
+
+    let mut app = crate::app::blank_app();
+    assert!(!app.engine.shared.asio_panel.take(AsioPanelSide::Input));
+    app.request_asio_panel(AsioPanelSide::Input);
+    assert!(app.engine.shared.asio_panel.take(AsioPanelSide::Input));
+    assert!(!app.engine.shared.asio_panel.take(AsioPanelSide::Output));
+
+    app.request_asio_panel(AsioPanelSide::Output);
+    assert!(app.engine.shared.asio_panel.take(AsioPanelSide::Output));
+}
+
+#[test]
+fn reset_plugin_lock_counters_clears_the_engine_report() {
+    let _main = crate::audio::claim_main_thread();
+    let mut app = crate::app::blank_app();
+    {
+        let path = app.engine.shared.path(0);
+        path.insert_delay_for_test(16);
+        let mut left = vec![0.0f32; 64];
+        let mut right = vec![0.0f32; 64];
+        assert!(path.process_plugins(&mut left, &mut right, 64));
+    }
+    assert!(app.engine_plugin_lock_report(0).effects[0].attempts > 0);
+    assert_eq!(
+        app.engine_plugin_views(0).len(),
+        1,
+        "the inserted delay is published"
+    );
+
+    app.reset_plugin_lock_counters();
+    let report = app.engine_plugin_lock_report(0);
+    assert_eq!(report.chain.attempts, 0);
+    assert!(report.effects.iter().all(|effect| effect.attempts == 0));
+
+    app.engine.shared.path(0).restore_plugins(Vec::new());
+}
