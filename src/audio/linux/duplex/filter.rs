@@ -66,9 +66,10 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         return;
     }
     if data.shared.callback_failure().is_some() {
-        // A previous cycle failed; the app is stopping the run and the
-        // chain must not be driven again.
-        unsafe { silence_cycle(data, position) };
+        // A previous cycle failed; the app is stopping the run and the chain
+        // must not be driven again.  Silencing goes through `contain` too:
+        // this is still PipeWire's callback, and nothing may unwind into it.
+        let _ = contain(|| unsafe { silence_cycle(data, position) });
         return;
     }
     // A panic must not unwind into PipeWire's own callback (Rust panics
@@ -76,7 +77,8 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     // and publish the failure for the app.
     if contain(|| unsafe { process_cycle(data, position) }) {
         data.shared.note_callback_failure(CallbackFailure::Panic);
-        unsafe { silence_cycle(data, position) };
+        // The panic path's silence must not unwind either.
+        let _ = contain(|| unsafe { silence_cycle(data, position) });
         // The cycle may have panicked before it opened the virtual-output
         // write; publish an empty generation so RigWerk Out plays silence
         // rather than repeating the last good buffer.
