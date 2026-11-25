@@ -11,9 +11,11 @@
 //! through the published effect links.  The handle keeps the views, the
 //! saved values and the state blob behind its own UI-only lock.
 //!
-//! Two things are not format-specific and live here rather than in a host:
+//! Three things are not format-specific and live here rather than in a host:
 //! `thread` records the plugin main thread and says where a plugin may be
-//! destroyed, and `state` is the outcome CLAP and LV2 state captures return.
+//! destroyed, `state` is the outcome CLAP and LV2 state captures return, and
+//! `host` is the UI half's one host contract with the bookkeeping every host
+//! shares.
 //!
 //! Each chain is split the same way: the runtime the audio thread owns
 //! (`chain`) and the model the UI edits (`model`), which sends structural
@@ -26,6 +28,7 @@ mod chain;
 #[cfg(test)]
 mod fixtures;
 mod handle;
+pub(crate) mod host;
 mod link;
 mod load;
 mod model;
@@ -81,12 +84,13 @@ pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
 pub(crate) use link::{
     ClapFailure, Lv2Failure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
 };
+pub(crate) use load::{merge_synced_params, Capture, Restore, MAX_BLOCK, MAX_STATE_BLOB};
 #[cfg(test)]
 pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
-pub(crate) use load::{Restore, MAX_BLOCK, MAX_STATE_BLOB};
 pub(crate) use model::{ChainModel, ReloadPlan};
 #[cfg(test)]
 pub(crate) use pause::PAUSE_STALL;
+pub(crate) use pause::{drive_pause, PauseStep};
 #[cfg(test)]
 pub(crate) use slot::SlotControls;
 pub(crate) use slot::{drain_deferred_plugins, Slot, SlotLink};

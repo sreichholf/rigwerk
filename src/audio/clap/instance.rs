@@ -1,7 +1,9 @@
 //! The main-thread half of a loaded CLAP plugin, and its load sequence.
 //! [`ClapInstance`] lives behind the plugin's UI-only lock (`PluginHandle`):
 //! parameters, state, latency, activation, timers, fds and the editor
-//! (`gui.rs`).  The audio-thread half is `processor.rs`.
+//! (`gui.rs`).  It implements [`PluginHostUi`], so the shared handle reaches
+//! its parameters, state and service without naming CLAP.  The audio-thread
+//! half is `processor.rs`.
 //!
 //! Both halves point into one [`ClapCore`], which destroys the plugin when
 //! the last of them goes.  The instance deactivates itself on drop, which
@@ -29,9 +31,13 @@ use clap_sys::plugin::clap_plugin;
 use clap_sys::string_sizes::CLAP_NAME_SIZE;
 use clap_sys::version::CLAP_VERSION;
 
+use crate::audio::plugins::host::{
+    apply_reported, drain_reported, finish_capture, resume_or_log, HostIo, PluginHostUi,
+};
 use crate::audio::plugins::{
-    param_transfer, AudioThreadScope, ParamIds, ParamOut, ParamReceiver, PluginParamView,
-    PluginShared, Restore, Retry, StateSave,
+    drive_pause, param_transfer, AudioThreadScope, Capture, ClapFailure, ParamIds, ParamOut,
+    ParamReceiver, PauseStep, PluginParamView, PluginShared, ProcessFailure, Restore, Retry,
+    StateSave, RESTART_ACTIVATION,
 };
 
 use super::gui::{choose_editor_api, session_candidates, EditorApi};
@@ -736,6 +742,161 @@ impl ClapInstance {
     pub(crate) fn native(&self, index: usize, value: f64) -> Option<(u32, f64)> {
         let range = self.ranges.get(index)?;
         Some((range.id, range.denormalise(value)))
+    }
+
+    /// Sends normalized `(index, value)` values to the plugin.  While it is
+    /// processing they go through the transfer into the next block's input
+    /// events.  While it is not (no block yet, or paused) and nothing older
+    /// is queued, the UI pauses it and hands them to `params.flush` itself,
+    /// so a value set with no audio running reaches the plugin and its state
+    /// at once.  Never waits for the audio thread: a pause that is not ready
+    /// at once leaves the values queued and is finished by
+    /// [`PluginHostUi::service`].
+    fn send_values(&mut self, io: &mut HostIo<'_>, values: &[(usize, f64)]) {
+        let shared = io.shared;
+        let native = |clap: &ClapInstance| -> Vec<(u32, f64)> {
+            values
+                .iter()
+                .filter_map(|&(index, value)| clap.native(index, value))
+                .collect()
+        };
+        if !self.is_active() {
+            // A failed reactivation: the plugin stays paused and never
+            // starts again, so `flush` is a plain main-thread call.
+            if self.can_flush() {
+                let reported = self.flush_values(&native(self));
+                apply_reported(io.ids, io.views, &reported, |id, value| {
+                    self.display_for(id, value)
+                });
+            }
+            return;
+        }
+        // Only from a pause, or before a start no block has begun: a plugin
+        // between the audio side's start and `started` is left to it.
+        let direct = shared.pause.is_idle()
+            && io.pause_wait.is_none()
+            && !shared.restart_pending()
+            && self.can_flush()
+            && !io.out.has_queued();
+        if direct
+            && drive_pause(&shared.pause, io.pause_wait, || self.stop_processing())
+                == PauseStep::Ready
+        {
+            // What the last blocks reported is older than this flush.
+            drain_reported(io.from_audio, io.ids, io.views, |id, value| {
+                self.display_for(id, value)
+            });
+            let reported = self.flush_values(&native(self));
+            apply_reported(io.ids, io.views, &reported, |id, value| {
+                self.display_for(id, value)
+            });
+            // A failed effect stays paused: no new start per knob move.
+            if shared.failure().is_none() {
+                resume_or_log(&shared.pause);
+            }
+            return;
+        }
+        for &(index, value) in values {
+            io.out.push(index, value);
+        }
+        let ids = io.ids;
+        io.undelivered.note(
+            values.iter().filter_map(|&(index, _)| ids.id(index)),
+            io.out.pushed(),
+        );
+    }
+}
+
+impl PluginHostUi for ClapInstance {
+    fn parameter_text(&self, id: u32, value: f64) -> Option<String> {
+        Some(self.display_for(id, value))
+    }
+
+    fn is_read_only(&self, id: u32) -> bool {
+        self.is_read_only(id)
+    }
+
+    fn write_parameter(&mut self, io: &mut HostIo<'_>, index: usize, value: f64) {
+        self.send_values(io, &[(index, value)]);
+    }
+
+    fn read_parameters(&mut self, io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        if io.out.has_queued() {
+            return None;
+        }
+        Some(self.parameters())
+    }
+
+    fn sync_parameters(&mut self, io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        if io.out.has_queued() {
+            return None;
+        }
+        Some(self.parameters())
+    }
+
+    fn reset_parameters(&mut self, io: &mut HostIo<'_>) -> Vec<PluginParamView> {
+        let defaults = self.default_values();
+        let views = self.default_views();
+        self.send_values(io, &defaults);
+        views
+    }
+
+    fn capture_state(&mut self, io: &mut HostIo<'_>) -> Capture {
+        io.undelivered.settle(io.out.applied());
+        finish_capture(io, self.save_state(), self.state_holds_params())
+    }
+
+    fn service(&mut self, io: &mut HostIo<'_>) -> bool {
+        self.service_callbacks();
+        let mut changed = drain_reported(io.from_audio, io.ids, io.views, |id, value| {
+            self.display_for(id, value)
+        });
+        if let Some(fresh) = self.rescan_if_requested() {
+            *io.views = fresh;
+            changed = true;
+        }
+        if !self.is_active() && self.take_flush_request() {
+            // Inactive (a failed reactivation): a main-thread flush.
+            let reported = self.flush_values(&[]);
+            changed |= apply_reported(io.ids, io.views, &reported, |id, value| {
+                self.display_for(id, value)
+            });
+        }
+        let flush_wanted = self.flush_requested() && !io.shared.pause.processing();
+        if (io.shared.restart_pending() || io.pause_wait.is_some() || flush_wanted)
+            && drive_pause(&io.shared.pause, io.pause_wait, || self.stop_processing())
+                == PauseStep::Ready
+        {
+            if io.shared.take_restart() & RESTART_ACTIVATION != 0 && !self.restart() {
+                // Left paused: an inactive plugin must not start again.
+                io.shared.fail(ProcessFailure::Clap(ClapFailure::NotActive));
+                changed = true;
+            }
+            if self.is_active() && self.take_flush_request() {
+                // Quiet: what the last blocks reported is older.
+                changed |= drain_reported(io.from_audio, io.ids, io.views, |id, value| {
+                    self.display_for(id, value)
+                });
+                let reported = self.flush_values(&[]);
+                changed |= apply_reported(io.ids, io.views, &reported, |id, value| {
+                    self.display_for(id, value)
+                });
+            }
+            // Never resume an inactive plugin, or restart a failed one.
+            if self.is_active() && io.shared.failure().is_none() {
+                resume_or_log(&io.shared.pause);
+            }
+        }
+        self.reread_latency_if_changed();
+        changed
+    }
+
+    fn state_holds_params(&self) -> bool {
+        true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

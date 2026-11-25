@@ -12,43 +12,29 @@
 //! reverse.
 //!
 //! Every format is split along its thread rules: the processor holds
-//! `ClapProcessor`, `Lv2Processor` or `Vst3Processor`, the UI half
-//! `ClapInstance`, `Lv2Instance` or `Vst3Controller`, and they talk through
-//! the parameter transfers, [`PluginShared`] and the pause handshake (a
-//! restart, or a CLAP flush while not processing, pauses the plugin from the
-//! UI and resumes it).  Neither half ever waits for the other.
+//! `ClapProcessor`, `Lv2Processor` or `Vst3Processor`, the UI half a
+//! `Box<dyn PluginHostUi>` implemented once per host module, and they talk
+//! through the parameter transfers, [`PluginShared`] and the pause handshake
+//! (a restart, or a CLAP flush while not processing, pauses the plugin from
+//! the UI and resumes it).  Neither half ever waits for the other.
+//!
+//! The UI half's parameter, state and service operations never branch on the
+//! format: the control views, the saved values, the state blob and the stale
+//! flag stay here, and each host operation that needs its own object goes
+//! through [`PluginHostUi`] with the borrowed [`HostIo`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::super::clap::{ClapInstance, ClapLoaded, ClapProcessor};
-use super::super::lv2::{Lv2Instance, Lv2Loaded, Lv2Processor};
-use super::super::vst3::{
-    Vst3Controller, Vst3Editor, Vst3Loaded, Vst3Processor, IO_CHANGED, LATENCY_CHANGED,
-    PARAM_TITLES_CHANGED, PARAM_VALUES_CHANGED, RELOAD_COMPONENT,
-};
-use super::link::{
-    ClapFailure, ParamIds, ParamOut, PluginShared, ProcessFailure, RESTART_ACTIVATION,
-};
-use super::load::{
-    apply_parameter_changes, captured_state, merge_synced_params, Capture, ParamChange,
-};
-use super::pause::{drive_pause, BlockAction, PauseStep};
+use super::super::lv2::{Lv2Loaded, Lv2Processor};
+use super::super::vst3::{Vst3Controller, Vst3Editor, Vst3Loaded, Vst3Processor};
+use super::host::{HostIo, PluginHostUi, Undelivered};
+use super::link::{ParamIds, ParamOut, PluginShared, ProcessFailure};
+use super::load::{merge_synced_params, Capture};
+use super::pause::BlockAction;
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginState};
 use super::slot::SlotControls;
-use super::state::StateSave;
 use super::transfer::ParamReceiver;
-
-/// The VST3 flags [`PluginHandle::service`] acts on; others are ignored.
-const VST3_HANDLED: u32 =
-    LATENCY_CHANGED | PARAM_VALUES_CHANGED | PARAM_TITLES_CHANGED | IO_CHANGED | RELOAD_COMPONENT;
-
-/// The UI half's plugin object.
-pub(crate) enum PluginInstance {
-    Vst3(Vst3Controller),
-    Clap(ClapInstance),
-    Lv2(Lv2Instance),
-}
 
 /// The audio half's plugin object (`Send`; it lives in the chain's slot).
 /// Boxed: each carries its buffers' descriptions inline.
@@ -111,7 +97,8 @@ pub(crate) struct PluginUi {
 
 /// What the UI half owns; behind [`PluginUi::ui`].
 struct UiSide {
-    instance: PluginInstance,
+    /// The format's main-thread plugin object, through its UI contract.
+    host: Box<dyn PluginHostUi>,
     /// The audio→UI parameter queue: CLAP output values, for the views.
     from_audio: ParamReceiver,
     ids: Arc<ParamIds>,
@@ -131,8 +118,6 @@ struct UiSide {
     state_stale: bool,
     /// A pause the UI is driving (see `drive_pause`), kept between frames.
     pause_wait: Option<(std::time::Instant, u64)>,
-    /// A VST3 `kLatencyChanged` waiting for that pause.
-    reactivate: bool,
     /// Editor edits taken from [`ParamOut`], reused every frame.
     edits: Vec<(u32, f64)>,
     /// Ids pushed to the processor whose values it has not applied yet
@@ -186,13 +171,7 @@ impl LoadedPlugin {
             state_current: _,
             undelivered,
         } = loaded;
-        let mut ui = UiSide::new(
-            PluginInstance::Vst3(controller),
-            from_audio,
-            ids,
-            views,
-            saved,
-        );
+        let mut ui = UiSide::new(Box::new(controller), from_audio, ids, views, saved);
         ui.undelivered.note(undelivered, out.pushed());
         Self {
             processor: PluginProcessor::Vst3(Box::new(processor)),
@@ -220,13 +199,7 @@ impl LoadedPlugin {
             state_current: _,
             undelivered,
         } = loaded;
-        let mut ui = UiSide::new(
-            PluginInstance::Clap(instance),
-            from_audio,
-            ids,
-            views,
-            saved,
-        );
+        let mut ui = UiSide::new(Box::new(instance), from_audio, ids, views, saved);
         ui.undelivered.note(undelivered, out.pushed());
         Self {
             processor: PluginProcessor::Clap(Box::new(processor)),
@@ -254,7 +227,7 @@ impl LoadedPlugin {
             state_current: _,
             undelivered,
         } = loaded;
-        let mut ui = UiSide::new(PluginInstance::Lv2(instance), from_audio, ids, views, saved);
+        let mut ui = UiSide::new(Box::new(instance), from_audio, ids, views, saved);
         ui.undelivered.note(undelivered, out.pushed());
         Self {
             processor: PluginProcessor::Lv2(Box::new(processor)),
@@ -398,14 +371,14 @@ impl Drop for LoadedPlugin {
 
 impl UiSide {
     fn new(
-        instance: PluginInstance,
+        host: Box<dyn PluginHostUi>,
         from_audio: ParamReceiver,
         ids: Arc<ParamIds>,
         views: Vec<PluginParamView>,
         saved: Saved,
     ) -> Self {
         Self {
-            instance,
+            host,
             from_audio,
             ids,
             views,
@@ -414,192 +387,9 @@ impl UiSide {
             state: saved.state,
             state_stale: saved.stale,
             pause_wait: None,
-            reactivate: false,
             edits: Vec::new(),
             undelivered: Undelivered::default(),
         }
-    }
-}
-
-/// Writes plugin-reported `(index, normalized)` values into the views.
-/// Returns whether any view moved.  `display` formats a value the way the
-/// loaded format does, so CLAP and LV2 share this one view update.
-fn apply_reported(
-    ids: &ParamIds,
-    views: &mut [PluginParamView],
-    reported: &[(usize, f64)],
-    display: impl Fn(u32, f64) -> String,
-) -> bool {
-    let mut changed = false;
-    for &(index, value) in reported {
-        let Some(id) = ids.id(index) else {
-            continue;
-        };
-        if let Some(view) = views.iter_mut().find(|view| view.id == id) {
-            view.value = value;
-            view.display = display(id, value);
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// Takes what the audio side reported from the transfer.
-fn drain_values(from_audio: &mut ParamReceiver) -> Vec<(usize, f64)> {
-    let mut reported = Vec::new();
-    from_audio.drain(|index, value, _| reported.push((index, value)));
-    reported
-}
-
-/// Drains what the audio side reported into the views, formatting with
-/// `display`.
-fn drain_reported(
-    from_audio: &mut ParamReceiver,
-    ids: &ParamIds,
-    views: &mut [PluginParamView],
-    display: impl Fn(u32, f64) -> String,
-) -> bool {
-    let reported = drain_values(from_audio);
-    apply_reported(ids, views, &reported, display)
-}
-
-/// Resumes after [`PauseStep::Ready`], which never refuses; a refusal is
-/// logged once instead of leaving the plugin silently paused unnoticed.
-fn resume_or_log(pause: &super::pause::PauseHandshake) {
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    if !pause.resume() && !LOGGED.swap(true, Ordering::Relaxed) {
-        eprintln!("[plugins] a plugin's pause would not resume; it stays paused");
-    }
-}
-
-/// Writes what a VST3 processor reported (its output parameters) into the
-/// controller and the views.  View-only: the saved values keep what the
-/// user set.  A value the controller already has is skipped.  Returns the
-/// `(id, value)` pairs it set, so an echo of them through `performEdit`
-/// (a controller whose `setParamNormalized` edits) is not taken for the
-/// user's.
-fn drain_vst3_reported(
-    controller: &Vst3Controller,
-    from_audio: &mut ParamReceiver,
-    ids: &ParamIds,
-    views: &mut [PluginParamView],
-) -> Vec<(u32, f64)> {
-    let mut reported = Vec::new();
-    from_audio.drain(|index, value, _| reported.push((index, value)));
-    let mut set = Vec::new();
-    for (index, value) in reported {
-        let Some(id) = ids.id(index) else {
-            continue;
-        };
-        if controller.value(id) == Some(value) {
-            continue;
-        }
-        controller.set(id, value);
-        set.push((id, value));
-        if let Some(view) = views.iter_mut().find(|view| view.id == id) {
-            view.value = value;
-            if let Some(display) = controller.format(id, value) {
-                view.display = display;
-            }
-        }
-    }
-    set
-}
-
-/// Applies editor edits to the views and the saved values (an edit is the
-/// user's setting), and notes their ids as not yet delivered to the
-/// processor.  Returns whether there were any.
-fn apply_vst3_edits(
-    controller: &Vst3Controller,
-    edits: &[(u32, f64)],
-    views: &mut [PluginParamView],
-    saved: &mut Vec<PluginParamPref>,
-    undelivered: &mut Undelivered,
-    pushed: u64,
-) -> bool {
-    if edits.is_empty() {
-        return false;
-    }
-    let changes: Vec<ParamChange> = edits
-        .iter()
-        .map(|&(id, value)| ParamChange {
-            id,
-            value,
-            display: controller.format(id, value),
-        })
-        .collect();
-    apply_parameter_changes(views, saved, &changes);
-    undelivered.note(edits.iter().map(|&(id, _)| id), pushed);
-    true
-}
-
-/// A state blob's snapshot of the saved values.  Ids in `undelivered` were
-/// still queued for the plugin when it saved, so the blob may not hold
-/// them.  No marker says so: the snapshot is built so the ordinary restore
-/// rule (`params_to_restore`, the same in older builds) applies them.  An
-/// undelivered id with a saved value is left out, so the saved value
-/// counts as changed and goes on top; one with no saved value (set back to
-/// its default) is listed, with its default from `views`, so it is reset.
-pub(super) fn capture_snapshot(
-    saved: &[PluginParamPref],
-    undelivered: &[u32],
-    views: &[PluginParamView],
-) -> Vec<PluginParamPref> {
-    let mut snapshot: Vec<PluginParamPref> = saved
-        .iter()
-        .filter(|param| !undelivered.contains(&param.id))
-        .cloned()
-        .collect();
-    snapshot.extend(
-        undelivered
-            .iter()
-            .filter(|id| !saved.iter().any(|param| param.id == **id))
-            .map(|&id| PluginParamPref {
-                id,
-                value: views
-                    .iter()
-                    .find(|view| view.id == id)
-                    .map_or(0.0, |view| view.default),
-            }),
-    );
-    snapshot
-}
-
-/// The ids pushed to the processor whose values it may not have applied
-/// yet, each with the transfer's push count once it was queued.  The
-/// processor publishes the push count up to which a block (or an empty
-/// flush block) the plugin accepted delivered everything; an id is done
-/// only once that count reaches its own.  An empty queue is not enough: a
-/// drained value can still be inside `process`, or in a block the plugin
-/// refused.
-#[derive(Default)]
-struct Undelivered {
-    ids: Vec<(u32, u64)>,
-}
-
-impl Undelivered {
-    /// Notes `ids` as queued up to push count `pushed`.
-    fn note(&mut self, ids: impl IntoIterator<Item = u32>, pushed: u64) {
-        for id in ids {
-            match self.ids.iter_mut().find(|(queued, _)| *queued == id) {
-                Some(entry) => entry.1 = entry.1.max(pushed),
-                None => self.ids.push((id, pushed)),
-            }
-        }
-    }
-
-    /// Forgets the ids the processor has applied up to push count
-    /// `applied`.
-    fn settle(&mut self, applied: u64) {
-        self.ids.retain(|&(_, pushed)| pushed > applied);
-    }
-
-    fn ids(&self) -> Vec<u32> {
-        self.ids.iter().map(|&(id, _)| id).collect()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.ids.is_empty()
     }
 }
 
@@ -637,19 +427,25 @@ impl PluginHandle {
     /// The buses a VST3 plugin's processor was built for, for the tests.
     #[cfg(test)]
     pub(crate) fn vst3_layout_for_test(&self) -> Option<super::super::vst3::BusLayout> {
-        match &self.ui().instance {
-            PluginInstance::Vst3(controller) => Some(controller.layout().clone()),
-            PluginInstance::Clap(_) | PluginInstance::Lv2(_) => None,
-        }
+        let mut ui = self.ui();
+        Some(
+            ui.host
+                .as_any_mut()
+                .downcast_mut::<Vst3Controller>()?
+                .layout()
+                .clone(),
+        )
     }
 
     /// The LV2 instance's own control views, for the tests.
     #[cfg(test)]
     pub(crate) fn lv2_parameters_for_test(&self) -> Vec<PluginParamView> {
-        match &self.ui().instance {
-            PluginInstance::Lv2(lv2) => lv2.parameters(),
-            PluginInstance::Vst3(_) | PluginInstance::Clap(_) => Vec::new(),
-        }
+        let mut ui = self.ui();
+        ui.host
+            .as_any_mut()
+            .downcast_mut::<super::super::lv2::Lv2Instance>()
+            .map(|lv2| lv2.parameters())
+            .unwrap_or_default()
     }
 
     /// A restart request as the plugin's own callback makes it, for the
@@ -685,107 +481,41 @@ impl PluginHandle {
     }
 
     /// Reads every control again, so the panel shows the plugin's values
-    /// right now.  A CLAP plugin with values still queued for it keeps the
-    /// views, which already show them.  An LV2 plugin has no call that reads
-    /// a control port (the host's buffer is the value), so its views are
-    /// always kept as they are.
+    /// right now.  The host reports `None` when a read would be stale (a
+    /// value still queued) or the format has no read call; the views are
+    /// kept then.
     pub(crate) fn refresh_parameters(&self) {
         let mut ui = self.ui();
-        let views = match &ui.instance {
-            PluginInstance::Vst3(controller) => controller.views(),
-            PluginInstance::Clap(_) if self.0.out.has_queued() => return,
-            PluginInstance::Clap(clap) => clap.parameters(),
-            PluginInstance::Lv2(_) => return,
+        let views = {
+            let UiSide {
+                host,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+                ..
+            } = &mut *ui;
+            let mut io = HostIo {
+                shared: &self.0.shared,
+                out: &self.0.out,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+            };
+            host.read_parameters(&mut io)
         };
-        ui.views = views;
-    }
-
-    /// Sends normalized `(index, value)` CLAP values to the plugin.  While
-    /// it is processing they go through the transfer into the next block's
-    /// input events.  While it is not (no block yet, or paused) and nothing
-    /// older is queued, the UI pauses it and hands them to `params.flush`
-    /// itself, so a value set with no audio running reaches the plugin and
-    /// its state at once.  Never waits for the audio thread: a pause that
-    /// is not ready at once leaves the values queued and is finished by
-    /// [`Self::service`].
-    fn send_clap(&self, ui: &mut UiSide, values: &[(usize, f64)]) {
-        let shared = &*self.0.shared;
-        let UiSide {
-            instance,
-            from_audio,
-            ids,
-            views,
-            pause_wait,
-            ..
-        } = ui;
-        let PluginInstance::Clap(clap) = instance else {
-            return;
-        };
-        let native = |clap: &ClapInstance| -> Vec<(u32, f64)> {
-            values
-                .iter()
-                .filter_map(|&(index, value)| clap.native(index, value))
-                .collect()
-        };
-        if !clap.is_active() {
-            // A failed reactivation: the plugin stays paused and never
-            // starts again, so `flush` is a plain main-thread call.
-            if clap.can_flush() {
-                let reported = clap.flush_values(&native(clap));
-                apply_reported(ids, views, &reported, |id, value| {
-                    clap.display_for(id, value)
-                });
-            }
-            return;
+        if let Some(views) = views {
+            ui.views = views;
         }
-        // Only from a pause, or before a start no block has begun: a plugin
-        // between the audio side's start and `started` is left to it.
-        let direct = shared.pause.is_idle()
-            && pause_wait.is_none()
-            && !shared.restart_pending()
-            && clap.can_flush()
-            && !self.0.out.has_queued();
-        if direct
-            && drive_pause(&shared.pause, pause_wait, || clap.stop_processing()) == PauseStep::Ready
-        {
-            // What the last blocks reported is older than this flush.
-            drain_reported(from_audio, ids, views, |id, value| {
-                clap.display_for(id, value)
-            });
-            let reported = clap.flush_values(&native(clap));
-            apply_reported(ids, views, &reported, |id, value| {
-                clap.display_for(id, value)
-            });
-            // A failed effect stays paused: no new start per knob move.
-            if shared.failure().is_none() {
-                resume_or_log(&shared.pause);
-            }
-            return;
-        }
-        for &(index, value) in values {
-            self.0.out.push(index, value);
-        }
-        let ids = &ui.ids;
-        ui.undelivered.note(
-            values.iter().filter_map(|&(index, _)| ids.id(index)),
-            self.0.out.pushed(),
-        );
-    }
-
-    /// Queues normalized `(index, value)` LV2 values for the processor.  LV2
-    /// reads its control buffers during `run`, so nothing is called on the
-    /// plugin from the UI, even while it is not processing: the values wait
-    /// for the next block or a skipped effect's flush.  That is also why the
-    /// UI cannot flush them itself when the stream is stopped, unlike CLAP.
-    fn send_lv2(&self, ui: &mut UiSide, values: &[(usize, f64)]) {
-        for &(index, value) in values {
-            self.0.out.push(index, value);
-        }
-        let ids = &ui.ids;
-        ui.undelivered.note(
-            values.iter().filter_map(|&(index, _)| ids.id(index)),
-            self.0.out.pushed(),
-        );
     }
 
     /// Sets one normalized control and keeps the views and the saved value
@@ -793,46 +523,40 @@ impl PluginHandle {
     pub(crate) fn set_parameter(&self, id: u32, value: f64) -> Result<Option<String>, String> {
         let value = value.clamp(0.0, 1.0);
         let mut ui = self.ui();
-        let ui = &mut *ui;
-        let display = match &mut ui.instance {
-            PluginInstance::Vst3(controller) => {
-                let index = ui
-                    .ids
-                    .index_of(id)
-                    .ok_or_else(|| "That control is no longer available.".to_owned())?;
-                // The controller has the value at once; the processor gets
-                // it with its next block (or a skipped effect's flush).
-                if !controller.is_read_only(id) {
-                    controller.set(id, value);
-                    self.0.out.push(index, value);
-                    ui.undelivered.note([id], self.0.out.pushed());
-                }
-                controller.format(id, value)
-            }
-            PluginInstance::Clap(clap) => {
-                let index = ui
-                    .ids
-                    .index_of(id)
-                    .ok_or_else(|| "That control is no longer available.".to_owned())?;
-                let display = Some(clap.display_for(id, value));
-                if !clap.is_read_only(id) {
-                    self.send_clap(ui, &[(index, value)]);
-                }
-                display
-            }
-            PluginInstance::Lv2(lv2) => {
-                let index = ui
-                    .ids
-                    .index_of(id)
-                    .ok_or_else(|| "That control is no longer available.".to_owned())?;
-                let display = Some(lv2.display_for(id, value));
-                if !lv2.is_read_only(id) {
-                    lv2.note_value(index, value);
-                    self.send_lv2(ui, &[(index, value)]);
-                }
-                display
-            }
-        };
+        let index = ui
+            .ids
+            .index_of(id)
+            .ok_or_else(|| "That control is no longer available.".to_owned())?;
+        let display = ui.host.parameter_text(id, value);
+        // A read-only control still shows the value the plugin reports and
+        // is saved like any other, but is never delivered to the plugin.
+        if !ui.host.is_read_only(id) {
+            let UiSide {
+                host,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+                ..
+            } = &mut *ui;
+            let mut io = HostIo {
+                shared: &self.0.shared,
+                out: &self.0.out,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+            };
+            host.write_parameter(&mut io, index, value);
+        }
         if let Some(parameter) = ui.views.iter_mut().find(|parameter| parameter.id == id) {
             parameter.value = value;
             if let Some(display) = &display {
@@ -853,33 +577,32 @@ impl PluginHandle {
     /// through [`Self::parameters`], which shares it with the next refresh.
     pub(crate) fn reset_parameters(&self) -> Result<(), String> {
         let mut ui = self.ui();
-        let ui = &mut *ui;
-        let views = match &mut ui.instance {
-            PluginInstance::Vst3(controller) => {
-                for (index, value) in controller.default_values() {
-                    if let Some(id) = ui.ids.id(index) {
-                        controller.set(id, value);
-                        self.0.out.push(index, value);
-                        ui.undelivered.note([id], self.0.out.pushed());
-                    }
-                }
-                controller.default_views()
-            }
-            PluginInstance::Clap(clap) => {
-                let defaults = clap.default_values();
-                let views = clap.default_views();
-                self.send_clap(ui, &defaults);
-                views
-            }
-            PluginInstance::Lv2(lv2) => {
-                let defaults = lv2.default_values();
-                let views = lv2.default_views();
-                for &(index, value) in &defaults {
-                    lv2.note_value(index, value);
-                }
-                self.send_lv2(ui, &defaults);
-                views
-            }
+        let views = {
+            let UiSide {
+                host,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+                ..
+            } = &mut *ui;
+            let mut io = HostIo {
+                shared: &self.0.shared,
+                out: &self.0.out,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+            };
+            host.reset_parameters(&mut io)
         };
         ui.views = views;
         ui.saved.clear();
@@ -890,37 +613,40 @@ impl PluginHandle {
     /// Reads every control and stores the result as the views and the
     /// saved values.  A VST3 plugin's reported values go to its controller
     /// first, and its editor edits are dropped: the controller already has
-    /// them, and this read is fresher.  `None` while a CLAP value still
-    /// waits for the audio side (reading the plugin then would show and
-    /// save the old value); nothing is stored then.  The list stays in the
+    /// them, and this read is fresher.  `None` when the host says a read now
+    /// would be stale; nothing is stored then.  The list stays in the
     /// handle; the caller reads it through [`Self::parameters`], which
     /// shares it with the next refresh.
     pub(crate) fn sync_full(&self) -> Option<()> {
         let mut ui = self.ui();
-        let UiSide {
-            instance,
-            from_audio,
-            ids,
-            views,
-            edits,
-            undelivered,
-            ..
-        } = &mut *ui;
-        let parameters = match instance {
-            PluginInstance::Vst3(controller) => {
-                drain_vst3_reported(controller, from_audio, ids, views);
-                self.0.out.take_edits(edits);
-                undelivered.note(edits.iter().map(|&(id, _)| id), self.0.out.pushed());
-                controller.views()
-            }
-            PluginInstance::Clap(_) if self.0.out.has_queued() => return None,
-            PluginInstance::Clap(clap) => clap.parameters(),
-            // LV2 offers no call that reads a control port: the views are
-            // the values, and a queued one is not applied until the next
-            // block (or flush), so reading now would show the old value.
-            PluginInstance::Lv2(_) if self.0.out.has_queued() => return None,
-            PluginInstance::Lv2(_) => views.clone(),
+        let parameters = {
+            let UiSide {
+                host,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+                ..
+            } = &mut *ui;
+            let mut io = HostIo {
+                shared: &self.0.shared,
+                out: &self.0.out,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+            };
+            host.sync_parameters(&mut io)
         };
+        let parameters = parameters?;
         ui.saved = merge_synced_params(&ui.saved, &parameters);
         ui.views = parameters;
         // The editor is open and can change more than parameters.
@@ -938,213 +664,42 @@ impl PluginHandle {
 
     /// The plugin's main-thread work, once per UI frame, under the UI lock
     /// only (never the chain model's lock, never a lock the audio thread
-    /// takes).
-    ///
-    /// CLAP: callbacks, timers and fds; the output values the audio side
-    /// reported, into the views; a parameter rescan; and a restart (or a
-    /// flush the plugin asked for while not processing) through the pause
-    /// handshake: the first frame asks the audio side to stop, a later one
-    /// (or this one, when it is not processing or the stream stalled)
-    /// deactivates and reactivates it, reads its latency and resumes it.
-    /// VST3: see [`Self::service_vst3`].  LV2: the control outputs the audio
-    /// side reported, a changed latency report, and a wake for the worker
-    /// thread; it has no main-thread callbacks, flush request or restart
-    /// request.
+    /// takes).  What that is per format lives in the host's
+    /// [`PluginHostUi::service`]; this adds the latency change every host
+    /// reports.
     ///
     /// Returns whether the views need republishing: the latency or a
     /// control the plugin reported changed, or a restart failed.
     pub(crate) fn service(&self) -> bool {
         let shared = &*self.0.shared;
         let mut ui = self.ui();
-        if matches!(ui.instance, PluginInstance::Vst3(_)) {
-            return self.service_vst3(&mut ui);
-        }
-        if matches!(ui.instance, PluginInstance::Lv2(_)) {
-            return self.service_lv2(&mut ui);
-        }
-        let UiSide {
-            instance,
-            from_audio,
-            ids,
-            views,
-            pause_wait,
-            ..
-        } = &mut *ui;
-        let PluginInstance::Clap(clap) = instance else {
-            return false;
+        let changed = {
+            let UiSide {
+                host,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+                ..
+            } = &mut *ui;
+            let mut io = HostIo {
+                shared: &self.0.shared,
+                out: &self.0.out,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+            };
+            host.service(&mut io)
         };
-        clap.service_callbacks();
-        let mut changed = drain_reported(from_audio, ids, views, |id, value| {
-            clap.display_for(id, value)
-        });
-        if let Some(fresh) = clap.rescan_if_requested() {
-            *views = fresh;
-            changed = true;
-        }
-        if !clap.is_active() && clap.take_flush_request() {
-            // Inactive (a failed reactivation): a main-thread flush.
-            let reported = clap.flush_values(&[]);
-            changed |= apply_reported(ids, views, &reported, |id, value| {
-                clap.display_for(id, value)
-            });
-        }
-        let flush_wanted = clap.flush_requested() && !shared.pause.processing();
-        if (shared.restart_pending() || pause_wait.is_some() || flush_wanted)
-            && drive_pause(&shared.pause, pause_wait, || clap.stop_processing()) == PauseStep::Ready
-        {
-            if shared.take_restart() & RESTART_ACTIVATION != 0 && !clap.restart() {
-                // Left paused: an inactive plugin must not start again.
-                shared.fail(ProcessFailure::Clap(ClapFailure::NotActive));
-                changed = true;
-            }
-            if clap.is_active() && clap.take_flush_request() {
-                // Quiet: what the last blocks reported is older.
-                changed |= drain_reported(from_audio, ids, views, |id, value| {
-                    clap.display_for(id, value)
-                });
-                let reported = clap.flush_values(&[]);
-                changed |= apply_reported(ids, views, &reported, |id, value| {
-                    clap.display_for(id, value)
-                });
-            }
-            // Never resume an inactive plugin, or restart a failed one.
-            if clap.is_active() && shared.failure().is_none() {
-                resume_or_log(&shared.pause);
-            }
-        }
-        clap.reread_latency_if_changed();
-        changed | shared.take_latency_change()
-    }
-
-    /// An LV2 plugin's frame: the worker thread is woken when a request is
-    /// waiting, the control outputs the audio side reported go into the
-    /// views and the instance's values, a latency change is republished, and
-    /// queued values settle once the processor applied them.  LV2 has no
-    /// main-thread callbacks and no flush request.
-    fn service_lv2(&self, ui: &mut UiSide) -> bool {
-        let shared = &*self.0.shared;
-        let UiSide {
-            instance,
-            from_audio,
-            ids,
-            views,
-            undelivered,
-            ..
-        } = ui;
-        let PluginInstance::Lv2(lv2) = instance else {
-            return false;
-        };
-        // A worker request made during the last block goes out at once
-        // rather than at the thread's safety timeout.
-        lv2.service_worker();
-        let reported = drain_values(from_audio);
-        for &(index, value) in &reported {
-            lv2.note_value(index, value);
-        }
-        let mut changed = apply_reported(ids, views, &reported, |id, value| {
-            lv2.display_for(id, value)
-        });
-        lv2.reread_latency_if_changed();
-        undelivered.settle(self.0.out.applied());
-        changed |= shared.take_latency_change();
-        changed
-    }
-
-    /// A VST3 plugin's frame: the processor's output values into the
-    /// controller and the views; the editor's edits into the views and the
-    /// saved values (an edit is the user's setting, so it is saved at
-    /// once); then the restart flags.  Values and titles are read again at
-    /// once.  `kLatencyChanged` pauses the plugin through the handshake,
-    /// then deactivates and reactivates it and reads its latency, which
-    /// VST3 only lets change while inactive.  `kIoChanged` with other
-    /// buses, `kReloadComponent` and a changed parameter id set ask for a
-    /// reload, as the processor's buffers and tables no longer fit: the
-    /// effect stops processing and the path rebuilds it.
-    fn service_vst3(&self, ui: &mut UiSide) -> bool {
-        let shared = &*self.0.shared;
-        let UiSide {
-            instance,
-            from_audio,
-            ids,
-            views,
-            saved,
-            state_stale,
-            pause_wait,
-            reactivate,
-            edits,
-            undelivered,
-            ..
-        } = ui;
-        let PluginInstance::Vst3(controller) = instance else {
-            return false;
-        };
-        let reported = drain_vst3_reported(controller, from_audio, ids, views);
-        let mut changed = !reported.is_empty();
-        self.0.out.take_edits(edits);
-        edits.retain(|edit| !reported.contains(edit));
-        changed |= apply_vst3_edits(
-            controller,
-            edits,
-            views,
-            saved,
-            undelivered,
-            self.0.out.pushed(),
-        );
-        if !edits.is_empty() {
-            *state_stale = true;
-        }
-        undelivered.settle(self.0.out.applied());
-        let flags = shared.take_restart();
-        if flags & PARAM_TITLES_CHANGED != 0 {
-            if controller.rescan() {
-                *views = controller.views();
-            } else {
-                eprintln!("[plugins] a VST3 plugin changed its parameter ids; reloading it");
-                shared.want_reload();
-            }
-            changed = true;
-        }
-        if flags & PARAM_VALUES_CHANGED != 0 {
-            *views = controller.views();
-            *saved = merge_synced_params(saved, views);
-            *state_stale = true;
-            changed = true;
-        }
-        if flags & IO_CHANGED != 0 && controller.buses_changed() {
-            eprintln!("[plugins] a VST3 plugin changed its audio buses; reloading it");
-            shared.want_reload();
-            changed = true;
-        }
-        if flags & RELOAD_COMPONENT != 0 {
-            eprintln!("[plugins] a VST3 plugin asked to be reloaded");
-            shared.want_reload();
-            changed = true;
-        }
-        if flags & !VST3_HANDLED != 0 {
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "[plugins] ignoring VST3 restart flags {:#x}",
-                    flags & !VST3_HANDLED
-                );
-            }
-        }
-        *reactivate |= flags & LATENCY_CHANGED != 0;
-        if (*reactivate || pause_wait.is_some())
-            && drive_pause(&shared.pause, pause_wait, || controller.stop_processing())
-                == PauseStep::Ready
-        {
-            // A flag `setActive` raises itself waits for the next frame.
-            if std::mem::take(reactivate) && !controller.reactivate() {
-                // Left paused: an inactive plugin must not process.
-                shared.fail(ProcessFailure::Vst3Inactive);
-                changed = true;
-            }
-            // Never resume an inactive plugin, or restart a failed one.
-            if controller.is_active() && shared.failure().is_none() {
-                resume_or_log(&shared.pause);
-            }
-        }
         changed | shared.take_latency_change()
     }
 
@@ -1168,68 +723,48 @@ impl PluginHandle {
     /// forever, losing state that is not a parameter (a file the editor
     /// loaded, say).  The blob then has the old values of those controls,
     /// so its snapshot is built for a restore to apply their saved values
-    /// (or defaults) on top (see [`capture_snapshot`]), and the slot stays stale.
+    /// (or defaults) on top (see
+    /// [`capture_snapshot`](crate::audio::plugins::host::capture_snapshot)),
+    /// and the slot stays stale.
     ///
     /// The snapshot must say what the blob holds, or a restore would skip
-    /// the newer saved values.  An LV2 blob holds no control values at all,
-    /// so its snapshot is empty; the load applies every saved parameter on
-    /// top of it.
+    /// the newer saved values.  A format whose blob holds no control values
+    /// (LV2) says so through `state_holds_params`, so its snapshot is empty
+    /// and the load applies every saved parameter on top of it.
     pub(crate) fn capture_state(&self) {
         let mut ui = self.ui();
-        let UiSide {
-            instance,
-            views,
-            saved,
-            state,
-            state_stale,
-            edits,
-            undelivered,
-            ..
-        } = &mut *ui;
-        if let PluginInstance::Vst3(controller) = instance {
-            // Edits since the last frame are saved values too.
-            self.0.out.take_edits(edits);
-            let pushed = self.0.out.pushed();
-            apply_vst3_edits(controller, edits, views, saved, undelivered, pushed);
-        }
-        undelivered.settle(self.0.out.applied());
-        let bytes = match instance {
-            PluginInstance::Vst3(controller) => controller.save_state().map_err(|error| {
-                eprintln!("[plugins] {error}");
-                Capture::Failed
-            }),
-            PluginInstance::Clap(clap) => match clap.save_state() {
-                StateSave::Saved(bytes) => Ok(bytes),
-                StateSave::Unavailable => Err(Capture::Failed),
-                StateSave::Deferred => Err(Capture::Deferred),
-            },
-            // A plugin without a state interface (or whose save fails) has no
-            // blob; its parameters alone describe it.
-            PluginInstance::Lv2(lv2) => match lv2.save_state() {
-                StateSave::Saved(bytes) => Ok(bytes),
-                StateSave::Unavailable => Err(Capture::Failed),
-                StateSave::Deferred => Err(Capture::Deferred),
-            },
-        };
-        let capture = match bytes {
-            Ok(bytes) => {
-                // LV2's blob holds no control values: they are applied
-                // separately from the saved parameters on restore, so the
-                // snapshot is empty and never claims otherwise.
-                let snapshot: &[PluginParamPref] = if matches!(instance, PluginInstance::Lv2(_)) {
-                    &[]
-                } else {
-                    &capture_snapshot(saved, &undelivered.ids(), views)
-                };
-                captured_state(&bytes, snapshot)
-            }
-            Err(capture) => capture,
+        let capture = {
+            let UiSide {
+                host,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+                ..
+            } = &mut *ui;
+            let mut io = HostIo {
+                shared: &self.0.shared,
+                out: &self.0.out,
+                from_audio,
+                ids,
+                views,
+                saved,
+                edits,
+                undelivered,
+                pause_wait,
+                state_stale,
+            };
+            host.capture_state(&mut io)
         };
         // A blob that misses queued values is captured again once they
         // reached the processor.
-        *state_stale = capture.leaves_stale() || !undelivered.is_empty();
+        ui.state_stale = capture.leaves_stale() || !ui.undelivered.is_empty();
         if let Capture::Saved(captured) = capture {
-            *state = Some(captured);
+            ui.state = Some(captured);
         }
     }
 
@@ -1249,22 +784,52 @@ impl PluginHandle {
     /// callbacks), under the UI lock; `None` for another format.  UI
     /// thread only.  The audio thread never waits for this.
     pub(crate) fn with_clap<R>(&self, body: impl FnOnce(&mut ClapInstance) -> R) -> Option<R> {
-        match &mut self.ui().instance {
-            PluginInstance::Clap(clap) => Some(body(clap)),
-            PluginInstance::Vst3(_) | PluginInstance::Lv2(_) => None,
-        }
+        let mut ui = self.ui();
+        let clap = ui.host.as_any_mut().downcast_mut::<ClapInstance>()?;
+        Some(body(clap))
     }
 
     /// A new editor view of a VST3 plugin, for its window
     /// (`app::plugin_gui`).  The window keeps this handle for longer than
     /// the view.  UI thread; it takes the UI lock only to create the view.
     pub(crate) fn open_vst3_editor(&self) -> Result<Vst3Editor, String> {
-        let view = match &self.ui().instance {
-            PluginInstance::Vst3(controller) => controller.create_view(),
-            PluginInstance::Clap(_) | PluginInstance::Lv2(_) => {
-                return Err("This is not a VST3 plugin.".to_owned());
-            }
+        let view = {
+            let mut ui = self.ui();
+            let controller = ui
+                .host
+                .as_any_mut()
+                .downcast_mut::<Vst3Controller>()
+                .ok_or_else(|| "This is not a VST3 plugin.".to_owned())?;
+            controller
+                .create_view()
+                .ok_or_else(|| "The plugin has no editor.".to_owned())?
         };
-        Vst3Editor::new(view.ok_or_else(|| "The plugin has no editor.".to_owned())?)
+        Vst3Editor::new(view)
+    }
+}
+
+#[cfg(test)]
+impl PluginHandle {
+    /// A handle over `host` alone, for the tests that pin the shared
+    /// postludes; nothing can run it, as there is no processor behind it.
+    pub(crate) fn with_host_for_test(
+        host: Box<dyn PluginHostUi>,
+        shared: Arc<PluginShared>,
+        views: Vec<PluginParamView>,
+        saved: Saved,
+        format: PluginFormat,
+    ) -> Self {
+        let ids = Arc::new(ParamIds::new(views.iter().map(|view| view.id).collect()));
+        let (to_audio, from_ui) = super::transfer::param_transfer(ids.len());
+        let (to_ui, from_audio) = super::transfer::param_transfer(ids.len());
+        drop((from_ui, to_ui));
+        let out = Arc::new(ParamOut::new(Arc::clone(&ids), to_audio));
+        Self(Arc::new(PluginUi {
+            shared,
+            out,
+            ui: Mutex::new(UiSide::new(host, from_audio, ids, views, saved)),
+            format,
+            has_editor: false,
+        }))
     }
 }

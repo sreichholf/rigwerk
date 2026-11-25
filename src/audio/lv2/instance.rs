@@ -2,7 +2,9 @@
 //!
 //! [`Lv2Instance`] lives behind the plugin's UI-only lock (`PluginHandle`):
 //! the port ranges, the current values, latency and the activation state.
-//! The audio-thread half is `processor.rs`.  Both point into one [`Lv2Core`],
+//! It implements [`PluginHostUi`], so the shared handle reaches its
+//! parameters, state and service without naming LV2.  The audio-thread half is
+//! `processor.rs`.  Both point into one [`Lv2Core`],
 //! which owns the instance handle, its descriptor, the library it came from
 //! and the feature set the plugin was instantiated with.  The last of the two
 //! halves to go runs `deactivate` (only if `activate` actually ran) and
@@ -47,9 +49,12 @@ use lv2_sys::{
     LV2_Worker_Interface, LV2_Worker_Status,
 };
 
+use crate::audio::plugins::host::{
+    apply_reported, drain_values, finish_capture, HostIo, PluginHostUi,
+};
 use crate::audio::plugins::{
-    param_transfer, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared, Restore,
-    StateSave,
+    param_transfer, Capture, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared,
+    Restore, StateSave,
 };
 
 use super::host::HostFeatures;
@@ -695,6 +700,91 @@ impl Lv2Instance {
 
     pub(crate) fn has_editor(&self) -> bool {
         false
+    }
+
+    /// Queues normalized `(index, value)` values for the processor.  LV2
+    /// reads its control buffers during `run`, so nothing is called on the
+    /// plugin from the UI, even while it is not processing: the values wait
+    /// for the next block or a skipped effect's flush.  That is also why the
+    /// UI cannot flush them itself when the stream is stopped, unlike CLAP.
+    fn send_values(&self, io: &mut HostIo<'_>, values: &[(usize, f64)]) {
+        for &(index, value) in values {
+            io.out.push(index, value);
+        }
+        let ids = io.ids;
+        io.undelivered.note(
+            values.iter().filter_map(|&(index, _)| ids.id(index)),
+            io.out.pushed(),
+        );
+    }
+}
+
+impl PluginHostUi for Lv2Instance {
+    fn parameter_text(&self, id: u32, value: f64) -> Option<String> {
+        Some(self.display_for(id, value))
+    }
+
+    fn is_read_only(&self, id: u32) -> bool {
+        self.is_read_only(id)
+    }
+
+    fn write_parameter(&mut self, io: &mut HostIo<'_>, index: usize, value: f64) {
+        self.note_value(index, value);
+        self.send_values(io, &[(index, value)]);
+    }
+
+    fn read_parameters(&mut self, _io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        // LV2 has no call that reads a control port (the host's buffer is
+        // the value), so the views are always kept as they are.
+        None
+    }
+
+    fn sync_parameters(&mut self, io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        // The views are the values, and a queued one is not applied until
+        // the next block (or flush), so reading now would show the old one.
+        if io.out.has_queued() {
+            return None;
+        }
+        Some(io.views.clone())
+    }
+
+    fn reset_parameters(&mut self, io: &mut HostIo<'_>) -> Vec<PluginParamView> {
+        let defaults = self.default_values();
+        let views = self.default_views();
+        for &(index, value) in &defaults {
+            self.note_value(index, value);
+        }
+        self.send_values(io, &defaults);
+        views
+    }
+
+    fn capture_state(&mut self, io: &mut HostIo<'_>) -> Capture {
+        io.undelivered.settle(io.out.applied());
+        finish_capture(io, self.save_state(), self.state_holds_params())
+    }
+
+    fn service(&mut self, io: &mut HostIo<'_>) -> bool {
+        // A worker request made during the last block goes out at once
+        // rather than at the thread's safety timeout.
+        self.service_worker();
+        let reported = drain_values(io.from_audio);
+        for &(index, value) in &reported {
+            self.note_value(index, value);
+        }
+        let changed = apply_reported(io.ids, io.views, &reported, |id, value| {
+            self.display_for(id, value)
+        });
+        self.reread_latency_if_changed();
+        io.undelivered.settle(io.out.applied());
+        changed
+    }
+
+    fn state_holds_params(&self) -> bool {
+        false
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

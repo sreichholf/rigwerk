@@ -2,8 +2,9 @@
 //! [`Vst3Controller`] lives behind the plugin's UI-only lock
 //! (`PluginHandle`): the component's lifetime and activation, the edit
 //! controller (single component or separate, connected through the host
-//! proxies), parameters, state and the editor view.  The audio-thread half
-//! is `processor.rs`.
+//! proxies), parameters, state and the editor view.  It implements
+//! [`PluginHostUi`], so the shared handle reaches its parameters, state and
+//! service without naming VST3.  The audio-thread half is `processor.rs`.
 //!
 //! The load follows the SDK's call sequence (`plugprovider.cpp`): create
 //! and initialize the component, find or create the controller, restore
@@ -15,6 +16,7 @@
 
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ::vst3::Steinberg::Vst::{
@@ -26,9 +28,12 @@ use ::vst3::Steinberg::Vst::{
 use ::vst3::Steinberg::{kNotImplemented, kResultOk, IBStream, IPlugView, IPluginBaseTrait, TUID};
 use ::vst3::{ComPtr, ComWrapper};
 
+use crate::audio::plugins::host::{
+    apply_vst3_edits, drain_vst3_reported, finish_capture, resume_or_log, HostIo, PluginHostUi,
+};
 use crate::audio::plugins::{
-    param_transfer, ParamIds, ParamOut, ParamReceiver, PluginParamView, PluginShared, Restore,
-    MAX_BLOCK,
+    drive_pause, merge_synced_params, param_transfer, Capture, ParamIds, ParamOut, ParamReceiver,
+    PauseStep, PluginParamView, PluginShared, ProcessFailure, Restore, StateSave, MAX_BLOCK,
 };
 
 use super::connection::Connection;
@@ -39,13 +44,18 @@ use super::module::{self, Vst3Module};
 use super::processor::{BusLayout, Vst3Processor};
 use super::stream::{decode_state, encode_state, MemoryStream, StateBlob};
 use super::{
-    utf16_text, CONT_TIME_VALID, K_AUDIO, K_EVENT, K_INPUT, K_MAIN, K_OUTPUT, K_REALTIME,
-    K_SAMPLE32, NEED_TEMPO, NEED_TIME_SIGNATURE, TEMPO_VALID, TIME_SIG_VALID,
+    utf16_text, CONT_TIME_VALID, IO_CHANGED, K_AUDIO, K_EVENT, K_INPUT, K_MAIN, K_OUTPUT,
+    K_REALTIME, K_SAMPLE32, LATENCY_CHANGED, NEED_TEMPO, NEED_TIME_SIGNATURE, PARAM_TITLES_CHANGED,
+    PARAM_VALUES_CHANGED, RELOAD_COMPONENT, TEMPO_VALID, TIME_SIG_VALID,
 };
 
 /// The most audio buses, and channels per bus, a plugin may have.
 const MAX_BUSES: usize = 16;
 const MAX_BUS_CHANNELS: usize = 32;
+
+/// The VST3 flags [`PluginHostUi::service`] acts on; others are ignored.
+const VST3_HANDLED: u32 =
+    LATENCY_CHANGED | PARAM_VALUES_CHANGED | PARAM_TITLES_CHANGED | IO_CHANGED | RELOAD_COMPONENT;
 
 /// One parameter as the controller lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +101,9 @@ pub(crate) struct Vst3Controller {
     layout: BusLayout,
     shared: Arc<PluginShared>,
     active: bool,
+    /// A `kLatencyChanged` waiting for the pause handshake, kept between
+    /// frames.
+    reactivate: bool,
     /// The setup the processor was given, given again on every
     /// reactivation (as the SDK's hosts do between `setActive` calls).
     setup: ProcessSetup,
@@ -180,6 +193,7 @@ impl Vst3Controller {
             layout: BusLayout::default(),
             shared: Arc::clone(shared),
             active: false,
+            reactivate: false,
             setup: ProcessSetup {
                 processMode: K_REALTIME,
                 symbolicSampleSize: K_SAMPLE32,
@@ -767,6 +781,146 @@ impl Vst3Controller {
             unsafe { self.component.setActive(0) };
             self.active = false;
         }
+    }
+}
+
+impl PluginHostUi for Vst3Controller {
+    fn parameter_text(&self, id: u32, value: f64) -> Option<String> {
+        self.format(id, value)
+    }
+
+    fn is_read_only(&self, id: u32) -> bool {
+        self.is_read_only(id)
+    }
+
+    fn write_parameter(&mut self, io: &mut HostIo<'_>, index: usize, value: f64) {
+        // The controller has the value at once; the processor gets it with
+        // its next block (or a skipped effect's flush).  The shared caller
+        // took `index` from the id table, which never changes.
+        let id = io
+            .ids
+            .id(index)
+            .expect("a parameter index from its id table");
+        self.set(id, value);
+        io.out.push(index, value);
+        io.undelivered.note([id], io.out.pushed());
+    }
+
+    fn read_parameters(&mut self, _io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        Some(self.views())
+    }
+
+    fn sync_parameters(&mut self, io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        drain_vst3_reported(self, io.from_audio, io.ids, io.views);
+        io.out.take_edits(io.edits);
+        io.undelivered
+            .note(io.edits.iter().map(|&(id, _)| id), io.out.pushed());
+        Some(self.views())
+    }
+
+    fn reset_parameters(&mut self, io: &mut HostIo<'_>) -> Vec<PluginParamView> {
+        for (index, value) in self.default_values() {
+            if let Some(id) = io.ids.id(index) {
+                self.set(id, value);
+                io.out.push(index, value);
+                io.undelivered.note([id], io.out.pushed());
+            }
+        }
+        self.default_views()
+    }
+
+    fn capture_state(&mut self, io: &mut HostIo<'_>) -> Capture {
+        // Edits since the last frame are saved values too.
+        io.out.take_edits(io.edits);
+        let pushed = io.out.pushed();
+        apply_vst3_edits(self, io.edits, io.views, io.saved, io.undelivered, pushed);
+        io.undelivered.settle(io.out.applied());
+        match self.save_state() {
+            Ok(bytes) => finish_capture(io, StateSave::Saved(bytes), self.state_holds_params()),
+            Err(error) => {
+                eprintln!("[plugins] {error}");
+                Capture::Failed
+            }
+        }
+    }
+
+    fn service(&mut self, io: &mut HostIo<'_>) -> bool {
+        let reported = drain_vst3_reported(self, io.from_audio, io.ids, io.views);
+        let mut changed = !reported.is_empty();
+        io.out.take_edits(io.edits);
+        io.edits.retain(|edit| !reported.contains(edit));
+        changed |= apply_vst3_edits(
+            self,
+            io.edits,
+            io.views,
+            io.saved,
+            io.undelivered,
+            io.out.pushed(),
+        );
+        if !io.edits.is_empty() {
+            *io.state_stale = true;
+        }
+        io.undelivered.settle(io.out.applied());
+        let flags = io.shared.take_restart();
+        if flags & PARAM_TITLES_CHANGED != 0 {
+            if self.rescan() {
+                *io.views = self.views();
+            } else {
+                eprintln!("[plugins] a VST3 plugin changed its parameter ids; reloading it");
+                io.shared.want_reload();
+            }
+            changed = true;
+        }
+        if flags & PARAM_VALUES_CHANGED != 0 {
+            *io.views = self.views();
+            *io.saved = merge_synced_params(io.saved, io.views);
+            *io.state_stale = true;
+            changed = true;
+        }
+        if flags & IO_CHANGED != 0 && self.buses_changed() {
+            eprintln!("[plugins] a VST3 plugin changed its audio buses; reloading it");
+            io.shared.want_reload();
+            changed = true;
+        }
+        if flags & RELOAD_COMPONENT != 0 {
+            eprintln!("[plugins] a VST3 plugin asked to be reloaded");
+            io.shared.want_reload();
+            changed = true;
+        }
+        if flags & !VST3_HANDLED != 0 {
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "[plugins] ignoring VST3 restart flags {:#x}",
+                    flags & !VST3_HANDLED
+                );
+            }
+        }
+        self.reactivate |= flags & LATENCY_CHANGED != 0;
+        if (self.reactivate || io.pause_wait.is_some())
+            && drive_pause(&io.shared.pause, io.pause_wait, || self.stop_processing())
+                == PauseStep::Ready
+        {
+            // A flag `setActive` raises itself waits for the next frame.
+            if std::mem::take(&mut self.reactivate) && !self.reactivate() {
+                // Left paused: an inactive plugin must not process.
+                io.shared.fail(ProcessFailure::Vst3Inactive);
+                changed = true;
+            }
+            // Never resume an inactive plugin, or restart a failed one.
+            if self.is_active() && io.shared.failure().is_none() {
+                resume_or_log(&io.shared.pause);
+            }
+        }
+        changed
+    }
+
+    fn state_holds_params(&self) -> bool {
+        true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
