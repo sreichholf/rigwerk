@@ -228,3 +228,25 @@ fn a_full_ring_drops_frames_while_the_tap_and_the_peaks_keep_them() {
     );
     assert_eq!(peaks(&shared), (0.5, 0.5));
 }
+
+/// The input callback's body allocates and frees nothing.  The guard is the
+/// test's, as in `audio/mixer/rt_tests.rs`: `build_input`'s own guard wraps a
+/// cpal closure that needs a device, so the block under it is driven here.
+/// A release build counts nothing, so the two reads are 0 == 0 there.
+#[test]
+fn an_input_block_allocates_and_frees_nothing() {
+    let shared = Shared::new(48_000);
+    let frames = [0.5f32, -0.25, 0.125, 0.75];
+
+    let guard = crate::audio::rt_guard::RtGuard::enter();
+    input_block(&frames, 2, &shared);
+    assert_eq!(
+        guard.allocations(),
+        0,
+        "the block allocated on the audio thread"
+    );
+    assert_eq!(guard.frees(), 0, "the block freed on the audio thread");
+    drop(guard);
+
+    assert_eq!(ring(&shared), vec![(0.5, -0.25), (0.125, 0.75)]);
+}

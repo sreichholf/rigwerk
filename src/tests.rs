@@ -596,10 +596,12 @@ fn a_recorded_screenshot_ending_is_the_process_status() {
 }
 
 /// The files whose audio callback must hold `RtGuard`: ASIO's dispatch (the
-/// silence and panic paths included), the duplex filter, the native capture,
-/// the virtual source, the sink monitor, and both mixer renders.
+/// silence and panic paths included), the cpal capture, the duplex filter, the
+/// native capture, the virtual source, the sink monitor, and both mixer
+/// renders.
 const GUARDED_CALLBACKS: &[&str] = &[
     "src/audio/win/asio/callback.rs",
+    "src/audio/input.rs",
     "src/audio/linux/duplex/filter.rs",
     "src/audio/linux/native.rs",
     "src/audio/linux/duplex/virtual_source.rs",
