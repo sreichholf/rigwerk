@@ -29,7 +29,7 @@ impl RigWerkApp {
         if layout.sheet_open {
             horizontal_meter(
                 &mut top,
-                self.meter_out_l.max(self.meter_out_r),
+                self.meters.out_l.max(self.meters.out_r),
                 "Master meter",
             );
         }
@@ -38,7 +38,7 @@ impl RigWerkApp {
             layout,
             &LevelBlock {
                 id: egui::Id::unique("console_master_meter"),
-                levels: &[self.meter_out_l, self.meter_out_r],
+                levels: &[self.meters.out_l, self.meters.out_r],
                 level_db: self.output_gain,
                 range: FaderRange {
                     min_db: OUTPUT_GAIN_MIN_DB,

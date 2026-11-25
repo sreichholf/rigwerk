@@ -63,7 +63,7 @@ impl RigWerkApp {
         if layout.sheet_open {
             horizontal_meter(
                 &mut top,
-                self.meter_in_l.max(self.meter_in_r),
+                self.meters.in_l.max(self.meters.in_r),
                 "Input meter",
             );
         }
@@ -90,7 +90,7 @@ impl RigWerkApp {
             layout,
             &LevelBlock {
                 id: egui::Id::unique("console_input_meter"),
-                levels: &[self.meter_in_l, self.meter_in_r],
+                levels: &[self.meters.in_l, self.meters.in_r],
                 level_db: self.input_gain,
                 range: FaderRange {
                     min_db: INPUT_GAIN_MIN_DB,
@@ -124,8 +124,8 @@ impl RigWerkApp {
         );
         let active = matches!(self.engine.state, EngineState::Running);
         for (samples, colour) in [
-            (&self.scope_in, colours.text3),
-            (&self.scope_out, colours.meter),
+            (&self.meters.scope_in, colours.text3),
+            (&self.meters.scope_out, colours.meter),
         ] {
             if !active || samples.is_empty() {
                 continue;

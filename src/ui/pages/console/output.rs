@@ -67,8 +67,8 @@ impl RigWerkApp {
             strip_detail(&mut top, &detail);
         }
         let meters: &[f32] = match row.extra_output_index {
-            None => &self.meter_out_channels,
-            Some(index) => &self.meter_extra_output_channels[index],
+            None => &self.meters.out_channels,
+            Some(index) => &self.meters.extra_output_channels[index],
         };
         let levels: Vec<f32> = meters.iter().take(row.channels).copied().collect();
         if layout.sheet_open {

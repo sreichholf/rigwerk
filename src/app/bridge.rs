@@ -1,8 +1,6 @@
 //! Starting, stopping and re-opening the bridge, and the live numbers the
 //! screens show about it.
 
-use std::time::Instant;
-
 use crate::app::devices::is_wrapper_driver;
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
@@ -276,12 +274,7 @@ impl RigWerkApp {
     /// captured before this pass.
     pub(crate) fn smooth_meters(&mut self, time: f64, output_muted: bool) {
         let time = time as f32;
-        let dt = self
-            .last_meter_tick
-            .elapsed()
-            .as_secs_f32()
-            .clamp(0.001, 0.1);
-        self.last_meter_tick = Instant::now();
+        let dt = self.meters.tick();
         let smooth = |current: f32, target: f32| {
             let speed = if target > current { 26.0 } else { 6.5 };
             current + (target - current) * (1.0 - (-speed * dt).exp())
@@ -306,15 +299,23 @@ impl RigWerkApp {
             (0.0, 0.0, 0.0, 0.0)
         };
 
-        self.meter_in_l = smooth(self.meter_in_l, in_l);
-        self.meter_in_r = smooth(self.meter_in_r, in_r);
+        self.meters.in_l = smooth(self.meters.in_l, in_l);
+        self.meters.in_r = smooth(self.meters.in_r, in_r);
         let mute_scale = if output_muted { 0.0 } else { 1.0 };
-        self.meter_out_l = smooth(self.meter_out_l, out_l * mute_scale);
-        self.meter_out_r = smooth(self.meter_out_r, out_r * mute_scale);
-        self.peak_in_l = self.peak_in_l.max(self.meter_in_l * 0.98).max(0.0);
-        self.peak_in_r = self.peak_in_r.max(self.meter_in_r * 0.98).max(0.0);
-        self.peak_out_l = self.peak_out_l.max(self.meter_out_l * 0.98).max(0.0);
-        self.peak_out_r = self.peak_out_r.max(self.meter_out_r * 0.98).max(0.0);
+        self.meters.out_l = smooth(self.meters.out_l, out_l * mute_scale);
+        self.meters.out_r = smooth(self.meters.out_r, out_r * mute_scale);
+        self.meters.peak_in_l = self.meters.peak_in_l.max(self.meters.in_l * 0.98).max(0.0);
+        self.meters.peak_in_r = self.meters.peak_in_r.max(self.meters.in_r * 0.98).max(0.0);
+        self.meters.peak_out_l = self
+            .meters
+            .peak_out_l
+            .max(self.meters.out_l * 0.98)
+            .max(0.0);
+        self.meters.peak_out_r = self
+            .meters
+            .peak_out_r
+            .max(self.meters.out_r * 0.98)
+            .max(0.0);
         // Per clock-device channel, after its map and level. Preview has no
         // engine reading, so the stand-in L/R goes through the same map.
         let live = self.live_path_mask();
@@ -330,10 +331,10 @@ impl RigWerkApp {
             ),
             _ => [0.0; audio::MAX_OUTPUT_CHANNELS],
         };
-        for (channel, meter) in self.meter_out_channels.iter_mut().enumerate() {
+        for (channel, meter) in self.meters.out_channels.iter_mut().enumerate() {
             let target = channel_targets[channel].abs();
             *meter = smooth(*meter, target);
-            let peak = &mut self.peak_out_channels[channel];
+            let peak = &mut self.meters.peak_out_channels[channel];
             *peak = peak.max(*meter * 0.98).max(0.0);
         }
         // Extra outputs / RigWerk Out: same smoothing as the clock output.
@@ -355,11 +356,11 @@ impl RigWerkApp {
             }),
             _ => [[0.0; audio::MAX_OUTPUT_CHANNELS]; audio::MAX_EXTRA_OUTPUTS],
         };
-        for (index, meters) in self.meter_extra_output_channels.iter_mut().enumerate() {
-            for (channel, meter) in meters.iter_mut().enumerate() {
+        for (index, channel_meters) in self.meters.extra_output_channels.iter_mut().enumerate() {
+            for (channel, meter) in channel_meters.iter_mut().enumerate() {
                 let target = extra_output_targets[index][channel].abs();
                 *meter = smooth(*meter, target);
-                let peak = &mut self.peak_extra_output_channels[index][channel];
+                let peak = &mut self.meters.peak_extra_output_channels[index][channel];
                 *peak = peak.max(*meter * 0.98).max(0.0);
             }
         }
@@ -373,41 +374,41 @@ impl RigWerkApp {
                 _ => (0.0, 0.0),
             };
             for (side, target) in [left, right].into_iter().enumerate() {
-                let meter = &mut self.meter_paths[slot][side];
+                let meter = &mut self.meters.path_levels[slot][side];
                 *meter = smooth(*meter, target.abs() * gain);
-                let peak = &mut self.peak_paths[slot][side];
+                let peak = &mut self.meters.peak_path_levels[slot][side];
                 *peak = peak.max(*meter * 0.98).max(0.0);
             }
         }
         let decay = (-2.3 * dt).exp();
-        for peaks in &mut self.peak_paths {
+        for peaks in &mut self.meters.peak_path_levels {
             for peak in peaks {
                 *peak *= decay;
             }
         }
-        for peak in &mut self.peak_out_channels {
+        for peak in &mut self.meters.peak_out_channels {
             *peak *= decay;
         }
-        for peaks in &mut self.peak_extra_output_channels {
+        for peaks in &mut self.meters.peak_extra_output_channels {
             for peak in peaks {
                 *peak *= decay;
             }
         }
-        self.peak_in_l *= decay;
-        self.peak_in_r *= decay;
-        self.peak_out_l *= decay;
-        self.peak_out_r *= decay;
+        self.meters.peak_in_l *= decay;
+        self.meters.peak_in_r *= decay;
+        self.meters.peak_out_l *= decay;
+        self.meters.peak_out_r *= decay;
 
-        if self.scope_in.len() != crate::audio::SCOPE_LEN {
-            self.scope_in.resize(crate::audio::SCOPE_LEN, 0.0);
-            self.scope_out.resize(crate::audio::SCOPE_LEN, 0.0);
+        if self.meters.scope_in.len() != crate::audio::SCOPE_LEN {
+            self.meters.scope_in.resize(crate::audio::SCOPE_LEN, 0.0);
+            self.meters.scope_out.resize(crate::audio::SCOPE_LEN, 0.0);
         }
         if self.engine.state == EngineState::Running {
             self.engine
-                .copy_scope(&mut self.scope_in, &mut self.scope_out);
+                .copy_scope(&mut self.meters.scope_in, &mut self.meters.scope_out);
         } else {
-            self.scope_in.fill(0.0);
-            self.scope_out.fill(0.0);
+            self.meters.scope_in.fill(0.0);
+            self.meters.scope_out.fill(0.0);
         }
     }
 

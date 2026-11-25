@@ -11,6 +11,7 @@ use pw::sys as pw_sys;
 use spa::sys as spa_sys;
 
 use crate::audio::denormal::DenormalGuard;
+use crate::audio::input::InputStage;
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output_map::MAX_EXTRA_OUTPUTS;
 use crate::audio::record::{push_device_frame, RecordSource};
@@ -111,11 +112,7 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     shared
         .output_step_frames
         .store(frames.min(u32::MAX as usize) as u32, Ordering::Relaxed);
-    let gain = shared.input_gain();
-    let enabled_l = shared.input_enabled[0].load(Ordering::Relaxed);
-    let enabled_r = shared.input_enabled[1].load(Ordering::Relaxed);
-    let mut peak_l = 0.0f32;
-    let mut peak_r = 0.0f32;
+    let mut stage = InputStage::new(shared);
     let virtual_output_active = (0..shared.extra_output_count())
         .any(|slot| shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot));
     if virtual_output_active {
@@ -139,16 +136,10 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
                 (Some(only), None) | (None, Some(only)) => (only, only),
                 (None, None) => (0.0, 0.0),
             };
-            // Raw, before gain; the direct path's one callback both captures
-            // and plays, so a measurement here still sees the physical loop.
-            shared.capture_calibration(raw_l, raw_r);
-            let left = raw_l * gain;
-            let right = raw_r * gain;
-            shared.tap_frame(left, right);
-            let left = if enabled_l { left } else { 0.0 };
-            let right = if enabled_r { right } else { 0.0 };
-            peak_l = peak_l.max(left.abs());
-            peak_r = peak_r.max(right.abs());
+            // The stage captures calibration raw, before the gain: this
+            // callback both captures and plays, so that still sees the
+            // physical loop.
+            let (left, right) = stage.frame(shared, raw_l, raw_r);
             shared.push_scope_in(left, right);
             scratch_l[index] = left;
             scratch_r[index] = right;
@@ -203,8 +194,7 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
     if virtual_output_active {
         virtual_output.end_write(written);
     }
-    shared.in_l.store(peak_l.to_bits(), Ordering::Relaxed);
-    shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
+    stage.publish(shared);
 }
 
 unsafe extern "C" fn on_state_changed(
