@@ -235,10 +235,9 @@ fn a_capture_with_audio_stopped_after_a_set_keeps_the_value_through_a_restore() 
     stateful();
     let restored = fake::load_restoring("fake", &pref).expect("restore the fake");
     assert!(fake::count("state.load") > 0, "the blob was restored");
-    let gain = restored
-        .handle()
-        .parameters()
-        .into_iter()
+    let parameters = restored.handle().parameters();
+    let gain = parameters
+        .iter()
         .find(|view| view.id == 7)
         .expect("the gain");
     assert!((gain.value - 0.75).abs() < 1e-9, "restored {}", gain.value);
@@ -384,6 +383,19 @@ pub(crate) fn fake_restoring_for_test(pref: &PluginPref) -> LoadedPlugin {
 /// every value it receives (see [`fake_received_for_test`]).
 pub(crate) fn fake_plugin_with_params_for_test() -> LoadedPlugin {
     fake_restoring_for_test(&PluginPref::default())
+}
+
+/// As [`fake_plugin_with_params_for_test`], reporting `value` for control
+/// `id` through its output port on every block, the way a CLAP plugin does
+/// when its own state changes (see `fake::emit_output`).  `value` is native,
+/// as the plugin's control range takes it.
+pub(crate) fn fake_plugin_reporting_for_test(id: u32, value: f64) -> LoadedPlugin {
+    const MAIN: u32 = clap_sys::ext::audio_ports::CLAP_AUDIO_PORT_IS_MAIN;
+    fake::reset(fake::Fail::Nothing);
+    fake::offer_params(true);
+    fake::emit_output(id, value);
+    fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
+    fake::load("fake").expect("load the fake plugin")
 }
 
 /// The `(id, native value, "process" | "flush")` the fake loaded last on
@@ -2621,7 +2633,8 @@ fn a_set_while_not_processing_is_flushed_on_the_main_thread() {
     handle.set_parameter(7, 0.75).expect("set the gain");
     assert_eq!(fake_received_for_test(), vec![(7, 1.5, "flush")]);
     // The plugin has it: a full read sees it, nothing is queued.
-    assert_eq!(handle.sync_full().expect("nothing queued")[0].value, 0.75);
+    handle.sync_full().expect("nothing queued");
+    assert_eq!(handle.parameters()[0].value, 0.75);
     // The pause it took is over: the first block starts and processes,
     // with nothing left to deliver.
     let (mut left, mut right) = (vec![0.0f32; 16], vec![0.0f32; 16]);

@@ -1,5 +1,7 @@
 //! Plugin preferences, opaque state, and UI views.
 
+use std::sync::Arc;
+
 /// Which plugin format an effect uses.  Saved effects written before CLAP
 /// support default to VST3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -196,7 +198,12 @@ impl Default for PluginPref {
 }
 
 /// One adjustable control of a loaded plugin, normalized to 0..1 for the UI.
-#[derive(Clone, Debug, Default)]
+///
+/// `PartialEq` is what lets a republish keep the control list it already has
+/// (see [`PluginView::parameters`]).  It compares values, not their bits, so
+/// `-0.0` equals `0.0`; a `NaN` never equals itself, so an effect that reports
+/// one copies its list on every republish.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PluginParamView {
     pub id: u32,
     pub name: String,
@@ -211,7 +218,15 @@ pub struct PluginParamView {
     pub read_only: bool,
 }
 
-/// What the UI shows for a slot; cheap to clone and independent of the plugin.
+/// What the UI shows for a slot; independent of the plugin.  Cloning it shares
+/// the control list, so a published set costs no per-control copy.
+///
+/// The list itself is shared between published generations, on both paths
+/// that write one: `SlotLink::view` hands back the list a slot's handle last
+/// published while nothing there changed, and `PathControls::patch_view`
+/// rebuilds only the effect a change is for.  A bypass or mix change copies no
+/// controls at all; a control change or a refresh copies only the effects
+/// whose controls actually moved.
 #[derive(Clone, Debug, Default)]
 pub struct PluginView {
     pub path: String,
@@ -223,7 +238,9 @@ pub struct PluginView {
     pub bypass: bool,
     pub mix: f32,
     pub error: Option<String>,
-    pub parameters: Vec<PluginParamView>,
+    /// The effect's controls, shared with every published view set it was in.
+    /// Read it as a slice (`iter`, indexing, `len`).
+    pub parameters: Arc<[PluginParamView]>,
     /// Whether the plugin can draw its own graphical editor.
     pub has_editor: bool,
     /// Which loaded instance this view describes (see

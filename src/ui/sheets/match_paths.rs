@@ -10,7 +10,7 @@ use crate::audio::{LOUDNESS_TARGET_MAX_LUFS, LOUDNESS_TARGET_MIN_LUFS, SILENCE_L
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{
-    format_db, row_info, segmented, styled_slider, OutlineButton, SliderStyle,
+    format_db, heading, row_info, segmented, styled_slider, OutlineButton, SliderStyle,
 };
 
 const COLUMN_GAP: f32 = 24.0;
@@ -394,15 +394,6 @@ fn measured_label(lufs: f32) -> String {
     } else {
         "—".to_owned()
     }
-}
-
-fn heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
-    ui.label(
-        RichText::new(text)
-            .font(font(Face::SansMedium, TypeRole::Secondary))
-            .color(colours.text3),
-    );
-    ui.add_space(3.0);
 }
 
 #[cfg(test)]

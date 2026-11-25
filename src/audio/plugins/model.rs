@@ -326,7 +326,7 @@ impl ChainModel {
     /// Returns every control to the plugin's own defaults and forgets the
     /// saved overrides, opening a never-opened slot first.
     pub(crate) fn reset_parameters(&mut self, index: usize) -> Result<(), String> {
-        self.open_handle(index)?.reset_parameters().map(|_| ())
+        self.open_handle(index)?.reset_parameters()
     }
 
     /// The handle of slot `index`, opened if it never was.

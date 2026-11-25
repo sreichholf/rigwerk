@@ -43,8 +43,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
 use super::super::plugins::{
-    ChainLease, ChainModel, PluginHandle, PluginPref, PluginView, ProcessFailure, ReloadPlan, Slot,
-    SlotLink, MAX_EFFECTS,
+    is_main_thread, ChainLease, ChainModel, PluginHandle, PluginPref, PluginView, ProcessFailure,
+    ReloadPlan, Slot, SlotLink, MAX_EFFECTS,
 };
 use super::{LockStats, PathControls, PluginLockReport};
 
@@ -128,17 +128,29 @@ impl PathControls {
     }
 
     /// Changes one effect in the published views, without the model lock.
+    ///
+    /// The set is rebuilt from the last one outside the publish lock, and
+    /// only shallowly: every view keeps its `parameters` arc, so a control
+    /// change copies one effect's control list at most, never every effect's.
+    /// Only the UI thread publishes (see [`Self::refresh_from_links`]), and
+    /// that is what makes the read here and the store below safe without
+    /// holding the lock in between: no other publisher can slip a set of its
+    /// own in.
     fn patch_view(&self, index: usize, patch: impl FnOnce(&mut PluginView)) {
-        let mut views = self
+        debug_assert!(
+            is_main_thread(),
+            "effect views are only written from the UI thread"
+        );
+        let mut list = self.plugin_views().to_vec();
+        let Some(view) = list.get_mut(index) else {
+            return;
+        };
+        patch(view);
+        *self
             .plugin_views
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let mut list = views.to_vec();
-        if let Some(view) = list.get_mut(index) {
-            patch(view);
-            *views = list.into();
-            self.plugin_views_version.fetch_add(1, Ordering::Release);
-        }
+            .unwrap_or_else(PoisonError::into_inner) = list.into();
+        self.plugin_views_version.fetch_add(1, Ordering::Release);
     }
 
     /// The latency in samples this path's effect chain should add (see
@@ -423,7 +435,10 @@ impl PathControls {
         let Some(handle) = self.plugin_handle(index) else {
             return;
         };
-        if let Some(parameters) = handle.sync_full() {
+        // The full read leaves the list in the handle; taking it from there
+        // keeps the next refresh sharing it (see `PluginHandle::parameters`).
+        if handle.sync_full().is_some() {
+            let parameters = handle.parameters();
             self.patch_view(index, |view| view.parameters = parameters);
         }
     }
@@ -444,20 +459,13 @@ impl PathControls {
                 .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()));
         };
         let value = value.clamp(0.0, 1.0);
-        let display = handle.set_parameter(id, value)?;
+        handle.set_parameter(id, value)?;
         self.wake_effects();
-        self.patch_view(index, |view| {
-            if let Some(parameter) = view
-                .parameters
-                .iter_mut()
-                .find(|parameter| parameter.id == id)
-            {
-                parameter.value = value;
-                if let Some(display) = &display {
-                    parameter.display = display.clone();
-                }
-            }
-        });
+        // The handle's own list already holds the value and its text; taking
+        // it shares the storage with the next refresh, so the change costs one
+        // copy in total (see `PluginHandle::parameters`).
+        let parameters = handle.parameters();
+        self.patch_view(index, |view| view.parameters = parameters);
         Ok(())
     }
 
@@ -470,8 +478,9 @@ impl PathControls {
                 .edit_chain(|chain| chain.reset_parameters(index))
                 .unwrap_or_else(|| Err("Plugin chain unavailable".to_owned()));
         };
-        let parameters = handle.reset_parameters()?;
+        handle.reset_parameters()?;
         self.wake_effects();
+        let parameters = handle.parameters();
         self.patch_view(index, |view| view.parameters = parameters);
         Ok(())
     }

@@ -24,7 +24,7 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{chip, row_info, segmented, OutlineButton};
+use crate::ui::widgets::{chip, engine_state_label, row_info, segmented, OutlineButton};
 
 /// Gap between string columns.  The strobe row uses it too, so a face sits
 /// on its cell.
@@ -781,8 +781,8 @@ fn idle_panel(ui: &mut egui::Ui, state: EngineState, actions: &mut Actions, colo
     );
     child.set_clip_rect(rect);
     let (label, colour) = match state {
-        EngineState::Starting => ("Starting…", colours.accent_text),
-        EngineState::Stopping => ("Stopping…", colours.warn),
+        EngineState::Starting => (engine_state_label(state), colours.accent_text),
+        EngineState::Stopping => (engine_state_label(state), colours.warn),
         _ => ("Start the bridge to tune", colours.text2),
     };
     let can_start = matches!(state, EngineState::Idle | EngineState::Error);

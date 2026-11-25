@@ -1,5 +1,3 @@
-use super::PATH_COLOUR_NAMES;
-use crate::ui::theme::DARK;
 use crate::ui::widgets::format_db;
 
 #[test]
@@ -7,11 +5,6 @@ fn a_level_reads_with_the_real_minus_and_one_decimal() {
     assert_eq!(format_db(0.0, 1), "0.0 dB");
     assert_eq!(format_db(-6.0, 1), "−6.0 dB");
     assert_eq!(format_db(1.5, 1), "+1.5 dB");
-}
-
-#[test]
-fn every_path_colour_has_a_name() {
-    assert_eq!(PATH_COLOUR_NAMES.len(), DARK.path.len());
 }
 
 #[test]

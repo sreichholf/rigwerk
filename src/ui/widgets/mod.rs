@@ -44,9 +44,15 @@ use egui::{
     Align, Color32, CornerRadius, FontFamily, FontId, Layout, Rect, RichText, Sense, Stroke, Vec2,
 };
 
+use crate::audio::EngineState;
 use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
-use crate::ui::theme::{font, palette, with_alpha, TypeRole, BORDER_SOFT, DIM, TEXT};
+use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole, BORDER_SOFT, DIM, TEXT};
+
+/// One level slider's height and readout width: the two sheet rows share
+/// them so a path and an output read the same.
+const LEVEL_ROW_H: f32 = 28.0;
+const LEVEL_VALUE_W: f32 = 80.0;
 
 /// Accent ring on a focused control, from the active palette.
 pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
@@ -72,6 +78,18 @@ pub(crate) fn mono(text: impl Into<String>, color: Color32, size: f32) -> RichTe
         .family(FontFamily::Monospace)
         .size(ts(size))
         .color(color)
+}
+
+/// The status bar's and Diagnostics' name for the engine state.
+pub(crate) fn engine_state_label(state: EngineState) -> &'static str {
+    match state {
+        EngineState::Preview => "Demo",
+        EngineState::Running => "Running",
+        EngineState::Starting => "Starting…",
+        EngineState::Stopping => "Stopping…",
+        EngineState::Error => "Error",
+        EngineState::Idle => "Stopped",
+    }
 }
 
 pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
@@ -151,6 +169,70 @@ pub(crate) fn progress_line(
     );
     ui.painter()
         .rect_filled(filled, CornerRadius::same(2), with_alpha(color, 220));
+}
+
+/// A section heading in a sheet: medium sans in `text3`, then 3 pt.
+pub(crate) fn heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
+    section(ui, text, colours, Face::SansMedium, 3.0);
+}
+
+/// The gate's section heading: body weight and 4 pt below, quieter beside
+/// its large knobs than [`heading`].
+pub(crate) fn quiet_heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
+    section(ui, text, colours, Face::Sans, 4.0);
+}
+
+fn section(ui: &mut egui::Ui, text: &str, colours: &Palette, face: Face, gap: f32) {
+    ui.label(
+        RichText::new(text)
+            .font(font(face, TypeRole::Secondary))
+            .color(colours.text3),
+    );
+    ui.add_space(gap);
+}
+
+/// A level slider and its readout.  `min_db` and `max_db` are the range the
+/// screen allows (a path's or an output's), `colour` is the track's accent,
+/// and `hint` says what the level applies to.
+pub(crate) fn level_row(
+    ui: &mut egui::Ui,
+    level: &mut f32,
+    min_db: f32,
+    max_db: f32,
+    colour: Color32,
+    hint: &str,
+    colours: &Palette,
+) {
+    // The two floats are adjacent and unlabelled: a swapped pair would still
+    // compile and quietly invert the slider.
+    debug_assert!(min_db < max_db, "level range runs {min_db} to {max_db}");
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let slider_w = (ui.available_width() - LEVEL_VALUE_W - 8.0).max(80.0);
+        styled_slider(
+            ui,
+            level,
+            min_db,
+            max_db,
+            0.1,
+            SliderStyle::named(colour, "Level")
+                .value(format_db(*level, 1))
+                .width(slider_w),
+        )
+        .on_hover_text(hint);
+        ui.allocate_ui_with_layout(
+            Vec2::new(LEVEL_VALUE_W, LEVEL_ROW_H),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                ui.set_width(LEVEL_VALUE_W);
+                ui.label(
+                    RichText::new(format_db(*level, 1))
+                        .font(font(Face::Mono, TypeRole::Secondary))
+                        .color(colours.text),
+                );
+            },
+        );
+    });
 }
 
 /// `text` shortened with "…" until it fits `max_width` in `font`.

@@ -1,11 +1,15 @@
 use crate::app::LogTone;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicI32;
+use std::sync::Arc;
 
 use eframe::egui;
 use eframe::App;
 
 use crate::ui::widgets::{run_frame, test_input};
 
+use super::screenshot::{ScreenshotJob, NO_ENDING};
 use super::settings::ExtraOutputPref;
 use super::settings::{
     load_preferences, Preferences, Session, PREFERENCES_BACKUP_KEY, PREFERENCES_KEY,
@@ -257,6 +261,26 @@ fn save_is_skipped_while_startup_scan_is_pending() {
     let mut storage = MemoryStorage::default();
     app.save(&mut storage);
     assert!(eframe::Storage::get_string(&storage, PREFERENCES_KEY).is_none());
+}
+
+#[test]
+fn a_screenshot_run_saves_no_preferences_and_no_memory() {
+    let mut app = blank_app();
+    app.screenshot = Some(ScreenshotJob::new(
+        PathBuf::from("shot.png"),
+        Arc::new(AtomicI32::new(NO_ENDING)),
+    ));
+    let mut storage = MemoryStorage::default();
+    app.save(&mut storage);
+    assert!(eframe::Storage::get_string(&storage, PREFERENCES_KEY).is_none());
+    assert!(!app.persist_egui_memory());
+
+    // The same app without the job writes both, so the guard is what keeps a
+    // screenshot run from storing its fixtures as the session.
+    app.screenshot = None;
+    app.save(&mut storage);
+    assert!(eframe::Storage::get_string(&storage, PREFERENCES_KEY).is_some());
+    assert!(app.persist_egui_memory());
 }
 
 #[test]

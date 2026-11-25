@@ -20,13 +20,14 @@ use crate::app::settings::{
 };
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{
-    BufferMode, MapPreset, MixSide, OutputDeviceSettings, UnusedChannels, MAX_OUTPUT_CHANNELS,
-    PATH_TRIM_MAX_MS,
+    BufferMode, MapPreset, MixSide, OutputDeviceSettings, UnusedChannels, DEVICE_LEVEL_MAX_DB,
+    DEVICE_LEVEL_MIN_DB, MAX_OUTPUT_CHANNELS, PATH_TRIM_MAX_MS,
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{
-    chip, format_db, horizontal_meter, row_info, segmented, styled_slider, SliderStyle,
+    chip, format_db, heading, horizontal_meter, level_row, row_info, segmented, styled_slider,
+    SliderStyle,
 };
 
 use crate::ui::widgets::OutlineButton;
@@ -126,7 +127,15 @@ impl RigWerkApp {
                         ui.set_width(column);
                         meters(ui, &levels, row.channels, &row.name, colours);
                         ui.add_space(8.0);
-                        level_row(ui, &mut level, colours);
+                        level_row(
+                            ui,
+                            &mut level,
+                            DEVICE_LEVEL_MIN_DB,
+                            DEVICE_LEVEL_MAX_DB,
+                            colours.accent,
+                            "This output's level, after the master",
+                            colours,
+                        );
                         ui.add_space(4.0);
                         if chip(ui, &mut mute, "Mute")
                             .on_hover_text(
@@ -158,7 +167,15 @@ impl RigWerkApp {
         } else {
             meters(ui, &levels, row.channels, &row.name, colours);
             ui.add_space(8.0);
-            level_row(ui, &mut level, colours);
+            level_row(
+                ui,
+                &mut level,
+                DEVICE_LEVEL_MIN_DB,
+                DEVICE_LEVEL_MAX_DB,
+                colours.accent,
+                "This output's level, after the master",
+                colours,
+            );
             ui.add_space(4.0);
             if chip(ui, &mut mute, "Mute")
                 .on_hover_text("Silence this output only; the master and the bridge keep running")
@@ -795,15 +812,6 @@ fn badge_word(ui: &mut egui::Ui, badge: OutputBadge, colours: &Palette) {
     );
 }
 
-fn heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
-    ui.label(
-        RichText::new(text)
-            .font(font(Face::SansMedium, TypeRole::Secondary))
-            .color(colours.text3),
-    );
-    ui.add_space(3.0);
-}
-
 /// One meter row per device channel.
 fn meters(ui: &mut egui::Ui, levels: &[f32], channels: usize, device: &str, colours: &Palette) {
     heading(ui, "Meters", colours);
@@ -819,36 +827,6 @@ fn meters(ui: &mut egui::Ui, levels: &[f32], channels: usize, device: &str, colo
             horizontal_meter(ui, level, &format!("{device} channel {}", channel + 1));
         });
     }
-}
-
-fn level_row(ui: &mut egui::Ui, level: &mut f32, colours: &Palette) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let slider_w = (ui.available_width() - VALUE_W - 8.0).max(80.0);
-        styled_slider(
-            ui,
-            level,
-            crate::audio::DEVICE_LEVEL_MIN_DB,
-            crate::audio::DEVICE_LEVEL_MAX_DB,
-            0.1,
-            SliderStyle::named(colours.accent, "Level")
-                .value(format_db(*level, 1))
-                .width(slider_w),
-        )
-        .on_hover_text("This output's level, after the master");
-        ui.allocate_ui_with_layout(
-            Vec2::new(VALUE_W, ROW_H),
-            Layout::right_to_left(Align::Center),
-            |ui| {
-                ui.set_width(VALUE_W);
-                ui.label(
-                    RichText::new(format_db(*level, 1))
-                        .font(font(Face::Mono, TypeRole::Secondary))
-                        .color(colours.text),
-                );
-            },
-        );
-    });
 }
 
 fn limiter(ui: &mut egui::Ui, reduction_db: f32, colours: &Palette) {
