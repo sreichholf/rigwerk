@@ -11,6 +11,7 @@
 mod button;
 mod chain_row;
 mod chip;
+mod db;
 mod dot;
 mod fader;
 mod meter;
@@ -25,13 +26,14 @@ pub(crate) use chain_row::{
     ChainRow, EffectDrag, NamDrag, RowMenu, CHAIN_ROW_H,
 };
 pub(crate) use chip::chip;
+pub(crate) use db::format_db;
 pub(crate) use dot::path_dot;
 pub(crate) use fader::{fader, fader_height, FaderRange};
 pub(crate) use meter::{horizontal_meter, vertical_meter, MeterChannel};
 pub(crate) use popover::popover;
 pub(crate) use segmented::segmented;
 
-pub(crate) use slider::{row_info, styled_slider};
+pub(crate) use slider::{row_info, styled_slider, SliderStyle};
 pub(crate) use text_field::TextField;
 
 #[cfg(test)]

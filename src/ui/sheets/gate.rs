@@ -22,7 +22,7 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{row_info, segmented, CONTROL_H};
+use crate::ui::widgets::{format_db, row_info, segmented, styled_slider, SliderStyle, CONTROL_H};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -56,19 +56,10 @@ impl GateUnit {
     /// decimal below 10 ms, none from there.
     pub(crate) fn format(self, value: f32) -> String {
         match self {
-            Self::Db => db_label(value),
+            Self::Db => format_db(value, 1),
             Self::Ms if value < 10.0 => format!("{value:.1} ms"),
             Self::Ms => format!("{value:.0} ms"),
         }
-    }
-}
-
-fn db_label(db: f32) -> String {
-    let tenths = (db * 10.0).round();
-    if tenths < 0.0 {
-        format!("−{:.1} dB", -tenths / 10.0)
-    } else {
-        format!("{:.1} dB", tenths.abs() / 10.0)
     }
 }
 
@@ -300,8 +291,6 @@ fn controls(ui: &mut egui::Ui, gate: &mut GateSettings, colours: &Palette) {
     let width = ui.available_width();
     let slider_w = (width - LABEL_W - VALUE_W - 16.0).max(80.0);
     ui.spacing_mut().item_spacing.y = 4.0;
-    // The filled part of a track is the accent, not the faint selection.
-    ui.visuals_mut().selection.bg_fill = colours.accent;
     for control in &GATE_CONTROLS {
         ui.allocate_ui_with_layout(
             Vec2::new(width, ROW_H),
@@ -323,26 +312,17 @@ fn controls(ui: &mut egui::Ui, gate: &mut GateSettings, colours: &Palette) {
                     },
                 );
                 let value = control.value(gate);
-                ui.spacing_mut().slider_width = slider_w;
-                let response = ui
-                    .add(
-                        egui::Slider::new(value, control.min..=control.max)
-                            .show_value(false)
-                            .step_by(f64::from(control.step))
-                            .logarithmic(control.logarithmic)
-                            .handle_shape(egui::style::HandleShape::Circle)
-                            .trailing_fill(true),
-                    )
+                let style = SliderStyle::named(colours.accent, control.name)
+                    .value(control.unit.format(*value))
+                    .width(slider_w);
+                let style = if control.logarithmic {
+                    style.logarithmic()
+                } else {
+                    style
+                };
+                styled_slider(ui, value, control.min, control.max, control.step, style)
                     .on_hover_text(control.hint);
                 let text = control.unit.format(*value);
-                row_info(
-                    &response,
-                    egui::Role::Slider,
-                    true,
-                    control.name,
-                    None,
-                    Some(text.clone()),
-                );
                 ui.allocate_ui_with_layout(
                     Vec2::new(VALUE_W, ROW_H),
                     Layout::right_to_left(Align::Center),
@@ -421,7 +401,7 @@ fn reduction_meter(ui: &mut egui::Ui, reduction_db: f32, range_db: f32, colours:
     } else {
         0.0
     };
-    let text = db_label(-reduction_db);
+    let text = format_db(-reduction_db, 1);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let bar_w = (ui.available_width() - VALUE_W - 8.0).max(40.0);

@@ -1,4 +1,4 @@
-use super::{node_named, nudge_slider, run_frame, styled_slider, test_input};
+use super::{node_named, nudge_slider, run_frame, styled_slider, test_input, SliderStyle};
 use crate::ui::theme::TEAL;
 use eframe::egui;
 
@@ -113,4 +113,96 @@ fn pointer_click_still_sets_the_slider() {
         value > 0.9,
         "click at the right of the track left the mix at {value}"
     );
+}
+
+#[test]
+fn a_custom_readout_is_what_the_screen_reader_reads() {
+    let mut value = 3.0f32;
+    let tree = super::accesskit_frame(|ui| {
+        styled_slider(
+            ui,
+            &mut value,
+            -12.0,
+            12.0,
+            0.1,
+            SliderStyle::named(TEAL, "EQ gain").value("+3.0 dB"),
+        );
+    });
+    let node = node_named(&tree, "EQ gain");
+    assert_eq!(node.value(), Some("+3.0 dB"));
+}
+
+#[test]
+fn an_explicit_width_keeps_the_row_layout() {
+    let ctx = egui::Context::default();
+    let mut value = 0.0f32;
+    let mut rect = egui::Rect::NOTHING;
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        rect = styled_slider(
+            ui,
+            &mut value,
+            0.0,
+            1.0,
+            0.01,
+            SliderStyle::named(TEAL, "Mix").width(120.0),
+        )
+        .rect;
+    });
+    near(rect.width(), 120.0);
+}
+
+#[test]
+fn a_logarithmic_track_puts_the_middle_at_the_geometric_mean() {
+    let ctx = egui::Context::default();
+    let mut value = 100.0f32;
+    let mut rect = egui::Rect::NOTHING;
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        rect = styled_slider(
+            ui,
+            &mut value,
+            100.0,
+            1_600.0,
+            1.0,
+            SliderStyle::named(TEAL, "Release").logarithmic(),
+        )
+        .rect;
+    });
+    let pos = rect.center();
+    let mut press = test_input(None);
+    press.events.push(egui::Event::PointerMoved(pos));
+    press.events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::default(),
+    });
+    let _ = run_frame(&ctx, press, |ui| {
+        styled_slider(
+            ui,
+            &mut value,
+            100.0,
+            1_600.0,
+            1.0,
+            SliderStyle::named(TEAL, "Release").logarithmic(),
+        );
+    });
+    let mut release = test_input(None);
+    release.events.push(egui::Event::PointerMoved(pos));
+    release.events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    let _ = run_frame(&ctx, release, |ui| {
+        styled_slider(
+            ui,
+            &mut value,
+            100.0,
+            1_600.0,
+            1.0,
+            SliderStyle::named(TEAL, "Release").logarithmic(),
+        );
+    });
+    near(value, 400.0);
 }

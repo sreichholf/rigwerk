@@ -240,7 +240,8 @@ fn the_meter_fills_against_the_range() {
 #[test]
 fn values_read_like_the_rest_of_the_ui() {
     assert_eq!(GateUnit::Db.format(-48.0), "−48.0 dB");
-    assert_eq!(GateUnit::Db.format(6.0), "6.0 dB");
+    assert_eq!(GateUnit::Db.format(-6.0), "−6.0 dB");
+    assert_eq!(GateUnit::Db.format(6.0), "+6.0 dB");
     assert_eq!(GateUnit::Db.format(-0.01), "0.0 dB");
     assert_eq!(GateUnit::Ms.format(1.2), "1.2 ms");
     assert_eq!(GateUnit::Ms.format(120.0), "120 ms");

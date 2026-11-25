@@ -25,7 +25,9 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{chip, horizontal_meter, row_info, segmented};
+use crate::ui::widgets::{
+    chip, format_db, horizontal_meter, row_info, segmented, styled_slider, SliderStyle,
+};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -231,31 +233,21 @@ impl RigWerkApp {
         });
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.spacing_mut().slider_width = (ui.available_width() - VALUE_W - 8.0).max(80.0);
-            ui.visuals_mut().selection.bg_fill = colours.accent;
+            let slider_w = (ui.available_width() - VALUE_W - 8.0).max(80.0);
             let mut target = row.settings.loudness.target_lufs;
-            let response = ui
-                .add(
-                    egui::Slider::new(
-                        &mut target,
-                        crate::audio::LOUDNESS_TARGET_MIN_LUFS
-                            ..=crate::audio::LOUDNESS_TARGET_MAX_LUFS,
-                    )
-                    .show_value(false)
-                    .step_by(0.5)
-                    .handle_shape(egui::style::HandleShape::Circle)
-                    .trailing_fill(true),
-                )
-                .on_hover_text(
-                    "The output Learn target. Learn sets the trim so this output reaches it with the level fader at 0 dB.",
-                );
-            row_info(
-                &response,
-                egui::Role::Slider,
-                true,
-                "Loudness target",
-                None,
-                Some(format!("{target:.1} LUFS")),
+            let target_text = format!("{target:.1} LUFS");
+            let response = styled_slider(
+                ui,
+                &mut target,
+                crate::audio::LOUDNESS_TARGET_MIN_LUFS,
+                crate::audio::LOUDNESS_TARGET_MAX_LUFS,
+                0.5,
+                SliderStyle::named(colours.accent, "Loudness target")
+                    .value(target_text)
+                    .width(slider_w),
+            )
+            .on_hover_text(
+                "The output Learn target. Learn sets the trim so this output reaches it with the level fader at 0 dB.",
             );
             if response.changed() {
                 self.set_output_loudness_target(device, target);
@@ -285,7 +277,7 @@ impl RigWerkApp {
                 egui::DragValue::new(&mut trim)
                     .speed(0.1)
                     .range(-crate::audio::LOUDNESS_TRIM_MAX_DB..=crate::audio::LOUDNESS_TRIM_MAX_DB)
-                    .suffix(" dB"),
+                    .custom_formatter(|value, _| format_db(value as f32, 1)),
             );
             row_info(
                 &response,
@@ -293,7 +285,7 @@ impl RigWerkApp {
                 true,
                 "Output trim",
                 None,
-                Some(format!("{trim:+.1} dB")),
+                Some(format_db(trim, 1)),
             );
             let mut commit = (trim - row.settings.loudness.trim_db).abs() > 0.001;
             if response.double_clicked() {
@@ -427,7 +419,7 @@ impl RigWerkApp {
                     egui::DragValue::new(&mut level_db)
                         .speed(0.1)
                         .range(crate::audio::PATH_LEVEL_MIN_DB..=crate::audio::PATH_LEVEL_MAX_DB)
-                        .suffix(" dB"),
+                        .custom_formatter(|value, _| format_db(value as f32, 1)),
                 );
                 row_info(
                     &response,
@@ -435,7 +427,7 @@ impl RigWerkApp {
                     true,
                     format!("{} level on {}", info.name, row.name),
                     None,
-                    Some(format!("{level_db:+.1} dB")),
+                    Some(format_db(level_db, 1)),
                 );
                 if (level_db - entry.level_db).abs() > 0.001 {
                     edits.push(MapEdit::Level {
@@ -742,18 +734,16 @@ impl RigWerkApp {
         }
         if mode == BufferMode::Fixed {
             let mut ms = pref.bridge_buffer_ms;
-            let response = ui.add(
-                egui::Slider::new(&mut ms, BRIDGE_BUFFER_MS_MIN..=BRIDGE_BUFFER_MS_MAX)
-                    .suffix(" ms")
-                    .show_value(true),
-            );
-            row_info(
-                &response,
-                egui::Role::Slider,
-                true,
-                "Bridge buffer",
-                None,
-                Some(format!("{ms:.1} ms")),
+            let response = styled_slider(
+                ui,
+                &mut ms,
+                BRIDGE_BUFFER_MS_MIN,
+                BRIDGE_BUFFER_MS_MAX,
+                0.0,
+                SliderStyle::named(colours.accent, "Bridge buffer")
+                    .format(|value| format!("{value:.1} ms"))
+                    .unit(" ms")
+                    .editable(),
             );
             if response.changed() {
                 pref.bridge_buffer_ms = ms;
@@ -832,35 +822,25 @@ fn meters(ui: &mut egui::Ui, levels: &[f32], channels: usize, device: &str, colo
 fn level_row(ui: &mut egui::Ui, level: &mut f32, colours: &Palette) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        ui.spacing_mut().slider_width = (ui.available_width() - VALUE_W - 8.0).max(80.0);
-        ui.visuals_mut().selection.bg_fill = colours.accent;
-        let response = ui
-            .add(
-                egui::Slider::new(
-                    level,
-                    crate::audio::DEVICE_LEVEL_MIN_DB..=crate::audio::DEVICE_LEVEL_MAX_DB,
-                )
-                .show_value(false)
-                .step_by(0.1)
-                .handle_shape(egui::style::HandleShape::Circle)
-                .trailing_fill(true),
-            )
-            .on_hover_text("This output's level, after the master");
-        row_info(
-            &response,
-            egui::Role::Slider,
-            true,
-            "Level",
-            None,
-            Some(format!("{level:+.1} dB")),
-        );
+        let slider_w = (ui.available_width() - VALUE_W - 8.0).max(80.0);
+        styled_slider(
+            ui,
+            level,
+            crate::audio::DEVICE_LEVEL_MIN_DB,
+            crate::audio::DEVICE_LEVEL_MAX_DB,
+            0.1,
+            SliderStyle::named(colours.accent, "Level")
+                .value(format_db(*level, 1))
+                .width(slider_w),
+        )
+        .on_hover_text("This output's level, after the master");
         ui.allocate_ui_with_layout(
             Vec2::new(VALUE_W, ROW_H),
             Layout::right_to_left(Align::Center),
             |ui| {
                 ui.set_width(VALUE_W);
                 ui.label(
-                    RichText::new(format!("{level:+.1} dB"))
+                    RichText::new(format_db(*level, 1))
                         .font(font(Face::Mono, TypeRole::Secondary))
                         .color(colours.text),
                 );

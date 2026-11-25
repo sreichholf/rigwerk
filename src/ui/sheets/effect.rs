@@ -16,7 +16,7 @@ use crate::app::RigWerkApp;
 use crate::audio::PluginParamView;
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{row_info, TextField, CONTROL_H};
+use crate::ui::widgets::{row_info, styled_slider, SliderStyle, TextField, CONTROL_H};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -179,25 +179,19 @@ impl RigWerkApp {
         });
         ui.add_space(2.0);
         let mut wet = mix;
-        ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
-        ui.visuals_mut().selection.bg_fill = colours.accent;
-        let wet_response = ui
-            .add(
-                egui::Slider::new(&mut wet, 0.0..=100.0)
-                    .show_value(false)
-                    .step_by(1.0)
-                    .handle_shape(egui::style::HandleShape::Circle)
-                    .trailing_fill(true),
-            )
-            .on_hover_text(WET_HINT);
-        row_info(
-            &wet_response,
-            egui::Role::Slider,
-            true,
-            "Wet",
-            None,
-            Some(format!("{wet:.0} %")),
-        );
+        let slider_w = (ui.available_width() - 120.0).max(80.0);
+        let wet_text = format!("{wet:.0} %");
+        styled_slider(
+            ui,
+            &mut wet,
+            0.0,
+            100.0,
+            1.0,
+            SliderStyle::named(colours.accent, "Wet")
+                .value(wet_text)
+                .width(slider_w),
+        )
+        .on_hover_text(WET_HINT);
         mix = wet;
 
         if let Some(error) = &error {
@@ -378,24 +372,21 @@ fn control_row(ui: &mut egui::Ui, parameter: &PluginParamView, colours: &Palette
                     0.002
                 };
                 let mut value = parameter.value as f32;
-                ui.spacing_mut().slider_width = (ui.available_width() - VALUE_W - 8.0).max(80.0);
-                ui.visuals_mut().selection.bg_fill = colours.accent;
-                let response = ui.add_enabled(
-                    !parameter.read_only,
-                    egui::Slider::new(&mut value, 0.0..=1.0)
-                        .show_value(false)
-                        .step_by(step)
-                        .handle_shape(egui::style::HandleShape::Circle)
-                        .trailing_fill(true),
-                );
-                row_info(
-                    &response,
-                    egui::Role::Slider,
-                    !parameter.read_only,
-                    &parameter.name,
-                    None,
-                    Some(control_value(parameter)),
-                );
+                let slider_w = (ui.available_width() - VALUE_W - 8.0).max(80.0);
+                let response = ui
+                    .add_enabled_ui(!parameter.read_only, |ui| {
+                        styled_slider(
+                            ui,
+                            &mut value,
+                            0.0,
+                            1.0,
+                            step as f32,
+                            SliderStyle::named(colours.accent, parameter.name.as_str())
+                                .value(control_value(parameter))
+                                .width(slider_w),
+                        )
+                    })
+                    .inner;
                 if response.changed() {
                     changed = Some(f64::from(value));
                 }

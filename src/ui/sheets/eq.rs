@@ -19,7 +19,7 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
-use crate::ui::widgets::{chip, row_info, CONTROL_H};
+use crate::ui::widgets::{chip, format_db, row_info, CONTROL_H};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -50,18 +50,6 @@ pub(crate) fn hz_label(hz: f32) -> String {
         format!("{:.1} kHz", hz / 1_000.0)
     } else {
         format!("{hz:.0} Hz")
-    }
-}
-
-/// An EQ gain: one decimal, the real minus sign, a plus for a boost.
-pub(crate) fn gain_label(db: f32) -> String {
-    let tenths = (db * 10.0).round();
-    if tenths == 0.0 {
-        "0.0 dB".to_owned()
-    } else if tenths < 0.0 {
-        format!("−{:.1} dB", -tenths / 10.0)
-    } else {
-        format!("+{:.1} dB", tenths / 10.0)
     }
 }
 
@@ -454,7 +442,7 @@ impl Edit<'_> {
                 "{}, {}, {}, Q {:.2}",
                 spec.name,
                 hz_label(band.hz),
-                gain_label(band.gain_db),
+                format_db(band.gain_db, 1),
                 band.q
             )),
         );
@@ -631,7 +619,7 @@ impl Edit<'_> {
                             .range(-EQ_MAX_GAIN_DB..=EQ_MAX_GAIN_DB)
                             .speed(0.05)
                             .fixed_decimals(1)
-                            .custom_formatter(|value, _| gain_label(value as f32))
+                            .custom_formatter(|value, _| format_db(value as f32, 1))
                             .custom_parser(parse_value),
                     )
                     .on_hover_text("Boost or cut, ±12 dB in 0.1 dB steps.");
@@ -641,7 +629,7 @@ impl Edit<'_> {
                     true,
                     format!("{} gain", spec.name),
                     None,
-                    Some(gain_label(gain)),
+                    Some(format_db(gain, 1)),
                 );
                 if response.changed() {
                     band.gain_db = gain;

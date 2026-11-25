@@ -2,10 +2,10 @@ use eframe::egui;
 use egui::accesskit::Toggled;
 use egui::{pos2, vec2, Event, Modifiers, Pos2, Rect};
 
-use super::{dragged_band, gain_label, hz_label, parse_value, q_hint, scrolled_q, slot_hint, Plot};
+use super::{dragged_band, hz_label, parse_value, q_hint, scrolled_q, slot_hint, Plot};
 use crate::app::{blank_app, RigWerkApp};
 use crate::audio::{BandKind, EqSettings, EqSlot, EQ_BANDS};
-use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
+use crate::ui::widgets::{accesskit_frame, format_db, node_named, run_frame, test_input};
 
 fn pre_eq(app: &RigWerkApp) -> EqSettings {
     app.paths[0].as_ref().expect("path 0").mix.eqs[0]
@@ -229,9 +229,9 @@ fn the_wheel_moves_q_in_steps_inside_its_range() {
 
 #[test]
 fn values_read_and_parse_like_the_rest_of_the_ui() {
-    assert_eq!(gain_label(-4.0), "−4.0 dB");
-    assert_eq!(gain_label(3.04), "+3.0 dB");
-    assert_eq!(gain_label(-0.01), "0.0 dB");
+    assert_eq!(format_db(-4.0, 1), "−4.0 dB");
+    assert_eq!(format_db(3.04, 1), "+3.0 dB");
+    assert_eq!(format_db(-0.01, 1), "0.0 dB");
     assert_eq!(hz_label(800.0), "800 Hz");
     assert_eq!(hz_label(2_500.0), "2.5 kHz");
     assert_eq!(parse_value("−4"), Some(-4.0));

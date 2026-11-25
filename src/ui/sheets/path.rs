@@ -21,7 +21,9 @@ use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{PathFeed, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, SEND_OFF_DB};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{chip, row_info, segmented, TextField};
+use crate::ui::widgets::{
+    chip, format_db, row_info, segmented, styled_slider, SliderStyle, TextField,
+};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -32,18 +34,6 @@ const COLUMN_GAP: f32 = 24.0;
 /// The path colours by saved index, as the menu names them.
 pub(crate) const PATH_COLOUR_NAMES: [&str; crate::audio::MAX_PATHS] =
     ["Blue", "Violet", "Green", "Rose"];
-
-/// `docs/ui-spec.md` §2.2: one decimal and the real minus for a level.
-pub(crate) fn level_label(db: f32) -> String {
-    let tenths = (db * 10.0).round();
-    if tenths == 0.0 {
-        "0.0 dB".to_owned()
-    } else if tenths < 0.0 {
-        format!("−{:.1} dB", -tenths / 10.0)
-    } else {
-        format!("+{:.1} dB", tenths / 10.0)
-    }
-}
 
 impl RigWerkApp {
     /// The path sheet body for path `slot`.
@@ -247,7 +237,7 @@ impl RigWerkApp {
                                     -crate::audio::PATH_MATCH_MAX_DB
                                         ..=crate::audio::PATH_MATCH_MAX_DB,
                                 )
-                                .suffix(" dB"),
+                                .custom_formatter(|value, _| format_db(value as f32, 1)),
                         );
                         row_info(
                             &response,
@@ -255,7 +245,7 @@ impl RigWerkApp {
                             true,
                             "Path match",
                             None,
-                            Some(level_label(match_db)),
+                            Some(format_db(match_db, 1)),
                         );
                         if response.double_clicked() {
                             match_db = 0.0;
@@ -568,7 +558,7 @@ pub(crate) fn send_label(db: f32) -> String {
     if db <= SEND_OFF_DB {
         "Off".to_owned()
     } else {
-        level_label(db)
+        format_db(db, 1)
     }
 }
 
@@ -602,25 +592,18 @@ fn send_row(
                 );
             },
         );
-        ui.spacing_mut().slider_width = (ui.available_width() - VALUE_W - 8.0).max(80.0);
-        ui.visuals_mut().selection.bg_fill = colour;
-        let response = ui
-            .add(
-                egui::Slider::new(level, SEND_OFF_DB..=PATH_LEVEL_MAX_DB)
-                    .show_value(false)
-                    .step_by(0.5)
-                    .handle_shape(egui::style::HandleShape::Circle)
-                    .trailing_fill(true),
-            )
-            .on_hover_text("Send level, after the sending path's level. All the way down is off.");
-        row_info(
-            &response,
-            egui::Role::Slider,
-            true,
-            name,
-            None,
-            Some(send_label(*level)),
-        );
+        let slider_w = (ui.available_width() - VALUE_W - 8.0).max(80.0);
+        let response = styled_slider(
+            ui,
+            level,
+            SEND_OFF_DB,
+            PATH_LEVEL_MAX_DB,
+            0.5,
+            SliderStyle::named(colour, name)
+                .value(send_label(*level))
+                .width(slider_w),
+        )
+        .on_hover_text("Send level, after the sending path's level. All the way down is off.");
         changed = response.changed();
         ui.allocate_ui_with_layout(
             Vec2::new(VALUE_W, ROW_H),
@@ -642,32 +625,26 @@ fn level_row(ui: &mut egui::Ui, level: &mut f32, colour: egui::Color32, colours:
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let value_w = VALUE_W;
-        ui.spacing_mut().slider_width = (ui.available_width() - value_w - 8.0).max(80.0);
-        ui.visuals_mut().selection.bg_fill = colour;
-        let response = ui
-            .add(
-                egui::Slider::new(level, PATH_LEVEL_MIN_DB..=PATH_LEVEL_MAX_DB)
-                    .show_value(false)
-                    .step_by(0.1)
-                    .handle_shape(egui::style::HandleShape::Circle)
-                    .trailing_fill(true),
-            )
-            .on_hover_text("This path's level, before the master");
-        row_info(
-            &response,
-            egui::Role::Slider,
-            true,
-            "Level",
-            None,
-            Some(level_label(*level)),
-        );
+        let slider_w = (ui.available_width() - value_w - 8.0).max(80.0);
+        let value_text = format_db(*level, 1);
+        styled_slider(
+            ui,
+            level,
+            PATH_LEVEL_MIN_DB,
+            PATH_LEVEL_MAX_DB,
+            0.1,
+            SliderStyle::named(colour, "Level")
+                .value(value_text.clone())
+                .width(slider_w),
+        )
+        .on_hover_text("This path's level, before the master");
         ui.allocate_ui_with_layout(
             Vec2::new(value_w, ROW_H),
             Layout::right_to_left(Align::Center),
             |ui| {
                 ui.set_width(value_w);
                 ui.label(
-                    RichText::new(level_label(*level))
+                    RichText::new(format_db(*level, 1))
                         .font(font(Face::Mono, TypeRole::Secondary))
                         .color(colours.text),
                 );
