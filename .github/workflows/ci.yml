@@ -4,10 +4,18 @@ on:
   push:
     branches: [master]
   pull_request:
+    # No test reads docs/ and nothing compiles markdown, so prose and images
+    # do not run the build.  There is no protected branch to wait on a check
+    # that never starts.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
+      - '.cursor/**'
 
 # A new push to a pull request cancels its older runs; a stacked series
 # otherwise fills the runner queue with superseded commits.  Pushes to
-# master and scheduled runs group by commit, so none is dropped.
+# master group by commit, so none is dropped.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

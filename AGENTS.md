@@ -63,6 +63,8 @@ CI (`.github/workflows/ci.yml`) also compiles the ignored hardware tests
 `cargo build --locked --release`. That release build is CI's gate, not
 the local one.  A `Deny` job runs cargo-deny against `deny.toml`, whose
 `allow` list takes a deliberate edit when a dependency licence changes.
+A pull request that only touches markdown or `docs/` runs nothing: no
+test reads those files.
 CodeQL (`.github/workflows/codeql.yml`) scans the Rust
 code and the workflows on pushes to `master`, on pull requests, and
 weekly.  Its alerts land in the repository's Security tab.
