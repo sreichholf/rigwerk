@@ -2443,7 +2443,8 @@ fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
         Outcome::Processed
     );
     // No queued value is left, so the sync may read and keeps the value.
-    let synced = handle.sync_full().expect("nothing is queued");
+    handle.sync_full().expect("nothing is queued");
+    let synced = handle.parameters();
     assert!((synced[gain].value - 0.5).abs() < 1e-9);
     assert_eq!(synced[gain].display, "5.00 dB");
 
@@ -2460,9 +2461,9 @@ fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
         Outcome::Processed
     );
     assert!(handle.service(), "the reported output changed the views");
-    let level_view = handle
-        .parameters()
-        .into_iter()
+    let parameters = handle.parameters();
+    let level_view = parameters
+        .iter()
         .find(|view| view.id == symbol_id("level"))
         .expect("the level view");
     assert!((level_view.value - 0.75).abs() < 1e-9);

@@ -525,6 +525,9 @@ impl SlotLink {
             bypass: self.controls.bypass(),
             mix: self.controls.mix(),
             error: self.resolved_error(),
+            // The handle hands back the list it last published while nothing
+            // changed there, so a republish of an unchanged effect copies no
+            // controls.
             parameters: self
                 .plugin
                 .as_ref()

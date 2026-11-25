@@ -212,6 +212,8 @@ fn neighbours_walk_the_chain_and_stop_at_its_ends() {
 #[test]
 fn stages_switch_on_and_off_per_path() {
     use super::ChainStage;
+    // Switching an effect publishes a view set, which only the UI thread does.
+    let _main = crate::audio::claim_main_thread();
     let mut app = crate::app::blank_app();
     assert!(app.stage_on(0, ChainStage::PreEq));
     app.set_stage_on(0, ChainStage::PreEq, false);

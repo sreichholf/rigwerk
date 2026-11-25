@@ -116,6 +116,11 @@ struct UiSide {
     from_audio: ParamReceiver,
     ids: Arc<ParamIds>,
     views: Vec<PluginParamView>,
+    /// The control list the last published [`PluginView`] holds, kept beside
+    /// [`Self::views`], which it mirrors.  A republish that finds `views`
+    /// still equal hands this list back instead of copying a new one (see
+    /// [`PluginHandle::parameters`]).
+    published: Option<Arc<[PluginParamView]>>,
     /// The saved control values (was the slot's `pref.params`).
     saved: Vec<PluginParamPref>,
     /// The saved state blob (was the slot's `pref.state`).
@@ -404,6 +409,7 @@ impl UiSide {
             from_audio,
             ids,
             views,
+            published: None,
             saved: saved.params,
             state: saved.state,
             state_stale: saved.stale,
@@ -659,9 +665,23 @@ impl PluginHandle {
         self.0.out.push_edit(id, value)
     }
 
-    /// The control views as last read or set.
-    pub(crate) fn parameters(&self) -> Vec<PluginParamView> {
-        self.ui().views.clone()
+    /// The control views as last read or set, as a published [`PluginView`]
+    /// holds them.
+    ///
+    /// The list the last call produced is handed back while the views still
+    /// equal it, so a UI republish that finds nothing new here copies no
+    /// controls; a changed list is copied once and kept for the next call
+    /// (see [`PluginView::parameters`]).
+    pub(crate) fn parameters(&self) -> Arc<[PluginParamView]> {
+        let mut ui = self.ui();
+        if let Some(published) = &ui.published {
+            if published.as_ref() == ui.views.as_slice() {
+                return Arc::clone(published);
+            }
+        }
+        let published: Arc<[PluginParamView]> = ui.views.clone().into();
+        ui.published = Some(Arc::clone(&published));
+        published
     }
 
     /// Reads every control again, so the panel shows the plugin's values
@@ -829,8 +849,9 @@ impl PluginHandle {
     }
 
     /// Returns every control to the plugin's own defaults and forgets the
-    /// saved overrides.
-    pub(crate) fn reset_parameters(&self) -> Result<Vec<PluginParamView>, String> {
+    /// saved overrides.  The list stays in the handle; the caller reads it
+    /// through [`Self::parameters`], which shares it with the next refresh.
+    pub(crate) fn reset_parameters(&self) -> Result<(), String> {
         let mut ui = self.ui();
         let ui = &mut *ui;
         let views = match &mut ui.instance {
@@ -863,7 +884,7 @@ impl PluginHandle {
         ui.views = views;
         ui.saved.clear();
         ui.state_stale = true;
-        Ok(ui.views.clone())
+        Ok(())
     }
 
     /// Reads every control and stores the result as the views and the
@@ -871,8 +892,10 @@ impl PluginHandle {
     /// first, and its editor edits are dropped: the controller already has
     /// them, and this read is fresher.  `None` while a CLAP value still
     /// waits for the audio side (reading the plugin then would show and
-    /// save the old value); nothing is stored then.
-    pub(crate) fn sync_full(&self) -> Option<Vec<PluginParamView>> {
+    /// save the old value); nothing is stored then.  The list stays in the
+    /// handle; the caller reads it through [`Self::parameters`], which
+    /// shares it with the next refresh.
+    pub(crate) fn sync_full(&self) -> Option<()> {
         let mut ui = self.ui();
         let UiSide {
             instance,
@@ -902,7 +925,7 @@ impl PluginHandle {
         ui.views = parameters;
         // The editor is open and can change more than parameters.
         ui.state_stale = true;
-        Some(ui.views.clone())
+        Some(())
     }
 
     pub(crate) fn is_vst3(&self) -> bool {
