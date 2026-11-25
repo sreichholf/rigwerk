@@ -34,7 +34,7 @@ use crate::audio::plugins::{
 /// save captures a blob that holds it.
 #[test]
 fn state_save_with_values_queued_marks_them_undelivered() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -77,7 +77,7 @@ fn state_save_with_values_queued_marks_them_undelivered() {
 /// next block; only after that block are the values applied.
 #[test]
 fn a_value_a_full_event_list_dropped_arrives_with_the_next_block() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -125,7 +125,7 @@ fn a_value_a_full_event_list_dropped_arrives_with_the_next_block() {
 /// next block and the second survives it, to arrive with the one after.
 #[test]
 fn two_values_a_full_event_list_kept_arrive_one_block_at_a_time() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::offer_params(true);
     fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
@@ -157,7 +157,7 @@ fn two_values_a_full_event_list_kept_arrive_one_block_at_a_time() {
 /// it is applied at once, so the next capture lists it.
 #[test]
 fn a_value_flushed_while_stopped_is_in_the_next_capture() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -176,7 +176,7 @@ fn a_value_flushed_while_stopped_is_in_the_next_capture() {
 
 #[test]
 fn a_failed_block_does_not_count_its_values_applied() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::set_state(b"state");
     fake::offer_params(true);
@@ -202,7 +202,7 @@ fn a_failed_block_does_not_count_its_values_applied() {
 /// on top of the older blob.
 #[test]
 fn a_capture_with_audio_stopped_after_a_set_keeps_the_value_through_a_restore() {
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     let stateful = || {
         fake::reset(fake::Fail::Nothing);
         fake::set_state(b"older");
@@ -2889,7 +2889,7 @@ fn show_hide_and_hint_requests_wait_for_the_window() {
 fn posix_fds_are_registered_once_and_polled_for_the_plugin() {
     use clap_sys::ext::posix_fd_support::{CLAP_POSIX_FD_READ, CLAP_POSIX_FD_WRITE};
 
-    let _main = super::claim_main_thread_for_test();
+    let _main = crate::audio::claim_main_thread();
     fake::reset(fake::Fail::Nothing);
     fake::gui::offer_fd_support();
     fake::declare_ports(&[(2, MAIN)], &[(2, MAIN)]);
