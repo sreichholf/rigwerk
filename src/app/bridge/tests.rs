@@ -93,6 +93,91 @@ fn running_latency_falls_back_until_the_device_reports() {
 }
 
 #[test]
+fn a_requested_native_start_is_not_reported_until_the_graph_measures_it() {
+    let mut app = latency_app();
+    app.buffer_size = 128;
+    app.output_buffer = 64;
+    app.sample_rate = 48_000;
+    app.engine.state = EngineState::Running;
+    // What a native PipeWire start publishes before it negotiates: the rate
+    // and the quantum asked for, with no reading behind either.  The input
+    // block is real as soon as the callback runs, the rate is not.
+    app.snapshot.input_block_frames = 64;
+    app.snapshot.input_rate = 48_000;
+    app.snapshot.output_rate = 48_000;
+    app.snapshot.output_step_frames = 64;
+    app.snapshot.target_frames = 128;
+    let parts = app.latency_parts();
+    assert!(
+        parts.input_reported,
+        "the input block itself is the callback's"
+    );
+    assert!(
+        !parts.input_read(),
+        "a measured block over an unread rate is not a reading"
+    );
+    assert!(
+        !parts.output_reported,
+        "the published output step is the quantum asked for"
+    );
+    assert!(!parts.output_read());
+    let step = |app: &RigWerkApp| {
+        app.latency_budget()
+            .parts
+            .into_iter()
+            .find(|part| part.label == "OUTPUT STEP")
+            .expect("an output step part")
+    };
+    assert_eq!(
+        step(&app).source,
+        crate::app::budget::LatencySource::Planned
+    );
+    assert!(step(&app).detail.ends_with("(planned)"));
+
+    // The capture's format handler, the playback node's first block and the
+    // playback format handler make them readings.
+    app.snapshot.input_rate_reported = true;
+    app.snapshot.output_rate_reported = true;
+    app.snapshot.output_step_reported = true;
+    let parts = app.latency_parts();
+    assert!(parts.input_read());
+    assert!(parts.output_read());
+    assert_eq!(
+        step(&app).source,
+        crate::app::budget::LatencySource::Reported
+    );
+    assert!(!step(&app).detail.contains("(planned)"));
+}
+
+#[test]
+fn a_measured_output_step_over_an_unread_rate_stays_planned() {
+    let mut app = latency_app();
+    app.buffer_size = 128;
+    app.output_buffer = 64;
+    app.sample_rate = 48_000;
+    app.engine.state = EngineState::Running;
+    app.snapshot.output_step_frames = 64;
+    app.snapshot.output_rate = 48_000;
+    // The step arrived, but the stream's format handler has not read the
+    // rate yet: the label names both, so it is still planned.
+    app.snapshot.output_step_reported = true;
+    let parts = app.latency_parts();
+    assert!(parts.output_reported);
+    assert!(!parts.output_read());
+    let step = app
+        .latency_budget()
+        .parts
+        .into_iter()
+        .find(|part| part.label == "OUTPUT STEP")
+        .expect("an output step part");
+    assert_eq!(step.source, crate::app::budget::LatencySource::Planned);
+    assert!(step.detail.ends_with("(planned)"));
+
+    app.snapshot.output_rate_reported = true;
+    assert!(app.latency_parts().output_read());
+}
+
+#[test]
 fn stopped_latency_ignores_the_previous_bridge_buffer() {
     let mut app = latency_app();
     app.buffer_size = 128;

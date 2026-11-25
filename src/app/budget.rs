@@ -40,7 +40,7 @@ pub(crate) enum LatencySource {
     /// RigWerk's own buffer choice, not a hardware reading.
     Setting,
     /// The size asked for while the bridge is stopped, or before the driver
-    /// has reported the block it opened.
+    /// or graph has reported the block it opened and the rate it runs at.
     Planned,
     /// Added or converted here from reported parts.
     Derived,
@@ -156,17 +156,19 @@ impl RigWerkApp {
         });
         parts.push(BudgetPart {
             label: "OUTPUT STEP",
+            // Same rule as the input block: the step and the rate it is
+            // counted at are both in the label, so both must be readings.
             detail: format!(
                 "{} frames at {}{}",
                 parts_of_bridge.output_step,
                 rate_label(parts_of_bridge.output_rate),
-                planned_suffix(parts_of_bridge.output_reported)
+                planned_suffix(parts_of_bridge.output_read())
             ),
             ms: Some(frames_ms(
                 parts_of_bridge.output_step,
                 parts_of_bridge.output_rate,
             )),
-            source: if parts_of_bridge.output_reported {
+            source: if parts_of_bridge.output_read() {
                 LatencySource::Reported
             } else {
                 LatencySource::Planned
@@ -330,16 +332,20 @@ fn planned_suffix(reported: bool) -> &'static str {
 }
 
 fn input_block_part(parts: &LatencyParts) -> BudgetPart {
+    // The label names the block and the rate it is counted at in one phrase,
+    // so it is `reported` only when both are readings (`input_read`): a
+    // measured block over a rate the native path only asked for would
+    // otherwise carry an unread rate as if the driver had read it.
     BudgetPart {
         label: "INPUT BLOCK",
         detail: format!(
             "{} frames at {}{}",
             parts.input_block,
             rate_label(parts.input_rate),
-            planned_suffix(parts.input_reported)
+            planned_suffix(parts.input_read())
         ),
         ms: Some(frames_ms(parts.input_block, parts.input_rate)),
-        source: if parts.input_reported {
+        source: if parts.input_read() {
             LatencySource::Reported
         } else {
             LatencySource::Planned

@@ -5,7 +5,6 @@
 //! the WASAPI exclusive and REAL-style attempt and Windows' "device in use"
 //! answer, `linux/alsa` owns the period and the mode line Linux asks for.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -231,9 +230,7 @@ where
                 let frames = data.len() / channels;
                 // The block the host hands over is the step the device really
                 // runs at, whatever buffer was asked for.
-                mix_shared
-                    .output_step_frames
-                    .store(frames as u32, Ordering::Relaxed);
+                mix_shared.note_output_step(frames as u32);
                 mixer.render(&mix_shared, frames, |index, mapped| {
                     // The frame write_frame is about to convert: channel map,
                     // level, limiter, mute and the calibration duck.
