@@ -809,8 +809,8 @@ fn fill_stereo(
 
 /// Silences a dequeued playback buffer for this cycle.  The panic path calls
 /// it so the graph plays silence, not whatever the interrupted render left.
-fn fill_silence(buffer: &mut pw::buffer::Buffer<'_>) -> usize {
-    fill_stereo(buffer, |bytes, frames| bytes[..frames * 8].fill(0))
+fn fill_silence(buffer: &mut pw::buffer::Buffer<'_>) {
+    fill_stereo(buffer, |bytes, frames| bytes[..frames * 8].fill(0));
 }
 
 /// Writes stereo frame `index` into `bytes`; false when it does not fit.

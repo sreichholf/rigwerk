@@ -14,7 +14,8 @@
 //! here covers the binary's own `--clap-scan` arguments.
 //!
 //! A third check pins the allocation guard at the entry point of each audio
-//! callback a normal test cannot enter on every platform.
+//! callback a normal test cannot enter on every platform, and the panic guard
+//! on the callbacks that would otherwise unwind into the host.
 //!
 //! A fourth check reads the same walk for the light theme: the surfaces that
 //! once drew the dark tokens (`ui/calibration.rs`, the shell windows in
@@ -619,6 +620,10 @@ const GUARDED_CALLBACKS: &[&str] = &[
 /// be a fragile indirection for the same evidence.
 #[test]
 fn every_audio_callback_holds_the_allocation_guard() {
+    assert!(
+        !GUARDED_CALLBACKS.is_empty(),
+        "the guarded-callback list is empty"
+    );
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     sources(&root.join("src"), root, &mut files);
@@ -637,6 +642,60 @@ fn every_audio_callback_holds_the_allocation_guard() {
     assert!(
         missing.is_empty(),
         "an audio callback enters no allocation guard (AGENTS.md, Audio thread):\n{}",
+        missing.join("\n")
+    );
+}
+
+/// The files whose backend callback must keep a panic inside RigWerk, and the
+/// call each one uses: the shared `contain` guard, the `render_or_silence`
+/// wrapper that contains the clock and extra-output cpal renders, or ASIO's
+/// own catch.  A file-level tripwire, as [`GUARDED_CALLBACKS`] is for the
+/// allocation guard.
+const CONTAINED_CALLBACKS: &[(&str, &str)] = &[
+    ("src/audio/input.rs", "contain("),
+    // The clock output's callback goes through `render_or_silence`, which is
+    // defined in the same file: matching `contain(` here would also hit the
+    // wrapper's own body.
+    ("src/audio/output.rs", "render_or_silence("),
+    ("src/audio/extra_output/stream.rs", "render_or_silence("),
+    ("src/audio/linux/native.rs", "contain("),
+    ("src/audio/linux/sink_monitor.rs", "contain("),
+    ("src/audio/linux/duplex/filter.rs", "contain("),
+    ("src/audio/linux/duplex/virtual_source.rs", "contain("),
+    ("src/audio/win/wasapi/real.rs", "contain("),
+    ("src/audio/win/wasapi/exclusive.rs", "contain("),
+    ("src/audio/win/asio/callback.rs", "catch_unwind"),
+];
+
+/// Every backend callback has to keep its panic inside RigWerk: an unwind
+/// across the host's C callback is undefined behaviour or an abort (see
+/// `audio/panic_guard`).  The callbacks themselves need a device or a live
+/// graph, so this checks the routing in the source, as the allocation guard
+/// check above does.
+#[test]
+fn every_audio_callback_contains_its_body() {
+    assert!(
+        !CONTAINED_CALLBACKS.is_empty(),
+        "the contained-callback list is empty"
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src"), root, &mut files);
+    let mut missing = Vec::new();
+    for &(callback, marker) in CONTAINED_CALLBACKS {
+        let Some((_, path)) = files.iter().find(|(file, _)| file.as_str() == callback) else {
+            missing.push(format!("{callback}: no such source file"));
+            continue;
+        };
+        let source = std::fs::read_to_string(path).expect("read source");
+        // A prose line may name the guard without calling it.
+        if boundary_lines(&source, &[marker]).is_empty() {
+            missing.push(format!("{callback}: no `{marker}`"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "an audio callback lets a panic reach the host (AGENTS.md, Audio thread):\n{}",
         missing.join("\n")
     );
 }
