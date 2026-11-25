@@ -58,8 +58,8 @@ plans and the code review has landed; that history is in git.
 
 ## Known limits
 
-Recorded when the review fixes landed (November 2026), not re-checked
-since.
+Checked against the code on 2026-11-25: the loudness, effect, NAM, cab,
+CLAP log, RT guard, ASIO and drift entries below still hold.
 
 - **Loudness.**  Integrated loudness is the last 60 s, not the whole run.
   *Learn* is one-shot; nothing follows the player.  Learn measures an
