@@ -822,6 +822,16 @@ impl AudioEngine {
         self.shared.paths[slot].publish_match_measurement(lufs, blocks);
     }
 
+    /// Declares an ASIO driver open on `side`, as a running bridge does, for
+    /// app tests that need [`Self::open_asio_driver`] to report one.
+    #[cfg(test)]
+    pub(crate) fn set_asio_driver_for_test(&mut self, side: AsioPanelSide, clsid: Option<u128>) {
+        match side {
+            AsioPanelSide::Input => self.asio_input_clsid = clsid,
+            AsioPanelSide::Output => self.asio_output_clsid = clsid,
+        }
+    }
+
     // `push_slot` hands a mismatched slot back so it can be dropped unlocked.
     #[allow(clippy::result_large_err)]
     pub fn add_plugin(&self, path: usize, plugin: PluginPref) -> Result<(), String> {

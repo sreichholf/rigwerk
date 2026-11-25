@@ -529,10 +529,19 @@ fn a_selected_asio_driver_makes_the_panel_wait_for_the_bridge() {
     });
     app.devices.use_asio_input = true;
     // Selected, but the bridge is not running on it: the panel exists and is
-    // disabled.  `Some(true)` needs a live ASIO driver, so it is not reachable
-    // headlessly.
+    // disabled.
     assert_eq!(app.driver_panel(AsioPanelSide::Input), Some(false));
     assert_eq!(app.driver_panel(AsioPanelSide::Output), None);
+
+    // The running bridge has that driver open: the panel can be opened.
+    app.engine.state = EngineState::Running;
+    app.engine
+        .set_asio_driver_for_test(AsioPanelSide::Input, Some(7));
+    assert_eq!(app.driver_panel(AsioPanelSide::Input), Some(true));
+    // A different driver open is still not this panel's.
+    app.engine
+        .set_asio_driver_for_test(AsioPanelSide::Input, Some(8));
+    assert_eq!(app.driver_panel(AsioPanelSide::Input), Some(false));
 }
 
 #[test]
