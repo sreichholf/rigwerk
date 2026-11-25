@@ -24,7 +24,9 @@ use super::ramp::{PathRamps, Ramp};
 /// gets the same stereo frame from the clock side.
 pub(crate) struct PathProcessor {
     /// One block of this path's taps, kept between callbacks so the plugin
-    /// effects can work on the whole block without allocating.
+    /// effects can work on the whole block without allocating.  Its length is
+    /// at least the prepared block size ([`Self::prepare`]); release growth for
+    /// a larger host block can make it longer.
     pub(super) block: Vec<[f32; 4]>,
     plugin_l: Vec<f32>,
     plugin_r: Vec<f32>,
@@ -264,7 +266,9 @@ impl PathProcessor {
         self.chain = None;
     }
 
-    /// Grows the per-block scratch outside the callback.
+    /// Grows the per-block scratch outside the callback.  The size it reaches
+    /// is the prepared size: every block the host hands over has to fit it
+    /// (see [`Self::reserve_block`]).
     pub(super) fn prepare(&mut self, frames: usize) {
         self.reserve_block(frames);
         if self.plugin_l.len() < frames {
@@ -273,8 +277,16 @@ impl PathProcessor {
         }
     }
 
-    /// Makes room for one block.  Only a host that hands over a larger block
-    /// than prepared allocates here, once.
+    /// Makes room for one block's taps, key, gains and model scratch.  The
+    /// scratch is sized before the stream opens, for the largest block the host
+    /// can deliver (its announced buffer, or a generous constant when it leaves
+    /// the size to its default: see `OutputMixer::prepare`), so the callback
+    /// never allocates.  `OutputMixer::begin_block` asserts that invariant.  A
+    /// host that hands over a larger block allocates here, once: release keeps
+    /// that block playing rather than dropping it, but a block past the
+    /// prepared size is a host bug, and the debug build says so.  The
+    /// `plugin_l`/`plugin_r` buffers are grown by [`Self::prepare`] and
+    /// `run_effects`, not here.
     pub(super) fn reserve_block(&mut self, frames: usize) {
         if self.block.len() < frames {
             self.block.resize(frames, [0.0; 4]);

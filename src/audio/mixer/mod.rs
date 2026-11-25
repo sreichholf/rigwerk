@@ -293,9 +293,10 @@ impl OutputMixer {
 
     /// Grows the per-block scratch of every path while the bridge is still
     /// opening, so the first callback (and the first block after a plugin or
-    /// a path is added) never has to allocate.  A host that later hands
-    /// over a larger block still works; that one block then grows the
-    /// scratch.
+    /// a path is added) never has to allocate.  This size is what every block
+    /// must fit: a host that later hands over a larger one still gets that
+    /// block rendered (release grows the scratch once), but the block would
+    /// allocate in the callback, so [`Self::begin_block`] asserts it.
     pub(crate) fn prepare(&mut self, frames: usize) {
         for path in &mut self.paths {
             path.prepare(frames);
@@ -360,8 +361,9 @@ impl OutputMixer {
 
     /// Picks up every UI change made since the last block: which slots
     /// are live, each live path's chain settings, the master gain and the
-    /// device controls.  Makes room for `frames` in every live path.
-    /// Shared by the ring path and the direct path.
+    /// device controls.  Makes room for `frames` in every live path; `frames`
+    /// must fit [`Self::prepare`], because the room is made inside the
+    /// callback.  Shared by the ring path and the direct path.
     fn begin_block(&mut self, shared: &Shared, frames: usize) {
         let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
         self.live = shared.live_slots();
@@ -379,6 +381,12 @@ impl OutputMixer {
         };
         for slot in self.live.iter() {
             let path = &mut self.paths[slot];
+            // Past the prepared size: release grows here, debug stops.
+            debug_assert!(
+                frames <= path.block.len(),
+                "a block of {frames} frames does not fit the {} prepared",
+                path.block.len()
+            );
             let restarted = path.begin_block(
                 &shared.paths[slot],
                 self.output_rate,
@@ -912,8 +920,27 @@ impl OutputMixer {
 
     /// Renders `frames` output frames, handing each one to `write` mapped
     /// onto the device's channels.  The backend only copies the frame into
-    /// its own buffer layout and sample format.
+    /// its own buffer layout and sample format.  This publishes the block's
+    /// size for the bridge buffer floor; a callback that splits a larger host
+    /// block publishes it once with [`Self::note_host_block`] and renders the
+    /// pieces with [`Self::render_chunk`].
     pub(crate) fn render(
+        &mut self,
+        shared: &Shared,
+        frames: usize,
+        mut write: impl FnMut(usize, &DeviceFrame),
+    ) {
+        self.note_host_block(shared, frames);
+        self.render_with(shared, frames, |clock, _, index, _, _, _| {
+            write(index, clock)
+        });
+    }
+
+    /// Renders one prepared-size piece of a host block the callback split to
+    /// fit the scratch.  Unlike [`Self::render`] this publishes nothing: the
+    /// floor follows the whole host block, so the callback publishes that
+    /// once with [`Self::note_host_block`] before the pieces.
+    pub(crate) fn render_chunk(
         &mut self,
         shared: &Shared,
         frames: usize,
@@ -922,6 +949,21 @@ impl OutputMixer {
         self.render_with(shared, frames, |clock, _, index, _, _, _| {
             write(index, clock)
         });
+    }
+
+    /// Publishes the whole host block this callback renders, in source
+    /// frames, once per callback before its pieces.  The bridge buffer floor
+    /// follows the host's block, not a scratch-sized piece.  The very first
+    /// block is skipped: a host fills its whole buffer once at start-up, and
+    /// sizing the bridge buffer from that one block would keep latency
+    /// several times higher than the steady step needs.
+    pub(crate) fn note_host_block(&mut self, shared: &Shared, frames: usize) {
+        let block_source_frames =
+            (frames as u64 * self.source_rate as u64).div_ceil(self.output_rate as u64) as usize;
+        if self.started {
+            shared.note_output_block(block_source_frames);
+        }
+        self.started = true;
     }
 
     /// [`Self::render`] handing over the four mixer taps (only 0/1 carry the
@@ -933,6 +975,7 @@ impl OutputMixer {
         frames: usize,
         mut write: impl FnMut(usize, [f32; 4]),
     ) {
+        self.note_host_block(shared, frames);
         self.render_with(shared, frames, |_, _, index, _, out, _| write(index, out));
     }
 
@@ -946,16 +989,9 @@ impl OutputMixer {
         self.follow_source_rate(shared);
         self.begin_block(shared, frames);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
-        // The ring holds input frames; one output block drains this many.
-        // The very first block is skipped: a host fills its whole buffer once
-        // at start-up, and sizing the bridge buffer from that one block would keep
-        // latency several times higher than the steady step needs.
+        // The ring holds input frames; one rendered block drains this many.
         let block_source_frames =
             (frames as u64 * self.source_rate as u64).div_ceil(self.output_rate as u64) as usize;
-        if self.started {
-            shared.note_output_block(block_source_frames);
-        }
-        self.started = true;
         let target = shared.target_frames();
 
         // A smaller bridge buffer chosen while playing takes effect at once instead

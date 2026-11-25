@@ -2,13 +2,14 @@ use std::sync::atomic::Ordering;
 
 use super::super::eq::{EqSettings, EqSlot};
 use super::super::nam::NamStack;
-use super::super::output::write_frame;
+use super::super::output::{block_chunks, write_frame};
 use super::super::output_map::{
     old_write_frame, ChannelMap, DeviceFrame, OutputDeviceSettings, PathMapSettings, UnusedChannels,
 };
 use super::super::record::{push_device_frame, RecordPhase, RecordSource};
 use super::super::shared::Shared;
 use super::super::types::BufferMode;
+use super::path::PathProcessor;
 use super::{route_frame, OutputMixer, Ramp, CONTROL_RAMP_SECONDS};
 
 #[test]
@@ -98,6 +99,68 @@ fn render(mixer: &mut OutputMixer, shared: &Shared, frames: usize) -> Vec<[f32; 
     let mut out = vec![[0.0f32; 4]; frames];
     mixer.render_taps(shared, frames, |index, frame| out[index] = frame);
     out
+}
+
+/// The prepared size is the path scratch's length, so a block at that size
+/// must not touch it: the audio thread would allocate otherwise.
+#[test]
+fn a_block_at_the_prepared_size_does_not_grow_the_scratch() {
+    let mut path = PathProcessor::new(48_000);
+    path.prepare(512);
+    assert_eq!(path.block.len(), 512);
+    let scratch = path.block.as_ptr();
+    path.reserve_block(512);
+    assert_eq!(path.block.len(), 512);
+    assert_eq!(
+        path.block.as_ptr(),
+        scratch,
+        "the prepared block reallocated"
+    );
+}
+
+/// The release fallback: a block past the prepared size still renders, so the
+/// scratch grows for it instead of dropping samples.  `begin_block` only
+/// asserts it in a debug build (the test below), so this exercises the growth
+/// itself in every profile.
+#[test]
+fn a_block_larger_than_prepared_grows_the_scratch() {
+    let mut path = PathProcessor::new(48_000);
+    path.prepare(64);
+    path.reserve_block(128);
+    assert_eq!(path.block.len(), 128);
+}
+
+/// The prepared size is an invariant, not a hope: the debug build stops a
+/// host block larger than prepared, which would allocate in the callback.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "does not fit the 64 prepared")]
+fn a_block_larger_than_prepared_is_a_host_bug() {
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    mixer.prepare(64);
+    mixer.render_taps(&shared, 128, |_, _| {});
+}
+
+/// A host block split into prepared-size pieces publishes the whole block:
+/// the bridge buffer floor follows the host's step, not one piece, or Auto
+/// and Minimum would size the ring for 8192 frames.
+#[test]
+fn a_chunked_host_block_publishes_the_whole_block() {
+    let shared = Shared::new(48_000);
+    shared.set_source_rate(48_000);
+    let mut mixer = OutputMixer::new(48_000, 2);
+    mixer.prepare(8_192);
+    // The first block only seeds the mixer; the second one is published.
+    for _ in 0..2 {
+        mixer.note_host_block(&shared, 16_000);
+        for (_, count) in block_chunks(16_000, 8_192) {
+            mixer.render_chunk(&shared, count, |_, _| {});
+        }
+    }
+    assert_eq!(shared.output_block.load(Ordering::Relaxed), 16_000);
+    // An unsplit block publishes its own size.
+    mixer.render(&shared, 128, |_, _| {});
+    assert_eq!(shared.output_block.load(Ordering::Relaxed), 128);
 }
 
 fn store_gain(shared: &Shared, gain: f32) {

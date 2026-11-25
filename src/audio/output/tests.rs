@@ -1,7 +1,7 @@
 use cpal::Sample;
 
 use super::super::output_map::{DeviceControls, DeviceMapper};
-use super::{block_frames, render_or_silence, write_frame};
+use super::{block_chunks, block_frames, render_or_silence, write_frame};
 use crate::audio::shared::{CallbackFailure, Shared};
 
 /// Maps one frame with the default device settings (L → 1, R → 2, mono
@@ -96,4 +96,20 @@ fn a_returning_output_body_keeps_the_block() {
 
     assert_eq!(block[0], 0.25);
     assert_eq!(shared.callback_failure(), None);
+}
+
+/// A host block larger than the prepared scratch is split, so the mixer never
+/// grows a buffer inside the callback.
+#[test]
+fn a_host_block_past_the_scratch_is_split_into_prepared_chunks() {
+    assert_eq!(
+        block_chunks(11, 4).collect::<Vec<_>>(),
+        [(0, 4), (4, 4), (8, 3)]
+    );
+    assert_eq!(block_chunks(4, 4).collect::<Vec<_>>(), [(0, 4)]);
+    assert_eq!(block_chunks(0, 4).count(), 0);
+    assert_eq!(
+        block_chunks(11, 4).map(|(_, count)| count).sum::<usize>(),
+        11
+    );
 }
