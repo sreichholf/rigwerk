@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::super::vst3::Vst3Controller;
-use super::link::{ParamIds, ParamOut, PluginShared};
+use super::link::{ParamIds, ParamOut, PluginShared, ProcessFailure};
 use super::load::{apply_parameter_changes, captured_state, Capture, ParamChange};
+use super::pause::{drive_pause, PauseStep};
 use super::pref::{PluginParamPref, PluginParamView};
 use super::state::StateSave;
 use super::transfer::ParamReceiver;
@@ -165,6 +166,18 @@ pub(crate) fn resume_or_log(pause: &super::pause::PauseHandshake) {
     if !pause.resume() && !LOGGED.swap(true, Ordering::Relaxed) {
         eprintln!("[plugins] a plugin's pause would not resume; it stays paused");
     }
+}
+
+/// One frame of a pause, with the outcome a stranded one deserves: a plugin
+/// that never returned from `process` is failed, so the effect shows why it
+/// is silent instead of staying paused forever.  The failure is an atomic
+/// write; no processor call follows.
+pub(crate) fn drive_pause_or_fail(io: &mut HostIo<'_>, stop: impl FnOnce()) -> PauseStep {
+    let step = drive_pause(&io.shared.pause, io.pause_wait, stop);
+    if step == PauseStep::Stranded {
+        io.shared.fail(ProcessFailure::PauseStranded);
+    }
+    step
 }
 
 /// Writes what a VST3 processor reported (its output parameters) into the

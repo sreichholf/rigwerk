@@ -19,6 +19,7 @@ fn only_the_first_failure_is_kept_and_reads_back() {
         ProcessFailure::Vst3StartFailed(-1),
         ProcessFailure::Vst3Inactive,
         ProcessFailure::ReloadLoop,
+        ProcessFailure::PauseStranded,
         ProcessFailure::Clap(ClapFailure::NotActive),
         ProcessFailure::Clap(ClapFailure::ProcessError),
         ProcessFailure::Clap(ClapFailure::StartFailed),
@@ -43,6 +44,11 @@ fn failure_messages_keep_the_host_texts() {
     assert_eq!(
         ProcessFailure::Vst3Inactive.message(),
         "The VST3 plugin is not active."
+    );
+    assert_eq!(
+        ProcessFailure::PauseStranded.message(),
+        "The plugin stopped responding while it was paused and no longer processes audio. \
+         Restart RigWerk to recover."
     );
     // The CLAP processor reports the failure, not a text: each kind keeps
     // the text the CLAP host used to report.

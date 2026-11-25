@@ -191,6 +191,10 @@ pub(crate) struct Slot {
     /// A pure delay standing in for a plugin, for tests.
     #[cfg(test)]
     pub(crate) test_delay: Option<TestDelay>,
+    /// Whether this slot's plugin is stranded, for the tests that prove the
+    /// leak: a real slot reads its plugin's pause handshake.
+    #[cfg(test)]
+    test_stranded: bool,
     /// Test slots counted by [`tracked_slots_alive`].  The counter lives on
     /// this field so `Slot` itself does not implement [`Drop`] (a `Drop`
     /// impl would reject the struct-update syntax the loaders use).
@@ -239,6 +243,8 @@ impl Slot {
             #[cfg(test)]
             test_delay: None,
             #[cfg(test)]
+            test_stranded: false,
+            #[cfg(test)]
             track: SlotTrack::default(),
         }
     }
@@ -270,6 +276,15 @@ impl Slot {
         TRACKED_SLOTS.fetch_add(1, Ordering::SeqCst);
         let mut slot = Self::empty(PluginPref::default());
         slot.track.tracked = true;
+        slot
+    }
+
+    /// A slot whose plugin is stranded, for the tests that prove it is
+    /// leaked rather than destroyed.
+    #[cfg(test)]
+    pub(crate) fn stranded_for_test() -> Self {
+        let mut slot = Self::empty(PluginPref::default());
+        slot.test_stranded = true;
         slot
     }
 
@@ -371,6 +386,33 @@ impl Slot {
                 .is_some_and(|plugin| plugin.shared().failure().is_some())
     }
 
+    /// Whether a pause of this slot's plugin was stranded (see
+    /// [`PauseHandshake::stranded`](super::pause::PauseHandshake::stranded)):
+    /// a block never came out of `process`.  Lock and allocation free; a
+    /// stranded slot is never destroyed.
+    pub(crate) fn stranded(&self) -> bool {
+        #[cfg(test)]
+        if self.test_stranded {
+            return true;
+        }
+        self.plugin
+            .as_ref()
+            .is_some_and(|plugin| plugin.shared().pause.stranded())
+    }
+
+    /// Destroys the slot, unless its plugin is stranded: that plugin is
+    /// still inside `process`, so no processor call follows it (no stop, no
+    /// deactivate, no destroy).  Such a slot and its instance are leaked for
+    /// the rest of the process; a restart builds fresh slots.  See
+    /// `docs/open-items.md`.
+    pub(crate) fn destroy(self) {
+        if self.stranded() {
+            std::mem::forget(self);
+        } else {
+            drop(self);
+        }
+    }
+
     /// The first error the slot should show (see [`SlotLink::resolved_error`]).
     /// UI thread only.
     #[cfg(test)]
@@ -424,6 +466,21 @@ pub(crate) struct SlotLink {
 }
 
 impl SlotLink {
+    /// A link over `handle` alone, for the tests that pin a failure's text
+    /// and paused state without building a slot.
+    #[cfg(test)]
+    pub(crate) fn with_handle_for_test(handle: PluginHandle) -> Self {
+        let pref = PluginPref::default();
+        Self {
+            base: Arc::new(pref.clone()),
+            controls: Arc::new(SlotControls::new(&pref)),
+            plugin: Some(handle),
+            error: None,
+            test_latency: None,
+            built_rate: None,
+        }
+    }
+
     /// Moves a test delay's latency (see [`Slot::delay_for_test`]), as a
     /// plugin moves its own.
     #[cfg(test)]
@@ -588,7 +645,9 @@ impl SlotPark {
     }
 
     /// Drops the plugins a bridge thread deferred.  Only the recorded main
-    /// thread destroys them; any other caller leaves the queue alone.
+    /// thread destroys them; any other caller leaves the queue alone.  A
+    /// slot whose plugin was stranded is leaked instead: the bridge released
+    /// it while a block was still inside `process`.
     pub(crate) fn drain(&self) {
         if !super::is_main_thread() {
             return;
@@ -597,7 +656,9 @@ impl SlotPark {
             Ok(mut queue) => std::mem::take(&mut *queue),
             Err(poison) => std::mem::take(&mut *poison.into_inner()),
         };
-        drop(pending);
+        for slot in pending {
+            slot.destroy();
+        }
     }
 
     /// How many slots wait for [`Self::drain`].
@@ -606,6 +667,28 @@ impl SlotPark {
         match self.slots.lock() {
             Ok(queue) => queue.len(),
             Err(poison) => poison.into_inner().len(),
+        }
+    }
+}
+
+impl Drop for SlotPark {
+    /// The last owner is gone.  On a thread that may destroy plugins, what
+    /// is left is destroyed as [`SlotPark::drain`] would (a stranded slot is
+    /// leaked).  Any other thread forgets it instead: the park has no later
+    /// owner to defer to, and this thread may not destroy a plugin.
+    fn drop(&mut self) {
+        let pending = match self.slots.get_mut() {
+            Ok(queue) => std::mem::take(queue),
+            Err(poison) => std::mem::take(poison.into_inner()),
+        };
+        if super::may_destroy_plugins_here() {
+            for slot in pending {
+                slot.destroy();
+            }
+        } else {
+            for slot in pending {
+                std::mem::forget(slot);
+            }
         }
     }
 }

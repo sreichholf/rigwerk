@@ -78,11 +78,21 @@ pub(crate) enum ChainCommand {
 /// values left in it when both its ends are gone, and what a chain edit does
 /// with the slots the runtime handed back.  A debug build asserts that this
 /// is not inside an audio callback.
+///
+/// A stranded slot is leaked here instead, on any thread: its plugin is
+/// still inside `process`, so it is never deferred and never destroyed (see
+/// [`Slot::destroy`]).
 pub(crate) fn release_slot(slot: Box<Slot>, park: &SlotPark) {
     debug_assert!(
         !super::super::rt_guard::in_audio_callback(),
         "a plugin slot was released inside an audio callback: it would destroy a plugin or take the deferred-slot lock"
     );
+    if slot.stranded() {
+        // The plugin is still inside `process`: leak it here on any thread,
+        // never defer it to a drain that would destroy it.
+        slot.destroy();
+        return;
+    }
     if super::may_destroy_plugins_here() {
         drop(slot);
     } else {
@@ -340,7 +350,7 @@ impl ChainRuntime {
     }
 
     /// Takes every slot out, so a test destroys them on its own thread
-    /// rather than through the deferred queue.
+    /// rather than through the engine's park.
     #[cfg(test)]
     pub(crate) fn clear_for_test(&mut self) -> Vec<Slot> {
         let slots = self.slots.drain(..).map(|slot| *slot).collect();

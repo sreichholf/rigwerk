@@ -88,9 +88,9 @@ pub(crate) use load::{merge_synced_params, Capture, Restore, MAX_BLOCK, MAX_STAT
 #[cfg(test)]
 pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
 pub(crate) use model::{ChainModel, ReloadPlan};
+pub(crate) use pause::PauseStep;
 #[cfg(test)]
 pub(crate) use pause::PAUSE_STALL;
-pub(crate) use pause::{drive_pause, PauseStep};
 #[cfg(test)]
 pub(crate) use slot::SlotControls;
 pub(crate) use slot::{Slot, SlotLink, SlotPark};

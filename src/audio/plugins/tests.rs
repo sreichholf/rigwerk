@@ -1,17 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use super::handle::{PluginHandle, Saved};
-use super::host::{finish_capture, HostIo, PluginHostUi};
+use super::host::{drive_pause_or_fail, finish_capture, HostIo, PluginHostUi};
 use super::load::{
     apply_parameter_changes, merge_synced_params, params_to_restore, Capture, ParamChange, Restore,
 };
+use super::pause::PauseStep;
 use super::pref::{
     base64_decode, base64_encode, PluginFormat, PluginParamPref, PluginParamView, PluginPref,
     PluginState, PLUGIN_STATE_VERSION,
 };
-use super::slot::{Slot, SlotPark};
+use super::slot::{Slot, SlotLink, SlotPark};
 use super::state::StateSave;
-use super::PluginShared;
+use super::{release_slot, PluginShared, ProcessFailure};
 
 fn param(id: u32, value: f64) -> PluginParamPref {
     PluginParamPref { id, value }
@@ -1505,6 +1506,10 @@ struct FakeState {
     capture: FakeCapture,
     holds_params: bool,
     service: bool,
+    /// Drive a pause in `service`, as a restart does.
+    pause: bool,
+    /// The step the paused `service` produced.
+    pause_step: Option<PauseStep>,
     /// Every `write_parameter` call, as `(index, value)`.
     written: Vec<(usize, f64)>,
 }
@@ -1526,6 +1531,8 @@ impl Default for FakeState {
             capture: FakeCapture::Saved,
             holds_params: true,
             service: false,
+            pause: false,
+            pause_step: None,
             written: Vec::new(),
         }
     }
@@ -1575,7 +1582,16 @@ impl PluginHostUi for FakeHost {
         }
     }
 
-    fn service(&mut self, _io: &mut HostIo<'_>) -> bool {
+    fn service(&mut self, io: &mut HostIo<'_>) -> bool {
+        let pause = self.state.lock().unwrap().pause;
+        if pause {
+            // As a host restart does: one frame drives the pause.  A
+            // `Stranded` one fails the effect in the shared helper and is
+            // republished like a real host's failure.
+            let step = drive_pause_or_fail(io, || {});
+            self.state.lock().unwrap().pause_step = Some(step);
+            return step == PauseStep::Stranded;
+        }
         self.state.lock().unwrap().service
     }
 
@@ -1735,4 +1751,76 @@ fn service_adds_a_pending_latency_change_to_the_hosts_result() {
     assert!(handle.service());
     state.lock().unwrap().service = false;
     assert!(!handle.service());
+}
+
+/// A plugin hung inside `process` never drops its block guard, so its pause
+/// never goes quiet.  The host helper turns that into a failure with a text,
+/// and the effect stops reading as paused.
+#[test]
+fn a_stranded_pause_fails_the_effect_instead_of_staying_paused() {
+    let (handle, state, shared) = fake_handle(vec![view(1, 0.5, 0.5)], Vec::new());
+    // A block is inside the plugin and does not come out.
+    let block = shared.pause.begin_block();
+    assert_eq!(block.action(), super::pause::BlockAction::Start);
+    shared.pause.started();
+    state.lock().unwrap().pause = true;
+    handle.seed_pause_wait_for_test();
+
+    assert!(handle.service(), "the stranded failure is republished");
+    assert_eq!(state.lock().unwrap().pause_step, Some(PauseStep::Stranded));
+    assert_eq!(shared.failure(), Some(ProcessFailure::PauseStranded));
+    assert!(shared.pause.stranded());
+
+    let link = SlotLink::with_handle_for_test(handle.clone());
+    assert!(!link.view().paused, "the failure wins over the pause");
+    assert_eq!(
+        link.resolved_error().as_deref(),
+        Some(
+            "Processing failed: The plugin stopped responding while it was paused and no longer \
+             processes audio. Restart RigWerk to recover."
+        )
+    );
+
+    drop(block);
+    assert!(shared.pause.quiet());
+    // Driving again reads the stranded flag and returns `Stranded` at once;
+    // the first failure stays.
+    assert!(handle.service());
+    assert_eq!(shared.failure(), Some(ProcessFailure::PauseStranded));
+}
+
+/// A slot with a real loaded plugin is leaked when its plugin's own pause
+/// handshake is stranded: the query reads the handshake, not the test flag.
+#[test]
+fn a_slot_with_a_stranded_plugin_handshake_is_leaked() {
+    use std::time::Instant;
+
+    use super::super::clap::tests::fake_plugin_for_test;
+    use super::pause::{drive_pause, BlockAction, PAUSE_STRANDED};
+
+    let slot =
+        Slot::with_plugin_for_test(PluginPref::default(), fake_plugin_for_test(false), 48_000);
+    let shared = slot.plugin.as_ref().expect("a loaded plugin").shared();
+    // A block is inside the plugin and does not come out.
+    let block = shared.pause.begin_block();
+    assert_eq!(block.action(), BlockAction::Start);
+    shared.pause.started();
+    // The wait is seeded past the deadline instead of sleeping it out.
+    let past = Instant::now().checked_sub(PAUSE_STRANDED).expect("uptime");
+    let mut wait = Some((past, shared.pause.served()));
+    assert_eq!(
+        drive_pause(&shared.pause, &mut wait, || {}),
+        PauseStep::Stranded
+    );
+    drop(block);
+    assert!(slot.stranded(), "the slot reads its plugin's handshake");
+
+    let controls = Arc::clone(&slot.controls);
+    let park = SlotPark::new();
+    release_slot(Box::new(slot), &park);
+    assert_eq!(
+        Arc::strong_count(&controls),
+        2,
+        "the slot with the stranded plugin is leaked"
+    );
 }
