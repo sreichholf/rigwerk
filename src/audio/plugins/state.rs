@@ -1,7 +1,8 @@
 //! The outcome of saving a plugin's state, shared by CLAP and LV2.
 //!
 //! Each host captures its own format's blob.  They share these three
-//! answers, and the handle maps them onto its own capture result.
+//! answers, and `host.rs`'s `finish_capture` maps them onto the handle's own
+//! capture result.
 
 /// The outcome of a host's `save_state`.
 #[derive(Debug, PartialEq, Eq)]

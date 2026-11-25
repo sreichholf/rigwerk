@@ -1,17 +1,119 @@
-//! The bookkeeping the plugin handle and each host's UI half share: the
-//! delivered-value ledger, the helpers that write what the audio side
-//! reported into the views, and the state snapshot rule.  Format-neutral.
+//! The UI half's one host contract ([`PluginHostUi`]) and the bookkeeping
+//! the handle and every host share: the delivered-value ledger, the helpers
+//! that write what the audio side reported into the views, and the state
+//! snapshot rule.  The VST3 reported-value drain stays here too, the one
+//! helper that names a host type.
 //!
-//! The callers hold the handle's UI lock; nothing here locks, allocates a
-//! queue, or reaches the audio thread.
+//! The handle's parameter, state and service operations never branch on the
+//! format; each host module implements the trait once.  The callers hold the
+//! handle's UI lock; nothing here locks, allocates a queue, or reaches the
+//! audio thread.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 use super::super::vst3::Vst3Controller;
-use super::link::ParamIds;
-use super::load::{apply_parameter_changes, ParamChange};
+use super::link::{ParamIds, ParamOut, PluginShared};
+use super::load::{apply_parameter_changes, captured_state, Capture, ParamChange};
 use super::pref::{PluginParamPref, PluginParamView};
+use super::state::StateSave;
 use super::transfer::ParamReceiver;
+
+/// The UI half's per-format contract.  One implementation per host module;
+/// the shared handle in `handle.rs` never branches on the format for these.
+pub(crate) trait PluginHostUi: Send {
+    /// The plugin's own text for a normalized value (None when the format has
+    /// none).
+    fn parameter_text(&self, id: u32, value: f64) -> Option<String>;
+
+    /// Whether the plugin reports this control and never lets the host set it.
+    fn is_read_only(&self, id: u32) -> bool;
+
+    /// Delivers one normalized value the way this format allows: set + queue
+    /// (VST3), a paused flush or a queued value (CLAP), a noted + queued value
+    /// (LV2).  `index` is the position in [`ParamIds`].
+    fn write_parameter(&mut self, io: &mut HostIo<'_>, index: usize, value: f64);
+
+    /// Live control views, or `None` when a read now would show a stale value
+    /// (a queued delivery) or the format has no read call.
+    fn read_parameters(&mut self, io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>>;
+
+    /// A full read after the editor changed values: drain what the audio side
+    /// reported and the editor's edits first, then read.  `None` as above.
+    fn sync_parameters(&mut self, io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>>;
+
+    /// Returns every control to its default, delivered this format's way;
+    /// returns the default views.
+    fn reset_parameters(&mut self, io: &mut HostIo<'_>) -> Vec<PluginParamView>;
+
+    /// Captures the state blob, applying the editor's pending edits first
+    /// where the format has them.  `state_holds_params` decides the snapshot
+    /// rule.  A format without a state interface (LV2) has no blob: its
+    /// parameters alone describe it.
+    fn capture_state(&mut self, io: &mut HostIo<'_>) -> Capture;
+
+    /// The plugin's main-thread work for one UI frame.  Returns whether the
+    /// views need republishing; the shared caller adds the latency change.
+    ///
+    /// VST3: the reported values and the editor's edits, then the restart
+    /// flags.  `kLatencyChanged` pauses the plugin through the handshake,
+    /// then deactivates and reactivates it and reads its latency, which VST3
+    /// only lets change while inactive; `kIoChanged` with other buses,
+    /// `kReloadComponent` and a changed parameter id set ask for a reload, as
+    /// the processor's buffers and tables no longer fit.  CLAP: callbacks,
+    /// timers and fds; a parameter rescan; and a restart (or a flush the
+    /// plugin asked for while not processing) through the same handshake, the
+    /// first frame asking the audio side to stop and a later one deactivating
+    /// and reactivating it.  LV2: the control outputs the audio side
+    /// reported, a changed latency report, and a wake for the worker thread;
+    /// it has no main-thread callbacks, flush request or restart request.
+    fn service(&mut self, io: &mut HostIo<'_>) -> bool;
+
+    /// Whether the saved state blob embeds the control values (LV2's does
+    /// not).
+    fn state_holds_params(&self) -> bool;
+
+    /// The host's own type, for the typed editor and CLAP accessors.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+/// The shared inputs one operation needs, borrowed from the handle's
+/// `UiSide` and its `PluginUi`.  Its fields are disjoint from the host that
+/// gets it, so a host may touch any of them.
+pub(crate) struct HostIo<'a> {
+    pub(crate) shared: &'a PluginShared,
+    pub(crate) out: &'a ParamOut,
+    pub(crate) from_audio: &'a mut ParamReceiver,
+    pub(crate) ids: &'a Arc<ParamIds>,
+    pub(crate) views: &'a mut Vec<PluginParamView>,
+    pub(crate) saved: &'a mut Vec<PluginParamPref>,
+    pub(crate) edits: &'a mut Vec<(u32, f64)>,
+    pub(crate) undelivered: &'a mut Undelivered,
+    pub(crate) pause_wait: &'a mut Option<(Instant, u64)>,
+    pub(crate) state_stale: &'a mut bool,
+}
+
+/// The handle's capture outcome from a host's blob.  An empty or oversized
+/// blob is a failed capture (see [`captured_state`]); the snapshot says what
+/// the blob holds: the saved values where the format embeds them, nothing
+/// where it does not (LV2).
+pub(crate) fn finish_capture(io: &mut HostIo<'_>, save: StateSave, holds_params: bool) -> Capture {
+    let bytes = match save {
+        StateSave::Saved(bytes) => bytes,
+        StateSave::Unavailable => return Capture::Failed,
+        StateSave::Deferred => return Capture::Deferred,
+    };
+    // LV2's blob holds no control values: they are applied separately from
+    // the saved parameters on restore, so the snapshot is empty and never
+    // claims otherwise.
+    let snapshot: &[PluginParamPref] = if holds_params {
+        &capture_snapshot(io.saved, &io.undelivered.ids(), io.views)
+    } else {
+        &[]
+    };
+    captured_state(&bytes, snapshot)
+}
 
 /// Writes plugin-reported `(index, normalized)` values into the views.
 /// Returns whether any view moved.  `display` formats a value the way the

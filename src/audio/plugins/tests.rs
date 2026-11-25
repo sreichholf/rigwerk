@@ -1,3 +1,7 @@
+use std::sync::{Arc, Mutex};
+
+use super::handle::{PluginHandle, Saved};
+use super::host::{finish_capture, HostIo, PluginHostUi};
 use super::load::{
     apply_parameter_changes, merge_synced_params, params_to_restore, Capture, ParamChange, Restore,
 };
@@ -6,6 +10,8 @@ use super::pref::{
     PluginState, PLUGIN_STATE_VERSION,
 };
 use super::slot::Slot;
+use super::state::StateSave;
+use super::PluginShared;
 
 fn param(id: u32, value: f64) -> PluginParamPref {
     PluginParamPref { id, value }
@@ -1482,4 +1488,251 @@ fn an_effect_in_a_restart_reads_paused() {
     drop(link);
     drop(handle);
     drop(chain.clear_for_test());
+}
+
+/// A stand-in host for the tests that pin the shared postludes.  The test
+/// keeps the other `Arc` and configures or reads it.
+struct FakeHost {
+    state: Arc<Mutex<FakeState>>,
+}
+
+struct FakeState {
+    text: Option<String>,
+    read_only: Vec<u32>,
+    read: Option<Vec<PluginParamView>>,
+    sync: Option<Vec<PluginParamView>>,
+    defaults: Vec<PluginParamView>,
+    capture: FakeCapture,
+    holds_params: bool,
+    service: bool,
+    /// Every `write_parameter` call, as `(index, value)`.
+    written: Vec<(usize, f64)>,
+}
+
+#[derive(Clone, Copy)]
+enum FakeCapture {
+    Saved,
+    Deferred,
+}
+
+impl Default for FakeState {
+    fn default() -> Self {
+        Self {
+            text: None,
+            read_only: Vec::new(),
+            read: None,
+            sync: None,
+            defaults: Vec::new(),
+            capture: FakeCapture::Saved,
+            holds_params: true,
+            service: false,
+            written: Vec::new(),
+        }
+    }
+}
+
+impl PluginHostUi for FakeHost {
+    fn parameter_text(&self, _id: u32, _value: f64) -> Option<String> {
+        self.state.lock().unwrap().text.clone()
+    }
+
+    fn is_read_only(&self, id: u32) -> bool {
+        self.state.lock().unwrap().read_only.contains(&id)
+    }
+
+    fn write_parameter(&mut self, io: &mut HostIo<'_>, index: usize, value: f64) {
+        self.state.lock().unwrap().written.push((index, value));
+        // As every real host does: the value is queued for the audio side and
+        // counted as not delivered until the processor applies it.
+        if let Some(id) = io.ids.id(index) {
+            io.out.push(index, value);
+            io.undelivered.note([id], io.out.pushed());
+        }
+    }
+
+    fn read_parameters(&mut self, _io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        self.state.lock().unwrap().read.clone()
+    }
+
+    fn sync_parameters(&mut self, _io: &mut HostIo<'_>) -> Option<Vec<PluginParamView>> {
+        self.state.lock().unwrap().sync.clone()
+    }
+
+    fn reset_parameters(&mut self, _io: &mut HostIo<'_>) -> Vec<PluginParamView> {
+        self.state.lock().unwrap().defaults.clone()
+    }
+
+    fn capture_state(&mut self, io: &mut HostIo<'_>) -> Capture {
+        let state = self.state.lock().unwrap();
+        let capture = state.capture;
+        let holds_params = state.holds_params;
+        drop(state);
+        match capture {
+            FakeCapture::Saved => {
+                finish_capture(io, StateSave::Saved(b"fake".to_vec()), holds_params)
+            }
+            FakeCapture::Deferred => Capture::Deferred,
+        }
+    }
+
+    fn service(&mut self, _io: &mut HostIo<'_>) -> bool {
+        self.state.lock().unwrap().service
+    }
+
+    fn state_holds_params(&self) -> bool {
+        self.state.lock().unwrap().holds_params
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// A handle over a [`FakeHost`]: the handle, the host state kept for the
+/// test, and the shared atomics.
+fn fake_handle(
+    views: Vec<PluginParamView>,
+    saved: Vec<PluginParamPref>,
+) -> (PluginHandle, Arc<Mutex<FakeState>>, Arc<PluginShared>) {
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let host = FakeHost {
+        state: Arc::clone(&state),
+    };
+    let shared = Arc::new(PluginShared::new(0));
+    let handle = PluginHandle::with_host_for_test(
+        Box::new(host),
+        Arc::clone(&shared),
+        views,
+        Saved {
+            params: saved,
+            state: None,
+            stale: false,
+        },
+        PluginFormat::Vst3,
+    );
+    (handle, state, shared)
+}
+
+/// A read-only control is still shown and saved, but never delivered: the
+/// rule used to live in the VST3 arm alone.
+#[test]
+fn a_read_only_control_updates_the_view_and_saved_value_but_is_not_delivered() {
+    let (handle, state, _shared) = fake_handle(vec![view(1, 0.2, 0.0)], Vec::new());
+    {
+        let mut state = state.lock().unwrap();
+        state.text = Some("42 %".to_owned());
+        state.read_only = vec![1];
+    }
+    assert_eq!(handle.set_parameter(1, 0.7), Ok(Some("42 %".to_owned())));
+    assert!(
+        state.lock().unwrap().written.is_empty(),
+        "a read-only control is not delivered"
+    );
+    let parameters = handle.parameters();
+    assert_eq!(parameters[0].value, 0.7);
+    assert_eq!(parameters[0].display, "42 %");
+    assert_eq!(handle.saved().0, vec![param(1, 0.7)]);
+    assert!(handle.wants_capture());
+
+    // A writable control goes to the host at its index in the table.
+    state.lock().unwrap().read_only.clear();
+    assert_eq!(handle.set_parameter(1, 0.3), Ok(Some("42 %".to_owned())));
+    assert_eq!(state.lock().unwrap().written, vec![(0, 0.3)]);
+}
+
+#[test]
+fn reset_parameters_clears_the_saved_values_and_keeps_the_returned_views() {
+    let (handle, state, _shared) = fake_handle(vec![view(1, 0.7, 0.0)], vec![param(1, 0.7)]);
+    state.lock().unwrap().defaults = vec![view(1, 0.0, 0.0), view(2, 1.0, 1.0)];
+    assert_eq!(handle.reset_parameters(), Ok(()));
+    let parameters = handle.parameters();
+    assert_eq!(parameters.len(), 2);
+    assert_eq!(parameters[0].value, 0.0);
+    assert!(handle.saved().0.is_empty());
+    assert!(handle.wants_capture());
+}
+
+#[test]
+fn sync_full_merges_the_saved_values_from_the_returned_list() {
+    let (handle, state, _shared) = fake_handle(vec![view(1, 0.2, 0.0)], vec![param(9, 0.4)]);
+    state.lock().unwrap().sync = Some(vec![view(1, 0.2, 0.5), view(2, 0.7, 0.1)]);
+    assert_eq!(handle.sync_full(), Some(()));
+    let parameters = handle.parameters();
+    assert_eq!(parameters.len(), 2);
+    assert_eq!(parameters[0].value, 0.2);
+    assert_eq!(
+        handle.saved().0,
+        vec![param(1, 0.2), param(2, 0.7), param(9, 0.4)]
+    );
+    assert!(handle.wants_capture());
+
+    // A read the host says would be stale stores nothing.
+    state.lock().unwrap().sync = None;
+    assert_eq!(handle.sync_full(), None);
+    assert_eq!(
+        handle.saved().0,
+        vec![param(1, 0.2), param(2, 0.7), param(9, 0.4)]
+    );
+}
+
+/// The snapshot rule is a capability now, not a format name: a host whose
+/// blob holds no control values passes an empty snapshot, so the load
+/// applies every saved value on top of it.
+#[test]
+fn a_capture_uses_the_hosts_snapshot_rule_and_a_deferred_one_stays_stale() {
+    let saved = vec![param(1, 0.6)];
+    let (handle, state, _shared) = fake_handle(vec![view(1, 0.6, 0.0)], saved.clone());
+    state.lock().unwrap().holds_params = false;
+    handle.mark_state_stale();
+    handle.capture_state();
+    let blob = handle.saved().1.expect("a captured blob");
+    assert_eq!(blob.bytes().as_deref(), Some(&b"fake"[..]));
+    assert!(
+        blob.params.is_empty(),
+        "a blob with no control values has no snapshot"
+    );
+    assert!(!handle.wants_capture(), "a current blob is not stale again");
+
+    state.lock().unwrap().holds_params = true;
+    handle.mark_state_stale();
+    handle.capture_state();
+    assert_eq!(handle.saved().1.expect("a captured blob").params, saved);
+
+    state.lock().unwrap().capture = FakeCapture::Deferred;
+    handle.mark_state_stale();
+    handle.capture_state();
+    assert!(handle.wants_capture(), "a deferred capture is retried");
+}
+
+/// A capture while a value is still queued for the audio side leaves it out of
+/// the snapshot and stays stale, so the next save captures the applied value.
+#[test]
+fn a_capture_while_a_value_is_undelivered_keeps_the_slot_stale() {
+    let (handle, _state, _shared) = fake_handle(vec![view(1, 0.9, 0.0)], vec![param(1, 0.9)]);
+    // The fake host queues the value and notes it as not delivered.
+    assert_eq!(handle.set_parameter(1, 0.4), Ok(None));
+    handle.mark_state_stale();
+    handle.capture_state();
+    let blob = handle.saved().1.expect("a captured blob");
+    assert!(
+        blob.params.is_empty(),
+        "the blob cannot claim the queued control was applied"
+    );
+    assert!(
+        handle.wants_capture(),
+        "an undelivered value is captured again"
+    );
+}
+
+#[test]
+fn service_adds_a_pending_latency_change_to_the_hosts_result() {
+    let (handle, state, shared) = fake_handle(vec![view(1, 0.5, 0.5)], Vec::new());
+    assert!(!handle.service());
+    assert!(shared.set_latency(96));
+    assert!(handle.service(), "the latency change is republished");
+    assert!(!handle.service());
+    state.lock().unwrap().service = true;
+    assert!(handle.service());
+    state.lock().unwrap().service = false;
+    assert!(!handle.service());
 }

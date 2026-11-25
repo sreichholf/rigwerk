@@ -765,6 +765,20 @@ fn a_dark_token_scan_is_case_sensitive_and_skips_comments() {
     );
 }
 
+/// The closed per-format enum the host contract replaced must not come back:
+/// each format lives behind `PluginHostUi`, implemented once in its own host
+/// module.  The handle still names the host types for its typed editor and
+/// CLAP accessors, so only the enum is scanned.
+#[test]
+fn the_plugin_handle_has_no_plugin_instance_enum() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/audio/plugins/handle.rs");
+    let source = std::fs::read_to_string(&path).expect("read the plugin handle");
+    assert!(
+        !source.contains("PluginInstance"),
+        "the plugin handle still names PluginInstance"
+    );
+}
+
 /// The files whose code runs inside an audio callback, where taking a
 /// blocking lock can stall a device.  `audio/clap/host.rs` is here because a
 /// plugin may log from its `process` thread.

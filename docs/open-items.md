@@ -8,7 +8,6 @@ code review has landed; that history is in git.
 The findings that need their own change, with the issue that tracks each:
 
 - Resampler kernel handoff out of the output callback (#119).
-- One plugin host contract, and LV2's capabilities in it (#120).
 - Process-wide audio statics with a single-run owner (#123).
 - The last `winapi` uses moved to the `windows` crate (#124).
 - A stranded plugin pause, and the global module and slot registries (#125).
@@ -128,6 +127,11 @@ CLAP log, RT guard, ASIO and drift entries below still hold.
   256-byte slot (`try_lock`, no allocation) on whatever thread logs, and the
   reader builds the `String`; nothing reads the slot yet, so a plugin's log
   line still goes nowhere.
+- **Plugin host contract.**  The seam covers parameters, state and the
+  per-frame service.  The editor is still a typed VST3/CLAP path in the
+  shared handle (`open_vst3_editor`, `with_clap`) and `has_editor` is a
+  load-time flag; restart and latency are handled inside each host's
+  `service`, not as capability methods.
 - **RT allocation guard.**  The counting allocator and the counts exist
   only under `debug_assertions` (`audio/rt_guard.rs`); in release
   `RtGuard` is a no-op, so a release build carries no automated evidence
