@@ -98,6 +98,7 @@ mod output;
 mod output_map;
 mod path;
 mod plugins;
+pub(crate) use plugins::mark_main_thread;
 #[cfg(test)]
 pub(crate) use plugins::{set_test_loader, TEST_PATH};
 mod record;

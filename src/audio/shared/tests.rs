@@ -128,14 +128,14 @@ pub(crate) fn claim_main_thread() -> MainClaim {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     MainClaim {
-        _thread: crate::audio::clap::claim_main_thread_for_test(),
+        _thread: crate::audio::plugins::claim_main_thread_for_test(),
         _serial: serial,
     }
 }
 
 pub(crate) struct MainClaim {
     // Dropped first, while `serial` is still held.
-    _thread: crate::audio::clap::MainThreadClaim,
+    _thread: crate::audio::plugins::MainThreadClaim,
     _serial: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -318,7 +318,7 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_audio_side() {
     let chain = shared.paths[0].hold_chain_for_test();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             for _ in 0..100 {
                 let views = shared.plugin_views();
                 assert_eq!(views.len(), 2);
@@ -356,7 +356,7 @@ fn structural_edits_never_wait_for_the_audio_side() {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             path.move_plugin(0, 1);
             path.remove_plugin(2);
             assert!(path.add_plugin(missing("c.vst3")).is_err());
@@ -418,7 +418,7 @@ fn mix_bypass_and_controls_never_wait_for_the_audio_side() {
     let chain = path.hold_chain_for_test();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             for step in 0..100 {
                 path.set_plugin_mix(0, step as f32 / 100.0);
                 path.set_plugin_bypass(0, step % 2 == 0);
@@ -466,7 +466,7 @@ fn capture_and_prefs_never_wait_for_the_audio_side() {
         let worker = scope.spawn(move || {
             // The fake's state is per thread, and CLAP saves only on the
             // thread that loaded it: it is loaded, saved and destroyed here.
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             path.restore_plugins(vec![missing("a.vst3")]);
             path.edit_chain(|chain| {
                 chain.insert_clap_for_test(fake_plugin_with_state_for_test(b"saved state"))
@@ -551,7 +551,7 @@ fn a_latency_change_republishes_without_the_audio_side() {
         let worker = scope.spawn(move || {
             // The fake's state is per thread: it is loaded, restarted and
             // serviced here.
-            let _worker_main = crate::audio::clap::claim_main_thread_for_test();
+            let _worker_main = crate::audio::plugins::claim_main_thread_for_test();
             path.edit_chain(|chain| {
                 chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64))
             });
