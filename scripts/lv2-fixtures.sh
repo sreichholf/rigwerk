@@ -8,9 +8,14 @@
 # eg-amp covers load, process and the panel; eg-params covers state (it has
 # only atom ports, no audio); eg-sampler covers state:loadDefaultState and
 # the worker.  eg-sampler needs libsndfile and libsamplerate to build.
+#
+# The tag is pinned to the commit it pointed at when it was chosen.  A tag
+# that has been moved fails the check instead of quietly changing the build.
 set -euo pipefail
 
 LV2_TAG=v1.18.10
+# An annotated tag: this is the commit refs/tags/v1.18.10 peels to.
+LV2_COMMIT=0bcde338db1c63bbc503b4d1f6d7b55ed43154af
 LV2_URL=https://github.com/lv2/lv2
 BUNDLES=(eg-amp eg-params eg-sampler)
 
@@ -30,11 +35,11 @@ mkdir -p "$1"
 cd "$1"
 
 # The bundles count as built only when every one is there and the tag file
-# names this tag.  Each bundle is moved into place after a full copy, so an
-# interrupted run never leaves a half bundle that looks finished.
+# names this tag and commit.  Each bundle is moved into place after a full
+# copy, so an interrupted run never leaves a half bundle that looks finished.
 have_all() {
   local bundle
-  [[ "$(cat plugins/.lv2-tag 2>/dev/null)" == "$LV2_TAG" ]] || return 1
+  [[ "$(cat plugins/.lv2-tag 2>/dev/null)" == "$LV2_TAG $LV2_COMMIT" ]] || return 1
   for bundle in "${BUNDLES[@]}"; do
     [[ -d "plugins/$bundle.lv2" ]] || return 1
   done
@@ -53,6 +58,11 @@ if [[ ! -d lv2/.git ]]; then
   rm -rf lv2
   git clone --depth 1 --branch "$LV2_TAG" "$LV2_URL" lv2
 fi
+if [[ "$(git -C lv2 rev-parse HEAD)" != "$LV2_COMMIT" ]]; then
+  echo "error: $LV2_TAG is not $LV2_COMMIT any more" >&2
+  exit 1
+fi
+git -C lv2 checkout --quiet --force "$LV2_COMMIT"
 
 options=(
   --buildtype=release
@@ -85,5 +95,5 @@ for bundle in "${BUNDLES[@]}"; do
   cp -R "stage/bundles/$bundle.lv2" "plugins/$bundle.lv2.partial"
   mv "plugins/$bundle.lv2.partial" "plugins/$bundle.lv2"
 done
-echo "$LV2_TAG" > plugins/.lv2-tag
+echo "$LV2_TAG $LV2_COMMIT" > plugins/.lv2-tag
 echo "LV2 fixtures in $(pwd)/plugins"
