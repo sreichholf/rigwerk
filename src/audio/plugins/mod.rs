@@ -21,7 +21,10 @@
 //! (`chain`) and the model the UI edits (`model`), which sends structural
 //! edits as commands through a queue (`queue`) and gets the slots the
 //! runtime let go of back the same way.  No lock is shared between the two
-//! sides.
+//! sides.  A slot a thread may not destroy plugins on lands in the engine's
+//! park (`slot::SlotPark`, one per engine and shared by its runs), which the
+//! recorded main thread drains; a slot whose plugin is stranded is leaked
+//! there instead of destroyed.
 
 mod audio_thread;
 mod chain;
@@ -77,7 +80,7 @@ pub use pref::{PluginFormat, PluginParamView, PluginPref, PluginView};
 
 #[cfg(test)]
 pub(crate) use chain::ChainRuntime;
-pub(crate) use chain::{ChainHome, ChainLease, MAX_EFFECTS};
+pub(crate) use chain::{release_slot, ChainHome, ChainLease, MAX_EFFECTS};
 pub(crate) use handle::PluginHandle;
 #[cfg(test)]
 pub(crate) use handle::{LoadedPlugin, Outcome, Saved};
@@ -88,12 +91,12 @@ pub(crate) use load::{merge_synced_params, Capture, Restore, MAX_BLOCK, MAX_STAT
 #[cfg(test)]
 pub(crate) use load::{set_test_loader, TestLoaderGuard, TEST_PATH};
 pub(crate) use model::{ChainModel, ReloadPlan};
+pub(crate) use pause::PauseStep;
 #[cfg(test)]
 pub(crate) use pause::PAUSE_STALL;
-pub(crate) use pause::{drive_pause, PauseStep};
 #[cfg(test)]
 pub(crate) use slot::SlotControls;
-pub(crate) use slot::{drain_deferred_plugins, Slot, SlotLink};
+pub(crate) use slot::{Slot, SlotLink, SlotPark};
 #[cfg(test)]
 pub(crate) use slot::{RELOAD_LIMIT, RELOAD_WINDOW_MS};
 pub(crate) use state::StateSave;
@@ -107,4 +110,4 @@ pub(crate) use transfer::{param_transfer, ParamReceiver, ParamSender, Retry};
 #[cfg(test)]
 pub(crate) use fixtures::{lv2_fixture, vst3_fixture};
 #[cfg(test)]
-pub(crate) use slot::{deferred_slot_count, tracked_slots_alive};
+pub(crate) use slot::tracked_slots_alive;

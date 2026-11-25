@@ -1,10 +1,18 @@
-//! Everything the ASIO driver callback needs, owned by one bridge and
-//! published through an atomic pointer only while that driver runs.
+//! Everything the ASIO driver callback needs, owned by one session and
+//! published into [`AsioHost`] only while that session's driver runs.
+//!
+//! `azo`'s callbacks are plain C functions with no user data, so the driver
+//! can only reach process-global pointers: one typed owner (`ASIO_HOST`)
+//! holds them, at most one session per callback role, plus the process-wide
+//! driver reset count.  A reset is delivered to the registration that was
+//! installed when it arrived and never to a later session; the message path
+//! reads and writes that count only, never a context pointer, so a reset
+//! raised by either role's driver cannot touch a context another thread frees.
 //!
 //! ASIO guarantees a buffer index only until the next `bufferSwitch`, so all
 //! sample work happens inside the callback.  The bridge thread only watches
 //! atomics: a callback counter for the watchdog, a flag for a callback that
-//! panicked, and a counter of driver reset requests.
+//! panicked, and the host's driver reset count.
 //!
 //! `outputReady` is deliberately never called.  It is an optional ASIO
 //! optimisation that must follow the fill of the current buffer, which only
@@ -50,15 +58,6 @@ impl AsioSignal {
             failed: AtomicBool::new(false),
         })
     }
-}
-
-/// Bumped by `kAsioResetRequest`.  The driver asks for a full teardown there
-/// (its rate or buffer size changed in its control panel), which the bridge
-/// reports instead of running on with a stale rate.
-static RESET_REQUESTS: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn note_driver_reset() {
-    RESET_REQUESTS.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) const DRIVER_RESET_MESSAGE: &str =
@@ -243,43 +242,82 @@ pub(crate) enum AsioCallbackSlot {
     Output,
 }
 
-static INPUT_CONTEXT: AtomicPtr<AsioCallbackContext> = AtomicPtr::new(ptr::null_mut());
-static OUTPUT_CONTEXT: AtomicPtr<AsioCallbackContext> = AtomicPtr::new(ptr::null_mut());
+/// The one owner of the driver's process-global callback pointers.  `azo`'s
+/// callbacks carry no user data, so a session is reached only through this
+/// table; each role holds at most one session at a time.
+pub(crate) struct AsioHost {
+    input: AtomicPtr<AsioCallbackContext>,
+    output: AtomicPtr<AsioCallbackContext>,
+    /// Driver resets seen by this process.  Only the count is read or written,
+    /// never a context, so the driver thread can raise one safely.
+    resets: AtomicU64,
+}
 
-impl AsioCallbackSlot {
-    fn pointer(self) -> &'static AtomicPtr<AsioCallbackContext> {
-        match self {
-            Self::Input => &INPUT_CONTEXT,
-            Self::Output => &OUTPUT_CONTEXT,
+impl AsioHost {
+    pub(crate) const fn new() -> Self {
+        Self {
+            input: AtomicPtr::new(ptr::null_mut()),
+            output: AtomicPtr::new(ptr::null_mut()),
+            resets: AtomicU64::new(0),
         }
     }
+
+    fn slot(&self, slot: AsioCallbackSlot) -> &AtomicPtr<AsioCallbackContext> {
+        match slot {
+            AsioCallbackSlot::Input => &self.input,
+            AsioCallbackSlot::Output => &self.output,
+        }
+    }
+
+    /// Records a driver reset.  Called from the driver thread, so it is one
+    /// atomic add: no allocation, no lock, and no context pointer touched.
+    pub(crate) fn request_reset(&self) {
+        self.resets.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn reset_count(&self) -> u64 {
+        self.resets.load(Ordering::SeqCst)
+    }
 }
+
+/// The driver callbacks reach the sessions through this one owner.
+pub(crate) static ASIO_HOST: AsioHost = AsioHost::new();
 
 /// Publishes a context for the driver callbacks.  The box stays alive until
 /// [`CallbackRegistration::clear`] runs after the driver has stopped.
 pub(crate) struct CallbackRegistration {
+    host: &'static AsioHost,
     slot: AsioCallbackSlot,
     pointer: *mut AsioCallbackContext,
     signal: Arc<AsioSignal>,
+    /// The host's reset count when this session was installed.  A reset that
+    /// arrived earlier belongs to whoever held the slot then, not here.
+    resets_seen: AtomicU64,
 }
 
 impl CallbackRegistration {
     pub(crate) fn install(
+        host: &'static AsioHost,
         slot: AsioCallbackSlot,
         context: Box<AsioCallbackContext>,
         signal: Arc<AsioSignal>,
     ) -> Result<Self, String> {
+        // Baselines are read before the CAS, so a reset raised while this
+        // install runs is still pending for the session that takes the slot.
+        let resets_seen = host.reset_count();
         let pointer = Box::into_raw(context);
-        match slot.pointer().compare_exchange(
+        match host.slot(slot).compare_exchange(
             ptr::null_mut(),
             pointer,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
             Ok(_) => Ok(Self {
+                host,
                 slot,
                 pointer,
                 signal,
+                resets_seen: AtomicU64::new(resets_seen),
             }),
             Err(_) => {
                 // Another session still owns this callback slot.  Its context
@@ -295,6 +333,19 @@ impl CallbackRegistration {
 
     pub(crate) fn signal(&self) -> &AsioSignal {
         &self.signal
+    }
+
+    /// Whether a driver reset arrived since this session was installed or
+    /// since the last call.  Consumes the reset, so one bump ends one wait.
+    /// Only the bridge's own waiter calls it, so this is a per-session latch
+    /// rather than a queue several threads drain.
+    pub(crate) fn take_reset(&self) -> bool {
+        let now = self.host.reset_count();
+        if now == self.resets_seen.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.resets_seen.store(now, Ordering::SeqCst);
+        true
     }
 
     /// Detaches the slot without freeing the context.  Used when the driver
@@ -313,8 +364,8 @@ impl CallbackRegistration {
             return;
         }
         if self
-            .slot
-            .pointer()
+            .host
+            .slot(self.slot)
             .compare_exchange(
                 pointer,
                 ptr::null_mut(),
@@ -334,7 +385,7 @@ impl Drop for CallbackRegistration {
         // a later bridge can start, but never free a context that a callback
         // might still be using.
         if !self.pointer.is_null() {
-            let _ = self.slot.pointer().compare_exchange(
+            let _ = self.host.slot(self.slot).compare_exchange(
                 self.pointer,
                 ptr::null_mut(),
                 Ordering::AcqRel,
@@ -362,12 +413,12 @@ pub(crate) enum CallbackWait {
 /// request).  When `tick` returns `true` it blocked this thread inside the
 /// driver's panel, and that wait is not counted as a missing callback.
 pub(crate) fn wait_for_callbacks(
-    signal: &AsioSignal,
+    registration: &CallbackRegistration,
     mut stopped: impl FnMut() -> bool,
     mut tick: impl FnMut() -> bool,
 ) -> CallbackWait {
+    let signal = registration.signal();
     let mut last_count = 0;
-    let resets = RESET_REQUESTS.load(Ordering::Relaxed);
     let mut last_callback = Instant::now();
     loop {
         let blocked = tick();
@@ -377,7 +428,9 @@ pub(crate) fn wait_for_callbacks(
         if signal.failed.load(Ordering::Relaxed) {
             return CallbackWait::Failed;
         }
-        if RESET_REQUESTS.load(Ordering::Relaxed) != resets {
+        // Consumes the bump: a reset raised before this wait started, even
+        // one in the install-to-wait gap, ends this wait exactly once.
+        if registration.take_reset() {
             return CallbackWait::Reset;
         }
         let count = signal.callbacks.load(Ordering::Relaxed);
@@ -397,10 +450,11 @@ pub(crate) fn wait_for_callbacks(
     }
 }
 
-/// Dispatches one input-side buffer switch.  The load is acquire; the context
-/// is only cleared after the driver stopped, so a non-null pointer is valid.
-pub(crate) fn dispatch_input(buffer_index: c_long) {
-    let pointer = INPUT_CONTEXT.load(Ordering::Acquire);
+/// Dispatches one buffer switch through the installed context of `slot`.  The
+/// load is acquire; the context is only cleared after the driver stopped, so a
+/// non-null pointer is valid.
+fn dispatch(slot: &AtomicPtr<AsioCallbackContext>, buffer_index: c_long) {
+    let pointer = slot.load(Ordering::Acquire);
     if pointer.is_null() {
         return;
     }
@@ -408,12 +462,12 @@ pub(crate) fn dispatch_input(buffer_index: c_long) {
     unsafe { (*pointer).dispatch(buffer_index) };
 }
 
+pub(crate) fn dispatch_input(buffer_index: c_long) {
+    dispatch(ASIO_HOST.slot(AsioCallbackSlot::Input), buffer_index);
+}
+
 pub(crate) fn dispatch_output(buffer_index: c_long) {
-    let pointer = OUTPUT_CONTEXT.load(Ordering::Acquire);
-    if pointer.is_null() {
-        return;
-    }
-    unsafe { (*pointer).dispatch(buffer_index) };
+    dispatch(ASIO_HOST.slot(AsioCallbackSlot::Output), buffer_index);
 }
 
 #[cfg(test)]

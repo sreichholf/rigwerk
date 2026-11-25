@@ -10,7 +10,7 @@ use crate::audio::types::{OutputMode, StartConfig};
 
 use super::callback::{
     wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioSignal, CallbackRegistration,
-    CallbackWait, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
+    CallbackWait, ASIO_HOST, CALLBACK_PANIC_MESSAGE, DRIVER_RESET_MESSAGE,
 };
 use super::output::silence_asio_output;
 use super::panel::service_asio_panel;
@@ -132,14 +132,18 @@ pub(crate) fn run_asio_duplex_bridge(
     )
     .with_input(input_buffers.to_vec(), input_types)
     .with_output(output_buffers.to_vec(), output_types, output_state);
-    let registration =
-        match CallbackRegistration::install(AsioCallbackSlot::Input, Box::new(context), signal) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let _ = driver.dispose_buffers();
-                return Err(format!("ASIO callbacks: {error}"));
-            }
-        };
+    let registration = match CallbackRegistration::install(
+        &ASIO_HOST,
+        AsioCallbackSlot::Input,
+        Box::new(context),
+        signal,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let _ = driver.dispose_buffers();
+            return Err(format!("ASIO callbacks: {error}"));
+        }
+    };
 
     if let Err(error) = driver.start() {
         let _ = driver.stop();
@@ -157,7 +161,7 @@ pub(crate) fn run_asio_duplex_bridge(
     let mut extra_outputs =
         crate::audio::extra_output::ExtraOutputOutputs::new(config.output_buffer, rate);
     let wait = wait_for_callbacks(
-        registration.signal(),
+        &registration,
         || stop.load(Ordering::Relaxed),
         || {
             extra_outputs.sync(&shared);

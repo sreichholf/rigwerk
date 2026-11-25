@@ -29,11 +29,12 @@ use ::vst3::Steinberg::{kNotImplemented, kResultOk, IBStream, IPlugView, IPlugin
 use ::vst3::{ComPtr, ComWrapper};
 
 use crate::audio::plugins::host::{
-    apply_vst3_edits, drain_vst3_reported, finish_capture, resume_or_log, HostIo, PluginHostUi,
+    apply_vst3_edits, drain_vst3_reported, drive_pause_or_fail, finish_capture, resume_or_log,
+    HostIo, PluginHostUi,
 };
 use crate::audio::plugins::{
-    drive_pause, merge_synced_params, param_transfer, Capture, ParamIds, ParamOut, ParamReceiver,
-    PauseStep, PluginParamView, PluginShared, ProcessFailure, Restore, StateSave, MAX_BLOCK,
+    merge_synced_params, param_transfer, Capture, ParamIds, ParamOut, ParamReceiver, PauseStep,
+    PluginParamView, PluginShared, ProcessFailure, Restore, StateSave, MAX_BLOCK,
 };
 
 use super::connection::Connection;
@@ -897,19 +898,21 @@ impl PluginHostUi for Vst3Controller {
             }
         }
         self.reactivate |= flags & LATENCY_CHANGED != 0;
-        if (self.reactivate || io.pause_wait.is_some())
-            && drive_pause(&io.shared.pause, io.pause_wait, || self.stop_processing())
-                == PauseStep::Ready
-        {
-            // A flag `setActive` raises itself waits for the next frame.
-            if std::mem::take(&mut self.reactivate) && !self.reactivate() {
-                // Left paused: an inactive plugin must not process.
-                io.shared.fail(ProcessFailure::Vst3Inactive);
-                changed = true;
-            }
-            // Never resume an inactive plugin, or restart a failed one.
-            if self.is_active() && io.shared.failure().is_none() {
-                resume_or_log(&io.shared.pause);
+        if io.shared.failure().is_none() && (self.reactivate || io.pause_wait.is_some()) {
+            let step = drive_pause_or_fail(io, || self.stop_processing());
+            // The failure text is new: republish so the effect shows it.
+            changed |= step == PauseStep::Stranded;
+            if step == PauseStep::Ready {
+                // A flag `setActive` raises itself waits for the next frame.
+                if std::mem::take(&mut self.reactivate) && !self.reactivate() {
+                    // Left paused: an inactive plugin must not process.
+                    io.shared.fail(ProcessFailure::Vst3Inactive);
+                    changed = true;
+                }
+                // Never resume an inactive plugin, or restart a failed one.
+                if self.is_active() && io.shared.failure().is_none() {
+                    resume_or_log(&io.shared.pause);
+                }
             }
         }
         changed

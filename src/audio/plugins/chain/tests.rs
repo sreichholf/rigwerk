@@ -2,12 +2,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::super::model::ChainModel;
-#[cfg(debug_assertions)]
+use super::super::slot::SlotPark;
 use super::release_slot;
 use super::{ChainRuntime, RETURN_QUEUE};
 
 fn model() -> ChainModel {
-    ChainModel::new(48_000, Arc::new(AtomicBool::new(false)))
+    ChainModel::new(48_000, Arc::new(AtomicBool::new(false)), SlotPark::new())
 }
 
 fn names(runtime: &ChainRuntime) -> Vec<String> {
@@ -31,7 +31,12 @@ fn a_home_hands_its_runtime_to_one_holder_at_a_time() {
     drop(lease);
     let again = home.take().expect("parked again by the lease");
     assert!(!again.is_from(
-        &super::super::model::ChainModel::new(48_000, Arc::new(AtomicBool::new(false))).home()
+        &super::super::model::ChainModel::new(
+            48_000,
+            Arc::new(AtomicBool::new(false)),
+            SlotPark::new(),
+        )
+        .home()
     ));
 }
 
@@ -141,6 +146,64 @@ fn a_replace_keeps_the_controls_and_a_new_rate_reaches_the_runtime() {
     assert_eq!(runtime.slot_mut_for_test(0).controls.mix(), 0.25);
 }
 
+/// A stranded slot's plugin is still inside `process`: releasing the slot
+/// must leak it, never drop it (a drop would stop and destroy the plugin
+/// under the call that never returned).
+#[test]
+fn a_stranded_slot_is_leaked_by_release() {
+    use super::super::slot::Slot;
+
+    let park = SlotPark::new();
+    let slot = Slot::stranded_for_test();
+    let controls = Arc::clone(&slot.controls);
+    release_slot(Box::new(slot), &park);
+    assert_eq!(
+        Arc::strong_count(&controls),
+        2,
+        "the leaked slot still holds its controls"
+    );
+    assert_eq!(park.len(), 0, "a stranded slot is never deferred");
+}
+
+/// The leak branch does not invert: a slot whose plugin is not stranded is
+/// still destroyed by the same release path.
+#[test]
+fn a_healthy_slot_is_destroyed_by_release() {
+    use super::super::slot::Slot;
+
+    let _main = crate::audio::claim_main_thread();
+    let park = SlotPark::new();
+    let slot = Slot::empty(super::PluginPref::default());
+    let controls = Arc::clone(&slot.controls);
+    release_slot(Box::new(slot), &park);
+    assert_eq!(
+        Arc::strong_count(&controls),
+        1,
+        "the healthy slot was destroyed"
+    );
+}
+
+/// A stranded slot a bridge deferred anyway reaches the park's drain, which
+/// must leak it too rather than destroy it under the stuck call.
+#[test]
+fn a_stranded_slot_is_leaked_when_the_park_drains() {
+    use super::super::slot::Slot;
+
+    let _main = crate::audio::claim_main_thread();
+    let park = SlotPark::new();
+    let slot = Slot::stranded_for_test();
+    let controls = Arc::clone(&slot.controls);
+    park.defer(vec![slot]);
+    assert_eq!(park.len(), 1);
+    park.drain();
+    assert_eq!(park.len(), 0, "the drain ran");
+    assert_eq!(
+        Arc::strong_count(&controls),
+        2,
+        "the drained slot is leaked, not destroyed"
+    );
+}
+
 /// A slot released inside a callback would destroy a plugin or take the
 /// deferred-slot lock on the audio thread: the last owner is the UI thread
 /// or the bridge, and a debug build asserts that at the one choke point.
@@ -151,6 +214,10 @@ fn releasing_a_slot_inside_a_callback_is_caught() {
     use super::super::super::rt_guard::RtGuard;
     use super::super::slot::Slot;
 
+    // The counted slot is created and dropped on this thread: keeping other
+    // counted tests off it means the counter only moves for this case.
+    let _main = crate::audio::claim_main_thread();
+    let park = SlotPark::new();
     let _guard = RtGuard::enter();
-    release_slot(Box::new(Slot::tracked_for_test()));
+    release_slot(Box::new(Slot::tracked_for_test()), &park);
 }

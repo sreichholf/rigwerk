@@ -24,6 +24,15 @@ use std::time::{Duration, Instant};
 /// one and its pause goes through the audio side's stop call.
 pub(crate) const PAUSE_STALL: Duration = Duration::from_millis(500);
 
+/// How long a pause may stay unconfirmed before it is taken to be stranded:
+/// four times [`PAUSE_STALL`].  A plugin hung inside `process` never drops
+/// its [`BlockGuard`], so [`PauseHandshake::quiet`] never turns true and the
+/// effect would stay "paused" forever.  Four stalls give a stream that
+/// stopped and restarted a few times, or a large buffer, plenty of room; a
+/// block held past that is treated as stranded, whether it is a hang, a
+/// debugger stop on the audio thread or severe preemption.
+pub(crate) const PAUSE_STRANDED: Duration = Duration::from_secs(2);
+
 /// Processing as usual.
 const RUNNING: u8 = 0;
 /// The UI asked for a pause; the audio side has not seen it yet.
@@ -106,7 +115,9 @@ pub(crate) enum BlockAction {
 /// The processor's `&mut`, held by whoever holds the chain's runtime, gives
 /// that.  A guard
 /// kept too long, or leaked, only keeps a pause from finishing (`quiet`
-/// stays false); it never makes one unsafe.
+/// stays false); it never makes one unsafe.  A pause that stays unquiet for
+/// [`PAUSE_STRANDED`] is taken to be stranded: it is marked (see
+/// [`Self::stranded`]) and the effect fails instead of waiting forever.
 pub(crate) struct PauseHandshake {
     state: AtomicU8,
     paused_blocks: AtomicU64,
@@ -121,6 +132,10 @@ pub(crate) struct PauseHandshake {
     /// UI side: set by [`Self::force`], cleared by the [`Self::quiet`] that
     /// follows it.  [`Self::resume`] refuses while it is set.
     forced: AtomicBool,
+    /// UI side: set by [`drive_pause`] when a pause stayed unquiet for
+    /// [`PAUSE_STRANDED`].  Never cleared: a plugin that never returned
+    /// from `process` is never trusted again.
+    stranded: AtomicBool,
 }
 
 /// One block of the audio side, from [`PauseHandshake::begin_block`].
@@ -158,6 +173,7 @@ impl PauseHandshake {
             processing: AtomicBool::new(false),
             served: AtomicU64::new(0),
             forced: AtomicBool::new(false),
+            stranded: AtomicBool::new(false),
         }
     }
 
@@ -282,6 +298,21 @@ impl PauseHandshake {
         self.served.load(Ordering::Relaxed)
     }
 
+    /// Whether a pause was stranded: a block has been inside the plugin for
+    /// [`PAUSE_STRANDED`] and the plugin no longer processes audio.  Set
+    /// once and never cleared; a plugin that never returned from `process`
+    /// is never driven again, and the slot that holds it is never
+    /// destroyed.
+    pub(crate) fn stranded(&self) -> bool {
+        self.stranded.load(Ordering::Acquire)
+    }
+
+    /// UI side, once: marks the pause stranded.  The processor is still
+    /// inside `process`, so no processor call follows.
+    fn mark_stranded(&self) {
+        self.stranded.store(true, Ordering::Release);
+    }
+
     /// Audio side, at the start of every block.  Hold the guard until the
     /// block is done with the plugin.
     pub(crate) fn begin_block(&self) -> BlockGuard<'_> {
@@ -351,6 +382,11 @@ pub(crate) enum PauseStep {
     /// Stopped, and no block is inside the plugin: do the work, then
     /// [`PauseHandshake::resume`], which succeeds from here.
     Ready,
+    /// A block has been inside the plugin for [`PAUSE_STRANDED`] and never
+    /// came out: the plugin is hung in `process`.  The handshake is marked
+    /// stranded and stays so; the caller fails the effect.  No stop call
+    /// was made and none may be.
+    Stranded,
 }
 
 /// UI side: one frame of a pause the UI wants, for any format.  `wait`
@@ -363,13 +399,23 @@ pub(crate) enum PauseStep {
 /// Otherwise the audio side's next block makes the stop call.  Once
 /// [`PauseHandshake::quiet`], `stop` runs if the plugin is still
 /// processing: the stop call the audio side did not make.
+///
+/// A pause that stays unquiet for [`PAUSE_STRANDED`], counted from the last
+/// served block or the request, is [`PauseStep::Stranded`]: the plugin is
+/// still inside `process` and never drops its guard.  The handshake is
+/// marked stranded and the wait cleared; every later call returns
+/// [`PauseStep::Stranded`] at once, even after a late `quiet`.
 pub(crate) fn drive_pause(
     pause: &PauseHandshake,
     wait: &mut Option<(Instant, u64)>,
     stop: impl FnOnce(),
 ) -> PauseStep {
+    if pause.stranded() {
+        return PauseStep::Stranded;
+    }
     let now = Instant::now();
     let served = pause.served();
+    let mut waiting_since = None;
     let stalled = match *wait {
         None => {
             pause.request();
@@ -380,12 +426,25 @@ pub(crate) fn drive_pause(
             *wait = Some((now, served));
             false
         }
-        Some((since, _)) => now.duration_since(since) >= PAUSE_STALL,
+        Some((since, _)) => {
+            waiting_since = Some(since);
+            now.duration_since(since) >= PAUSE_STALL
+        }
     };
     if stalled || !pause.processing() {
         pause.force();
     }
     if !pause.quiet() {
+        // Nothing served a block and no stop call confirmed the pause for
+        // the whole stranded deadline: the block inside the plugin is not
+        // coming out.
+        let stranded =
+            waiting_since.is_some_and(|since| now.duration_since(since) >= PAUSE_STRANDED);
+        if stranded {
+            pause.mark_stranded();
+            *wait = None;
+            return PauseStep::Stranded;
+        }
         return PauseStep::Waiting;
     }
     if pause.take_processing() {

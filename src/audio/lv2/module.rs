@@ -3,8 +3,9 @@
 //! A bundle names one binary per platform, and that binary may hold several
 //! plugin descriptors.  The OS shares one copy of a library between every
 //! `dlopen`/`LoadLibrary` of it, and a binary expects its global state to be
-//! set up once, so every instance and scan of one binary shares a single
-//! [`Lv2Module`] through the [`ModuleRegistry`], keyed by the canonical path.
+//! set up once, so every instance of one binary shares a single [`Lv2Module`]
+//! through the [`ModuleRegistry`], keyed by the canonical path.  Nothing else
+//! opens a binary: the scan (`scan`) reads the Turtle only.
 //!
 //! A library exports `lv2_lib_descriptor`, `lv2_descriptor` or both.  As in
 //! lilv, `lv2_lib_descriptor(bundle_path, features)` is tried first and its
@@ -12,10 +13,18 @@
 //! descriptor gets an empty feature array, since the host's features belong
 //! to one instance and the library outlives it, and its `cleanup` runs when
 //! the module drops, before the library unloads.  The last [`ModuleHandle`]
-//! removes the module and unloads the library under the registry lock, after
-//! the instances that used it have called `cleanup`.  The lock is only taken on the UI and scan
-//! threads; the audio callback never drops the last reference to a plugin,
-//! because the chain runtime hands every slot it lets go of back to the UI.
+//! runs that `cleanup` and unloads the library under the module's own entry
+//! lock, after the instances that used it are gone.
+//!
+//! The registry map's lock only guards the lookup and the insert, so a slow
+//! load of one binary never blocks a load of another.  Entries are never
+//! removed: the entry outlives its module, so a waiter always waits in the
+//! entry the loader or the last release is using, and one binary is never
+//! opened twice at once.  One `PathBuf` and one mutex per binary ever loaded
+//! is the accepted cost.  Both locks are taken only where a module is loaded
+//! or released, which in the app is the UI thread: the audio callback never
+//! drops the last reference to a plugin, because the chain runtime hands
+//! every slot it lets go of back to the UI.
 //!
 //! [`native_binary`] turns a plugin's `lv2:binary` into the path of the
 //! binary this build can open.  A bundle may list several (one per
@@ -151,64 +160,105 @@ impl Lv2Module {
     }
 }
 
-/// The process-wide table of loaded LV2 modules, keyed by the canonical path
-/// of the binary.  One lock covers every module, so a slow library load of
-/// one module delays loads of others until it finishes; loads are rare and
-/// happen off the audio thread, so this is accepted for the simpler
-/// guarantee that no unload races a load of the same file.
-struct ModuleRegistry {
-    modules: Mutex<BTreeMap<PathBuf, Arc<Lv2Module>>>,
+/// The process-wide table of module entries, keyed by the canonical path of
+/// the binary.  The map's lock only guards the lookup and the insert; each
+/// path has its own entry, whose lock is held across that module's load and
+/// across its cleanup and unload, so a slow load of one module never blocks a
+/// load of another.
+///
+/// An entry is never removed.  It outlives the module it opened, so a waiter
+/// always waits in the entry the loader or the last release is using: one
+/// binary is never opened twice at once, and no unload races a load of it.
+pub(super) struct ModuleRegistry {
+    modules: Mutex<BTreeMap<PathBuf, Arc<ModuleEntry>>>,
+}
+
+/// One canonical binary path's share of the registry: its loaded module and
+/// how many handles hold it.  The lock is held across that module's load and
+/// across its cleanup and unload, so those never overlap.
+struct ModuleEntry {
+    state: Mutex<EntryState>,
+}
+
+/// What one [`ModuleEntry`] holds.  `module` stays `None` after a failed
+/// `open`, so the empty entry is reused and the next acquire retries in
+/// place.
+struct EntryState {
+    module: Option<Arc<Lv2Module>>,
+    /// The live [`ModuleHandle`]s for `module`.
+    users: usize,
 }
 
 /// The registry every load goes through.
 static MODULES: ModuleRegistry = ModuleRegistry::new();
 
+impl ModuleEntry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, EntryState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 impl ModuleRegistry {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             modules: Mutex::new(BTreeMap::new()),
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PathBuf, Arc<Lv2Module>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PathBuf, Arc<ModuleEntry>>> {
         self.modules
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The entry for `key`, inserting an empty one when the table has none.
+    /// The map's lock is released before the entry's is taken.
+    fn entry(&self, key: &Path) -> Arc<ModuleEntry> {
+        let mut modules = self.lock();
+        Arc::clone(modules.entry(key.to_path_buf()).or_insert_with(|| {
+            Arc::new(ModuleEntry {
+                state: Mutex::new(EntryState {
+                    module: None,
+                    users: 0,
+                }),
+            })
+        }))
+    }
+
     /// Hands out the module stored under `key`, opening it with `open` first
-    /// when no one is using it.  A module whose `open` fails is not stored,
-    /// so the next acquire tries again.
-    fn acquire(
-        &'static self,
+    /// when it is not loaded.  A module whose `open` fails is not stored, so
+    /// the next acquire tries again in place.
+    pub(super) fn acquire(
+        &self,
         key: PathBuf,
         open: impl FnOnce() -> Result<Lv2Module, String>,
     ) -> Result<ModuleHandle, String> {
-        let mut modules = self.lock();
-        if let Some(module) = modules.get(&key) {
-            let module = Arc::clone(module);
+        let entry = self.entry(&key);
+        let mut state = entry.lock();
+        if let Some(module) = state.module.as_ref().map(Arc::clone) {
+            state.users += 1;
             return Ok(ModuleHandle {
-                registry: self,
-                key,
+                entry: Arc::clone(&entry),
                 module: Some(module),
             });
         }
         let module = Arc::new(open()?);
-        modules.insert(key.clone(), Arc::clone(&module));
+        state.module = Some(Arc::clone(&module));
+        state.users = 1;
         Ok(ModuleHandle {
-            registry: self,
-            key,
+            entry: Arc::clone(&entry),
             module: Some(module),
         })
     }
 }
 
 /// One user's share of an [`Lv2Module`].  Handles are never cloned; each one
-/// comes from [`acquire_module`].  Dropping the last one removes the module
-/// and unloads its library, under the registry lock.
+/// comes from [`acquire_module`].  Dropping the last one runs the library's
+/// `cleanup` and unloads it, under that module's entry lock.
 pub(super) struct ModuleHandle {
-    registry: &'static ModuleRegistry,
-    key: PathBuf,
+    entry: Arc<ModuleEntry>,
     /// Always `Some` until `drop`.
     module: Option<Arc<Lv2Module>>,
 }
@@ -226,23 +276,19 @@ impl Drop for ModuleHandle {
         let Some(module) = self.module.take() else {
             return;
         };
-        let mut modules = self.registry.lock();
-        // Every reference is created (`acquire`) and released (here) under
-        // the lock, so the count is stable while it is held: two references
-        // (the table's and this one) mean this is the last user.
-        let last = Arc::strong_count(&module) == 2;
-        let stored = if last {
-            let stored = modules.remove(&self.key);
-            debug_assert!(stored
-                .as_ref()
-                .is_some_and(|stored| Arc::ptr_eq(stored, &module)));
-            stored
-        } else {
-            None
-        };
+        let mut state = self.entry.lock();
+        state.users -= 1;
+        if state.users == 0 {
+            // This handle and the entry's `Option` are the only references
+            // left, so this handle holds the last one.  The entry's share goes
+            // first and the drop below then runs the library's `cleanup` and
+            // the unload here, under the entry lock the next acquire of it
+            // needs.
+            debug_assert_eq!(Arc::strong_count(&module), 2);
+            state.module = None;
+        }
         drop(module);
-        // On the last release the library unloads here, still under the lock.
-        drop(stored);
+        drop(state);
     }
 }
 

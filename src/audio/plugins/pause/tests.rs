@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{drive_pause, BlockAction, PauseHandshake, PauseStep, PAUSE_STALL};
+use super::{drive_pause, BlockAction, PauseHandshake, PauseStep, PAUSE_STALL, PAUSE_STRANDED};
 
 /// One whole block: begin it, return its action, end it.
 fn block(pause: &PauseHandshake) -> BlockAction {
@@ -393,6 +393,79 @@ fn a_pause_after_the_stream_stopped_is_forced_after_the_stall() {
     assert_eq!(block(&pause), BlockAction::Skip);
     assert!(pause.resume());
     assert_eq!(block(&pause), BlockAction::Start);
+}
+
+#[test]
+fn a_pause_that_stays_unquiet_is_stranded_after_the_deadline() {
+    // A block is inside the plugin and never comes out: a plugin hung in
+    // `process`.
+    let pause = Arc::new(running());
+    let (entered, was_entered) = std::sync::mpsc::channel();
+    let release = Arc::new(AtomicBool::new(false));
+    let audio = {
+        let pause = Arc::clone(&pause);
+        let release = Arc::clone(&release);
+        std::thread::spawn(move || {
+            let block = pause.begin_block();
+            assert_eq!(block.action(), BlockAction::Process);
+            entered.send(()).expect("the block began");
+            while !release.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
+            drop(block);
+        })
+    };
+    was_entered.recv().expect("the block began");
+
+    let stops = AtomicU64::new(0);
+    let mut wait = None;
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    // The deadline is seeded, not slept: the wait runs since the request.
+    let (_, served) = wait.expect("waiting");
+    let long_ago = Instant::now().checked_sub(PAUSE_STRANDED).expect("uptime");
+    wait = Some((long_ago, served));
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Stranded);
+    assert!(pause.stranded());
+    assert_eq!(wait, None, "the wait is dropped");
+    assert_eq!(
+        stops.load(Ordering::Relaxed),
+        0,
+        "no stop call under the running one"
+    );
+
+    // A late quiet does not resume it: the plugin is never trusted again.
+    release.store(true, Ordering::Relaxed);
+    audio.join().expect("audio thread");
+    assert!(pause.quiet());
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Stranded);
+    assert!(pause.stranded());
+    assert_eq!(
+        stops.load(Ordering::Relaxed),
+        0,
+        "a stranded pause drives nothing"
+    );
+}
+
+#[test]
+fn a_pause_unquiet_for_less_than_the_deadline_only_waits() {
+    let pause = running();
+    pause.request();
+    let stop = pause.begin_block();
+    assert_eq!(stop.action(), BlockAction::Stop);
+    pause.stopped();
+    let stops = AtomicU64::new(0);
+    let mut wait = None;
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    let (_, served) = wait.expect("waiting");
+    let recently = Instant::now()
+        .checked_sub(PAUSE_STRANDED / 2)
+        .expect("uptime");
+    wait = Some((recently, served));
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
+    assert!(!pause.stranded());
+    drop(stop);
+    assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Ready);
+    assert_eq!(stops.load(Ordering::Relaxed), 0, "the block stopped it");
 }
 
 #[test]

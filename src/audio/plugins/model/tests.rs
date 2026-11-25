@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use super::super::chain::MAX_EFFECTS;
 use super::super::pref::PluginPref;
-use super::super::slot::Slot;
+use super::super::slot::{Slot, SlotPark};
 use super::ChainModel;
 
 fn model() -> ChainModel {
-    ChainModel::new(48_000, Arc::new(AtomicBool::new(false)))
+    ChainModel::new(48_000, Arc::new(AtomicBool::new(false)), SlotPark::new())
 }
 
 fn pref(index: usize) -> PluginPref {
@@ -20,7 +20,7 @@ fn pref(index: usize) -> PluginPref {
 #[test]
 fn a_rate_of_zero_is_48_khz() {
     assert_eq!(
-        ChainModel::new(0, Arc::new(AtomicBool::new(false))).rate(),
+        ChainModel::new(0, Arc::new(AtomicBool::new(false)), SlotPark::new()).rate(),
         48_000
     );
 }
@@ -85,7 +85,8 @@ fn restored_slots_are_unopened_until_a_reload_opens_them() {
     assert_eq!(plan.previous_rate, 48_000);
     assert!(plan.requested.is_empty());
     // A rate change with nothing to open only moves the rate.
-    let mut empty = super::ChainModel::new(48_000, Arc::new(AtomicBool::new(false)));
+    let mut empty =
+        super::ChainModel::new(48_000, Arc::new(AtomicBool::new(false)), SlotPark::new());
     assert!(empty.reload_plan(44_100).is_none());
     assert_eq!(empty.rate(), 44_100);
     drop(model.flush());

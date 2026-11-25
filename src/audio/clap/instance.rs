@@ -32,12 +32,13 @@ use clap_sys::string_sizes::CLAP_NAME_SIZE;
 use clap_sys::version::CLAP_VERSION;
 
 use crate::audio::plugins::host::{
-    apply_reported, drain_reported, finish_capture, resume_or_log, HostIo, PluginHostUi,
+    apply_reported, drain_reported, drive_pause_or_fail, finish_capture, resume_or_log, HostIo,
+    PluginHostUi,
 };
 use crate::audio::plugins::{
-    drive_pause, param_transfer, AudioThreadScope, Capture, ClapFailure, ParamIds, ParamOut,
-    ParamReceiver, PauseStep, PluginParamView, PluginShared, ProcessFailure, Restore, Retry,
-    StateSave, RESTART_ACTIVATION,
+    param_transfer, AudioThreadScope, Capture, ClapFailure, ParamIds, ParamOut, ParamReceiver,
+    PauseStep, PluginParamView, PluginShared, ProcessFailure, Restore, Retry, StateSave,
+    RESTART_ACTIVATION,
 };
 
 use super::gui::{choose_editor_api, session_candidates, EditorApi};
@@ -778,10 +779,7 @@ impl ClapInstance {
             && !shared.restart_pending()
             && self.can_flush()
             && !io.out.has_queued();
-        if direct
-            && drive_pause(&shared.pause, io.pause_wait, || self.stop_processing())
-                == PauseStep::Ready
-        {
+        if direct && drive_pause_or_fail(io, || self.stop_processing()) == PauseStep::Ready {
             // What the last blocks reported is older than this flush.
             drain_reported(io.from_audio, io.ids, io.views, |id, value| {
                 self.display_for(id, value)
@@ -863,28 +861,32 @@ impl PluginHostUi for ClapInstance {
             });
         }
         let flush_wanted = self.flush_requested() && !io.shared.pause.processing();
-        if (io.shared.restart_pending() || io.pause_wait.is_some() || flush_wanted)
-            && drive_pause(&io.shared.pause, io.pause_wait, || self.stop_processing())
-                == PauseStep::Ready
+        if io.shared.failure().is_none()
+            && (io.shared.restart_pending() || io.pause_wait.is_some() || flush_wanted)
         {
-            if io.shared.take_restart() & RESTART_ACTIVATION != 0 && !self.restart() {
-                // Left paused: an inactive plugin must not start again.
-                io.shared.fail(ProcessFailure::Clap(ClapFailure::NotActive));
-                changed = true;
-            }
-            if self.is_active() && self.take_flush_request() {
-                // Quiet: what the last blocks reported is older.
-                changed |= drain_reported(io.from_audio, io.ids, io.views, |id, value| {
-                    self.display_for(id, value)
-                });
-                let reported = self.flush_values(&[]);
-                changed |= apply_reported(io.ids, io.views, &reported, |id, value| {
-                    self.display_for(id, value)
-                });
-            }
-            // Never resume an inactive plugin, or restart a failed one.
-            if self.is_active() && io.shared.failure().is_none() {
-                resume_or_log(&io.shared.pause);
+            let step = drive_pause_or_fail(io, || self.stop_processing());
+            // The failure text is new: republish so the effect shows it.
+            changed |= step == PauseStep::Stranded;
+            if step == PauseStep::Ready {
+                if io.shared.take_restart() & RESTART_ACTIVATION != 0 && !self.restart() {
+                    // Left paused: an inactive plugin must not start again.
+                    io.shared.fail(ProcessFailure::Clap(ClapFailure::NotActive));
+                    changed = true;
+                }
+                if self.is_active() && self.take_flush_request() {
+                    // Quiet: what the last blocks reported is older.
+                    changed |= drain_reported(io.from_audio, io.ids, io.views, |id, value| {
+                        self.display_for(id, value)
+                    });
+                    let reported = self.flush_values(&[]);
+                    changed |= apply_reported(io.ids, io.views, &reported, |id, value| {
+                        self.display_for(id, value)
+                    });
+                }
+                // Never resume an inactive plugin, or restart a failed one.
+                if self.is_active() && io.shared.failure().is_none() {
+                    resume_or_log(&io.shared.pause);
+                }
             }
         }
         self.reread_latency_if_changed();

@@ -77,7 +77,7 @@ use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::nam::{NamCommand, NamPark, NamPending, NamStack, PreparedNam};
 use super::output_map::level_gain;
-use super::plugins::{ChainHome, ChainModel, PluginView, SlotLink};
+use super::plugins::{ChainHome, ChainModel, PluginView, SlotLink, SlotPark};
 
 mod plugins;
 
@@ -467,8 +467,8 @@ pub(crate) struct PathControls {
     ///
     /// Declared before `chain_home` on purpose: fields drop in order, so
     /// these extra references are gone before the runtime hands its slots
-    /// to the deferred queue, and the main thread's drain is always the
-    /// last owner.
+    /// to the engine's slot park, which outlives this run and drains them on
+    /// the main thread.
     pub(super) slot_links: Mutex<Arc<[SlotLink]>>,
     /// The effect views the UI draws.  Republished by every chain edit, and
     /// read without the model lock.  The audio thread never takes this lock,
@@ -488,6 +488,10 @@ pub(crate) struct PathControls {
     pub(super) chain: Mutex<ChainModel>,
     /// Where the chain's runtime waits while no audio thread holds it.
     chain_home: Arc<ChainHome>,
+    /// Where a slot an edit let go of is released when this is not the
+    /// thread that may destroy plugins.  Shared with the engine, so the park
+    /// outlives the run.
+    slot_park: Arc<SlotPark>,
     /// The chain's total latency, read by the mixer.  The runtime's holder
     /// stores it at the start of every block; a chain edit stores the total
     /// of its links.
@@ -548,20 +552,25 @@ pub(crate) struct PathControls {
 }
 
 impl PathControls {
-    /// A path with its own park.  Tests that never queue a model use this;
-    /// a run shares one park via [`Self::with_park`].
+    /// A path with its own parks.  Tests that never queue a model use this;
+    /// a run shares one park each via [`Self::with_park`].
     #[cfg(test)]
     pub(crate) fn new(sample_rate: u32) -> Self {
-        Self::with_park(sample_rate, NamPark::new(), CabPark::new())
+        Self::with_park(sample_rate, NamPark::new(), CabPark::new(), SlotPark::new())
     }
 
     pub(crate) fn with_park(
         sample_rate: u32,
         nam_park: Arc<NamPark>,
         cab_park: Arc<CabPark>,
+        slot_park: Arc<SlotPark>,
     ) -> Self {
         let chain_bypass = Arc::new(AtomicBool::new(false));
-        let chain = ChainModel::new(sample_rate, Arc::clone(&chain_bypass));
+        let chain = ChainModel::new(
+            sample_rate,
+            Arc::clone(&chain_bypass),
+            Arc::clone(&slot_park),
+        );
         Self {
             routes: [
                 AtomicBool::new(true),
@@ -604,6 +613,7 @@ impl PathControls {
             chain_unopened: AtomicBool::new(false),
             chain_home: chain.home(),
             chain: Mutex::new(chain),
+            slot_park,
             latency: AtomicU32::new(0),
             path_latency: AtomicU32::new(0),
             chain_bypass,

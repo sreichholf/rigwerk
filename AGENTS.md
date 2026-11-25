@@ -314,6 +314,15 @@ This applies to an input callback, an output callback, an ASIO
   (`plugins/chain.rs`) and applies the commands the UI's model queued
   at the start of a block.  A slot it lets go of goes back through the
   return queue: the audio side never destroys one.
+- The deferred slot queue and the parks belong to the engine (one set per
+  engine, shared by every run it starts), not to a static, so a stopped
+  drain cannot leak or block another engine.  `release_slot` is the one
+  teardown path for a slot that may have run; a slot built but never run is
+  dropped directly.  A stranded slot (a pause that stayed unquiet for
+  `PAUSE_STRANDED`, so a block never came out of `process`) is leaked by
+  `release_slot` and by the park's drain and drop, on any thread: no
+  processor call follows it.  Never destroy, stop or deactivate a plugin
+  under a call that never returned.
 - Plugin instances have no lock the callback takes.  The chain's slot
   owns each plugin's processor; the UI reaches the rest through its
   `PluginHandle`.  Values cross in the transfer queues (`transfer.rs`).

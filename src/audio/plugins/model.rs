@@ -27,7 +27,7 @@ use super::handle::LoadedPlugin;
 use super::handle::PluginHandle;
 use super::pref::PluginPref;
 use super::queue::{queue, Consumer, Producer};
-use super::slot::{Slot, SlotLink};
+use super::slot::{Slot, SlotLink, SlotPark};
 
 /// Slots [`ChainModel::reload_plan`] wants opened at a new or first rate.
 /// The caller builds them and hands them to [`ChainModel::install`].
@@ -50,21 +50,39 @@ pub(crate) struct ChainModel {
     backlog: VecDeque<ChainCommand>,
     returns: Consumer<Box<Slot>>,
     home: Arc<ChainHome>,
+    /// Where a slot this model or its queues let go of is released.  The
+    /// engine owns it, so the park outlives every run.
+    slot_park: Arc<SlotPark>,
 }
 
 impl ChainModel {
     /// An empty chain at `sample_rate` (0 means 48 kHz) and its runtime,
     /// parked in [`Self::home`].  `chain_bypass` is the path's bypass flag,
     /// which the runtime loads every block.
-    pub(crate) fn new(sample_rate: u32, chain_bypass: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(
+        sample_rate: u32,
+        chain_bypass: Arc<AtomicBool>,
+        slot_park: Arc<SlotPark>,
+    ) -> Self {
         let rate = if sample_rate == 0 {
             48_000
         } else {
             sample_rate
         };
-        let (commands, command_rx) = queue(COMMAND_QUEUE, release_command);
-        let (return_tx, returns) = queue(RETURN_QUEUE, release_slot);
-        let runtime = ChainRuntime::new(rate, chain_bypass, command_rx, return_tx);
+        let command_park = Arc::clone(&slot_park);
+        let return_park = Arc::clone(&slot_park);
+        let (commands, command_rx) = queue(COMMAND_QUEUE, move |command| {
+            release_command(command, &command_park)
+        });
+        let (return_tx, returns) =
+            queue(RETURN_QUEUE, move |slot| release_slot(slot, &return_park));
+        let runtime = ChainRuntime::new(
+            rate,
+            chain_bypass,
+            command_rx,
+            return_tx,
+            Arc::clone(&slot_park),
+        );
         Self {
             links: Vec::new(),
             rate,
@@ -72,6 +90,7 @@ impl ChainModel {
             backlog: VecDeque::new(),
             returns,
             home: ChainHome::new(runtime),
+            slot_park,
         }
     }
 
@@ -102,16 +121,17 @@ impl ChainModel {
     }
 
     /// Sends the queued commands, applies them at once if the runtime is
-    /// parked, and returns the slots the runtime handed back, for the
-    /// caller to destroy on this (the UI) thread.  Never waits for the
-    /// audio side: a runtime it holds applies the commands with its next
-    /// block, and the slots come back with a later flush.
+    /// parked, and returns the boxes the runtime handed back, for the caller
+    /// to release through [`release_slot`] on this (the UI) thread.  Never
+    /// waits for the audio side: a runtime it holds applies the commands
+    /// with its next block, and the slots come back with a later flush.
     #[must_use]
-    pub(crate) fn flush(&mut self) -> Vec<Slot> {
+    #[allow(clippy::vec_box)] // The boxes travel queued: collecting them moves no slot.
+    pub(crate) fn flush(&mut self) -> Vec<Box<Slot>> {
         let mut returned = Vec::new();
         loop {
             // First, so a runtime parked with a full return queue has room.
-            returned.extend(std::iter::from_fn(|| self.returns.pop().map(|slot| *slot)));
+            returned.extend(std::iter::from_fn(|| self.returns.pop()));
             while let Some(command) = self.backlog.pop_front() {
                 if let Err(command) = self.commands.push(command) {
                     self.backlog.push_front(command);
@@ -127,14 +147,14 @@ impl ChainModel {
                 Some(mut runtime) => runtime.apply_commands(),
                 None => false,
             };
-            returned.extend(std::iter::from_fn(|| self.returns.pop().map(|slot| *slot)));
+            returned.extend(std::iter::from_fn(|| self.returns.pop()));
             // A full queue (or return queue) held commands back: go round
             // again with the room just made.
             if !applied {
                 break;
             }
         }
-        returned.extend(std::iter::from_fn(|| self.returns.pop().map(|slot| *slot)));
+        returned.extend(std::iter::from_fn(|| self.returns.pop()));
         returned
     }
 
@@ -379,17 +399,17 @@ impl ChainModel {
 
 impl Drop for ChainModel {
     /// Commands that never reached the runtime and slots it handed back go
-    /// where a queue's leftovers go (see `chain::release_slot`).
+    /// where a chain edit's leftovers go (see `chain::release_slot`).
     fn drop(&mut self) {
         // The links hold handles of the plugins in those slots: gone first,
-        // so a slot released to the deferred queue is its plugin's last
-        // owner, and the UI thread destroys it.
+        // so a slot released to the park is its plugin's last owner, and the
+        // main thread destroys it.
         self.links.clear();
         for command in self.backlog.drain(..) {
-            release_command(command);
+            release_command(command, &self.slot_park);
         }
         while let Some(slot) = self.returns.pop() {
-            release_slot(slot);
+            release_slot(slot, &self.slot_park);
         }
     }
 }

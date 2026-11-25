@@ -1,8 +1,12 @@
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use super::{
-    acquire, binary_path, read_image, Image, ModuleCode, ARCH_FOLDERS, BINARY_EXTENSION, MACHINES,
+    binary_path, read_image, Image, ModuleCode, ModuleEntry, ModuleRegistry, Vst3Module,
+    ARCH_FOLDERS, BINARY_EXTENSION, MACHINES,
 };
 
 /// The start of an ELF binary: the identification and `e_machine`.
@@ -52,23 +56,17 @@ fn foreign_binary() -> Vec<u8> {
 }
 
 /// What a plugin would do if its `ModuleExit` (or a release during an
-/// unload) loaded a module: the registry lock is already held further up.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+/// unload) loaded a module: the entry lock is already held further up.
 #[test]
 fn registry_reentry_during_module_code_panics_instead_of_deadlocking() {
-    // A bundle the layout and header checks pass, so `acquire` reaches the
-    // registry; its binary is only a header, so nothing ever loads.
-    let root = TempBundle::new("reentry");
-    root.file(
-        &format!(
-            "Fake.vst3/Contents/{}/Fake.{BINARY_EXTENSION}",
-            ARCH_FOLDERS[0]
-        ),
-        &this_build_binary(),
-    );
-    let fake = root.0.join("Fake.vst3");
+    let registry = ModuleRegistry::new();
+    let key = PathBuf::from("reentry.vst3");
     let code = ModuleCode::enter();
-    let reentry = std::panic::catch_unwind(|| acquire(&fake).is_ok());
+    let reentry = std::panic::catch_unwind(|| {
+        registry
+            .acquire_with(key.clone(), |_| Err("unused".to_owned()))
+            .is_ok()
+    });
     let message = reentry.expect_err("re-entry panics");
     let message = message
         .downcast_ref::<String>()
@@ -81,8 +79,93 @@ fn registry_reentry_during_module_code_panics_instead_of_deadlocking() {
     );
     drop(code);
     // Outside module code the registry works as usual: the load is tried,
-    // and fails.
-    assert!(acquire(&fake).is_err());
+    // and its failure is reported.
+    let error = registry
+        .acquire_with(key, |_| Err("the load failed".to_owned()))
+        .err()
+        .expect("the load is tried");
+    assert_eq!(error, "the load failed");
+}
+
+/// A module that takes its time to load blocks only its own entry: an
+/// acquire of another key finishes while the first `open` is still inside.
+#[test]
+fn a_slow_load_of_one_module_does_not_block_another() {
+    let registry = ModuleRegistry::new();
+    let (opening, opened) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let registry = &registry;
+        scope.spawn(move || {
+            let slow = registry.acquire_with("slow.vst3".into(), |_| {
+                opening.send(()).expect("signal the open");
+                released.recv().expect("the test releases the open");
+                Err("refused".to_owned())
+            });
+            assert!(slow.is_err());
+        });
+        // The slow open is inside its entry lock from here on.
+        opened
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the slow open started");
+        let (done, finished) = mpsc::channel();
+        scope.spawn(move || {
+            let other = registry.acquire_with("fast.vst3".into(), |_| Err("missing".to_owned()));
+            done.send(other.err()).expect("report the other open");
+        });
+        let other = finished.recv_timeout(Duration::from_secs(5));
+        // Let the blocked open go before asserting, so a regression fails
+        // instead of leaving the thread behind.
+        release.send(()).expect("release the slow open");
+        let other = other.expect("a load of another module finished while one was blocked");
+        assert_eq!(other.as_deref(), Some("missing"));
+    });
+}
+
+/// A module over `entry` with no binary behind it: nothing to release and
+/// nothing to unload, but the same entry and the same `Drop` path.
+fn empty_module(entry: &Arc<ModuleEntry>) -> Vst3Module {
+    Vst3Module {
+        factory: None,
+        exit: None,
+        library: None,
+        entry: Arc::clone(entry),
+        #[cfg(target_os = "linux")]
+        base: 0,
+    }
+}
+
+/// A loaded module is handed out again until its last user lets go, and the
+/// next acquire after that loads it anew.
+#[test]
+fn an_acquire_shares_a_loaded_module_and_loads_it_again_after_the_last_release() {
+    static OPENS: AtomicUsize = AtomicUsize::new(0);
+    let registry = ModuleRegistry::new();
+    let key = PathBuf::from("shared.vst3");
+    let open = |entry: &Arc<ModuleEntry>| {
+        OPENS.fetch_add(1, Ordering::SeqCst);
+        Ok(empty_module(entry))
+    };
+    let first = registry
+        .acquire_with(key.clone(), open)
+        .expect("first acquire");
+    let second = registry
+        .acquire_with(key.clone(), open)
+        .expect("second acquire");
+    assert!(Arc::ptr_eq(&first, &second), "one module per key");
+    assert_eq!(OPENS.load(Ordering::SeqCst), 1);
+    // One user letting go does not load the binary again.
+    drop(first);
+    let third = registry
+        .acquire_with(key.clone(), open)
+        .expect("third acquire");
+    assert!(Arc::ptr_eq(&second, &third));
+    assert_eq!(OPENS.load(Ordering::SeqCst), 1, "still held");
+    drop((second, third));
+    // The last release drops the module, so the next acquire loads again.
+    let fourth = registry.acquire_with(key, open).expect("reacquire");
+    assert_eq!(OPENS.load(Ordering::SeqCst), 2);
+    drop(fourth);
 }
 
 /// A bundle directory in the temp dir, removed on drop.

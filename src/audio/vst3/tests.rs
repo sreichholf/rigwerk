@@ -28,6 +28,11 @@ fn fixture_module(name: &str) -> Option<Arc<Vst3Module>> {
     Some(module::acquire(&bundle).unwrap_or_else(|error| panic!("{name}: {error}")))
 }
 
+/// Fixture `name`'s registry key, or `None` when the fixtures are not set up.
+fn fixture_key(name: &str) -> Option<std::path::PathBuf> {
+    module::module_key(&crate::audio::vst3_fixture(name)?).ok()
+}
+
 /// A component of class `cid`, initialized with the host context.
 fn initialized(module: &Vst3Module, cid: &TUID) -> ComPtr<IComponent> {
     let component = factory::create::<IComponent>(module.factory(), cid).expect("a component");
@@ -141,7 +146,7 @@ fn vst3_fixture_again_component_initializes_with_the_host_context() {
     let Some(module) = fixture_module("again") else {
         return;
     };
-    let key = module.key().to_path_buf();
+    let key = fixture_key("again").expect("AGain's registry key");
     assert!(module::is_loaded(&key));
     let cid = factory::audio_class(module.factory(), Some(FIXTURES[0].1)).expect("AGain");
     let component = initialized(&module, &cid);
@@ -237,7 +242,7 @@ fn vst3_fixture_a_module_loads_once_for_two_instances() {
     };
     let second = fixture_module("adelay").expect("the same fixture");
     assert!(Arc::ptr_eq(&first, &second), "one module per binary");
-    let key = first.key().to_path_buf();
+    let key = fixture_key("adelay").expect("ADelay's registry key");
     let cid = factory::audio_class(first.factory(), Some(FIXTURES[1].1)).expect("ADelay");
     let one = initialized(&first, &cid);
     let two = initialized(&second, &cid);

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::AudioEngine;
 use crate::audio::record::{RecordPhase, RecordSource};
-use crate::audio::{AsioPanelSide, EngineState};
+use crate::audio::{AsioPanelSide, EngineState, StartConfig};
 
 fn recording_file(name: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -228,4 +228,99 @@ fn stopping_the_bridge_clears_the_published_beat() {
     assert_eq!(engine.state, EngineState::Idle);
     // 0 is the "—" the Live strip shows.
     assert_eq!(engine.snapshot().metronome_beat, 0);
+}
+
+/// Each engine owns the plugin-slot park its runs share, so a slot one
+/// engine's bridge deferred is invisible to another engine.
+#[test]
+fn two_engines_have_two_plugin_parks() {
+    let _main = crate::audio::claim_main_thread();
+    let alive = crate::audio::plugins::tracked_slots_alive;
+    let first = AudioEngine::new(48_000);
+    let second = AudioEngine::new(48_000);
+    let first_park = std::sync::Arc::clone(first.shared.plugin_park());
+    let second_park = std::sync::Arc::clone(second.shared.plugin_park());
+    assert!(
+        !std::sync::Arc::ptr_eq(&first_park, &second_park),
+        "two engines must not share one park"
+    );
+
+    let before = alive();
+    first_park.defer(vec![crate::audio::plugins::Slot::tracked_for_test()]);
+    assert_eq!(first_park.len(), 1);
+    assert_eq!(
+        second_park.len(),
+        0,
+        "the other engine's park never sees it"
+    );
+    second_park.drain();
+    assert_eq!(alive(), before + 1, "another owner's drain frees nothing");
+
+    first_park.drain();
+    assert_eq!(alive(), before);
+    assert_eq!(first_park.len(), 0);
+}
+
+/// Each run the engine swaps in shares its park, so a bridge that defers
+/// after `replace_run` still hands its slots to a live owner.
+#[test]
+fn a_run_inherits_the_engine_plugin_park() {
+    let mut engine = AudioEngine::new(48_000);
+    let park = std::sync::Arc::clone(engine.shared.plugin_park());
+    assert!(std::sync::Arc::ptr_eq(&park, &engine.slot_park));
+
+    engine.replace_run();
+
+    assert!(
+        std::sync::Arc::ptr_eq(&park, engine.shared.plugin_park()),
+        "a run must inherit the engine's park"
+    );
+}
+
+/// The start refusal stays the backstop behind the per-engine park: while an
+/// old bridge still owns the device, a second start fails with the same
+/// message and spawns nothing.
+#[test]
+fn a_lingering_bridge_refuses_a_second_start_with_the_same_message() {
+    const MESSAGE: &str = "The previous bridge is still shutting down and has not released the audio device. Start again once it has finished.";
+
+    let mut engine = AudioEngine::new(48_000);
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (parked_tx, parked_rx) = std::sync::mpsc::channel::<()>();
+    let blocked = std::thread::spawn(move || {
+        parked_tx
+            .send(())
+            .expect("the test is still waiting for the bridge");
+        let _ = release_rx.recv();
+    });
+    parked_rx.recv().expect("the bridge thread starts");
+    engine.park_lingering_for_test(blocked);
+    assert!(engine.teardown_pending(), "the bridge is still alive");
+
+    engine.start(StartConfig {
+        asio_clsid: None,
+        input_id: None,
+        output_id: "test:output".to_owned(),
+        output_asio_clsid: None,
+        sample_rate: 48_000,
+        buffer_size: 128,
+        output_rate: None,
+        output_buffer: 128,
+        asio_wrapper: false,
+        low_latency_request: false,
+        exclusive_output: false,
+        pipewire_low_latency: false,
+    });
+
+    assert_eq!(engine.state, EngineState::Error);
+    assert_eq!(engine.snapshot().error.as_deref(), Some(MESSAGE));
+    assert_eq!(engine.bridge_status(), format!("Error: {MESSAGE}"));
+    assert!(engine.handle.is_none(), "no bridge was spawned");
+
+    release_tx.send(()).expect("the bridge thread stops");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while engine.teardown_pending() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!engine.teardown_pending(), "the helper bridge did not end");
 }

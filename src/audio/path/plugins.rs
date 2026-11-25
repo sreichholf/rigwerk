@@ -43,8 +43,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
 use super::super::plugins::{
-    is_main_thread, ChainLease, ChainModel, PluginHandle, PluginPref, PluginView, ProcessFailure,
-    ReloadPlan, Slot, SlotLink, MAX_EFFECTS,
+    is_main_thread, release_slot, ChainLease, ChainModel, PluginHandle, PluginPref, PluginView,
+    ProcessFailure, ReloadPlan, Slot, SlotLink, MAX_EFFECTS,
 };
 use super::{LockStats, PathControls, PluginLockReport};
 
@@ -80,7 +80,7 @@ impl PathControls {
     /// them at once while the runtime is parked), and republishes what the
     /// UI and the audio flags read from it.  `None` when an earlier edit
     /// panicked.  The replaced links and the slots the runtime handed back
-    /// are dropped after the model lock is released, on this thread.
+    /// are released after the model lock is released, on this thread.
     pub(in crate::audio) fn edit_chain<R>(
         &self,
         edit: impl FnOnce(&mut ChainModel) -> R,
@@ -97,25 +97,34 @@ impl PathControls {
             (result, stale, returned)
         };
         drop(stale);
-        drop(returned);
+        self.release_slots(returned);
         // Models and cabinet kernels the audio side retired, from the same
-        // UI-thread flush as the plugin slots just dropped.
+        // UI-thread flush as the plugin slots just released.
         self.nam_park.flush();
         self.cab_park.flush();
         Some(result)
     }
 
-    /// Sends what the model still queues and destroys the slots the
-    /// runtime handed back since the last flush.  No republish: the links
-    /// did not change.
+    /// Sends what the model still queues and releases the slots the runtime
+    /// handed back since the last flush.  No republish: the links did not
+    /// change.
     pub(crate) fn flush_chain(&self) {
         let returned = match self.chain.lock() {
             Ok(mut chain) => chain.flush(),
             Err(_) => return,
         };
-        drop(returned);
+        self.release_slots(returned);
         self.nam_park.flush();
         self.cab_park.flush();
+    }
+
+    /// Releases every slot a flush handed back through the one teardown
+    /// path, after the model lock is gone.
+    #[allow(clippy::vec_box)] // As `ChainModel::flush`: the boxes are the queued slots.
+    fn release_slots(&self, returned: Vec<Box<Slot>>) {
+        for slot in returned {
+            release_slot(slot, &self.slot_park);
+        }
     }
 
     /// The effect at `index` as last published.

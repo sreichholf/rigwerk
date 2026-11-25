@@ -5,13 +5,16 @@ use std::sync::Arc;
 
 use azo::sys::SampleType;
 
-use super::{AsioCallbackContext, AsioSignal};
+use super::{
+    wait_for_callbacks, AsioCallbackContext, AsioCallbackSlot, AsioHost, AsioSignal,
+    CallbackRegistration, CallbackWait,
+};
 use crate::audio::shared::Shared;
 
 /// One input-side buffer switch over f32 channel buffers.  It calls
 /// `process_input` directly rather than through `dispatch`: that keeps the
-/// test off the process-wide `INPUT_CONTEXT` slot, and a panic fails the test
-/// instead of being silenced by the callback's `catch_unwind`.  What
+/// test off the driver's process-global callback slot, and a panic fails the
+/// test instead of being silenced by the callback's `catch_unwind`.  What
 /// `dispatch` adds - the buffer-index clamp and the denormal guard - is not
 /// what these tests measure.
 fn run_input(shared: &Arc<Shared>, left: &[f32], right: Option<&[f32]>) {
@@ -88,4 +91,163 @@ fn a_mono_input_copies_its_only_channel_to_both_sides() {
     // sides hold the louder sample's level.
     assert_eq!(peaks(&shared), (0.5, 0.5));
     assert_eq!(shared.snapshot().input_frames, 2);
+}
+
+/// Installs one idle session on `slot` and hands back the registration.  Every
+/// test leaks its own host, so a registration never lands in the production
+/// `ASIO_HOST`.
+fn install(
+    host: &'static AsioHost,
+    slot: AsioCallbackSlot,
+    shared: &Arc<Shared>,
+    signal: &Arc<AsioSignal>,
+) -> Result<CallbackRegistration, String> {
+    let context = AsioCallbackContext::new(Arc::clone(shared), Arc::clone(signal), 1);
+    CallbackRegistration::install(host, slot, Box::new(context), Arc::clone(signal))
+}
+
+/// A reset belongs to the registration that was installed when it arrived: it
+/// reaches every installed role once, and a session installed later baselines
+/// the bump away.
+#[test]
+fn a_reset_request_reaches_the_installed_session_only() {
+    let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));
+    let shared = Arc::new(Shared::new(48_000));
+
+    let input_signal = AsioSignal::new();
+    let input = install(host, AsioCallbackSlot::Input, &shared, &input_signal)
+        .expect("the empty input slot takes a session");
+
+    host.request_reset();
+    assert!(input.take_reset());
+    assert!(!input.take_reset(), "one bump ends one wait");
+
+    input.clear();
+    host.request_reset();
+    let input_signal = AsioSignal::new();
+    let input = install(host, AsioCallbackSlot::Input, &shared, &input_signal)
+        .expect("the input slot is free again");
+    assert!(
+        !input.take_reset(),
+        "a fresh install captures a fresh baseline"
+    );
+
+    // One bump reaches both roles that are installed when it arrives.
+    let output_signal = AsioSignal::new();
+    let output = install(host, AsioCallbackSlot::Output, &shared, &output_signal)
+        .expect("the empty output slot takes a session");
+
+    host.request_reset();
+    assert!(input.take_reset());
+    assert!(output.take_reset());
+    assert!(!input.take_reset());
+    assert!(!output.take_reset());
+
+    input.clear();
+    output.clear();
+}
+
+/// The host, not the engine start path, is what refuses a second session per
+/// role: the first context stays installed and keeps receiving resets while
+/// the second is turned away without a slot or a baseline.
+#[test]
+fn a_second_install_on_the_same_slot_is_refused_by_the_owner() {
+    let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));
+    let shared = Arc::new(Shared::new(48_000));
+
+    let first_signal = AsioSignal::new();
+    let first = install(host, AsioCallbackSlot::Input, &shared, &first_signal)
+        .expect("the empty input slot takes the first session");
+
+    let second_signal = AsioSignal::new();
+    let error = match install(host, AsioCallbackSlot::Input, &shared, &second_signal) {
+        Ok(_) => panic!("the owner must refuse a second session on one slot"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        "The previous ASIO session is still shutting down and has not released its driver callbacks."
+    );
+
+    // The refusal did not disturb the installed context: it still owns the
+    // slot and still sees the reset the refused session never existed for.
+    host.request_reset();
+    assert!(first.take_reset());
+
+    first.clear();
+
+    let second = install(host, AsioCallbackSlot::Input, &shared, &second_signal)
+        .expect("the released slot takes the next session");
+    assert!(
+        !second.take_reset(),
+        "the second session does not inherit the earlier bump"
+    );
+    host.request_reset();
+    assert!(second.take_reset());
+
+    second.clear();
+}
+
+/// A reset that arrives between `install` and the first wait is pending, and
+/// after one wait consumed it a later wait does not fire again.
+#[test]
+fn a_reset_before_the_wait_is_still_reported() {
+    let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));
+    let shared = Arc::new(Shared::new(48_000));
+    let signal = AsioSignal::new();
+    let registration = install(host, AsioCallbackSlot::Input, &shared, &signal)
+        .expect("the empty input slot takes a session");
+
+    host.request_reset();
+    let wait = wait_for_callbacks(&registration, || false, || false);
+    assert!(
+        matches!(wait, CallbackWait::Reset),
+        "the gap reset is pending"
+    );
+
+    // The consumed bump does not fire a second wait: the wait must pass
+    // through at least one `take_reset()` check first, or this would only
+    // prove that `stopped` is read before the reset.
+    let ticks = std::cell::Cell::new(0);
+    let wait = wait_for_callbacks(
+        &registration,
+        || ticks.get() > 1,
+        || {
+            ticks.set(ticks.get() + 1);
+            false
+        },
+    );
+    assert!(
+        matches!(wait, CallbackWait::Stopped),
+        "a second wait is Stopped, not Reset"
+    );
+
+    registration.clear();
+}
+
+/// `Drop` detaches the slot without freeing the context, so the role can be
+/// installed again and the new session starts from its own baseline.
+#[test]
+fn dropping_a_registration_lets_the_slot_be_installed_again() {
+    let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));
+    let shared = Arc::new(Shared::new(48_000));
+
+    let first_signal = AsioSignal::new();
+    let first = install(host, AsioCallbackSlot::Input, &shared, &first_signal)
+        .expect("the empty input slot takes a session");
+    host.request_reset();
+    drop(first);
+
+    let second_signal = AsioSignal::new();
+    let second = install(host, AsioCallbackSlot::Input, &shared, &second_signal)
+        .expect("Drop released the slot");
+    assert!(
+        !second.take_reset(),
+        "no reset is attributed to the session after a detach"
+    );
+
+    host.request_reset();
+    assert!(second.take_reset());
+
+    second.clear();
 }

@@ -363,7 +363,11 @@ impl Drop for LoadedPlugin {
     /// `ClapInstance` drop), which an open editor may hold a little longer:
     /// its view is detached first, then the plugin deactivated.
     fn drop(&mut self) {
-        if self.handle.0.shared.pause.take_processing() {
+        let pause = &self.handle.0.shared.pause;
+        // A stranded plugin is still inside `process`: a stop would be a
+        // second call under it.  Production never reaches this (the slot is
+        // leaked), but a direct drop in a test must not either.
+        if !pause.stranded() && pause.take_processing() {
             self.processor.stop();
         }
     }
@@ -810,6 +814,16 @@ impl PluginHandle {
 
 #[cfg(test)]
 impl PluginHandle {
+    /// Seeds the pause's wait past the stranded deadline, for the test that
+    /// proves the failure without a 2 s sleep.
+    pub(crate) fn seed_pause_wait_for_test(&self) {
+        use super::pause::PAUSE_STRANDED;
+        let past = std::time::Instant::now()
+            .checked_sub(PAUSE_STRANDED)
+            .expect("uptime");
+        self.ui().pause_wait = Some((past, self.0.shared.pause.served()));
+    }
+
     /// A handle over `host` alone, for the tests that pin the shared
     /// postludes; nothing can run it, as there is no processor behind it.
     pub(crate) fn with_host_for_test(

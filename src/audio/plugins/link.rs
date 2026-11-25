@@ -141,6 +141,9 @@ pub(crate) enum ProcessFailure {
     Vst3Inactive,
     /// A plugin rebuilt on its own request asked again at once.
     ReloadLoop,
+    /// A pause was still unquiet after the stranded deadline: the plugin is
+    /// hung inside `process` and no longer processes audio.
+    PauseStranded,
     Clap(ClapFailure),
     Lv2(Lv2Failure),
 }
@@ -217,6 +220,7 @@ const FAILURE_CLAP: u64 = 3;
 const FAILURE_VST3_INACTIVE: u64 = 4;
 const FAILURE_RELOAD_LOOP: u64 = 5;
 const FAILURE_LV2: u64 = 6;
+const FAILURE_PAUSE_STRANDED: u64 = 7;
 
 impl ProcessFailure {
     /// The text the effect's error shows (UI thread).
@@ -228,6 +232,11 @@ impl ProcessFailure {
             }
             ProcessFailure::Vst3Inactive => "The VST3 plugin is not active.".to_owned(),
             ProcessFailure::ReloadLoop => "The plugin keeps asking to be reloaded.".to_owned(),
+            ProcessFailure::PauseStranded => {
+                "The plugin stopped responding while it was paused and no longer processes audio. \
+                 Restart RigWerk to recover."
+                    .to_owned()
+            }
             ProcessFailure::Clap(failure) => failure.message().to_owned(),
             ProcessFailure::Lv2(failure) => failure.message().to_owned(),
         }
@@ -241,6 +250,7 @@ impl ProcessFailure {
             }
             ProcessFailure::Vst3Inactive => FAILURE_VST3_INACTIVE << 32,
             ProcessFailure::ReloadLoop => FAILURE_RELOAD_LOOP << 32,
+            ProcessFailure::PauseStranded => FAILURE_PAUSE_STRANDED << 32,
             ProcessFailure::Clap(failure) => FAILURE_CLAP << 32 | u64::from(failure.code()),
             ProcessFailure::Lv2(failure) => FAILURE_LV2 << 32 | u64::from(failure.code()),
         }
@@ -253,6 +263,7 @@ impl ProcessFailure {
             FAILURE_VST3_START => Some(ProcessFailure::Vst3StartFailed(code as i32)),
             FAILURE_VST3_INACTIVE => Some(ProcessFailure::Vst3Inactive),
             FAILURE_RELOAD_LOOP => Some(ProcessFailure::ReloadLoop),
+            FAILURE_PAUSE_STRANDED => Some(ProcessFailure::PauseStranded),
             FAILURE_CLAP => ClapFailure::from_code(code).map(ProcessFailure::Clap),
             FAILURE_LV2 => Lv2Failure::from_code(code).map(ProcessFailure::Lv2),
             _ => None,
