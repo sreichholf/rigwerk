@@ -733,9 +733,9 @@ values; widgets read the active one, never a literal colour.
 | `text2` | `#b0aa9f` | `#55514a` | secondary text |
 | `text3` | `#948e83` | `#6b665d` | labels, hints |
 | `led_off` | `#7d776e` | `#857f73` | bypassed LED ring, off states |
-| `accent` | `#ff8f40` | `#c55a0c` | engaged states, outlines and fills |
-| `accent_text` | `#ffb27a` | `#a8480a` | accent as text |
-| `accent_bg` | `#2a1a0e` | `#fbeee2` | selected fill |
+| `accent` | `#19c2a9` | `#0d7d6f` | engaged states, outlines and fills |
+| `accent_text` | `#5fe3cf` | `#0b6f63` | accent as text |
+| `accent_bg` | `#102e29` | `#dff3ef` | selected fill |
 | `warn` | `#ffcc4d` | `#7a5700` | warnings, with an icon |
 | `error` | `#ff5a4a` | `#d93a2b` | clip, recording, error icons |
 | `error_text` | `#ff5a4a` | `#b8291c` | error text |
