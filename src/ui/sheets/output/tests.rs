@@ -7,7 +7,7 @@ use eframe::egui::accesskit::Toggled;
 
 fn four_channel_extra() -> crate::app::RigWerkApp {
     let mut app = blank_app();
-    app.inventory.outputs.push(DeviceItem {
+    app.devices.inventory.outputs.push(DeviceItem {
         id: "hw:Card".to_owned(),
         name: "Card".to_owned(),
         backend: "ALSA".to_owned(),

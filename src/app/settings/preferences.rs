@@ -485,6 +485,8 @@ pub(crate) fn rematch_windows_virtual_output(
             if !extra_output.virtual_output {
                 continue;
             }
+            // The virtual output stays on id equality: a name or backend match
+            // would hide the missing id the Windows cable rebind has to see.
             let present = outputs.iter().any(|device| device.id == extra_output.id);
             let stale = extra_output.id.is_empty()
                 || extra_output.id == VIRTUAL_OUTPUT_ID

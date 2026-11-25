@@ -15,7 +15,7 @@ use crate::audio::{BufferMode, ChannelMap, DeviceItem, EngineState, PathMapSetti
 
 /// A real (not demo) clock output the driver check can read.
 fn with_real_output(app: &mut RigWerkApp) {
-    app.inventory.outputs.push(DeviceItem {
+    app.devices.inventory.outputs.push(DeviceItem {
         id: "test:out".to_owned(),
         name: "Scarlett 2i2".to_owned(),
         backend: if cfg!(target_os = "windows") {
@@ -759,7 +759,7 @@ fn show_selects_the_anchor_and_closes_the_drawer() {
 /// device list and on a Minimum bridge buffer.
 fn with_extra_output() -> RigWerkApp {
     let mut app = blank_app();
-    app.inventory.outputs.push(DeviceItem {
+    app.devices.inventory.outputs.push(DeviceItem {
         id: "test:usb".to_owned(),
         name: "USB Headphones".to_owned(),
         backend: "ALSA".to_owned(),
@@ -805,7 +805,7 @@ fn a_extra_output_being_retried_is_a_warning_that_shows_it_in_the_mixer() {
     assert_eq!(app.issue_view().hidden, 1);
 
     app.snapshot.extra_output_missing[0] = false;
-    app.inventory.outputs.clear();
+    app.devices.inventory.outputs.clear();
     let issues = app.live_issues();
     assert_eq!(issues.len(), 1, "gone from the device list: {issues:?}");
     assert_eq!(issues[0].key, IssueKey::ExtraOutputNotListed(0));
@@ -982,7 +982,7 @@ fn a_slot_that_holds_another_extra_output_starts_over() {
 
     // Replaced live by another device; its stream has not opened yet, so
     // the slot still reads the old one's count and drift.
-    app.inventory.outputs.push(DeviceItem {
+    app.devices.inventory.outputs.push(DeviceItem {
         id: "test:dock".to_owned(),
         name: "Dock".to_owned(),
         backend: "ALSA".to_owned(),
@@ -1131,7 +1131,7 @@ fn a_device_against_the_ceiling_warns_until_the_signal_drops() {
     with_real_output(&mut app);
     app.engine.state = EngineState::Running;
     app.snapshot.out_reduction_db = 1.0;
-    app.inventory.outputs.push(DeviceItem {
+    app.devices.inventory.outputs.push(DeviceItem {
         id: "test:hp".to_owned(),
         name: "Headphones".to_owned(),
         backend: "ALSA".to_owned(),

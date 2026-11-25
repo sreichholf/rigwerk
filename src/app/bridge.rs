@@ -469,7 +469,7 @@ impl RigWerkApp {
         use crate::app::settings::{bridge_buffer_from_pref, rematch_windows_virtual_output};
         use crate::audio::{ExtraOutputLink, ExtraOutputPlan, MAX_EXTRA_OUTPUTS};
 
-        rematch_windows_virtual_output(&mut self.extra_outputs, &self.inventory.outputs);
+        rematch_windows_virtual_output(&mut self.extra_outputs, &self.devices.inventory.outputs);
 
         let count = self.extra_outputs.len().min(MAX_EXTRA_OUTPUTS);
         let mut settings = Vec::with_capacity(count);

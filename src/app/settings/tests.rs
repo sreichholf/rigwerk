@@ -1050,6 +1050,34 @@ fn windows_virtual_out_rematch_binds_vb_cable_from_inventory() {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn a_virtual_out_whose_id_is_gone_is_rebound() {
+    use crate::audio::DeviceItem;
+
+    let cable = DeviceItem {
+        id: "wasapi:{new-cable}".to_owned(),
+        name: "CABLE Input (VB-Audio Virtual Cable)".to_owned(),
+        backend: "WASAPI".to_owned(),
+        channels: 2,
+        demo: false,
+        preferred: false,
+        asio_clsid: None,
+    };
+    let mut extra_outputs = vec![ExtraOutputPref {
+        id: "wasapi:{old-cable}".to_owned(),
+        backend: "WASAPI".to_owned(),
+        name: VIRTUAL_OUTPUT_NAME.to_owned(),
+        virtual_output: true,
+        virtual_output_on: true,
+        ..ExtraOutputPref::default()
+    }];
+    rematch_windows_virtual_output(&mut extra_outputs, std::slice::from_ref(&cable));
+    assert_eq!(extra_outputs[0].id, "wasapi:{new-cable}");
+    assert_eq!(extra_outputs[0].backend, "WASAPI");
+    assert_eq!(extra_outputs[0].name, VIRTUAL_OUTPUT_NAME);
+}
+
 #[test]
 fn wasapi_mode_migrates_from_legacy_bool() {
     let raw_on = r#"(low_latency_output:true,sample_rate:48000)"#;

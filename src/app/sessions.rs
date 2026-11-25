@@ -1,7 +1,8 @@
 //! Saving, loading and deleting sessions (saved device pairs).
 
 use crate::app::devices::{
-    device_restore_note, restore_device, restore_input, DeviceRestore, InputGroup,
+    device_restore_note, restore_device, restore_extra_output, restore_input, DeviceRestore,
+    InputGroup,
 };
 use crate::app::settings::{
     bridge_buffer_from_pref, bridge_buffer_to_pref, sanitize_session, PathPref, Session,
@@ -217,13 +218,13 @@ impl RigWerkApp {
                 .map_or(0, |&(_, _, mask)| mask)
         };
         let session_output = restore_device(
-            &self.inventory.outputs,
+            &self.devices.inventory.outputs,
             &session.output_id,
             &session.output_backend,
             &session.output,
         )
         .index()
-        .and_then(|index| self.inventory.outputs.get(index))
+        .and_then(|index| self.devices.inventory.outputs.get(index))
         .unwrap_or(current_output);
         let mut clock = session.clock_output;
         clock.click_mask = live_mask(&session_output.id, &session_output.backend);
@@ -232,6 +233,10 @@ impl RigWerkApp {
             .iter()
             .cloned()
             .map(|mut extra_output| {
+                // A saved session can name an extra output the scan has
+                // re-enumerated.  Adopt its live id/name before the click
+                // mask lookup and the install.
+                restore_extra_output(&self.devices.inventory.outputs, &mut extra_output);
                 extra_output.settings.click_mask =
                     live_mask(&extra_output.id, &extra_output.backend);
                 extra_output
@@ -255,8 +260,8 @@ impl RigWerkApp {
             session.input.as_str()
         };
         match restore_input(
-            &self.inventory.asio,
-            &self.inventory.inputs,
+            &self.devices.inventory.asio,
+            &self.devices.inventory.inputs,
             &session.input_id,
             &session.input_backend,
             &session.input,
@@ -265,13 +270,13 @@ impl RigWerkApp {
                 if let Some(device_index) = found.restore.index() {
                     match found.group {
                         InputGroup::LowLatency => {
-                            self.asio_idx = device_index;
-                            self.use_asio_input = true;
+                            self.devices.asio_idx = device_index;
+                            self.devices.use_asio_input = true;
                             self.accept_asio_device();
                         }
                         InputGroup::System => {
-                            self.input_idx = device_index;
-                            self.use_asio_input = false;
+                            self.devices.input_idx = device_index;
+                            self.devices.use_asio_input = false;
                             self.accept_input_device();
                         }
                     }
@@ -292,13 +297,13 @@ impl RigWerkApp {
             session.output.as_str()
         };
         let output_restore = restore_device(
-            &self.inventory.outputs,
+            &self.devices.inventory.outputs,
             &session.output_id,
             &session.output_backend,
             &session.output,
         );
         if let Some(output_index) = output_restore.index() {
-            self.output_idx = output_index;
+            self.devices.output_idx = output_index;
             self.accept_output_device();
         }
         if self.log_device_restore("Session output", output_label, output_restore) {

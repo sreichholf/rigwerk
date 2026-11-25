@@ -22,11 +22,16 @@ fn device(id: &str, name: &str, backend: &str) -> DeviceItem {
 fn test_app() -> RigWerkApp {
     let mut app = crate::app::blank_app();
     app.page = Page::Console;
-    app.inventory
+    app.devices
+        .inventory
         .asio
         .push(device("asio:focusrite", "Focusrite", "ASIO"));
-    app.inventory.inputs.push(device("hw:Mic", "Mic", "ALSA"));
-    app.inventory
+    app.devices
+        .inventory
+        .inputs
+        .push(device("hw:Mic", "Mic", "ALSA"));
+    app.devices
+        .inventory
         .outputs
         .push(device("hw:Speaker", "Speaker", "ALSA"));
     app
@@ -57,8 +62,8 @@ fn a_missing_device_is_an_error_and_the_mix_still_applies() {
         ..crate::app::settings::Session::default()
     });
     app.input_gain = -12.0;
-    app.asio_idx = 0;
-    app.output_idx = 0;
+    app.devices.asio_idx = 0;
+    app.devices.output_idx = 0;
 
     app.apply_session(0);
 
@@ -68,8 +73,8 @@ fn a_missing_device_is_an_error_and_the_mix_still_applies() {
     assert_eq!(app.input_channels, [true, false]);
     assert_eq!(app.path().mix.output_enabled, [false, true]);
     assert!(app.path().mix.mono);
-    assert_eq!(app.asio_idx, 0);
-    assert_eq!(app.output_idx, 0);
+    assert_eq!(app.devices.asio_idx, 0);
+    assert_eq!(app.devices.output_idx, 0);
     assert_eq!(app.active_input().id, "asio:focusrite");
     assert_eq!(app.selected_output().id, "hw:Speaker");
     let lines = log_lines(&app);
@@ -209,14 +214,16 @@ fn saving_and_applying_a_session_round_trips_the_mix() {
     app.output_rate = 0;
     app.output_buffer = 128;
     app.engine.restore_plugins(0, Vec::new());
-    app.inventory
+    app.devices
+        .inventory
         .asio
         .insert(0, device("asio:other", "Other", "ASIO"));
-    app.asio_idx = 0;
-    app.inventory
+    app.devices.asio_idx = 0;
+    app.devices
+        .inventory
         .outputs
         .insert(0, device("hw:Other", "Other out", "ALSA"));
-    app.output_idx = 0;
+    app.devices.output_idx = 0;
 
     app.apply_session(0);
 
@@ -426,7 +433,8 @@ fn the_click_mask_follows_the_device_when_a_session_swaps_clock_and_extra_output
     use crate::app::settings::ExtraOutputPref;
 
     let mut app = test_app();
-    app.inventory
+    app.devices
+        .inventory
         .outputs
         .push(device("hw:Monitor", "Monitor", "ALSA"));
     let as_extra_output = |id: &str, name: &str| ExtraOutputPref {
@@ -437,12 +445,12 @@ fn the_click_mask_follows_the_device_when_a_session_swaps_clock_and_extra_output
     };
     // Saved with Speaker as the clock and Monitor as an extra output.
     app.session_name = "Speaker clock".to_owned();
-    app.output_idx = 0;
+    app.devices.output_idx = 0;
     app.extra_outputs = vec![as_extra_output("hw:Monitor", "Monitor")];
     app.save_session();
 
     // Now Monitor is the clock and Speaker an extra output, each with its click.
-    app.output_idx = 1;
+    app.devices.output_idx = 1;
     app.clock_output.click_mask = 0b0011;
     app.extra_outputs = vec![as_extra_output("hw:Speaker", "Speaker")];
     app.extra_outputs[0].settings.click_mask = 0b1100;
@@ -462,9 +470,9 @@ fn saving_a_session_writes_current_gate() {
 
     let mut app = test_app();
     app.session_name = "Mine".to_owned();
-    app.asio_idx = 0;
-    app.output_idx = 0;
-    app.use_asio_input = true;
+    app.devices.asio_idx = 0;
+    app.devices.output_idx = 0;
+    app.devices.use_asio_input = true;
     app.path_mut().mix.gate = GateSettings {
         enabled: true,
         slot: GateSlot::Pre,
@@ -485,8 +493,8 @@ fn saving_a_session_writes_current_gate() {
 fn a_saved_session_is_edited_when_the_gain_changes() {
     let mut app = test_app();
     app.session_name = "Clean".to_owned();
-    app.asio_idx = 0;
-    app.output_idx = 0;
+    app.devices.asio_idx = 0;
+    app.devices.output_idx = 0;
     app.save_session();
     assert!(!app.session_edited(), "a fresh save matches");
     app.input_gain += 1.0;
@@ -494,4 +502,26 @@ fn a_saved_session_is_edited_when_the_gain_changes() {
     app.start_new_session();
     assert_eq!(app.session_name, "Untitled session");
     assert!(app.session_edited());
+}
+
+#[test]
+fn applying_a_session_adopts_a_reenumerated_extra_output_id() {
+    let mut app = test_app();
+    app.devices
+        .inventory
+        .outputs
+        .push(device("hw:Monitor-new", "Monitor", "ALSA"));
+    app.sessions.push(crate::app::settings::Session {
+        name: "Renamed extra".to_owned(),
+        extra_outputs: vec![crate::app::settings::ExtraOutputPref {
+            id: "hw:Monitor-old".to_owned(),
+            backend: "ALSA".to_owned(),
+            name: "Monitor".to_owned(),
+            ..Default::default()
+        }],
+        ..crate::app::settings::Session::default()
+    });
+    app.apply_session(0);
+    assert_eq!(app.extra_outputs[0].id, "hw:Monitor-new");
+    assert_eq!(app.extra_outputs[0].backend, "ALSA");
 }

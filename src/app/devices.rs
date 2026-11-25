@@ -9,10 +9,70 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::app::settings::ExtraOutputPref;
 use crate::app::RigWerkApp;
 use crate::audio::{self, DeviceItem, Inventory};
 /// How many scans must miss a selected device before it counts as unplugged.
 const UNPLUG_SCANS: u8 = 2;
+
+/// The scanned device lists, the selection, and the scan plumbing.
+///
+/// The inventory and the selection must survive a scan that does not list the
+/// selected device: the held identities and the miss counters are what `save`
+/// keeps and what says a device is unplugged, so one flaky scan cannot drop a
+/// working device.  The scan receiver is here because one owner starts the
+/// scan thread and picks its result up.
+pub(crate) struct Devices {
+    pub(crate) inventory: Inventory,
+    pub(crate) asio_idx: usize,
+    pub(crate) input_idx: usize,
+    pub(crate) output_idx: usize,
+    pub(crate) use_asio_input: bool,
+    /// Which output list is shown: the low-latency driver's (ASIO) or the
+    /// system's.  Follows the selected output unless that list is empty.
+    pub(crate) output_tab_low_latency: bool,
+    pub(crate) inventory_fingerprint: u64,
+    last_device_scan: Instant,
+    device_scan: Option<mpsc::Receiver<Inventory>>,
+    manual_scan: bool,
+    /// Stored low-latency input kept when startup did not find it.
+    pub(crate) asio_held: Option<HeldDevice>,
+    /// Stored system input kept when startup did not find it.
+    pub(crate) input_held: Option<HeldDevice>,
+    /// Stored output kept when startup did not find it.
+    pub(crate) output_held: Option<HeldDevice>,
+    /// Consecutive scans that did not list the selected input. One miss is
+    /// not an unplug: a busy device fails a probe the same way a missing one
+    /// does. The bridge stops only after a second miss.
+    input_misses: u8,
+    /// Consecutive scans that did not list the selected output.  Above 0,
+    /// the clock output's strip and sheet read missing.
+    pub(crate) output_misses: u8,
+}
+
+impl Devices {
+    /// The state before the first scan: empty lists, every selection on row
+    /// 0, the low-latency input, and no held identity.
+    pub(crate) fn new() -> Self {
+        Self {
+            inventory: Inventory::default(),
+            asio_idx: 0,
+            input_idx: 0,
+            output_idx: 0,
+            use_asio_input: true,
+            output_tab_low_latency: false,
+            inventory_fingerprint: 0,
+            last_device_scan: Instant::now(),
+            device_scan: None,
+            manual_scan: false,
+            asio_held: None,
+            input_held: None,
+            output_held: None,
+            input_misses: 0,
+            output_misses: 0,
+        }
+    }
+}
 
 /// Whether a sound-card uevent, or a PipeWire source or sink coming or
 /// going, arrived since the last look.
@@ -108,6 +168,63 @@ pub(crate) fn device_index(
     name: &str,
 ) -> Option<usize> {
     restore_device(devices, id, backend, name).index()
+}
+
+/// The scanned row for an extra output, by the same id-then-name identity
+/// the clock sides use.  A `demo` row is a preview, not the saved device, so
+/// a name that lands on one is `None`: the row reads missing until a real
+/// device is listed.
+pub(crate) fn extra_output_index(
+    outputs: &[DeviceItem],
+    extra_output: &ExtraOutputPref,
+) -> Option<usize> {
+    let index = device_index(
+        outputs,
+        &extra_output.id,
+        &extra_output.backend,
+        &extra_output.name,
+    )?;
+    (!outputs.get(index)?.demo).then_some(index)
+}
+
+/// Finds an extra output's scanned row and points it at what was found.
+///
+/// A name match adopts the found id and backend, so the next save keeps
+/// pointing at the device the scan listed.  This is the clock sides' rule
+/// through [`restore_device`], not a legacy-only fallback: a re-enumerated
+/// device must be adopted even when a stored id was present and is now gone.
+/// Two devices with one display name resolve to the first, as they do for the
+/// clock sides.  An id match refreshes the display name so a rename is saved
+/// too; a complete miss leaves the whole identity alone so the row reads
+/// missing.  The virtual output is not a device row and keeps its own.  A
+/// `demo` row is a preview the placeholder inventory shows before the first
+/// scan, so it never contributes an id or a name.
+pub(crate) fn restore_extra_output(
+    outputs: &[DeviceItem],
+    extra_output: &mut ExtraOutputPref,
+) -> DeviceRestore {
+    let restore = restore_device(
+        outputs,
+        &extra_output.id,
+        &extra_output.backend,
+        &extra_output.name,
+    );
+    if extra_output.virtual_output {
+        return restore;
+    }
+    let Some(device) = restore.index().and_then(|index| outputs.get(index)) else {
+        return restore;
+    };
+    if device.demo {
+        return restore;
+    }
+    if restore.matched_by_name() {
+        extra_output.id.clone_from(&device.id);
+        extra_output.backend.clone_from(&device.backend);
+    } else {
+        extra_output.name.clone_from(&device.name);
+    }
+    restore
 }
 
 /// Which input list a preset row was found in.
@@ -413,23 +530,31 @@ pub(crate) fn missing_output_device() -> &'static DeviceItem {
 
 impl RigWerkApp {
     pub(crate) fn selected_asio(&self) -> &DeviceItem {
-        self.inventory
+        self.devices
+            .inventory
             .asio
-            .get(self.asio_idx)
-            .or_else(|| self.inventory.asio.first())
+            .get(self.devices.asio_idx)
+            .or_else(|| self.devices.inventory.asio.first())
             .unwrap_or_else(|| missing_input_device())
     }
 
     pub(crate) fn using_other_input(&self) -> bool {
-        !self.use_asio_input && self.inventory.inputs.get(self.input_idx).is_some()
+        !self.devices.use_asio_input
+            && self
+                .devices
+                .inventory
+                .inputs
+                .get(self.devices.input_idx)
+                .is_some()
     }
 
     pub(crate) fn active_input(&self) -> &DeviceItem {
         if self.using_other_input() {
-            self.inventory
+            self.devices
+                .inventory
                 .inputs
-                .get(self.input_idx)
-                .or_else(|| self.inventory.inputs.first())
+                .get(self.devices.input_idx)
+                .or_else(|| self.devices.inventory.inputs.first())
                 .unwrap_or_else(|| missing_input_device())
         } else {
             self.selected_asio()
@@ -437,29 +562,30 @@ impl RigWerkApp {
     }
 
     pub(crate) fn selected_output(&self) -> &DeviceItem {
-        self.inventory
+        self.devices
+            .inventory
             .outputs
-            .get(self.output_idx)
-            .or_else(|| self.inventory.outputs.first())
+            .get(self.devices.output_idx)
+            .or_else(|| self.devices.inventory.outputs.first())
             .unwrap_or_else(|| missing_output_device())
     }
 
     /// The person chose this low-latency input, or a session found it.
     /// Later saves may write that identity. A silent fallback does not call this.
     pub(crate) fn accept_asio_device(&mut self) {
-        self.asio_held = None;
+        self.devices.asio_held = None;
     }
 
     /// The person chose this system input, or a session found it.
     pub(crate) fn accept_input_device(&mut self) {
-        self.input_held = None;
+        self.devices.input_held = None;
     }
 
     /// The person chose this output, or a session found it.  No scan has
     /// missed it yet, so its clock row does not read missing.
     pub(crate) fn accept_output_device(&mut self) {
-        self.output_held = None;
-        self.output_misses = 0;
+        self.devices.output_held = None;
+        self.devices.output_misses = 0;
     }
 
     pub(crate) fn is_preview(&self) -> bool {
@@ -474,15 +600,19 @@ impl RigWerkApp {
         // ASIO driver) holds a device.  Enumerating on the UI thread made the
         // window stop responding, so the scan runs on its own thread and the
         // result is picked up here.
-        let received = self.device_scan.as_ref().map(|scan| scan.try_recv());
+        let received = self
+            .devices
+            .device_scan
+            .as_ref()
+            .map(|scan| scan.try_recv());
         let mut finished = None;
         match received {
             Some(Ok(fresh)) => {
-                self.device_scan = None;
+                self.devices.device_scan = None;
                 finished = Some(fresh);
             }
             Some(Err(TryRecvError::Disconnected)) => {
-                self.device_scan = None;
+                self.devices.device_scan = None;
             }
             _ => {}
         }
@@ -502,26 +632,27 @@ impl RigWerkApp {
                     #[cfg(target_os = "linux")]
                     self.refresh_quantum_check(true);
                 }
-                if !changed && self.manual_scan {
+                if !changed && self.devices.manual_scan {
                     self.push_log("Scan complete — no device changes.", LogTone::Green);
                     self.start_output_driver_check(true);
                 }
-                self.manual_scan = false;
+                self.devices.manual_scan = false;
             }
         }
         // Drain only between scans, so a change that lands while a scan runs
         // starts the next one.
-        if self.device_scan.is_none()
-            && (hotplug_pending() || self.last_device_scan.elapsed() >= Duration::from_millis(2500))
+        if self.devices.device_scan.is_none()
+            && (hotplug_pending()
+                || self.devices.last_device_scan.elapsed() >= Duration::from_millis(2500))
         {
             self.start_device_scan();
         }
     }
 
     pub(crate) fn start_device_scan(&mut self) {
-        self.last_device_scan = Instant::now();
+        self.devices.last_device_scan = Instant::now();
         let (sender, receiver) = mpsc::channel();
-        let previous = self.inventory.clone();
+        let previous = self.devices.inventory.clone();
         // Opening a PCM to read its configuration contends with a bridge that
         // already holds that device. While the bridge is up, list what the
         // host still enumerates and leave configuration to the next idle scan.
@@ -543,13 +674,13 @@ impl RigWerkApp {
                 let _ = sender.send(fresh);
             });
         match scan {
-            Ok(_) => self.device_scan = Some(receiver),
+            Ok(_) => self.devices.device_scan = Some(receiver),
             Err(_) => {
                 // No spare thread: fall back to scanning here, once.
                 let fresh = if cold_start {
                     audio::scan_devices()
                 } else {
-                    audio::scan_devices_from(&self.inventory, probe)
+                    audio::scan_devices_from(&self.devices.inventory, probe)
                 };
                 if self.startup.is_some() {
                     self.finish_startup_scan(fresh);
@@ -561,11 +692,11 @@ impl RigWerkApp {
     }
 
     pub(crate) fn rescan(&mut self) {
-        if self.device_scan.is_some() {
+        if self.devices.device_scan.is_some() {
             self.push_log("Already scanning audio devices…", LogTone::Muted);
             return;
         }
-        self.manual_scan = true;
+        self.devices.manual_scan = true;
         self.push_log("Scanning audio devices…", LogTone::Blue);
         self.start_device_scan();
     }
@@ -580,7 +711,12 @@ impl RigWerkApp {
         let asio_backend = self.selected_asio().backend.clone();
         let asio_name = self.selected_asio().name.clone();
         let asio_demo = self.selected_asio().demo;
-        let input = self.inventory.inputs.get(self.input_idx).cloned();
+        let input = self
+            .devices
+            .inventory
+            .inputs
+            .get(self.devices.input_idx)
+            .cloned();
         let output = self.selected_output().clone();
 
         let input_demo = if self.using_other_input() {
@@ -601,10 +737,10 @@ impl RigWerkApp {
             !device_present(&fresh.asio, &asio_id, &asio_backend, &asio_name)
         };
         if input_demo || !input_absent {
-            self.input_misses = 0;
+            self.devices.input_misses = 0;
         } else {
-            self.input_misses = self.input_misses.saturating_add(1);
-            if self.input_misses < UNPLUG_SCANS {
+            self.devices.input_misses = self.devices.input_misses.saturating_add(1);
+            if self.devices.input_misses < UNPLUG_SCANS {
                 let (id, name) = if self.using_other_input() {
                     match input.as_ref() {
                         Some(device) => (device.id.clone(), device.name.clone()),
@@ -614,10 +750,11 @@ impl RigWerkApp {
                     (asio_id.clone(), asio_name.clone())
                 };
                 if let Some(prior) = self
+                    .devices
                     .inventory
                     .asio
                     .iter()
-                    .chain(self.inventory.inputs.iter())
+                    .chain(self.devices.inventory.inputs.iter())
                     .find(|device| device.id == id)
                     .cloned()
                 {
@@ -627,7 +764,7 @@ impl RigWerkApp {
                         fresh.asio.push(prior);
                     }
                 }
-                if self.input_misses == 1 && !name.is_empty() {
+                if self.devices.input_misses == 1 && !name.is_empty() {
                     self.push_log(
                         format!(
                             "{name} missed one device scan. It stays selected until a second scan misses it too."
@@ -639,11 +776,12 @@ impl RigWerkApp {
 
         if output.demo || device_present(&fresh.outputs, &output.id, &output.backend, &output.name)
         {
-            self.output_misses = 0;
+            self.devices.output_misses = 0;
         } else {
-            self.output_misses = self.output_misses.saturating_add(1);
-            if self.output_misses < UNPLUG_SCANS {
+            self.devices.output_misses = self.devices.output_misses.saturating_add(1);
+            if self.devices.output_misses < UNPLUG_SCANS {
                 if let Some(prior) = self
+                    .devices
                     .inventory
                     .outputs
                     .iter()
@@ -651,7 +789,7 @@ impl RigWerkApp {
                 {
                     fresh.outputs.push(prior.clone());
                 }
-                if self.output_misses == 1 {
+                if self.devices.output_misses == 1 {
                     self.push_log(
                         format!(
                             "{} missed one device scan. It stays selected until a second scan misses it too.",
@@ -681,10 +819,10 @@ impl RigWerkApp {
     pub(crate) fn apply_inventory(&mut self, mut fresh: Inventory) -> bool {
         let scan_notes = fresh.notes.clone();
         self.hold_unconfirmed_devices(&mut fresh);
-        if inventory_fingerprint(&fresh) == self.inventory_fingerprint {
+        if inventory_fingerprint(&fresh) == self.devices.inventory_fingerprint {
             // Same devices. A scan can still fail, and that note has to be kept.
-            if self.inventory.notes != scan_notes {
-                self.inventory.notes = scan_notes.clone();
+            if self.devices.inventory.notes != scan_notes {
+                self.devices.inventory.notes = scan_notes.clone();
             }
             self.log_scan_notes(&scan_notes);
             return false;
@@ -696,24 +834,28 @@ impl RigWerkApp {
         let asio_name = self.selected_asio().name.clone();
         let asio_demo = self.selected_asio().demo;
         let input_id = self
+            .devices
             .inventory
             .inputs
-            .get(self.input_idx)
+            .get(self.devices.input_idx)
             .map(|device| device.id.clone());
         let input_backend = self
+            .devices
             .inventory
             .inputs
-            .get(self.input_idx)
+            .get(self.devices.input_idx)
             .map(|device| device.backend.clone());
         let input_name = self
+            .devices
             .inventory
             .inputs
-            .get(self.input_idx)
+            .get(self.devices.input_idx)
             .map(|device| device.name.clone());
         let input_demo = self
+            .devices
             .inventory
             .inputs
-            .get(self.input_idx)
+            .get(self.devices.input_idx)
             .map(|device| device.demo)
             .unwrap_or(true);
         let output_id = self.selected_output().id.clone();
@@ -748,17 +890,25 @@ impl RigWerkApp {
             asio_demo
         };
 
-        self.inventory = fresh;
-        self.inventory_fingerprint = inventory_fingerprint(&self.inventory);
+        self.devices.inventory = fresh;
+        self.devices.inventory_fingerprint = inventory_fingerprint(&self.devices.inventory);
         crate::app::settings::rematch_windows_virtual_output(
             &mut self.extra_outputs,
-            &self.inventory.outputs,
+            &self.devices.inventory.outputs,
         );
-        self.asio_idx = device_index(&self.inventory.asio, &asio_id, &asio_backend, &asio_name)
-            .unwrap_or_else(|| default_index(&self.inventory.asio));
-        self.input_idx = match (&input_id, &input_name) {
+        for extra_output in &mut self.extra_outputs {
+            restore_extra_output(&self.devices.inventory.outputs, extra_output);
+        }
+        self.devices.asio_idx = device_index(
+            &self.devices.inventory.asio,
+            &asio_id,
+            &asio_backend,
+            &asio_name,
+        )
+        .unwrap_or_else(|| default_index(&self.devices.inventory.asio));
+        self.devices.input_idx = match (&input_id, &input_name) {
             (Some(id), Some(name)) => device_index(
-                &self.inventory.inputs,
+                &self.devices.inventory.inputs,
                 id,
                 input_backend.as_deref().unwrap_or(""),
                 name,
@@ -766,21 +916,23 @@ impl RigWerkApp {
             .unwrap_or(0),
             _ => 0,
         };
-        self.output_idx = device_index(
-            &self.inventory.outputs,
+        self.devices.output_idx = device_index(
+            &self.devices.inventory.outputs,
             &output_id,
             &output_backend,
             &output_name,
         )
-        .unwrap_or_else(|| default_index(&self.inventory.outputs));
+        .unwrap_or_else(|| default_index(&self.devices.inventory.outputs));
 
         let asio_count = self
+            .devices
             .inventory
             .asio
             .iter()
             .filter(|device| !device.demo)
             .count();
         let output_count = self
+            .devices
             .inventory
             .outputs
             .iter()
@@ -788,17 +940,17 @@ impl RigWerkApp {
             .count();
 
         let mut missing: Vec<String> = Vec::new();
-        if !input_present && !active_input_demo && self.input_misses >= UNPLUG_SCANS {
+        if !input_present && !active_input_demo && self.devices.input_misses >= UNPLUG_SCANS {
             missing.push(if self.using_other_input() {
                 input_name.clone().unwrap_or_else(|| asio_name.clone())
             } else {
                 asio_name.clone()
             });
         }
-        if !output_present && !output_demo && self.output_misses >= UNPLUG_SCANS {
+        if !output_present && !output_demo && self.devices.output_misses >= UNPLUG_SCANS {
             missing.push(output_name.clone());
             // The selection fell back to another output, which no scan missed.
-            self.output_misses = 0;
+            self.devices.output_misses = 0;
         }
 
         if missing.is_empty() {
@@ -847,12 +999,13 @@ impl RigWerkApp {
 
     /// ASIO outputs on Windows, JACK or direct ALSA hardware on Linux.
     pub(crate) fn is_low_latency_output(&self, device: &DeviceItem) -> bool {
-        audio::is_low_latency_device(device, &self.inventory.low_latency_label)
+        audio::is_low_latency_device(device, &self.devices.inventory.low_latency_label)
     }
 
     /// Positions in the output list that belong to one tab.
     pub(crate) fn output_indices(&self, low_latency: bool) -> Vec<usize> {
-        self.inventory
+        self.devices
+            .inventory
             .outputs
             .iter()
             .enumerate()

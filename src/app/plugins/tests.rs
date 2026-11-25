@@ -1,6 +1,7 @@
 use super::{
     candidate_from_clap, candidates_from_bundle, category_tag, declared_channels, position_phrase,
-    sanitize_effect_ids, visible_effects, EffectFilter, EffectId, PluginCandidate, SCAN_TIMEOUT,
+    sanitize_effect_ids, visible_effects, EffectFilter, EffectId, PluginCandidate, SCAN_GRACE,
+    SCAN_TIMEOUT,
 };
 use crate::audio::vst3::TestBundles;
 use crate::audio::PluginFormat;
@@ -269,16 +270,17 @@ fn start_scan_arms_one_deadline_and_refuses_a_second_scan() {
     let mut browser = super::PluginBrowser::default();
     let before = std::time::Instant::now();
     // An empty body: the suite must not read, or load, the machine's plugins.
-    browser.start_scan_with(Vec::new);
+    browser.start_scan_with(|_| Vec::new());
     let armed = browser.scan_deadline.expect("the deadline is armed");
     let after = std::time::Instant::now();
     assert!(browser.scanning);
     assert!(browser.receiver.is_some());
+    let window = SCAN_TIMEOUT + SCAN_GRACE;
     assert!(
-        armed >= before + SCAN_TIMEOUT && armed <= after + SCAN_TIMEOUT,
-        "one timeout from the moment the scan started"
+        armed >= before + window && armed <= after + window,
+        "the child's timeout plus the grace its failure rows need"
     );
-    browser.start_scan_with(Vec::new);
+    browser.start_scan_with(|_| Vec::new());
     assert_eq!(
         browser.scan_deadline,
         Some(armed),

@@ -1,10 +1,15 @@
 //! CLAP bundle discovery and descriptor scanning.  Unlike VST3 and LV2,
 //! listing a CLAP bundle loads its module and calls the bundle's own `init`
 //! in this process, so this is the only scan that runs third-party code
-//! just to say what a bundle holds.
+//! just to say what a bundle holds.  The browser therefore runs it in a
+//! child process ([`scan_library_isolated`]): a hung `init` or an `abort`
+//! inside a bundle costs that child, not the app and its module lock.
 
 use std::ffi::c_char;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use clap_sys::plugin::clap_plugin_descriptor;
 
@@ -20,7 +25,7 @@ pub(crate) fn fixed_string(buffer: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 /// One discovered CLAP plugin, or one bundle that could not be read.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ClapCandidate {
     pub(crate) path: PathBuf,
     /// The plugin id, empty on a bundle that could not be read.
@@ -77,6 +82,324 @@ pub(crate) fn scan_library() -> Vec<ClapCandidate> {
         collect_bundles(&root, 0, &mut bundles);
     }
     scan_bundles(bundles)
+}
+
+/// The version of the `--clap-scan` result file.  A parent that finds another
+/// version cannot trust the fields it names, so it treats the scan as failed;
+/// bump this when `ClapCandidate` changes shape.
+const SCAN_FILE_VERSION: u32 = 1;
+
+/// What the child writes for the parent: a version tag and the scan.  Reading
+/// decodes the whole file first and then refuses an unknown version, so the
+/// shape the parent trusts is the one this build wrote.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ScanFile {
+    version: u32,
+    candidates: Vec<ClapCandidate>,
+}
+
+impl ScanFile {
+    fn new(candidates: Vec<ClapCandidate>) -> Self {
+        Self {
+            version: SCAN_FILE_VERSION,
+            candidates,
+        }
+    }
+}
+
+/// Encodes a scan result for the parent (`--clap-scan`).
+pub(super) fn encode_scan(candidates: Vec<ClapCandidate>) -> Result<String, ron::Error> {
+    ron::ser::to_string(&ScanFile::new(candidates))
+}
+
+/// The rows a child can put on the wire.  The file carries a path as text, so
+/// a bundle whose path is not valid UTF-8 cannot cross as itself.  It becomes
+/// one error row rather than failing the encode, which would hide every other
+/// bundle in the scan.
+pub(super) fn wire_candidates(candidates: Vec<ClapCandidate>) -> Vec<ClapCandidate> {
+    candidates
+        .into_iter()
+        .map(|mut candidate| {
+            if candidate.path.to_str().is_some() {
+                return candidate;
+            }
+            candidate.plugin_id.clear();
+            candidate.features.clear();
+            candidate.scan_error = Some("The bundle path is not valid UTF-8.".to_owned());
+            candidate.path = PathBuf::from(candidate.path.to_string_lossy().into_owned());
+            candidate
+        })
+        .collect()
+}
+
+/// The candidates in a child's file, or `None` when the text does not parse or
+/// was written by another version.
+pub(super) fn decode_scan(text: &str) -> Option<Vec<ClapCandidate>> {
+    let file: ScanFile = ron::from_str(text).ok()?;
+    (file.version == SCAN_FILE_VERSION).then_some(file.candidates)
+}
+
+/// The child half of the isolated scan (`--clap-scan <file> <limit-ms>`):
+/// writes a scan result where the parent reads it.  The file is created with
+/// `create_new`, so an existing path is never overwritten; `Err` says why the
+/// child cannot report, and the parent then goes by the exit status.
+pub(crate) fn write_scan_file(path: &Path, candidates: Vec<ClapCandidate>) -> Result<(), String> {
+    use std::io::Write;
+
+    let text = encode_scan(wire_candidates(candidates))
+        .map_err(|error| format!("The CLAP scan could not be encoded: {error}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("{} could not be created: {error}", path.display()))?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))
+}
+
+/// The child's exit code when it could not write its result.
+pub(crate) const CHILD_EXIT_UNWRITABLE: i32 = 1;
+
+/// The child's exit code when its own watchdog ended it, because a bundle held
+/// it past every deadline the parent has.
+pub(crate) const CHILD_EXIT_ABANDONED: i32 = 3;
+
+/// Scans the CLAP library in a child process of this binary.
+///
+/// A child is what keeps a bundle's own code away from this process: an `init`
+/// that never returns holds the child's module lock, not this process's, and
+/// an `abort` in the bundle ends only the child.  `timeout` is the parent's
+/// whole budget for the child: when it passes the child is killed and one row
+/// per scan root reports why there are no results.  A zero timeout starts no
+/// child at all.  Nothing here touches the parent's module registry, so a scan
+/// and a load can run side by side.
+pub(crate) fn scan_library_isolated(timeout: Duration) -> Vec<ClapCandidate> {
+    let roots = scan_roots();
+    if timeout.is_zero() {
+        return resolve(Err(ScanFailure::NoTime), &roots);
+    }
+    resolve(run_scan_child(timeout), &roots)
+}
+
+/// Turns a child result into rows: a scan that produced candidates passes them
+/// through unchanged, a failure becomes one row per scan root.  Pure, so a test
+/// can drive both arms without starting a process.
+pub(super) fn resolve(
+    result: Result<Vec<ClapCandidate>, ScanFailure>,
+    roots: &[PathBuf],
+) -> Vec<ClapCandidate> {
+    match result {
+        Ok(candidates) => candidates,
+        Err(cause) => failure_rows(roots, &cause),
+    }
+}
+
+/// A folder for one child scan's result, created before the child starts and
+/// removed with the file it holds.
+///
+/// The name is predictable and the temp directory is shared, so the file must
+/// not sit there on its own: the folder is this scan's alone, it is created
+/// with mode 0700 on Unix, and the file inside it is opened with `create_new`.
+/// Windows' temp directory is already user-scoped, so the same code path holds
+/// there.
+struct ScanResult {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl ScanResult {
+    fn create() -> Result<Self, ScanFailure> {
+        let dir = scan_result_dir()?;
+        let file = dir.join("scan.ron");
+        Ok(Self { dir, file })
+    }
+}
+
+impl Drop for ScanResult {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+        // A child the parent gave up on may still be writing, so the folder is
+        // removed with anything else the late write left in it.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The pid, a counter and the clock together keep two scans in one process and
+/// two processes apart.  A name that is already taken is skipped rather than
+/// reused, so a scan never writes into a folder it did not create.
+pub(super) fn scan_result_dir() -> Result<PathBuf, ScanFailure> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let base = std::env::temp_dir();
+    for _ in 0..8 {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or_default();
+        let dir = base.join(format!(
+            "rigwerk-clap-scan-{}-{serial}-{nanos}",
+            std::process::id()
+        ));
+        match create_private_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(ScanFailure::Spawn),
+        }
+    }
+    Err(ScanFailure::Spawn)
+}
+
+/// Creates the result folder with no group or other access on Unix.
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    std::fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+/// Windows' temp directory is already user-scoped, so the default mode holds.
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(dir)
+}
+
+/// How often the parent checks on a child.  Short enough that a quick scan
+/// comes back quickly, long enough not to spin a core.
+const SCAN_POLL: Duration = Duration::from_millis(25);
+
+/// How much longer the child may run than the parent waits.  The parent kills
+/// a child that overruns, but the parent may itself be killed or its kill may
+/// fail, so the child's own watchdog ends it at this point instead of leaving
+/// it to load plugins for ever.
+const CHILD_GRACE: Duration = Duration::from_secs(5);
+
+/// How long the parent waits for a killed child to be reaped before dropping
+/// the handle.  `kill` can fail, and `wait` would then block until the child
+/// ends by itself, which is the hang this guards against.
+const KILL_SETTLE: Duration = Duration::from_secs(2);
+
+/// Runs `--clap-scan` from this binary and reads what it wrote.
+///
+/// stdin, stdout and stderr are null rather than pipes: the release build is a
+/// GUI-subsystem process without a console, and a pipe would have to be
+/// drained.  The file is the only result, and [`ScanResult`] removes it and its
+/// folder on every path.
+///
+/// The spawn is not covered by a unit test: under `cargo test` the running
+/// binary is the test harness, and `--clap-scan` would be taken by libtest
+/// instead of by `main`.  Only a real `rigwerk` launch exercises the child.
+fn run_scan_child(timeout: Duration) -> Result<Vec<ClapCandidate>, ScanFailure> {
+    let result = ScanResult::create()?;
+    let path = result.file.as_path();
+    let exe = std::env::current_exe().map_err(|_| ScanFailure::Spawn)?;
+    let mut child = Command::new(exe)
+        .arg("--clap-scan")
+        .arg(path)
+        // The child's own limit, so it stops even if this process cannot.
+        .arg((timeout + CHILD_GRACE).as_millis().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ScanFailure::Spawn)?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                abandon_child(&mut child);
+                return Err(ScanFailure::TimedOut);
+            }
+            Ok(None) => std::thread::sleep(SCAN_POLL),
+            Err(_) => {
+                abandon_child(&mut child);
+                return Err(ScanFailure::Unreadable);
+            }
+        }
+    };
+    if !status.success() {
+        return Err(match status.code() {
+            Some(CHILD_EXIT_ABANDONED) => ScanFailure::Abandoned,
+            Some(CHILD_EXIT_UNWRITABLE) => ScanFailure::Unwritable,
+            _ => ScanFailure::Exited(status.to_string()),
+        });
+    }
+    let text = std::fs::read_to_string(path);
+    decode_scan(&text.map_err(|_| ScanFailure::Unreadable)?).ok_or(ScanFailure::Unreadable)
+}
+
+/// Ends a child the parent has given up on.  The kill is best effort, and the
+/// wait for it to be reaped is bounded too: if the child is not gone within
+/// [`KILL_SETTLE`] the handle is dropped and this process carries on, leaving
+/// the child to the OS rather than hanging on it.
+fn abandon_child(child: &mut Child) {
+    let _ = child.kill();
+    let settle = Instant::now() + KILL_SETTLE;
+    while Instant::now() < settle {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(SCAN_POLL),
+        }
+    }
+}
+
+/// Why an isolated scan gave no candidates.  The exit status of a cause this
+/// build does not know is kept as text, not as an `ExitStatus`, so
+/// [`failure_rows`] stays a pure function a test can call with a made-up cause.
+#[derive(Debug)]
+pub(super) enum ScanFailure {
+    /// The parent's budget passed; the child was killed.
+    TimedOut,
+    /// The child's own watchdog ended it: a bundle would not return.
+    Abandoned,
+    /// The child could not write its result.
+    Unwritable,
+    /// Any other non-zero exit; the text is its `ExitStatus` as displayed.
+    Exited(String),
+    /// The child process could not be started, or the folder for its result
+    /// could not be created.
+    Spawn,
+    /// The child ended but its result was missing, unreadable, unparsable, or
+    /// from another version.
+    Unreadable,
+    /// No time was left to start a child at all.
+    NoTime,
+}
+
+impl ScanFailure {
+    fn message(&self) -> String {
+        // One ending for every cause: the reason is the start of the sentence.
+        const TAIL: &str = ", so no CLAP effects were listed.";
+        match self {
+            Self::TimedOut => format!("The CLAP scan did not finish in time{TAIL}"),
+            Self::Abandoned => {
+                format!("The CLAP scan abandoned a plugin that would not return{TAIL}")
+            }
+            Self::Unwritable => format!("The CLAP scan could not write its result{TAIL}"),
+            Self::Exited(status) => format!("The CLAP scan ended unexpectedly ({status}){TAIL}"),
+            Self::Spawn => format!("The CLAP scan process could not be started{TAIL}"),
+            Self::Unreadable => format!("The CLAP scan produced no readable result{TAIL}"),
+            Self::NoTime => format!("The CLAP scan ran out of time before it could start{TAIL}"),
+        }
+    }
+}
+
+/// One row per scan root when the scan gave nothing back, so the browser shows
+/// where CLAP was looked for and why those folders are unknown.
+pub(super) fn failure_rows(roots: &[PathBuf], cause: &ScanFailure) -> Vec<ClapCandidate> {
+    roots
+        .iter()
+        .map(|root| ClapCandidate {
+            path: root.clone(),
+            plugin_id: String::new(),
+            name: root.display().to_string(),
+            vendor: String::new(),
+            category: "CLAP effect".to_owned(),
+            features: Vec::new(),
+            scan_error: Some(cause.message()),
+        })
+        .collect()
 }
 
 /// Lists the effects in `bundles`, keeping one row for a bundle that cannot

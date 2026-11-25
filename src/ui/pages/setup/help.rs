@@ -16,8 +16,8 @@ impl RigWerkApp {
         let windows = cfg!(target_os = "windows");
         let intro = format!(
             "RigWerk sits between the driver your interface insists on and the speakers you actually want to use. The input and the clock output keep their own rates.\n\n{} · {}",
-            self.inventory.os.to_uppercase(),
-            self.inventory.low_latency_label
+            self.devices.inventory.os.to_uppercase(),
+            self.devices.inventory.low_latency_label
         );
         panel(ui, "Help", None, None, |ui| {
             let colours = palette(ui.ctx());

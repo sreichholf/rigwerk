@@ -23,13 +23,14 @@ fn device(id: &str, name: &str) -> DeviceItem {
 /// `Shared` is not actually running; tests that need that say so.
 fn live_app() -> RigWerkApp {
     let mut app = blank_app();
-    app.use_asio_input = false;
-    app.inventory.inputs.push(device("hw:Mic", "Mic"));
-    app.inventory
+    app.devices.use_asio_input = false;
+    app.devices.inventory.inputs.push(device("hw:Mic", "Mic"));
+    app.devices
+        .inventory
         .outputs
         .push(device("out:Speakers", "Speakers"));
-    app.input_idx = 0;
-    app.output_idx = 0;
+    app.devices.input_idx = 0;
+    app.devices.output_idx = 0;
     app.engine.state = EngineState::Running;
     app.snapshot.input_rate = 48_000;
     app.snapshot.output_rate = 48_000;
@@ -248,7 +249,7 @@ fn a_measurement_whose_rig_changed_is_discarded() {
 fn a_rename_during_the_measurement_keeps_the_result() {
     let mut app = live_app();
     armed_measurement(&mut app, 4_800);
-    app.inventory.inputs[0].name = "Mic (renamed)".to_owned();
+    app.devices.inventory.inputs[0].name = "Mic (renamed)".to_owned();
     app.poll_calibration();
     assert!(app.measured_latency.is_some());
 }

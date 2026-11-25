@@ -129,7 +129,8 @@ fn a_zero_latency_edit_panic_is_named_in_diagnostics() {
 #[test]
 fn the_report_includes_status_notes_and_the_log() {
     let mut app = blank_app();
-    app.inventory
+    app.devices
+        .inventory
         .notes
         .push("ASIO registry scan: boom".to_owned());
     app.push_log("Bridge ready.", LogTone::Muted);

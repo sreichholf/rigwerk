@@ -13,19 +13,70 @@ static ALLOCATOR: audio::rt_guard::GuardAllocator = audio::rt_guard::GuardAlloca
 #[cfg(test)]
 mod tests;
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 fn parse_screenshot() -> Option<PathBuf> {
-    let mut args = std::env::args().skip(1);
+    // `args_os`: a non-UTF-8 path is a valid path, and the parent of a scan
+    // child may itself have one in `TEMP`.
+    let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
-        if argument == "--screenshot" {
+        if argument.as_os_str() == OsStr::new("--screenshot") {
             return args.next().map(PathBuf::from);
         }
-        if let Some(path) = argument.strip_prefix("--screenshot=") {
+        let text = argument.to_str();
+        if let Some(path) = text.and_then(|text| text.strip_prefix("--screenshot=")) {
             return Some(PathBuf::from(path));
         }
     }
     None
+}
+
+/// The child's own arguments: `--clap-scan <file> <limit-ms>`.  Returns
+/// whether the flag was given and, when both values are there, the file and
+/// the child's own limit.  The file stays an `OsString`: the parent passes its
+/// temp path, which need not be UTF-8.  The first item is the binary's own
+/// name and is skipped, as it is in `std::env::args_os`.
+fn parse_clap_scan(
+    args: impl Iterator<Item = std::ffi::OsString>,
+) -> (bool, Option<(PathBuf, Duration)>) {
+    let mut args = args.skip(1);
+    while let Some(argument) = args.next() {
+        if argument.as_os_str() != OsStr::new("--clap-scan") {
+            continue;
+        }
+        let path = args.next().map(PathBuf::from);
+        let limit = args
+            .next()
+            .and_then(|limit| limit.to_str()?.parse::<u64>().ok())
+            .map(Duration::from_millis);
+        return (true, path.zip(limit));
+    }
+    (false, None)
+}
+
+/// A crash inside a bundle must not open a crash dialog on a machine nobody is
+/// watching: a scan child has no window, and the dialog would wait for a click
+/// that never comes.  Called before the child starts any plugin code.
+#[cfg(windows)]
+fn silence_child_crashes() {
+    const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+    const SEM_NOGPFAULTERRORBOX: u32 = 0x0002;
+    const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetErrorMode(mode: u32) -> u32;
+    }
+
+    // SAFETY: `SetErrorMode` takes a plain bitmask and returns the previous
+    // mode.  It takes no pointers, holds no references and needs no cleanup,
+    // and it runs on the child's main thread before any scan thread starts, so
+    // every fault in bundle code sees it.  The previous mode is not needed.
+    unsafe {
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    }
 }
 
 /// A Windows release build is a GUI subsystem process, so it has no console.
@@ -35,8 +86,12 @@ fn parse_screenshot() -> Option<PathBuf> {
 /// console, and a redirected stderr handle is left alone.
 #[cfg(windows)]
 fn ensure_screenshot_console() {
-    let requested = std::env::args()
-        .any(|argument| argument == "--screenshot" || argument.starts_with("--screenshot="));
+    let requested = std::env::args_os().any(|argument| {
+        argument.as_os_str() == OsStr::new("--screenshot")
+            || argument
+                .to_str()
+                .is_some_and(|text| text.starts_with("--screenshot="))
+    });
     if !requested {
         return;
     }
@@ -104,11 +159,41 @@ fn ensure_screenshot_console() {
 }
 
 fn main() -> eframe::Result<()> {
+    // `--clap-scan <file> <limit-ms>` is the child half of the isolated plugin
+    // scan (`audio::clap::scan_library_isolated`): scan, write the result,
+    // exit.  It comes before the screenshot console and eframe so the child
+    // opens no window and prints nothing; the parent reads only its exit
+    // status and the file.
+    let (scan_requested, scan) = parse_clap_scan(std::env::args_os());
+    if scan_requested {
+        let Some((path, limit)) = scan else {
+            std::process::exit(2);
+        };
+        #[cfg(windows)]
+        silence_child_crashes();
+        // The parent kills a child that overruns, but it may itself be killed
+        // or its kill may fail, so this thread is the child's own last resort.
+        // No unwinding and no destructors: a bundle's thread is not ours to
+        // join, and the exit code is all the parent reads.
+        std::thread::spawn(move || {
+            std::thread::sleep(limit);
+            std::process::exit(audio::clap::CHILD_EXIT_ABANDONED);
+        });
+        let found = audio::clap::scan_library();
+        let code = match audio::clap::write_scan_file(&path, found) {
+            Ok(()) => 0,
+            Err(_) => audio::clap::CHILD_EXIT_UNWRITABLE,
+        };
+        std::process::exit(code);
+    }
+
     #[cfg(windows)]
     ensure_screenshot_console();
 
     let screenshot = parse_screenshot();
-    if std::env::args().any(|argument| argument == "--screenshot") && screenshot.is_none() {
+    if std::env::args_os().any(|argument| argument.as_os_str() == OsStr::new("--screenshot"))
+        && screenshot.is_none()
+    {
         eprintln!("Usage: rigwerk --screenshot <file.png>");
         std::process::exit(2);
     }
