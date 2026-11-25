@@ -698,7 +698,15 @@ fn one_missed_scan_does_not_stop_the_bridge() {
         .log
         .iter()
         .any(|entry| entry.text.contains("unplugged — bridge stopped")));
-    assert_eq!(app.issue_state.device_lost, app.device_alert);
+    assert_eq!(
+        app.issue_state
+            .stopped
+            .as_ref()
+            .map(|(reason, detail)| (*reason, detail.as_str())),
+        app.device_alert
+            .as_ref()
+            .map(|(detail, reason)| (reason.expect("a stopped bridge"), detail.as_str()))
+    );
 }
 
 /// One M key event.  `down` is false for the release between two presses.

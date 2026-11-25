@@ -212,7 +212,8 @@ pub(crate) use plugins::MAX_ALIGN;
 pub(crate) use plugins::MAX_EFFECTS;
 pub use plugins::{PluginFormat, PluginParamView, PluginPref, PluginView};
 pub(crate) use record::{RecordPhase, RecordSource, RecordStatus};
-pub(crate) use shared::{is_callback_failure_message, ExtraOutputLink, ExtraOutputPlan, SCOPE_LEN};
+pub(crate) use shared::CallbackFailure;
+pub(crate) use shared::{ExtraOutputLink, ExtraOutputPlan, SCOPE_LEN};
 pub(crate) use tuner::{
     cents_to_ratio, note_name, octave, tuning_index, TuneState, TunerAnalysis, TunerChannel,
     TunerFrame, TunerTolerance, Tuning, TuningGroup, DEFAULT_PRESET_ID, TAP_COPY_FRAMES, TUNINGS,

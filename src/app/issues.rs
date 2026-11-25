@@ -73,10 +73,13 @@
 //! be the old stream's until the new one opens.
 //!
 //! The bridge's own:
-//! - a bridge stopped because a device was disconnected: an error row once
-//!   the `device_alert` window is dismissed, so the drawer says why it
-//!   emptied instead of vanishing.  The window stays the hard stop; the row
-//!   points at Setup and clears with the next bridge start.
+//! - the bridge stopped because a device was disconnected, or because a
+//!   real-time callback caught a failure, once the `device_alert` window is
+//!   dismissed: an error row, so the drawer says why it emptied instead of
+//!   vanishing.  The row names which of the two happened and the next step:
+//!   a lost device opens Setup, a failed callback opens Diagnostics (the
+//!   anchor stays Setup until there is a diagnostics anchor).  The window
+//!   stays the hard stop, and the row clears with the next bridge start.
 //!
 //! The state behind the rows ([`IssueState`]) moves once per update tick in
 //! [`RigWerkApp::tick_issues`], whether or not the console is drawn, and
@@ -118,8 +121,8 @@ use crate::app::paths::PathInfo;
 use crate::app::settings::{bridge_buffer_from_pref, bridge_buffer_to_pref, BUFFERS};
 use crate::app::RigWerkApp;
 use crate::audio::{
-    BufferMode, EngineState, EXTRA_OUTPUT_DRIFT_LIMIT_PPM, MAX_ALIGN, MAX_EXTRA_OUTPUTS,
-    SAFETY_CEILING_DB, SAFETY_GR_DB,
+    BufferMode, CallbackFailure, EngineState, EXTRA_OUTPUT_DRIFT_LIMIT_PPM, MAX_ALIGN,
+    MAX_EXTRA_OUTPUTS, SAFETY_CEILING_DB, SAFETY_GR_DB,
 };
 #[cfg(target_os = "linux")]
 use crate::audio::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
@@ -355,7 +358,8 @@ impl IssueFilter {
 /// one does not hide another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IssueKey {
-    DeviceLost,
+    /// The bridge stopped: a lost device or a caught callback failure.
+    BridgeStopped,
     /// Output device row.
     UnalignedSum(usize),
     /// Output device row.
@@ -448,6 +452,42 @@ impl IssueView {
     }
 }
 
+/// Why a bridge run stopped and left an alert: a device went away, or a
+/// real-time callback caught a failure.  The row says which, and what to do
+/// next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    /// A device the bridge used was disconnected.
+    DeviceLost,
+    /// A callback caught this failure.
+    Callback(CallbackFailure),
+}
+
+impl StopReason {
+    fn title(self) -> &'static str {
+        match self {
+            Self::DeviceLost => "The bridge stopped: a device was disconnected",
+            Self::Callback(_) => "The bridge stopped: a real-time audio callback failed",
+        }
+    }
+
+    /// The row's next step, when the alert does not already carry one.  A
+    /// lost device's alert ends with its reconnect step; a malformed block is
+    /// not a plugin's fault, so it must not blame one.
+    fn next_step(self) -> Option<&'static str> {
+        match self {
+            Self::DeviceLost => None,
+            Self::Callback(CallbackFailure::Panic) => {
+                Some("Disable the plugin that failed, then start the bridge again.")
+            }
+            Self::Callback(CallbackFailure::BadBlock) => Some(
+                "Start the bridge again; if it comes back, the device is handing over blocks \
+                 that do not line up.",
+            ),
+        }
+    }
+}
+
 /// The issue state the drawer keeps between frames (not persisted).
 #[derive(Debug, Default)]
 pub(crate) struct IssueState {
@@ -462,9 +502,9 @@ pub(crate) struct IssueState {
     extra_output_ids: Option<[String; MAX_EXTRA_OUTPUTS]>,
     /// Whether the clock sink went silent under Low latency.
     pub(crate) silence: SilenceWatch,
-    /// The alert of a bridge stopped on a disconnected device, until the
-    /// next bridge start.
-    pub(crate) device_lost: Option<String>,
+    /// The alert of a bridge stopped on a lost device or a failed callback,
+    /// with the detail to show, until the next bridge start.
+    pub(crate) stopped: Option<(StopReason, String)>,
     /// The error titles of the last tick, to tell a new error from one
     /// already announced.
     seen_errors: Vec<String>,
@@ -840,7 +880,7 @@ impl RigWerkApp {
         let infos = self.path_infos();
         let rows = self.output_device_rows();
         let mut issues = Vec::new();
-        self.device_lost_issue(&mut issues);
+        self.stopped_bridge_issue(&mut issues);
         self.unaligned_sum_issues(&rows, &mut issues);
         self.clamped_issues(&infos, &rows, &mut issues);
         self.unheard_path_issues(&infos, &mut issues);
@@ -855,24 +895,33 @@ impl RigWerkApp {
         issues
     }
 
-    /// A bridge stopped on a disconnected device.  Not while the alert
-    /// window is up: that is the hard stop, and the row is what stays once
-    /// it is dismissed.
-    fn device_lost_issue(&self, issues: &mut Vec<LiveIssue>) {
-        let Some(alert) = &self.issue_state.device_lost else {
+    /// A bridge stopped on a disconnected device or a caught callback
+    /// failure.  Not while the alert window is up: that is the hard stop, and
+    /// the row is what stays once it is dismissed.
+    fn stopped_bridge_issue(&self, issues: &mut Vec<LiveIssue>) {
+        let Some((reason, detail)) = &self.issue_state.stopped else {
             return;
         };
         if self.device_alert.is_some() {
             return;
         }
+        let detail = match reason.next_step() {
+            Some(next) => format!("{detail} {next}"),
+            None => detail.clone(),
+        };
         issues.push(LiveIssue {
-            key: IssueKey::DeviceLost,
+            key: IssueKey::BridgeStopped,
             severity: IssueSeverity::Error,
-            title: "The bridge stopped: a device was disconnected".to_owned(),
-            detail: alert.clone(),
+            title: reason.title().to_owned(),
+            detail,
             place: "Setup".to_owned(),
+            // No diagnostics anchor yet: the row keeps Setup until there is
+            // one, even when its action opens Diagnostics.
             anchor: Anchor::Setup(crate::app::screen::SetupSection::Devices),
-            action: IssueAction::OpenDevices,
+            action: match reason {
+                StopReason::DeviceLost => IssueAction::OpenDevices,
+                StopReason::Callback(_) => IssueAction::OpenDiagnostics,
+            },
         });
     }
 

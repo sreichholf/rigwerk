@@ -27,6 +27,7 @@ fn a_failed_callback_publishes_a_message_and_a_lost_device() {
 
     let snapshot = shared.snapshot();
     assert_eq!(shared.callback_failure(), Some(CallbackFailure::Panic));
+    assert_eq!(snapshot.callback_failure, Some(CallbackFailure::Panic));
     assert!(snapshot.device_lost);
     assert_eq!(
         snapshot.error.as_deref(),
@@ -36,6 +37,7 @@ fn a_failed_callback_publishes_a_message_and_a_lost_device() {
     shared.reset();
     let snapshot = shared.snapshot();
     assert!(!snapshot.device_lost);
+    assert_eq!(snapshot.callback_failure, None);
     assert_eq!(snapshot.error, None);
     assert_eq!(shared.callback_failure(), None);
 }
@@ -50,6 +52,7 @@ fn a_malformed_block_is_not_reported_as_a_panic() {
 
     let snapshot = shared.snapshot();
     assert!(snapshot.device_lost);
+    assert_eq!(snapshot.callback_failure, Some(CallbackFailure::BadBlock));
     assert_eq!(
         snapshot.error.as_deref(),
         Some(CallbackFailure::BadBlock.message())
@@ -85,6 +88,43 @@ fn an_existing_error_keeps_its_text() {
     assert_eq!(
         shared.snapshot().error.as_deref(),
         Some("Output device disconnected: unplugged")
+    );
+}
+
+/// A device failure stored first is not relabelled by a callback caught while
+/// that device tears down: the device path owns the text and the row.
+#[test]
+fn a_device_failure_outranks_a_late_callback() {
+    let shared = super::Shared::new(48_000);
+    shared.set_device_lost("Output device disconnected: unplugged");
+    shared.note_callback_failure(CallbackFailure::Panic);
+
+    let snapshot = shared.snapshot();
+    assert!(snapshot.device_lost);
+    assert_eq!(snapshot.callback_failure, None);
+    assert_eq!(
+        snapshot.error.as_deref(),
+        Some("Output device disconnected: unplugged")
+    );
+    // The record itself stays: it is what keeps a panicked callback out of
+    // the chain while the run tears down.
+    assert_eq!(shared.callback_failure(), Some(CallbackFailure::Panic));
+}
+
+/// The other order too: a callback caught first does not keep the device
+/// flag from owning the report once a backend sees the device go.
+#[test]
+fn a_callback_before_a_device_flag_still_reports_the_device() {
+    let shared = super::Shared::new(48_000);
+    shared.note_callback_failure(CallbackFailure::Panic);
+    shared.set_device_lost("Input device disconnected: unplugged");
+
+    let snapshot = shared.snapshot();
+    assert!(snapshot.device_lost);
+    assert_eq!(snapshot.callback_failure, None);
+    assert_eq!(
+        snapshot.error.as_deref(),
+        Some("Input device disconnected: unplugged")
     );
 }
 

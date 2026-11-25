@@ -9,6 +9,7 @@ use std::time::Instant;
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 
+use crate::app::issues::StopReason;
 use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MIN};
 use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
@@ -144,7 +145,7 @@ impl RigWerkApp {
             .error_title
             .clone()
             .filter(|_| !self.chrome.error_dismissed);
-        let Some(text) = device.clone().or(error) else {
+        let Some(text) = device.as_ref().map(|(text, _)| text.clone()).or(error) else {
             return;
         };
         ui.horizontal(|ui| {
@@ -153,12 +154,20 @@ impl RigWerkApp {
                     .font(font(Face::Sans, TypeRole::Body))
                     .color(colours.error_text),
             );
-            if device.is_some() {
-                if banner_button(ui, "Rescan").clicked() {
-                    self.rescan();
-                }
-                if banner_button(ui, "Open Setup").clicked() {
-                    self.open_setup(SetupSection::Devices);
+            if let Some((_, reason)) = &device {
+                // A failed callback is not a device problem: rescanning and
+                // the device picker cannot fix a panicking plugin.
+                if matches!(reason, Some(StopReason::Callback(_))) {
+                    if banner_button(ui, "Open diagnostics").clicked() {
+                        self.open_diagnostics();
+                    }
+                } else {
+                    if banner_button(ui, "Rescan").clicked() {
+                        self.rescan();
+                    }
+                    if banner_button(ui, "Open Setup").clicked() {
+                        self.open_setup(SetupSection::Devices);
+                    }
                 }
                 if banner_button(ui, "Dismiss").clicked() {
                     self.device_alert = None;

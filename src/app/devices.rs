@@ -1,6 +1,7 @@
 //! Which devices are selected, what they are, and keeping the lists current
 //! when devices are plugged in or out.
 
+use crate::app::issues::StopReason;
 use crate::app::LogTone;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
@@ -981,16 +982,22 @@ impl RigWerkApp {
                 format!("{subject} {verb} unplugged — bridge stopped."),
                 LogTone::Red,
             );
-            self.alert_lost_device(format!(
-                "{subject} {verb} unplugged, so the bridge was stopped. Reconnect the device, then start the bridge again."
-            ));
+            self.alert_stopped_bridge(
+                format!(
+                    "{subject} {verb} unplugged, so the bridge was stopped. Reconnect the device, then start the bridge again."
+                ),
+                StopReason::DeviceLost,
+            );
         } else {
             self.push_log(
                 format!("{subject} {verb} unplugged. Choose another device."),
                 LogTone::Amber,
             );
-            self.device_alert = Some(format!(
-                "{subject} {verb} unplugged. Choose another device before starting the bridge."
+            self.device_alert = Some((
+                format!(
+                    "{subject} {verb} unplugged. Choose another device before starting the bridge."
+                ),
+                None,
             ));
         }
         self.log_scan_notes(&scan_notes);

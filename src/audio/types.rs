@@ -4,6 +4,7 @@
 use super::loudness::LoudnessReading;
 use super::output_map::{MAX_EXTRA_OUTPUTS, MAX_OUTPUT_CHANNELS};
 use super::path::MAX_PATHS;
+use super::shared::CallbackFailure;
 
 pub const DEMO_ASIO_ID: &str = "demo:asio";
 pub const DEMO_INPUT_ID: &str = "demo:input";
@@ -228,6 +229,10 @@ pub struct Snapshot {
     pub drift_ppm: f32,
     pub error: Option<String>,
     pub device_lost: bool,
+    /// Why a real-time callback stopped the run, when one did.  `device_lost`
+    /// is true then too, because the run cannot continue, but no device went
+    /// away.
+    pub callback_failure: Option<CallbackFailure>,
     /// The bridge's own status line. The header pill follows [`EngineState`]
     /// and does not read this, so an error pill stays an error pill.
     #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.

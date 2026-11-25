@@ -312,7 +312,9 @@ pub struct RigWerkApp {
     pub(crate) bridge_restart_pending: bool,
     /// Whether this bridge start's real driver settings were already logged.
     pub(crate) driver_checked: bool,
-    pub(crate) device_alert: Option<String>,
+    /// The alert window's text, with the reason when a bridge stop left it.
+    /// `None` as the reason is a device that went away while no bridge ran.
+    pub(crate) device_alert: Option<(String, Option<issues::StopReason>)>,
     /// The last stand-alone check of the selected output's driver.
     pub(crate) driver_probe: Option<driver_check::DriverCheck>,
     /// A stand-alone driver check running on its own thread.
