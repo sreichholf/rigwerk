@@ -998,8 +998,9 @@ impl AudioEngine {
 
         // Every start gets its own run state.  A bridge that outlived a
         // stop keeps the `Arc<Shared>` it was started with, so it can no
-        // longer write `running`, `status`, `error`, `device_lost`, meters or
-        // samples into the run this start is about to open.
+        // longer write `running`, `status`, `error`, `device_lost`, the
+        // callback failure, meters or samples into the run this start is
+        // about to open.
         self.replace_run();
 
         self.shared.reset();
@@ -1130,6 +1131,10 @@ impl AudioEngine {
             extra_output.clear_alignment();
         }
         self.shared.device_lost.store(false, Ordering::Relaxed);
+        // Only a run whose streams are gone gets here, so the failure flag is
+        // cleared last: while a panicked callback's stream still lived, the
+        // flag kept it out of the chain.
+        self.shared.clear_callback_failure();
         // The mixer has stopped writing.  A beat it published would sit on
         // the Live strip until the next run.
         self.shared.clear_metronome_beat();
@@ -1315,6 +1320,9 @@ impl AudioEngine {
     /// purpose, so the next Start is a clean attempt.
     pub fn clear_error(&mut self) {
         self.shared.device_lost.store(false, Ordering::Relaxed);
+        // Not `clear_callback_failure`: a panicked run that `stop` is still
+        // tearing down must keep its flag, or its streams would drive the
+        // chain again.  `finish_stop` clears it once they are gone.
         if let Ok(mut error) = self.shared.error.lock() {
             *error = None;
         }

@@ -9,9 +9,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
 
 use super::super::devices::pick_output_config;
-use super::super::output::{clamp_output_buffer, explain_output_error, write_frame};
+use super::super::output::{
+    block_frames, clamp_output_buffer, explain_output_error, render_or_silence, write_frame,
+};
 use super::super::record::{push_device_frame, RecordSource};
-use super::super::shared::Shared;
+use super::super::shared::{CallbackFailure, Shared};
 use super::super::thread_priority::PromoteOnce;
 use super::mixer::ExtraOutputMixer;
 
@@ -154,19 +156,37 @@ where
             config,
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
                 promote.run();
-                let frames = data.len() / channels;
-                mixer.render(&mix_shared, frames, |index, mapped| {
-                    // After this mixer's resampler and dropout fade: the
-                    // frame the cable (or any other extra output) actually plays.
-                    if channels > 0 {
-                        push_device_frame(
-                            &mix_shared.recorder,
-                            RecordSource::ExtraOutput(slot),
-                            mapped,
-                            channels,
-                        );
-                    }
-                    write_frame(&mut data[index * channels..(index + 1) * channels], mapped);
+                let Some(frames) = block_frames(data.len(), channels) else {
+                    // A block with no channel or a partial frame cannot be
+                    // written frame by frame: its whole-frame count is
+                    // unknown and its tail would stay unwritten.  Silence it
+                    // and publish the failure; the sample path failed, not
+                    // the device, so this stops the run even for an extra
+                    // output.
+                    data.fill(T::EQUILIBRIUM);
+                    mix_shared.note_callback_failure(CallbackFailure::BadBlock);
+                    return;
+                };
+                if mix_shared.callback_failure().is_some() {
+                    // The run already failed; the supervisor will see the
+                    // bridge stop and drop this stream.
+                    data.fill(T::EQUILIBRIUM);
+                    return;
+                }
+                render_or_silence(&mix_shared, data, |block| {
+                    mixer.render(&mix_shared, frames, |index, mapped| {
+                        // After this mixer's resampler and dropout fade: the
+                        // frame the cable (or any other extra output) actually plays.
+                        if channels > 0 {
+                            push_device_frame(
+                                &mix_shared.recorder,
+                                RecordSource::ExtraOutput(slot),
+                                mapped,
+                                channels,
+                            );
+                        }
+                        write_frame(&mut block[index * channels..(index + 1) * channels], mapped);
+                    });
                 });
             },
             move |error| {

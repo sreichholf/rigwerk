@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
-use super::InputStage;
-use crate::audio::shared::Shared;
+use super::{input_block, whole_frames, InputStage};
+use crate::audio::shared::{CallbackFailure, Shared};
 
 /// Runs one callback's worth of raw frames the way `build_input` does: one
 /// stage per block, the ring push of the returned frame, then the peaks.
@@ -32,6 +32,53 @@ fn peaks(shared: &Shared) -> (f32, f32) {
         f32::from_bits(shared.in_l.load(Ordering::Relaxed)),
         f32::from_bits(shared.in_r.load(Ordering::Relaxed)),
     )
+}
+
+/// A host block that ends on a partial frame contributes only its whole
+/// frames; the tail is dropped rather than read as a stereo pair.
+#[test]
+fn a_short_trailing_chunk_is_not_a_frame() {
+    assert_eq!(whole_frames(0, 2), 0);
+    assert_eq!(whole_frames(1, 2), 0);
+    assert_eq!(whole_frames(3, 2), 1);
+    assert_eq!(whole_frames(5, 2), 2);
+    assert_eq!(whole_frames(4, 2), 2);
+}
+
+/// An odd sample count is not a whole number of frames on any channel count
+/// above one.
+#[test]
+fn an_odd_length_counts_whole_frames_only() {
+    assert_eq!(whole_frames(7, 2), 3);
+    assert_eq!(whole_frames(7, 4), 1);
+    assert_eq!(whole_frames(9, 4), 2);
+}
+
+/// A zero channel count cannot form a frame.  `build_input` also clamps it to
+/// one, but the arithmetic must not divide by zero if it does not.
+#[test]
+fn zero_channels_has_no_frames() {
+    assert_eq!(whole_frames(0, 0), 0);
+    assert_eq!(whole_frames(5, 0), 0);
+}
+
+/// The input counterpart of the output guard's test: a body that panics does
+/// not count the block as delivered or tap it, and marks the run failed.
+/// Zero channels is the body panic a test can reach; the callback clamps it,
+/// so this pins the guard rather than the real block shape.
+#[test]
+fn a_panicking_input_body_leaves_the_counters_and_the_tap_untouched() {
+    let shared = Shared::new(48_000);
+    shared.note_input_block(256);
+    shared.note_input_frames(256);
+
+    input_block(&[0.5f32, -0.25], 0, &shared);
+
+    assert_eq!(shared.callback_failure(), Some(CallbackFailure::Panic));
+    assert_eq!(shared.input_block.load(Ordering::Relaxed), 256);
+    assert_eq!(shared.input_frames.load(Ordering::Relaxed), 256);
+    let mut samples = [0.0f32; 8];
+    assert_eq!(shared.copy_tap(&mut samples, 4), 0);
 }
 
 /// Every value here is an exact power-of-two fraction, so the products are
