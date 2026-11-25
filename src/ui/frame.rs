@@ -60,6 +60,8 @@ impl eframe::App for RigWerkApp {
 
         let ctx = root.ctx().clone();
         // Screenshots need a painted frame, so they stay on the drawing side.
+        // A run closes the window when it has its ending; `main` then exits
+        // with the code the run recorded.
         self.handle_screenshot(&ctx);
 
         let colours = crate::ui::theme::palette(root.ctx());
@@ -256,6 +258,12 @@ impl eframe::App for RigWerkApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.save_to(storage);
+    }
+
+    /// A screenshot run starts from defaults and its screens are fixtures, so
+    /// closing its window leaves the stored egui memory alone too.
+    fn persist_egui_memory(&self) -> bool {
+        self.screenshot.is_none()
     }
 }
 

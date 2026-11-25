@@ -32,7 +32,8 @@ pub(crate) mod startup;
 pub(crate) mod tuner;
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::AtomicI32;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -408,6 +409,11 @@ impl RigWerkApp {
     /// byte-identical and only the copy is saved; a file too damaged to yield
     /// a number is replaced, with its original text kept in that copy.
     pub(crate) fn save_to(&mut self, storage: &mut dyn eframe::Storage) {
+        // A screenshot run starts from defaults and its screens are fixtures,
+        // so closing its window must not store that as the session's state.
+        if self.screenshot.is_some() {
+            return;
+        }
         // Before the gate: a quit while the first scan still runs must keep
         // the original text a damaged load could not read.
         store_preferences_backup(storage, &mut self.preferences_backup);
@@ -807,7 +813,11 @@ impl RigWerkApp {
         self.stored_schema_version = stored_schema_version;
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        screenshot: Option<PathBuf>,
+        screenshot_exit: Arc<AtomicI32>,
+    ) -> Self {
         // eframe builds the app on its UI thread, which is the thread that
         // services CLAP plugins; record it before any plugin can load.
         crate::audio::mark_main_thread();
@@ -831,10 +841,7 @@ impl RigWerkApp {
         // the screenshot flag, so both go in before the preferences do.
         app.devices.inventory = audio::placeholder_inventory();
         app.devices.inventory_fingerprint = inventory_fingerprint(&app.devices.inventory);
-        app.screenshot = screenshot.map(|path| ScreenshotJob {
-            path,
-            requested: false,
-        });
+        app.screenshot = screenshot.map(|path| ScreenshotJob::new(path, screenshot_exit));
         app.apply_preferences(&preferences, loaded.stored_schema_version);
         app.preferences_backup = loaded.backup;
         app.startup = Some(StartupGate {
