@@ -52,7 +52,9 @@ The hardware tests read the devices from the environment: `RIGWERK_IN`,
 CI (`.github/workflows/ci.yml`) also compiles the ignored hardware tests
 (`cargo test --locked --no-run -- --ignored`) and runs
 `cargo build --locked --release`. That release build is CI's gate, not
-the local one.  CodeQL (`.github/workflows/codeql.yml`) scans the Rust
+the local one.  A `Deny` job runs cargo-deny against `deny.toml`, whose
+`allow` list takes a deliberate edit when a dependency licence changes.
+CodeQL (`.github/workflows/codeql.yml`) scans the Rust
 code and the workflows on pushes to `master`, on pull requests, and
 weekly.  Its alerts land in the repository's Security tab.
 

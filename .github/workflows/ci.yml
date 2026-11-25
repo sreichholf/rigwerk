@@ -15,6 +15,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every action is pinned by commit SHA (the tag or ref is in the trailing
+# comment), like the toolchain.  Updating one is a deliberate edit of the SHA.
 jobs:
   linux:
     name: Linux
@@ -22,7 +24,7 @@ jobs:
     # moving there on 2026-10-19.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # The mirror is slow (minutes for ~60 MB), so the downloaded .debs
       # are cached.  Install still runs apt, so a stale cache only means a
@@ -30,7 +32,7 @@ jobs:
       # has, which keeps the cache from growing.
       - name: Restore apt archives
         id: apt-cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/apt-archives
           key: apt-${{ runner.os }}-24.04-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -80,18 +82,18 @@ jobs:
 
       - name: Save apt archives
         if: steps.apt-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/apt-archives
           key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       # rust-toolchain.toml pins 1.95.0 (MSRV) with rustfmt + clippy.
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -118,7 +120,7 @@ jobs:
       # The Steinberg SDK samples the vst3_fixture tests load, built by the
       # script and cached per runner OS and script revision (which pins the
       # SDK tag).
-      - uses: actions/cache@v5
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .vst3-fixtures/plugins
           key: vst3-fixtures-${{ runner.os }}-${{ hashFiles('scripts/vst3-fixtures.sh') }}
@@ -143,7 +145,7 @@ jobs:
       # built by the script and cached per runner OS and script revision
       # (which pins the LV2 tag).  Linux only: the script is POSIX and the
       # fixtures are not built on Windows yet.
-      - uses: actions/cache@v5
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .lv2-fixtures/plugins
           key: lv2-fixtures-${{ runner.os }}-${{ hashFiles('scripts/lv2-fixtures.sh') }}
@@ -165,19 +167,33 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/nam-rs-parity.sh .nam-rs-parity
 
+  # Advisories, licences, bans, and sources for the locked crates (deny.toml).
+  # No build: the action's image ships cargo-deny, which reads Cargo.lock
+  # through `cargo metadata`.
+  deny:
+    name: Deny
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        with:
+          command: check
+          arguments: --all-features --locked
+
   windows:
     name: Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -197,7 +213,7 @@ jobs:
       # The Steinberg SDK samples the vst3_fixture tests load, built by the
       # script and cached per runner OS and script revision (which pins the
       # SDK tag).
-      - uses: actions/cache@v5
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .vst3-fixtures/plugins
           key: vst3-fixtures-${{ runner.os }}-${{ hashFiles('scripts/vst3-fixtures.sh') }}
