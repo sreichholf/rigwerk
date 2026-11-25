@@ -4,7 +4,7 @@ use super::{
 };
 use crate::audio::rt_guard::RtGuard;
 use crate::audio::DeviceItem;
-use crate::ui::theme::TEAL;
+use crate::ui::theme::DARK;
 use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
 use eframe::egui::{self, accesskit::Toggled};
 
@@ -23,7 +23,7 @@ fn item(name: &str) -> DeviceItem {
 #[test]
 fn a_device_row_exposes_its_name_and_whether_it_is_in_use() {
     let tree = accesskit_frame(|ui| {
-        assert!(!device_row(ui, &item("Analog In"), true, TEAL, &[]));
+        assert!(!device_row(ui, &item("Analog In"), true, DARK.accent, &[]));
     });
     let node = node_named(&tree, "Analog In");
     assert_eq!(node.role(), egui::Role::RadioButton);
@@ -36,14 +36,14 @@ fn enter_on_a_focused_device_row_still_counts_as_a_pick() {
     let ctx = egui::Context::default();
     let device = item("Analog In");
     let _ = run_frame(&ctx, test_input(None), |ui| {
-        assert!(!device_row(ui, &device, false, TEAL, &[]));
+        assert!(!device_row(ui, &device, false, DARK.accent, &[]));
     });
     let _ = run_frame(&ctx, test_input(Some(egui::Key::Tab)), |ui| {
-        assert!(!device_row(ui, &device, false, TEAL, &[]));
+        assert!(!device_row(ui, &device, false, DARK.accent, &[]));
     });
     let mut picked = false;
     let _ = run_frame(&ctx, test_input(Some(egui::Key::Enter)), |ui| {
-        picked = device_row(ui, &device, false, TEAL, &[]);
+        picked = device_row(ui, &device, false, DARK.accent, &[]);
     });
     assert!(picked);
 }

@@ -737,6 +737,7 @@ values; widgets read the active one, never a literal colour.
 | `warn` | `#ffcc4d` | `#7a5700` | warnings, with an icon |
 | `error` | `#ff5a4a` | `#d93a2b` | clip, recording, error icons |
 | `error_text` | `#ff5a4a` | `#b8291c` | error text |
+| `ok_text` | `#9cc48a` | `#446b33` | OK states as text: a measured result |
 | `meter` | `#cfc8bb` | `#4a463f` | meter below −6 dBFS |
 | `meter_hot` | = `warn` | = `warn` | meter −6 to −1 dBFS, limiter reduction |
 | `path[0..4]` | `#7fb2d6 #c49bd8 #9cc48a #e39aa6` | `#3f7fae #8d5bb0 #5f8f4a #b5566a` | path identity |
@@ -746,8 +747,8 @@ values; widgets read the active one, never a literal colour.
   index stays.  Amber stops being a path colour because amber means warning.
 - `theme/tests.rs` checks, in both themes:
   - text tokens (`text`, `text2`, `text3`, `accent_text`, `warn`,
-    `error_text`) against `bg`, `bar`, `strip`, `sheet` and `slot` at
-    4.5:1.  The lowest pair is light `text3` on `bg`, 4.57:1;
+    `error_text`, `ok_text`) against `bg`, `bar`, `strip`, `sheet` and `slot`
+    at 4.5:1.  The lowest pair is light `text3` on `bg`, 4.57:1;
   - state colours (`accent`, `led_off`, `meter`, `meter_hot`, paths)
     against `strip` and `slot` at 3:1.  The lowest is the light green path
     colour on `slot`, 3.25:1.
@@ -793,7 +794,9 @@ values; widgets read the active one, never a literal colour.
   subsetting.
 - Scale (pt at 100 %): 11 grid headers, meter scale; 12 secondary, status
   bar; 13 body, rows; 14 strip names, buttons; 15 title, sheet title; 18
-  Setup headings; 22 tuner strings; 44 tuner cents; 200 tuner note.
+  Setup headings; 22 tuner strings; 44 tuner cents; 104 tuner note.  The note
+  is the largest text, and 104 pt is what fits its 150 pt readout; the type
+  scale's roles are all at 100 % (the interface size zooms them).
 
 ### 7.4 Shape and space
 
