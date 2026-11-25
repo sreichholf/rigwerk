@@ -1,0 +1,39 @@
+# cargo-deny policy: advisories, licences, and sources of the locked crates.
+# `cargo deny check` runs in CI (.github/workflows/ci.yml, job `deny`).
+
+[advisories]
+# A yanked version is an error: the lockfile must move off it.
+yanked = "deny"
+
+[licenses]
+# The exact set `cargo metadata --locked` reports for this lockfile, so an
+# update that adds a new licence fails here instead of passing silently.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "GPL-3.0-or-later",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicates warn: cargo picks them and the tree changes often enough that
+# a hard deny would break unrelated updates.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

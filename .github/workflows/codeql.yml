@@ -17,6 +17,8 @@ concurrency:
 permissions:
   contents: read
 
+# Every action is pinned by commit SHA (the tag or ref is in the trailing
+# comment), like the toolchain.  Updating one is a deliberate edit of the SHA.
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
@@ -31,7 +33,7 @@ jobs:
       matrix:
         language: [rust, actions]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # The Rust extractor runs build scripts; pipewire-sys and alsa-sys
       # need their headers.  Only the Linux cfg is analyzed.
@@ -55,16 +57,16 @@ jobs:
             libgl1-mesa-dev \
             pkg-config
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master @ 2026-11-15
         if: matrix.language == 'rust'
         with:
           toolchain: 1.95.0
 
-      - uses: github/codeql-action/init@v4
+      - uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
 
-      - uses: github/codeql-action/analyze@v4
+      - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4
         with:
           category: /language:${{ matrix.language }}
