@@ -47,7 +47,7 @@ use egui::{
 use crate::audio::EngineState;
 use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
-use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole, BORDER_SOFT, DIM, TEXT};
+use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
 
 /// One level slider's height and readout width: the two sheet rows share
 /// them so a path and an output read the same.
@@ -100,44 +100,40 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
 }
 
 /// A [`tab_button`] that explains itself on hover.
-pub(crate) fn hinted_tab(
-    ui: &mut egui::Ui,
-    label: &str,
-    selected: bool,
-    color: Color32,
-    hint: &str,
-) -> bool {
-    tab_button(ui, label, selected, color)
+pub(crate) fn hinted_tab(ui: &mut egui::Ui, label: &str, selected: bool, hint: &str) -> bool {
+    tab_button(ui, label, selected)
         .on_hover_text(hint)
         .clicked()
 }
 
 /// A compact exclusive choice.  Same type size as [`segmented`] and outline
-/// buttons, so leftover calibration tabs match the rest of the chrome.
-pub(crate) fn tab_button(
-    ui: &mut egui::Ui,
-    label: &str,
-    selected: bool,
-    color: Color32,
-) -> egui::Response {
+/// buttons, so leftover calibration tabs match the rest of the chrome.  The
+/// selected tab is tinted and labelled with the accent pair, the rest with
+/// `text3` and the control border, all from the active palette.
+pub(crate) fn tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let colours = palette(ui.ctx());
     ui.add(
         egui::Button::new(
             RichText::new(label)
                 .font(font(Face::Sans, TypeRole::Control))
-                .color(if selected { color } else { DIM })
+                .color(if selected {
+                    colours.accent_text
+                } else {
+                    colours.text3
+                })
                 .strong(),
         )
         .fill(if selected {
-            with_alpha(color, 20)
+            with_alpha(colours.accent, 20)
         } else {
             Color32::TRANSPARENT
         })
         .stroke(Stroke::new(
             1.0,
             if selected {
-                with_alpha(color, 60)
+                with_alpha(colours.accent, 60)
             } else {
-                BORDER_SOFT
+                colours.line2
             },
         ))
         .corner_radius(CornerRadius::same(5))
@@ -154,15 +150,16 @@ pub(crate) fn progress_line(
     fraction: f32,
     color: Color32,
 ) {
+    let colours = palette(ui.ctx());
     ui.horizontal(|ui| {
-        ui.label(micro_label(label, DIM));
+        ui.label(micro_label(label, colours.text3));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(mono(value, color, 9.0));
         });
     });
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(2), Color32::from_rgb(27, 34, 46));
+        .rect_filled(rect, CornerRadius::same(2), colours.well);
     let filled = Rect::from_min_size(
         rect.min,
         Vec2::new(rect.width() * fraction.clamp(0.0, 1.0), rect.height()),
@@ -239,7 +236,7 @@ pub(crate) fn level_row(
 pub(crate) fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, max_width: f32) -> String {
     let width = |candidate: &str| {
         ui.painter()
-            .layout_no_wrap(candidate.to_owned(), font.clone(), TEXT)
+            .layout_no_wrap(candidate.to_owned(), font.clone(), palette(ui.ctx()).text)
             .size()
             .x
     };

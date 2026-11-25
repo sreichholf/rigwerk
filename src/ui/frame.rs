@@ -15,9 +15,7 @@ use crate::app::{Page, RigWerkApp};
 use crate::ui::brand;
 use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
-use crate::ui::theme::{
-    configure_style, font, with_alpha, TypeRole, BORDER, CARD, DIM, GREEN, MUTED, TEAL, TEXT,
-};
+use crate::ui::theme::{configure_style, font, palette, with_alpha, TypeRole};
 
 /// Command and shift, and nothing else.  Command is Ctrl on Windows and
 /// Linux, and Command on macOS.  `matches_exact` rejects Alt; egui's
@@ -64,7 +62,7 @@ impl eframe::App for RigWerkApp {
         // with the code the run recorded.
         self.handle_screenshot(&ctx);
 
-        let colours = crate::ui::theme::palette(root.ctx());
+        let colours = palette(root.ctx());
         let bar = colours.bar;
         egui::Panel::top("rigwerk_title")
             .exact_size(52.0)
@@ -155,8 +153,8 @@ impl eframe::App for RigWerkApp {
                 .fixed_size(Vec2::new(460.0, 460.0))
                 .frame(
                     egui::Frame::new()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0, BORDER))
+                        .fill(colours.strip)
+                        .stroke(egui::Stroke::new(1.0, colours.line2))
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(Margin::same(16)),
                 )
@@ -174,7 +172,7 @@ impl eframe::App for RigWerkApp {
                             ui.heading("RigWerk");
                             ui.label(
                                 RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                                    .color(DIM),
+                                    .color(colours.text3),
                             );
                         });
                     });
@@ -183,7 +181,7 @@ impl eframe::App for RigWerkApp {
                         RichText::new(
                             "An independent-clock audio bridge. Capture and playback keep their own rates; a short ring absorbs the drift. Extra outputs can follow the finished mix.",
                         )
-                        .color(MUTED),
+                        .color(colours.text2),
                     );
                     ui.add_space(10.0);
                     ui.label(
@@ -191,14 +189,14 @@ impl eframe::App for RigWerkApp {
                             "Windows: ASIO and WASAPI (DirectSound and MME when the host lists them). Mixer can add WASAPI extra outputs; the virtual output uses an installed virtual cable such as VB-Audio Cable. Linux: PipeWire is the low-latency path (own nodes linked to the source and sink you pick), with direct ALSA hw: available and PulseAudio on the system side. PipeWire clocks can add extra outputs and RigWerk Out. The ALSA buffer is compared with the PipeWire graph buffer instead of hiding a mismatch.",
                         )
                         .size(ts(10.5))
-                        .color(GREEN),
+                        .color(colours.ok_text),
                     );
                     ui.label(
                         RichText::new(
                             "Pick any listed input and output. Whether one interface can do both jobs at once depends on its driver; RigWerk reports what that driver allows instead of guessing.",
                         )
                         .size(ts(10.0))
-                        .color(MUTED),
+                        .color(colours.text2),
                     );
                     ui.add_space(8.0);
                     if ui
@@ -206,10 +204,10 @@ impl eframe::App for RigWerkApp {
                             egui::Button::new(
                                 RichText::new("Close")
                                     .font(font(Face::Sans, TypeRole::Control))
-                                    .color(TEAL),
+                                    .color(colours.accent_text),
                             )
-                            .fill(with_alpha(TEAL, 14))
-                            .stroke(egui::Stroke::new(1.0, with_alpha(TEAL, 45)))
+                            .fill(with_alpha(colours.accent, 14))
+                            .stroke(egui::Stroke::new(1.0, with_alpha(colours.accent, 45)))
                             .corner_radius(egui::CornerRadius::same(7)),
                         )
                         .clicked()
@@ -229,8 +227,8 @@ impl eframe::App for RigWerkApp {
                 .fixed_size(Vec2::new(360.0, 120.0))
                 .frame(
                     egui::Frame::new()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0, BORDER))
+                        .fill(colours.strip)
+                        .stroke(egui::Stroke::new(1.0, colours.line2))
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(Margin::same(18)),
                 )
@@ -238,7 +236,7 @@ impl eframe::App for RigWerkApp {
                     ui.label(
                         RichText::new("Finding audio devices…")
                             .font(font(Face::Sans, TypeRole::Control))
-                            .color(TEXT),
+                            .color(colours.text),
                     );
                     ui.add_space(8.0);
                     ui.label(
@@ -246,7 +244,7 @@ impl eframe::App for RigWerkApp {
                             "The window is ready. Device lists fill in as soon as the scan finishes.",
                         )
                         .font(font(Face::Sans, TypeRole::Secondary))
-                        .color(MUTED),
+                        .color(colours.text2),
                     );
                 });
         }

@@ -1,9 +1,9 @@
 //! Colours and the egui style.
 //!
 //! [`DARK`] and [`LIGHT`] hold the tokens of `docs/ui-spec.md` §7.1, and
-//! [`palette`] gives the active one.  The old constants (`CARD`, `TEAL`, …)
-//! are the dark tokens.  Calibration and the tab helpers still use them, so
-//! those controls stay on the dark tokens in the light theme.
+//! [`palette`] gives the active one.  Every control draws from that palette,
+//! so the light theme is drawn in light tokens from the window frame to the
+//! calibration panel.
 
 use eframe::egui;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Theme, Vec2};
@@ -39,6 +39,8 @@ pub(crate) enum TypeRole {
     TunerString,
     /// The tuner's cents.
     TunerCents,
+    /// The tuner's note: the largest text in the window.
+    TunerNote,
 }
 
 /// The size of `role` in points at 100 %.  The interface size zooms it.
@@ -52,6 +54,7 @@ pub(crate) fn type_size(role: TypeRole) -> f32 {
         TypeRole::Heading => 18.0,
         TypeRole::TunerString => 22.0,
         TypeRole::TunerCents => 44.0,
+        TypeRole::TunerNote => 104.0,
     }
 }
 
@@ -102,6 +105,10 @@ pub(crate) struct Palette {
     pub(crate) error: Color32,
     /// Error text.
     pub(crate) error_text: Color32,
+    /// OK states as text: a measured result, a good reading.  The palette's
+    /// green is a path's identity, so it is not dark enough for text in every
+    /// theme.
+    pub(crate) ok_text: Color32,
     /// Meter below −6 dBFS.
     pub(crate) meter: Color32,
     /// Meter from −6 to −1 dBFS, limiter reduction.  Always `warn`.
@@ -140,6 +147,7 @@ pub(crate) const DARK: Palette = Palette {
     warn: hex(0xffcc4d),
     error: hex(0xff5a4a),
     error_text: hex(0xff5a4a),
+    ok_text: hex(0x9cc48a),
     meter: hex(0xcfc8bb),
     meter_hot: hex(0xffcc4d),
     path: [hex(0x7fb2d6), hex(0xc49bd8), hex(0x9cc48a), hex(0xe39aa6)],
@@ -164,6 +172,7 @@ pub(crate) const LIGHT: Palette = Palette {
     warn: hex(0x7a5700),
     error: hex(0xd93a2b),
     error_text: hex(0xb8291c),
+    ok_text: hex(0x446b33),
     meter: hex(0x4a463f),
     meter_hot: hex(0x7a5700),
     path: [hex(0x3f7fae), hex(0x8d5bb0), hex(0x5f8f4a), hex(0xb5566a)],
@@ -182,19 +191,6 @@ impl Palette {
 pub(crate) fn palette(ctx: &egui::Context) -> &'static Palette {
     Palette::of(ctx.theme())
 }
-
-// The dark tokens the controls that predate the palette still use.
-pub(crate) const CARD: Color32 = DARK.strip;
-pub(crate) const BORDER: Color32 = DARK.line2;
-pub(crate) const BORDER_SOFT: Color32 = DARK.line;
-pub(crate) const TEXT: Color32 = DARK.text;
-pub(crate) const MUTED: Color32 = DARK.text2;
-/// Secondary text, `text3`: about 5.4:1 on CARD and quieter than MUTED.
-pub(crate) const DIM: Color32 = DARK.text3;
-pub(crate) const TEAL: Color32 = DARK.accent;
-pub(crate) const AMBER: Color32 = DARK.warn;
-/// OK states.  The palette's only green is the Green path colour.
-pub(crate) const GREEN: Color32 = DARK.path[2];
 
 /// Installs the fonts and both egui styles.  Which one is drawn is the
 /// theme preference, which `app` puts on the context at start.
