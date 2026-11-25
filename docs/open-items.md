@@ -114,10 +114,10 @@ since.
   this; closing an editor by hand and reopening it later still can.
   The fix belongs upstream (`cairo_device_finish` before
   `xcb_disconnect`, as VSTGUI's Wayland path does).
-- **CLAP log.**  `host_log` (`clap/host.rs`) builds a `String` and replaces
-  `last_log` (under `try_lock`) on whatever thread logs, so a plugin that
-  logs from `process` allocates and frees on the audio thread.  Nothing
-  reads `last_log`.
+- **CLAP log.**  `host_log` (`clap/host.rs`) copies the message into a fixed
+  256-byte slot (`try_lock`, no allocation) on whatever thread logs, and the
+  reader builds the `String`; nothing reads the slot yet, so a plugin's log
+  line still goes nowhere.
 - **RT allocation guard.**  The counting allocator and the counts exist
   only under `debug_assertions` (`audio/rt_guard.rs`); in release
   `RtGuard` is a no-op, so a release build carries no automated evidence

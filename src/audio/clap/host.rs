@@ -11,8 +11,10 @@
 
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicI32;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use clap_sys::ext::audio_ports::{clap_host_audio_ports, CLAP_EXT_AUDIO_PORTS};
@@ -30,7 +32,6 @@ use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK}
 use clap_sys::ext::timer_support::{clap_host_timer_support, CLAP_EXT_TIMER_SUPPORT};
 use clap_sys::host::clap_host;
 
-use super::cstring;
 use super::ports::{AUDIO_PORTS_RESCAN_ALL, AUDIO_PORTS_RESCAN_STOPS};
 use crate::audio::plugins::{
     on_audio_thread, recorded_main_thread, PluginShared, RESTART_ACTIVATION,
@@ -45,6 +46,125 @@ pub(super) struct TimerEntry {
     pub(super) id: u32,
     pub(super) period: Duration,
     pub(super) next: Instant,
+}
+
+/// The capacity of one [`LogSlot`].  A CLAP message is a short line; the
+/// slot is fixed so `host_log` can run on the plugin's process thread
+/// without allocating.  The UI builds its `String` when it reads the slot.
+pub(super) const LOG_BYTES: usize = 256;
+
+/// How many file-descriptor unregister requests may wait for a busy list.
+#[cfg(target_os = "linux")]
+pub(super) const PENDING_UNREGISTER: usize = 8;
+
+/// An empty slot in [`HostState::pending_unregister`]; a descriptor is never
+/// negative (`host_register_fd` refuses those).
+#[cfg(target_os = "linux")]
+const EMPTY_PENDING_FD: i32 = -1;
+
+/// The latest log message, in a fixed buffer.  `host_log` may run on the
+/// plugin's process thread, so writing it never allocates and never waits:
+/// the message is cut at the first character that does not fit, and
+/// [`truncated`](Self::truncated) records that.
+pub(super) struct LogSlot {
+    bytes: [u8; LOG_BYTES],
+    len: usize,
+    truncated: bool,
+}
+
+impl LogSlot {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; LOG_BYTES],
+            len: 0,
+            truncated: false,
+        }
+    }
+
+    /// Replaces the stored message with `bytes`.  Invalid UTF-8 becomes
+    /// U+FFFD, as the UI's old lossy decode did, and the copy stops before
+    /// a character that would cross the end.  Only the bytes that can still
+    /// reach the slot are validated (plus three for the character at its
+    /// edge): a long message is not scanned past where it is cut.
+    fn write(&mut self, bytes: &[u8]) {
+        self.len = 0;
+        self.truncated = false;
+        let limit = LOG_BYTES + 3;
+        let cut_by_limit = bytes.len() > limit;
+        let mut rest = &bytes[..bytes.len().min(limit)];
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(text) => {
+                    self.push(text);
+                    self.truncated |= cut_by_limit;
+                    return;
+                }
+                Err(error) => {
+                    let valid =
+                        unsafe { std::str::from_utf8_unchecked(&rest[..error.valid_up_to()]) };
+                    if !self.push(valid) {
+                        return;
+                    }
+                    let skipped = match error.error_len() {
+                        Some(len) => len,
+                        None => {
+                            // An incomplete sequence at the end.  If the
+                            // message was cut to the limit, the character
+                            // continues past it: drop it whole, as the slot's
+                            // end does.  A real trailing fragment becomes
+                            // U+FFFD.
+                            if cut_by_limit {
+                                self.truncated = true;
+                                return;
+                            }
+                            rest.len() - error.valid_up_to()
+                        }
+                    };
+                    let mut encoded = [0u8; 4];
+                    let replacement = char::REPLACEMENT_CHARACTER.encode_utf8(&mut encoded);
+                    if !self.push(replacement) {
+                        return;
+                    }
+                    rest = &rest[error.valid_up_to() + skipped..];
+                }
+            }
+        }
+    }
+
+    /// Appends `text` while every character fits.  `false` once one does
+    /// not; the message is then marked truncated and stops there.
+    fn push(&mut self, text: &str) -> bool {
+        for character in text.chars() {
+            let mut encoded = [0u8; 4];
+            let bytes = character.encode_utf8(&mut encoded).as_bytes();
+            if self.len + bytes.len() > LOG_BYTES {
+                self.truncated = true;
+                return false;
+            }
+            self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+            self.len += bytes.len();
+        }
+        true
+    }
+
+    pub(super) fn text(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or_default()
+    }
+
+    pub(super) fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+/// `mutex.try_lock()` with a poisoned lock recovered and a busy one `None`.
+/// A callback answers a busy lock as "not now"; it never waits behind the
+/// UI or the plugin.
+fn try_lock_now<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
 }
 
 /// Callback state shared with the plugin.  The plugin may call into this from
@@ -79,9 +199,17 @@ pub(crate) struct HostState {
     /// with the flags it watches.  Main-thread only, like the extension.
     #[cfg(target_os = "linux")]
     pub(super) fds: Mutex<Vec<(i32, clap_posix_fd_flags)>>,
+    /// Unregister requests a busy `fds` could not take yet.  A slot holds a
+    /// descriptor, `EMPTY_PENDING_FD` is free.  The next service drains them
+    /// before it polls; when all slots are full a request is refused and its
+    /// descriptor stays registered.
+    #[cfg(target_os = "linux")]
+    pub(super) pending_unregister: [AtomicI32; PENDING_UNREGISTER],
     pub(super) timers: Mutex<Vec<TimerEntry>>,
     pub(super) next_timer: AtomicU32,
-    pub(super) last_log: Mutex<Option<String>>,
+    /// The latest message from `clap_host_log`, in a fixed slot: a plugin
+    /// may log from its process thread, where a `String` would allocate.
+    pub(super) last_log: Mutex<Option<LogSlot>>,
 }
 
 impl HostState {
@@ -104,6 +232,8 @@ impl HostState {
             gui_hints_changed: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             fds: Mutex::new(Vec::new()),
+            #[cfg(target_os = "linux")]
+            pending_unregister: [const { AtomicI32::new(EMPTY_PENDING_FD) }; PENDING_UNREGISTER],
             timers: Mutex::new(Vec::new()),
             next_timer: AtomicU32::new(1),
             last_log: Mutex::new(None),
@@ -137,6 +267,16 @@ impl HostState {
         self.gui_hints_changed.swap(false, Ordering::Relaxed)
     }
 
+    /// The latest log message and whether it was cut, built on the caller's
+    /// (UI) thread.  `None` before the first message, or while the callback
+    /// holds the slot (the next service reads it).
+    #[cfg_attr(not(test), allow(dead_code))] // No reader in the tree yet.
+    pub(crate) fn log_message(&self) -> Option<(String, bool)> {
+        let last = try_lock_now(&self.last_log)?;
+        last.as_ref()
+            .map(|slot| (slot.text().to_owned(), slot.truncated()))
+    }
+
     /// Whether this is the plugin's main thread.
     pub(super) fn on_main_thread(&self) -> bool {
         std::thread::current().id() == self.main_thread
@@ -145,10 +285,11 @@ impl HostState {
     /// The timers due now, rescheduled.  The list is released before the
     /// caller calls the plugin, which may (un)register timers from there.
     pub(super) fn due_timers(&self) -> Vec<u32> {
-        let mut timers = self
-            .timers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Never wait: a plugin may be registering a timer from another
+        // thread.  The due ones stay due for the next service.
+        let Some(mut timers) = try_lock_now(&self.timers) else {
+            return Vec::new();
+        };
         let now = Instant::now();
         let mut due = Vec::new();
         for timer in timers.iter_mut() {
@@ -162,16 +303,52 @@ impl HostState {
 }
 
 impl HostState {
+    /// Queues an unregister for the next service.  `true` once `fd` is in a
+    /// slot (or already was); `false` when all slots are full, which leaves
+    /// the descriptor registered.  A conforming plugin unregisters on the
+    /// main thread, where the list is free, so this is the overflow path.
+    #[cfg(target_os = "linux")]
+    fn queue_unregister(&self, fd: i32) -> bool {
+        for slot in &self.pending_unregister {
+            if slot
+                .compare_exchange(EMPTY_PENDING_FD, fd, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+            if slot.load(Ordering::Acquire) == fd {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Applies queued unregisters to `fds`, whose lock the caller holds, before
+    /// the caller polls or edits it.  A request queued after this swap waits for
+    /// the next service, so this pass still polls that descriptor once.  CLAP
+    /// asks the plugin to unregister on the main thread, where the list is free,
+    /// so only a plugin off that thread reaches that window.
+    #[cfg(target_os = "linux")]
+    fn apply_pending_unregister(&self, fds: &mut Vec<(i32, clap_posix_fd_flags)>) {
+        for slot in &self.pending_unregister {
+            let fd = slot.swap(EMPTY_PENDING_FD, Ordering::AcqRel);
+            if fd != EMPTY_PENDING_FD {
+                fds.retain(|&(known, _)| known != fd);
+            }
+        }
+    }
+
     /// Polls the registered file descriptors without waiting and returns
     /// the ready ones with their CLAP flags.  The list is released before
     /// the caller hands them to `on_fd`.
     #[cfg(target_os = "linux")]
     pub(super) fn ready_fds(&self) -> Vec<(i32, clap_posix_fd_flags)> {
         let mut polled: Vec<libc::pollfd> = {
-            let fds = self
-                .fds
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Never wait: the list is a callback's, not this service's.
+            let Some(mut fds) = try_lock_now(&self.fds) else {
+                return Vec::new();
+            };
+            self.apply_pending_unregister(&mut fds);
             fds.iter()
                 .map(|&(fd, flags)| libc::pollfd {
                     fd,
@@ -322,10 +499,14 @@ pub(super) unsafe extern "C" fn host_log(
     let Some(state) = (unsafe { state(host) }) else {
         return;
     };
-    let text = cstring(message);
+    let bytes = if message.is_null() {
+        &[][..]
+    } else {
+        unsafe { CStr::from_ptr(message) }.to_bytes()
+    };
     // A plugin may log from its process callback; never wait behind the UI.
-    if let Ok(mut last) = state.last_log.try_lock() {
-        *last = Some(text);
+    if let Some(mut last) = try_lock_now(&state.last_log) {
+        last.get_or_insert_with(LogSlot::new).write(bytes);
     }
 }
 
@@ -552,10 +733,13 @@ pub(super) unsafe extern "C" fn host_register_fd(
     if fd < 0 {
         return false;
     }
-    let mut fds = state
-        .fds
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(mut fds) = try_lock_now(&state.fds) else {
+        // CLAP calls this on the main thread.  A service pass owns the list
+        // briefly; answer false without changing anything, so the plugin can
+        // retry, and the next service drains queued unregisters first.
+        return false;
+    };
+    state.apply_pending_unregister(&mut fds);
     if fds.iter().any(|&(known, _)| known == fd) {
         return false;
     }
@@ -572,10 +756,10 @@ pub(super) unsafe extern "C" fn host_modify_fd(
     let Some(state) = (unsafe { state(host) }) else {
         return false;
     };
-    let mut fds = state
-        .fds
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(mut fds) = try_lock_now(&state.fds) else {
+        return false;
+    };
+    state.apply_pending_unregister(&mut fds);
     match fds.iter_mut().find(|(known, _)| *known == fd) {
         Some(entry) => {
             entry.1 = flags;
@@ -590,10 +774,16 @@ pub(super) unsafe extern "C" fn host_unregister_fd(host: *const clap_host, fd: i
     let Some(state) = (unsafe { state(host) }) else {
         return false;
     };
-    let mut fds = state
-        .fds
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if fd < 0 {
+        return false;
+    }
+    let Some(mut fds) = try_lock_now(&state.fds) else {
+        // Never wait: queue it, and the next service removes it before it
+        // polls.  A full queue refuses (`false`) and leaves the descriptor
+        // registered; a plugin that follows CLAP never fills it.
+        return state.queue_unregister(fd);
+    };
+    state.apply_pending_unregister(&mut fds);
     let before = fds.len();
     fds.retain(|&(known, _)| known != fd);
     fds.len() != before
