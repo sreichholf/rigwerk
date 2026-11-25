@@ -1,10 +1,12 @@
+use std::sync::atomic::Ordering;
+
 use super::{
     capture_window, endpoint_kind, extra_output_node_name, is_alsa_shim, is_native_id,
-    node_extra_outputs, node_latency_frames, path_delay_ns, playback_frames, EndpointKind,
-    CAPTURE_NODE, PLAYBACK_NODE,
+    node_extra_outputs, node_latency_frames, path_delay_ns, playback_frames, push_capture,
+    EndpointKind, CAPTURE_NODE, PLAYBACK_NODE,
 };
 use crate::audio::output_map::{MAX_EXTRA_OUTPUTS, VIRTUAL_OUTPUT_ID};
-use crate::audio::shared::{ExtraOutputLink, ExtraOutputPlan};
+use crate::audio::shared::{ExtraOutputLink, ExtraOutputPlan, Shared};
 
 #[test]
 fn the_two_stream_bridge_plays_each_pipewire_node_extra_output_to_its_node() {
@@ -155,4 +157,59 @@ fn listing_nodes_returns_whether_or_not_a_server_is_running() {
         }
         Err(error) => assert!(!error.is_empty()),
     }
+}
+
+/// Packed stereo f32 little-endian, the layout `push_capture` reads when the
+/// chunk has no padding.
+fn packed_stereo(frames: &[(f32, f32)]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(frames.len() * 8);
+    for &(left, right) in frames {
+        bytes.extend_from_slice(&left.to_le_bytes());
+        bytes.extend_from_slice(&right.to_le_bytes());
+    }
+    bytes
+}
+
+fn peaks(shared: &Shared) -> (f32, f32) {
+    (
+        f32::from_bits(shared.in_l.load(Ordering::Relaxed)),
+        f32::from_bits(shared.in_r.load(Ordering::Relaxed)),
+    )
+}
+
+/// The tap is taken before the channel enable.  Swapping the two would leave
+/// the tuner silent on a muted side while the ring still looked correct.
+#[test]
+fn a_muted_capture_channel_still_reaches_the_tap() {
+    let shared = Shared::new(48_000);
+    shared.set_master(false, [false, true], true);
+    let frames = [(0.5, 0.25), (-0.75, 0.125)];
+    let bytes = packed_stereo(&frames);
+
+    push_capture(&shared, &bytes, 2, 8, frames.len());
+
+    let pushed: Vec<(f32, f32)> = std::iter::from_fn(|| shared.pop_frame()).collect();
+    assert_eq!(pushed, vec![(0.0, 0.25), (0.0, 0.125)]);
+    let mut tapped = vec![0.0; frames.len() * 2];
+    assert_eq!(shared.copy_tap(&mut tapped, frames.len()), frames.len());
+    assert_eq!(tapped, vec![0.5, 0.25, -0.75, 0.125]);
+    assert_eq!(peaks(&shared), (0.0, 0.25));
+}
+
+/// A one-channel chunk repeats its only sample on both sides before the
+/// stage, which takes a full pair.  The rule stays in this file.
+#[test]
+fn a_mono_capture_chunk_copies_its_sample_to_both_sides() {
+    let shared = Shared::new(48_000);
+    let mono = [0.5f32, -0.25, 0.125];
+    let mut bytes = Vec::with_capacity(mono.len() * 4);
+    for sample in mono {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    push_capture(&shared, &bytes, 1, 4, mono.len());
+
+    let pushed: Vec<(f32, f32)> = std::iter::from_fn(|| shared.pop_frame()).collect();
+    assert_eq!(pushed, vec![(0.5, 0.5), (-0.25, -0.25), (0.125, 0.125)]);
+    assert_eq!(peaks(&shared), (0.5, 0.5));
 }

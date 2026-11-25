@@ -8,6 +8,8 @@
 //! Backends live in their own platform folders:
 //! - `win/asio`: ASIO drivers on either or both sides (Windows).
 //! - `win/wasapi`: REAL-style WASAPI playback (Windows).
+//! - `win/output`: which clock output Windows opens and in what order, and its
+//!   "device in use" answer (Windows).
 //! - `linux/native`: PipeWire sources, sinks, and RigWerk's own nodes.
 //! - `linux/pipewire`: the desktop-wide quantum switch.
 //! - `linux/sink_monitor`: the clock sink's monitor peak under Low latency.

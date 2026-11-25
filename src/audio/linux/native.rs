@@ -42,7 +42,7 @@ use crate::audio::denormal::DenormalGuard;
 use crate::audio::extra_output::{
     lay_out_ring, ExtraOutputMixer, ExtraOutputOutputs, ExtraOutputSlots,
 };
-use crate::audio::input::{make_input_stream, open_input_device};
+use crate::audio::input::{make_input_stream, open_input_device, InputStage};
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::open_output;
 use crate::audio::output_map::DeviceFrame;
@@ -895,36 +895,21 @@ fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, stride: usize, f
     let channels = channels.max(1);
     shared.note_input_block(frames);
     shared.note_input_frames(frames);
-    let gain = shared.input_gain();
-    let enabled_l = shared.input_enabled[0].load(Ordering::Relaxed);
-    let enabled_r = shared.input_enabled[1].load(Ordering::Relaxed);
-    let mut peak_l = 0.0f32;
-    let mut peak_r = 0.0f32;
+    let mut stage = InputStage::new(shared);
     for frame in 0..frames {
         let base = frame * stride;
         let raw_left = sample_at(bytes, base);
+        // A mono source copies its only sample to both sides before the
+        // stage, which takes a full pair.
         let raw_right = if channels > 1 {
             sample_at(bytes, base + 4)
         } else {
             raw_left
         };
-        // Raw, before gain: a calibration must see the converter's level.
-        shared.capture_calibration(raw_left, raw_right);
-        let mut left = raw_left * gain;
-        let mut right = raw_right * gain;
-        shared.tap_frame(left, right);
-        if !enabled_l {
-            left = 0.0;
-        }
-        if !enabled_r {
-            right = 0.0;
-        }
-        peak_l = peak_l.max(left.abs());
-        peak_r = peak_r.max(right.abs());
+        let (left, right) = stage.frame(shared, raw_left, raw_right);
         shared.push_frame(left, right);
     }
-    shared.in_l.store(peak_l.to_bits(), Ordering::Relaxed);
-    shared.in_r.store(peak_r.to_bits(), Ordering::Relaxed);
+    stage.publish(shared);
 }
 
 /// The f32 sample starting at byte `start`, or silence past the end.

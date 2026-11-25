@@ -118,6 +118,10 @@ since.
   `last_log` (under `try_lock`) on whatever thread logs, so a plugin that
   logs from `process` allocates and frees on the audio thread.  Nothing
   reads `last_log`.
+- **RT allocation guard.**  The counting allocator and the counts exist
+  only under `debug_assertions` (`audio/rt_guard.rs`); in release
+  `RtGuard` is a no-op, so a release build carries no automated evidence
+  for the no-allocation claim.
 - **Stuck drivers.**  A driver that never returns from open or teardown
   leaves a parked bridge thread and an error; RigWerk asks for a restart
   but cannot release the driver.
