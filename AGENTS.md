@@ -244,11 +244,18 @@ import `app` or `ui`, and it does not import egui.
   is the only place outside `audio` that holds a `PluginHandle`; the
   editor reaches the plugin through it on the UI thread.  Do not put a
   handle or an instance on a page, and do not move that window into
-  `audio` (the audio crate does not own a window).
+  `audio` (the audio crate does not own a window).  That editor window
+  is the only window `app` owns.
 - `app` is state, startup, preferences, device selection, and bridge
-  control.  It does not draw, and it does not import `ui`.  A method
-  that changes the engine, a preference, or path state is implemented
-  in `app/`.
+  control.  It does not build widgets and does not paint, and its
+  non-test code does not import `ui`: widgets and painting stay in `ui`.
+  It may use an `egui::Context` for the window work that is not drawing
+  (the theme and zoom it applies and saves, the pixel scale it reads, the
+  repaint timing it asks for, and the screenshot run's capture and
+  viewport commands), and a raw window handle it copies from the frame,
+  which the `rfd` folder dialogs it opens are parented to.  A method that
+  changes the engine, a preference, or path state is implemented in
+  `app/`.
 - `ui` draws.  A page calls a `RigWerkApp` method.  It does not read
   `engine.shared`.  It does not call `engine.set_*` for a value an app
   field already stores (gains, bridge buffer, path mix): add the setter on
