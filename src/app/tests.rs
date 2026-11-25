@@ -128,7 +128,14 @@ fn a_file_from_a_newer_build_is_never_overwritten() {
         loaded.notices
     );
     let mut app = blank_app();
-    app.stored_schema_version = loaded.stored_schema_version;
+    // The hand-off `new` makes, except for the argument: there is no headless
+    // harness for `new`, so this passes the loaded number itself and pins the
+    // save gate, not `new`'s argument.
+    let preferences = loaded
+        .preferences
+        .clone()
+        .expect("a newer file still loads");
+    app.apply_preferences(&preferences, loaded.stored_schema_version);
     app.preferences_backup = loaded.backup;
     let mut storage = MemoryStorage::default();
     eframe::Storage::set_string(&mut storage, PREFERENCES_KEY, newer.to_owned());
