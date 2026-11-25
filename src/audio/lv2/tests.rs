@@ -31,7 +31,7 @@ use crate::audio::plugins::{
 
 use super::host::{used_uris, HostFeatures, SATISFIED, SUPPORTED};
 use super::instance::{Lv2Core, Lv2Instance, Lv2Loaded};
-use super::module::{native_binary, resolve, Descriptors, Lv2Module};
+use super::module::{native_binary, resolve, Descriptors, Lv2Module, ModuleRegistry};
 use super::ports::{
     symbol_id, Buffer, PortBuffers, PortInfo, PortKind, PortTable, ScalePoint, ATOM_CAPACITY,
 };
@@ -4672,6 +4672,137 @@ fn a_failing_library_descriptor_is_an_error_and_lv2_descriptor_is_the_fallback()
         Ok(Descriptors::Function(_))
     ));
     assert!(resolve(None, None, c"/b/", features.as_ptr()).is_err());
+}
+
+/// A module over a fake library whose `cleanup` marks a release in progress,
+/// so the release/acquire overlap test can tell whether a load ran under it.
+static OVERLAP_LIB_HANDLE: u8 = 0;
+static CLEANUPS: AtomicUsize = AtomicUsize::new(0);
+static INSIDE_MODULE_CALL: AtomicBool = AtomicBool::new(false);
+static OVERLAPPED_MODULE_CALL: AtomicBool = AtomicBool::new(false);
+
+fn enter_and_wait_for_module_call() {
+    if INSIDE_MODULE_CALL.swap(true, Ordering::SeqCst) {
+        OVERLAPPED_MODULE_CALL.store(true, Ordering::SeqCst);
+    }
+    // Long enough for a racing caller to arrive.
+    std::thread::sleep(Duration::from_millis(50));
+    INSIDE_MODULE_CALL.store(false, Ordering::SeqCst);
+}
+
+/// Waits until the fake module is inside a load or its `cleanup`.
+fn wait_until_inside_module_call() {
+    for _ in 0..5_000 {
+        if INSIDE_MODULE_CALL.load(Ordering::SeqCst) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("the module never entered its load or cleanup");
+}
+
+unsafe extern "C" fn overlap_cleanup(_handle: lv2_sys::LV2_Lib_Handle) {
+    CLEANUPS.fetch_add(1, Ordering::SeqCst);
+    enter_and_wait_for_module_call();
+}
+
+static OVERLAP_LIB: SyncLib = SyncLib(lv2_sys::LV2_Lib_Descriptor {
+    handle: &OVERLAP_LIB_HANDLE as *const u8 as lv2_sys::LV2_Lib_Handle,
+    size: std::mem::size_of::<lv2_sys::LV2_Lib_Descriptor>() as u32,
+    cleanup: Some(overlap_cleanup),
+    get_plugin: None,
+});
+
+/// Opens the fake overlap module (see [`OVERLAP_LIB`]), as a slow load.
+fn open_overlap_module() -> Result<Lv2Module, String> {
+    enter_and_wait_for_module_call();
+    Ok(Lv2Module::for_test(Descriptors::Library(
+        &OVERLAP_LIB.0 as *const lv2_sys::LV2_Lib_Descriptor,
+    )))
+}
+
+/// A module that takes its time to load blocks only its own entry: an
+/// acquire of another key finishes while the first `open` is still inside.
+#[test]
+fn a_slow_load_of_one_module_does_not_block_another() {
+    static REGISTRY: ModuleRegistry = ModuleRegistry::new();
+    let (opening, opened) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let slow = REGISTRY.acquire("slow.lv2".into(), || {
+                opening.send(()).expect("signal the open");
+                released.recv().expect("the test releases the open");
+                Err("refused".to_owned())
+            });
+            assert!(slow.is_err());
+        });
+        // The slow open is inside its entry lock from here on.
+        opened
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the slow open started");
+        let (done, finished) = mpsc::channel();
+        scope.spawn(move || {
+            let other = REGISTRY.acquire("fast.lv2".into(), || Err("missing".to_owned()));
+            done.send(other.err()).expect("report the other open");
+        });
+        let other = finished.recv_timeout(Duration::from_secs(5));
+        // Let the blocked open go before asserting, so a regression fails
+        // instead of leaving the thread behind.
+        release.send(()).expect("release the slow open");
+        let other = other.expect("a load of another module finished while one was blocked");
+        assert_eq!(other.as_deref(), Some("missing"));
+    });
+}
+
+/// Two acquires of one module open it once and share it until both let go.
+#[test]
+fn concurrent_acquires_of_one_module_open_it_once() {
+    static REGISTRY: ModuleRegistry = ModuleRegistry::new();
+    let opens = AtomicUsize::new(0);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let barrier = Arc::clone(&barrier);
+            let opens = &opens;
+            scope.spawn(move || {
+                barrier.wait();
+                let module = REGISTRY
+                    .acquire("once.lv2".into(), || {
+                        opens.fetch_add(1, Ordering::SeqCst);
+                        Ok(Lv2Module::for_test(Descriptors::Function(plain_descriptor)))
+                    })
+                    .expect("acquire the module");
+                // Both threads hold the module before either releases it.
+                barrier.wait();
+                drop(module);
+            });
+        }
+    });
+    assert_eq!(opens.load(Ordering::SeqCst), 1);
+}
+
+/// The release of one module and a later acquire of it never overlap: the
+/// `cleanup` runs under the entry lock the next load needs.
+#[test]
+fn a_release_and_a_reacquire_of_one_module_never_overlap() {
+    let registry = ModuleRegistry::new();
+    let key = PathBuf::from("released-and-reacquired.lv2");
+    let first = registry
+        .acquire(key.clone(), open_overlap_module)
+        .expect("acquire the overlap module");
+    std::thread::scope(|scope| {
+        scope.spawn(move || drop(first));
+        // The release is inside its `cleanup` from here on: the reacquire
+        // must wait for it, not load the binary under it.
+        wait_until_inside_module_call();
+        let again = registry
+            .acquire(key, open_overlap_module)
+            .expect("reacquire the overlap module");
+        drop(again);
+    });
+    assert_eq!(CLEANUPS.load(Ordering::SeqCst), 2);
+    assert!(!OVERLAPPED_MODULE_CALL.load(Ordering::SeqCst));
 }
 
 /// What the default-state fake's `restore` retrieved: key URI to type URI
