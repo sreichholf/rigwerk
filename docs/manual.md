@@ -197,7 +197,9 @@ is wrong, what to do and where: *Show* closes the drawer and selects the
 thing the issue points at, in the console or in Setup. Warnings that allow
 it can be dismissed. Errors also show a banner under the title bar until
 they clear or are dismissed; *Audio device disconnected* is one, with
-*Rescan* and *Open Setup*.
+*Rescan* and *Open Setup*. A banner for a stopped real-time callback
+offers *Open diagnostics* instead, and it says whether a plugin panicked
+or the device handed over a malformed block.
 
 The **diagnostics sheet** opens from *Log*. Its tabs are the activity log
 (newest first; Copy and Export write it oldest first), performance (DSP
