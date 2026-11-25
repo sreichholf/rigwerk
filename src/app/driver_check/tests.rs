@@ -74,6 +74,15 @@ fn asio_output_app(id: &str) -> RigWerkApp {
 fn running_output(app: &mut RigWerkApp) {
     app.engine.state = EngineState::Running;
     app.snapshot.opened_output_mode = Some(OutputMode::Shared);
+    // A running cpal/ASIO output publishes its rate and step as readings.
+    app.snapshot.output_rate_reported = true;
+    app.snapshot.output_step_reported = true;
+}
+
+/// The snapshot half of a running input: the driver published a rate.
+fn running_input(app: &mut RigWerkApp) {
+    app.engine.state = EngineState::Running;
+    app.snapshot.input_rate_reported = true;
 }
 
 #[test]
@@ -202,7 +211,7 @@ fn a_check_already_running_is_not_started_again() {
 }
 
 #[test]
-fn an_input_reading_needs_a_running_bridge_and_a_first_block() {
+fn an_input_reading_needs_a_running_bridge_a_reported_rate_and_a_first_block() {
     let mut app = input_app(false);
     app.snapshot.input_rate = 48_000;
     app.snapshot.input_block_frames = 128;
@@ -215,12 +224,22 @@ fn an_input_reading_needs_a_running_bridge_and_a_first_block() {
     app.snapshot.input_rate = 48_000;
     app.snapshot.input_block_frames = 0;
     assert!(app.input_actual().is_none(), "no block arrived yet");
+
+    // The block arrived, but the native path has only published the rate it
+    // asked for.
+    app.snapshot.input_block_frames = 128;
+    assert!(
+        app.input_actual().is_none(),
+        "the rate is only the one asked for"
+    );
+    app.snapshot.input_rate_reported = true;
+    assert!(app.input_actual().is_some(), "a reading at last");
 }
 
 #[test]
 fn an_input_that_runs_as_asked_is_good() {
     let mut app = input_app(false);
-    app.engine.state = EngineState::Running;
+    running_input(&mut app);
     app.sample_rate = 44_100;
     app.buffer_size = 256;
     app.snapshot.input_rate = 44_100;
@@ -237,7 +256,7 @@ fn an_input_that_runs_as_asked_is_good() {
 fn an_input_at_another_rate_names_both_rates_and_where_to_change_it() {
     for asio in [false, true] {
         let mut app = input_app(asio);
-        app.engine.state = EngineState::Running;
+        running_input(&mut app);
         app.sample_rate = 48_000;
         app.buffer_size = 128;
         app.snapshot.input_rate = 44_100;
@@ -273,7 +292,7 @@ fn an_input_at_another_rate_names_both_rates_and_where_to_change_it() {
 #[test]
 fn a_system_input_at_another_block_says_shared_mode_decided_it() {
     let mut app = input_app(false);
-    app.engine.state = EngineState::Running;
+    running_input(&mut app);
     app.sample_rate = 48_000;
     app.buffer_size = 128;
     app.snapshot.input_rate = 48_000;
@@ -309,7 +328,7 @@ fn a_system_input_at_another_block_says_shared_mode_decided_it() {
 #[test]
 fn an_asio_input_at_another_block_points_at_its_own_panel() {
     let mut app = input_app(true);
-    app.engine.state = EngineState::Running;
+    running_input(&mut app);
     app.sample_rate = 48_000;
     app.buffer_size = 128;
     app.snapshot.input_rate = 48_000;
@@ -335,7 +354,7 @@ fn an_asio_input_at_another_block_points_at_its_own_panel() {
 #[test]
 fn an_input_at_another_rate_and_block_gets_both_notes() {
     let mut app = input_app(false);
-    app.engine.state = EngineState::Running;
+    running_input(&mut app);
     app.sample_rate = 48_000;
     app.buffer_size = 128;
     app.snapshot.input_rate = 44_100;
@@ -354,6 +373,26 @@ fn an_input_at_another_rate_and_block_gets_both_notes() {
         "{:?}",
         actual.notes
     );
+}
+
+#[test]
+fn a_running_output_whose_graph_has_not_reported_shows_no_driver_reading() {
+    let mut app = output_app("hw:Speaker");
+    app.engine.state = EngineState::Running;
+    // What the native path publishes before the graph reports: the rate and
+    // quantum asked for, with neither read from the stream.
+    app.snapshot.output_rate = 48_000;
+    app.snapshot.output_step_frames = 128;
+    assert!(app.output_actual().is_none());
+
+    app.snapshot.output_step_reported = true;
+    assert!(
+        app.output_actual().is_none(),
+        "the rate is still the one asked for"
+    );
+
+    app.snapshot.output_rate_reported = true;
+    assert!(app.output_actual().is_some(), "both readings arrived");
 }
 
 #[test]

@@ -266,7 +266,9 @@ pub(crate) fn run(
     if input_native {
         input_rate = config.sample_rate;
         input_channels = 2;
-        shared.set_source_rate(input_rate);
+        // Requested: the capture stream's `param_changed` publishes the rate
+        // the graph negotiated through `set_source_rate`.
+        shared.set_requested_source_rate(input_rate);
     } else {
         shared.set_status("Opening input…");
         let device = open_input_device(config)?;
@@ -304,7 +306,10 @@ pub(crate) fn run(
         } else {
             OutputMode::Standard
         };
-        shared.set_output(output_rate, frames, opened, mode);
+        // Requested: the playback stream's format handler publishes the rate
+        // it negotiated (`set_output_rate`) and its process callback the step
+        // it really feeds (`note_output_step`), each as its own reading.
+        shared.set_requested_output(output_rate, frames, opened, mode);
     } else {
         shared.set_status("Opening independent output…");
         let output = open_output(
@@ -430,6 +435,8 @@ fn run_graph(
                     data.channels.store(channels, Ordering::Relaxed);
                     let rate = info.rate();
                     if rate > 0 {
+                        // The graph negotiated this rate: a reading, not the
+                        // request `run` published.
                         data.shared.set_source_rate(rate);
                     }
                 })
@@ -488,14 +495,31 @@ fn run_graph(
                         state_shared.set_device_lost(format!("PipeWire output: {message}"));
                     }
                 })
+                .param_changed(|_, data, id, param| {
+                    let Some(param) = param else {
+                        return;
+                    };
+                    if id != spa::param::ParamType::Format.as_raw() {
+                        return;
+                    }
+                    let mut info = spa::param::audio::AudioInfoRaw::new();
+                    if info.parse(param).is_err() {
+                        return;
+                    }
+                    let rate = info.rate();
+                    if rate > 0 {
+                        // The stream negotiated this rate: a reading, not the
+                        // request `run` published.  The step stays its own
+                        // reading, marked by `note_output_step` below.
+                        data.shared.set_output_rate(rate);
+                    }
+                })
                 .process(|stream, data| {
                     let Some(mut buffer) = stream.dequeue_buffer() else {
                         return;
                     };
                     let filled = fill_stereo(&mut buffer, |bytes, frames| {
-                        data.shared
-                            .output_step_frames
-                            .store(frames as u32, Ordering::Relaxed);
+                        data.shared.note_output_step(frames as u32);
                         data.mixer.render(&data.shared, frames, |index, mapped| {
                             if write_stereo(bytes, index, mapped) {
                                 // Two channels, eight bytes: the clock node only.

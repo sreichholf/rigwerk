@@ -398,8 +398,8 @@ impl RigWerkApp {
 
     /// The buffer line of output `device`'s strip.  The clock output: its
     /// output mode and, while the bridge runs, the buffer time it really
-    /// opened.  An extra output: its bridge buffer (`auto 5.3 ms`), or *In
-    /// graph*.
+    /// opened (`… (asked)` until the graph has read its own rate and step).
+    /// An extra output: its bridge buffer (`auto 5.3 ms`), or *In graph*.
     pub(crate) fn output_buffer_line(&self, device: usize) -> String {
         if device == 0 {
             let running = self.engine.state == EngineState::Running;
@@ -412,10 +412,15 @@ impl RigWerkApp {
             let rate = self.snapshot.output_rate;
             let frames = self.snapshot.output_step_frames;
             if running && rate > 0 && frames > 0 {
-                return format!(
-                    "{mode} · {}",
-                    format_ms(frames as f32 * 1000.0 / rate as f32)
-                );
+                let time = format_ms(frames as f32 * 1000.0 / rate as f32);
+                // A native PipeWire stream publishes the quantum it asked for
+                // before its first block; that is the request, not a reading.
+                let read = self.snapshot.output_rate_reported && self.snapshot.output_step_reported;
+                return if read {
+                    format!("{mode} · {time}")
+                } else {
+                    format!("{mode} · {time} (asked)")
+                };
             }
             return mode.to_owned();
         }

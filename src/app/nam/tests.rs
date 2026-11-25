@@ -134,6 +134,11 @@ fn a_capture_is_measured_at_the_opened_output_step() {
     app.engine.state = EngineState::Running;
     app.snapshot.output_rate = 48_000;
     app.snapshot.output_step_frames = 480;
+    // The native path publishes the quantum it asked for first; that is not
+    // a measurement and the request stands until the rate and step are read.
+    assert_eq!(app.nam_frames(), 256, "the request until the graph reports");
+    app.snapshot.output_rate_reported = true;
+    app.snapshot.output_step_reported = true;
     assert_eq!(app.nam_frames(), 480, "what the driver opened");
 }
 

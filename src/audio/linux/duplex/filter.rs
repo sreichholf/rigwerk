@@ -79,6 +79,11 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         return;
     }
     let rate = clock.rate.denom;
+    // The step is a reading as soon as this cycle runs, while the graph rate
+    // is only just being read: store the step first so `output_read()` can
+    // never pair a measured rate with the quantum asked for at start.
+    data.shared
+        .note_output_step(frames.min(u32::MAX as usize) as u32);
     if rate > 0 && rate != data.rate {
         data.rate = rate;
         data.mixer.set_direct_rate(rate);
@@ -115,9 +120,6 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         shared.note_input_block(frames);
         shared.note_input_frames(frames);
     }
-    shared
-        .output_step_frames
-        .store(frames.min(u32::MAX as usize) as u32, Ordering::Relaxed);
     let mut stage = InputStage::new(shared);
     let virtual_output_active = (0..shared.extra_output_count())
         .any(|slot| shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot));

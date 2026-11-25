@@ -524,7 +524,7 @@ impl RigWerkApp {
                 );
                 ui.add_space(2.0);
                 ui.label(sans(
-                    "Reported means the driver, graph or a plugin said so; planned is the size asked for before the driver has opened; setting is RigWerk's own bridge buffer; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
+                    "Reported means the driver, graph or a plugin said so; planned is the block and rate asked for before the driver or graph has reported the ones it runs at; setting is RigWerk's own bridge buffer; estimated is added here from those readings; measured is a click that went out through the loopback and came back.",
                     colours.text3,
                     TypeRole::Secondary,
                 ));

@@ -19,8 +19,8 @@ fn device(id: &str, name: &str) -> DeviceItem {
     }
 }
 
-/// An app whose bridge is live with both rates reported.  The engine's
-/// `Shared` is not actually running; tests that need that say so.
+/// An app whose bridge is live with both rates and the output step reported.
+/// The engine's `Shared` is not actually running; tests that need that say so.
 fn live_app() -> RigWerkApp {
     let mut app = blank_app();
     app.devices.use_asio_input = false;
@@ -36,6 +36,10 @@ fn live_app() -> RigWerkApp {
     app.snapshot.output_rate = 48_000;
     app.snapshot.input_block_frames = 128;
     app.snapshot.output_step_frames = 128;
+    // Readings, as a running cpal/ASIO driver publishes them.
+    app.snapshot.input_rate_reported = true;
+    app.snapshot.output_rate_reported = true;
+    app.snapshot.output_step_reported = true;
     app
 }
 
@@ -84,6 +88,48 @@ fn a_live_bridge_without_reported_rates_waits() {
         .contains("rates"));
     app.snapshot.input_rate = 48_000;
     assert_eq!(app.calibration_blocker(), None);
+
+    // A value the native path only asked for is not a reading: the click and
+    // the capture window are timed from what the graph reported.
+    app.snapshot.input_rate_reported = false;
+    assert!(app
+        .calibration_blocker()
+        .expect("unread input rate")
+        .contains("block sizes"));
+    app.snapshot.input_rate_reported = true;
+    app.snapshot.output_rate_reported = false;
+    assert!(app
+        .calibration_blocker()
+        .expect("unread output rate")
+        .contains("block sizes"));
+    app.snapshot.output_rate_reported = true;
+    app.snapshot.output_step_reported = false;
+    assert!(app
+        .calibration_blocker()
+        .expect("unread output step")
+        .contains("block sizes"));
+    app.snapshot.output_step_reported = true;
+    app.snapshot.input_block_frames = 0;
+    assert!(app
+        .calibration_blocker()
+        .expect("no input block")
+        .contains("block sizes"));
+    app.snapshot.input_block_frames = 128;
+    assert_eq!(app.calibration_blocker(), None);
+}
+
+#[test]
+fn a_calibration_cannot_arm_against_a_guessed_rate() {
+    let mut app = live_app();
+    app.snapshot.output_rate_reported = false;
+    app.start_calibration();
+    match &app.calibration.phase {
+        CalibrationPhase::Failed { reason } => {
+            assert!(reason.contains("block sizes"), "{reason}")
+        }
+        other => panic!("expected the gate, got {other:?}"),
+    }
+    assert_eq!(app.engine.calibration_state(), CalibrationState::Idle);
 }
 
 #[test]

@@ -74,6 +74,9 @@ impl CalibrationUi {
 
 impl RigWerkApp {
     /// Why a measurement cannot start right now, or `None` when it can.
+    /// A rate or step a native PipeWire path only asked for is not enough:
+    /// the click, the capture window and the conditions the result is stored
+    /// under are timed from what the graph reported.
     pub(crate) fn calibration_blocker(&self) -> Option<String> {
         if self.is_preview() {
             return Some(
@@ -85,9 +88,15 @@ impl RigWerkApp {
                 "Start the bridge first: the loopback needs the input and output open.".to_owned(),
             );
         }
-        if self.snapshot.input_rate == 0 || self.snapshot.output_rate == 0 {
+        if self.snapshot.input_rate == 0
+            || self.snapshot.output_rate == 0
+            || !self.snapshot.input_rate_reported
+            || !self.snapshot.output_rate_reported
+            || !self.snapshot.output_step_reported
+            || self.snapshot.input_block_frames == 0
+        {
             return Some(
-                "The bridge has not reported both rates yet. Wait until it is live and try again."
+                "The bridge has not reported its live rates and block sizes yet. Wait until it is live and try again."
                     .to_owned(),
             );
         }

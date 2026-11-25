@@ -1,7 +1,10 @@
 //! State shared between the input callback, the output callback and the
 //! UI: the ring buffer, the bridge buffer (its fill target), meters, the master
 //! and device settings, the signal paths, the tuner tap and what each side
-//! really runs at.
+//! really runs at.  A native PipeWire path publishes the rate it asks for
+//! before the graph negotiates, so the rate and step carry a provenance bit:
+//! only a value the device or graph reported is published as a reading, and
+//! a request never overwrites a reading.
 //! An armed round-trip measurement lives here too ([`super::calibration`]):
 //! its capture buffer and click are allocated with the run, so the
 //! callbacks only touch atomics.  An ASIO control-panel request lives here
@@ -181,6 +184,19 @@ pub(crate) struct Shared {
     pub(crate) source_rate: AtomicU32,
     pub(crate) output_rate: AtomicU32,
     pub(crate) output_step_frames: AtomicU32,
+    /// Whether [`Self::source_rate`] is a reading from the input device or
+    /// graph.  False while it is only the rate asked for before the stream
+    /// or graph opened (see [`Self::set_requested_source_rate`]).
+    input_rate_reported: AtomicBool,
+    /// Whether [`Self::output_rate`] is a reading from the output device or
+    /// graph.  False while it is only the rate asked for (see
+    /// [`Self::set_requested_output`]).
+    output_rate_reported: AtomicBool,
+    /// Whether [`Self::output_step_frames`] is the step the driver or graph
+    /// really feeds.  False while it is only the quantum asked for before a
+    /// native PipeWire playback stream runs (see
+    /// [`Self::set_requested_output`]).
+    output_step_reported: AtomicBool,
     pub(crate) output_mode: Mutex<String>,
     /// [`OutputMode::to_u8`] of the mode the output opened in, published
     /// with [`Self::output_mode`]; 0 until it has opened.
@@ -286,6 +302,9 @@ impl Shared {
             source_rate: AtomicU32::new(0),
             output_rate: AtomicU32::new(0),
             output_step_frames: AtomicU32::new(0),
+            input_rate_reported: AtomicBool::new(false),
+            output_rate_reported: AtomicBool::new(false),
+            output_step_reported: AtomicBool::new(false),
             output_mode: Mutex::new(String::new()),
             opened_output_mode: AtomicU8::new(0),
             path_delay_ns: AtomicU64::new(PATH_DELAY_UNKNOWN),
@@ -673,6 +692,9 @@ impl Shared {
         self.output_block.store(0, Ordering::Relaxed);
         self.output_rate.store(0, Ordering::Relaxed);
         self.output_step_frames.store(0, Ordering::Relaxed);
+        self.input_rate_reported.store(false, Ordering::Relaxed);
+        self.output_rate_reported.store(false, Ordering::Relaxed);
+        self.output_step_reported.store(false, Ordering::Relaxed);
         self.path_delay_ns
             .store(PATH_DELAY_UNKNOWN, Ordering::Relaxed);
         self.set_output_mode("");
@@ -702,26 +724,68 @@ impl Shared {
         }
     }
 
+    /// Publishes the rate the input device or graph really opened at: the
+    /// stream exists, so its rate is a reading.  A rate asked for before the
+    /// stream opened goes through [`Self::set_requested_source_rate`].
     pub(crate) fn set_source_rate(&self, rate: u32) {
-        self.source_rate.store(rate, Ordering::Relaxed);
-        self.scope_in.set_rate(rate);
+        self.store_source_rate(rate, true);
         // A fixed bridge buffer is set in milliseconds; re-measure it in frames.
         self.lift_to_floor();
     }
 
-    /// Publishes the one graph rate both sides of the duplex node run at.
-    /// Atomics only, so the audio thread may call it when the graph rate
-    /// changes; the mode text is updated later from the main loop.
+    /// Publishes the input rate asked for before the stream or graph has
+    /// opened (the native PipeWire capture, before it negotiates).  The
+    /// snapshot then says the rate is not read yet; [`Self::set_source_rate`]
+    /// replaces it once the device or graph reports.  A request never
+    /// replaces a rate that is already a reading: it has nothing to add.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn set_requested_source_rate(&self, rate: u32) {
+        if self.source_rate_is_read() {
+            return;
+        }
+        self.store_source_rate(rate, false);
+        self.lift_to_floor();
+    }
+
+    fn store_source_rate(&self, rate: u32, reported: bool) {
+        self.source_rate.store(rate, Ordering::Relaxed);
+        self.input_rate_reported.store(reported, Ordering::Relaxed);
+        self.scope_in.set_rate(rate);
+    }
+
+    fn source_rate_is_read(&self) -> bool {
+        self.input_rate_reported.load(Ordering::Relaxed)
+    }
+
+    /// Publishes the one graph rate both sides of the duplex node run at, as
+    /// the filter's callback read it.  Atomics only, so the audio thread may
+    /// call it when the graph rate changes; the mode text is updated later
+    /// from the main loop.  It does not lift the bridge buffer: the duplex
+    /// node has no ring, and the callers counted on the rate store alone.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn note_direct_rate(&self, rate: u32) {
-        self.source_rate.store(rate, Ordering::Relaxed);
-        self.scope_in.set_rate(rate);
-        self.output_rate.store(rate, Ordering::Relaxed);
-        self.scope_out.set_rate(rate);
+        self.store_source_rate(rate, true);
+        self.store_output_rate(rate, true);
+    }
+
+    /// Publishes the rate the duplex node is asked for before the graph has
+    /// reported one.  Not a reading: the filter's first cycle and the main
+    /// loop's timer publish the real rate through [`Self::note_direct_rate`]
+    /// and [`Self::set_output`], and a request never undoes those.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn note_requested_direct_rate(&self, rate: u32) {
+        if !self.source_rate_is_read() {
+            self.store_source_rate(rate, false);
+        }
+        if !self.output_rate_is_read() {
+            self.store_output_rate(rate, false);
+        }
     }
 
     /// Publishes what the output opened: its rate, the step it is fed in,
-    /// the mode it really runs in and the line that describes it.
+    /// the mode it really runs in and the line that describes it.  A stream
+    /// or graph that opened at that rate is a reading; a rate asked for
+    /// before it opens goes through [`Self::set_requested_output`].
     pub(crate) fn set_output(
         &self,
         rate: u32,
@@ -729,10 +793,52 @@ impl Shared {
         opened: OutputMode,
         mode: impl Into<String>,
     ) {
-        self.output_rate.store(rate, Ordering::Relaxed);
+        self.store_output(rate, step_frames, opened, mode, true);
+    }
+
+    /// Publishes the output rate and step asked for before the stream or
+    /// graph has opened (the native PipeWire streams, before they negotiate).
+    /// The snapshot then says the rate is not read yet;
+    /// [`Self::set_output`], [`Self::set_output_rate`] or
+    /// [`Self::note_output_step`] replaces it once the graph reports.  A
+    /// request never overwrites a rate or step that is already a reading.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn set_requested_output(
+        &self,
+        rate: u32,
+        step_frames: u32,
+        opened: OutputMode,
+        mode: impl Into<String>,
+    ) {
+        if self.output_rate_is_read() || self.output_step_is_read() {
+            return;
+        }
+        self.store_output(rate, step_frames, opened, mode, false);
+    }
+
+    /// Publishes the rate the output stream negotiated, as its format
+    /// handler read it.  The step and the mode line stay as published;
+    /// [`Self::note_output_step`] marks the step on its own.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn set_output_rate(&self, rate: u32) {
+        self.store_output_rate(rate, true);
+    }
+
+    fn store_output(
+        &self,
+        rate: u32,
+        step_frames: u32,
+        opened: OutputMode,
+        mode: impl Into<String>,
+        reported: bool,
+    ) {
+        self.store_output_rate(rate, reported);
         self.output_step_frames
             .store(step_frames, Ordering::Relaxed);
-        self.scope_out.set_rate(rate);
+        // A step of 0 is not a reading: the stream opened without a fixed
+        // buffer and its callback publishes the real one.
+        self.output_step_reported
+            .store(reported && step_frames > 0, Ordering::Relaxed);
         self.set_output_mode(mode);
         self.opened_output_mode
             .store(opened.to_u8(), Ordering::Relaxed);
@@ -751,6 +857,29 @@ impl Shared {
                 .max(1) as usize;
             self.note_output_block(source_step);
         }
+    }
+
+    fn store_output_rate(&self, rate: u32, reported: bool) {
+        self.output_rate.store(rate, Ordering::Relaxed);
+        self.output_rate_reported.store(reported, Ordering::Relaxed);
+        self.scope_out.set_rate(rate);
+    }
+
+    fn output_rate_is_read(&self) -> bool {
+        self.output_rate_reported.load(Ordering::Relaxed)
+    }
+
+    fn output_step_is_read(&self) -> bool {
+        self.output_step_reported.load(Ordering::Relaxed)
+    }
+
+    /// The step the output driver or graph really feeds, frames.  Called by
+    /// the playback callbacks.  It marks the step only: the rate is a
+    /// separate reading, published by the stream's format handler or by
+    /// [`Self::set_output`].
+    pub(crate) fn note_output_step(&self, frames: u32) {
+        self.output_step_frames.store(frames, Ordering::Relaxed);
+        self.output_step_reported.store(true, Ordering::Relaxed);
     }
 
     /// Sets the starting bridge buffer for a new bridge.
@@ -1351,9 +1480,12 @@ impl Shared {
                 .map(|status| status.clone())
                 .unwrap_or_default(),
             input_rate: self.source_rate.load(Ordering::Relaxed),
+            input_rate_reported: self.input_rate_reported.load(Ordering::Relaxed),
             input_block_frames: self.input_block.load(Ordering::Relaxed) as u32,
             output_rate: self.output_rate.load(Ordering::Relaxed),
+            output_rate_reported: self.output_rate_reported.load(Ordering::Relaxed),
             output_step_frames: self.output_step_frames.load(Ordering::Relaxed),
+            output_step_reported: self.output_step_reported.load(Ordering::Relaxed),
             output_mode: self
                 .output_mode
                 .lock()
