@@ -1,13 +1,15 @@
-# cargo-deny policy: advisories, licences, and sources of the locked crates.
-# `cargo deny check` runs in CI (.github/workflows/ci.yml, job `deny`).
+# cargo-deny policy: advisories, licences, bans, and sources of the locked
+# crates.  `cargo deny check` runs in CI (.github/workflows/ci.yml, job `deny`).
 
 [advisories]
 # A yanked version is an error: the lockfile must move off it.
 yanked = "deny"
 
 [licenses]
-# The exact set `cargo metadata --locked` reports for this lockfile, so an
-# update that adds a new licence fails here instead of passing silently.
+# The set that covers this lockfile.  A crate that also offers GPL-2.0-only
+# or LGPL-2.1-or-later passes through an allowed alternative, so this is not
+# the only set of licences `cargo metadata --locked` could report; a genuinely
+# new licence still fails here instead of passing silently.
 allow = [
     "0BSD",
     "Apache-2.0",
@@ -28,8 +30,10 @@ allow = [
 confidence-threshold = 0.9
 
 [bans]
-# Duplicates warn: cargo picks them and the tree changes often enough that
-# a hard deny would break unrelated updates.
+# Duplicates warn on purpose: cargo picks them, the tree changes often enough
+# that a hard deny would break unrelated updates, and a per-crate allowlist
+# would need an edit for every duplicate.  The warnings are the report; they
+# are not meant to be silenced.
 multiple-versions = "warn"
 wildcards = "warn"
 
