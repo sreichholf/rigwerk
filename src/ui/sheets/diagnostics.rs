@@ -9,7 +9,6 @@
 //! failures that the live status line replaces.
 
 use crate::app::LogTone;
-use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use egui::{Color32, CornerRadius, RichText, Stroke};
@@ -183,21 +182,6 @@ fn budget_row(
     });
 }
 
-fn diagnostics_export_path() -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    let name = format!("rigwerk-diagnostics-{stamp}.txt");
-    let dir = std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Downloads"))
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Downloads"))
-        })
-        .unwrap_or_else(std::env::temp_dir);
-    dir.join(name)
-}
-
 impl RigWerkApp {
     fn bridge_status_line(&self) -> String {
         let status = self.engine_bridge_status();
@@ -321,18 +305,6 @@ impl RigWerkApp {
             }
         }
         lines.join("\n")
-    }
-
-    pub(crate) fn write_diagnostics(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-            }
-        }
-        let text = self.diagnostics_text();
-        std::fs::write(path, text)
-            .map_err(|error| format!("Could not write {}: {error}", path.display()))
     }
 
     fn diagnostics_tabs(&mut self, ui: &mut egui::Ui) {
@@ -702,9 +674,9 @@ impl RigWerkApp {
                     self.push_log("Diagnostics copied to the clipboard.", LogTone::Teal);
                 }
                 if OutlineButton::new("Export").show(ui).clicked() {
-                    let path = diagnostics_export_path();
-                    match self.write_diagnostics(&path) {
-                        Ok(()) => self.push_log(
+                    let report = self.diagnostics_text();
+                    match self.save_diagnostics_report(&report) {
+                        Ok(path) => self.push_log(
                             format!("Diagnostics exported to {}.", path.display()),
                             LogTone::Teal,
                         ),

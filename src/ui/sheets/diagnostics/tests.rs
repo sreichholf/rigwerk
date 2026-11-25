@@ -1,5 +1,4 @@
 use crate::app::LogTone;
-use std::path::PathBuf;
 
 use crate::app::blank_app;
 use crate::audio::claim_main_thread;
@@ -159,15 +158,6 @@ fn the_report_includes_status_notes_and_the_log() {
         })),
         "0.21 ms avg · 0.43 ms peak of 10.7 ms · 2% / 4%"
     );
-
-    let path: PathBuf = std::env::temp_dir().join(format!(
-        "rigwerk-diagnostics-test-{}-report.txt",
-        std::process::id()
-    ));
-    app.write_diagnostics(&path).expect("export");
-    let written = std::fs::read_to_string(&path).expect("read export");
-    assert_eq!(written, text);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
