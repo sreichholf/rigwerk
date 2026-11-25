@@ -21,6 +21,10 @@
 //! `ui/frame.rs`, the tab and progress helpers in `ui/widgets/mod.rs`) and the
 //! tuner's note, which named a raw `FontId::new`, name none of them and
 //! invent no colour literal.
+//!
+//! A fourth check pins the UI-to-app rule inside `ui`: a production file
+//! there reaches the engine only through a `RigWerkApp` method, never
+//! `app.engine` or `self.engine`.
 
 use std::path::{Path, PathBuf};
 
@@ -759,4 +763,281 @@ fn a_dark_token_scan_is_case_sensitive_and_skips_comments() {
         dark_only_lines(note, &["FontId::new"]),
         [(1, "FontId::new")]
     );
+}
+
+/// The files whose code runs inside an audio callback, where taking a
+/// blocking lock can stall a device.  `audio/clap/host.rs` is here because a
+/// plugin may log from its `process` thread.
+const CALLBACK_FILES: &[&str] = &[
+    "src/audio/input.rs",
+    "src/audio/output.rs",
+    "src/audio/linux/native.rs",
+    "src/audio/linux/duplex/filter.rs",
+    "src/audio/linux/duplex/virtual_source.rs",
+    "src/audio/linux/sink_monitor.rs",
+    "src/audio/extra_output/stream.rs",
+    "src/audio/win/asio/callback.rs",
+    "src/audio/clap/host.rs",
+];
+
+/// Constructors that allocate.  `host_log` must not use one: a plugin may
+/// call it from its process thread.
+const ALLOCATING: &[&str] = &[
+    "to_owned",
+    "to_string",
+    "to_string_lossy",
+    "format!",
+    "String::from",
+    "String::new",
+    "String::with_capacity",
+    "Vec::new",
+    "vec!",
+    "Box::new",
+    "cstring(",
+];
+
+/// The 1-based lines of `source` that call `method` as `.method(`.
+/// `try_lock` is not `.lock`, and a comment is not code.
+fn method_call_lines(source: &str, method: &str) -> Vec<usize> {
+    let continues = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let mut depth = 0;
+    let mut out = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let code = code_only(line, &mut depth);
+        for (at, _) in code.match_indices(method) {
+            let before = code[..at].chars().next_back();
+            let after = code[at + method.len()..].chars().next();
+            if continues(before) || continues(after) {
+                continue;
+            }
+            let receiver = code[..at].trim_end().chars().next_back();
+            let call = code[at + method.len()..].trim_start().chars().next();
+            if receiver == Some('.') && call == Some('(') {
+                out.push(index + 1);
+            }
+        }
+    }
+    out
+}
+
+/// The 1-based lines of `source` that use `token`, which must be a whole name
+/// at its start: `to_string` does not match `to_string_lossy`.
+fn token_lines(source: &str, token: &str) -> Vec<usize> {
+    let continues = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let ends_in_name = continues(token.chars().next_back());
+    let mut depth = 0;
+    let mut out = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let code = code_only(line, &mut depth);
+        for (at, _) in code.match_indices(token) {
+            let before = code[..at].chars().next_back();
+            let after = code[at + token.len()..].chars().next();
+            if !continues(before) && (!ends_in_name || !continues(after)) {
+                out.push(index + 1);
+            }
+        }
+    }
+    out
+}
+
+/// The source from the line that contains `opener` to its matching closing
+/// brace.  Braces are counted in the raw text: a brace inside a string literal
+/// would end the body early, so the pinned functions keep none.
+fn block_body(source: &str, opener: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut inside = false;
+    let mut opened = false;
+    let mut depth = 0usize;
+    for line in source.lines() {
+        if !inside {
+            if !line.contains(opener) {
+                continue;
+            }
+            inside = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+        opened |= line.contains('{');
+        depth += line.matches('{').count();
+        depth = depth.saturating_sub(line.matches('}').count());
+        if opened && depth == 0 {
+            break;
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The audio callbacks take no blocking lock, and the CLAP log path
+/// (`host_log` and `impl LogSlot`) allocates nothing: a plugin may call it
+/// from its `process` thread.
+///
+/// Locks: `.lock()`, `Mutex::lock(…)`, and `.read()`/`.write()` in a file
+/// that names `RwLock`.  This reads the files as text.  It cannot prove that
+/// a helper they call does not lock or allocate, nor see a lock through a
+/// macro, an alias in another module, or `try_read`/`try_write`.  Comments
+/// are skipped; a string literal is not, so one containing `.lock()` would
+/// fail this test (a false positive, never a missed lock).  `block_body`
+/// counts braces raw for the same reason; the scan checks each body still
+/// reaches its last item, so a brace in a literal fails instead of silently
+/// narrowing what is scanned.
+#[test]
+fn audio_callbacks_take_no_blocking_lock() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src"), root, &mut files);
+    let path_of = |want: &str| {
+        files
+            .iter()
+            .find(|(file, _)| file == want)
+            .map(|(_, path)| path.as_path())
+            .unwrap_or_else(|| panic!("the walk did not find {want}"))
+    };
+
+    let mut hits = Vec::new();
+    for file in CALLBACK_FILES {
+        let source = std::fs::read_to_string(path_of(file)).expect("read source");
+        for line in method_call_lines(&source, "lock") {
+            hits.push(format!("{file}:{line}: .lock()"));
+        }
+        for path in ["Mutex::lock", "RwLock::read", "RwLock::write"] {
+            for line in token_lines(&source, path) {
+                hits.push(format!("{file}:{line}: {path}()"));
+            }
+        }
+        // `.read()` and `.write()` are only unambiguous when the file names
+        // the type: without it, `File::read` and `LogSlot::write` look the
+        // same.
+        if !token_lines(&source, "RwLock").is_empty() {
+            for method in ["read", "write"] {
+                for line in method_call_lines(&source, method) {
+                    hits.push(format!("{file}:{line}: .{method}()"));
+                }
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "a callback waits on a lock (AGENTS.md, Audio thread):\n{}",
+        hits.join("\n")
+    );
+
+    let host = "src/audio/clap/host.rs";
+    let source = std::fs::read_to_string(path_of(host)).expect("read source");
+    let mut hits = Vec::new();
+    for (name, opener, tail) in [
+        ("host_log", "fn host_log(", "try_lock_now"),
+        ("impl LogSlot", "impl LogSlot {", "fn push"),
+    ] {
+        let body = block_body(&source, opener).unwrap_or_else(|| panic!("{name} is in {host}"));
+        assert!(
+            body.contains(tail),
+            "{name}'s body ended before `{tail}`: a brace in a literal?"
+        );
+        for token in ALLOCATING {
+            for line in token_lines(&body, token) {
+                hits.push(format!("{host}: {name} uses {token} (body line {line})"));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "the CLAP log path allocates on the plugin's process thread:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn a_try_lock_is_not_a_blocking_lock() {
+    let source = "// .lock() in prose\nlet a = lock.try_lock();\nlet b = m\n    .lock();\n";
+    assert_eq!(method_call_lines(source, "lock"), [4]);
+    assert_eq!(token_lines("let g = Mutex::lock(&m);", "Mutex::lock"), [1]);
+    assert_eq!(
+        token_lines("let g = RwLock::read(&r);", "RwLock::read"),
+        [1]
+    );
+    assert_eq!(
+        token_lines("let g = RwLock::write(&r);", "RwLock::write"),
+        [1]
+    );
+    assert_eq!(method_call_lines("let g = lock.read();", "read"), [1]);
+    assert!(method_call_lines("let g = lock.try_read();", "read").is_empty());
+    assert!(token_lines("let a = text.to_string_lossy();", "to_string").is_empty());
+    assert_eq!(token_lines("let a = text.to_owned();", "to_owned"), [1]);
+    // An accumulator the log scan must catch is one of these constructors.
+    assert_eq!(
+        token_lines("let mut s = String::new();", "String::new"),
+        [1]
+    );
+    assert_eq!(
+        token_lines("let s = String::with_capacity(8);", "String::with_capacity"),
+        [1]
+    );
+    assert_eq!(token_lines("let mut v = Vec::new();", "Vec::new"), [1]);
+    assert_eq!(token_lines("let v = vec![0u8; 8];", "vec!"), [1]);
+    assert_eq!(token_lines("let b = Box::new(0);", "Box::new"), [1]);
+    // A literal is not lexed, so `.lock()` in one is a false positive.
+    assert_eq!(method_call_lines("let s = \"x.lock()\";", "lock"), [1]);
+}
+
+/// The 1-based lines of `source` that read the engine through the field,
+/// `.engine`, rather than a wrapper method (`engine_state`).  Comments are
+/// skipped; a following identifier character means a longer name.
+fn engine_references(source: &str) -> Vec<usize> {
+    let mut depth = 0;
+    let mut out = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let code = code_only(line, &mut depth);
+        for (at, _) in code.match_indices(".engine") {
+            let after = code[at + ".engine".len()..].chars().next();
+            if after.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            out.push(index + 1);
+        }
+    }
+    out
+}
+
+/// The UI reaches the engine through `RigWerkApp` methods only; no production
+/// file under `src/ui` reads `app.engine` / `self.engine` directly.  `tests.rs`
+/// files are exempt: they may drive the engine to set a fixture.
+///
+/// This reads the source text, so it sees the field access however it is
+/// formatted (`.engine` on its own line included), and it skips comments.  It
+/// does not see an access through another module's helper.
+#[test]
+fn the_ui_never_reaches_the_engine_directly() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src/ui"), root, &mut files);
+    assert!(
+        files.iter().any(|(file, _)| file == "src/ui/shell.rs"),
+        "the walk lost the UI source"
+    );
+    let mut hits = Vec::new();
+    for (file, path) in &files {
+        let source = std::fs::read_to_string(path).expect("read source");
+        for line in engine_references(&source) {
+            hits.push(format!("{file}:{line}: .engine"));
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "a production UI file reads the engine directly instead of a RigWerkApp method:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn the_engine_scan_matches_the_field_not_the_wrapper_names() {
+    let source = concat!(
+        "// self.engine.state\n",
+        "/* self.engine.state */\n",
+        "let a = self.engine.state;\n",
+        "let b = self.engine_state();\n",
+        "let c = app\n",
+        "    .engine\n",
+        "    .plugin_views(0);\n",
+    );
+    assert_eq!(engine_references(source), [3, 6]);
 }
