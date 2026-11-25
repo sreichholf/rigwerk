@@ -17,7 +17,9 @@ use crate::ui::fonts::Face;
 use crate::ui::pages::setup::driver_line::driver_line;
 use crate::ui::pages::setup::{hint, panel};
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{fit_text, palette_focus, row_info, segmented, TextField};
+use crate::ui::widgets::{
+    asio_panel_chip, fit_text, palette_focus, row_info, segmented, TextField,
+};
 
 /// Allocated height of one row, including the gap under it.
 pub(crate) const DEVICE_ROW_H: f32 = 30.0;
@@ -433,11 +435,11 @@ impl RigWerkApp {
             self.input_rate_and_buffer(ui);
             ui.add_space(6.0);
             let input_actual = self.input_actual();
-            let stopped = self.engine.state != EngineState::Running;
+            let stopped = self.engine_state() != EngineState::Running;
             let _ = driver_line(
                 ui,
                 input_actual.as_ref(),
-                if self.engine.state == EngineState::Running {
+                if self.engine_state() == EngineState::Running {
                     "measuring…"
                 } else {
                     "not running"
@@ -446,7 +448,19 @@ impl RigWerkApp {
                 None,
             );
             ui.add_space(6.0);
-            self.asio_panel_chip(ui, AsioPanelSide::Input);
+            let side = AsioPanelSide::Input;
+            if let Some(ready) = self.driver_panel(side) {
+                if asio_panel_chip(
+                    ui,
+                    ready,
+                    "Driver panel",
+                    false,
+                    "The driver panel is available once the bridge is running on that ASIO driver.",
+                    "Open this ASIO driver's control panel.",
+                ) {
+                    self.request_asio_panel(side);
+                }
+            }
         });
 
         panel(ui, "Clock output", section, None, |ui| {
@@ -492,7 +506,7 @@ impl RigWerkApp {
             self.output_mode_control(ui);
             ui.add_space(6.0);
             let output_actual = self.output_actual();
-            let stopped = self.engine.state != EngineState::Running;
+            let stopped = self.engine_state() != EngineState::Running;
             let checking = self
                 .output_driver_checkable()
                 .then(|| self.driver_probe_job.is_some());
@@ -531,7 +545,19 @@ impl RigWerkApp {
                     }
             }
             ui.add_space(6.0);
-            self.asio_panel_chip(ui, AsioPanelSide::Output);
+            let side = AsioPanelSide::Output;
+            if let Some(ready) = self.driver_panel(side) {
+                if asio_panel_chip(
+                    ui,
+                    ready,
+                    "Driver panel",
+                    false,
+                    "The driver panel is available once the bridge is running on that ASIO driver.",
+                    "Open this ASIO driver's control panel.",
+                ) {
+                    self.request_asio_panel(side);
+                }
+            }
         });
 
         if ui

@@ -12,41 +12,16 @@ use egui::{Align, CornerRadius, Layout, Margin, RichText, Stroke, Vec2};
 use crate::app::screen::{format_ms, Drawer, SetupSection, Sheet, SHEET_MIN};
 use crate::app::settings::rate_label;
 use crate::app::{Page, RigWerkApp};
-use crate::audio::{AsioPanelSide, EngineState};
+use crate::audio::EngineState;
 use crate::ui::brand;
 use crate::ui::theme::{font, palette, Face, TypeRole};
-use crate::ui::widgets::{engine_state_label, OutlineButton};
+use crate::ui::widgets::engine_state_label;
 
 const DRAWER_W: f32 = 460.0;
 /// How far the sheet's resize handle reaches, above the edge and inside it.
 const GRAB: f32 = 10.0;
 
 impl RigWerkApp {
-    /// The ASIO control-panel button for one side of the bridge.  Hidden
-    /// unless that side is ASIO, disabled until the running bridge has that
-    /// driver open; a click only posts a request.
-    pub(crate) fn asio_panel_chip(&mut self, ui: &mut egui::Ui, side: AsioPanelSide) {
-        let clsid = match side {
-            AsioPanelSide::Input => self.active_input().asio_clsid,
-            AsioPanelSide::Output => self.selected_output().asio_clsid,
-        };
-        let Some(clsid) = clsid else {
-            return;
-        };
-        let ready = self.engine.open_asio_driver(side) == Some(clsid);
-        let response = OutlineButton::new("Driver panel").enabled(ready).show(ui);
-        if !ready {
-            let _ = response.on_disabled_hover_text(
-                "The driver panel is available once the bridge is running on that ASIO driver.",
-            );
-        } else if response
-            .on_hover_text("Open this ASIO driver's control panel.")
-            .clicked()
-        {
-            self.engine.request_asio_panel(side);
-        }
-    }
-
     pub(crate) fn title_bar(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         ui.horizontal(|ui| {
@@ -107,8 +82,8 @@ impl RigWerkApp {
 
     fn bridge_control(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
-        let label = engine_state_label(self.engine.state);
-        let colour = match self.engine.state {
+        let label = engine_state_label(self.engine_state());
+        let colour = match self.engine_state() {
             EngineState::Running => colours.accent,
             EngineState::Error => colours.error,
             EngineState::Preview => colours.warn,
@@ -119,13 +94,13 @@ impl RigWerkApp {
         ui.label(
             RichText::new(label)
                 .font(font(Face::Sans, TypeRole::Control))
-                .color(if self.engine.state == EngineState::Running {
+                .color(if self.engine_state() == EngineState::Running {
                     colours.accent_text
                 } else {
                     colours.text
                 }),
         );
-        let stopping = self.engine.state == EngineState::Stopping;
+        let stopping = self.engine_state() == EngineState::Stopping;
         let active = self.is_active();
         let verb = if active { "Stop" } else { "Start" };
         let start = bar_button(ui.ctx(), verb, active);
@@ -332,7 +307,7 @@ impl RigWerkApp {
                 let dropouts = dropout_line(self.snapshot.dropouts);
                 let dropout_text = status_text(ui.ctx(), &dropouts);
                 ui.label(dropout_text).on_hover_text(self.dropout_hover());
-                if let Some(load) = self.engine.total_dsp_time() {
+                if let Some(load) = self.engine_total_dsp_time() {
                     let load_text =
                         status_text(ui.ctx(), &format!("{:.0} %", load.avg_share() * 100.0));
                     ui.label(load_text);
@@ -373,7 +348,7 @@ impl RigWerkApp {
         };
         // While the bridge runs, a rate the native PipeWire path only asked
         // for is marked: the graph has not read its own yet.
-        if self.engine.state == EngineState::Running
+        if self.engine_state() == EngineState::Running
             && (!self.snapshot.input_rate_reported || !self.snapshot.output_rate_reported)
         {
             rates.push_str(" (asked)");
@@ -409,7 +384,7 @@ impl RigWerkApp {
         };
         // Same rule as the driver line: a size that is only the request is
         // marked while the bridge runs.
-        if self.engine.state == EngineState::Running && !(input_read && output_read) {
+        if self.engine_state() == EngineState::Running && !(input_read && output_read) {
             line.push_str(" (asked)");
         }
         line

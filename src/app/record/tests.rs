@@ -198,3 +198,14 @@ fn record_path_appends_a_suffix_when_the_take_exists() {
     );
     assert!(!third.exists());
 }
+
+/// The writer path itself needs a running bridge and a real WAV, so headless
+/// this only proves the idle read reaches the engine's recorder.
+#[test]
+fn the_recording_status_reads_the_idle_writer() {
+    let app = crate::app::blank_app();
+    let status = app.engine_recording_status();
+    assert!(matches!(status.phase, crate::audio::RecordPhase::Idle));
+    assert_eq!(status.frames, 0);
+    assert!(status.error.is_none());
+}

@@ -26,8 +26,8 @@ use crate::audio::{
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{
-    chip, format_db, heading, horizontal_meter, level_row, row_info, segmented, styled_slider,
-    SliderStyle,
+    asio_panel_chip, chip, format_db, heading, horizontal_meter, level_row, row_info, segmented,
+    styled_slider, SliderStyle,
 };
 
 use crate::ui::widgets::OutlineButton;
@@ -95,7 +95,19 @@ impl RigWerkApp {
                     remove = true;
                 }
                 if row.clock {
-                    self.asio_panel_chip(ui, crate::audio::AsioPanelSide::Output);
+                    let side = crate::audio::AsioPanelSide::Output;
+                    if let Some(ready) = self.driver_panel(side) {
+                        if asio_panel_chip(
+                            ui,
+                            ready,
+                            "Driver panel",
+                            false,
+                            "The driver panel is available once the bridge is running on that ASIO driver.",
+                            "Open this ASIO driver's control panel.",
+                        ) {
+                            self.request_asio_panel(side);
+                        }
+                    }
                 }
             });
         });

@@ -120,11 +120,11 @@ impl RigWerkApp {
         // the image shows the tuner rather than its idle state.
         let active = self.screenshot.is_some()
             || matches!(
-                self.engine.state,
+                self.engine_state(),
                 EngineState::Running | EngineState::Preview
             );
-        let muted = self.tuner.auto_muted(self.page, self.engine.state);
-        let state = self.engine.state;
+        let muted = self.tuner.auto_muted(self.page, self.engine_state());
+        let state = self.engine_state();
         let mut actions = Actions::default();
 
         if muted {

@@ -123,7 +123,7 @@ impl RigWerkApp {
         let open = self.chrome.sheet;
         let gate_text = format_db(mix.gate.threshold_db, 0);
         let top = ui.cursor().top();
-        let views = self.engine.plugin_views(slot);
+        let views = self.engine_plugin_views(slot);
         let count = views.len();
         let pre: Vec<NamRow> = nam
             .iter()
@@ -370,7 +370,7 @@ impl RigWerkApp {
         rate: u32,
         open: Option<Sheet>,
     ) {
-        let views = self.engine.plugin_views(slot);
+        let views = self.engine_plugin_views(slot);
         if views.is_empty() {
             return;
         }

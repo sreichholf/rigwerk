@@ -41,8 +41,7 @@ impl RigWerkApp {
             Sheet::Path { .. } => "Path".to_owned(),
             Sheet::MatchPaths => "Match paths".to_owned(),
             Sheet::Effect { path, index } => self
-                .engine
-                .plugin_views(path)
+                .engine_plugin_views(path)
                 .get(index)
                 .map(|view| view.name.clone())
                 .unwrap_or_else(|| "Effect".to_owned()),

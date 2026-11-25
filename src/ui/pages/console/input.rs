@@ -12,7 +12,7 @@ use crate::app::RigWerkApp;
 use crate::audio::{AsioPanelSide, EngineState};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{chip, fit_text, horizontal_meter, row_info, FaderRange, OutlineButton};
+use crate::ui::widgets::{asio_panel_chip, chip, fit_text, horizontal_meter, row_info, FaderRange};
 
 const SCOPE_H: f32 = 56.0;
 
@@ -122,7 +122,7 @@ impl RigWerkApp {
             rect.center().y,
             Stroke::new(1.0, colours.line),
         );
-        let active = matches!(self.engine.state, EngineState::Running);
+        let active = matches!(self.engine_state(), EngineState::Running);
         for (samples, colour) in [
             (&self.meters.scope_in, colours.text3),
             (&self.meters.scope_out, colours.meter),
@@ -149,22 +149,18 @@ impl RigWerkApp {
     /// *Driver panel* for an ASIO input: disabled until the bridge runs on
     /// that driver, with that reason on hover.
     fn input_driver_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(clsid) = self.active_input().asio_clsid else {
-            return;
-        };
-        let ready = self.engine.open_asio_driver(AsioPanelSide::Input) == Some(clsid);
-        let response = OutlineButton::new("Driver panel")
-            .enabled(ready)
-            .full_width()
-            .show(ui);
-        if !ready {
-            let _ = response
-                .on_disabled_hover_text("Available once the bridge runs on this ASIO driver");
-        } else if response
-            .on_hover_text("Open this ASIO driver's own settings window")
-            .clicked()
-        {
-            self.engine.request_asio_panel(AsioPanelSide::Input);
+        let side = AsioPanelSide::Input;
+        if let Some(ready) = self.driver_panel(side) {
+            if asio_panel_chip(
+                ui,
+                ready,
+                "Driver panel",
+                true,
+                "Available once the bridge runs on this ASIO driver",
+                "Open this ASIO driver's own settings window",
+            ) {
+                self.request_asio_panel(side);
+            }
         }
     }
 }
