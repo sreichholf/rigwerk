@@ -26,6 +26,7 @@ mod chain;
 #[cfg(test)]
 mod fixtures;
 mod handle;
+mod host;
 mod link;
 mod load;
 mod model;

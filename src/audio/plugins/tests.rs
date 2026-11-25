@@ -123,7 +123,7 @@ fn a_restored_state_takes_precedence_over_unchanged_values() {
 /// shares): no marker is needed.
 #[test]
 fn a_snapshot_with_undelivered_values_restores_them_through_the_plain_rule() {
-    use super::handle::capture_snapshot;
+    use super::host::capture_snapshot;
     // 1 and 2 were queued when the blob was saved: 1 is saved at 0.2, and 2
     // was set back to its default (so it is not saved any more); 3 was
     // delivered.
