@@ -9,7 +9,7 @@
 
 mod fixtures;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -217,6 +217,37 @@ impl ScreenshotJob {
     }
 }
 
+/// Writes one capture, unless an earlier ending already owns the run.  Returns
+/// the ending to report, or `None` when the run had ended before the capture
+/// landed, so no file is written that the run no longer reports.
+fn save_capture(exit: &AtomicI32, path: &Path, image: &egui::ColorImage) -> Option<End> {
+    if exit.load(Ordering::Acquire) != NO_ENDING {
+        return None;
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let width = image.width() as u32;
+    let height = image.height() as u32;
+    let mut rgba = Vec::with_capacity(image.pixels.len() * 4);
+    for pixel in &image.pixels {
+        rgba.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
+    }
+    let saved = ::image::save_buffer(path, &rgba, width, height, ::image::ColorType::Rgba8);
+    Some(match saved {
+        Ok(()) => {
+            println!("Screenshot saved to {}", path.display());
+            End::Saved
+        }
+        Err(error) => {
+            eprintln!("Could not save screenshot {}: {error}", path.display());
+            End::SaveFailed
+        }
+    })
+}
+
 impl RigWerkApp {
     pub(crate) fn handle_screenshot(&mut self, ctx: &egui::Context) {
         // Wait until the first device inventory is in so the capture matches
@@ -291,35 +322,11 @@ impl RigWerkApp {
                 // A deadline may have ended the run while this capture was in
                 // flight; the first ending wins, so this one is dropped
                 // without writing a file the run no longer reports.
-                if exit.load(Ordering::Acquire) != NO_ENDING {
-                    return;
+                if let Some(end) = save_capture(&exit, &path, &image) {
+                    // Only a closed window drops the receiving end, and then
+                    // there is no run left to report to.
+                    let _ = outcome.send(end);
                 }
-                if let Some(parent) = path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                }
-                let width = image.width() as u32;
-                let height = image.height() as u32;
-                let mut rgba = Vec::with_capacity(image.pixels.len() * 4);
-                for pixel in &image.pixels {
-                    rgba.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
-                }
-                let saved =
-                    ::image::save_buffer(&path, &rgba, width, height, ::image::ColorType::Rgba8);
-                let end = match saved {
-                    Ok(()) => {
-                        println!("Screenshot saved to {}", path.display());
-                        End::Saved
-                    }
-                    Err(error) => {
-                        eprintln!("Could not save screenshot {}: {error}", path.display());
-                        End::SaveFailed
-                    }
-                };
-                // Only a closed window drops the receiving end, and then
-                // there is no run left to report to.
-                let _ = outcome.send(end);
             });
         }
         ctx.request_repaint();
