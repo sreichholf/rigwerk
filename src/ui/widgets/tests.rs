@@ -1,5 +1,6 @@
 use super::{
-    engine_state_label, node_named, nudge_slider, run_frame, styled_slider, test_input, SliderStyle,
+    engine_state_label, fit_text, node_named, nudge_slider, run_frame, styled_slider, test_input,
+    text_width, SliderStyle, LAYOUTS,
 };
 use crate::audio::EngineState;
 use crate::ui::theme::DARK;
@@ -222,4 +223,78 @@ fn a_logarithmic_track_puts_the_middle_at_the_geometric_mean() {
         );
     });
     near(value, 400.0);
+}
+
+fn layouts() -> usize {
+    LAYOUTS.with(|count| count.get())
+}
+
+fn reset_layouts() {
+    LAYOUTS.with(|count| count.set(0));
+}
+
+/// The fitted string is the longest prefix that fits with the ellipsis, the
+/// whole string when it already fits, and the ellipsis alone when nothing
+/// does, at every width.
+#[test]
+fn fit_text_keeps_the_longest_prefix_that_fits() {
+    let ctx = egui::Context::default();
+    let font = egui::FontId::proportional(12.0);
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        let long = "a".repeat(120);
+        let width_of_40 = {
+            let mut candidate = "a".repeat(40);
+            candidate.push('\u{2026}');
+            text_width(ui, &candidate, &font)
+        };
+
+        assert_eq!(fit_text(ui, "short", &font, 10_000.0), "short");
+        assert_eq!(fit_text(ui, "", &font, 10_000.0), "");
+        assert_eq!(fit_text(ui, "", &font, -1.0), "\u{2026}");
+
+        let fitted = fit_text(ui, &long, &font, width_of_40);
+        let keep = fitted.chars().count() - 1;
+        assert!(fitted.ends_with('\u{2026}'), "{fitted:?}");
+        assert!(keep >= 40, "kept {keep} of 120");
+        assert!(text_width(ui, &fitted, &font) <= width_of_40);
+
+        let mut longer: String = long.chars().take(keep + 1).collect();
+        longer.push('\u{2026}');
+        assert!(
+            text_width(ui, &longer, &font) > width_of_40,
+            "a longer prefix also fit, so the search stopped early"
+        );
+
+        // Truncation lands on a character boundary, not inside a code point.
+        let accented = "Grüße · Kabellänge · Rückweg ".repeat(6);
+        let fitted = fit_text(ui, &accented, &font, 60.0);
+        assert!(fitted.ends_with('\u{2026}'), "{fitted:?}");
+        assert!(accented.starts_with(fitted.trim_end_matches('\u{2026}')));
+
+        assert_eq!(fit_text(ui, &long, &font, 0.0), "\u{2026}");
+    });
+}
+
+/// Measuring every prefix would lay out one string per character; the search
+/// must stay logarithmic.
+#[test]
+fn fit_text_measures_a_logarithmic_number_of_prefixes() {
+    let ctx = egui::Context::default();
+    let font = egui::FontId::proportional(12.0);
+    let _ = run_frame(&ctx, test_input(None), |ui| {
+        let long = "a".repeat(1_000);
+        let width_of_100 = {
+            let mut candidate = "a".repeat(100);
+            candidate.push('\u{2026}');
+            text_width(ui, &candidate, &font)
+        };
+        reset_layouts();
+        let fitted = fit_text(ui, &long, &font, width_of_100);
+        assert!(fitted.ends_with('\u{2026}'));
+        let measured = layouts();
+        assert!(
+            measured <= 12,
+            "{measured} layouts for a 1000-character string"
+        );
+    });
 }

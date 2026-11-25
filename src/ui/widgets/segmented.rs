@@ -1,27 +1,42 @@
-//! A segmented control for two to four exclusive choices (`docs/ui-spec.md`
-//! §4.5).  The chosen segment is filled with `accent_bg` and labelled in
-//! `accent_text`.  Left and right arrows move the choice while a segment
-//! has focus.
+//! A segmented control for exclusive choices (`docs/ui-spec.md` §4.5).  The
+//! chosen segment is filled with `accent_bg` and labelled in `accent_text`.
+//! Left and right arrows move the choice while a segment has focus.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};
 
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
-use crate::ui::widgets::{palette_focus, row_info};
+use crate::ui::widgets::{palette_focus, row_info, text_width};
 
 const HEIGHT: f32 = 32.0;
-const MAX_OPTIONS: usize = 4;
 
-/// Paints `options` and writes the chosen index into `selected`.  More than
-/// four options are cut off: the spec is two to four.
+/// Paints `options` and writes the chosen index into `selected`.
 pub(crate) fn segmented(
     ui: &mut egui::Ui,
     selected: &mut usize,
     options: &[&str],
 ) -> egui::Response {
-    let count = options.len().clamp(1, MAX_OPTIONS);
-    let options = &options[..count.min(options.len())];
+    paint(ui, selected, options, &[])
+}
+
+/// [`segmented`] with a hover text per option; an option without one is
+/// explained by its label, as in [`segmented`].
+pub(crate) fn segmented_hinted(
+    ui: &mut egui::Ui,
+    selected: &mut usize,
+    options: &[&str],
+    hints: &[&str],
+) -> egui::Response {
+    paint(ui, selected, options, hints)
+}
+
+fn paint(
+    ui: &mut egui::Ui,
+    selected: &mut usize,
+    options: &[&str],
+    hints: &[&str],
+) -> egui::Response {
     if options.is_empty() {
         return ui.allocate_response(Vec2::ZERO, Sense::hover());
     }
@@ -30,7 +45,7 @@ pub(crate) fn segmented(
     let text_font = font(Face::Sans, TypeRole::Control);
     let widths: Vec<f32> = options
         .iter()
-        .map(|option| measure(ui, option, &text_font) + 24.0)
+        .map(|option| text_width(ui, option, &text_font) + 24.0)
         .collect();
     let width = widths.iter().sum::<f32>().max(HEIGHT);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::hover());
@@ -97,7 +112,7 @@ pub(crate) fn segmented(
             None,
         );
         palette_focus(ui, &response, segment);
-        response = response.on_hover_text(*option);
+        response = response.on_hover_text(hint(hints, index, option));
         combined = Some(match combined {
             Some(previous) => previous.union(response),
             None => response,
@@ -110,11 +125,10 @@ pub(crate) fn segmented(
     response
 }
 
-fn measure(ui: &egui::Ui, text: &str, font_id: &egui::FontId) -> f32 {
-    ui.painter()
-        .layout_no_wrap(text.to_owned(), font_id.clone(), palette(ui.ctx()).text)
-        .size()
-        .x
+/// The hover text for the option at `index`: its hint when one was given,
+/// else the label itself.
+fn hint<'a>(hints: &[&'a str], index: usize, option: &'a str) -> &'a str {
+    hints.get(index).copied().unwrap_or(option)
 }
 
 fn arrows(

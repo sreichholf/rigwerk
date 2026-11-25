@@ -16,7 +16,7 @@ use egui::{Color32, CornerRadius, RichText, Stroke};
 use crate::app::{RigWerkApp, ACTIVITY_LOG_CAP};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{engine_state_label, status_dot};
+use crate::ui::widgets::{engine_state_label, segmented, status_dot};
 
 use crate::ui::widgets::OutlineButton;
 
@@ -309,31 +309,24 @@ impl RigWerkApp {
 
     fn diagnostics_tabs(&mut self, ui: &mut egui::Ui) {
         use crate::app::screen::DiagnosticsTab;
-        let colours = palette(ui.ctx());
+        // One list, so a tab cannot be labelled by one entry and drawn from
+        // another.
+        const TABS: [(&str, DiagnosticsTab); 5] = [
+            ("Log", DiagnosticsTab::Log),
+            ("Performance", DiagnosticsTab::Performance),
+            ("Latency", DiagnosticsTab::Latency),
+            ("Scan", DiagnosticsTab::Scan),
+            ("Status", DiagnosticsTab::Status),
+        ];
+        let labels = TABS.map(|(label, _)| label);
         let current = self.chrome.diagnostics_tab;
-        ui.horizontal_wrapped(|ui| {
-            for (label, tab) in [
-                ("Log", DiagnosticsTab::Log),
-                ("Performance", DiagnosticsTab::Performance),
-                ("Latency", DiagnosticsTab::Latency),
-                ("Scan", DiagnosticsTab::Scan),
-                ("Status", DiagnosticsTab::Status),
-            ] {
-                let selected = current == tab;
-                let text = sans(
-                    label,
-                    if selected {
-                        colours.accent
-                    } else {
-                        colours.text2
-                    },
-                    TypeRole::Control,
-                );
-                if ui.selectable_label(selected, text).clicked() {
-                    self.chrome.diagnostics_tab = tab;
-                }
-            }
-        });
+        let mut index = TABS
+            .iter()
+            .position(|&(_, tab)| tab == current)
+            .unwrap_or(0);
+        if segmented(ui, &mut index, &labels).changed() {
+            self.chrome.diagnostics_tab = TABS[index].1;
+        }
         ui.add_space(8.0);
     }
 
