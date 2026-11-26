@@ -122,6 +122,39 @@ fn vst3_fixture_opens_and_closes_a_vst3_window() {
     assert_eq!(crate::audio::vst3::run_loop_counts(), (0, 0));
 }
 
+/// A saved effect that was never opened (the bridge has not started) opens
+/// its editor through `open_plugin_editor`, which loads it first.  Needs
+/// `RIGWERK_VST3_FIXTURES` like the test above.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[test]
+fn opening_a_saved_effect_editor_loads_it_first() {
+    let Some(bundle) = crate::audio::vst3_fixture("again") else {
+        return;
+    };
+    #[cfg(target_os = "linux")]
+    assert!(
+        std::env::var_os("DISPLAY").is_some(),
+        "RIGWERK_VST3_FIXTURES is set but there is no X server; run under xvfb-run"
+    );
+    let _main = crate::audio::claim_main_thread();
+    #[cfg(target_os = "linux")]
+    let _x_client = xcb::Connection::connect(None).expect("reach the X server");
+    let mut app = crate::app::blank_app();
+    assert!(app.add_plugin_from_bundle(&bundle, Some("AGain VST3")));
+    let prefs = app.engine.plugin_prefs(app.selected_path);
+    app.engine.restore_plugins(app.selected_path, prefs);
+    let views = app.engine.plugin_views(app.selected_path);
+    assert_eq!(views.len(), 1);
+    assert!(!views[0].loaded(), "the saved effect starts unopened");
+    assert!(!views[0].has_editor, "its editor is unknown until it loads");
+
+    app.open_plugin_editor(0);
+
+    assert!(app.engine.plugin_views(app.selected_path)[0].loaded());
+    assert!(app.plugin_gui.is_some(), "the editor did not open");
+    app.finish_plugin_gui();
+}
+
 #[test]
 fn poll_with_no_editor_leaves_the_window_unset() {
     let mut app = crate::app::blank_app();

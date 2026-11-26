@@ -21,6 +21,12 @@ impl PluginFormat {
             Self::Lv2 => "LV2",
         }
     }
+
+    /// Whether a plugin of this format can draw its own editor here.  The
+    /// host has no LV2 UI support, so an LV2 effect only shows its controls.
+    pub(crate) fn has_editor_support(self) -> bool {
+        !matches!(self, Self::Lv2)
+    }
 }
 
 /// A parameter value the person changed, kept with the effect so the plugin
@@ -256,4 +262,13 @@ pub struct PluginView {
     /// until it resumes.  False for a failed effect, which shows its error
     /// instead.
     pub paused: bool,
+}
+
+impl PluginView {
+    /// Whether the effect has been opened, so its plugin instance exists.
+    /// A saved effect stays unopened until the bridge starts or something
+    /// asks for its editor or controls.
+    pub(crate) fn loaded(&self) -> bool {
+        self.instance.is_some()
+    }
 }

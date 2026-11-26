@@ -571,10 +571,13 @@ its value and today's hover text; a reduction meter (audio addition, §0);
 *Dry input*; *Reset* (keeps on/off).
 
 **Effect**: header *On* / *Bypass*, *Wet* (its default on hover), latency,
-state (*Active*, *Bypassed*, *Didn't load*: today's controls-window marks),
-*Editor*, *Reset to defaults*, *Remove*.  Body: the controls with *Find a
+state (*Not loaded*, *Active*, *Bypassed*, *Didn't load*: today's
+controls-window marks), *Editor* (an unopened effect loads before its editor
+opens; one whose format has no editor here shows *Controls* and loads for
+them), *Reset to defaults*, *Remove*.  Body: the controls with *Find a
 control…*, or *This effect draws its own controls*, *reports no controls*,
-*did not load*.  The errors the plugin reported are listed here.
+*is not loaded yet*, *did not load*.  The errors the plugin reported are
+listed here.
 
 **Path**: name, colour, source (*Input* / *Sends*; for the input the 2 × 2
 grid and *Stereo* / *Mono*), the sends (*Send to* each return, or on a
