@@ -6,18 +6,19 @@
 //! its sizing border, so the user cannot drag it to a size the view ignores.
 
 use std::mem;
-use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
-use winapi::shared::windef::{HWND, RECT};
-use winapi::um::libloaderapi::GetModuleHandleW;
-use winapi::um::winuser::{
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::UpdateWindow;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-    GetDpiForWindow, GetWindowLongPtrW, LoadCursorW, RegisterClassExW, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, UpdateWindow, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA,
-    GWL_STYLE, IDC_ARROW, SIZE_MINIMIZED, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_CLOSE, WM_DPICHANGED, WM_SIZE, WNDCLASSEXW, WS_MAXIMIZEBOX,
+    GetWindowLongPtrW, LoadCursorW, RegisterClassExW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, IDC_ARROW, SIZE_MINIMIZED,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DPICHANGED, WM_SIZE, WNDCLASSEXW, WS_MAXIMIZEBOX,
     WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 
@@ -56,14 +57,14 @@ impl Win32Frame {
         Ok(Self { hwnd, state })
     }
 
-    fn style(&self) -> u32 {
-        unsafe { GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32 }
+    fn style(&self) -> WINDOW_STYLE {
+        WINDOW_STYLE(unsafe { GetWindowLongPtrW(self.hwnd, GWL_STYLE) } as u32)
     }
 }
 
 impl EditorFrame for Win32Frame {
     fn parent(&self) -> ParentWindow {
-        ParentWindow::Win32(self.hwnd as *mut std::ffi::c_void)
+        ParentWindow::Win32(self.hwnd.0)
     }
 
     fn own_scale(&self) -> Option<f64> {
@@ -90,10 +91,10 @@ impl EditorFrame for Win32Frame {
             bottom: height as i32,
         };
         unsafe {
-            AdjustWindowRectEx(&mut rect, self.style(), 0, 0);
-            SetWindowPos(
+            let _ = AdjustWindowRectEx(&mut rect, self.style(), false, WINDOW_EX_STYLE(0));
+            let _ = SetWindowPos(
                 self.hwnd,
-                ptr::null_mut(),
+                None,
                 0,
                 0,
                 rect.right - rect.left,
@@ -114,10 +115,10 @@ impl EditorFrame for Win32Frame {
             return;
         }
         unsafe {
-            SetWindowLongPtrW(self.hwnd, GWL_STYLE, style as isize);
-            SetWindowPos(
+            SetWindowLongPtrW(self.hwnd, GWL_STYLE, style.0 as isize);
+            let _ = SetWindowPos(
                 self.hwnd,
-                ptr::null_mut(),
+                None,
                 0,
                 0,
                 0,
@@ -129,14 +130,14 @@ impl EditorFrame for Win32Frame {
 
     fn show(&mut self) {
         unsafe {
-            ShowWindow(self.hwnd, SW_SHOW);
-            UpdateWindow(self.hwnd);
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            let _ = UpdateWindow(self.hwnd);
         }
     }
 
     fn hide(&mut self) {
         unsafe {
-            ShowWindow(self.hwnd, SW_HIDE);
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
 }
@@ -145,7 +146,7 @@ impl Drop for Win32Frame {
     fn drop(&mut self) {
         unsafe {
             SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
-            DestroyWindow(self.hwnd);
+            let _ = DestroyWindow(self.hwnd);
         }
         let _ = &self.state;
     }
@@ -158,7 +159,7 @@ unsafe fn window_state(hwnd: HWND) -> Option<&'static WindowState> {
 
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
-    message: UINT,
+    message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
@@ -167,12 +168,12 @@ unsafe extern "system" fn window_proc(
             if let Some(state) = unsafe { window_state(hwnd) } {
                 state.closed.store(true, Ordering::Relaxed);
             }
-            return 0;
+            return LRESULT(0);
         }
-        WM_SIZE if wparam != SIZE_MINIMIZED => {
+        WM_SIZE if wparam.0 != SIZE_MINIMIZED as usize => {
             if let Some(state) = unsafe { window_state(hwnd) } {
                 let mut rect: RECT = unsafe { mem::zeroed() };
-                if unsafe { GetClientRect(hwnd, &mut rect) } != 0 {
+                if unsafe { GetClientRect(hwnd, &mut rect) }.is_ok() {
                     let width = (rect.right - rect.left).max(0) as u64;
                     let height = (rect.bottom - rect.top).max(0) as u64;
                     state
@@ -180,15 +181,17 @@ unsafe extern "system" fn window_proc(
                         .store((width << 32) | height, Ordering::Relaxed);
                 }
             }
-            return 0;
+            return LRESULT(0);
         }
         WM_DPICHANGED => {
             // The new DPI is in the low word.  The editor's size at that
             // scale decides the window size, not the suggested rectangle.
             if let Some(state) = unsafe { window_state(hwnd) } {
-                state.dpi.store((wparam & 0xffff) as u32, Ordering::Relaxed);
+                state
+                    .dpi
+                    .store((wparam.0 & 0xffff) as u32, Ordering::Relaxed);
             }
-            return 0;
+            return LRESULT(0);
         }
         _ => {}
     }
@@ -205,15 +208,18 @@ unsafe fn create_window(
     let class_name = "IndependentAudioBridgeClapWindow\0"
         .encode_utf16()
         .collect::<Vec<u16>>();
+    let instance = unsafe { GetModuleHandleW(None) }
+        .map(|module| HINSTANCE(module.0))
+        .ok();
     unsafe {
         REGISTER.call_once(|| {
             let mut class: WNDCLASSEXW = mem::zeroed();
-            class.cbSize = mem::size_of::<WNDCLASSEXW>() as UINT;
+            class.cbSize = mem::size_of::<WNDCLASSEXW>() as u32;
             class.style = CS_HREDRAW | CS_VREDRAW;
             class.lpfnWndProc = Some(window_proc);
-            class.hInstance = GetModuleHandleW(ptr::null());
-            class.hCursor = LoadCursorW(ptr::null_mut(), IDC_ARROW);
-            class.lpszClassName = class_name.as_ptr();
+            class.hInstance = instance.unwrap_or_default();
+            class.hCursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
+            class.lpszClassName = PCWSTR(class_name.as_ptr());
             RegisterClassExW(&class);
         });
 
@@ -223,28 +229,29 @@ unsafe fn create_window(
             right: width as i32,
             bottom: height as i32,
         };
-        AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
+        let _ = AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0));
         let window_title = format!("{title} - CLAP\0")
             .encode_utf16()
             .collect::<Vec<u16>>();
         let hwnd = CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            window_title.as_ptr(),
+            WINDOW_EX_STYLE(0),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(window_title.as_ptr()),
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             rect.right - rect.left,
             rect.bottom - rect.top,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            GetModuleHandleW(ptr::null()),
-            ptr::null_mut(),
-        );
-        if hwnd.is_null() {
-            return Err("Could not create a window for the CLAP interface.".to_owned());
-        }
+            None,
+            None,
+            instance,
+            None,
+        )
+        .map_err(|_| "Could not create a window for the CLAP interface.".to_owned())?;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as *const _ as isize);
         Ok(hwnd)
     }
 }
+
+#[cfg(test)]
+mod tests;
