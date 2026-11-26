@@ -100,6 +100,8 @@ impl LogSlot {
                     return;
                 }
                 Err(error) => {
+                    // SAFETY: `valid_up_to` is the length of the valid prefix
+                    // `from_utf8` just checked, so this slice is valid UTF-8.
                     let valid =
                         unsafe { std::str::from_utf8_unchecked(&rest[..error.valid_up_to()]) };
                     if !self.push(valid) {
@@ -268,8 +270,9 @@ impl HostState {
     }
 
     /// The latest log message and whether it was cut, built on the caller's
-    /// (UI) thread.  `None` before the first message, or while the callback
-    /// holds the slot (the next service reads it).
+    /// (UI) thread.  `None` before the first message, and while the plugin's
+    /// callback holds the slot: the read never waits, so that frame skips the
+    /// message.  Nothing draws it yet.
     #[cfg_attr(not(test), allow(dead_code))] // No reader in the tree yet.
     pub(crate) fn log_message(&self) -> Option<(String, bool)> {
         let last = try_lock_now(&self.last_log)?;

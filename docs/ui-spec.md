@@ -30,8 +30,8 @@ The scope below is the plan the rewrite followed; the spec itself is kept.
 - Not in scope: an EQ input spectrum (needs an analyser on the path; later),
   native file dialogs (no dialog crate; paths stay text fields).
 
-No feature is dropped.  §9 lists every control, reading and state the
-current UI has and where it goes.  Things that are new are marked *(new)*.
+No feature is dropped.  §9 is the history: every control, reading and state
+the old UI had, and where it went.  Things that are new are marked *(new)*.
 
 ## 1. Principles
 
@@ -203,8 +203,8 @@ Left to right:
 - **Logo** and *RigWerk*.  A click opens *About* (today's text, including
   *preview build*).
 - **Session menu**: the session name, then *edited* when the setup differs
-  from the saved session of that name.  Actions, in `app/sessions.rs`
-  (today's `presets.rs` logic, which matches sessions by name):
+  from the saved session of that name.  Actions, in `app/sessions.rs`, which
+  matches sessions by name:
   - the list of saved sessions with rates, buffer and estimated latency.
     Picking one loads it, which replaces the setup and reopens the devices.
     While the current setup is *edited*, loading needs a second click
@@ -622,8 +622,8 @@ Board 7.
 - Virtual output: *On* / *Off*; on Windows the VB-Cable state, with *Install
   VB-Audio Virtual Cable, then rescan* when it is missing.
 
-**Adding an output** (the add column) opens a device list with today's
-rules (`ui/pages/mixer/output_devices`):
+**Adding an output** (the add column) opens a device list with the platform's
+rules (`ui/pages/console/add_output.rs`):
 - PipeWire clock output: PipeWire sinks only, plus *RigWerk Out*.
 - ALSA or another Linux clock: the generic devices.
 - Windows: WASAPI devices, with VB-Cable under *Virtual*, and the ASIO
@@ -666,12 +666,14 @@ it (not the limiter warning, as today).  Filter: *All*, *Warnings*,
   carries the marker: `Anchor::{Input, Path(slot), Stage(slot, stage),
   Master, Output(id), Setup(section)}` replaces today's Live card.  The
   navigation actions map to anchors: `OpenRouting` → `Output(id)`,
-  `OpenDevices` → `Setup(Devices)`, `ShowFollower` and `ShowOutput` →
-  `Output(id)`.
+  `OpenDevices` → `Setup(Devices)`, `OpenDiagnostics` → the diagnostics
+  sheet, `ShowFollower` and `ShowOutput` → `Output(id)`.
 - A new issue makes the count pulse once.  A new error also shows the
   error banner under the title bar, which stays until the error clears or
   is dismissed.  Today's *Audio device disconnected* modal becomes this
-  banner, with *Rescan* and *Open Setup*.
+  banner, with *Rescan* and *Open Setup*; a banner for a stopped real-time
+  callback offers *Open diagnostics* instead, because rescanning devices
+  cannot fix a plugin that panicked.
 
 ### 6.5 Diagnostics sheet
 
@@ -744,9 +746,9 @@ values; widgets read the active one, never a literal colour.
 | `meter_hot` | = `warn` | = `warn` | meter −6 to −1 dBFS, limiter reduction |
 | `path[0..4]` | `#7fb2d6 #c49bd8 #9cc48a #e39aa6` | `#3f7fae #8d5bb0 #5f8f4a #b5566a` | path identity |
 
-- Path colours are *Blue*, *Violet*, *Green*, *Rose*.  Today they are Teal,
-  Violet, Amber, Pink (`ui/theme.rs`, names in `path_stage.rs`).  The saved
-  index stays.  Amber stops being a path colour because amber means warning.
+- Path colours are *Blue*, *Violet*, *Green*, *Rose*.  The old UI used Teal,
+  Violet, Amber and Pink.  The saved index stays.  Amber stops being a path
+  colour because amber means warning.
 - `theme/tests.rs` checks, in both themes:
   - text tokens (`text`, `text2`, `text3`, `accent_text`, `warn`,
     `error_text`, `ok_text`) against `bg`, `bar`, `strip`, `sheet` and `slot`
@@ -942,8 +944,8 @@ Dependencies still point `ui` → `app` → `audio`.
 src/app/
   screen.rs        Screen { Console, Tuner, Setup }, Sheet, Drawer, selection
   issues.rs        Anchor replaces the Live card (§6.4)
-  layouts.rs       today's cards.rs
-  sessions.rs      today's presets.rs, plus rename, edited, load confirm
+  layouts.rs       path layouts
+  sessions.rs      saved sessions, rename, edited, load confirm
   budget.rs        heard_estimate (§3.5)
 src/ui/
   shell.rs         title bar, status bar, banner, sheet and drawer hosts
@@ -969,12 +971,12 @@ src/ui/
 
 ## 11. Screenshots and tests
 
-The screenshot flags and test moves below are history; the section records
-where they landed.
+The test moves below are history; the screenshot flags are live.
 
 - `RIGWERK_PAGE` takes `console`, `tuner`, `setup`.  `RIGWERK_SHEET`
-  (`eq`, `gate`, `effect`, `path`, `output`, `scope`, `diagnostics`) and
-  `RIGWERK_DRAWER` (`browser`, `issues`) replace `RIGWERK_MIXER_STAGE`.
+  (`eq`, `gate`, `nam`, `cab`, `effect`, `path`, `output`, `match-paths`,
+  `scope`, `diagnostics`) and `RIGWERK_DRAWER` (`browser`, `issues`) replace
+  `RIGWERK_MIXER_STAGE`.
   `RIGWERK_THEME` (`dark`, `light`) overrides the preference.
   `RIGWERK_SCREENSHOT_SIZE=<w>x<h>` *(new)* replaces the fixed 1440 × 1080
   (`app/screenshot.rs`).

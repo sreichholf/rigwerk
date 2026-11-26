@@ -139,6 +139,37 @@ fn kicker(text: &str, colours: &Palette) -> RichText {
         .color(colours.text3)
 }
 
+/// The diagnostics ribbon: one label and tab per row, in order.
+const TABS: [(&str, crate::app::screen::DiagnosticsTab); 5] = [
+    ("Log", crate::app::screen::DiagnosticsTab::Log),
+    (
+        "Performance",
+        crate::app::screen::DiagnosticsTab::Performance,
+    ),
+    ("Latency", crate::app::screen::DiagnosticsTab::Latency),
+    ("Scan", crate::app::screen::DiagnosticsTab::Scan),
+    ("Status", crate::app::screen::DiagnosticsTab::Status),
+];
+
+/// The ribbon position of `tab`.  Exhaustive, so a new variant cannot be
+/// drawn without a row in [`TABS`].
+fn tab_index(tab: crate::app::screen::DiagnosticsTab) -> usize {
+    use crate::app::screen::DiagnosticsTab;
+    match tab {
+        DiagnosticsTab::Log => 0,
+        DiagnosticsTab::Performance => 1,
+        DiagnosticsTab::Latency => 2,
+        DiagnosticsTab::Scan => 3,
+        DiagnosticsTab::Status => 4,
+    }
+}
+
+// Inserting or removing a variant before `Status` moves its discriminant, so
+// the row count and the enum disagree here.  A variant added after `Status`
+// keeps the count: `tab_index`'s exhaustive match still demands an arm for
+// it, but the row in `TABS` is then a manual step.
+const _: () = assert!(TABS.len() == crate::app::screen::DiagnosticsTab::Status as usize + 1);
+
 /// A group on the sheet: strip fill, a line, 4 pt corners.
 fn group(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui)) {
     let colours = palette(ui.ctx());
@@ -308,22 +339,10 @@ impl RigWerkApp {
     }
 
     fn diagnostics_tabs(&mut self, ui: &mut egui::Ui) {
-        use crate::app::screen::DiagnosticsTab;
         // One list, so a tab cannot be labelled by one entry and drawn from
         // another.
-        const TABS: [(&str, DiagnosticsTab); 5] = [
-            ("Log", DiagnosticsTab::Log),
-            ("Performance", DiagnosticsTab::Performance),
-            ("Latency", DiagnosticsTab::Latency),
-            ("Scan", DiagnosticsTab::Scan),
-            ("Status", DiagnosticsTab::Status),
-        ];
         let labels = TABS.map(|(label, _)| label);
-        let current = self.chrome.diagnostics_tab;
-        let mut index = TABS
-            .iter()
-            .position(|&(_, tab)| tab == current)
-            .unwrap_or(0);
+        let mut index = tab_index(self.chrome.diagnostics_tab);
         if segmented(ui, &mut index, &labels).changed() {
             self.chrome.diagnostics_tab = TABS[index].1;
         }

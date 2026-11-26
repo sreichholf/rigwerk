@@ -163,6 +163,24 @@ fn a_chunked_host_block_publishes_the_whole_block() {
     assert_eq!(shared.output_block.load(Ordering::Relaxed), 128);
 }
 
+/// The first host block only seeds the mixer: a start-up buffer is often
+/// several times the steady step, and sizing the bridge buffer from it would
+/// keep latency high.  The second block is published.
+#[test]
+fn the_first_host_block_publishes_nothing() {
+    let shared = Shared::new(48_000);
+    let mut mixer = OutputMixer::new(48_000, 2);
+
+    mixer.note_host_block(&shared, 16_000);
+    assert_eq!(
+        shared.output_block.load(Ordering::Relaxed),
+        0,
+        "the start-up block sized the bridge buffer"
+    );
+    mixer.note_host_block(&shared, 128);
+    assert_eq!(shared.output_block.load(Ordering::Relaxed), 128);
+}
+
 fn store_gain(shared: &Shared, gain: f32) {
     shared.output_gain.store(gain.to_bits(), Ordering::Relaxed);
 }

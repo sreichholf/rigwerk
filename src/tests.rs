@@ -14,7 +14,8 @@
 //! here covers the binary's own `--clap-scan` arguments.
 //!
 //! A third check pins the allocation guard at the entry point of each audio
-//! callback a normal test cannot enter on every platform.
+//! callback a normal test cannot enter on every platform, and the panic guard
+//! on the callbacks that would otherwise unwind into the host.
 //!
 //! A fourth check reads the same walk for the light theme: the surfaces that
 //! once drew the dark tokens (`ui/calibration.rs`, the shell windows in
@@ -22,7 +23,7 @@
 //! tuner's note, which named a raw `FontId::new`, name none of them and
 //! invent no colour literal.
 //!
-//! A fourth check pins the UI-to-app rule inside `ui`: a production file
+//! A fifth check pins the UI-to-app rule inside `ui`: a production file
 //! there reaches the engine only through a `RigWerkApp` method, never
 //! `app.engine` or `self.engine`.
 
@@ -574,11 +575,34 @@ fn clap_scan_arguments_are_parsed_or_refused() {
     );
 }
 
+/// A screenshot run's recorded ending is its process status; the exit-code
+/// table itself is pinned by `app::screenshot`'s `every_ending_has_its_own_exit_code`.
+#[test]
+fn a_recorded_screenshot_ending_is_the_process_status() {
+    use crate::app::screenshot::{EXIT_RUN_TIMED_OUT, NO_ENDING};
+
+    // Saved, viewport mismatch, save failed, capture timed out.  A launch
+    // result never overrides a recorded ending, either way.
+    for ending in [0, 1, 3, 5] {
+        assert_eq!(crate::screenshot_exit_status(ending, true), Some(ending));
+        assert_eq!(crate::screenshot_exit_status(ending, false), Some(ending));
+    }
+    // Nothing recorded: a clean close never saved, while a launch error
+    // keeps eframe's own report and failure.
+    assert_eq!(
+        crate::screenshot_exit_status(NO_ENDING, true),
+        Some(EXIT_RUN_TIMED_OUT)
+    );
+    assert_eq!(crate::screenshot_exit_status(NO_ENDING, false), None);
+}
+
 /// The files whose audio callback must hold `RtGuard`: ASIO's dispatch (the
-/// silence and panic paths included), the duplex filter, the native capture,
-/// the virtual source, the sink monitor, and both mixer renders.
+/// silence and panic paths included), the cpal capture, the duplex filter, the
+/// native capture, the virtual source, the sink monitor, and both mixer
+/// renders.
 const GUARDED_CALLBACKS: &[&str] = &[
     "src/audio/win/asio/callback.rs",
+    "src/audio/input.rs",
     "src/audio/linux/duplex/filter.rs",
     "src/audio/linux/native.rs",
     "src/audio/linux/duplex/virtual_source.rs",
@@ -596,6 +620,10 @@ const GUARDED_CALLBACKS: &[&str] = &[
 /// be a fragile indirection for the same evidence.
 #[test]
 fn every_audio_callback_holds_the_allocation_guard() {
+    assert!(
+        !GUARDED_CALLBACKS.is_empty(),
+        "the guarded-callback list is empty"
+    );
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     sources(&root.join("src"), root, &mut files);
@@ -618,6 +646,60 @@ fn every_audio_callback_holds_the_allocation_guard() {
     );
 }
 
+/// The files whose backend callback must keep a panic inside RigWerk, and the
+/// call each one uses: the shared `contain` guard, the `render_or_silence`
+/// wrapper that contains the clock and extra-output cpal renders, or ASIO's
+/// own catch.  A file-level tripwire, as [`GUARDED_CALLBACKS`] is for the
+/// allocation guard.
+const CONTAINED_CALLBACKS: &[(&str, &str)] = &[
+    ("src/audio/input.rs", "contain("),
+    // The clock output's callback goes through `render_or_silence`, which is
+    // defined in the same file: matching `contain(` here would also hit the
+    // wrapper's own body.
+    ("src/audio/output.rs", "render_or_silence("),
+    ("src/audio/extra_output/stream.rs", "render_or_silence("),
+    ("src/audio/linux/native.rs", "contain("),
+    ("src/audio/linux/sink_monitor.rs", "contain("),
+    ("src/audio/linux/duplex/filter.rs", "contain("),
+    ("src/audio/linux/duplex/virtual_source.rs", "contain("),
+    ("src/audio/win/wasapi/real.rs", "contain("),
+    ("src/audio/win/wasapi/exclusive.rs", "contain("),
+    ("src/audio/win/asio/callback.rs", "catch_unwind"),
+];
+
+/// Every backend callback has to keep its panic inside RigWerk: an unwind
+/// across the host's C callback is undefined behaviour or an abort (see
+/// `audio/panic_guard`).  The callbacks themselves need a device or a live
+/// graph, so this checks the routing in the source, as the allocation guard
+/// check above does.
+#[test]
+fn every_audio_callback_contains_its_body() {
+    assert!(
+        !CONTAINED_CALLBACKS.is_empty(),
+        "the contained-callback list is empty"
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    sources(&root.join("src"), root, &mut files);
+    let mut missing = Vec::new();
+    for &(callback, marker) in CONTAINED_CALLBACKS {
+        let Some((_, path)) = files.iter().find(|(file, _)| file.as_str() == callback) else {
+            missing.push(format!("{callback}: no such source file"));
+            continue;
+        };
+        let source = std::fs::read_to_string(path).expect("read source");
+        // A prose line may name the guard without calling it.
+        if boundary_lines(&source, &[marker]).is_empty() {
+            missing.push(format!("{callback}: no `{marker}`"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "an audio callback lets a panic reach the host (AGENTS.md, Audio thread):\n{}",
+        missing.join("\n")
+    );
+}
+
 /// The files the light theme used to miss, with the names each one must not
 /// use besides [`DARK_ONLY`].  They drew the dark tokens (`CARD`, `TEAL`, …)
 /// straight from `theme.rs`, so they stayed dark under the light palette
@@ -631,15 +713,17 @@ const PALETTE_ONLY: &[(&str, &[&str])] = &[
     ("src/ui/widgets/mod.rs", &[]),
 ];
 
-/// The retired dark constants, and the constructors that invent a colour no
-/// theme has a token for.  Both were the same bug: a control drawn with a
-/// fixed value instead of the palette.
+/// The retired per-theme constants (a file that named one theme bypassed the
+/// palette), and the constructors that invent a colour no theme has a token
+/// for.  Both were the same bug: a control drawn with a fixed value instead
+/// of the palette.
 ///
 /// `from_black_alpha` is not on the list: the measure window's shadow is
 /// black in both themes, and a tint that follows the palette goes through
 /// [`crate::ui::theme::with_alpha`].
 const DARK_ONLY: &[&str] = &[
     "DARK",
+    "LIGHT",
     "CARD",
     "BORDER_SOFT",
     "BORDER",
@@ -650,10 +734,13 @@ const DARK_ONLY: &[&str] = &[
     "AMBER",
     "GREEN",
     "from_rgb",
+    "from_rgb_additive",
     "from_rgba_unmultiplied",
+    "from_rgba_unmultiplied_const",
     "from_rgba_premultiplied",
     "from_gray",
     "from_white_alpha",
+    "from_hex",
 ];
 
 /// The code part of `line`, without its comments.  `depth` carries an open
@@ -757,12 +844,56 @@ fn a_dark_token_scan_is_case_sensitive_and_skips_comments() {
         [(3, "DARK"), (6, "from_rgb")]
     );
 
+    // The other theme's tokens and a raw hex colour are as retired as the
+    // dark ones.
+    let light = "let a = LIGHT.bg;\nlet b = Color32::from_hex(\"#ffffff\");\n";
+    assert_eq!(
+        dark_only_lines(light, DARK_ONLY),
+        [(1, "LIGHT"), (2, "from_hex")]
+    );
+
     // A file's own names are checked the same way; the tuner's is the note.
     let note = "    let big = egui::FontId::new(104.0, family);\n";
     assert_eq!(
         dark_only_lines(note, &["FontId::new"]),
         [(1, "FontId::new")]
     );
+}
+
+#[test]
+fn every_dark_only_token_matches_a_sample() {
+    // The palette scan would pass silently if a token stopped matching
+    // anything, so every token must be found in a sample that uses it.  The
+    // constructors are the ones this egui version has.
+    let sample = concat!(
+        "let a = DARK.bg;\n",
+        "let b = LIGHT.bg;\n",
+        "let c = CARD.fill;\n",
+        "let d = BORDER_SOFT;\n",
+        "let e = BORDER;\n",
+        "let f = TEXT;\n",
+        "let g = MUTED;\n",
+        "let h = DIM;\n",
+        "let i = TEAL;\n",
+        "let j = AMBER;\n",
+        "let k = GREEN;\n",
+        "let l = egui::Color32::from_rgb(1, 2, 3);\n",
+        "let m = egui::Color32::from_rgb_additive(1, 2, 3);\n",
+        "let n = egui::Color32::from_rgba_unmultiplied(1, 2, 3, 4);\n",
+        "let o = egui::Color32::from_rgba_unmultiplied_const(1, 2, 3, 4);\n",
+        "let p = egui::Color32::from_rgba_premultiplied(1, 2, 3, 4);\n",
+        "let q = egui::Color32::from_gray(1);\n",
+        "let r = egui::Color32::from_white_alpha(1);\n",
+        "let s = egui::Color32::from_hex(\"#ffffff\");\n",
+    );
+    for &token in DARK_ONLY {
+        assert!(
+            dark_only_lines(sample, DARK_ONLY)
+                .iter()
+                .any(|&(_, used)| used == token),
+            "DARK_ONLY token {token:?} matches no sample"
+        );
+    }
 }
 
 /// The closed per-format enum the host contract replaced must not come back:
@@ -791,6 +922,8 @@ const CALLBACK_FILES: &[&str] = &[
     "src/audio/linux/sink_monitor.rs",
     "src/audio/extra_output/stream.rs",
     "src/audio/win/asio/callback.rs",
+    "src/audio/win/wasapi/real.rs",
+    "src/audio/win/wasapi/exclusive.rs",
     "src/audio/clap/host.rs",
 ];
 
@@ -804,9 +937,20 @@ const ALLOCATING: &[&str] = &[
     "String::from",
     "String::new",
     "String::with_capacity",
+    "String::from_utf8",
+    "String::from_utf8_lossy",
+    "String::from_utf16",
     "Vec::new",
+    "Vec::from",
+    "Vec::with_capacity",
     "vec!",
+    "to_vec",
+    "into_owned",
+    "collect(",
+    "collect::<",
     "Box::new",
+    "Rc::new",
+    "Arc::new",
     "cstring(",
 ];
 
@@ -961,6 +1105,42 @@ fn audio_callbacks_take_no_blocking_lock() {
 }
 
 #[test]
+fn every_allocation_token_matches_a_sample() {
+    // The CLAP log scan would pass silently if a token stopped matching
+    // anything, so every token must be found in a sample that uses it.
+    let sample = concat!(
+        "let a = x.to_owned();\n",
+        "let b = x.to_string();\n",
+        "let c = x.to_string_lossy();\n",
+        "let d = format!(\"{x}\");\n",
+        "let e = String::from(\"x\");\n",
+        "let f = String::new();\n",
+        "let g = String::with_capacity(8);\n",
+        "let h = String::from_utf8(v)?;\n",
+        "let i = String::from_utf8_lossy(&v);\n",
+        "let j = String::from_utf16(&v)?;\n",
+        "let k = Vec::new();\n",
+        "let l = Vec::from(v);\n",
+        "let m = Vec::with_capacity(8);\n",
+        "let n = vec![0u8; 8];\n",
+        "let o = v.to_vec();\n",
+        "let p = cow.into_owned();\n",
+        "let q = v.iter().collect();\n",
+        "let q = v.iter().collect::<Vec<_>>();\n",
+        "let r = Box::new(0);\n",
+        "let s = Rc::new(0);\n",
+        "let t = Arc::new(0);\n",
+        "let u = cstring(\"x\");\n",
+    );
+    for token in ALLOCATING {
+        assert!(
+            !token_lines(sample, token).is_empty(),
+            "ALLOCATING token {token:?} matches no sample"
+        );
+    }
+}
+
+#[test]
 fn a_try_lock_is_not_a_blocking_lock() {
     let source = "// .lock() in prose\nlet a = lock.try_lock();\nlet b = m\n    .lock();\n";
     assert_eq!(method_call_lines(source, "lock"), [4]);
@@ -1054,4 +1234,118 @@ fn the_engine_scan_matches_the_field_not_the_wrapper_names() {
         "    .plugin_views(0);\n",
     );
     assert_eq!(engine_references(source), [3, 6]);
+}
+
+/// The `uses:` values in a workflow, with the line each starts on.  A line
+/// whose first non-space character is `#` is prose; a trailing comment is not
+/// part of the value.
+fn action_refs(source: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed
+            .strip_prefix("- uses:")
+            .or_else(|| trimmed.strip_prefix("uses:"))
+        else {
+            continue;
+        };
+        let value = rest.split('#').next().unwrap_or("").trim();
+        if !value.is_empty() {
+            out.push((index + 1, value.to_owned()));
+        }
+    }
+    out
+}
+
+/// Whether `reference` pins a 40-hex commit SHA after its last `@`.  A `./`
+/// action is a path inside this repository, not a ref, so it is pinned by
+/// construction.
+fn action_is_pinned(reference: &str) -> bool {
+    if reference.starts_with("./") {
+        return true;
+    }
+    reference.rsplit_once('@').is_some_and(|(_, sha)| {
+        sha.len() == 40 && sha.chars().all(|character| character.is_ascii_hexdigit())
+    })
+}
+
+#[test]
+fn an_action_ref_is_read_from_its_line() {
+    let source = concat!(
+        "steps:\n",
+        "  - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5\n",
+        "  # - uses: actions/checkout@v5\n",
+        "    uses: actions/cache@v5\n",
+    );
+    let refs = action_refs(source);
+    assert_eq!(refs.len(), 2, "{refs:?}");
+    assert_eq!(refs[0].0, 2);
+    assert_eq!(
+        refs[0].1,
+        "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+    );
+    assert_eq!(refs[1], (4, "actions/cache@v5".to_owned()));
+    assert!(action_is_pinned(&refs[0].1));
+    assert!(!action_is_pinned(&refs[1].1), "a tag is not a commit");
+    assert!(!action_is_pinned("actions/checkout"));
+    assert!(action_is_pinned("./.github/actions/linux-deps"));
+}
+
+/// Every `.yml` or `.yaml` file under `dir`, recursively.
+fn yaml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .expect("read the workflow and action directories")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            yaml_files(&path, out);
+            continue;
+        }
+        let yaml = path
+            .extension()
+            .is_some_and(|extension| extension == "yml" || extension == "yaml");
+        if yaml {
+            out.push(path);
+        }
+    }
+}
+
+/// Every action a workflow or a composite action uses is pinned by commit
+/// SHA, as the header of both workflows says.  The tag or ref may follow in
+/// the trailing comment; an unpinned tag is what this fails on.
+#[test]
+fn every_workflow_action_is_pinned_to_a_commit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut paths = Vec::new();
+    yaml_files(&root.join(".github/workflows"), &mut paths);
+    // A composite action's own `uses:` lines are refs too.
+    yaml_files(&root.join(".github/actions"), &mut paths);
+    paths.sort();
+    assert!(!paths.is_empty(), "found no workflows or actions");
+
+    let mut pinned = 0;
+    let mut unpinned = Vec::new();
+    for path in paths {
+        let name = path
+            .strip_prefix(root)
+            .expect("under the crate")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = std::fs::read_to_string(&path).expect("read workflow or action");
+        for (line, reference) in action_refs(&source) {
+            if action_is_pinned(&reference) {
+                pinned += 1;
+            } else {
+                unpinned.push(format!("{name}:{line}: {reference} is not a 40-hex SHA"));
+            }
+        }
+    }
+    assert!(pinned > 0, "found no pinned actions");
+    assert!(
+        unpinned.is_empty(),
+        "every action must pin a commit SHA (workflows and composite actions):\n{}",
+        unpinned.join("\n")
+    );
 }

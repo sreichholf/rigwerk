@@ -38,9 +38,9 @@ if [[ "$(git -C "$checkout" rev-parse HEAD)" != "$NAM_RS_COMMIT" ]]; then
 fi
 git -C "$checkout" checkout --quiet --force "$NAM_RS_COMMIT"
 # The swap left files behind, so a re-run would diff last run's copy: the
-# forced checkout restores the tracked files it changed and `clean` removes
-# the extra files it added.
-git -C "$checkout" clean -fdq -- src
+# forced checkout restores the tracked files it changed and `clean -x` removes
+# the extra files it added, ignored ones included.
+git -C "$checkout" clean -fdxq -- src
 
 # The provenance report, written before the swap.  Only src/ takes part, so
 # the Cargo files and the fixtures stay out.  The two trees are staged under
@@ -63,7 +63,14 @@ if (( diff_status > 1 )); then
   echo "error: diff -ru against upstream src failed ($diff_status)" >&2
   exit 1
 fi
-changed=$(grep -c -E '^(diff |Only in )' "$report" || true)
+grep_status=0
+changed=$(grep -c -E '^(diff |Only in )' "$report") || grep_status=$?
+# 1 is "no matches", which is a valid empty report; anything above it is a
+# grep that could not read the report, not an empty one.
+if (( grep_status > 1 )); then
+  echo "error: could not read $report ($grep_status)" >&2
+  exit 1
+fi
 echo "wrote $report: $changed changed file(s) against upstream src"
 
 rm -rf "$checkout/src"

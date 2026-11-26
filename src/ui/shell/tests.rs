@@ -2,7 +2,9 @@ use eframe::egui;
 use egui::{pos2, vec2, Event, Modifiers, Pos2};
 
 use crate::app::blank_app;
+use crate::app::issues::StopReason;
 use crate::app::screen::Sheet;
+use crate::audio::CallbackFailure;
 use crate::ui::widgets::{accesskit_frame, node_named, run_frame, test_input};
 
 #[test]
@@ -27,6 +29,39 @@ fn the_status_bar_names_the_issue_count_and_the_log() {
     let tree = accesskit_frame(|ui| app.status_bar(ui));
     let _ = node_named(&tree, "No issues");
     let _ = node_named(&tree, "Log ▴");
+}
+
+#[test]
+fn a_lost_device_alert_offers_a_rescan() {
+    let mut app = blank_app();
+    app.alert_stopped_bridge(
+        "Scarlett 2i2 was unplugged, so the bridge was stopped.".to_owned(),
+        StopReason::DeviceLost,
+    );
+    let tree = accesskit_frame(|ui| app.error_banner(ui));
+    let _ = node_named(&tree, "Rescan");
+    let _ = node_named(&tree, "Open Setup");
+    let _ = node_named(&tree, "Dismiss");
+}
+
+#[test]
+fn a_callback_alert_offers_diagnostics_not_a_rescan() {
+    let mut app = blank_app();
+    app.alert_stopped_bridge(
+        "A real-time audio callback panicked. The bridge was stopped.".to_owned(),
+        StopReason::Callback(CallbackFailure::Panic),
+    );
+    let tree = accesskit_frame(|ui| app.error_banner(ui));
+    let _ = node_named(&tree, "Open diagnostics");
+    let _ = node_named(&tree, "Dismiss");
+    for label in ["Rescan", "Open Setup"] {
+        assert!(
+            tree.nodes
+                .iter()
+                .all(|(_, node)| node.label() != Some(label)),
+            "a failed callback is not a device problem, so no {label:?}"
+        );
+    }
 }
 
 #[test]

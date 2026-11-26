@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 use super::silence::{SILENCE_RAISE_ALONE, SILENCE_RAISE_WITH_DROPOUTS};
 use super::{
     Anchor, DropoutWatch, DspAlarm, HeldFlag, IssueAction, IssueFilter, IssueKey, IssueSeverity,
-    DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER, DROPOUT_BURST_WINDOW, DROPOUT_QUIET,
+    StopReason, DRIFT_CLEAR_AFTER, DRIFT_RAISE_AFTER, DROPOUT_BURST_WINDOW, DROPOUT_QUIET,
 };
 use crate::app::driver_check::{DriverActual, DriverCheck, DriverTone};
 use crate::app::layouts::PathLayout;
 use crate::app::settings::{bridge_buffer_to_pref, ExtraOutputPref};
 use crate::app::{blank_app, Page, RigWerkApp};
-use crate::audio::{BufferMode, ChannelMap, DeviceItem, EngineState, PathMapSettings, MAX_ALIGN};
+use crate::audio::{
+    BufferMode, CallbackFailure, ChannelMap, DeviceItem, EngineState, PathMapSettings, MAX_ALIGN,
+};
 
 /// A real (not demo) clock output the driver check can read.
 fn with_real_output(app: &mut RigWerkApp) {
@@ -465,7 +467,10 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
         warning: true,
         error: false,
     };
-    app.alert_lost_device("Scarlett 2i2 was unplugged, so the bridge was stopped.".to_owned());
+    app.alert_stopped_bridge(
+        "Scarlett 2i2 was unplugged, so the bridge was stopped.".to_owned(),
+        StopReason::DeviceLost,
+    );
     assert_eq!(app.issue_state.dsp, DspAlarm::default(), "the run ended");
     assert!(
         app.live_issues().is_empty(),
@@ -506,9 +511,120 @@ fn a_lost_device_leaves_an_error_row_once_the_alert_is_dismissed() {
 
     app.start_bridge();
     assert!(
-        app.issue_state.device_lost.is_none(),
+        app.issue_state.stopped.is_none(),
         "the next bridge start clears it"
     );
+}
+
+/// A caught callback failure stops the run too, but no device went away: the
+/// row says what actually happened, opens Diagnostics and gives the next
+/// step instead of offering a reconnect.
+#[test]
+fn a_failed_callback_leaves_a_callback_row_not_a_device_row() {
+    let mut app = blank_app();
+    let detail = "A real-time audio callback panicked (most likely inside a plugin). The bridge \
+                  was stopped so the audio engine does not keep a failed callback running.";
+    app.alert_stopped_bridge(
+        detail.to_owned(),
+        StopReason::Callback(CallbackFailure::Panic),
+    );
+    app.device_alert = None;
+
+    let issues = app.live_issues();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(
+        issues[0].title,
+        "The bridge stopped: a real-time audio callback failed"
+    );
+    assert_eq!(issues[0].key, IssueKey::BridgeStopped);
+    assert_eq!(issues[0].action, IssueAction::OpenDiagnostics);
+    assert_eq!(issues[0].action.label(), "Open diagnostics");
+    assert_eq!(
+        issues[0].detail,
+        format!("{detail} Disable the plugin that failed, then start the bridge again.")
+    );
+}
+
+/// A caught callback failure is told apart from a lost device by the typed
+/// reason, not by matching the error text: only the device case asks for a
+/// reconnect.
+#[test]
+fn a_caught_callback_failure_alerts_as_a_callback() {
+    let mut app = blank_app();
+    app.engine.state = EngineState::Running;
+    app.bridge_signature = 7;
+    app.engine
+        .shared
+        .note_callback_failure(CallbackFailure::Panic);
+    app.publish_engine();
+
+    let (reason, detail) = app.issue_state.stopped.as_ref().expect("an alert");
+    assert_eq!(*reason, StopReason::Callback(CallbackFailure::Panic));
+    assert!(detail.contains("panicked"), "{detail}");
+    assert!(!detail.contains("Reconnect"), "{detail}");
+
+    app.device_alert = None;
+    let rows = app.live_issues();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].title,
+        "The bridge stopped: a real-time audio callback failed"
+    );
+    assert_eq!(rows[0].action, IssueAction::OpenDiagnostics);
+    assert!(
+        rows[0]
+            .detail
+            .ends_with("Disable the plugin that failed, then start the bridge again."),
+        "{}",
+        rows[0].detail
+    );
+}
+
+/// A malformed block is not a plugin panic: the row still opens Diagnostics
+/// but never tells the person to disable a plugin.
+#[test]
+fn a_malformed_block_row_does_not_blame_a_plugin() {
+    let mut app = blank_app();
+    app.alert_stopped_bridge(
+        "A real-time audio callback received a malformed block.".to_owned(),
+        StopReason::Callback(CallbackFailure::BadBlock),
+    );
+    app.device_alert = None;
+
+    let rows = app.live_issues();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].action, IssueAction::OpenDiagnostics);
+    assert!(
+        rows[0].detail.ends_with(
+            "Start the bridge again; if it comes back, the device is handing over blocks that do \
+             not line up."
+        ),
+        "{}",
+        rows[0].detail
+    );
+    assert!(!rows[0].detail.contains("plugin"), "{}", rows[0].detail);
+}
+
+/// The other side of the same distinction: a device error keeps the reconnect
+/// advice and the device title, also when a callback is caught while that
+/// device tears down.
+#[test]
+fn a_lost_device_alerts_as_a_device() {
+    let mut app = blank_app();
+    app.engine.state = EngineState::Running;
+    app.bridge_signature = 7;
+    app.engine
+        .shared
+        .set_device_lost("Output device disconnected".to_owned());
+    app.engine
+        .shared
+        .note_callback_failure(CallbackFailure::Panic);
+    app.publish_engine();
+
+    let (reason, detail) = app.issue_state.stopped.as_ref().expect("an alert");
+    assert_eq!(*reason, StopReason::DeviceLost);
+    assert!(detail.contains("Reconnect"), "{detail}");
+    assert!(detail.contains("Output device disconnected"), "{detail}");
 }
 
 /// An app with one warning: an unmuted second path routed nowhere.

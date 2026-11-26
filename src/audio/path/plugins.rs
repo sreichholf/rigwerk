@@ -240,6 +240,13 @@ impl PathControls {
     /// atomics (latency, failures, reload requests), which the runtime
     /// reads too, so a running bridge stores the same total and count with
     /// its next block, once it applied the edit's commands.
+    ///
+    /// Only the UI thread calls it: `edit_chain` and `service_plugins` are the
+    /// two entry points, and that is what makes the read-modify-write in
+    /// [`Self::patch_view`] safe with no publish lock held across it.  Unlike
+    /// `patch_view`, this has no debug assert: most chain tests publish
+    /// without claiming the process-wide main thread, so an assert here would
+    /// fail them rather than catch a production caller.
     fn publish_from(&self, links: &[SlotLink]) {
         let total = links
             .iter()

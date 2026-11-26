@@ -160,6 +160,22 @@ fn ensure_screenshot_console() {
     }
 }
 
+/// The process status a screenshot run exits with, once eframe has returned.
+/// `recorded` is the ending the run wrote, and `launch_ok` says whether eframe
+/// itself returned `Ok`.  `None` keeps eframe's own error and failure: no
+/// ending was recorded and the launch failed.
+fn screenshot_exit_status(recorded: i32, launch_ok: bool) -> Option<i32> {
+    if recorded != app::screenshot::NO_ENDING {
+        // A recorded ending decides the status, saved or failed.
+        Some(recorded)
+    } else if launch_ok {
+        // The window closed on its own without the run saving: timed out.
+        Some(app::screenshot::EXIT_RUN_TIMED_OUT)
+    } else {
+        None
+    }
+}
+
 fn main() -> eframe::Result<()> {
     // `--clap-scan <file> <limit-ms>` is the child half of the isolated plugin
     // scan (`audio::clap::scan_library_isolated`): scan, write the result,
@@ -279,15 +295,9 @@ fn main() -> eframe::Result<()> {
         }),
     );
     if screenshot_mode {
-        // A recorded ending decides the status.  Without one the run never
-        // saved: a window that closed on its own counts as timed out, while a
-        // launch error keeps eframe's own report and failure.
         let end = screenshot_exit.load(Ordering::Acquire);
-        if end != app::screenshot::NO_ENDING {
-            std::process::exit(end);
-        }
-        if result.is_ok() {
-            std::process::exit(app::screenshot::EXIT_RUN_TIMED_OUT);
+        if let Some(status) = screenshot_exit_status(end, result.is_ok()) {
+            std::process::exit(status);
         }
     }
     result

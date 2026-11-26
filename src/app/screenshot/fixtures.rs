@@ -1,10 +1,13 @@
 //! The fixtures a screenshot run assembles: fake routing, effects, NAM
 //! blocks, a cab IR, Match paths rows and the extras a checked screen needs.
 //!
-//! Dev-only.  Every builder reads a `RIGWERK_*` variable and the driver in
-//! [`super`] (`RigWerkApp::handle_screenshot`) is the only caller, so a
-//! normal session never reaches this module and never builds this state.
-//! Nothing here decides when a run ends or what it exits with.
+//! Dev-only.  Most builders read a `RIGWERK_*` variable;
+//! `screenshot_match_paths` is called from a driver branch and
+//! `apply_screenshot_four_paths` from `apply_screenshot_routing`, instead.
+//! The driver in [`super`]
+//! (`RigWerkApp::handle_screenshot`) is the only caller, so a normal session
+//! never reaches this module and never builds this state.  Nothing here
+//! decides when a run ends or what it exits with.
 
 use crate::app::RigWerkApp;
 

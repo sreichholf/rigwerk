@@ -27,13 +27,11 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{
     asio_panel_chip, chip, format_db, heading, horizontal_meter, level_row, row_info, segmented,
-    styled_slider, SliderStyle,
+    styled_slider, SliderStyle, ROW_H, VALUE_W,
 };
 
 use crate::ui::widgets::OutlineButton;
 
-const ROW_H: f32 = 28.0;
-const VALUE_W: f32 = 80.0;
 const CELL: f32 = 22.0;
 const CHANNEL_W: f32 = 34.0;
 /// Below this the two columns stack.

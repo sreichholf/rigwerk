@@ -381,7 +381,10 @@ impl OutputMixer {
         };
         for slot in self.live.iter() {
             let path = &mut self.paths[slot];
-            // Past the prepared size: release grows here, debug stops.
+            // Past the prepared size: release grows here, debug stops.  A
+            // backend that does not split a larger host block therefore ends
+            // a debug run on this assert; the release build grows and plays
+            // on.  Split with `render_chunk` when a driver can deliver one.
             debug_assert!(
                 frames <= path.block.len(),
                 "a block of {frames} frames does not fit the {} prepared",

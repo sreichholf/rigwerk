@@ -178,9 +178,10 @@ fn session_missing_fields_still_loads() {
 }
 
 #[test]
-fn a_stored_session_choice_follows_the_name_through_deduplication() {
+fn a_stored_index_choice_follows_that_session_name_through_deduplication() {
     // A hand-edited or older file can hold two sessions with the same name.
-    // The stored index points at the second copy, which dedupe drops.
+    // With no stored name, the index names the second copy, which dedupe
+    // drops, so the fallback finds the surviving copy by that name.
     let preferences = Preferences {
         sessions: vec![session("Clean"), session("Lead"), session("clean")],
         selected_session: Some(2),
@@ -960,7 +961,7 @@ fn only_entries_the_load_keeps_are_reported() {
         vec![crate::audio::SEND_OFF_DB, -3.0, -4.0, -5.0]
     );
     assert_eq!(preferences.clock_output.path_map[3].level_db, -4.0);
-    // One kept extra output (the skipped one and the duplicate are gone).
+    // Two kept extra outputs (the skipped one and the duplicate are gone).
     assert_eq!(preferences.extra_outputs.len(), 2);
     let notice = loaded
         .notices
@@ -1005,6 +1006,11 @@ fn corrupt_plugin_entry_is_skipped_and_missing_name_filled_in() {
         loaded.notices[0]
     );
     assert!(loaded.backup.is_some());
+}
+
+#[test]
+fn the_backup_key_is_the_stored_one() {
+    assert_eq!(PREFERENCES_BACKUP_KEY, "rigwerk-preferences-backup");
 }
 
 #[test]

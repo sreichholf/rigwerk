@@ -162,3 +162,26 @@ fn a_capture_that_never_arrives_ends_the_run_at_the_deadline() {
     assert!(job.ended, "the deadline ended the run");
     assert_eq!(job.requested_at, None, "the ending cleared the request");
 }
+
+#[test]
+fn a_capture_that_lands_after_the_ending_writes_nothing() {
+    let stamp = std::process::id();
+    let saved = std::env::temp_dir().join(format!("rigwerk-saved-{stamp}.png"));
+    let late = std::env::temp_dir().join(format!("rigwerk-late-{stamp}.png"));
+    let _ = std::fs::remove_file(&saved);
+    let _ = std::fs::remove_file(&late);
+    let image = egui::ColorImage::filled([1, 1], egui::Color32::BLACK);
+
+    // The control: before any ending, the capture is written and reported.
+    let exit = AtomicI32::new(NO_ENDING);
+    assert_eq!(save_capture(&exit, &saved, &image), Some(End::Saved));
+    assert!(saved.exists(), "the capture was not written");
+
+    // A capture that lands after the run ended is dropped, with no file.
+    exit.store(End::Timeout.exit_code(), Ordering::Release);
+    assert_eq!(save_capture(&exit, &late, &image), None);
+    assert!(!late.exists(), "a late capture wrote a file");
+
+    let _ = std::fs::remove_file(&saved);
+    let _ = std::fs::remove_file(&late);
+}

@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use super::{diagnostics_report_path, write_report};
+use super::{default_report_path, diagnostics_report_path, write_all_or_remove, write_report};
 
 #[test]
 fn the_report_prefers_home_downloads_then_userprofile_then_temp() {
@@ -34,6 +34,57 @@ fn the_report_prefers_home_downloads_then_userprofile_then_temp() {
         diagnostics_report_path(None, None, temp, 42, true),
         temp.join("rigwerk-diagnostics-42.txt")
     );
+}
+
+/// The platform's own order: Windows keeps `USERPROFILE` first because Git
+/// Bash and MSYS set `HOME` to a POSIX path that `Path` reads as
+/// drive-relative; Unix takes `HOME` first.
+#[test]
+fn the_default_report_path_follows_the_platform() {
+    let path = default_report_path(
+        Some(OsStr::new("/home/ada")),
+        Some(OsStr::new("C:/Users/Ada")),
+        Path::new("/tmp"),
+        7,
+    );
+    #[cfg(windows)]
+    let first = Path::new("C:/Users/Ada");
+    #[cfg(not(windows))]
+    let first = Path::new("/home/ada");
+    assert_eq!(
+        path,
+        first.join("Downloads").join("rigwerk-diagnostics-7.txt")
+    );
+}
+
+/// A writer that fails every write, standing in for a full disk.
+struct Failing;
+
+impl std::io::Write for Failing {
+    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "full disk",
+        ))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A failed write must not leave half a report under the name the person was
+/// told about.
+#[test]
+fn a_failed_write_removes_the_partial_report() {
+    let dir = Scratch::new();
+    let path = dir.0.join("rigwerk-diagnostics-1.txt");
+    std::fs::write(&path, "seed").expect("seed");
+
+    let result = write_all_or_remove(&path, Failing, "half a report");
+
+    assert!(result.is_err());
+    assert!(!path.exists(), "the partial report was left behind");
 }
 
 struct Scratch(PathBuf);
@@ -69,9 +120,10 @@ fn the_report_creates_its_folder_and_writes_the_report() {
     );
     assert!(!dir.0.join("Downloads").exists());
 
-    // The exported bytes are the report the sheet shows, not a literal.
-    let text = crate::app::blank_app().diagnostics_text();
-    let written = write_report(&path, &text, false).expect("write");
+    // The exported bytes are the text handed to the writer, not a literal the
+    // writer invents; the report's own wording is the sheet's (`ui`) test.
+    let text = "RigWerk diagnostics\nEngine: waiting\n";
+    let written = write_report(&path, text, false).expect("write");
     assert_eq!(written, path);
     assert_eq!(std::fs::read_to_string(&written).expect("read"), text);
 }

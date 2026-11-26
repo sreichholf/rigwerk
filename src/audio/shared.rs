@@ -34,7 +34,7 @@ const PATH_DELAY_UNKNOWN: u64 = u64::MAX;
 /// [`Shared`]: the callback may not format a message, so [`Shared::snapshot`]
 /// words it.  The first cause wins, so a later symptom does not relabel it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CallbackFailure {
+pub enum CallbackFailure {
     /// A callback's sample body panicked.
     Panic,
     /// A block could not be read as whole interleaved frames: a partial
@@ -68,13 +68,6 @@ impl CallbackFailure {
             }
         }
     }
-}
-
-/// Whether `error` is one of the sentences a callback failure publishes
-/// through [`Shared::snapshot`].  `app` uses it to tell a callback failure
-/// from a lost device by the error text alone, so the wording stays here.
-pub(crate) fn is_callback_failure_message(error: &str) -> bool {
-    error == CallbackFailure::Panic.message() || error == CallbackFailure::BadBlock.message()
 }
 
 use super::cab::CabPark;
@@ -1485,14 +1478,21 @@ impl Shared {
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {
-        let failure = self.callback_failure();
+        // The explicit device flag takes precedence: a callback caught while
+        // that device tears down must not relabel it.
+        let device_lost_flag = self.device_lost.load(Ordering::Relaxed);
+        let callback_failure = if device_lost_flag {
+            None
+        } else {
+            self.callback_failure()
+        };
         let error = self
             .error
             .lock()
             .ok()
             .and_then(|error| error.clone())
-            .or_else(|| failure.map(|failure| failure.message().to_owned()));
-        let device_lost = self.device_lost.load(Ordering::Relaxed) || failure.is_some();
+            .or_else(|| callback_failure.map(|failure| failure.message().to_owned()));
+        let device_lost = device_lost_flag || callback_failure.is_some();
         // A callback mid-block when the bridge failed may store its beat
         // after `set_error`, and a stopping bridge keeps mixing until its
         // teardown ends; a bridge that is not running shows no beat.
@@ -1578,6 +1578,7 @@ impl Shared {
             drift_ppm: f32::from_bits(self.drift_ppm.load(Ordering::Relaxed)),
             error,
             device_lost,
+            callback_failure,
             status: self
                 .status
                 .lock()

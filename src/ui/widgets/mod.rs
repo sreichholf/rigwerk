@@ -49,10 +49,10 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
 use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
 
-/// One level slider's height and readout width: the two sheet rows share
-/// them so a path and an output read the same.
-const LEVEL_ROW_H: f32 = 28.0;
-const LEVEL_VALUE_W: f32 = 80.0;
+/// One setting row's height and its readout width: the path and output
+/// sheets and the level rows share them so they read the same.
+pub(crate) const ROW_H: f32 = 28.0;
+pub(crate) const VALUE_W: f32 = 80.0;
 
 // How many layouts [`text_width`] ran on this test thread, so a test can
 // check that [`fit_text`] searches rather than measuring every prefix.
@@ -200,7 +200,7 @@ pub(crate) fn level_row(
     debug_assert!(min_db < max_db, "level range runs {min_db} to {max_db}");
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let slider_w = (ui.available_width() - LEVEL_VALUE_W - 8.0).max(80.0);
+        let slider_w = (ui.available_width() - VALUE_W - 8.0).max(80.0);
         styled_slider(
             ui,
             level,
@@ -213,10 +213,10 @@ pub(crate) fn level_row(
         )
         .on_hover_text(hint);
         ui.allocate_ui_with_layout(
-            Vec2::new(LEVEL_VALUE_W, LEVEL_ROW_H),
+            Vec2::new(VALUE_W, ROW_H),
             Layout::right_to_left(Align::Center),
             |ui| {
-                ui.set_width(LEVEL_VALUE_W);
+                ui.set_width(VALUE_W);
                 ui.label(
                     RichText::new(format_db(*level, 1))
                         .font(font(Face::Mono, TypeRole::Secondary))

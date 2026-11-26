@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::app::devices::is_wrapper_driver;
+use crate::app::issues::StopReason;
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 use crate::audio::{
@@ -160,7 +161,7 @@ impl RigWerkApp {
         self.sync_plugin_editor();
         self.driver_checked = false;
         self.issue_state.new_run();
-        self.issue_state.device_lost = None;
+        self.issue_state.stopped = None;
         self.apply_gains();
         self.apply_metronome();
         if self.is_preview() {
@@ -259,12 +260,13 @@ impl RigWerkApp {
         self.bridge_restart_pending = true;
     }
 
-    /// The bridge stopped because a device went away: the alert window now,
-    /// and the Live Issues row once that is dismissed.
-    pub(crate) fn alert_lost_device(&mut self, alert: String) {
+    /// The bridge stopped because a device went away or a callback caught a
+    /// failure: the alert window now, and the Live Issues row once that is
+    /// dismissed.  `reason` is what the row says happened.
+    pub(crate) fn alert_stopped_bridge(&mut self, alert: String, reason: StopReason) {
         self.issue_state.new_run();
-        self.issue_state.device_lost = Some(alert.clone());
-        self.device_alert = Some(alert);
+        self.issue_state.stopped = Some((reason, alert.clone()));
+        self.device_alert = Some((alert, Some(reason)));
     }
 
     /// Pushes mix state, polls the bridge, and handles a lost device.
@@ -316,11 +318,6 @@ impl RigWerkApp {
         {
             // A callback failure arrives as `device_lost` too, but the device
             // is fine and telling the person to reconnect it would be wrong.
-            let callback_failed = self
-                .snapshot
-                .error
-                .as_deref()
-                .is_some_and(audio::is_callback_failure_message);
             let reason = self
                 .snapshot
                 .error
@@ -330,22 +327,28 @@ impl RigWerkApp {
             self.engine.clear_error();
             self.bridge_signature = 0;
             self.bridge_restart_pending = false;
-            if callback_failed {
+            if let Some(failure) = self.snapshot.callback_failure {
                 self.push_log(
                     "A real-time audio callback failed - bridge stopped.",
                     LogTone::Red,
                 );
-                self.alert_lost_device(format!(
-                    "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open."
-                ));
+                self.alert_stopped_bridge(
+                    format!(
+                        "{reason}. The bridge was stopped so the audio engine does not keep a failed callback running."
+                    ),
+                    StopReason::Callback(failure),
+                );
             } else {
                 self.push_log(
                     "A bridge device was disconnected — bridge stopped.",
                     LogTone::Red,
                 );
-                self.alert_lost_device(format!(
-                    "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
-                ));
+                self.alert_stopped_bridge(
+                    format!(
+                        "{reason}. The bridge was stopped so the audio engine does not keep an invalid device open. Reconnect the device, then start the bridge again."
+                    ),
+                    StopReason::DeviceLost,
+                );
             }
         }
         output_muted
