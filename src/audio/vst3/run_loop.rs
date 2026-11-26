@@ -32,6 +32,10 @@ struct Entry<H: Interface> {
     /// Tells this registration apart from a later one of the same handler.
     serial: u64,
     handler: ComPtr<H>,
+    /// The `IRunLoop` this registration belongs to.  The host context and
+    /// every editor frame are separate run loops; unregistering through one
+    /// must not remove the others' registrations.
+    owner: usize,
     /// The load address of the binary holding the handler's vtable.
     module_base: usize,
 }
@@ -85,23 +89,32 @@ pub(super) fn module_base(address: *const c_void) -> usize {
 ///
 /// # Safety
 /// `handler` must be a live `H`.
-unsafe fn entry<H: Interface>(registry: &mut Registry, handler: ComRef<'_, H>) -> Entry<H> {
+unsafe fn entry<H: Interface>(
+    registry: &mut Registry,
+    handler: ComRef<'_, H>,
+    owner: usize,
+) -> Entry<H> {
     registry.next_serial += 1;
     // SAFETY: a live COM object starts with its vtable pointer.
     let vtable = unsafe { *handler.as_ptr().cast::<*const c_void>() };
     Entry {
         serial: registry.next_serial,
         handler: handler.to_com_ptr(),
+        owner,
         module_base: module_base(vtable),
     }
 }
 
-/// `IRunLoop::registerEventHandler`.  One handler per descriptor, as the
-/// SDK's editor host allows.
+/// `IRunLoop::registerEventHandler`.  One handler per descriptor per run
+/// loop, as the SDK's editor host allows.
 ///
 /// # Safety
 /// `handler` must be null or a live handler.
-pub(super) unsafe fn register_fd(handler: *mut IEventHandler, fd: FileDescriptor) -> tresult {
+pub(super) unsafe fn register_fd(
+    owner: usize,
+    handler: *mut IEventHandler,
+    fd: FileDescriptor,
+) -> tresult {
     // SAFETY: the caller's contract.
     let Some(handler) = (unsafe { ComRef::from_raw(handler) }) else {
         return kInvalidArgument;
@@ -109,31 +122,41 @@ pub(super) unsafe fn register_fd(handler: *mut IEventHandler, fd: FileDescriptor
     let Some(mut registry) = try_registry() else {
         return kResultFalse;
     };
-    if registry.fds.iter().any(|(_, registered)| *registered == fd) {
+    if registry
+        .fds
+        .iter()
+        .any(|(entry, registered)| entry.owner == owner && *registered == fd)
+    {
         return kInvalidArgument;
     }
     // SAFETY: checked non-null above; the caller's contract.
-    let entry = unsafe { entry(&mut registry, handler) };
+    let entry = unsafe { entry(&mut registry, handler, owner) };
     registry.fds.push((entry, fd));
     kResultTrue
 }
 
-/// `IRunLoop::unregisterEventHandler`: removes the handler's registration.
-pub(super) fn unregister_fd(handler: *mut IEventHandler) -> tresult {
+/// `IRunLoop::unregisterEventHandler`: removes every registration of the
+/// handler on this run loop.  The call names only the handler, not a
+/// descriptor, so a plugin that watched several descriptors unregisters them
+/// all at once (JUCE does exactly that when its editor closes its X11 and
+/// message-loop descriptors).  Another run loop's registration of the same
+/// handler stays: the host context and each editor frame are separate.
+pub(super) fn unregister_fd(owner: usize, handler: *mut IEventHandler) -> tresult {
     if handler.is_null() {
         return kInvalidArgument;
     }
     let Some(mut registry) = try_registry() else {
         return kResultFalse;
     };
-    let Some(at) = registry
+    let removed: Vec<_> = registry
         .fds
-        .iter()
-        .position(|(entry, _)| entry.handler.as_ptr() == handler)
-    else {
+        .extract_if(.., |(entry, _)| {
+            entry.owner == owner && entry.handler.as_ptr() == handler
+        })
+        .collect();
+    if removed.is_empty() {
         return kResultFalse;
-    };
-    let removed = registry.fds.remove(at);
+    }
     // A release may run plugin code: not under the lock.
     drop(registry);
     drop(removed);
@@ -146,6 +169,7 @@ pub(super) fn unregister_fd(handler: *mut IEventHandler) -> tresult {
 /// # Safety
 /// `handler` must be null or a live handler.
 pub(super) unsafe fn register_timer(
+    owner: usize,
     handler: *mut ITimerHandler,
     milliseconds: TimerInterval,
 ) -> tresult {
@@ -161,7 +185,7 @@ pub(super) unsafe fn register_timer(
     };
     let interval = Duration::from_millis(milliseconds);
     // SAFETY: checked non-null above; the caller's contract.
-    let entry = unsafe { entry(&mut registry, handler) };
+    let entry = unsafe { entry(&mut registry, handler, owner) };
     registry.timers.push(Timer {
         entry,
         interval,
@@ -170,23 +194,49 @@ pub(super) unsafe fn register_timer(
     kResultTrue
 }
 
-/// `IRunLoop::unregisterTimer`: removes one registration of the handler.
-pub(super) fn unregister_timer(handler: *mut ITimerHandler) -> tresult {
+/// `IRunLoop::unregisterTimer`: removes every registration of the handler
+/// on this run loop.  Like [`unregister_fd`], the call names only the
+/// handler; a plugin that registered it more than once expects one call to
+/// remove all of them.
+pub(super) fn unregister_timer(owner: usize, handler: *mut ITimerHandler) -> tresult {
     if handler.is_null() {
         return kInvalidArgument;
     }
     let Some(mut registry) = try_registry() else {
         return kResultFalse;
     };
-    let Some(at) = registry
+    let removed: Vec<_> = registry
         .timers
-        .iter()
-        .position(|timer| timer.entry.handler.as_ptr() == handler)
-    else {
+        .extract_if(.., |timer| {
+            timer.entry.owner == owner && timer.entry.handler.as_ptr() == handler
+        })
+        .collect();
+    if removed.is_empty() {
+        return kResultFalse;
+    }
+    // A release may run plugin code: not under the lock.
+    drop(registry);
+    drop(removed);
+    kResultTrue
+}
+
+/// Removes a handler from every run loop.  The reentrant-unregister test's
+/// callback has only the raw pointer, not the run loop it came through.
+#[cfg(test)]
+pub(super) fn unregister_timer_everywhere(handler: *mut ITimerHandler) -> tresult {
+    if handler.is_null() {
+        return kInvalidArgument;
+    }
+    let Some(mut registry) = try_registry() else {
         return kResultFalse;
     };
-    let removed = registry.timers.remove(at);
-    // A release may run plugin code: not under the lock.
+    let removed: Vec<_> = registry
+        .timers
+        .extract_if(.., |timer| timer.entry.handler.as_ptr() == handler)
+        .collect();
+    if removed.is_empty() {
+        return kResultFalse;
+    }
     drop(registry);
     drop(removed);
     kResultTrue
