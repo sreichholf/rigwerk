@@ -3,12 +3,6 @@
 What is known to be missing or limited.  The rest of the old plans and the
 code review has landed; that history is in git.
 
-## Deferred from the review
-
-The findings that need their own change, with the issue that tracks each:
-
-- The last `winapi` uses moved to the `windows` crate (#124).
-
 ## Features
 
 - RigWerk Out, the virtual output, is played by the PipeWire duplex node alone.  The
