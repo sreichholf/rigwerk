@@ -879,6 +879,11 @@ impl RigWerkApp {
         self.path_mut().mix.eqs[index] = eq;
     }
 
+    /// The edited path's pitch shifter.
+    pub(crate) fn set_path_pitch(&mut self, pitch: crate::audio::PitchSettings) {
+        self.path_mut().mix.pitch = pitch.sanitized();
+    }
+
     /// The edited path's gate.
     pub(crate) fn set_path_gate(&mut self, gate: GateSettings) {
         self.path_mut().mix.gate = gate;

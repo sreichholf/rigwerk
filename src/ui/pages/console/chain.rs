@@ -1,5 +1,6 @@
-//! A path's chain on its strip (spec §4.2, §5.3): *Pre EQ*, the gate when
-//! it sits before the effects, the NAM blocks that do, the effects group,
+//! A path's chain on its strip (spec §4.2, §5.3): *Pitch*, *Pre EQ*, the
+//! gate when it sits before the effects, the NAM blocks that do, the effects
+//! group,
 //! the NAM blocks after them, the cabinet, the gate when after, and *Post
 //! EQ*.
 //!
@@ -17,7 +18,7 @@ use super::DensityStep;
 use crate::app::chain::ChainStage;
 use crate::app::screen::{format_ms, Sheet};
 use crate::app::RigWerkApp;
-use crate::audio::{GateSlot, NamPosition, MAX_EFFECTS};
+use crate::audio::{format_pitch_interval, GateSlot, NamPosition, MAX_EFFECTS};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{
@@ -122,6 +123,20 @@ impl RigWerkApp {
         let show_curve = matches!(step, DensityStep::Normal | DensityStep::CompactOutputs);
         let open = self.chrome.sheet;
         let gate_text = format_db(mix.gate.threshold_db, 0);
+        let pitch_text = if mix.pitch.enabled {
+            let latency = mix.pitch.latency_samples(rate);
+            if latency == 0 {
+                format_pitch_interval(mix.pitch.semitones, mix.pitch.cents)
+            } else {
+                format!(
+                    "{} · {}",
+                    format_pitch_interval(mix.pitch.semitones, mix.pitch.cents),
+                    format_ms(latency as f32 * 1000.0 / rate as f32)
+                )
+            }
+        } else {
+            format_pitch_interval(mix.pitch.semitones, mix.pitch.cents)
+        };
         let top = ui.cursor().top();
         let views = self.engine_plugin_views(slot);
         let count = views.len();
@@ -138,6 +153,18 @@ impl RigWerkApp {
         let overloaded =
             self.issue_state.dsp.severity() == Some(crate::app::issues::IssueSeverity::Error);
 
+        self.builtin_row(
+            ui,
+            slot,
+            ChainStage::Pitch,
+            "Pitch",
+            None,
+            ChainMark::Label(&pitch_text),
+            false,
+            None,
+            show_curve,
+            rate,
+        );
         self.builtin_row(
             ui,
             slot,

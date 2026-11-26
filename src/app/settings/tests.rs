@@ -399,6 +399,32 @@ fn a_saved_return_loads_without_a_solo_or_sends() {
 }
 
 #[test]
+fn a_path_without_a_pitch_stage_stays_bypassed() {
+    let raw = r#"(paths:[(name:"Main")])"#;
+    let preferences = load_preferences(Some(raw), BACKUP)
+        .preferences
+        .expect("readable");
+    assert_eq!(
+        preferences.paths[0].pitch,
+        crate::audio::PitchSettings::default()
+    );
+}
+
+#[test]
+fn a_pitch_stage_is_clamped_on_load() {
+    let raw = r#"(paths:[(pitch:(enabled:true,semitones:40.0,cents:NaN,wet:5.0))])"#;
+    let preferences = load_preferences(Some(raw), BACKUP)
+        .preferences
+        .expect("readable");
+    let pitch = preferences.paths[0].pitch;
+    assert!(pitch.enabled);
+    assert_eq!(pitch.semitones, crate::audio::PITCH_MAX_SEMITONES);
+    assert_eq!(pitch.cents, 0.0);
+    assert_eq!(pitch.wet, 1.0);
+    assert_eq!(pitch.window, crate::audio::PitchWindow::Normal);
+}
+
+#[test]
 fn a_gate_saved_before_the_key_listens_to_its_signal() {
     let raw = r#"(paths:[(gate:(enabled:true,slot:pre,threshold_db:-40.0))])"#;
     let preferences = load_preferences(Some(raw), BACKUP)
@@ -2326,6 +2352,7 @@ fn golden_path(name: &str) -> PathPref {
             release_ms: 150.0,
             hold_ms: 20.0,
         },
+        pitch: crate::audio::PitchSettings::default(),
         plugins: vec![
             PluginPref {
                 path: "/usr/lib/vst3/Amp.vst3".to_owned(),

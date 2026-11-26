@@ -118,7 +118,7 @@ Environment variables for screenshot runs:
 | Variable | Values |
 | --- | --- |
 | `RIGWERK_PAGE` | `console`, `tuner`, `setup` |
-| `RIGWERK_SHEET` | `eq`, `gate`, `nam`, `cab`, `effect` (a stand-in effect when the chain is empty), `path`, `output` (the clock output), `match-paths`, `scope`, `diagnostics`; on the selected path, applied after the setup |
+| `RIGWERK_SHEET` | `eq`, `gate`, `pitch`, `nam`, `cab`, `effect` (a stand-in effect when the chain is empty), `path`, `output` (the clock output), `match-paths`, `scope`, `diagnostics`; on the selected path, applied after the setup |
 | `RIGWERK_DRAWER` | `browser`, `issues` |
 | `RIGWERK_THEME` | `dark`, `light`: wins over the saved theme for the run |
 | `RIGWERK_ROUTING_SETUP` | `showcase` (the README setup); `showcase4` (the showcase plus Drive with ten bypassed copies of the room's first effect and an empty Stream path); `drywet`, `sum3`, `blend`, `dualamp-off` (alignment off, the red warning) for the alignment and routing cases |

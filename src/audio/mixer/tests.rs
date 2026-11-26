@@ -74,6 +74,63 @@ fn snap_adopts_a_value_without_moving() {
     assert_eq!(ramp.next(), 0.25);
 }
 
+#[test]
+fn an_octave_down_pitch_shift_halves_the_frequency_in_a_small_buffer() {
+    use super::super::pitch::{PitchSettings, PitchWindow};
+    let (mut mixer, shared) = steady_mixer((0.0, 0.0));
+    let bypassed = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    shared.set_eq(EqSlot::Pre, bypassed);
+    shared.set_eq(EqSlot::Post, bypassed);
+    shared.paths[0].set_pitch(PitchSettings {
+        enabled: true,
+        semitones: -12.0,
+        window: PitchWindow::Normal,
+        ..PitchSettings::default()
+    });
+    mixer.prepare(128);
+    let mut heard = Vec::new();
+    let mut n = 0u32;
+    // Keep the ring fed while rendering, so a 128-sample buffer is the
+    // whole of what the shifter sees.  16 ms of delay at 48 kHz is 768
+    // samples, well under a 2048-sample host buffer.
+    for _ in 0..80 {
+        for _ in 0..128 {
+            let sample = (std::f32::consts::TAU * 480.0 * n as f32 / 48_000.0).sin() * 0.4;
+            shared.push_frame(sample, sample);
+            n += 1;
+        }
+        let block = render(&mut mixer, &shared, 128);
+        heard.extend(block.iter().map(|frame| frame[0]));
+    }
+    assert_eq!(shared.paths[0].path_latency_samples(), 768);
+    let window = &heard[heard.len() - 4096..];
+    let down = goertzel(window, 240.0);
+    let source = goertzel(window, 480.0);
+    assert!(
+        down > source * 10.0,
+        "octave down power {down:.3} vs 480 Hz {source:.3}"
+    );
+}
+
+/// Goertzel power at `freq` over `samples` at 48 kHz, Hann-windowed.
+fn goertzel(samples: &[f32], freq: f32) -> f32 {
+    let omega = std::f32::consts::TAU * freq / 48_000.0;
+    let coeff = 2.0 * omega.cos();
+    let mut s1 = 0.0f32;
+    let mut s2 = 0.0f32;
+    let last = samples.len().saturating_sub(1) as f32;
+    for (index, sample) in samples.iter().enumerate() {
+        let window = 0.5 * (1.0 - (std::f32::consts::TAU * index as f32 / last).cos());
+        let s0 = sample * window + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    (s1 * s1 + s2 * s2 - coeff * s1 * s2).abs()
+}
+
 /// A 1:1 bridge with drift off, a deep bridge buffer and the EQs bypassed, so a
 /// rendered frame is the mix itself and not the resampler or a filter.
 fn steady_mixer(signal: (f32, f32)) -> (OutputMixer, Shared) {

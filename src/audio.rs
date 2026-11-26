@@ -53,6 +53,8 @@
 //! - `serde_util`: the read that keeps a damaged entry in its own slot of a
 //!   positional saved list (preferences, a device's routing rows).
 //! - `eq`: the built-in 5-band EQs before and after the plugin effects.
+//! - `pitch`: the built-in pitch shifter, before the pre EQ.  It runs at the
+//!   bridge's own buffer and reports half its grain as latency.
 //! - `gate`: the built-in noise gate (PRE or POST effects).
 //! - `nam`: the built-in Neural Amp Modeler blocks (before or after the
 //!   effects, up to sixteen of them).  The callback never builds or drops a
@@ -103,6 +105,7 @@ mod output;
 mod output_map;
 mod panic_guard;
 mod path;
+mod pitch;
 mod plugins;
 pub(crate) use plugins::mark_main_thread;
 #[cfg(test)]
@@ -183,6 +186,11 @@ pub use output_map::{
     UnusedChannels, DEVICE_LEVEL_MAX_DB, DEVICE_LEVEL_MIN_DB, LOUDNESS_TARGET_DEFAULT_LUFS,
     LOUDNESS_TARGET_MAX_LUFS, LOUDNESS_TARGET_MIN_LUFS, LOUDNESS_TRIM_MAX_DB, MAX_EXTRA_OUTPUTS,
     MAX_OUTPUT_CHANNELS, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
+};
+pub use pitch::{
+    format_cents, format_interval as format_pitch_interval, format_semitones, PitchSettings,
+    PitchWindow, MAX_CENTS as PITCH_MAX_CENTS, MAX_SEMITONES as PITCH_MAX_SEMITONES,
+    MIN_CENTS as PITCH_MIN_CENTS, MIN_SEMITONES as PITCH_MIN_SEMITONES,
 };
 #[cfg(test)]
 pub(crate) use shared::tests::claim_main_thread;

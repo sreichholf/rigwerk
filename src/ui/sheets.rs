@@ -15,6 +15,7 @@ pub(crate) mod match_paths;
 pub(crate) mod nam;
 pub(crate) mod output;
 pub(crate) mod path;
+pub(crate) mod pitch;
 pub(crate) mod scope;
 
 use eframe::egui;
@@ -35,6 +36,7 @@ impl RigWerkApp {
             Sheet::Scope => "Scope".to_owned(),
             Sheet::Eq { post: false, .. } => "Pre EQ".to_owned(),
             Sheet::Eq { post: true, .. } => "Post EQ".to_owned(),
+            Sheet::Pitch { .. } => "Pitch".to_owned(),
             Sheet::Gate { .. } => "Gate".to_owned(),
             Sheet::Nam { .. } => "NAM".to_owned(),
             Sheet::Cab { .. } => "Cab".to_owned(),
@@ -185,6 +187,7 @@ impl RigWerkApp {
             .show(ui, |ui| match sheet {
                 Sheet::Diagnostics => self.diagnostics_page(ui),
                 Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
+                Sheet::Pitch { path } => self.pitch_sheet(ui, path),
                 Sheet::Gate { path } => self.gate_sheet(ui, path),
                 Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
                 Sheet::Path { path } => self.path_sheet(ui, path),

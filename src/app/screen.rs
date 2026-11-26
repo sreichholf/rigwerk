@@ -14,6 +14,10 @@ use crate::app::RigWerkApp;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sheet {
     Diagnostics,
+    /// The pitch shifter, before the pre EQ.
+    Pitch {
+        path: usize,
+    },
     /// *Pre EQ*, or *Post EQ* when `post`.
     Eq {
         path: usize,
@@ -53,6 +57,7 @@ impl Sheet {
     /// The sheet that edits `stage` of path `path`.
     pub(crate) fn for_stage(path: usize, stage: ChainStage) -> Self {
         match stage {
+            ChainStage::Pitch => Self::Pitch { path },
             ChainStage::PreEq => Self::Eq { path, post: false },
             ChainStage::Gate => Self::Gate { path },
             ChainStage::Nam(index) => Self::Nam { path, index },
@@ -65,6 +70,7 @@ impl Sheet {
     /// The path and the chain stage this sheet edits, for the stage sheets.
     pub(crate) fn stage(self) -> Option<(usize, ChainStage)> {
         match self {
+            Self::Pitch { path } => Some((path, ChainStage::Pitch)),
             Self::Eq { path, post: false } => Some((path, ChainStage::PreEq)),
             Self::Eq { path, post: true } => Some((path, ChainStage::PostEq)),
             Self::Gate { path } => Some((path, ChainStage::Gate)),
@@ -88,6 +94,7 @@ impl Sheet {
     /// path `path`.  `diagnostics` is read at launch, before the paths.
     pub(crate) fn from_key(key: &str, path: usize) -> Option<Self> {
         Some(match key.trim().to_lowercase().as_str() {
+            "pitch" => Self::Pitch { path },
             "eq" => Self::Eq { path, post: false },
             "gate" => Self::Gate { path },
             "nam" | "amp" => Self::Nam { path, index: 0 },

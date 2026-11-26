@@ -2,16 +2,18 @@
 //!
 //! This is navigation state on [`RigWerkApp`](crate::app::RigWerkApp), not
 //! paint.  Stage colours stay in `ui`.  [`chain_stages`] is the signal
-//! order the console draws and the sheet's ‹ › walk: the gate sits before or
-//! after the effects as its slot says, and each NAM block runs before or
-//! after them as its position says.  The cabinet always sits after the
-//! effects and after the NAM blocks.
+//! order the console draws and the sheet's ‹ › walk: pitch, then the pre EQ,
+//! the gate before or after the effects as its slot says, and each NAM block
+//! before or after them as its position says.  The cabinet always sits after
+//! the effects and after the NAM blocks.
 
 use crate::audio::{EqSlot, GateSlot, NamPosition, NamStack};
 
 /// One stage of a path's chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChainStage {
+    /// The pitch shifter, before the pre EQ.
+    Pitch,
     PreEq,
     Gate,
     /// The NAM block at this index of the path's stack.
@@ -23,12 +25,13 @@ pub(crate) enum ChainStage {
     PostEq,
 }
 
-/// A chain's stages in the order the sound passes them: *Pre EQ*, the gate
-/// when it sits before the effects, the NAM blocks that sit there, the
-/// effects, the NAM blocks that sit after them, the cabinet, the gate when
-/// after, and *Post EQ*.
+/// A chain's stages in the order the sound passes them: *Pitch*, *Pre EQ*,
+/// the gate when it sits before the effects, the NAM blocks that sit there,
+/// the effects, the NAM blocks that sit after them, the cabinet, the gate
+/// when after, and *Post EQ*.
 pub(crate) fn chain_stages(effects: usize, gate: GateSlot, nam: &NamStack) -> Vec<ChainStage> {
-    let mut stages = Vec::with_capacity(effects + nam.count() + 5);
+    let mut stages = Vec::with_capacity(effects + nam.count() + 6);
+    stages.push(ChainStage::Pitch);
     stages.push(ChainStage::PreEq);
     if gate == GateSlot::Pre {
         stages.push(ChainStage::Gate);
@@ -76,6 +79,7 @@ pub(crate) fn neighbour_stage(
 /// What the Mixer inspector (and Live chips) currently point at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChainSelection {
+    Pitch,
     PreEq,
     /// The effect group header — not a single plugin.
     Plugins,
@@ -147,6 +151,7 @@ impl ChainSelection {
     /// The selection that marks `stage` in the Mixer and on the console.
     pub(crate) fn from_stage(stage: ChainStage) -> Self {
         match stage {
+            ChainStage::Pitch => Self::Pitch,
             ChainStage::PreEq => Self::PreEq,
             ChainStage::Gate => Self::Gate,
             ChainStage::Nam(index) => Self::Nam(index),
@@ -175,6 +180,7 @@ impl crate::app::RigWerkApp {
             return false;
         };
         match stage {
+            ChainStage::Pitch => path.mix.pitch.enabled,
             ChainStage::PreEq => path.mix.eqs[0].enabled,
             ChainStage::PostEq => path.mix.eqs[1].enabled,
             ChainStage::Gate => path.mix.gate.enabled,
@@ -205,6 +211,7 @@ impl crate::app::RigWerkApp {
             return;
         };
         match stage {
+            ChainStage::Pitch => path.mix.pitch.enabled = on,
             ChainStage::PreEq => path.mix.eqs[0].enabled = on,
             ChainStage::PostEq => path.mix.eqs[1].enabled = on,
             ChainStage::Gate => path.mix.gate.enabled = on,

@@ -24,7 +24,7 @@ the scope; and the input gain. A click on the device opens Setup › Input.
 
 - a source: which input channels feed it, in stereo or summed to mono,
   or *Sends* for an effects return (below);
-- a chain in signal order: Pre EQ, the gate (when before), NAM blocks
+- a chain in signal order: Pitch, Pre EQ, the gate (when before), NAM blocks
   before the effects, the effects, NAM blocks after them, the cab, the
   gate (when after), Post EQ;
 - its latency and DSP load;
@@ -123,14 +123,19 @@ instead.
 ## Sheets, drawers and diagnostics
 
 Click a stage in a chain, a path name or an output to edit it in a sheet at
-the bottom of the console. A sheet covers one thing at a time: EQ, gate,
-NAM, cab, effect, path, output or scope. It can be resized from its top
+the bottom of the console. A sheet covers one thing at a time: EQ, pitch,
+gate, NAM, cab, effect, path, output or scope. It can be resized from its top
 edge and moves through the chain with *‹ previous* and *next ›*. Esc
 closes it. The title bar and status bar keep working while it is open,
 and each strip shows a thin meter.
 
 - **EQ** has five bands (low shelf, three bells, high shelf) with a curve
   and a band table, and a *Flat* button.
+- **Pitch** shifts the guitar before the amp, by semitones and cents, with
+  wet and a window (*Tight*, *Normal*, *Smooth*).  The delay is half that
+  window — 8, 16 or 32 ms — and it is part of the path latency, so the
+  other paths wait for it.  The device buffer stays where you set it.
+  Bypass adds no delay.  Negative semitones are a drop tuning.
 - **Gate** has threshold, range, hysteresis, attack, release and hold, a
   reduction meter, *Before effects* / *After effects*, and what it
   listens to: the *Gated signal*, or the *Dry input* before the chain,

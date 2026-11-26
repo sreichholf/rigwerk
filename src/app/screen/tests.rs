@@ -53,10 +53,7 @@ fn previous_and_next_walk_the_chain_in_signal_order() {
     use crate::audio::GateSlot;
     let mut app = with_effects(&["A", "B"]);
     app.path_mut().mix.gate.slot = GateSlot::Pre;
-    app.open_sheet(Sheet::Eq {
-        path: 0,
-        post: false,
-    });
+    app.open_sheet(Sheet::Pitch { path: 0 });
     assert_eq!(app.sheet_neighbour(false), None);
     let mut seen = vec![app.chrome.sheet.unwrap()];
     while app.step_sheet(true) {
@@ -65,6 +62,7 @@ fn previous_and_next_walk_the_chain_in_signal_order() {
     assert_eq!(
         seen,
         [
+            Sheet::Pitch { path: 0 },
             Sheet::Eq {
                 path: 0,
                 post: false
@@ -145,6 +143,7 @@ fn sheet_keys_name_every_sheet() {
         Sheet::from_key("nam", 0),
         Some(Sheet::Nam { path: 0, index: 0 })
     );
+    assert_eq!(Sheet::from_key("pitch", 0), Some(Sheet::Pitch { path: 0 }));
     assert_eq!(Sheet::from_key("cab", 0), Some(Sheet::Cab { path: 0 }));
     assert_eq!(
         Sheet::from_key("effect", 0),
