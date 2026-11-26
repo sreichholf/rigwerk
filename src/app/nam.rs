@@ -1009,14 +1009,16 @@ pub(crate) fn set_ctrl_v_for_test(down: bool) {
 fn platform_ctrl_v_down() -> bool {
     #[cfg(windows)]
     {
-        use winapi::um::winuser::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
-        // The high bit is set while the key is down.  No pointer is passed.
-        // 0x56 is V.  Shift and Alt stay out so this is Ctrl+V only.
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT, VK_V,
+        };
+        // The high bit is set while the key is down.  Shift and Alt stay out
+        // so this is Ctrl+V only.
         unsafe {
-            GetAsyncKeyState(VK_CONTROL) < 0
-                && GetAsyncKeyState(0x56) < 0
-                && GetAsyncKeyState(VK_SHIFT) >= 0
-                && GetAsyncKeyState(VK_MENU) >= 0
+            GetAsyncKeyState(VK_CONTROL.0 as i32) < 0
+                && GetAsyncKeyState(VK_V.0 as i32) < 0
+                && GetAsyncKeyState(VK_SHIFT.0 as i32) >= 0
+                && GetAsyncKeyState(VK_MENU.0 as i32) >= 0
         }
     }
     #[cfg(not(windows))]
