@@ -1,7 +1,7 @@
 //! One signal path's controls, as the UI writes them and the audio
 //! callback reads them: input routing, mono, channel enable, the two
-//! built-in EQs, the gate, the NAM blocks, the plugin effect chain, the
-//! cabinet and the path meters.
+//! built-in EQs, the pitch shifter, the gate, the NAM blocks, the plugin
+//! effect chain, the cabinet and the path meters.
 //!
 //! [`Shared`](super::shared::Shared) holds [`MAX_PATHS`] of these as fixed
 //! slots, all preallocated, so adding a path never allocates in a callback.
@@ -77,6 +77,7 @@ use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::nam::{NamCommand, NamPark, NamPending, NamStack, PreparedNam};
 use super::output_map::level_gain;
+use super::pitch::PitchSettings;
 use super::plugins::{ChainHome, ChainModel, PluginView, SlotLink, SlotPark};
 
 mod plugins;
@@ -143,7 +144,8 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
 }
 
 /// The settings of one path the UI owns and pushes: input routing, mono,
-/// channel enable, the two EQs, the gate, the cabinet, the path level, mute
+/// channel enable, the two EQs, the pitch shifter, the gate, the cabinet,
+/// the path level, mute
 /// and solo, and the effect-chain bypass.  The NAM blocks are pushed
 /// separately ([`PathControls::set_nam`]): sixteen of them do not fit a
 /// snapshot the mixer copies as one [`Copy`] value.  The plugin chain, the
@@ -159,6 +161,8 @@ pub struct PathMix {
     pub output_enabled: [bool; 2],
     /// The EQs before and after the effects, indexed by [`EqSlot`].
     pub eqs: [EqSettings; 2],
+    /// Built-in pitch shifter, before the pre EQ.
+    pub pitch: PitchSettings,
     pub gate: GateSettings,
     /// Built-in cabinet.  The impulse path is not here: this stays [`Copy`].
     pub cab: CabControls,
@@ -187,6 +191,7 @@ impl Default for PathMix {
             mono: false,
             output_enabled: [true, true],
             eqs: [EqSettings::default(), EqSettings::default()],
+            pitch: PitchSettings::default(),
             gate: GateSettings::default(),
             cab: CabControls::default(),
             level_db: 0.0,
@@ -201,12 +206,13 @@ impl Default for PathMix {
 }
 
 impl PathMix {
-    /// Every value in range (EQ, gate, level, match and sends).  A NaN
+    /// Every value in range (EQ, pitch, gate, level, match and sends).  A NaN
     /// send is off, not 0 dB.  A return has no solo and no sends of its own.
     pub fn sanitized(self) -> Self {
         let is_return = self.is_return();
         Self {
             eqs: self.eqs.map(EqSettings::sanitized),
+            pitch: self.pitch.sanitized(),
             gate: self.gate.sanitized(),
             cab: self.cab.sanitized(),
             level_db: sanitize_path_level(self.level_db),
@@ -523,6 +529,10 @@ pub(crate) struct PathControls {
     /// lets the audio callback notice a change without taking the lock.
     eq: [Mutex<EqSettings>; 2],
     eq_version: [AtomicU64; 2],
+    /// Built-in pitch shifter, before the pre EQ.  The callback copies it
+    /// with `try_lock` when its version moved.
+    pitch: Mutex<PitchSettings>,
+    pitch_version: AtomicU64,
     /// Built-in noise gate (PRE or POST effects).
     gate: Mutex<GateSettings>,
     gate_version: AtomicU64,
@@ -627,6 +637,8 @@ impl PathControls {
                 Mutex::new(EqSettings::default()),
             ],
             eq_version: [AtomicU64::new(1), AtomicU64::new(1)],
+            pitch: Mutex::new(PitchSettings::default()),
+            pitch_version: AtomicU64::new(1),
             gate: Mutex::new(GateSettings::default()),
             gate_version: AtomicU64::new(1),
             nam: Mutex::new(NamStack::default()),
@@ -675,6 +687,13 @@ impl PathControls {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             self.set_eq(slot, *settings);
+        }
+        {
+            let settings = previous
+                .pitch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.set_pitch(*settings);
         }
         {
             let settings = previous.gate.lock().unwrap_or_else(PoisonError::into_inner);
@@ -810,6 +829,7 @@ impl PathControls {
         for slot in EqSlot::ALL {
             self.set_eq(slot, mix.eqs[slot.index()]);
         }
+        self.set_pitch(mix.pitch);
         self.set_gate(mix.gate);
         self.set_cab(mix.cab);
         self.set_level_db(mix.level_db);
@@ -842,6 +862,7 @@ impl PathControls {
                 self.output_enabled[1].load(Ordering::Relaxed),
             ],
             eqs: [eq(EqSlot::Pre), eq(EqSlot::Post)],
+            pitch: *self.pitch.lock().unwrap_or_else(PoisonError::into_inner),
             gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
             cab: *self.cab.lock().unwrap_or_else(PoisonError::into_inner),
             level_db: self.level_db(),
@@ -1076,6 +1097,25 @@ impl PathControls {
             .try_lock()
             .ok()
             .map(|settings| *settings)
+    }
+
+    pub(crate) fn set_pitch(&self, settings: PitchSettings) {
+        let settings = settings.sanitized();
+        if let Ok(mut current) = self.pitch.lock() {
+            if *current != settings {
+                *current = settings;
+                self.pitch_version.fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
+    pub(crate) fn pitch_version(&self) -> u64 {
+        self.pitch_version.load(Ordering::Acquire)
+    }
+
+    /// The current settings, or `None` if the UI holds the lock right now.
+    pub(crate) fn try_pitch(&self) -> Option<PitchSettings> {
+        self.pitch.try_lock().ok().map(|settings| *settings)
     }
 
     pub(crate) fn set_gate(&self, settings: GateSettings) {

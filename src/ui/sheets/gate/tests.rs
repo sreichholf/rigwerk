@@ -113,13 +113,22 @@ fn the_position_moves_the_gate_and_its_chain_row() {
     click(&ctx, &mut app, centre(&tree, "Before effects"));
 
     assert_eq!(gate(&app).slot, GateSlot::Pre);
-    assert_eq!(
-        chain_stages(
-            1,
-            gate(&app).slot,
-            &app.paths[0].as_ref().unwrap().nam_stack()
-        )[1],
-        ChainStage::Gate
+    let stages = chain_stages(
+        1,
+        gate(&app).slot,
+        &app.paths[0].as_ref().unwrap().nam_stack(),
+    );
+    let gate_at = stages
+        .iter()
+        .position(|stage| *stage == ChainStage::Gate)
+        .expect("gate");
+    let nam_at = stages
+        .iter()
+        .position(|stage| *stage == ChainStage::Nam(0))
+        .expect("nam");
+    assert!(
+        gate_at < nam_at,
+        "before effects puts the gate ahead of NAM"
     );
     let tree = frame(&ctx, &mut app, Vec::new());
     assert_eq!(

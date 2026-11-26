@@ -13,11 +13,13 @@ use super::super::gate::{GateKey, GateSlot, NoiseGate};
 use super::super::loudness::LoudnessMeter;
 use super::super::nam::{NamPosition, NamStage};
 use super::super::path::{DspTime, PathControls, PathState};
+use super::super::pitch::PitchShifter;
 use super::super::plugins::{ChainLease, MAX_ALIGN};
 use super::ramp::{PathRamps, Ramp};
 
 /// The chain of one signal path, from the split to the sum: routing,
-/// channel enable and mono (ramped), the pre EQ, a PRE gate, the NAM blocks
+/// channel enable and mono (ramped), the pitch shifter, the pre EQ, a PRE
+/// gate, the NAM blocks
 /// that sit before the effects, the plugin effects, the NAM blocks after
 /// them, the cabinet, a POST gate and the post EQ.  [`OutputMixer`] owns one per
 /// possible path, preallocated, and runs only the active ones; every path
@@ -34,6 +36,11 @@ pub(crate) struct PathProcessor {
     /// each was last updated from.
     eq: [Equalizer; 2],
     eq_version: [u64; 2],
+    /// Built-in pitch shifter, before the pre EQ, and the settings version
+    /// it was last updated from.  Bypass adds nothing; while it is on it
+    /// delays by half its grain.
+    pitch: PitchShifter,
+    pitch_version: u64,
     /// Built-in noise gate and the settings version it was last updated from.
     gate: NoiseGate,
     gate_version: u64,
@@ -90,18 +97,18 @@ pub(crate) struct PathProcessor {
     /// Frames a removed, silent path still runs so its alignment delay
     /// lines play out; `None` until its fade reaches silence.
     pub(super) drain: Option<u32>,
-    /// The chain latency (frames) read at the start of the block: what the
-    /// alignment counts for this path, and what a missed chain is replaced
-    /// by.  The plugin chain's latency plus, for each NAM block that runs an
-    /// oversampled model this block, the oversampling pair's delay.  The
-    /// cabinet adds none.
+    /// The whole path's latency (frames) this block: the plugin chain, each
+    /// oversampled NAM block, and the pitch shifter when it is on.  The
+    /// alignment counts it, and a POST gate keyed on the input delays its
+    /// key by it.  The cabinet adds none.
     latency: u32,
+    /// The plugin chain's own latency, clamped to [`MAX_ALIGN`].  A missed
+    /// chain is replaced by this delay.  The NAM blocks and the pitch
+    /// shifter are in front of the chain, so they are already in the
+    /// samples the chain hears and are not added again here.
+    plugin_latency: u32,
     /// The same, before clamping to [`MAX_ALIGN`] (for the report).
     pub(super) latency_raw: u32,
-    /// The plugin chain's own latency, clamped to [`MAX_ALIGN`]: what the
-    /// fallback for a missed chain delays by.  It stands in for the chain
-    /// alone; the NAM blocks before it already delayed its input.
-    chain_latency: u32,
     /// The path's chain runtime, taken with the first block of the path and
     /// parked again when the path stops being live or this processor drops
     /// (see `plugins::chain`).
@@ -198,8 +205,8 @@ impl PathProcessor {
     pub(super) fn new(rate: u32) -> Self {
         Self {
             latency: 0,
+            plugin_latency: 0,
             latency_raw: 0,
-            chain_latency: 0,
             drain: None,
             chain: None,
             chain_line: DelayLine::new(MAX_ALIGN as usize + CHAIN_CHUNK),
@@ -218,6 +225,8 @@ impl PathProcessor {
             plugin_r: Vec::new(),
             eq: [Equalizer::new(rate), Equalizer::new(rate)],
             eq_version: [0; 2],
+            pitch: PitchShifter::new(rate),
+            pitch_version: 0,
             gate: NoiseGate::new(rate),
             gate_version: 0,
             key: Vec::new(),
@@ -244,6 +253,7 @@ impl PathProcessor {
     /// block scratch is kept.
     fn restart(&mut self, rate: u32, generation: u64) {
         self.eq = [Equalizer::new(rate), Equalizer::new(rate)];
+        self.pitch.reset(rate);
         self.gate = NoiseGate::new(rate);
         self.key_line.reset();
         self.nam.restart(rate);
@@ -310,6 +320,7 @@ impl PathProcessor {
     /// block redesigns them (for a new rate).  Version 0 is never published.
     pub(super) fn invalidate_settings(&mut self) {
         self.eq_version = [0; 2];
+        self.pitch_version = 0;
         self.gate_version = 0;
         self.nam.invalidate();
         self.cab.invalidate();
@@ -339,11 +350,15 @@ impl PathProcessor {
         // the chain this block runs.
         let unopened = controls.begin_chain(&mut self.chain);
         self.nam.begin(controls, rate, ramp_samples);
-        // Plugin latency and NAM latency add: an oversampled block really
-        // delays its output, so this path does not delay it again.
+        self.follow_pitch(controls, rate);
+        // The pitch shifter and the NAM blocks are in front of the plugin
+        // chain, so a missed chain is replaced by the chain's own latency
+        // only; the path total adds all three.
         let chain_latency = controls.latency_samples();
-        self.chain_latency = chain_latency.min(MAX_ALIGN);
-        self.latency_raw = chain_latency.saturating_add(self.nam.latency_samples());
+        self.plugin_latency = chain_latency.min(MAX_ALIGN);
+        self.latency_raw = chain_latency
+            .saturating_add(self.nam.latency_samples())
+            .saturating_add(self.pitch.latency_samples());
         self.latency = self.latency_raw.min(MAX_ALIGN);
         controls.store_path_latency(self.latency_raw);
         self.cab.begin(controls, rate, ramp_samples);
@@ -454,6 +469,18 @@ impl PathProcessor {
         }
     }
 
+    /// Picks up pitch changes made in the UI since the last block.
+    fn follow_pitch(&mut self, controls: &PathControls, rate: u32) {
+        let version = controls.pitch_version();
+        if version == self.pitch_version {
+            return;
+        }
+        if let Some(settings) = controls.try_pitch() {
+            self.pitch.update(settings, rate);
+            self.pitch_version = version;
+        }
+    }
+
     /// Picks up gate changes made in the UI since the last block.
     fn follow_gate(&mut self, controls: &PathControls, rate: u32) {
         let version = controls.gate_version();
@@ -486,14 +513,18 @@ impl PathProcessor {
             let mut out = self.ramps.next_input(left, right);
             let key = out[0].abs().max(out[1].abs());
             self.key[index] = key;
-            // The chain on the path's mix (taps 1/2), in order: pre EQ,
-            // optional PRE gate, the NAM blocks that sit before the plugin
-            // effects, plugin effects, the NAM blocks after them, the
+            // The chain on the path's mix (taps 1/2), in order: pitch, pre
+            // EQ, optional PRE gate, the NAM blocks that sit before the
+            // plugin effects, plugin effects, the NAM blocks after them, the
             // cabinet, optional POST gate, post EQ.
-            // The EQ and the gate are per-sample; the cabinet is a short
-            // direct head then partitioned overlap-save.  Neither adds
-            // latency.  An oversampled NAM block does; its delay was read at
-            // the start of the block.
+            // The pitch shifter delays by half its grain when it is on, and
+            // that delay was read at the start of the block.  The EQ and the
+            // gate are per-sample; the cabinet is a short direct head then
+            // partitioned overlap-save.  None of those three adds latency.
+            // An oversampled NAM block does; its delay was read too.
+            // The key above is the dry input, before the shift, so a gate
+            // listening to the input still hears the guitar.
+            (out[0], out[1]) = self.pitch.process(out[0], out[1]);
             if self.plan.pre_eq {
                 (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
             }
@@ -535,9 +566,8 @@ impl PathProcessor {
     /// needs (see the `audio::path::plugins` docs), so a miss is rare: the
     /// UI holding the parked runtime for a moment, or another mixer still
     /// holding it.  The chain's input also goes into `chain_line`; a chunk
-    /// the chain cannot run plays that input delayed by the plugin chain's
-    /// own latency instead (not the path's: the NAM blocks before the chain
-    /// already delayed that input).  That
+    /// the chain cannot run plays that input delayed by the chain latency
+    /// instead.  That
     /// keeps the path's timing in the sum (no comb, no phase jump), but not
     /// its sound: for the missed chunk the path plays dry (its effects'
     /// level and tone are gone).  The switch into the fallback cannot
@@ -549,7 +579,7 @@ impl PathProcessor {
     /// chain with no active effect but some latency (all bypassed) still
     /// runs: its skipped effects delay by their latency.
     pub(super) fn run_effects(&mut self, controls: &PathControls, frames: usize) {
-        if !controls.has_plugins() && self.chain_latency == 0 {
+        if !controls.has_plugins() && self.plugin_latency == 0 {
             // Nothing runs and nothing delays.  The history is stale from
             // here on; a chain that comes back starts from silence.
             self.chain_line.reset();
@@ -560,9 +590,10 @@ impl PathProcessor {
         }
         if self.chain_mix >= 1.0 {
             // Nothing reads the fallback: it follows the latency at once.
-            self.chain_tap.snap(self.chain_latency);
+            self.chain_tap.snap(self.plugin_latency);
         } else {
-            self.chain_tap.set_target(self.chain_latency, self.tap_fade);
+            self.chain_tap
+                .set_target(self.plugin_latency, self.tap_fade);
         }
         let mut left = std::mem::take(&mut self.plugin_l);
         let mut right = std::mem::take(&mut self.plugin_r);
@@ -587,7 +618,7 @@ impl PathProcessor {
             let entering = !ran && self.chain_mix > 0.0 && !self.chain_fresh;
             if !ran {
                 self.chain_mix = 0.0;
-                self.chain_hold = self.chain_latency;
+                self.chain_hold = self.plugin_latency;
             }
             if self.chain_mix < 1.0 {
                 for index in 0..count {

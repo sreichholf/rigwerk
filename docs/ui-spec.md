@@ -77,7 +77,7 @@ reads.
 | **Source** | Which input channels feed a path, and whether it is *Stereo* or *Mono*. | routes, layer 1, mono sum |
 | **Path outputs** | Whether a path's L and R play at all (*L*, *R*), before any output. | OUT 1 / OUT 2 (for this) |
 | **Chain** | A path's stages, in the order the sound passes them. | signal chain, rack |
-| **Stage** | One step of a chain: *Pre EQ*, *Amp*, an effect, *Cab*, *Gate*, *Post EQ*. | slot, block |
+| **Stage** | One step of a chain: *Pitch*, *Pre EQ*, *Amp*, an effect, *Cab*, *Gate*, *Post EQ*. | slot, block |
 | **Effect** | A VST3 or CLAP plugin placed in a chain. | insert, plug |
 | **Plugin** | The installed VST3 or CLAP file: the format, the scan, the plugin's own window. | (kept) |
 | **Editor** | The window a plugin draws itself. | plugin interface, own editor |
@@ -292,9 +292,9 @@ on paths), so the faders line up across the screen.
 - *Source* button: `In 1 · mono`.  It opens the source popover: a 2 × 2
   grid (In 1, In 2 → L, R) and *Stereo* / *Mono*.  When the path outputs
   are not both on, the button adds `· L only` or `· R only`.
-- The chain (§4.2), in signal order: *Pre EQ*, *Gate* when it sits before
-  the effects, *Amp* when it sits before the effects, the effects group,
-  *Amp* when after, *Cab*, *Gate* when after, *Post EQ*.
+- The chain (§4.2), in signal order: *Pitch*, *Pre EQ*, *Gate* when it sits
+  before the effects, *Amp* when it sits before the effects, the effects
+  group, *Amp* when after, *Cab*, *Gate* when after, *Post EQ*.
 - The chain's latency and the path's DSP load.  The DSP alarm is raised on
   the total (as today, `app::issues`); the strip of the path with the
   largest share carries its marker.
@@ -534,10 +534,10 @@ table.
 
 ### 5.3 Chain height: 32 effects
 
-- *Pre EQ*, either *Gate* and *Post EQ* are pinned; only the effects group
-  scrolls.
-- The group gets the height left after the fixed rows and the fader: six
-  rows at 1440 × 900, three at 1040 × 700.
+- *Pitch*, *Pre EQ*, either *Gate* and *Post EQ* are pinned; only the
+  effects group scrolls.
+- The group gets the height left after the fixed rows and the fader: five
+  rows at 1440 × 900, two at 1040 × 700.
 - On overflow: a 3 pt scroll thumb, a fade at the bottom edge, *n more ·
   scroll* in the fade.  The wheel scrolls the group, not the console.
 - The selected effect, and one being dragged, stays in view.
@@ -564,6 +564,11 @@ gain, Q, on).  Header: *On* / *Bypass*, *Flat*.  Drag a handle for
 frequency and gain, scroll for Q, double-click to reset a band.  Gain ±12
 dB in 0.1 dB steps, Q 0.3–6.  The hover texts of today's EQ card (what the
 pre and post EQ are for, shelf vs bell Q) stay.
+
+**Pitch**: semitones (−12 to +12), cents, wet, and a window (*Tight* /
+*Normal* / *Smooth*).  It sits before the pre EQ, so the amp hears the
+new pitch.  The delay is half the window (8, 16 or 32 ms) and the device
+buffer is unchanged.  Bypass adds no delay.
 
 **Gate**: threshold, range, hysteresis, attack, release and hold, each with
 its value and today's hover text; a reduction meter (audio addition, §0);
@@ -977,7 +982,7 @@ src/ui/
 The test moves below are history; the screenshot flags are live.
 
 - `RIGWERK_PAGE` takes `console`, `tuner`, `setup`.  `RIGWERK_SHEET`
-  (`eq`, `gate`, `nam`, `cab`, `effect`, `path`, `output`, `match-paths`,
+  (`eq`, `gate`, `pitch`, `nam`, `cab`, `effect`, `path`, `output`, `match-paths`,
   `scope`, `diagnostics`) and `RIGWERK_DRAWER` (`browser`, `issues`) replace
   `RIGWERK_MIXER_STAGE`.
   `RIGWERK_THEME` (`dark`, `light`) overrides the preference.

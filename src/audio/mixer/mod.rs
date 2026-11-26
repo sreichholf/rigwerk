@@ -893,8 +893,8 @@ impl OutputMixer {
         }
         self.output_rate = rate;
         self.source_rate = rate;
-        // The next block re-reads every path's EQs and gate and `update`
-        // redesigns them for the new rate.
+        // The next block re-reads every path's EQs, pitch shifter and gate
+        // and `update` redesigns them for the new rate.
         for path in &mut self.paths {
             path.invalidate_settings();
         }
