@@ -49,6 +49,13 @@ fn base64_rejects_damage() {
 }
 
 #[test]
+fn only_vst3_and_clap_have_editor_support() {
+    assert!(PluginFormat::Vst3.has_editor_support());
+    assert!(PluginFormat::Clap.has_editor_support());
+    assert!(!PluginFormat::Lv2.has_editor_support());
+}
+
+#[test]
 fn state_blob_needs_a_known_version_and_data() {
     let state = PluginState::capture(&[1, 2, 3], &[param(1, 0.5)]);
     assert_eq!(state.version, PLUGIN_STATE_VERSION);

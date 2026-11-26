@@ -63,7 +63,7 @@ impl PluginGuiWindow {
     /// editor of its own.
     fn rebuilt(&self, view: Option<&PluginView>) -> bool {
         view.is_some_and(|view| {
-            view.instance.is_some()
+            view.loaded()
                 && view.has_editor
                 && (view.path.as_str(), view.class_id.as_deref())
                     == (self.plugin.0.as_str(), self.plugin.1.as_deref())
@@ -73,13 +73,14 @@ impl PluginGuiWindow {
 
 impl RigWerkApp {
     /// Opens the plugin's own interface for one effect, replacing any editor
-    /// that is already open.  Returns whether a window could be opened.
+    /// that is already open.  The effect must be loaded first
+    /// (`open_plugin_editor` does that).  Returns whether a window could be
+    /// opened.
     pub(crate) fn open_plugin_gui(&mut self, key: EffectKey) -> bool {
         let EffectKey {
             path,
             effect: index,
         } = key;
-        self.engine.ensure_plugin_loaded(path, index);
         // Dropping the old window detaches its editor before the new one opens.
         self.finish_plugin_gui();
         let Some(handle) = self.engine.plugin_handle(path, index) else {

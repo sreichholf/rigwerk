@@ -13,7 +13,7 @@ use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
 use crate::app::paths::EffectKey;
 use crate::app::screen::format_ms;
 use crate::app::RigWerkApp;
-use crate::audio::PluginParamView;
+use crate::audio::{PluginParamView, PluginView};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{row_info, styled_slider, SliderStyle, TextField, CONTROL_H};
@@ -29,23 +29,57 @@ const WET_DEFAULT: f32 = 100.0;
 pub(crate) const STATE_ACTIVE: &str = "Active";
 pub(crate) const STATE_BYPASSED: &str = "Bypassed";
 pub(crate) const STATE_FAILED: &str = "Didn't load";
+pub(crate) const STATE_NOT_LOADED: &str = "Not loaded";
 
 pub(crate) const NO_CONTROLS: &str = "This effect reports no controls.";
 pub(crate) const OWN_CONTROLS: &str = "This effect draws its own controls.";
 pub(crate) const FAILED_CONTROLS: &str = "This effect did not load.";
+pub(crate) const NOT_LOADED: &str = "This effect is not loaded yet.";
 
 pub(crate) const WET_HINT: &str = "How much of the effect you hear. Its default is 100 %.";
 pub(crate) const RESET_HINT: &str = "Put every control back to the plugin's own default.";
 pub(crate) const REMOVE_HINT: &str = "Take this effect out of the chain. Its controls are lost.";
 
-/// The state word and whether it is an error.
-pub(crate) fn state_word(bypass: bool, failed: bool) -> &'static str {
+/// The state word: a failed effect first, then one that was never opened.
+pub(crate) fn state_word(bypass: bool, failed: bool, loaded: bool) -> &'static str {
     if failed {
         STATE_FAILED
+    } else if !loaded {
+        STATE_NOT_LOADED
     } else if bypass {
         STATE_BYPASSED
     } else {
         STATE_ACTIVE
+    }
+}
+
+/// The header button's label and whether it can be pressed.  An effect that
+/// has not been opened yet may still have an editor: only a loaded plugin
+/// knows, so an editor-capable format loads it on the way.  LV2 has no
+/// editor here, so its unopened slot loads for the controls instead.
+pub(crate) fn editor_button(view: &PluginView) -> (&'static str, bool) {
+    let failed = view.error.is_some();
+    if view.has_editor {
+        ("Editor", !failed)
+    } else if view.loaded() || failed {
+        ("Controls", false)
+    } else if view.format.has_editor_support() {
+        ("Editor", true)
+    } else {
+        ("Controls", true)
+    }
+}
+
+/// The body's note when the effect reports no controls to list.
+pub(crate) fn body_note(view: &PluginView) -> &'static str {
+    if view.error.is_some() {
+        FAILED_CONTROLS
+    } else if !view.loaded() {
+        NOT_LOADED
+    } else if view.has_editor {
+        OWN_CONTROLS
+    } else {
+        NO_CONTROLS
     }
 }
 
@@ -74,6 +108,8 @@ impl RigWerkApp {
         let error = view.error.clone();
         let bypass = view.bypass;
         let has_editor = view.has_editor;
+        let loaded = view.loaded();
+        let format_can_have_editor = view.format.has_editor_support();
         let parameters = view.parameters.clone();
         let latency = view.latency;
         let rate = if self.snapshot.output_rate > 0 {
@@ -87,7 +123,7 @@ impl RigWerkApp {
             effect: index,
         };
 
-        let state = state_word(bypass, error.is_some());
+        let state = state_word(bypass, error.is_some(), loaded);
         let mut mix = view.mix * 100.0;
         let mut reset = false;
         let mut remove = false;
@@ -118,11 +154,17 @@ impl RigWerkApp {
                 {
                     reset = true;
                 }
-                let label = if has_editor { "Editor" } else { "Controls" };
+                let (label, editor_enabled) = editor_button(view);
                 if OutlineButton::new(label)
-                    .enabled(error.is_none() && has_editor)
+                    .enabled(editor_enabled)
                     .show(ui)
-                    .on_hover_text(if has_editor {
+                    .on_hover_text(if error.is_some() {
+                        "This effect did not load"
+                    } else if !loaded && format_can_have_editor {
+                        "Open the effect's editor; the effect loads first"
+                    } else if !loaded {
+                        "Load the effect to show its controls"
+                    } else if has_editor {
                         "Open the editor the plugin draws itself"
                     } else {
                         "This effect has no editor of its own"
@@ -139,7 +181,7 @@ impl RigWerkApp {
             ui.spacing_mut().item_spacing.x = 14.0;
             let ink = if error.is_some() {
                 colours.error_text
-            } else if bypass {
+            } else if !loaded || bypass {
                 colours.text3
             } else {
                 colours.accent_text
@@ -208,19 +250,13 @@ impl RigWerkApp {
         if parameters.is_empty() {
             ui.add_space(6.0);
             ui.label(
-                RichText::new(if error.is_some() {
-                    FAILED_CONTROLS
-                } else if has_editor {
-                    OWN_CONTROLS
-                } else {
-                    NO_CONTROLS
-                })
-                .font(font(Face::SansMedium, TypeRole::Body))
-                .color(if error.is_some() {
-                    colours.error_text
-                } else {
-                    colours.text2
-                }),
+                RichText::new(body_note(view))
+                    .font(font(Face::SansMedium, TypeRole::Body))
+                    .color(if error.is_some() {
+                        colours.error_text
+                    } else {
+                        colours.text2
+                    }),
             );
         } else {
             controls_header(ui, parameters.len(), &mut self.plugin_param_filter, colours);
@@ -260,11 +296,7 @@ impl RigWerkApp {
             self.reset_plugin_parameters(key);
         }
         if editor {
-            if has_editor {
-                self.open_plugin_editor(index);
-            } else {
-                self.open_sheet(crate::app::screen::Sheet::Effect { path, index });
-            }
+            self.open_plugin_editor(index);
         }
         if (mix - view.mix * 100.0).abs() > 0.25 {
             self.set_plugin_mix(index, mix / 100.0);
