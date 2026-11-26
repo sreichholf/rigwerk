@@ -1432,3 +1432,13 @@ fn every_output_mode_survives_its_stored_byte() {
     assert_eq!(OutputMode::from_u8(0), None);
     assert_eq!(OutputMode::from_u8(200), None);
 }
+
+/// The duplex node has no mixer or resampler: its rate publishers stay
+/// atomics-only and post no kernel for the clock mixer.
+#[test]
+fn the_duplex_rate_publishers_post_no_kernel() {
+    let shared = super::Shared::new(48_000);
+    shared.note_requested_direct_rate(44_100);
+    shared.note_direct_rate(48_000);
+    assert_eq!(shared.clock_kernel.pending_pair(), None);
+}

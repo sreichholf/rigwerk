@@ -273,7 +273,7 @@ pub(crate) fn run_asio_output_loop(
     }
 
     let mut mixer = OutputMixer::new(rate, output_channels);
-    mixer.follow_source_rate(&shared);
+    mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
     mixer.prepare(buffer_frames.max(1) as usize);
 

@@ -82,6 +82,7 @@ use super::path::{DspCell, DspTime, LiveSlots, PathControls, PathMix, PathState,
 #[cfg(test)]
 use super::plugins::PluginView;
 use super::plugins::{PluginPref, SlotPark, MAX_ALIGN};
+use super::resampler::{FrameResampler, KernelHandoff};
 use super::scope::ScopeLane;
 use super::types::{BufferMode, OutputMode, Snapshot};
 
@@ -231,6 +232,11 @@ pub(crate) struct Shared {
     pub(crate) source_rate: AtomicU32,
     pub(crate) output_rate: AtomicU32,
     pub(crate) output_step_frames: AtomicU32,
+    /// Kernel tables planned by the rate publishers for the clock mixer and
+    /// one per extra output.  A running mixer takes its table here with
+    /// `try_lock`; the publishers plan and post off the audio thread.
+    pub(crate) clock_kernel: KernelHandoff,
+    pub(crate) extra_kernels: [KernelHandoff; MAX_EXTRA_OUTPUTS],
     /// Whether [`Self::source_rate`] is a reading from the input device or
     /// graph.  False while it is only the rate asked for before the stream
     /// or graph opened (see [`Self::set_requested_source_rate`]).
@@ -355,6 +361,8 @@ impl Shared {
             source_rate: AtomicU32::new(0),
             output_rate: AtomicU32::new(0),
             output_step_frames: AtomicU32::new(0),
+            clock_kernel: KernelHandoff::new(),
+            extra_kernels: std::array::from_fn(|_| KernelHandoff::new()),
             input_rate_reported: AtomicBool::new(false),
             output_rate_reported: AtomicBool::new(false),
             output_step_reported: AtomicBool::new(false),
@@ -758,6 +766,10 @@ impl Shared {
         self.output_block.store(0, Ordering::Relaxed);
         self.output_rate.store(0, Ordering::Relaxed);
         self.output_step_frames.store(0, Ordering::Relaxed);
+        self.clock_kernel.clear();
+        for handoff in &self.extra_kernels {
+            handoff.clear();
+        }
         self.input_rate_reported.store(false, Ordering::Relaxed);
         self.output_rate_reported.store(false, Ordering::Relaxed);
         self.output_step_reported.store(false, Ordering::Relaxed);
@@ -794,7 +806,7 @@ impl Shared {
     /// stream exists, so its rate is a reading.  A rate asked for before the
     /// stream opened goes through [`Self::set_requested_source_rate`].
     pub(crate) fn set_source_rate(&self, rate: u32) {
-        self.store_source_rate(rate, true);
+        self.store_source_rate(rate, true, true);
         // A fixed bridge buffer is set in milliseconds; re-measure it in frames.
         self.lift_to_floor();
     }
@@ -809,14 +821,31 @@ impl Shared {
         if self.source_rate_is_read() {
             return;
         }
-        self.store_source_rate(rate, false);
+        self.store_source_rate(rate, false, true);
         self.lift_to_floor();
     }
 
-    fn store_source_rate(&self, rate: u32, reported: bool) {
+    /// Stores the source rate and, when `publish_kernel` is set, plans the
+    /// clock mixer's kernel for the pair it just completed.  The duplex path
+    /// passes false: it has no resampler and publishes atomics only.
+    fn store_source_rate(&self, rate: u32, reported: bool, publish_kernel: bool) {
         self.source_rate.store(rate, Ordering::Relaxed);
         self.input_rate_reported.store(reported, Ordering::Relaxed);
         self.scope_in.set_rate(rate);
+        if publish_kernel {
+            self.post_clock_kernel();
+        }
+    }
+
+    /// Plans and posts the clock mixer's kernel when both rates are known.
+    /// Call it off the audio thread, after the rate store.
+    fn post_clock_kernel(&self) {
+        let source = self.source_rate.load(Ordering::Relaxed);
+        let output = self.output_rate.load(Ordering::Relaxed);
+        if source != 0 && output != 0 {
+            self.clock_kernel
+                .post(FrameResampler::<(f32, f32)>::plan(source, output));
+        }
     }
 
     fn source_rate_is_read(&self) -> bool {
@@ -830,8 +859,8 @@ impl Shared {
     /// node has no ring, and the callers counted on the rate store alone.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn note_direct_rate(&self, rate: u32) {
-        self.store_source_rate(rate, true);
-        self.store_output_rate(rate, true);
+        self.store_source_rate(rate, true, false);
+        self.store_output_rate(rate, true, false);
     }
 
     /// Publishes the rate the duplex node is asked for before the graph has
@@ -841,10 +870,10 @@ impl Shared {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn note_requested_direct_rate(&self, rate: u32) {
         if !self.source_rate_is_read() {
-            self.store_source_rate(rate, false);
+            self.store_source_rate(rate, false, false);
         }
         if !self.output_rate_is_read() {
-            self.store_output_rate(rate, false);
+            self.store_output_rate(rate, false, false);
         }
     }
 
@@ -887,7 +916,7 @@ impl Shared {
     /// [`Self::note_output_step`] marks the step on its own.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn set_output_rate(&self, rate: u32) {
-        self.store_output_rate(rate, true);
+        self.store_output_rate(rate, true, true);
     }
 
     fn store_output(
@@ -898,7 +927,7 @@ impl Shared {
         mode: impl Into<String>,
         reported: bool,
     ) {
-        self.store_output_rate(rate, reported);
+        self.store_output_rate(rate, reported, true);
         self.output_step_frames
             .store(step_frames, Ordering::Relaxed);
         // A step of 0 is not a reading: the stream opened without a fixed
@@ -925,10 +954,23 @@ impl Shared {
         }
     }
 
-    fn store_output_rate(&self, rate: u32, reported: bool) {
+    fn store_output_rate(&self, rate: u32, reported: bool, publish_kernel: bool) {
         self.output_rate.store(rate, Ordering::Relaxed);
         self.output_rate_reported.store(reported, Ordering::Relaxed);
         self.scope_out.set_rate(rate);
+        if !publish_kernel {
+            return;
+        }
+        self.post_clock_kernel();
+        // An extra output's producer rate is this clock rate and its device
+        // rate was fixed when its stream opened.  Only one that has published
+        // a rate has a pair to plan for.
+        for (handoff, bus) in self.extra_kernels.iter().zip(&self.extra_output_buses) {
+            let playback = bus.playback_rate();
+            if rate != 0 && playback != 0 {
+                handoff.post(FrameResampler::<(f32, f32)>::plan(rate, playback));
+            }
+        }
     }
 
     fn output_rate_is_read(&self) -> bool {

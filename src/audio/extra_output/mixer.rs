@@ -118,9 +118,29 @@ impl ExtraOutputMixer {
         shared.extra_outputs[self.slot].set_channels(self.channels);
     }
 
+    /// Follows the clock output's rate, which is what feeds this ring.  The
+    /// worker that publishes the new rate plans the kernel; this callback only
+    /// installs it, and plays the current pair until it is ready (a small
+    /// pitch error for those blocks, not a rebuild inside the block).
     pub(crate) fn follow_source_rate(&mut self, shared: &Shared) {
-        // Extra output rings are fed at the clock output's output rate.
-        let source = match shared.output_rate.load(Ordering::Relaxed) {
+        let source = self.followed_source(shared);
+        if source == self.source_rate {
+            return;
+        }
+        shared.extra_kernels[self.slot].try_adopt(&mut self.resampler);
+        if self.resampler.pair() == (source, self.output_rate) {
+            self.source_rate = source;
+            shared.extra_output_bus(self.slot).set_source_rate(source);
+            self.drift_ppm = 0.0;
+            self.drift_integral = 0.0;
+            self.drift_error = None;
+            self.step_error = None;
+        }
+    }
+
+    /// The rate the clock side feeds this ring at, as `Shared` publishes it.
+    fn followed_source(&self, shared: &Shared) -> u32 {
+        match shared.output_rate.load(Ordering::Relaxed) {
             0 => match shared
                 .extra_output_bus(self.slot)
                 .source_rate
@@ -130,16 +150,36 @@ impl ExtraOutputMixer {
                 rate => rate,
             },
             rate => rate,
-        };
-        if source != self.source_rate {
-            self.source_rate = source;
-            self.resampler.configure(source, self.output_rate);
-            shared.extra_output_bus(self.slot).set_source_rate(source);
-            self.drift_ppm = 0.0;
-            self.drift_integral = 0.0;
-            self.drift_error = None;
-            self.step_error = None;
         }
+    }
+
+    /// Builds the filter for the rate `Shared` already published.  Call it when
+    /// the stream opens, before it drains the ring; a callback adopts a
+    /// planned table instead.
+    pub(crate) fn configure_source_rate(&mut self, shared: &Shared) {
+        let source = self.followed_source(shared);
+        if source == self.source_rate {
+            return;
+        }
+        self.source_rate = source;
+        self.resampler.configure(source, self.output_rate);
+        shared.extra_output_bus(self.slot).set_source_rate(source);
+        self.drift_ppm = 0.0;
+        self.drift_integral = 0.0;
+        self.drift_error = None;
+        self.step_error = None;
+    }
+
+    /// For tests: how many kernels the resampler built.
+    #[cfg(test)]
+    pub(crate) fn configure_calls(&self) -> usize {
+        self.resampler.configure_calls()
+    }
+
+    /// The rate pair the resampler is playing, for tests.
+    #[cfg(test)]
+    pub(crate) fn resampler_pair(&self) -> (u32, u32) {
+        self.resampler.pair()
     }
 
     fn steer_drift(&mut self, shared: &Shared, target: usize, seconds: f32, drift: bool) -> f32 {

@@ -1,4 +1,5 @@
-use super::{kernel_taps, FrameResampler};
+use super::super::rt_guard::RtGuard;
+use super::{kernel_taps, FrameResampler, KernelHandoff};
 
 /// An endless sine at `frequency`, fed one source frame at a time.
 fn sine(source_rate: u32, frequency: f32) -> impl FnMut() -> (f32, f32) {
@@ -213,6 +214,27 @@ fn a_rate_change_reuses_the_reserved_kernel_storage() {
     assert_eq!(history, resampler.history.as_ptr());
 }
 
+/// A source above `PREALLOCATED_SOURCE_RATE` (ASIO allows up to 768 kHz)
+/// outgrows the kernel-row reservation, but its history is still inside the
+/// separate `MAX_TAPS` reservation: `adopt` must not allocate or free.
+#[test]
+fn adopting_above_the_preallocated_source_rate_reuses_the_history() {
+    let mut resampler: FrameResampler = FrameResampler::new(48_000, 44_100);
+    let history = resampler.history.as_ptr();
+    let kernel = FrameResampler::<(f32, f32)>::plan(384_000, 44_100);
+    let guard = RtGuard::enter();
+    let retired = resampler.adopt(kernel);
+    assert_eq!(guard.allocations(), 0, "adopt allocated");
+    assert_eq!(guard.frees(), 0, "adopt freed");
+    assert_eq!(
+        history,
+        resampler.history.as_ptr(),
+        "the history reallocated"
+    );
+    drop(guard);
+    drop(retired);
+}
+
 #[test]
 fn lane_frames_resample_like_the_stereo_pair() {
     let mut stereo = FrameResampler::new(44_100, 48_000);
@@ -238,4 +260,89 @@ fn lane_frames_resample_like_the_stereo_pair() {
         // Lanes past the count stay silent.
         assert_eq!(frame[3], 0.0);
     }
+}
+
+/// A planned table installed by `adopt` is the same filter `configure`
+/// would have built, on an integer pair, a non-integer ratio and a
+/// downsampling pair.
+#[test]
+fn an_adopted_kernel_plays_like_a_configured_one() {
+    for (source_rate, output_rate) in [(48_000, 48_000), (44_100, 48_000), (96_000, 44_100)] {
+        let mut configured = FrameResampler::new(48_000, 48_000);
+        configured.configure(source_rate, output_rate);
+        let mut adopted = FrameResampler::new(48_000, 48_000);
+        let kernel = FrameResampler::<(f32, f32)>::plan(source_rate, output_rate);
+        drop(adopted.adopt(kernel));
+
+        let mut configured_source = sine(source_rate, 1_000.0);
+        let mut adopted_source = sine(source_rate, 1_000.0);
+        for frame in 0..400 {
+            let expected = configured.next(&mut configured_source);
+            let played = adopted.next(&mut adopted_source);
+            assert_eq!(
+                played.0.to_bits(),
+                expected.0.to_bits(),
+                "{source_rate} -> {output_rate}, frame {frame}"
+            );
+            assert_eq!(
+                played.1.to_bits(),
+                expected.1.to_bits(),
+                "{source_rate} -> {output_rate}, frame {frame}"
+            );
+        }
+    }
+}
+
+/// The handoff keeps one pending table, retires the rows a callback replaced
+/// for the poster to drop, and retires a table for the pair already playing
+/// instead of restarting its history.
+#[test]
+fn the_kernel_handoff_retires_rows_and_leaves_a_matching_table() {
+    let handoff = KernelHandoff::new();
+    handoff.post(FrameResampler::<(f32, f32)>::plan(44_100, 48_000));
+    handoff.post(FrameResampler::<(f32, f32)>::plan(96_000, 44_100));
+    assert_eq!(
+        handoff.pending_pair(),
+        Some((96_000, 44_100)),
+        "the stale pending table was replaced"
+    );
+
+    let mut resampler: FrameResampler = FrameResampler::new(48_000, 44_100);
+    let built = resampler.configure_calls();
+    handoff.try_adopt(&mut resampler);
+    assert_eq!(resampler.pair(), (96_000, 44_100));
+    assert_eq!(handoff.pending_pair(), None);
+    assert_eq!(resampler.configure_calls(), built, "adopt built nothing");
+    assert!(
+        handoff.retired_len().is_some(),
+        "the rows the callback replaced wait for the poster"
+    );
+
+    // The next post frees them on this thread and installs its own table.
+    handoff.post(FrameResampler::<(f32, f32)>::plan(48_000, 48_000));
+    assert_eq!(handoff.retired_len(), None);
+    assert_eq!(handoff.pending_pair(), Some((48_000, 48_000)));
+
+    // A table for the pair already playing would reset the history, so it is
+    // retired uninstalled, and the ready flag drops: the next block is a
+    // single relaxed load again instead of a lock for the rest of the run.
+    let mut playing: FrameResampler = FrameResampler::new(44_100, 48_000);
+    let built = playing.configure_calls();
+    handoff.post(FrameResampler::<(f32, f32)>::plan(44_100, 48_000));
+    handoff.try_adopt(&mut playing);
+    assert_eq!(playing.pair(), (44_100, 48_000));
+    assert_eq!(playing.configure_calls(), built);
+    assert_eq!(handoff.pending_pair(), None);
+    assert!(handoff.retired_len().is_some());
+    assert!(
+        !handoff.ready_for_test(),
+        "the matching table is not retried"
+    );
+
+    // And a table planned for another output rate is retired the same way.
+    handoff.post(FrameResampler::<(f32, f32)>::plan(96_000, 96_000));
+    handoff.try_adopt(&mut playing);
+    assert_eq!(playing.pair(), (44_100, 48_000));
+    assert_eq!(handoff.pending_pair(), None);
+    assert!(!handoff.ready_for_test());
 }
