@@ -7,7 +7,6 @@ code review has landed; that history is in git.
 
 The findings that need their own change, with the issue that tracks each:
 
-- Resampler kernel handoff out of the output callback (#119).
 - The last `winapi` uses moved to the `windows` crate (#124).
 
 ## Features

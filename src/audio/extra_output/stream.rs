@@ -148,7 +148,7 @@ where
     let channels = channels.max(1);
     let mut promote = PromoteOnce::default();
     let mut mixer = ExtraOutputMixer::new(slot, config.sample_rate, channels);
-    mixer.follow_source_rate(&shared);
+    mixer.configure_source_rate(&shared);
     mixer.publish_channels(&shared);
 
     let stream = device

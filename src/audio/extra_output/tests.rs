@@ -95,9 +95,8 @@ fn render_one_block(
 fn an_extra_output_block_allocates_and_frees_nothing() {
     let frames = 128;
     let shared = one_extra_output(2, 100.0);
-    // The drift loop steers every block, and the rate switch below rebuilds
-    // the resampler's kernel (`FrameResampler::configure`) inside a counted
-    // block: not only the ring read.
+    // The drift loop steers every block; the rate switch below is planned by
+    // the publisher, and the counted block only adopts the table.
     shared.drift_enabled.store(true, Ordering::Relaxed);
     let bus = shared.extra_output_bus(0);
     // Enough to leave priming on the first block and run dry later, so the
@@ -117,9 +116,11 @@ fn an_extra_output_block_allocates_and_frees_nothing() {
         48_000,
         "no rate change yet"
     );
-    // The clock output redraws at 96 kHz: the next counted block reconfigures
-    // the resampler, which must reuse the storage `new` reserved.
-    shared.output_rate.store(96_000, Ordering::Relaxed);
+    // The stream published the device rate it opened at, and the clock output
+    // redraws at 96 kHz: the publisher plans the kernel, and the next counted
+    // block only adopts it.
+    bus.set_playback_rate(48_000);
+    shared.set_output_rate(96_000);
     render_one_block(&mut mixer, &shared, frames, &mut out);
     assert_eq!(
         bus.source_rate.load(Ordering::Relaxed),
@@ -380,6 +381,8 @@ fn played_and_recorded(
         shared.push_extra_output_frame(0, bus.generation(), &frame);
     }
     let mut mixer = ExtraOutputMixer::new(0, device_rate, channels);
+    mixer.configure_source_rate(&shared);
+    assert_eq!(mixer.resampler_pair(), (44_100, device_rate));
     let mut out = Vec::new();
     mixer.render(&shared, frames + 512, |_, mapped| {
         out.push(
@@ -501,4 +504,39 @@ fn a_extra_output_stream_publishes_its_rate_buffer_and_bridge_buffer_fill() {
     bus.reset_playback();
     bus.set_playback_rate(44_100);
     assert_eq!(shared.snapshot().extra_output_buffer_frames[0], 0);
+}
+
+/// The clock output redrawing after the extra output opened posts a kernel
+/// for the pair (clock rate, the device's own rate); the extra mixer adopts
+/// it without building one.
+#[test]
+fn an_extra_output_adopts_the_kernel_the_clock_rate_posts() {
+    let frames = 128;
+    let shared = one_extra_output(2, 100.0);
+    let bus = shared.extra_output_bus(0);
+    bus.set_playback_rate(48_000);
+    for _ in 0..bus.target_frames() + 6 * frames {
+        bus.push_lanes(&[0.25, -0.25]);
+    }
+    let mut mixer = ExtraOutputMixer::new(0, 48_000, 2);
+    let mut out = vec![vec![0.0f32; 2]; frames];
+    render_one_block(&mut mixer, &shared, frames, &mut out);
+    let built = mixer.configure_calls();
+
+    shared.set_output_rate(96_000);
+    assert_eq!(
+        shared.extra_kernels[0].pending_pair(),
+        Some((96_000, 48_000)),
+        "the clock publisher planned the extra's pair"
+    );
+    render_one_block(&mut mixer, &shared, frames, &mut out);
+
+    assert_eq!(mixer.resampler_pair(), (96_000, 48_000));
+    assert_eq!(
+        mixer.configure_calls(),
+        built,
+        "the callback built a kernel"
+    );
+    assert_eq!(bus.source_rate.load(Ordering::Relaxed), 96_000);
+    assert!(out.iter().any(|frame| frame[0] > 0.0));
 }
