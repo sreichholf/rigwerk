@@ -146,15 +146,17 @@ impl ::vst3::Steinberg::Linux::IRunLoopTrait for HostApplication {
         handler: *mut ::vst3::Steinberg::Linux::IEventHandler,
         fd: ::vst3::Steinberg::Linux::FileDescriptor,
     ) -> tresult {
+        let owner = std::ptr::from_ref(self) as usize;
         // SAFETY: the plugin passes a live handler or null.
-        unsafe { super::run_loop::register_fd(handler, fd) }
+        unsafe { super::run_loop::register_fd(owner, handler, fd) }
     }
 
     unsafe fn unregisterEventHandler(
         &self,
         handler: *mut ::vst3::Steinberg::Linux::IEventHandler,
     ) -> tresult {
-        super::run_loop::unregister_fd(handler)
+        let owner = std::ptr::from_ref(self) as usize;
+        super::run_loop::unregister_fd(owner, handler)
     }
 
     unsafe fn registerTimer(
@@ -162,15 +164,17 @@ impl ::vst3::Steinberg::Linux::IRunLoopTrait for HostApplication {
         handler: *mut ::vst3::Steinberg::Linux::ITimerHandler,
         milliseconds: ::vst3::Steinberg::Linux::TimerInterval,
     ) -> tresult {
+        let owner = std::ptr::from_ref(self) as usize;
         // SAFETY: the plugin passes a live handler or null.
-        unsafe { super::run_loop::register_timer(handler, milliseconds) }
+        unsafe { super::run_loop::register_timer(owner, handler, milliseconds) }
     }
 
     unsafe fn unregisterTimer(
         &self,
         handler: *mut ::vst3::Steinberg::Linux::ITimerHandler,
     ) -> tresult {
-        super::run_loop::unregister_timer(handler)
+        let owner = std::ptr::from_ref(self) as usize;
+        super::run_loop::unregister_timer(owner, handler)
     }
 }
 

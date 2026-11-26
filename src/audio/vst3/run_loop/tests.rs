@@ -28,7 +28,7 @@ impl ITimerHandlerTrait for Timer {
         self.fired.fetch_add(1, Ordering::SeqCst);
         let targets = self.targets.lock().expect("targets").clone();
         for target in targets {
-            super::unregister_timer(target as *mut ITimerHandler);
+            super::unregister_timer_everywhere(target as *mut ITimerHandler);
         }
     }
 }
@@ -176,6 +176,120 @@ fn run_loop_calls_an_fd_handler_when_its_fd_is_readable() {
         libc::close(pipe[1]);
     }
     assert_eq!(counts(), (0, 0));
+}
+
+#[test]
+fn unregister_event_handler_removes_every_fd_of_the_handler() {
+    let _main = crate::audio::claim_main_thread();
+    let run_loop = host_run_loop();
+    let reader = ComWrapper::new(Reader::default());
+    let handler = reader
+        .as_com_ref::<IEventHandler>()
+        .expect("handler")
+        .as_ptr();
+    let mut pipes = [[0; 2]; 2];
+    for pipe in &mut pipes {
+        // SAFETY: each array has room for both ends.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    }
+    // SAFETY: a live handler, and two live descriptors.
+    unsafe {
+        assert_eq!(
+            run_loop.registerEventHandler(handler, pipes[0][0]),
+            kResultTrue
+        );
+        assert_eq!(
+            run_loop.registerEventHandler(handler, pipes[1][0]),
+            kResultTrue
+        );
+    }
+    assert_eq!(counts().0, 2);
+    // The interface has no descriptor argument: one call unregisters the
+    // handler everywhere, as JUCE relies on when its editor closes.
+    // SAFETY: the registered handler.
+    assert_eq!(
+        unsafe { run_loop.unregisterEventHandler(handler) },
+        kResultTrue
+    );
+    assert_eq!(counts().0, 0, "both descriptors went with one unregister");
+    // SAFETY: the handler is gone; close our own descriptors.
+    unsafe {
+        assert_eq!(run_loop.unregisterEventHandler(handler), kResultFalse);
+        for pipe in pipes {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+    }
+}
+
+#[test]
+fn one_run_loop_does_not_unregister_anothers_handler() {
+    let _main = crate::audio::claim_main_thread();
+    let host = host_run_loop();
+    let frame = ComWrapper::new(crate::audio::vst3::editor::PlugFrame::new());
+    let frame_loop = frame
+        .as_com_ref::<IRunLoop>()
+        .expect("the frame is a run loop");
+    let reader = ComWrapper::new(Reader::default());
+    let handler = reader
+        .as_com_ref::<IEventHandler>()
+        .expect("handler")
+        .as_ptr();
+    let mut pipes = [[0; 2]; 2];
+    for pipe in &mut pipes {
+        // SAFETY: each array has room for both ends.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    }
+    // SAFETY: a live handler and two live descriptors on two run loops.
+    unsafe {
+        assert_eq!(host.registerEventHandler(handler, pipes[0][0]), kResultTrue);
+        assert_eq!(
+            frame_loop.registerEventHandler(handler, pipes[1][0]),
+            kResultTrue
+        );
+    }
+    assert_eq!(counts().0, 2);
+    // SAFETY: the registered handler.
+    assert_eq!(unsafe { host.unregisterEventHandler(handler) }, kResultTrue);
+    assert_eq!(counts().0, 1, "the frame's registration stays");
+    // SAFETY: the registered handler.
+    assert_eq!(
+        unsafe { frame_loop.unregisterEventHandler(handler) },
+        kResultTrue
+    );
+    assert_eq!(counts().0, 0);
+    // SAFETY: our own descriptors.
+    unsafe {
+        for pipe in pipes {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+    }
+}
+
+#[test]
+fn unregister_timer_removes_every_registration_of_the_handler() {
+    let _main = crate::audio::claim_main_thread();
+    let run_loop = host_run_loop();
+    let timer = ComWrapper::new(Timer::default());
+    // SAFETY: a live handler; the interval is irrelevant here.
+    unsafe {
+        assert_eq!(
+            run_loop.registerTimer(timer_ptr(&timer), 1_000),
+            kResultTrue
+        );
+        assert_eq!(
+            run_loop.registerTimer(timer_ptr(&timer), 2_000),
+            kResultTrue
+        );
+    }
+    assert_eq!(counts().1, 2);
+    // SAFETY: the registered handler.
+    assert_eq!(
+        unsafe { run_loop.unregisterTimer(timer_ptr(&timer)) },
+        kResultTrue
+    );
+    assert_eq!(counts().1, 0, "one unregister removes every interval");
 }
 
 #[test]
