@@ -614,7 +614,7 @@ unsafe fn run(
     let channels = session.info.channels;
     let kind = session.format.kind;
     let mut mixer = OutputMixer::new(session.info.rate, channels);
-    mixer.follow_source_rate(&shared);
+    mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
     // Exclusive event-driven: every signal requires a *full* endpoint buffer
     // (IAudioClient::GetBufferSize).  Shared REAL-style keeps one engine step

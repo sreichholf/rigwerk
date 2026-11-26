@@ -411,7 +411,7 @@ unsafe fn run(
     let channels = session.info.channels;
     let mut mixer = OutputMixer::new(session.info.rate, channels);
     // Design the filter before the loop starts, not during an audio step.
-    mixer.follow_source_rate(&shared);
+    mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
     mixer.prepare(session.buffer_frames.max(1) as usize);
     // Keep exactly one step queued.  The host hands us a much larger buffer

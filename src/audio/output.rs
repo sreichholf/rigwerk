@@ -256,7 +256,7 @@ where
     let mut mixer = OutputMixer::new(config.sample_rate, channels);
     // Design the filter before the stream starts: the first callback must not
     // spend a millisecond building the kernel.
-    mixer.follow_source_rate(&shared);
+    mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
     // cpal only knows the block size once it calls back; size the scratch for
     // the requested buffer or, with the host's default, for a generous one.

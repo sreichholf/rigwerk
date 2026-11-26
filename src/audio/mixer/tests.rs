@@ -7,6 +7,7 @@ use super::super::output_map::{
     old_write_frame, ChannelMap, DeviceFrame, OutputDeviceSettings, PathMapSettings, UnusedChannels,
 };
 use super::super::record::{push_device_frame, RecordPhase, RecordSource};
+use super::super::rt_guard::RtGuard;
 use super::super::shared::Shared;
 use super::super::types::BufferMode;
 use super::path::PathProcessor;
@@ -789,6 +790,7 @@ fn golden_ring_render(hash: &mut Fnv) {
     store_gain(&shared, 0.8);
     let channels = 4;
     let mut mixer = OutputMixer::new(48_000, channels);
+    mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
     mixer.prepare(256);
     let mut source = Source::new();
@@ -2681,4 +2683,164 @@ fn a_paused_effect_is_republished_into_and_out_of_its_pause() {
     let version = shared.plugin_views_version();
     shared.service_plugins();
     assert_eq!(shared.plugin_views_version(), version);
+}
+
+/// Renders one block into a buffer the test owns and asserts the callback
+/// allocated and freed nothing.  The scratch is grown before the guard, as a
+/// backend does.
+fn guarded_render(mixer: &mut OutputMixer, shared: &Shared, frames: usize) -> Vec<[f32; 4]> {
+    mixer.prepare(frames);
+    let mut out = vec![[0.0f32; 4]; frames];
+    let guard = RtGuard::enter();
+    mixer.render_taps(shared, frames, |index, frame| out[index] = frame);
+    assert_eq!(guard.allocations(), 0, "the block allocated");
+    assert_eq!(guard.frees(), 0, "the block freed a table");
+    drop(guard);
+    out
+}
+
+/// A rate change whose kernel never reached the mixers keeps the old pair and
+/// keeps playing; the callback must not build one.
+#[test]
+fn a_source_rate_change_without_a_kernel_keeps_playing_and_builds_nothing() {
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    let _ = guarded_render(&mut mixer, &shared, 64);
+    assert_eq!(mixer.resampler_pair(), (48_000, 48_000));
+    let built = mixer.configure_calls();
+
+    // The publisher's table was lost: post one, then drop it through the
+    // test accessor, and change the published rate without posting another.
+    shared.set_output_rate(48_000);
+    assert!(
+        shared.clock_kernel.take_pending().is_some(),
+        "the publisher posted a table to drop"
+    );
+    shared.source_rate.store(44_100, Ordering::Relaxed);
+    assert!(shared.clock_kernel.take_pending().is_none());
+
+    for _ in 0..4 {
+        let out = guarded_render(&mut mixer, &shared, 64);
+        assert!(
+            out.iter().all(|frame| frame[0].is_finite()),
+            "the old table still produced finite output"
+        );
+        assert!(
+            out.iter().any(|frame| frame[0].abs() > 0.1),
+            "the old table kept playing"
+        );
+    }
+    assert_eq!(mixer.resampler_pair(), (48_000, 48_000));
+    assert_eq!(
+        mixer.configure_calls(),
+        built,
+        "the callback built a kernel"
+    );
+}
+
+/// A table the publisher planned is adopted on the next block, and the rows
+/// the callback replaced are left in the handoff for the poster.
+#[test]
+fn a_posted_kernel_is_adopted_on_the_next_block() {
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    let _ = guarded_render(&mut mixer, &shared, 64);
+    let built = mixer.configure_calls();
+
+    shared.set_output_rate(48_000);
+    shared.set_source_rate(44_100);
+    assert_eq!(
+        shared.clock_kernel.pending_pair(),
+        Some((44_100, 48_000)),
+        "the publisher posted the pair it just completed"
+    );
+
+    let out = guarded_render(&mut mixer, &shared, 64);
+    assert_eq!(mixer.resampler_pair(), (44_100, 48_000));
+    assert_eq!(
+        mixer.configure_calls(),
+        built,
+        "the callback built a kernel"
+    );
+    assert!(out.iter().any(|frame| frame[0].abs() > 0.1));
+    assert!(
+        shared.clock_kernel.retired_len().is_some(),
+        "the callback left the replaced rows for the poster"
+    );
+}
+
+/// A busy handoff lock leaves the block on the old table; the block after the
+/// lock is free adopts the posted one.
+#[test]
+fn a_busy_handoff_lock_plays_the_old_table_until_the_next_block() {
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    let _ = guarded_render(&mut mixer, &shared, 64);
+    let built = mixer.configure_calls();
+
+    shared.set_output_rate(48_000);
+    shared.set_source_rate(44_100);
+    let held = shared.clock_kernel.hold_for_test();
+    let out = guarded_render(&mut mixer, &shared, 64);
+    assert_eq!(mixer.resampler_pair(), (48_000, 48_000));
+    assert_eq!(
+        mixer.configure_calls(),
+        built,
+        "the callback built a kernel"
+    );
+    assert!(out.iter().any(|frame| frame[0].abs() > 0.1));
+    drop(held);
+
+    let out = guarded_render(&mut mixer, &shared, 64);
+    assert_eq!(mixer.resampler_pair(), (44_100, 48_000));
+    assert_eq!(
+        mixer.configure_calls(),
+        built,
+        "the callback built a kernel"
+    );
+    assert!(out.iter().any(|frame| frame[0].abs() > 0.1));
+}
+
+/// A kernel planned for a different device rate (the output renegotiated
+/// while the source changed) is not adopted: the mixer keeps its own output
+/// rate, and a later correct table still is.
+#[test]
+fn a_kernel_for_another_output_rate_is_not_adopted() {
+    let (mut mixer, shared) = steady_mixer((0.5, -0.25));
+    let _ = guarded_render(&mut mixer, &shared, 64);
+    let built = mixer.configure_calls();
+
+    shared
+        .clock_kernel
+        .post(super::super::resampler::FrameResampler::<(f32, f32)>::plan(
+            44_100, 96_000,
+        ));
+    shared.source_rate.store(44_100, Ordering::Relaxed);
+
+    let out = guarded_render(&mut mixer, &shared, 64);
+    assert_eq!(mixer.resampler_pair(), (48_000, 48_000));
+    assert_eq!(
+        mixer.configure_calls(),
+        built,
+        "the callback built a kernel"
+    );
+    assert!(out.iter().any(|frame| frame[0].abs() > 0.1));
+    assert_eq!(
+        shared.clock_kernel.pending_pair(),
+        None,
+        "the foreign table is retired, not retried every block"
+    );
+    assert!(
+        shared.clock_kernel.retired_len().is_some(),
+        "the foreign table waits for the next post to be dropped"
+    );
+
+    // The publisher's next table is for this device's rate and is adopted.
+    shared.set_output_rate(48_000);
+    shared.set_source_rate(44_100);
+    let out = guarded_render(&mut mixer, &shared, 64);
+    assert_eq!(mixer.resampler_pair(), (44_100, 48_000));
+    assert_eq!(
+        mixer.configure_calls(),
+        built,
+        "the callback built a kernel"
+    );
+    assert!(out.iter().any(|frame| frame[0].abs() > 0.1));
 }

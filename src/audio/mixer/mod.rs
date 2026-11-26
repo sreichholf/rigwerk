@@ -306,18 +306,61 @@ impl OutputMixer {
     /// Follows the input's real rate.  It is only known once the input has
     /// opened, and an input that could not take the requested rate reports
     /// its own here.
+    ///
+    /// The new kernel is planned by the rate publisher and handed over in
+    /// [`Shared::clock_kernel`]; this only installs it (see
+    /// [`super::resampler::KernelHandoff::try_adopt`]).  While it is not
+    /// ready the mixer keeps
+    /// its current pair and keeps playing: the pitch is off by the rate
+    /// difference for the few blocks until the table arrives, rather than the
+    /// block rebuilding it.
     pub(crate) fn follow_source_rate(&mut self, shared: &Shared) {
-        let source = match shared.source_rate.load(Ordering::Relaxed) {
-            0 => self.output_rate,
-            rate => rate,
-        };
-        if source != self.source_rate {
+        let source = self.followed_source(shared);
+        if source == self.source_rate {
+            return;
+        }
+        shared.clock_kernel.try_adopt(&mut self.resampler);
+        if self.resampler.pair() == (source, self.output_rate) {
             self.source_rate = source;
-            self.resampler.configure(source, self.output_rate);
             self.drift_ppm = 0.0;
             self.drift_integral = 0.0;
             self.drift_error = None;
         }
+    }
+
+    /// The source rate the mixer should run at, from `Shared`.
+    fn followed_source(&self, shared: &Shared) -> u32 {
+        match shared.source_rate.load(Ordering::Relaxed) {
+            0 => self.output_rate,
+            rate => rate,
+        }
+    }
+
+    /// Builds the filter for the source rate `Shared` already published.  Call
+    /// it on the setup thread before the stream starts; a callback adopts a
+    /// planned table instead.
+    pub(crate) fn configure_source_rate(&mut self, shared: &Shared) {
+        let source = self.followed_source(shared);
+        if source == self.source_rate {
+            return;
+        }
+        self.source_rate = source;
+        self.resampler.configure(source, self.output_rate);
+        self.drift_ppm = 0.0;
+        self.drift_integral = 0.0;
+        self.drift_error = None;
+    }
+
+    /// For tests: how many kernels the resampler built.
+    #[cfg(test)]
+    pub(crate) fn configure_calls(&self) -> usize {
+        self.resampler.configure_calls()
+    }
+
+    /// The rate pair the resampler is playing, for tests.
+    #[cfg(test)]
+    pub(crate) fn resampler_pair(&self) -> (u32, u32) {
+        self.resampler.pair()
     }
 
     /// Steers the conversion ratio from the ring-fill error.  A fill above

@@ -458,9 +458,19 @@ impl KernelHandoff {
             self.ready.store(false, Ordering::Relaxed);
             return;
         };
-        if (kernel.source_rate, kernel.output_rate) == resampler.pair() {
-            // Adopting this would reset the history and restart what is
-            // already playing at the right pair.  The next post replaces it.
+        let current = resampler.pair();
+        let usable =
+            kernel.output_rate == current.1 && (kernel.source_rate, kernel.output_rate) != current;
+        if !usable {
+            // Either it is already what plays (adopting it would reset the
+            // history and restart the right pair) or it is planned for another
+            // output rate, which would leave the mixer's own device rate
+            // behind.  Park it where the poster drops it, so the block costs
+            // one relaxed load again instead of a lock until the next post.
+            if slot.retired.is_none() {
+                slot.retired = slot.pending.take().map(|kernel| kernel.rows);
+            }
+            self.ready.store(false, Ordering::Relaxed);
             return;
         }
         if slot.retired.is_some() {
@@ -492,6 +502,12 @@ impl KernelHandoff {
                 .as_ref()
                 .map(|kernel| (kernel.source_rate, kernel.output_rate))
         })
+    }
+
+    /// Whether a block would look at the slot, for tests.
+    #[cfg(test)]
+    pub(crate) fn ready_for_test(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
     }
 
     /// Takes the pending table out, for a test that wants the callback to

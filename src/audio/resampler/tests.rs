@@ -294,8 +294,8 @@ fn an_adopted_kernel_plays_like_a_configured_one() {
 }
 
 /// The handoff keeps one pending table, retires the rows a callback replaced
-/// for the poster to drop, and leaves a table for the pair already playing
-/// alone instead of restarting its history.
+/// for the poster to drop, and retires a table for the pair already playing
+/// instead of restarting its history.
 #[test]
 fn the_kernel_handoff_retires_rows_and_leaves_a_matching_table() {
     let handoff = KernelHandoff::new();
@@ -324,10 +324,25 @@ fn the_kernel_handoff_retires_rows_and_leaves_a_matching_table() {
     assert_eq!(handoff.pending_pair(), Some((48_000, 48_000)));
 
     // A table for the pair already playing would reset the history, so it is
-    // not adopted at all.
+    // retired uninstalled, and the ready flag drops: the next block is a
+    // single relaxed load again instead of a lock for the rest of the run.
     let mut playing: FrameResampler = FrameResampler::new(44_100, 48_000);
+    let built = playing.configure_calls();
     handoff.post(FrameResampler::<(f32, f32)>::plan(44_100, 48_000));
     handoff.try_adopt(&mut playing);
-    assert_eq!(handoff.pending_pair(), Some((44_100, 48_000)));
     assert_eq!(playing.pair(), (44_100, 48_000));
+    assert_eq!(playing.configure_calls(), built);
+    assert_eq!(handoff.pending_pair(), None);
+    assert!(handoff.retired_len().is_some());
+    assert!(
+        !handoff.ready_for_test(),
+        "the matching table is not retried"
+    );
+
+    // And a table planned for another output rate is retired the same way.
+    handoff.post(FrameResampler::<(f32, f32)>::plan(96_000, 96_000));
+    handoff.try_adopt(&mut playing);
+    assert_eq!(playing.pair(), (44_100, 48_000));
+    assert_eq!(handoff.pending_pair(), None);
+    assert!(!handoff.ready_for_test());
 }

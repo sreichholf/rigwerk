@@ -503,7 +503,7 @@ fn run_graph(
         // The Mixer offers click chips for those two only, so a chip for
         // channel 3 or 4 is not shown.
         let mut mixer = OutputMixer::new(output_rate, 2);
-        mixer.follow_source_rate(&shared);
+        mixer.configure_source_rate(&shared);
         mixer.publish_device_channels(&shared);
         mixer.prepare(PREPARED_BLOCK);
         let data = PlaybackData {
