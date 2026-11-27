@@ -98,6 +98,10 @@ pub(crate) struct PathProcessor {
     latency: u32,
     /// The same, before clamping to [`MAX_ALIGN`] (for the report).
     pub(super) latency_raw: u32,
+    /// The plugin chain's own latency, clamped to [`MAX_ALIGN`]: what the
+    /// fallback for a missed chain delays by.  It stands in for the chain
+    /// alone; the NAM blocks before it already delayed its input.
+    chain_latency: u32,
     /// The path's chain runtime, taken with the first block of the path and
     /// parked again when the path stops being live or this processor drops
     /// (see `plugins::chain`).
@@ -195,6 +199,7 @@ impl PathProcessor {
         Self {
             latency: 0,
             latency_raw: 0,
+            chain_latency: 0,
             drain: None,
             chain: None,
             chain_line: DelayLine::new(MAX_ALIGN as usize + CHAIN_CHUNK),
@@ -336,9 +341,9 @@ impl PathProcessor {
         self.nam.begin(controls, rate, ramp_samples);
         // Plugin latency and NAM latency add: an oversampled block really
         // delays its output, so this path does not delay it again.
-        self.latency_raw = controls
-            .latency_samples()
-            .saturating_add(self.nam.latency_samples());
+        let chain_latency = controls.latency_samples();
+        self.chain_latency = chain_latency.min(MAX_ALIGN);
+        self.latency_raw = chain_latency.saturating_add(self.nam.latency_samples());
         self.latency = self.latency_raw.min(MAX_ALIGN);
         controls.store_path_latency(self.latency_raw);
         self.cab.begin(controls, rate, ramp_samples);
@@ -530,8 +535,9 @@ impl PathProcessor {
     /// needs (see the `audio::path::plugins` docs), so a miss is rare: the
     /// UI holding the parked runtime for a moment, or another mixer still
     /// holding it.  The chain's input also goes into `chain_line`; a chunk
-    /// the chain cannot run plays that input delayed by the chain latency
-    /// instead.  That
+    /// the chain cannot run plays that input delayed by the plugin chain's
+    /// own latency instead (not the path's: the NAM blocks before the chain
+    /// already delayed that input).  That
     /// keeps the path's timing in the sum (no comb, no phase jump), but not
     /// its sound: for the missed chunk the path plays dry (its effects'
     /// level and tone are gone).  The switch into the fallback cannot
@@ -543,7 +549,7 @@ impl PathProcessor {
     /// chain with no active effect but some latency (all bypassed) still
     /// runs: its skipped effects delay by their latency.
     pub(super) fn run_effects(&mut self, controls: &PathControls, frames: usize) {
-        if !controls.has_plugins() && self.latency == 0 {
+        if !controls.has_plugins() && self.chain_latency == 0 {
             // Nothing runs and nothing delays.  The history is stale from
             // here on; a chain that comes back starts from silence.
             self.chain_line.reset();
@@ -554,9 +560,9 @@ impl PathProcessor {
         }
         if self.chain_mix >= 1.0 {
             // Nothing reads the fallback: it follows the latency at once.
-            self.chain_tap.snap(self.latency);
+            self.chain_tap.snap(self.chain_latency);
         } else {
-            self.chain_tap.set_target(self.latency, self.tap_fade);
+            self.chain_tap.set_target(self.chain_latency, self.tap_fade);
         }
         let mut left = std::mem::take(&mut self.plugin_l);
         let mut right = std::mem::take(&mut self.plugin_r);
@@ -581,7 +587,7 @@ impl PathProcessor {
             let entering = !ran && self.chain_mix > 0.0 && !self.chain_fresh;
             if !ran {
                 self.chain_mix = 0.0;
-                self.chain_hold = self.latency;
+                self.chain_hold = self.chain_latency;
             }
             if self.chain_mix < 1.0 {
                 for index in 0..count {

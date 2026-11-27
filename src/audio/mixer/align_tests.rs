@@ -336,6 +336,90 @@ fn a_missed_chain_keeps_the_sum_in_time_and_level() {
     }
 }
 
+/// One path with an oversampled NAM block before a pure delay of
+/// `latency`, playing only on the clock output.
+fn oversampled_chain_mixer(latency: u32) -> (OutputMixer, Shared) {
+    use super::super::nam::NamBlockControls;
+    let shared = Shared::new(RATE);
+    shared.set_master(false, [true, true], false);
+    shared
+        .direct
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let off = EqSettings {
+        enabled: false,
+        ..EqSettings::default()
+    };
+    let mix = PathMix {
+        eqs: [off, off],
+        ..PathMix::default()
+    };
+    let mut stack = NamStack::default();
+    stack.push(NamBlockControls::default());
+    shared.restore_path(0, &mix, &stack, Vec::new());
+    shared.paths[0].queue_nam(0, super::rt_tests::scaled_model());
+    shared.paths[0].edit_chain(|chain| chain.insert_delay_for_test(latency));
+    let mut mixer = OutputMixer::new(RATE, 2);
+    mixer.prepare(BLOCK);
+    (mixer, shared)
+}
+
+/// The fallback for a missed chain stands in for the plugin chain alone:
+/// its input already comes out of the oversampled block, so it delays by
+/// the chain's latency, not the whole path's.
+#[test]
+fn a_missed_chain_after_an_oversampled_block_keeps_its_timing() {
+    const LATENCY: u32 = 64;
+    let (mut reference, reference_shared) = oversampled_chain_mixer(LATENCY);
+    let (mut mixer, shared) = oversampled_chain_mixer(LATENCY);
+    let mut clock = 0;
+    let mut reference_clock = 0;
+    // The model warms up and fades in.
+    let mut want = run_left(
+        &mut reference,
+        &reference_shared,
+        &mut reference_clock,
+        16,
+        signal,
+    );
+    let mut out = run_left(&mut mixer, &shared, &mut clock, 16, signal);
+    assert!(
+        shared.paths[0].path_latency_samples() > LATENCY,
+        "the block oversamples: {}",
+        shared.paths[0].path_latency_samples()
+    );
+    reference.park_chains_for_test();
+    want.extend(run_left(
+        &mut reference,
+        &reference_shared,
+        &mut reference_clock,
+        1,
+        signal,
+    ));
+    {
+        mixer.park_chains_for_test();
+        let _held = shared.paths[0].hold_chain_for_test();
+        out.extend(run_left(&mut mixer, &shared, &mut clock, 1, signal));
+    }
+    want.extend(run_left(
+        &mut reference,
+        &reference_shared,
+        &mut reference_clock,
+        4,
+        signal,
+    ));
+    out.extend(run_left(&mut mixer, &shared, &mut clock, 4, signal));
+    let peak = want
+        .iter()
+        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    assert!(peak > 0.1, "the path plays: {peak}");
+    for (n, (sample, wanted)) in out.iter().zip(&want).enumerate() {
+        assert!(
+            (sample - wanted).abs() < 2e-3,
+            "frame {n}: {sample} vs {wanted}"
+        );
+    }
+}
+
 #[test]
 fn one_path_without_latency_has_no_delay() {
     let (mut mixer, shared) = aligned_mixer(0, 0);
