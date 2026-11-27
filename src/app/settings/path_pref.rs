@@ -3,7 +3,7 @@
 use super::serde_util::skip_unreadable;
 use crate::audio::{
     sanitize_send, CabSettings, EqSettings, GateSettings, LegacyNamSettings, NamBlockSettings,
-    PathFeed, PathMix, PluginPref, MAX_NAM_BLOCKS, MAX_PATHS, SEND_OFF_DB,
+    PathFeed, PathMix, PitchSettings, PluginPref, MAX_NAM_BLOCKS, MAX_PATHS, SEND_OFF_DB,
 };
 
 /// One signal path: its name and colour (UI data), its chain settings, its
@@ -27,6 +27,10 @@ pub(crate) struct PathPref {
     /// The EQ after the plugin effects.
     pub(crate) eq_post: EqSettings,
     pub(crate) gate: GateSettings,
+    /// The built-in pitch shifter.  Missing on older saves (off), and
+    /// omitted while it is still the default.
+    #[serde(default, skip_serializing_if = "PitchSettings::is_unset")]
+    pub(crate) pitch: PitchSettings,
     /// The NAM blocks in signal order, with their captures.  Missing on
     /// older saves, and omitted while empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,6 +141,7 @@ impl PathPref {
             eq: mix.eqs[0],
             eq_post: mix.eqs[1],
             gate: mix.gate,
+            pitch: mix.pitch,
             nam_blocks,
             amp: LegacyNamSettings::default(),
             cab: CabSettings::from_controls(mix.cab, cab_file.trim().to_owned()),
@@ -188,6 +193,7 @@ impl PathPref {
             output_enabled: self.output_channels,
             eqs: [self.eq, self.eq_post],
             gate: self.gate,
+            pitch: self.pitch,
             cab: self.cab.controls(),
             level_db: self.level_db,
             match_db: self.match_db,
@@ -200,7 +206,7 @@ impl PathPref {
         .sanitized()
     }
 
-    /// EQs, gate, level and sends in range, and a return without a solo or
+    /// EQs, gate, pitch, level and sends in range, and a return without a solo or
     /// sends; a blank name gets the default; the colour stays in the
     /// palette.  An older save's single NAM stage
     /// becomes the first block, once.
@@ -218,6 +224,7 @@ impl PathPref {
         self.eq = mix.eqs[0];
         self.eq_post = mix.eqs[1];
         self.gate = mix.gate;
+        self.pitch = mix.pitch;
         self.cab = CabSettings::from_controls(mix.cab, self.cab.file.clone()).sanitized();
         self.level_db = mix.level_db;
         self.match_db = mix.match_db;

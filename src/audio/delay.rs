@@ -117,6 +117,11 @@ impl MonoDelayLine {
         }
     }
 
+    /// The longest delay this line can read.
+    pub(crate) fn max_delay(&self) -> usize {
+        self.samples.len().saturating_sub(1)
+    }
+
     /// Forgets the history: every older sample reads as silence again.
     /// O(1), so the audio thread may call it.
     pub(crate) fn reset(&mut self) {

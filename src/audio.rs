@@ -106,8 +106,6 @@ mod output;
 mod output_map;
 mod panic_guard;
 mod path;
-// The path wiring follows; until then only the tests run the stage.
-#[allow(dead_code)]
 mod pitch;
 mod plugins;
 pub(crate) use plugins::mark_main_thread;
@@ -210,6 +208,11 @@ pub use path::{
     sanitize_path_level, sanitize_path_match, sanitize_send, DspTime, LockStats, PathFeed, PathMix,
     PluginLockReport, MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_MATCH_MAX_DB,
     SEND_OFF_DB,
+};
+pub(crate) use pitch::pitch_latency_samples;
+pub use pitch::{
+    PitchSettings, PITCH_MAX_CENTS, PITCH_MAX_DELAY_MS, PITCH_MAX_SEMITONES, PITCH_MIN_CENTS,
+    PITCH_MIN_DELAY_MS, PITCH_MIN_SEMITONES,
 };
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;

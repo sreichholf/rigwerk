@@ -596,10 +596,7 @@ impl RigWerkApp {
     /// What the UI shows for every live path, in display order.
     pub(crate) fn path_infos(&self) -> Vec<PathInfo> {
         let any_solo = self.any_solo();
-        let rate = match self.snapshot.output_rate {
-            0 => self.sample_rate.max(1),
-            rate => rate,
-        };
+        let rate = self.display_rate();
         let selected = self.selected_slot();
         let devices = self.device_settings().len();
         self.path_slots()
@@ -609,6 +606,7 @@ impl RigWerkApp {
                 let effects = self.engine.plugin_views(slot).len();
                 let mix = &path.mix;
                 let builtins = [
+                    mix.pitch.enabled && !mix.is_return(),
                     mix.eqs[0].is_active(),
                     mix.gate.enabled,
                     path.nam_active(),
@@ -882,6 +880,29 @@ impl RigWerkApp {
     /// The edited path's gate.
     pub(crate) fn set_path_gate(&mut self, gate: GateSettings) {
         self.path_mut().mix.gate = gate;
+    }
+
+    /// The edited path's pitch shifter, clamped.  It never runs on a
+    /// return, whatever is stored here.
+    pub(crate) fn set_path_pitch(&mut self, pitch: crate::audio::PitchSettings) {
+        self.path_mut().mix.pitch = pitch.sanitized();
+    }
+
+    /// What the pitch shifter at `delay_ms` delays a path by while on, ms,
+    /// at the rate the output opened (the configured one before it opens).
+    /// The DSP's own figure, so it can be shown while the stage is off.
+    pub(crate) fn pitch_latency_ms(&self, delay_ms: f32) -> f32 {
+        let rate = self.display_rate();
+        crate::audio::pitch_latency_samples(rate, delay_ms) as f32 * 1000.0 / rate as f32
+    }
+
+    /// The rate latencies are shown at: the one the output opened, else
+    /// the configured one.
+    fn display_rate(&self) -> u32 {
+        match self.snapshot.output_rate {
+            0 => self.sample_rate.max(1),
+            rate => rate,
+        }
     }
 
     /// The edited path's cabinet controls.  Does not read an impulse.

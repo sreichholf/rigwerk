@@ -358,16 +358,17 @@ impl AudioEngine {
     }
 
     /// Path `slot`'s latency in samples as the last block measured it: its
-    /// plugin chain (bypassed effects count) plus any oversampled NAM block.
+    /// plugin chain (bypassed effects count) plus any oversampled NAM block
+    /// and the pitch shifter while it is on (never on a return).
     /// The diagnostics line reads this.
     pub fn path_latency_samples(&self, slot: usize) -> u32 {
         self.shared.path(slot).path_latency_samples()
     }
 
     /// Every path slot's latency in samples (0 for unused slots), as the
-    /// alignment counts it: its chain, an oversampled NAM block's delay, and
-    /// for a return also the wait for its slowest sender.  The cabinet adds
-    /// none.
+    /// alignment counts it: its chain, an oversampled NAM block's delay, the
+    /// pitch shifter's while it is on, and for a return also the wait for its
+    /// slowest sender.  The cabinet adds none.
     pub fn path_latencies(&self) -> [u32; MAX_PATHS] {
         self.shared.alignment_latencies()
     }

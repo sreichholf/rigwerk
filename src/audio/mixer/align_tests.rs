@@ -871,3 +871,231 @@ fn a_return_plays_on_the_ring_path_too() {
     assert!((last[0] - 0.25).abs() < 1e-4, "{last:?}");
     assert!((last[1] + 0.25).abs() < 1e-4, "{last:?}");
 }
+
+/// Bursts of a sine over a faint hiss, so a keyed gate opens and closes
+/// many times, some of them inside a block.
+fn bursts(n: usize) -> f32 {
+    let hiss = ((n.wrapping_mul(2_654_435_761) >> 7) % 1_000) as f32 / 1_000.0 - 0.5;
+    let on = (n / 700) % 3 != 1;
+    let tone = if on {
+        (n as f32 * 0.05).sin() * 0.25
+    } else {
+        0.0
+    };
+    tone + hiss * 0.002
+}
+
+/// Folds output samples (as bits) into one hash (FNV-1a style).
+fn hash_samples(samples: &[f32]) -> u64 {
+    samples
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, sample| {
+            sample
+                .to_bits()
+                .to_le_bytes()
+                .iter()
+                .fold(hash, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(0x0001_0000_0000_01b3)
+                })
+        })
+}
+
+/// A gate keyed on the input, in either slot, with the pitch shifter off
+/// renders what it rendered before the key line was fed in the front of
+/// the chain (hashes recorded from that build).
+#[test]
+fn a_keyed_gate_with_the_pitch_shifter_off_is_bit_identical() {
+    use super::super::gate::GateSlot;
+    let mut hashes = Vec::new();
+    for slot in [GateSlot::Pre, GateSlot::Post] {
+        let (mut mixer, shared, _) = keyed_gate_mixer(300, slot);
+        let mut clock = 0;
+        let out = run_left(&mut mixer, &shared, &mut clock, 40, bursts);
+        assert!(out.iter().any(|sample| sample.abs() > 0.1));
+        hashes.push(hash_samples(&out));
+    }
+    // The gate's design uses the platform's libm, so the hashes are only
+    // checked where they were recorded.  Gating before the delay and gating
+    // the delayed signal on the delayed key play the same samples.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    assert_eq!(hashes, [0x57b0_6de8_cb91_6ca0; 2]);
+}
+
+/// The pitch shifter on at 0 semitones.
+fn pitch_on() -> super::super::pitch::PitchSettings {
+    super::super::pitch::PitchSettings {
+        enabled: true,
+        ..super::super::pitch::PitchSettings::default()
+    }
+}
+
+/// A path with the shifter on reports its latency, really has it, and a
+/// path without it lines up with it: at 0 semitones the two sum to twice
+/// the delayed signal.
+#[test]
+fn a_path_with_the_pitch_shifter_lines_up_with_one_without() {
+    let latency = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms);
+    let (mut mixer, shared) = aligned_mixer(0, 0);
+    let mut mix = shared.paths[0].mix();
+    mix.pitch = pitch_on();
+    shared.paths[0].set_mix(&mix);
+    mixer.prepare(BLOCK);
+    let mut clock = 0;
+    let out = run_left(&mut mixer, &shared, &mut clock, 40, signal);
+    assert_eq!(shared.paths[0].path_latency_samples(), latency);
+    assert_eq!(shared.paths[1].path_latency_samples(), 0);
+    let report = shared.clock_output.alignment().expect("published");
+    assert_eq!(report.delays[0], Some(0));
+    assert_eq!(report.delays[1], Some(latency));
+    // From the first sample the shifted path is the input, delayed by
+    // exactly what it reports.
+    let mut worst = 0.0f32;
+    for (n, sample) in out.iter().enumerate() {
+        worst = worst.max((sample - 2.0 * delayed(n, latency as usize)).abs());
+    }
+    assert!(worst < 1e-3, "{worst}");
+}
+
+/// Switching the shifter off takes its latency off the path again.
+#[test]
+fn switching_the_pitch_shifter_off_drops_its_latency() {
+    let (mut mixer, shared) = aligned_mixer(64, 0);
+    let mut mix = shared.paths[0].mix();
+    mix.pitch = pitch_on();
+    shared.paths[0].set_mix(&mix);
+    mixer.prepare(BLOCK);
+    let mut clock = 0;
+    let _ = run_left(&mut mixer, &shared, &mut clock, 4, signal);
+    let on = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms);
+    assert_eq!(shared.paths[0].path_latency_samples(), 64 + on);
+    mix.pitch.enabled = false;
+    shared.paths[0].set_mix(&mix);
+    // The dip: warm nothing, fade out, switch, fade in.
+    let out = run_left(&mut mixer, &shared, &mut clock, 8, signal);
+    assert_eq!(shared.paths[0].path_latency_samples(), 64);
+    assert!(out.iter().all(|sample| sample.is_finite()));
+}
+
+/// A longer pitch delay lands on the path's latency, and the other path
+/// follows it: at 0 semitones the two sum to twice the newly delayed
+/// signal again.
+#[test]
+fn the_other_path_follows_a_pitch_delay_change() {
+    use super::super::pitch::{pitch_latency_samples, PITCH_MAX_DELAY_MS};
+    let (mut mixer, shared) = aligned_mixer(0, 0);
+    let mut mix = shared.paths[0].mix();
+    mix.pitch = pitch_on();
+    shared.paths[0].set_mix(&mix);
+    mixer.prepare(BLOCK);
+    let mut clock = 0;
+    let _ = run_left(&mut mixer, &shared, &mut clock, 8, signal);
+    let before = pitch_latency_samples(RATE, pitch_on().delay_ms);
+    assert_eq!(shared.paths[0].path_latency_samples(), before);
+    mix.pitch.delay_ms = PITCH_MAX_DELAY_MS;
+    shared.paths[0].set_mix(&mix);
+    let start = clock;
+    let out = run_left(&mut mixer, &shared, &mut clock, 40, signal);
+    let after = pitch_latency_samples(RATE, PITCH_MAX_DELAY_MS);
+    assert!(after > before);
+    assert_eq!(shared.paths[0].path_latency_samples(), after);
+    let report = shared.clock_output.alignment().expect("published");
+    assert_eq!(report.delays[0], Some(0));
+    assert_eq!(report.delays[1], Some(after));
+    assert!(out.iter().all(|sample| sample.is_finite()));
+    let settled = out.len() - 8 * BLOCK;
+    let mut worst = 0.0f32;
+    for (n, sample) in out.iter().enumerate().skip(settled) {
+        worst = worst.max((sample - 2.0 * delayed(start + n, after as usize)).abs());
+    }
+    assert!(worst < 1e-3, "{worst}");
+}
+
+/// A reused slot whose first block finds the pitch lock busy runs with the
+/// shifter off, not with the settings of the path it held before.
+#[test]
+fn a_reused_slot_does_not_run_the_last_paths_pitch() {
+    use super::super::path::PathState;
+    let (mut mixer, shared) = aligned_mixer(0, 0);
+    let mut mix = shared.paths[0].mix();
+    mix.pitch = pitch_on();
+    shared.paths[0].set_mix(&mix);
+    mixer.prepare(BLOCK);
+    let mut clock = 0;
+    let _ = run_left(&mut mixer, &shared, &mut clock, 4, signal);
+    assert!(shared.paths[0].path_latency_samples() > 0);
+    shared.paths[0].set_state(PathState::FadingOut);
+    let _ = run_left(&mut mixer, &shared, &mut clock, 8, signal);
+    assert_eq!(shared.paths[0].state(), PathState::Inactive);
+    mix.pitch.enabled = false;
+    shared.paths[0].set_mix(&mix);
+    let held = shared.paths[0].hold_pitch();
+    shared.paths[0].set_state(PathState::Active);
+    let _ = run_left(&mut mixer, &shared, &mut clock, 1, signal);
+    assert_eq!(shared.paths[0].path_latency_samples(), 0);
+    drop(held);
+}
+
+/// A return never runs the shifter and never counts its latency, even with
+/// it saved on.
+#[test]
+fn a_return_never_runs_the_pitch_shifter() {
+    let (mut mixer, shared) = return_mixer(0, 0.0, [false, true, false]);
+    let mut mix = shared.paths[1].mix();
+    mix.pitch = super::super::pitch::PitchSettings {
+        semitones: -5,
+        ..pitch_on()
+    };
+    shared.paths[1].set_mix(&mix);
+    shared.paths[2].set_mute(true);
+    let mut clock = 0;
+    let out = run(&mut mixer, &shared, &mut clock, 24);
+    assert_eq!(shared.paths[1].path_latency_samples(), 0);
+    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
+        assert!((frame[0] - signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
+        assert!((frame[1] + signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
+    }
+}
+
+/// With the shifter on, a gate keyed on the dry input in either slot hears
+/// the note when the shifted note reaches it, not a pitch latency early: at
+/// 0 semitones the path plays what a path without the shifter plays on the
+/// input delayed by the shifter's latency, the gate's opening included.
+#[test]
+fn a_keyed_gate_behind_the_pitch_shifter_opens_on_the_delayed_note() {
+    use super::super::gate::GateSlot;
+    const CHAIN: u32 = 300;
+    // The tone is near its peak where the burst starts, so a gate already
+    // open when the note arrives would pass it at once.
+    const START: usize = 8_192;
+    const BURST: usize = 4_096;
+    let pitch = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms) as usize;
+    let blocks = (START + BURST + pitch) / BLOCK + 24;
+    let input = |n: usize| {
+        if (START..START + BURST).contains(&n) {
+            (n as f32 * 0.05).sin() * 0.25
+        } else {
+            0.0
+        }
+    };
+    for slot in [GateSlot::Pre, GateSlot::Post] {
+        let (mut mixer, shared, _) = keyed_gate_mixer(CHAIN, slot);
+        let mut mix = shared.paths[0].mix();
+        mix.pitch = pitch_on();
+        shared.paths[0].set_mix(&mix);
+        let mut clock = 0;
+        let out = run_left(&mut mixer, &shared, &mut clock, blocks, input);
+        let (mut reference, reference_shared, _) = keyed_gate_mixer(CHAIN, slot);
+        let mut clock = 0;
+        let want = run_left(&mut reference, &reference_shared, &mut clock, blocks, |n| {
+            n.checked_sub(pitch).map_or(0.0, input)
+        });
+        let arrives = START + pitch + CHAIN as usize;
+        assert!(out[arrives + 64].abs() > 0.05, "{slot:?}: the note plays");
+        for (n, (sample, wanted)) in out.iter().zip(&want).enumerate() {
+            assert!(
+                (sample - wanted).abs() < 2e-3,
+                "{slot:?} frame {n}: {sample} vs {wanted}"
+            );
+        }
+    }
+}

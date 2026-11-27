@@ -13,11 +13,13 @@ use super::super::gate::{GateKey, GateSlot, NoiseGate};
 use super::super::loudness::LoudnessMeter;
 use super::super::nam::{NamPosition, NamStage};
 use super::super::path::{DspTime, PathControls, PathState};
+use super::super::pitch::{PitchSettings, PitchShifter};
 use super::super::plugins::{ChainLease, MAX_ALIGN};
 use super::ramp::{PathRamps, Ramp};
 
 /// The chain of one signal path, from the split to the sum: routing,
-/// channel enable and mono (ramped), the pre EQ, a PRE gate, the NAM blocks
+/// channel enable and mono (ramped), the pitch shifter (not on a return),
+/// the pre EQ, a PRE gate, the NAM blocks
 /// that sit before the effects, the plugin effects, the NAM blocks after
 /// them, the cabinet, a POST gate and the post EQ.  [`OutputMixer`] owns one per
 /// possible path, preallocated, and runs only the active ones; every path
@@ -37,17 +39,40 @@ pub(crate) struct PathProcessor {
     /// Built-in noise gate and the settings version it was last updated from.
     gate: NoiseGate,
     gate_version: u64,
-    /// The dry input's peak per frame of this block, taken after routing
-    /// and mono and before the pre EQ: the gate's key when it listens to
-    /// the input.
-    key: Vec<f32>,
-    /// That key delayed by the chain latency for a POST gate, so the
-    /// detector hears the note the gate is cutting, not one a chain's
-    /// latency earlier.  Fed while the gate is set to listen to the input,
-    /// on or off and in either slot, so turning it on or moving it after
-    /// the effects mid-note does not leave the detector a latency of
-    /// silence.
+    /// The dry input's peak per frame, taken after routing and mono and
+    /// before the pitch shifter: the gate's key when it listens to the
+    /// input.  The whole block goes in at the front of the chain
+    /// ([`Self::run_front`]) before any gate reads it, so frame `index` of a
+    /// `frames`-long block reads `frames − 1 − index` plus its delay back.
+    /// It holds [`MAX_ALIGN`] plus the largest block ([`Self::reserve_block`]).
+    /// Fed while the gate is set to listen to the input, on or off and in
+    /// either slot, so turning it on or moving it after the effects
+    /// mid-note does not leave the detector a latency of silence.
     key_line: MonoDelayLine,
+    /// Where a PRE gate reads the key: the pitch shifter's latency, so the
+    /// detector hears the note the gate is cutting.
+    pre_key_tap: DelayTap,
+    /// Where a POST gate reads it: the whole chain's latency (clamped), so
+    /// it does not hear a note a chain's latency early.  Both glide when
+    /// the latency moves (a tap nothing reads follows at once).
+    post_key_tap: DelayTap,
+    /// The first block since the path (re)started snaps both taps to its
+    /// latencies instead of gliding from 0.
+    key_taps_adopted: bool,
+    /// Built-in pitch shifter, first in the chain.  Allocated here for
+    /// 192 kHz; never runs on a return.
+    pitch: PitchShifter,
+    /// The settings version the pitch settings were last read at, and
+    /// those settings.
+    pitch_version: u64,
+    pitch_settings: PitchSettings,
+    /// What the shifter was last given (the settings as it runs them, off
+    /// on a return, and the rate); `None` makes the next block give it
+    /// again.
+    pitch_applied: Option<(PitchSettings, u32)>,
+    /// The shifter's latency this block, clamped to [`MAX_ALIGN`]: 0 when it
+    /// is off or the path is a return.
+    pitch_latency: u32,
     /// Built-in NAM blocks.  Their models are taken at the start of the
     /// block; the scratch they process into is grown in
     /// [`Self::reserve_block`].
@@ -93,8 +118,8 @@ pub(crate) struct PathProcessor {
     /// The chain latency (frames) read at the start of the block: what the
     /// alignment counts for this path, and what a missed chain is replaced
     /// by.  The plugin chain's latency plus, for each NAM block that runs an
-    /// oversampled model this block, the oversampling pair's delay.  The
-    /// cabinet adds none.
+    /// oversampled model this block, the oversampling pair's delay, plus the
+    /// pitch shifter's while it is on.  The cabinet adds none.
     latency: u32,
     /// The same, before clamping to [`MAX_ALIGN`] (for the report).
     pub(super) latency_raw: u32,
@@ -195,7 +220,9 @@ const CHAIN_RESUME_SECONDS: f32 = 0.005;
 const CHAIN_CHUNK: usize = super::super::plugins::MAX_BLOCK;
 
 impl PathProcessor {
-    pub(super) fn new(rate: u32) -> Self {
+    /// `slot` is the path's index: the pitch shifter staggers its period
+    /// estimates by it.
+    pub(super) fn new(rate: u32, slot: usize) -> Self {
         Self {
             latency: 0,
             latency_raw: 0,
@@ -220,8 +247,15 @@ impl PathProcessor {
             eq_version: [0; 2],
             gate: NoiseGate::new(rate),
             gate_version: 0,
-            key: Vec::new(),
-            key_line: MonoDelayLine::new(MAX_ALIGN as usize),
+            key_line: MonoDelayLine::new(0),
+            pre_key_tap: DelayTap::default(),
+            post_key_tap: DelayTap::default(),
+            key_taps_adopted: false,
+            pitch: PitchShifter::new(rate, slot),
+            pitch_version: 0,
+            pitch_settings: PitchSettings::default(),
+            pitch_applied: None,
+            pitch_latency: 0,
             nam: NamStage::new(rate),
             cab: CabStage::new(rate),
             ramps: PathRamps::new(),
@@ -246,6 +280,9 @@ impl PathProcessor {
         self.eq = [Equalizer::new(rate), Equalizer::new(rate)];
         self.gate = NoiseGate::new(rate);
         self.key_line.reset();
+        self.key_taps_adopted = false;
+        self.pitch.restart();
+        self.pitch_settings = PitchSettings::default();
         self.nam.restart(rate);
         self.cab.restart(rate);
         self.invalidate_settings();
@@ -271,6 +308,14 @@ impl PathProcessor {
         self.chain = None;
     }
 
+    /// A block of a path that is not live: keeps the pitch estimate
+    /// schedule in the phase of the paths that kept running, so a slot
+    /// that comes back does not estimate together with another path.  No
+    /// allocation.
+    pub(super) fn skip_idle(&mut self, frames: usize) {
+        self.pitch.skip(frames);
+    }
+
     /// Grows the per-block scratch outside the callback.  The size it reaches
     /// is the prepared size: every block the host hands over has to fit it
     /// (see [`Self::reserve_block`]).
@@ -282,7 +327,7 @@ impl PathProcessor {
         }
     }
 
-    /// Makes room for one block's taps, key, gains and model scratch.  The
+    /// Makes room for one block's taps, key line, gains and model scratch.  The
     /// scratch is sized before the stream opens, for the largest block the host
     /// can deliver (its announced buffer, or a generous constant when it leaves
     /// the size to its default: see `OutputMixer::prepare`), so the callback
@@ -296,8 +341,10 @@ impl PathProcessor {
         if self.block.len() < frames {
             self.block.resize(frames, [0.0; 4]);
         }
-        if self.key.len() < frames {
-            self.key.resize(frames, 0.0);
+        let key_capacity = MAX_ALIGN as usize + frames;
+        if self.key_line.max_delay() < key_capacity {
+            // A larger block than before: the key's history starts over.
+            self.key_line = MonoDelayLine::new(key_capacity);
         }
         if self.gains.len() < frames {
             self.gains.resize(frames, 0.0);
@@ -306,11 +353,14 @@ impl PathProcessor {
         self.cab.reserve(frames);
     }
 
-    /// Forgets which settings the EQs and gate were built from, so the next
-    /// block redesigns them (for a new rate).  Version 0 is never published.
+    /// Forgets which settings the EQs, gate and pitch shifter were built
+    /// from, so the next block redesigns them (for a new rate: that is how a
+    /// rate change reaches the shifter).  Version 0 is never published.
     pub(super) fn invalidate_settings(&mut self) {
         self.eq_version = [0; 2];
         self.gate_version = 0;
+        self.pitch_version = 0;
+        self.pitch_applied = None;
         self.nam.invalidate();
         self.cab.invalidate();
     }
@@ -339,12 +389,39 @@ impl PathProcessor {
         // the chain this block runs.
         let unopened = controls.begin_chain(&mut self.chain);
         self.nam.begin(controls, rate, ramp_samples);
-        // Plugin latency and NAM latency add: an oversampled block really
-        // delays its output, so this path does not delay it again.
+        // Whether this block is a return comes before the latency: the pitch
+        // shifter never runs on one.  A change of feed is taken only once
+        // the path gain has reached 0.
+        let adopted = self.controls_adopted;
+        let wanted = controls.is_return();
+        if !adopted || self.gain.is_settled_at(0.0) {
+            self.is_return = wanted;
+        }
+        let switching = wanted != self.is_return;
+        // Before the latency read, so a switch the shifter lands at this
+        // block boundary is counted in this block.
+        self.follow_pitch(controls, rate);
+        self.pitch.begin_block();
+        let pitch_latency = if self.is_return {
+            0
+        } else {
+            self.pitch.latency_samples()
+        };
+        self.pitch_latency = pitch_latency.min(MAX_ALIGN);
+        // Plugin, NAM and pitch latency add: an oversampled block and the
+        // shifter really delay their output, so this path does not delay
+        // it again.
         let chain_latency = controls.latency_samples();
         self.chain_latency = chain_latency.min(MAX_ALIGN);
-        self.latency_raw = chain_latency.saturating_add(self.nam.latency_samples());
+        self.latency_raw = chain_latency
+            .saturating_add(self.nam.latency_samples())
+            .saturating_add(pitch_latency);
         self.latency = self.latency_raw.min(MAX_ALIGN);
+        if !self.key_taps_adopted {
+            self.pre_key_tap.snap(self.pitch_latency);
+            self.post_key_tap.snap(self.latency);
+            self.key_taps_adopted = true;
+        }
         controls.store_path_latency(self.latency_raw);
         self.cab.begin(controls, rate, ramp_samples);
         self.tap_fade = TAP_FADE_SECONDS * rate as f32;
@@ -359,12 +436,6 @@ impl PathProcessor {
             self.match_meter.reset();
         }
         self.match_active = controls.match_measuring();
-        let adopted = self.controls_adopted;
-        let wanted = controls.is_return();
-        if !adopted || self.gain.is_settled_at(0.0) {
-            self.is_return = wanted;
-        }
-        let switching = wanted != self.is_return;
         self.follow_controls(controls, ramp_samples);
         self.fading = controls.state() == PathState::FadingOut;
         // A chain whose plugins are still being opened (a path just added,
@@ -397,8 +468,9 @@ impl PathProcessor {
         restarted
     }
 
-    /// The chain latency this block, clamped to [`MAX_ALIGN`]: what the
-    /// chain really delays by.
+    /// The whole path's latency this block, clamped to [`MAX_ALIGN`]: the
+    /// plugin chain, the oversampled NAM blocks and the pitch shifter.  The
+    /// sends use it to line a return up with its senders.
     pub(super) fn latency(&self) -> u32 {
         self.latency
     }
@@ -466,6 +538,34 @@ impl PathProcessor {
         }
     }
 
+    /// Picks up pitch changes made in the UI since the last block, and gives
+    /// the shifter what it runs: the settings, off on a return, at `rate`.
+    /// A busy lock keeps the last settings.  Becoming a return turns the
+    /// shifter off at once (the path is silent then).
+    fn follow_pitch(&mut self, controls: &PathControls, rate: u32) {
+        let version = controls.pitch_version();
+        if version != self.pitch_version {
+            if let Some(settings) = controls.try_pitch() {
+                self.pitch_settings = settings.sanitized();
+                self.pitch_version = version;
+            }
+        }
+        let mut settings = self.pitch_settings;
+        if self.is_return {
+            settings.enabled = false;
+        }
+        let wanted = Some((settings, rate));
+        if self.pitch_applied == wanted {
+            return;
+        }
+        self.pitch_applied = wanted;
+        if self.is_return {
+            self.pitch.restart();
+        } else {
+            self.pitch.update(settings, rate);
+        }
+    }
+
     /// Holds one input frame in `block` for [`Self::run_front`].
     #[inline]
     pub(super) fn stage_input(&mut self, index: usize, left: f32, right: f32) {
@@ -473,38 +573,71 @@ impl PathProcessor {
     }
 
     /// The front of the chain over a block of staged input frames, in
-    /// place: routing, channel enable and mono (with their ramps), then the
-    /// pre EQ and a PRE gate.  The result waits in `block` for the plugin
-    /// effects.  Each path's state only moves with its own frames, so
-    /// running it per block instead of per frame gives the same samples,
-    /// and the mixer can time each path as one piece.
+    /// place: routing, channel enable and mono (with their ramps), the pitch
+    /// shifter, then the pre EQ and a PRE gate.  The result waits in `block`
+    /// for the plugin effects.  Each path's state only moves with its own
+    /// frames, so running it per block instead of per frame gives the same
+    /// samples, and the mixer can time each path as one piece.
     pub(super) fn run_front(&mut self, frames: usize) {
+        let keyed = self.plan.gate_keyed;
+        if !keyed {
+            self.key_line.reset();
+        }
         for index in 0..frames {
             let [left, right, _, _] = self.block[index];
             // Routing, channel enable and mono move with the ramps, before
-            // the EQ and the effects, which is where those controls act.
-            let mut out = self.ramps.next_input(left, right);
-            let key = out[0].abs().max(out[1].abs());
-            self.key[index] = key;
-            // The chain on the path's mix (taps 1/2), in order: pre EQ,
-            // optional PRE gate, the NAM blocks that sit before the plugin
-            // effects, plugin effects, the NAM blocks after them, the
-            // cabinet, optional POST gate, post EQ.
-            // The EQ and the gate are per-sample; the cabinet is a short
-            // direct head then partitioned overlap-save.  Neither adds
-            // latency.  An oversampled NAM block does; its delay was read at
-            // the start of the block.
-            if self.plan.pre_eq {
-                (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
-            }
-            if self.plan.gate_pre {
-                (out[0], out[1]) = if self.plan.gate_keyed {
-                    self.gate.process_keyed(out[0], out[1], key)
-                } else {
-                    self.gate.process(out[0], out[1])
-                };
+            // the shifter, the EQ and the effects, which is where those
+            // controls act.
+            let out = self.ramps.next_input(left, right);
+            if keyed {
+                // The key is the dry input, before the shifter.
+                self.key_line.push(out[0].abs().max(out[1].abs()));
             }
             self.block[index] = out;
+        }
+        // The chain on the path's mix (taps 1/2), in order: pitch shifter,
+        // pre EQ, optional PRE gate, the NAM blocks that sit before the
+        // plugin effects, plugin effects, the NAM blocks after them, the
+        // cabinet, optional POST gate, post EQ.  The EQ and the gate are
+        // per-sample; the cabinet is a short direct head then partitioned
+        // overlap-save.  Neither adds latency.  The shifter and an
+        // oversampled NAM block do; their delay was read at the start of
+        // the block.  The shifter comes first so the pre EQ shapes the
+        // shifted signal.  Off and settled it leaves the block untouched;
+        // it never runs on a return.
+        if !self.is_return {
+            self.pitch.process(&mut self.block, frames);
+        } else {
+            // A return never runs the shifter, but its schedule moves on
+            // with the paths that do, so the slot keeps its hop phase if it
+            // becomes an input path again.
+            self.pitch.skip(frames);
+        }
+        if self.plan.gate_pre && keyed {
+            self.pre_key_tap
+                .set_target(self.pitch_latency, self.tap_fade);
+        } else {
+            self.pre_key_tap.snap(self.pitch_latency);
+        }
+        if self.plan.pre_eq || self.plan.gate_pre {
+            for index in 0..frames {
+                let mut out = self.block[index];
+                if self.plan.pre_eq {
+                    (out[0], out[1]) = self.eq[EqSlot::Pre.index()].process(out[0], out[1]);
+                }
+                if self.plan.gate_pre {
+                    (out[0], out[1]) = if keyed {
+                        // Behind the shifter: the key a pitch latency back.
+                        let key = self
+                            .pre_key_tap
+                            .next_mono(&self.key_line, frames - 1 - index);
+                        self.gate.process_keyed(out[0], out[1], key)
+                    } else {
+                        self.gate.process(out[0], out[1])
+                    };
+                }
+                self.block[index] = out;
+            }
         }
         self.nam.process(&mut self.block, frames, NamPosition::Pre);
     }
@@ -636,23 +769,25 @@ impl PathProcessor {
     /// them, the cabinet, the POST gate and the post EQ, in place, then
     /// the path meters and the gate's reduction.  The cabinet adds no
     /// latency.  A POST gate keyed on the input reads the key a chain
-    /// latency back, the delay the effects' output has too.
+    /// latency back (the pitch shifter's included), the delay the effects'
+    /// output has too.  [`Self::run_front`] already put the block's key in
+    /// the line.
     pub(super) fn finish_block(&mut self, controls: &PathControls, frames: usize) {
         self.nam.process(&mut self.block, frames, NamPosition::Post);
         self.cab.process_block(&mut self.block, frames);
-        if !self.plan.gate_keyed {
-            self.key_line.reset();
+        if self.plan.gate_post && self.plan.gate_keyed {
+            self.post_key_tap.set_target(self.latency, self.tap_fade);
+        } else {
+            self.post_key_tap.snap(self.latency);
         }
-        let key_delay = self.latency as usize;
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
-        for (out, &key) in self.block[..frames].iter_mut().zip(&self.key[..frames]) {
-            if self.plan.gate_keyed {
-                self.key_line.push(key);
-            }
+        for (index, out) in self.block[..frames].iter_mut().enumerate() {
             if self.plan.gate_post {
                 (out[0], out[1]) = if self.plan.gate_keyed {
-                    let key = self.key_line.read(key_delay);
+                    let key = self
+                        .post_key_tap
+                        .next_mono(&self.key_line, frames - 1 - index);
                     self.gate.process_keyed(out[0], out[1], key)
                 } else {
                     self.gate.process(out[0], out[1])

@@ -298,3 +298,93 @@ fn clearing_during_a_swap_allocates_and_frees_nothing() {
         "the model fading out and the one fading in were both parked"
     );
 }
+
+/// The pitch shifter on at `semitones`.
+fn pitch(semitones: i8) -> super::super::pitch::PitchSettings {
+    super::super::pitch::PitchSettings {
+        enabled: true,
+        semitones,
+        ..super::super::pitch::PitchSettings::default()
+    }
+}
+
+/// Every change the pitch sheet can make, between blocks, with the stage on:
+/// semitones, wet, bypass and delay, and switching it off and on.
+#[test]
+fn pitch_changes_allocate_and_free_nothing() {
+    use super::super::pitch::PitchSettings;
+    let frames = 256;
+    let (mut mixer, shared) = running_mixer(frames);
+    let mut out = vec![vec![0.0f32; 2]; frames];
+    let changes = [
+        pitch(-2),
+        pitch(-12),
+        PitchSettings {
+            wet: 0.5,
+            ..pitch(5)
+        },
+        PitchSettings {
+            bypass: true,
+            ..pitch(5)
+        },
+        PitchSettings {
+            wet: 0.5,
+            ..pitch(3)
+        },
+        PitchSettings {
+            delay_ms: 40.0,
+            ..pitch(3)
+        },
+        PitchSettings::default(),
+        pitch(-7),
+    ];
+    for settings in changes {
+        let mut mix = shared.path(0).mix();
+        mix.pitch = settings;
+        shared.path(0).set_mix(&mix);
+        // Long enough for a switch to warm, dip and land.
+        for _ in 0..24 {
+            render_fed(&mut mixer, &shared, frames, &mut out);
+        }
+    }
+}
+
+/// The stage on, the graph rate moved 48 → 192 → 48 kHz in place, as the
+/// PipeWire duplex filter does (`set_direct_rate` inside the callback).
+#[test]
+fn a_rate_change_with_the_pitch_shifter_on_allocates_nothing() {
+    let frames = 256;
+    let shared = Shared::new(48_000);
+    shared.set_mix(false, false, [true, true], [true, true], false);
+    shared
+        .direct
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut mixer = OutputMixer::new(48_000, 2);
+    mixer.prepare(frames);
+    let left: Vec<f32> = (0..frames).map(|n| (n as f32 * 0.03).sin() * 0.3).collect();
+    let mut peak = 0.0f32;
+    let mut mix = shared.path(0).mix();
+    mix.pitch = pitch(-5);
+    shared.path(0).set_mix(&mix);
+    for rate in [48_000, 192_000, 48_000] {
+        // Long enough for the switch on to warm, dip and land.
+        for block in 0..32 {
+            let guard = RtGuard::enter();
+            if block == 0 {
+                mixer.set_direct_rate(rate);
+            }
+            mixer.render_direct(&shared, &left, &left, |_, mapped| {
+                peak = peak.max(mapped.sample(0).abs());
+            });
+            assert_eq!(guard.allocations(), 0, "@{rate} allocated");
+            assert_eq!(guard.frees(), 0, "@{rate} freed");
+            drop(guard);
+        }
+        assert_eq!(
+            shared.path(0).path_latency_samples(),
+            super::super::pitch::pitch_latency_samples(rate, 4.0),
+            "@{rate}"
+        );
+    }
+    assert!(peak.is_finite() && peak > 0.01, "the path plays: {peak}");
+}

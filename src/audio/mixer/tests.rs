@@ -106,7 +106,7 @@ fn render(mixer: &mut OutputMixer, shared: &Shared, frames: usize) -> Vec<[f32; 
 /// must not touch it: the audio thread would allocate otherwise.
 #[test]
 fn a_block_at_the_prepared_size_does_not_grow_the_scratch() {
-    let mut path = PathProcessor::new(48_000);
+    let mut path = PathProcessor::new(48_000, 0);
     path.prepare(512);
     assert_eq!(path.block.len(), 512);
     let scratch = path.block.as_ptr();
@@ -125,7 +125,7 @@ fn a_block_at_the_prepared_size_does_not_grow_the_scratch() {
 /// itself in every profile.
 #[test]
 fn a_block_larger_than_prepared_grows_the_scratch() {
-    let mut path = PathProcessor::new(48_000);
+    let mut path = PathProcessor::new(48_000, 0);
     path.prepare(64);
     path.reserve_block(128);
     assert_eq!(path.block.len(), 128);
