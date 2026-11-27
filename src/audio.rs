@@ -62,6 +62,9 @@
 //!   after the NAM blocks.  The first 128 taps are direct; the rest is
 //!   partitioned overlap-save.  The callback never reads a file, resamples,
 //!   or drops a kernel.
+//! - `pitch`: the built-in pitch shifter, first in the chain.  A
+//!   delay-line shifter preallocated for 192 kHz, so a rate change does not
+//!   allocate.
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute, safety ceiling and channel map.
 //! - `limiter`: the per-device sample-peak ceiling after the device level.
@@ -103,6 +106,9 @@ mod output;
 mod output_map;
 mod panic_guard;
 mod path;
+// The path wiring follows; until then only the tests run the stage.
+#[allow(dead_code)]
+mod pitch;
 mod plugins;
 pub(crate) use plugins::mark_main_thread;
 #[cfg(test)]
