@@ -14,6 +14,10 @@ use crate::app::RigWerkApp;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sheet {
     Diagnostics,
+    /// The pitch shifter, first in the chain.
+    Pitch {
+        path: usize,
+    },
     /// *Pre EQ*, or *Post EQ* when `post`.
     Eq {
         path: usize,
@@ -53,6 +57,7 @@ impl Sheet {
     /// The sheet that edits `stage` of path `path`.
     pub(crate) fn for_stage(path: usize, stage: ChainStage) -> Self {
         match stage {
+            ChainStage::Pitch => Self::Pitch { path },
             ChainStage::PreEq => Self::Eq { path, post: false },
             ChainStage::Gate => Self::Gate { path },
             ChainStage::Nam(index) => Self::Nam { path, index },
@@ -65,6 +70,7 @@ impl Sheet {
     /// The path and the chain stage this sheet edits, for the stage sheets.
     pub(crate) fn stage(self) -> Option<(usize, ChainStage)> {
         match self {
+            Self::Pitch { path } => Some((path, ChainStage::Pitch)),
             Self::Eq { path, post: false } => Some((path, ChainStage::PreEq)),
             Self::Eq { path, post: true } => Some((path, ChainStage::PostEq)),
             Self::Gate { path } => Some((path, ChainStage::Gate)),
@@ -88,6 +94,7 @@ impl Sheet {
     /// path `path`.  `diagnostics` is read at launch, before the paths.
     pub(crate) fn from_key(key: &str, path: usize) -> Option<Self> {
         Some(match key.trim().to_lowercase().as_str() {
+            "pitch" => Self::Pitch { path },
             "eq" => Self::Eq { path, post: false },
             "gate" => Self::Gate { path },
             "nam" | "amp" => Self::Nam { path, index: 0 },
@@ -319,6 +326,7 @@ impl RigWerkApp {
             effects,
             path.mix.gate.slot,
             &path.nam_stack(),
+            path.mix.is_return(),
             forward,
         )
         .map(|next| Sheet::for_stage(slot, next))
@@ -337,7 +345,8 @@ impl RigWerkApp {
     }
 
     /// Closes a sheet whose subject has gone: a removed path, an effect
-    /// index past the chain, an extra output that was removed.  The host
+    /// index past the chain, an extra output that was removed, the pitch
+    /// stage of a path that became a return.  The host
     /// calls this before it draws.
     pub(crate) fn tidy_sheet(&mut self) {
         let Some(sheet) = self.chrome.sheet else {
@@ -350,6 +359,12 @@ impl RigWerkApp {
                 self.paths.get(path).is_none_or(Option::is_none)
                     || index >= self.engine.plugin_views(path).len()
             }
+            // A return has no pitch stage.
+            Sheet::Pitch { path } => self
+                .paths
+                .get(path)
+                .and_then(Option::as_ref)
+                .is_none_or(|path| path.mix.is_return()),
             other => other
                 .path()
                 .is_none_or(|path| self.paths.get(path).is_none_or(Option::is_none)),

@@ -1,7 +1,7 @@
-//! A path's chain on its strip (spec §4.2, §5.3): *Pre EQ*, the gate when
-//! it sits before the effects, the NAM blocks that do, the effects group,
-//! the NAM blocks after them, the cabinet, the gate when after, and *Post
-//! EQ*.
+//! A path's chain on its strip (spec §4.2, §5.3): *Pitch* (not on a
+//! return), *Pre EQ*, the gate when it sits before the effects, the NAM
+//! blocks that do, the effects group, the NAM blocks after them, the
+//! cabinet, the gate when after, and *Post EQ*.
 //!
 //! The built-in rows stay pinned; only the effects group scrolls, on its
 //! own for each path so the faders stay on one line.  On overflow it shows
@@ -122,6 +122,7 @@ impl RigWerkApp {
         let show_curve = matches!(step, DensityStep::Normal | DensityStep::CompactOutputs);
         let open = self.chrome.sheet;
         let gate_text = format_db(mix.gate.threshold_db, 0);
+        let pitch_text = crate::ui::sheets::pitch::row_mark(mix.pitch);
         let top = ui.cursor().top();
         let views = self.engine_plugin_views(slot);
         let count = views.len();
@@ -138,6 +139,20 @@ impl RigWerkApp {
         let overloaded =
             self.issue_state.dsp.severity() == Some(crate::app::issues::IssueSeverity::Error);
 
+        if !mix.is_return() {
+            self.builtin_row(
+                ui,
+                slot,
+                ChainStage::Pitch,
+                "Pitch",
+                None,
+                ChainMark::Label(&pitch_text),
+                false,
+                None,
+                show_curve,
+                rate,
+            );
+        }
         self.builtin_row(
             ui,
             slot,
@@ -321,8 +336,8 @@ impl RigWerkApp {
         }
     }
 
-    /// One pinned row: an EQ, the gate, a NAM block's way in, or the
-    /// cabinet.
+    /// One pinned row: the pitch shifter, an EQ, the gate, a NAM block's
+    /// way in, or the cabinet.
     #[allow(clippy::too_many_arguments)]
     fn builtin_row(
         &mut self,
@@ -353,7 +368,11 @@ impl RigWerkApp {
                 mark,
                 show_curve,
                 sample_rate: rate,
-                menu: crate::ui::widgets::RowMenu::Builtin,
+                menu: if stage == ChainStage::Pitch {
+                    crate::ui::widgets::RowMenu::Switch
+                } else {
+                    crate::ui::widgets::RowMenu::Builtin
+                },
                 warn: false,
             },
         );

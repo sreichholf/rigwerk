@@ -50,6 +50,9 @@ const BANNED: &[&str] = &[
     "published",
     "endpoint",
     "preview",
+    "harmonizer",
+    "splice",
+    "lookahead",
 ];
 
 /// Platform code, where the word is the platform's own term (`quantum` in

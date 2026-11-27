@@ -2,7 +2,8 @@
 //!
 //! This is navigation state on [`RigWerkApp`](crate::app::RigWerkApp), not
 //! paint.  Stage colours stay in `ui`.  [`chain_stages`] is the signal
-//! order the console draws and the sheet's ‹ › walk: the gate sits before or
+//! order the console draws and the sheet's ‹ › walk: the pitch shifter is
+//! first, except on a return, which never runs it; the gate sits before or
 //! after the effects as its slot says, and each NAM block runs before or
 //! after them as its position says.  The cabinet always sits after the
 //! effects and after the NAM blocks.
@@ -12,6 +13,8 @@ use crate::audio::{EqSlot, GateSlot, NamPosition, NamStack};
 /// One stage of a path's chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChainStage {
+    /// The pitch shifter, before the *Pre EQ*.  Never on a return.
+    Pitch,
     PreEq,
     Gate,
     /// The NAM block at this index of the path's stack.
@@ -23,12 +26,21 @@ pub(crate) enum ChainStage {
     PostEq,
 }
 
-/// A chain's stages in the order the sound passes them: *Pre EQ*, the gate
+/// A chain's stages in the order the sound passes them: *Pitch* (not on a
+/// return), *Pre EQ*, the gate
 /// when it sits before the effects, the NAM blocks that sit there, the
 /// effects, the NAM blocks that sit after them, the cabinet, the gate when
 /// after, and *Post EQ*.
-pub(crate) fn chain_stages(effects: usize, gate: GateSlot, nam: &NamStack) -> Vec<ChainStage> {
-    let mut stages = Vec::with_capacity(effects + nam.count() + 5);
+pub(crate) fn chain_stages(
+    effects: usize,
+    gate: GateSlot,
+    nam: &NamStack,
+    is_return: bool,
+) -> Vec<ChainStage> {
+    let mut stages = Vec::with_capacity(effects + nam.count() + 6);
+    if !is_return {
+        stages.push(ChainStage::Pitch);
+    }
     stages.push(ChainStage::PreEq);
     if gate == GateSlot::Pre {
         stages.push(ChainStage::Gate);
@@ -61,9 +73,10 @@ pub(crate) fn neighbour_stage(
     effects: usize,
     gate: GateSlot,
     nam: &NamStack,
+    is_return: bool,
     forward: bool,
 ) -> Option<ChainStage> {
-    let stages = chain_stages(effects, gate, nam);
+    let stages = chain_stages(effects, gate, nam, is_return);
     let at = stages.iter().position(|stage| *stage == current)?;
     if forward {
         stages.get(at + 1).copied()
@@ -76,6 +89,7 @@ pub(crate) fn neighbour_stage(
 /// What the Mixer inspector (and Live chips) currently point at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChainSelection {
+    Pitch,
     PreEq,
     /// The effect group header — not a single plugin.
     Plugins,
@@ -147,6 +161,7 @@ impl ChainSelection {
     /// The selection that marks `stage` in the Mixer and on the console.
     pub(crate) fn from_stage(stage: ChainStage) -> Self {
         match stage {
+            ChainStage::Pitch => Self::Pitch,
             ChainStage::PreEq => Self::PreEq,
             ChainStage::Gate => Self::Gate,
             ChainStage::Nam(index) => Self::Nam(index),
@@ -167,7 +182,8 @@ impl crate::app::RigWerkApp {
         }
     }
 
-    /// Whether `stage` of path `slot` is on, or bypassed.  An effect that
+    /// Whether `stage` of path `slot` is on, or bypassed (the pitch
+    /// shifter: on, or off and out of the chain).  An effect that
     /// failed to load keeps its own switch; its row shows the failure.
     /// `false` for a path or an effect that is not there.
     pub(crate) fn stage_on(&self, slot: usize, stage: ChainStage) -> bool {
@@ -175,6 +191,7 @@ impl crate::app::RigWerkApp {
             return false;
         };
         match stage {
+            ChainStage::Pitch => path.mix.pitch.enabled,
             ChainStage::PreEq => path.mix.eqs[0].enabled,
             ChainStage::PostEq => path.mix.eqs[1].enabled,
             ChainStage::Gate => path.mix.gate.enabled,
@@ -193,7 +210,8 @@ impl crate::app::RigWerkApp {
 
     /// Switches `stage` of path `slot` on, or bypasses it.  An EQ keeps its
     /// bands, the gate its settings and a NAM block its capture; an effect
-    /// keeps its latency.
+    /// keeps its latency.  The pitch shifter keeps its settings; off, it
+    /// takes its latency with it.
     pub(crate) fn set_stage_on(&mut self, slot: usize, stage: ChainStage, on: bool) {
         if let ChainStage::Effect(index) = stage {
             if self.paths.get(slot).is_some_and(Option::is_some) {
@@ -205,6 +223,7 @@ impl crate::app::RigWerkApp {
             return;
         };
         match stage {
+            ChainStage::Pitch => path.mix.pitch.enabled = on,
             ChainStage::PreEq => path.mix.eqs[0].enabled = on,
             ChainStage::PostEq => path.mix.eqs[1].enabled = on,
             ChainStage::Gate => path.mix.gate.enabled = on,

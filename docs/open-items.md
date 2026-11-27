@@ -168,3 +168,15 @@ entries below still hold.
   seconds, so a large offset at start, or a Minimum bridge buffer, can
   have a dropout once before it has learned the offset.  A large bridge buffer cut
   pops the excess, which the resampler turns into a short crossfade.
+- **Pitch shifter.**  One mono shifter per path, first in the chain; a
+  return has none.  It follows a period from 20 Hz to 1.3 kHz and
+  splices in phase with it.  A chord no period fits, or a note above
+  1.3 kHz, is spliced out of phase: full chords chorus.  A longer *Delay*
+  splices less often and is the remedy for full chords, at the cost of
+  latency; single notes and power chords stay at the 4 ms default.
+  Between attacks its delay moves away from the *Delay* it reports.  On a
+  drop at 4 ms it stays within about ±4 ms of it, but sweeps from 0.25 ms
+  over one period below about 130 Hz, and over 30 ms on a ringing chord no
+  period fits.  On an up-shift it sweeps well above the *Delay* (a ringing
+  chord at +12 and 4 ms about 15–45 ms).  With *Wet* under 100 % the shifted sustain then flams
+  against the dry signal, most on an up-shift.
