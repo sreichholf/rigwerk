@@ -117,8 +117,9 @@ fn the_position_moves_the_gate_and_its_chain_row() {
         chain_stages(
             1,
             gate(&app).slot,
-            &app.paths[0].as_ref().unwrap().nam_stack()
-        )[1],
+            &app.paths[0].as_ref().unwrap().nam_stack(),
+            false
+        )[2],
         ChainStage::Gate
     );
     let tree = frame(&ctx, &mut app, Vec::new());

@@ -1,7 +1,7 @@
 //! One signal path's controls, as the UI writes them and the audio
 //! callback reads them: input routing, mono, channel enable, the two
-//! built-in EQs, the gate, the NAM blocks, the plugin effect chain, the
-//! cabinet and the path meters.
+//! built-in EQs, the gate, the pitch shifter, the NAM blocks, the plugin
+//! effect chain, the cabinet and the path meters.
 //!
 //! [`Shared`](super::shared::Shared) holds [`MAX_PATHS`] of these as fixed
 //! slots, all preallocated, so adding a path never allocates in a callback.
@@ -59,9 +59,11 @@
 //! still counts.  The mixer lines the paths up per device with it (`output_map`,
 //! "Alignment").  An oversampled NAM block adds its up/down pair's delay,
 //! read from the NAM stage and added here; a block that is not oversampling
-//! adds none.  The cabinet adds none either: a short direct head plus
+//! adds none.  The pitch shifter, while on and not on a return, adds its
+//! `D` ([`pitch_latency_samples`](super::pitch::pitch_latency_samples));
+//! off it adds none.  The cabinet adds none either: a short direct head plus
 //! partitioned overlap-save, and a delay that is the impulse itself is not
-//! reported here.
+//! reported here.  [`PathControls::path_latency_samples`] is the sum.
 //!
 //! The plugin-chain side of [`PathControls`] (edits, publish, controls,
 //! servicing, state) is in `plugins`, with how a chain is handed between
@@ -77,6 +79,7 @@ use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::nam::{NamCommand, NamPark, NamPending, NamStack, PreparedNam};
 use super::output_map::level_gain;
+use super::pitch::PitchSettings;
 use super::plugins::{ChainHome, ChainModel, PluginView, SlotLink, SlotPark};
 
 mod plugins;
@@ -143,7 +146,7 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
 }
 
 /// The settings of one path the UI owns and pushes: input routing, mono,
-/// channel enable, the two EQs, the gate, the cabinet, the path level, mute
+/// channel enable, the two EQs, the gate, the pitch shifter, the cabinet, the path level, mute
 /// and solo, and the effect-chain bypass.  The NAM blocks are pushed
 /// separately ([`PathControls::set_nam`]): sixteen of them do not fit a
 /// snapshot the mixer copies as one [`Copy`] value.  The plugin chain, the
@@ -160,6 +163,8 @@ pub struct PathMix {
     /// The EQs before and after the effects, indexed by [`EqSlot`].
     pub eqs: [EqSettings; 2],
     pub gate: GateSettings,
+    /// Built-in pitch shifter, first in the chain.  Never runs on a return.
+    pub pitch: PitchSettings,
     /// Built-in cabinet.  The impulse path is not here: this stays [`Copy`].
     pub cab: CabControls,
     /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
@@ -188,6 +193,7 @@ impl Default for PathMix {
             output_enabled: [true, true],
             eqs: [EqSettings::default(), EqSettings::default()],
             gate: GateSettings::default(),
+            pitch: PitchSettings::default(),
             cab: CabControls::default(),
             level_db: 0.0,
             match_db: 0.0,
@@ -201,13 +207,14 @@ impl Default for PathMix {
 }
 
 impl PathMix {
-    /// Every value in range (EQ, gate, level, match and sends).  A NaN
+    /// Every value in range (EQ, gate, pitch, level, match and sends).  A NaN
     /// send is off, not 0 dB.  A return has no solo and no sends of its own.
     pub fn sanitized(self) -> Self {
         let is_return = self.is_return();
         Self {
             eqs: self.eqs.map(EqSettings::sanitized),
             gate: self.gate.sanitized(),
+            pitch: self.pitch.sanitized(),
             cab: self.cab.sanitized(),
             level_db: sanitize_path_level(self.level_db),
             match_db: sanitize_path_match(self.match_db),
@@ -497,7 +504,7 @@ pub(crate) struct PathControls {
     /// of its links.
     latency: AtomicU32,
     /// The whole path's latency last block: the chain's plus the delay of
-    /// each oversampled NAM block.  The mixer aligns with it, and the UI
+    /// each oversampled NAM block and of the pitch shifter while it is on.  The mixer aligns with it, and the UI
     /// reads it for the diagnostics line.
     path_latency: AtomicU32,
     /// Path-level effect bypass.  The runtime loads it every block; the UI
@@ -526,6 +533,9 @@ pub(crate) struct PathControls {
     /// Built-in noise gate (PRE or POST effects).
     gate: Mutex<GateSettings>,
     gate_version: AtomicU64,
+    /// Built-in pitch shifter, read like the gate.
+    pitch: Mutex<PitchSettings>,
+    pitch_version: AtomicU64,
     /// Built-in NAM blocks, in signal order.  The callback copies the whole
     /// stack with `try_lock`, and only when its version moved.  The captures
     /// themselves are [`pending_nam`], never this lock.
@@ -629,6 +639,8 @@ impl PathControls {
             eq_version: [AtomicU64::new(1), AtomicU64::new(1)],
             gate: Mutex::new(GateSettings::default()),
             gate_version: AtomicU64::new(1),
+            pitch: Mutex::new(PitchSettings::default()),
+            pitch_version: AtomicU64::new(1),
             nam: Mutex::new(NamStack::default()),
             nam_version: AtomicU64::new(1),
             pending_nam: Mutex::new(NamPending::default()),
@@ -679,6 +691,13 @@ impl PathControls {
         {
             let settings = previous.gate.lock().unwrap_or_else(PoisonError::into_inner);
             self.set_gate(*settings);
+        }
+        {
+            let settings = previous
+                .pitch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.set_pitch(*settings);
         }
         {
             // The block settings move.  The live models stay with the run
@@ -811,6 +830,7 @@ impl PathControls {
             self.set_eq(slot, mix.eqs[slot.index()]);
         }
         self.set_gate(mix.gate);
+        self.set_pitch(mix.pitch);
         self.set_cab(mix.cab);
         self.set_level_db(mix.level_db);
         self.set_match_db(mix.match_db);
@@ -843,6 +863,7 @@ impl PathControls {
             ],
             eqs: [eq(EqSlot::Pre), eq(EqSlot::Post)],
             gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
+            pitch: *self.pitch.lock().unwrap_or_else(PoisonError::into_inner),
             cab: *self.cab.lock().unwrap_or_else(PoisonError::into_inner),
             level_db: self.level_db(),
             match_db: self.match_db(),
@@ -1093,6 +1114,29 @@ impl PathControls {
 
     pub(crate) fn try_gate(&self) -> Option<GateSettings> {
         self.gate.try_lock().ok().map(|settings| *settings)
+    }
+
+    pub(crate) fn set_pitch(&self, settings: PitchSettings) {
+        if let Ok(mut current) = self.pitch.lock() {
+            if *current != settings {
+                *current = settings;
+                self.pitch_version.fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
+    pub(crate) fn pitch_version(&self) -> u64 {
+        self.pitch_version.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn try_pitch(&self) -> Option<PitchSettings> {
+        self.pitch.try_lock().ok().map(|settings| *settings)
+    }
+
+    /// Holds the pitch lock, so the audio side finds it busy.
+    #[cfg(test)]
+    pub(crate) fn hold_pitch(&self) -> std::sync::MutexGuard<'_, PitchSettings> {
+        self.pitch.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Applies the NAM blocks.  Does not parse or build a model.

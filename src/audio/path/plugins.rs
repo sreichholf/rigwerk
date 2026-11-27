@@ -169,8 +169,9 @@ impl PathControls {
     }
 
     /// Stores the whole path's latency for the block just begun: the chain's
-    /// plus the delay of each oversampled NAM block.  Audio side, after the
-    /// NAM stage has taken its commands.
+    /// plus the delay of each oversampled NAM block and of the pitch shifter
+    /// while it is on.  Audio side, after the NAM and pitch stages have
+    /// taken their settings.
     pub(crate) fn store_path_latency(&self, samples: u32) {
         self.path_latency.store(samples, Ordering::Relaxed);
     }

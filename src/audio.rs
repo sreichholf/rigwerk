@@ -62,6 +62,9 @@
 //!   after the NAM blocks.  The first 128 taps are direct; the rest is
 //!   partitioned overlap-save.  The callback never reads a file, resamples,
 //!   or drops a kernel.
+//! - `pitch`: the built-in pitch shifter, first in the chain.  A
+//!   delay-line shifter preallocated for 192 kHz, so a rate change does not
+//!   allocate.
 //! - `tuner`: YIN pitch detection and the preset-guided per-string analysis.
 //! - `output_map`: per-device level, mute, safety ceiling and channel map.
 //! - `limiter`: the per-device sample-peak ceiling after the device level.
@@ -103,6 +106,7 @@ mod output;
 mod output_map;
 mod panic_guard;
 mod path;
+mod pitch;
 mod plugins;
 pub(crate) use plugins::mark_main_thread;
 #[cfg(test)]
@@ -204,6 +208,11 @@ pub use path::{
     sanitize_path_level, sanitize_path_match, sanitize_send, DspTime, LockStats, PathFeed, PathMix,
     PluginLockReport, MAX_PATHS, PATH_LEVEL_MAX_DB, PATH_LEVEL_MIN_DB, PATH_MATCH_MAX_DB,
     SEND_OFF_DB,
+};
+pub(crate) use pitch::pitch_latency_samples;
+pub use pitch::{
+    PitchSettings, PITCH_MAX_CENTS, PITCH_MAX_DELAY_MS, PITCH_MAX_SEMITONES, PITCH_MIN_CENTS,
+    PITCH_MIN_DELAY_MS, PITCH_MIN_SEMITONES,
 };
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;

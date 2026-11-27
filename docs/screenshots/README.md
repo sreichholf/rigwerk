@@ -48,6 +48,7 @@ shot() {
 | `nam-sheet.png` | `RIGWERK_SHEET=nam shot nam-sheet.png` | the first NAM block's sheet on Room |
 | `cab-sheet.png` | `RIGWERK_SHEET=cab shot cab-sheet.png` | the cab sheet on Room |
 | `eq-sheet.png` | `RIGWERK_SHEET=eq shot eq-sheet.png` | the Pre EQ sheet on Room |
+| `pitch-sheet.png` | `RIGWERK_SHEET=pitch shot pitch-sheet.png` | the pitch sheet on Room |
 | `output-sheet.png` | `RIGWERK_SHEET=output shot output-sheet.png` | the clock output's sheet |
 | `match-paths.png` | `RIGWERK_ROUTING_SETUP=showcase RIGWERK_MATCH_PATHS=1 RIGWERK_SHEET=match-paths shot match-paths.png` | the Match paths sheet after a measurement |
 | `browser.png` | `RIGWERK_DRAWER=browser shot browser.png` | the effect browser |
@@ -104,6 +105,20 @@ dbus-run-session -- bash -c '
 '
 ```
 
+On a machine with sound cards, keep the real devices out of the shots and
+out of your WirePlumber state:
+
+- Give WirePlumber an `XDG_CONFIG_HOME` whose
+  `wireplumber/wireplumber.conf.d/99-no-hardware.conf` holds
+  `wireplumber.profiles = { main = { monitor.alsa = disabled
+  monitor.alsa-midi = disabled monitor.bluez = disabled
+  monitor.bluez-midi = disabled monitor.libcamera = disabled
+  monitor.v4l2 = disabled } }`, and point `HOME` and `XDG_STATE_HOME` at a
+  scratch folder.
+- Run the app under
+  `bwrap --dev-bind / / --tmpfs /dev/snd --tmpfs /proc/asound -- …`, or
+  Setup lists the ALSA cards and one becomes the extra output.
+
 The runtime directory must be short: PipeWire's socket path is limited to
 108 bytes. The app needs the X11 and GL packages under Xvfb (`xvfb`,
 `mesa-dri-gallium`, `libxkbcommon-x11`). On Alpine install `pipewire`,
@@ -118,7 +133,7 @@ Environment variables for screenshot runs:
 | Variable | Values |
 | --- | --- |
 | `RIGWERK_PAGE` | `console`, `tuner`, `setup` |
-| `RIGWERK_SHEET` | `eq`, `gate`, `nam`, `cab`, `effect` (a stand-in effect when the chain is empty), `path`, `output` (the clock output), `match-paths`, `scope`, `diagnostics`; on the selected path, applied after the setup |
+| `RIGWERK_SHEET` | `pitch`, `eq`, `gate`, `nam`, `cab`, `effect` (a stand-in effect when the chain is empty), `path`, `output` (the clock output), `match-paths`, `scope`, `diagnostics`; on the selected path, applied after the setup |
 | `RIGWERK_DRAWER` | `browser`, `issues` |
 | `RIGWERK_THEME` | `dark`, `light`: wins over the saved theme for the run |
 | `RIGWERK_ROUTING_SETUP` | `showcase` (the README setup); `showcase4` (the showcase plus Drive with ten bypassed copies of the room's first effect and an empty Stream path); `drywet`, `sum3`, `blend`, `dualamp-off` (alignment off, the red warning) for the alignment and routing cases |

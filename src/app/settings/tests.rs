@@ -2353,6 +2353,7 @@ fn golden_path(name: &str) -> PathPref {
         } else {
             vec![crate::audio::SEND_OFF_DB, -12.0]
         },
+        pitch: crate::audio::PitchSettings::default(),
         nam_blocks: Vec::new(),
         amp: crate::audio::LegacyNamSettings::default(),
         cab: crate::audio::CabSettings::default(),
@@ -2546,4 +2547,127 @@ fn the_last_click_mask_is_saved_only_once_used() {
     let text = ron::to_string(&used).expect("preferences");
     let back: Preferences = ron::from_str(&text).expect("preferences");
     assert_eq!(back.last_click_mask, 0b1100);
+}
+
+fn shifted() -> crate::audio::PitchSettings {
+    crate::audio::PitchSettings {
+        enabled: true,
+        semitones: -5,
+        cents: 12.5,
+        wet: 0.75,
+        ..crate::audio::PitchSettings::default()
+    }
+}
+
+#[test]
+fn pitch_round_trips_in_preferences_and_sessions() {
+    let path = PathPref {
+        pitch: shifted(),
+        ..PathPref::default()
+    };
+    let mut session = session("Drop");
+    session.paths = vec![path.clone()];
+    let preferences = Preferences {
+        paths: vec![path],
+        sessions: vec![session],
+        ..Preferences::default()
+    };
+    let loaded = load_preferences(Some(&stored(&preferences)), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let back = loaded.preferences.expect("readable");
+    assert_eq!(back.paths[0].pitch, shifted());
+    assert_eq!(back.sessions[0].paths[0].pitch, shifted());
+    assert_eq!(back.paths[0].mix().pitch, shifted());
+}
+
+#[test]
+fn pitch_missing_from_old_saves_is_off_and_an_unset_one_is_not_written() {
+    let raw = r#"(paths:[(name:"Main",level_db:-3.0)],sessions:[(name:"Old",paths:[(name:"A")])])"#;
+    let preferences = load_preferences(Some(raw), BACKUP)
+        .preferences
+        .expect("readable");
+    let off = crate::audio::PitchSettings::default();
+    assert_eq!(preferences.paths[0].pitch, off);
+    assert!(!preferences.paths[0].pitch.enabled);
+    assert_eq!(preferences.sessions[0].paths[0].pitch, off);
+    let saved = ron::to_string(&PathPref::default()).expect("save");
+    assert!(
+        !saved.contains("pitch:"),
+        "an unset stage was written: {saved}"
+    );
+    let saved = ron::to_string(&PathPref {
+        pitch: shifted(),
+        ..PathPref::default()
+    })
+    .expect("save");
+    assert!(saved.contains("pitch:"), "{saved}");
+}
+
+#[test]
+fn pitch_with_an_engine_or_a_mode_from_an_old_save_loads() {
+    let raw = r#"(
+            paths:[
+                (name:"A",pitch:(enabled:true,semitones:-2,engine:spectral,mode:quality)),
+                (name:"B",pitch:(enabled:true,bypass:true,cents:10.0,engine:tight,mode:fast)),
+                (name:"C",pitch:(semitones:-7,wet:0.5,mode:balanced)),
+            ],
+            sessions:[(name:"Old",paths:[(name:"S",pitch:(enabled:true,semitones:-5,engine:spectral))])]
+        )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    let preferences = loaded.preferences.expect("readable");
+    let pitch = |enabled, bypass, semitones, cents, wet| crate::audio::PitchSettings {
+        enabled,
+        bypass,
+        semitones,
+        cents,
+        wet,
+        delay_ms: 4.0,
+    };
+    let names: Vec<&str> = preferences.paths.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["A", "B", "C"]);
+    assert_eq!(preferences.paths[0].pitch, pitch(true, false, -2, 0.0, 1.0));
+    assert_eq!(preferences.paths[1].pitch, pitch(true, true, 0, 10.0, 1.0));
+    assert_eq!(
+        preferences.paths[2].pitch,
+        pitch(false, false, -7, 0.0, 0.5)
+    );
+    assert_eq!(
+        preferences.sessions[0].paths[0].pitch,
+        pitch(true, false, -5, 0.0, 1.0)
+    );
+}
+
+#[test]
+fn pitch_is_sanitized_on_load() {
+    let raw = r#"(
+            paths:[(pitch:(enabled:true,semitones:-40,cents:NaN,wet:3.0,delay_ms:NaN,mode:warp))],
+            sessions:[(name:"Bad",paths:[(pitch:(enabled:true,semitones:30,cents:-900.0,wet:NaN,delay_ms:99.0))])]
+        )"#;
+    let loaded = load_preferences(Some(raw), BACKUP);
+    let preferences = loaded.preferences.expect("readable");
+    let defaults = crate::audio::PitchSettings::default();
+    let pitch = preferences.paths[0].pitch;
+    assert!(pitch.enabled);
+    assert_eq!(pitch.semitones, crate::audio::PITCH_MIN_SEMITONES);
+    assert_eq!(pitch.cents, defaults.cents);
+    assert_eq!(pitch.wet, 1.0);
+    assert_eq!(pitch.delay_ms, defaults.delay_ms);
+    let session_pitch = preferences.sessions[0].paths[0].pitch;
+    assert_eq!(session_pitch.semitones, crate::audio::PITCH_MAX_SEMITONES);
+    assert_eq!(session_pitch.cents, crate::audio::PITCH_MIN_CENTS);
+    assert_eq!(session_pitch.wet, defaults.wet);
+    assert_eq!(session_pitch.delay_ms, crate::audio::PITCH_MAX_DELAY_MS);
+}
+
+#[test]
+fn a_session_from_before_paths_keeps_the_current_pitch() {
+    let current = PathPref {
+        pitch: shifted(),
+        ..PathPref::default()
+    };
+    let mut old = session("Old");
+    old.paths.clear();
+    old.migrate_paths(&current);
+    assert_eq!(old.paths[0].pitch, shifted());
 }

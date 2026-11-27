@@ -12,7 +12,9 @@
 //! Ctrl+Enter opens its editor, and dragging it sets an [`EffectDrag`]
 //! payload.  The hover on that grip says that moving an effect closes its
 //! open editor.  A NAM block row moves the same way and drags as a
-//! [`NamDrag`]; a built-in row only bypasses.  A `warn` row prints its mark
+//! [`NamDrag`]; a built-in row only bypasses.  A switched row (the pitch
+//! shifter) is on or off, not bypassed: its LED, menu and value say so,
+//! though the event is still [`ChainEvent::Bypass`].  A `warn` row prints its mark
 //! in the warning colour, which is how an overloaded NAM block shows what
 //! it costs.
 
@@ -56,6 +58,9 @@ pub(crate) struct NamDrag(pub usize);
 pub(crate) enum RowMenu {
     /// A built-in stage: bypass only.
     Builtin,
+    /// A built-in stage that is on or off, out of the chain when off (the
+    /// pitch shifter, whose bypass lives in its sheet).
+    Switch,
     /// A plugin effect: editor, controls, move, remove, and drag.
     Effect,
     /// A NAM block: move and remove, and drag.
@@ -102,6 +107,10 @@ pub(crate) struct ChainRow<'a> {
 impl ChainRow<'_> {
     fn effect(&self) -> bool {
         matches!(self.menu, RowMenu::Effect)
+    }
+
+    fn switched(&self) -> bool {
+        matches!(self.menu, RowMenu::Switch)
     }
 
     fn movable(&self) -> bool {
@@ -156,7 +165,7 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         match row.menu {
             RowMenu::Effect => response.dnd_set_drag_payload(EffectDrag(row.index)),
             RowMenu::Nam => response.dnd_set_drag_payload(NamDrag(row.index)),
-            RowMenu::Builtin => {}
+            RowMenu::Builtin | RowMenu::Switch => {}
         }
         event = event.or(arrows(ui, &response));
     }
@@ -166,6 +175,12 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         RowMenu::Nam => response.context_menu(|ui| nam_menu(ui, &mut event)),
         RowMenu::Builtin => response.context_menu(|ui| {
             if menu_item(ui, "Bypass") {
+                event = Some(ChainEvent::Bypass);
+                ui.close();
+            }
+        }),
+        RowMenu::Switch => response.context_menu(|ui| {
+            if menu_item(ui, if row.on { "Turn off" } else { "Turn on" }) {
                 event = Some(ChainEvent::Bypass);
                 ui.close();
             }
@@ -185,6 +200,10 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         "Didn't load"
     } else if row.paused {
         "Paused"
+    } else if row.switched() {
+        // The pitch row's value is its state or shift: "Bypass" must not
+        // read as "On".
+        mark_text(row).unwrap_or(if row.on { "On" } else { "Off" })
     } else if row.on {
         "On"
     } else {
@@ -198,12 +217,17 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         Some(row.selected),
         Some(value.to_owned()),
     );
+    let (led_name, led_toggled) = if row.switched() {
+        (format!("{} on", row.name), row.on)
+    } else {
+        (format!("Bypass {}", row.name), !row.on)
+    };
     row_info(
         &led_response,
         egui::Role::Button,
         ui.is_enabled(),
-        format!("Bypass {}", row.name),
-        Some(!row.on),
+        led_name,
+        Some(led_toggled),
         None,
     );
     if let (Some(shown), false) = (row.shown, row.failed) {

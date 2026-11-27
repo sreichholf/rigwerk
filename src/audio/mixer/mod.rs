@@ -242,7 +242,7 @@ impl OutputMixer {
             drift_error: None,
             resampling: false,
             stable_since: Instant::now(),
-            paths: std::array::from_fn(|_| PathProcessor::new(output_rate)),
+            paths: std::array::from_fn(|slot| PathProcessor::new(output_rate, slot)),
             live: LiveSlots::default(),
             lines: std::array::from_fn(|_| DelayLine::new(MAX_ALIGN_DELAY as usize)),
             send_lines: std::array::from_fn(|_| DelayLine::new(MAX_ALIGN as usize)),
@@ -413,6 +413,7 @@ impl OutputMixer {
         for slot in 0..MAX_PATHS {
             if !self.live.contains(slot) {
                 self.paths[slot].release_chain();
+                self.paths[slot].skip_idle(frames);
             }
         }
         let any_solo = shared.any_solo();
@@ -635,7 +636,7 @@ impl OutputMixer {
     }
 
     /// The chains for a block that `stage_front` filled: each live path's
-    /// front (routing, pre EQ, PRE gate), effects, POST gate and post EQ,
+    /// front (routing, pitch, pre EQ, PRE gate), effects, POST gate and post EQ,
     /// each path timed (its DSP time, see [`PathProcessor::publish_dsp`]:
     /// one clock read per path and stage, no allocation, no lock) and the
     /// block's total over every path published, then the master level on

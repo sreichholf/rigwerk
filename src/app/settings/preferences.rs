@@ -339,6 +339,7 @@ impl Preferences {
             eq: self.eq,
             eq_post: self.eq_post,
             gate: self.gate,
+            pitch: crate::audio::PitchSettings::default(),
             nam_blocks: Vec::new(),
             amp: LegacyNamSettings::default(),
             cab: crate::audio::CabSettings::default(),

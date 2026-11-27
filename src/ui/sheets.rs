@@ -3,7 +3,8 @@
 //!
 //! The shell draws the sheet's frame, height and drag edge.  This file
 //! draws the header (the path dot and name, `/`, the item, *On* /
-//! *Bypass* for a stage, ‹ › through the chain, ×) and picks the body.
+//! *Bypass* for a stage, *On* / *Bypass* / *Off* for the pitch shifter,
+//! ‹ › through the chain, ×) and picks the body.
 
 pub(crate) mod cab;
 pub(crate) mod catalog;
@@ -15,11 +16,13 @@ pub(crate) mod match_paths;
 pub(crate) mod nam;
 pub(crate) mod output;
 pub(crate) mod path;
+pub(crate) mod pitch;
 pub(crate) mod scope;
 
 use eframe::egui;
 use egui::{Align, Layout, RichText, Vec2};
 
+use crate::app::chain::ChainStage;
 use crate::app::screen::Sheet;
 use crate::app::RigWerkApp;
 use crate::ui::fonts::Face;
@@ -33,6 +36,7 @@ impl RigWerkApp {
         match sheet {
             Sheet::Diagnostics => "Diagnostics".to_owned(),
             Sheet::Scope => "Scope".to_owned(),
+            Sheet::Pitch { .. } => "Pitch".to_owned(),
             Sheet::Eq { post: false, .. } => "Pre EQ".to_owned(),
             Sheet::Eq { post: true, .. } => "Post EQ".to_owned(),
             Sheet::Gate { .. } => "Gate".to_owned(),
@@ -70,6 +74,7 @@ impl RigWerkApp {
         let mut step = None;
         let mut close = false;
         let mut stage_on = None;
+        let mut pitch = None;
         ui.horizontal(|ui| {
             ui.set_min_height(CONTROL_H);
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -97,7 +102,17 @@ impl RigWerkApp {
                     .color(colours.text),
             );
             row_info(&heading, egui::Role::Heading, true, &title, None, None);
-            if let Some((slot, stage)) = sheet.stage() {
+            if let Some((slot, ChainStage::Pitch)) = sheet.stage() {
+                ui.add_space(8.0);
+                if let Some(current) = self
+                    .paths
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .map(|path| path.mix.pitch)
+                {
+                    pitch = pitch::state_switch(ui, current).map(|next| (slot, current, next));
+                }
+            } else if let Some((slot, stage)) = sheet.stage() {
                 ui.add_space(8.0);
                 let on = self.stage_on(slot, stage);
                 let mut choice = usize::from(!on);
@@ -138,6 +153,11 @@ impl RigWerkApp {
         });
         if let Some((slot, stage, on)) = stage_on {
             self.set_stage_on(slot, stage, on);
+        }
+        if let Some((slot, current, next)) = pitch {
+            if self.select_path(slot) {
+                self.apply_pitch(current, next, false);
+            }
         }
         if let Some(forward) = step {
             self.step_sheet(forward);
@@ -186,6 +206,7 @@ impl RigWerkApp {
                 Sheet::Diagnostics => self.diagnostics_page(ui),
                 Sheet::Eq { path, post } => self.eq_sheet(ui, path, post),
                 Sheet::Gate { path } => self.gate_sheet(ui, path),
+                Sheet::Pitch { path } => self.pitch_sheet(ui, path),
                 Sheet::Effect { path, index } => self.effect_sheet(ui, path, index),
                 Sheet::Path { path } => self.path_sheet(ui, path),
                 Sheet::Output { output } => self.output_sheet(ui, output),
