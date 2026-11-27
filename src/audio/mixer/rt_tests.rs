@@ -34,7 +34,7 @@ fn model() -> super::super::nam::PreparedNam {
 }
 
 /// The docs model built for an oversampled group.
-fn scaled_model() -> super::super::nam::PreparedNam {
+pub(super) fn scaled_model() -> super::super::nam::PreparedNam {
     match prepare_nam_json_at(TINY, 48_000, 1.0, 2) {
         NamFile::Ready(loaded) => loaded.prepared,
         _ => panic!("the docs model should load"),
