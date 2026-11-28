@@ -1358,13 +1358,13 @@ mod fake {
             GUI.with(|cell| *cell.borrow_mut() = Some(gui));
         }
 
-        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        #[cfg(target_os = "linux")]
         pub(in super::super) fn offer_fd_support() {
             FDS.with(|fds| fds.set(true));
         }
 
         /// The `(fd, flags)` the plugin's `on_fd` was called with.
-        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        #[cfg(target_os = "linux")]
         pub(in super::super) fn fd_calls() -> Vec<(i32, u32)> {
             FD_CALLS.with(|calls| calls.borrow().clone())
         }

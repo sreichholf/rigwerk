@@ -62,7 +62,7 @@ pub(crate) struct RecordStatus {
     pub(crate) overruns: u64,
     pub(crate) frames: u64,
     pub(crate) rate: u32,
-    #[cfg_attr(not(test), allow(dead_code))] // For the Live row.
+    #[cfg(test)]
     pub(crate) channels: usize,
     pub(crate) error: Option<String>,
     pub(crate) path: Option<String>,
@@ -428,6 +428,7 @@ impl Recorder {
             overruns: self.inner.overruns.load(Ordering::Relaxed),
             frames: self.inner.frames.load(Ordering::Relaxed),
             rate: self.inner.rate.load(Ordering::Relaxed),
+            #[cfg(test)]
             channels: self.inner.channels.load(Ordering::Relaxed),
             error,
             path,

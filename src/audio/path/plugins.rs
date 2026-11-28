@@ -430,7 +430,7 @@ impl PathControls {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn plugin_views_version(&self) -> u64 {
         self.plugin_views_version.load(Ordering::Acquire)
     }

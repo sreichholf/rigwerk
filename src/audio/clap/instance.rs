@@ -20,6 +20,7 @@ use clap_sys::ext::params::{
     clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN,
     CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
 };
+#[cfg(target_os = "linux")]
 use clap_sys::ext::posix_fd_support::{clap_plugin_posix_fd_support, CLAP_EXT_POSIX_FD_SUPPORT};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
 use clap_sys::ext::timer_support::{clap_plugin_timer_support, CLAP_EXT_TIMER_SUPPORT};
@@ -113,7 +114,7 @@ pub(crate) struct ClapInstance {
     pub(super) state_ext: *const clap_plugin_state,
     pub(super) latency_ext: *const clap_plugin_latency,
     /// `posix-fd-support` is Linux-only.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub(super) fd_ext: *const clap_plugin_posix_fd_support,
     /// The panel's list, as last scanned.
     pub(super) cached_params: Vec<ClapParam>,
@@ -220,6 +221,7 @@ impl ClapInstance {
             timer_ext: extension(plugin, CLAP_EXT_TIMER_SUPPORT),
             state_ext: extension(plugin, CLAP_EXT_STATE),
             latency_ext: extension(plugin, CLAP_EXT_LATENCY),
+            #[cfg(target_os = "linux")]
             fd_ext: extension(plugin, CLAP_EXT_POSIX_FD_SUPPORT),
             cached_params: Vec::new(),
             ranges: Arc::from(Vec::new()),

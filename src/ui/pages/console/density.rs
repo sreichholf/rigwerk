@@ -10,7 +10,6 @@ const FIXED_WIDTH: f32 = 24.0 + 36.0 + 80.0;
 /// The clock output plus every extra output.
 const MAX_OUTPUTS: usize = 1 + MAX_EXTRA_OUTPUTS;
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DensityStep {
     Normal,
@@ -20,7 +19,6 @@ pub(crate) enum DensityStep {
     Scroll,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl DensityStep {
     /// The steps that fit without scrolling, in the order they are tried.
     pub(crate) const FITTING: [Self; 4] = [
@@ -30,6 +28,7 @@ impl DensityStep {
         Self::MiniOutputs,
     ];
 
+    #[cfg(test)]
     pub(crate) fn number(self) -> u8 {
         match self {
             Self::Normal => 1,
@@ -56,7 +55,6 @@ impl DensityStep {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StripWidths {
     pub(crate) input: f32,
@@ -65,22 +63,20 @@ pub(crate) struct StripWidths {
     pub(crate) output: f32,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PathsScroll {
     pub(crate) visible: f32,
     pub(crate) content: f32,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl PathsScroll {
+    #[cfg(test)]
     pub(crate) fn visible_paths(self, path_width: f32) -> f32 {
         // n strips take n × w + (n − 1), so n = (width + 1) / (w + 1).
         (self.visible + 1.0) / (path_width + 1.0)
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Density {
     pub(crate) step: DensityStep,
@@ -90,7 +86,6 @@ pub(crate) struct Density {
 }
 
 /// A width that is not a number counts as 0.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn density(available: f32, paths: usize, outputs: usize) -> Density {
     let available = if available.is_nan() { 0.0 } else { available };
     let (paths, outputs) = clamp_counts(paths, outputs);
@@ -118,7 +113,6 @@ pub(crate) fn density(available: f32, paths: usize, outputs: usize) -> Density {
 
 /// For step 5 this is the step 4 figure: scrolling starts once that
 /// does not fit.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn width_needed(step: DensityStep, paths: usize, outputs: usize) -> f32 {
     let (paths, outputs) = clamp_counts(paths, outputs);
     let widths = step.widths();

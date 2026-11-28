@@ -603,7 +603,6 @@ impl RigWerkApp {
     /// Path `slot`'s gate gain reduction in dB from the live snapshot: the
     /// deepest of the last block, 0 while the gate is open or off, and
     /// while no bridge runs.
-    #[cfg_attr(not(test), allow(dead_code))] // For the gate sheet's meter.
     pub(crate) fn gate_reduction_db(&self, slot: usize) -> f32 {
         if self.engine.state != EngineState::Running {
             return 0.0;

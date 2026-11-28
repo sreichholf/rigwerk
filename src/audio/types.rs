@@ -10,13 +10,14 @@ pub const DEMO_INPUT_ID: &str = "demo:input";
 pub const DEMO_OUTPUT_ID: &str = "demo:output";
 
 /// The quantum RigWerk asks PipeWire for while the low-latency bridge runs.
+#[cfg(target_os = "linux")]
 pub const PIPEWIRE_LOW_QUANTUM: u32 = 64;
 /// Above this, a PipeWire route is the desktop's shared size, not low latency.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[cfg(target_os = "linux")]
 pub const PIPEWIRE_LOW_QUANTUM_MAX: u32 = 256;
 
 /// A period at or below the quantum that divides it evenly is a fit.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug, Default)]
 pub struct QuantumInfo {
     pub available: bool,
@@ -29,7 +30,7 @@ pub struct QuantumInfo {
     pub note: String,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 impl QuantumInfo {
     pub fn assess(available: bool, quantum: u32, rate: u32, alsa_period: u32) -> Self {
         let rate = if rate == 0 { 48_000 } else { rate };
@@ -100,7 +101,7 @@ impl QuantumInfo {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
 
 #[derive(Clone, Debug)]
@@ -144,14 +145,13 @@ pub struct Snapshot {
     pub out_l: f32,
     pub out_r: f32,
     /// 0 while the gate is open or off, and for a slot no mixer runs.
-    #[cfg_attr(not(test), allow(dead_code))] // For the gate sheet's meter.
     pub gate_reduction_db: [f32; MAX_PATHS],
     pub out_channels: [f32; MAX_OUTPUT_CHANNELS],
     pub out_reduction_db: f32,
     /// No reading is silence at [`super::SILENCE_LUFS`].
     pub out_loudness: LoudnessReading,
     pub output_channels: u32,
-    #[allow(dead_code)] // Published on the snapshot. The strips do not read the count.
+    #[cfg(test)]
     pub extra_output_count: usize,
     pub extra_output_channels: [[f32; MAX_OUTPUT_CHANNELS]; MAX_EXTRA_OUTPUTS],
     pub extra_output_reduction_db: [f32; MAX_EXTRA_OUTPUTS],
@@ -163,19 +163,13 @@ pub struct Snapshot {
     pub extra_output_dropouts: [u64; MAX_EXTRA_OUTPUTS],
     pub extra_output_drift_at_limit: [bool; MAX_EXTRA_OUTPUTS],
     /// 0 while it has no stream, including one played in the PipeWire graph.
-    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
     pub extra_output_rates: [u32; MAX_EXTRA_OUTPUTS],
-    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
     pub extra_output_buffer_frames: [u32; MAX_EXTRA_OUTPUTS],
-    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
     pub extra_output_ring_fill: [f32; MAX_EXTRA_OUTPUTS],
     /// At the clock output's rate.  0 while it has no stream.
-    #[cfg_attr(not(test), allow(dead_code))] // For the output strip and sheet.
     pub extra_output_target_frames: [usize; MAX_EXTRA_OUTPUTS],
     pub dropouts: u64,
-    #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
-    pub overruns: u64,
-    #[allow(dead_code)] // The heartbeat reads `Shared` directly.
+    #[cfg(test)]
     pub input_frames: u64,
     pub frames: u64,
     pub ring_fill: f32,
@@ -185,8 +179,7 @@ pub struct Snapshot {
     pub device_lost: bool,
     /// `device_lost` is set too, but no device went away.
     pub callback_failure: Option<CallbackFailure>,
-    /// The header pill follows [`EngineState`], not this line.
-    #[allow(dead_code)] // Published for diagnostics; no UI consumer yet.
+    #[cfg(test)]
     pub status: String,
     pub input_rate: u32,
     /// False while this is only the rate asked for.
@@ -323,13 +316,11 @@ impl OutputMode {
 #[derive(Clone, Debug)]
 pub struct StartConfig {
     /// Set when the input is an ASIO driver (Windows only).
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub asio_clsid: Option<u128>,
     pub input_id: Option<String>,
     pub output_id: String,
     /// Set when the selected output is an ASIO driver.  The bridge then opens
     /// that driver for playback instead of handing the device to a system host.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub output_asio_clsid: Option<u128>,
     /// Input side: the rate and buffer asked of the capture device.
     pub sample_rate: u32,
@@ -344,7 +335,7 @@ pub struct StartConfig {
     pub output_buffer: usize,
     /// A wrapper driver (ASIO4ALL and friends) does not name its hardware, so
     /// playback errors get an extra hint about sharing one sound card.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg(target_os = "windows")]
     pub asio_wrapper: bool,
     /// A refusal falls back to shared cpal: `output_buffer` on Windows, the
     /// requested period on Linux, then once at the driver's default.  Ignored
@@ -352,10 +343,9 @@ pub struct StartConfig {
     pub low_latency_request: bool,
     /// WASAPI exclusive mode for the clock output only.  On refuse, falls back
     /// to shared cpal with `output_buffer` (not REAL-style).
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub exclusive_output: bool,
     /// Linux: ask PipeWire for its low quantum while the bridge runs.  The
     /// quantum is released as soon as the bridge stops.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub pipewire_low_latency: bool,
 }

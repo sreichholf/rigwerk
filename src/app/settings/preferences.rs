@@ -357,7 +357,7 @@ impl Default for ExtraOutputPref {
 }
 
 impl ExtraOutputPref {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn virtual_output() -> Self {
         Self {
             id: VIRTUAL_OUTPUT_ID.to_owned(),

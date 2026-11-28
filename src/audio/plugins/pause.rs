@@ -328,7 +328,7 @@ impl PauseHandshake {
 
     // Diagnostics counts pauses per effect (`SlotControls`), so a reset
     // there does not clear this.  The tests read it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn paused_blocks(&self) -> u64 {
         self.paused_blocks.load(Ordering::Relaxed)
     }

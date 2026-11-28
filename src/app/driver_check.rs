@@ -143,10 +143,6 @@ impl RigWerkApp {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[allow(dead_code)]
-    pub(crate) fn refresh_quantum_check(&mut self, _log: bool) {}
-
     /// Once the output runs, keep the graph quantum and the delivered block in
     /// sync. The idle check freezes while Running, so without this the
     /// quantum issue can stick on a pre-start 1024/48 kHz reading after the
@@ -249,10 +245,6 @@ impl RigWerkApp {
         }
         self.refresh_quantum_check(true);
     }
-
-    #[cfg(not(target_os = "linux"))]
-    #[allow(dead_code)]
-    pub(crate) fn refresh_quantum_if_idle(&mut self) {}
 
     /// The PipeWire graph buffer and whether the ALSA buffer fits it.
     /// None off Linux.

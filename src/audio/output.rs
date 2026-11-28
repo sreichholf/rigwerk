@@ -30,14 +30,20 @@ pub(crate) struct OpenedOutput {
     pub(crate) channels: usize,
 }
 
-/// Both keep playing until dropped.
-#[allow(dead_code)]
+/// Both keep playing until dropped.  The payloads are unread: dropping the
+/// value is what stops the stream.
 pub(crate) enum OutputStream {
-    Cpal(cpal::Stream),
+    Cpal {
+        _stream: cpal::Stream,
+    },
     #[cfg(target_os = "windows")]
-    Real(wasapi::RealOutput),
+    Real {
+        _stream: wasapi::RealOutput,
+    },
     #[cfg(target_os = "windows")]
-    Exclusive(wasapi::ExclusiveOutput),
+    Exclusive {
+        _stream: wasapi::ExclusiveOutput,
+    },
 }
 
 pub(crate) fn open_output(
@@ -110,7 +116,7 @@ pub(crate) fn open_output(
         .play()
         .map_err(|error| format!("Starting output: {error}"))?;
     Ok(OpenedOutput {
-        _stream: OutputStream::Cpal(stream),
+        _stream: OutputStream::Cpal { _stream: stream },
         rate,
         channels,
     })

@@ -26,7 +26,7 @@ const COM_ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14
 pub(crate) struct ClassInfo {
     pub(crate) cid: TUID,
     /// Shown by the tests; loads pick a class by id or category.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) name: String,
     pub(crate) category: String,
 }
@@ -43,6 +43,7 @@ pub(crate) fn classes(factory: &ComPtr<IPluginFactory>) -> Vec<ClassInfo> {
             let result = unsafe { factory.getClassInfo(index, &mut info) };
             (result == kResultOk).then(|| ClassInfo {
                 cid: info.cid,
+                #[cfg(test)]
                 name: c_text(&info.name),
                 category: c_text(&info.category),
             })

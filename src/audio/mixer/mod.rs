@@ -169,7 +169,7 @@ impl OutputMixer {
 
     /// Duplex extra outputs are stereo pairs.  A generic extra output's
     /// stream publishes its own count.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn publish_extra_output_channels(&self, shared: &Shared) {
         let count = shared.extra_output_count();
         for index in 0..count {
@@ -681,7 +681,7 @@ impl OutputMixer {
 
     /// [`Self::render_direct`] once per live device: index 0 is the clock
     /// output, then each extra output.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn render_direct_devices(
         &mut self,
         shared: &Shared,
@@ -704,7 +704,7 @@ impl OutputMixer {
 
     /// The direct path's rate.  Allocation-free: coefficients redesign on
     /// the next block.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn set_direct_rate(&mut self, rate: u32) {
         let rate = rate.max(1);
         if rate == self.output_rate {
@@ -719,7 +719,7 @@ impl OutputMixer {
 
     /// One block from the same graph cycle.  Both sides share one clock,
     /// so there is no ring, priming, drift or resampling.
-    #[allow(dead_code)] // Single-device direct path; duplex fans out via devices.
+    #[cfg(test)]
     pub(crate) fn render_direct(
         &mut self,
         shared: &Shared,
@@ -748,7 +748,7 @@ impl OutputMixer {
         });
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     fn render_direct_with(
         &mut self,
         shared: &Shared,

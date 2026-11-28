@@ -119,3 +119,10 @@ opt-level = 3
 # unoptimised ones would make the always-on suite slow.
 [profile.dev.package.rustfft]
 opt-level = 3
+
+# Denied on every build, including tests.  `forbid` is unconditional in
+# source outside `cfg(test)`: the test harness inserts `allow(dead_code)`,
+# and an unconditional `forbid` rejects that attribute.  vendor/nam-rs is a
+# separate crate and is not covered.
+[lints.rust]
+dead_code = "deny"

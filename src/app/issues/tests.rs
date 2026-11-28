@@ -842,18 +842,6 @@ fn show_selects_the_anchor_and_closes_the_drawer() {
     );
     assert_eq!(app.chrome.reveal_path, Some(slot));
 
-    app.show_issue(Anchor::Stage {
-        path: slot,
-        stage: crate::app::chain::ChainStage::Gate,
-    });
-    assert_eq!(
-        app.chrome.sheet,
-        Some(crate::app::screen::Sheet::Gate { path: slot })
-    );
-    assert!(app.chrome.follow_stage);
-    assert_eq!(app.chrome.reveal_path, Some(slot));
-    assert_eq!(app.selected_path, slot);
-
     app.show_issue(Anchor::Output(1));
     assert_eq!(
         app.chrome.sheet,

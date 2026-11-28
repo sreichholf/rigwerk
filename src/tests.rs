@@ -1250,3 +1250,97 @@ fn every_workflow_action_is_pinned_to_a_commit() {
         unpinned.join("\n")
     );
 }
+
+/// `dead_code` is `forbid`.  An allow that a cfg leaves inactive on this
+/// host would still silence another target, so the spelling is banned in
+/// the tree and not only when rustc emits the attribute.  `unused` is the
+/// group that contains it.
+#[test]
+fn source_does_not_allow_dead_code() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut hits = Vec::new();
+    let mut files = Vec::new();
+    rust_files(&root.join("src"), &mut files);
+    for path in files {
+        let name = path
+            .strip_prefix(root)
+            .expect("under the crate")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = std::fs::read_to_string(&path).expect("read source");
+        for line in dead_code_allows(&source) {
+            hits.push(format!("{name}:{line}"));
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "dead_code is forbid; delete the item or cfg it:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
+fn the_dead_code_scan_sees_every_spelling() {
+    let lint = "dead_code";
+    for source in [
+        format!("#[allow({lint})]"),
+        format!("#[expect({lint}, reason = \"x\")]"),
+        format!("#[allow(clippy::all, {lint})]"),
+        format!("#[cfg_attr(windows, allow(\n    unused_imports,\n    {lint},\n))]"),
+        format!("#[allow({})]", "unused"),
+    ] {
+        assert_eq!(dead_code_allows(&source), vec![1], "{source}");
+    }
+    for source in [
+        "#[allow(unused_imports)]",
+        "let _ = value.expect(\"dead_code\");",
+        "fn disallow(unused: u8) {}",
+    ] {
+        assert!(dead_code_allows(source).is_empty(), "{source}");
+    }
+}
+
+/// The 1-based line of each `allow(...)` or `expect(...)` that names
+/// `dead_code` or `unused`, including one split across lines.
+fn dead_code_allows(source: &str) -> Vec<usize> {
+    let mut lines = Vec::new();
+    for keyword in ["allow(", "expect("] {
+        for (start, _) in source.match_indices(keyword) {
+            let preceded_by_word = source[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if preceded_by_word {
+                continue;
+            }
+            let rest = &source[start + keyword.len()..];
+            let body = &rest[..rest.find(')').unwrap_or(rest.len())];
+            if body
+                .split(',')
+                .map(str::trim)
+                .any(|item| item == "dead_code" || item == "unused")
+            {
+                lines.push(source[..start].matches('\n').count() + 1);
+            }
+        }
+    }
+    lines.sort_unstable();
+    lines
+}
+
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .expect("read src")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            rust_files(&path, out);
+            continue;
+        }
+        if path.extension().is_some_and(|extension| extension == "rs") {
+            out.push(path);
+        }
+    }
+}

@@ -42,7 +42,7 @@ pub(crate) fn attempt(
                     info.describe(sample_rate),
                 );
                 Attempt::Opened(OpenedOutput {
-                    _stream: OutputStream::Exclusive(stream),
+                    _stream: OutputStream::Exclusive { _stream: stream },
                     rate: info.rate,
                     channels: info.channels,
                 })
@@ -65,7 +65,7 @@ pub(crate) fn attempt(
                     info.describe(sample_rate),
                 );
                 Attempt::Opened(OpenedOutput {
-                    _stream: OutputStream::Real(stream),
+                    _stream: OutputStream::Real { _stream: stream },
                     rate: info.rate,
                     channels: info.channels,
                 })
