@@ -1,9 +1,6 @@
 #![allow(clippy::needless_range_loop)] // Frames of several devices, indexed alike.
 
-//! Latency alignment through the whole mixer: two identical paths, one with
-//! a latent effect (a pure delay standing in for a lookahead plugin), on
-//! the clock output, the extra outputs of the PipeWire direct path and a generic
-//! extra output fed through its ring.
+//! Two identical paths, one latent, must not comb on a device.
 
 use super::super::eq::EqSettings;
 use super::super::nam::NamStack;
@@ -27,7 +24,7 @@ fn delayed(n: usize, by: usize) -> f32 {
 }
 
 /// Two identical paths (EQs off, IN 1/2 on L/R), path 0 with a pure delay
-/// of `latency` frames, both on every device; `extra_outputs` stereo extra outputs.
+/// of `latency` frames, both on every device.  `extra_outputs` are stereo.
 fn aligned_mixer(latency: u32, extra_outputs: usize) -> (OutputMixer, Shared) {
     let shared = Shared::new(RATE);
     shared.set_master(false, [true, true], false);
@@ -70,8 +67,7 @@ fn run(
     let devices = 1 + shared.extra_output_count();
     // Sized up front: the write closure runs inside the allocation guard.
     let mut out = vec![vec![[0.0f32; 2]; blocks * BLOCK]; devices];
-    // The callback must not allocate: the scratch is sized here, as the
-    // backends do before the first block.
+    // Sized here: the callback must not allocate.
     mixer.prepare(BLOCK);
     for block in 0..blocks {
         let left: Vec<f32> = (*clock..*clock + BLOCK).map(signal).collect();
@@ -240,7 +236,8 @@ fn polarity_cancels_and_a_trim_moves_one_path() {
     let mut inverted = OutputDeviceSettings::default();
     inverted.path_map[1].invert = true;
     shared.clock_output.set(&inverted);
-    // Extra output: path 1 trimmed by +1 ms (48 frames) on top of the alignment.
+    // Extra output: path 1 trimmed by +1 ms (48 frames) on top of
+    // the alignment.
     let mut trimmed = OutputDeviceSettings::default();
     trimmed.path_map[1].trim_ms = 1.0;
     let plan = ExtraOutputPlan {
@@ -496,7 +493,8 @@ fn a_missed_chain_fades_into_the_fallback_without_a_click() {
         out.extend(run(&mut mixer, &shared, &mut clock, 1).remove(0));
     }
     out.extend(run(&mut mixer, &shared, &mut clock, 2).remove(0));
-    // From the limited plugin level to the dry sine and back: smoothed both ways.
+    // From the limited plugin level to the dry sine and back: smoothed
+    // both ways.
     let step = largest_step(&out, 0);
     assert!(step < 0.05, "largest step {step}");
     assert!(
@@ -900,9 +898,7 @@ fn hash_samples(samples: &[f32]) -> u64 {
         })
 }
 
-/// A gate keyed on the input, in either slot, with the pitch shifter off
-/// renders what it rendered before the key line was fed in the front of
-/// the chain (hashes recorded from that build).
+/// A keyed gate, shifter off, matches the recorded hashes.
 #[test]
 fn a_keyed_gate_with_the_pitch_shifter_off_is_bit_identical() {
     use super::super::gate::GateSlot;
@@ -914,9 +910,8 @@ fn a_keyed_gate_with_the_pitch_shifter_off_is_bit_identical() {
         assert!(out.iter().any(|sample| sample.abs() > 0.1));
         hashes.push(hash_samples(&out));
     }
-    // The gate's design uses the platform's libm, so the hashes are only
-    // checked where they were recorded.  Gating before the delay and gating
-    // the delayed signal on the delayed key play the same samples.
+    // The gate uses libm, so the hashes are checked only where they
+    // were recorded.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     assert_eq!(hashes, [0x57b0_6de8_cb91_6ca0; 2]);
 }

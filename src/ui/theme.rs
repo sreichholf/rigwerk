@@ -1,49 +1,34 @@
-//! Colours and the egui style.
-//!
-//! [`DARK`] and [`LIGHT`] hold the tokens of `docs/ui-spec.md` §7.1, and
-//! [`palette`] gives the active one.  Every control draws from that palette,
-//! so the light theme is drawn in light tokens from the window frame to the
-//! calibration panel.
+//! Colours and the egui style.  Every control reads [`palette`], never a
+//! literal.
 
 use eframe::egui;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Theme, Vec2};
 
 pub(crate) use crate::ui::fonts::Face;
 
-/// Every text size in the window is multiplied by this, so the whole interface
-/// can be made easier to read from one place.
+/// One multiplier, so the whole interface scales together.
 pub(crate) const FONT_SCALE: f32 = 1.2;
 
-/// A text size at the interface's reading scale.
 pub(crate) fn ts(size: f32) -> f32 {
     size * FONT_SCALE
 }
 
-/// A step of the type scale (`docs/ui-spec.md` §7.3).  The rewritten pages
-/// use this; `ts()` remains for the controls that predate it.
+/// A step of the type scale (`docs/ui-spec.md` §7.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TypeRole {
-    /// Grid headers, the meter scale.
     GridHeader,
-    /// Secondary text, the status bar.
     Secondary,
-    /// Body text, rows.
     Body,
-    /// Strip names, buttons.
     Control,
-    /// The title, a sheet's title.
     Title,
-    /// Setup headings.
     Heading,
-    /// The tuner's strings.
     TunerString,
-    /// The tuner's cents.
     TunerCents,
-    /// The tuner's note: the largest text in the window.
+    /// The largest text in the window.
     TunerNote,
 }
 
-/// The size of `role` in points at 100 %.  The interface size zooms it.
+/// Points at 100 %.  The interface size zooms the result.
 pub(crate) fn type_size(role: TypeRole) -> f32 {
     match role {
         TypeRole::GridHeader => 11.0,
@@ -58,68 +43,45 @@ pub(crate) fn type_size(role: TypeRole) -> f32 {
     }
 }
 
-/// `role`'s size in one of the bundled faces, e.g.
-/// `font(Face::Mono, TypeRole::Secondary)` for the status bar.
 pub(crate) fn font(face: Face, role: TypeRole) -> FontId {
     FontId::new(type_size(role), face.family())
 }
 
-/// The colour tokens of one theme.  Both themes define every token; a
-/// widget reads the active one through [`palette`], never a literal.
+/// Both themes define every token.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Palette {
-    /// Console well, window.
     pub(crate) bg: Color32,
-    /// Title bar, status bar.
     pub(crate) bar: Color32,
-    /// Strips, setup panels.
     pub(crate) strip: Color32,
-    /// Chain rows, buttons.
     pub(crate) slot: Color32,
-    /// Meter tracks, scope.  Never under text.
+    /// Never under text.
     pub(crate) well: Color32,
-    /// Sheets, drawers.
     pub(crate) sheet: Color32,
-    /// Separators.
     pub(crate) line: Color32,
-    /// Control borders.  Below 3:1 on purpose: a button is known by its
-    /// label and fill, not its border.
+    /// Below 3:1 on purpose: a button is known by its label and fill, not
+    /// its border.
     pub(crate) line2: Color32,
-    /// Primary text.
     pub(crate) text: Color32,
-    /// Secondary text.
     pub(crate) text2: Color32,
-    /// Labels, hints.
     pub(crate) text3: Color32,
-    /// A bypassed LED's ring, off states.
     pub(crate) led_off: Color32,
-    /// Engaged states: running, selected, armed, muted, soloed.
     pub(crate) accent: Color32,
-    /// The accent as text.
     pub(crate) accent_text: Color32,
-    /// Selected fill.
     pub(crate) accent_bg: Color32,
-    /// Warnings, always with an icon or a word.
+    /// Always with an icon or a word.
     pub(crate) warn: Color32,
-    /// Clip, recording, error icons.
     pub(crate) error: Color32,
-    /// Error text.
     pub(crate) error_text: Color32,
-    /// OK states as text: a measured result, a good reading.  The palette's
-    /// green is a path's identity, so it is not dark enough for text in every
-    /// theme.
+    /// The palette's green is a path's identity, so it is not dark enough
+    /// for text in every theme.
     pub(crate) ok_text: Color32,
-    /// Meter below −6 dBFS.
     pub(crate) meter: Color32,
-    /// Meter from −6 to −1 dBFS, limiter reduction.  Always `warn`.
+    /// Always `warn`.
     pub(crate) meter_hot: Color32,
-    /// Path identity by the saved colour index, in the order
-    /// [`PATH_COLOUR_NAMES`] names them.
+    /// Same order as [`PATH_COLOUR_NAMES`].
     pub(crate) path: [Color32; crate::audio::MAX_PATHS],
 }
 
-/// The path colours by saved index, as the menu names them.  Same order as
-/// the palette's `path` array.
 pub(crate) const PATH_COLOUR_NAMES: [&str; crate::audio::MAX_PATHS] =
     ["Blue", "Violet", "Green", "Rose"];
 
@@ -187,13 +149,11 @@ impl Palette {
     }
 }
 
-/// The palette of the theme egui draws with now.
 pub(crate) fn palette(ctx: &egui::Context) -> &'static Palette {
     Palette::of(ctx.theme())
 }
 
-/// Installs the fonts and both egui styles.  Which one is drawn is the
-/// theme preference, which `app` puts on the context at start.
+/// Installs both themes.  `app` picks which one is drawn.
 pub(crate) fn configure_style(ctx: &egui::Context) {
     crate::ui::fonts::install(ctx);
     for theme in [Theme::Dark, Theme::Light] {
@@ -202,11 +162,8 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
     install_hover_cursor(ctx);
 }
 
-/// The pointer for a control that did not choose one.
-///
-/// Anything that can be clicked is a hand, a button and a painted row
-/// alike.  A fader, a slider, a curve handle and the sheet edge set their
-/// own cursor while they are hovered, and that choice wins over this one.
+/// Anything that can be clicked is a hand.  A fader, a slider, a curve
+/// handle and the sheet edge set their own cursor, and that choice wins.
 pub(crate) fn hover_cursor(sense: egui::Sense, enabled: bool) -> Option<egui::CursorIcon> {
     if enabled && sense.senses_click() {
         Some(egui::CursorIcon::PointingHand)
@@ -242,7 +199,6 @@ fn install_hover_cursor(ctx: &egui::Context) {
     );
 }
 
-/// egui's style for `theme`, coloured from its palette.
 fn style(theme: Theme) -> egui::Style {
     let p = Palette::of(theme);
     let mut style = theme.default_style();

@@ -191,9 +191,9 @@ fn auto_bridge_buffer_keeps_two_output_blocks_and_grows_256() {
 
 #[test]
 fn set_output_lifts_the_auto_bridge_buffer_for_a_large_exclusive_step() {
-    // Bridge opens output before input has filled anything; exclusive may
-    // wake with a 10 ms (or larger) GetBufferSize.  The bridge buffer must already
-    // cover two of those steps or the first audible block drops out.
+    // Bridge opens output before input has filled anything.  Exclusive may
+    // wake with a 10 ms (or larger) `GetBufferSize`, so the bridge buffer
+    // must already cover two of those steps or the first block drops out.
     let shared = super::Shared::new(48_000);
     shared.set_bridge_buffer(BufferMode::Auto, 10.0);
     shared.set_source_rate(48_000);
@@ -623,11 +623,8 @@ fn drawing_and_quiet_service_frames_never_wait_for_the_audio_side() {
     });
 }
 
-/// Structural edits (move, remove, add) do not wait for the audio side
-/// either: while it holds the runtime they are published at once and
-/// queued, and its next block applies them.  The slot it lets go of is
-/// destroyed by the next service frame on the UI thread, never by the
-/// audio side.
+/// Structural edits are published at once while the audio side holds the
+/// runtime.  The slot it lets go of is destroyed on the UI thread.
 #[test]
 fn structural_edits_never_wait_for_the_audio_side() {
     let _main = claim_main_thread();
@@ -734,11 +731,9 @@ fn mix_bypass_and_controls_never_wait_for_the_audio_side() {
     path.edit_chain(|chain| chain.restore(Vec::new()));
 }
 
-/// A state capture, a preference save, marking a state stale and a full
-/// editor sync all go through the published links: the worker finishes
-/// while this thread holds the chain runtime, and its capture succeeds.  A
-/// capture off the plugin's main thread is deferred and leaves the effect
-/// stale with its previous blob.
+/// Capture, save, and editor sync go through the published links, so they
+/// finish while this thread holds the runtime.  A capture off the plugin's
+/// main thread is deferred and leaves the previous blob.
 #[test]
 fn capture_and_prefs_never_wait_for_the_audio_side() {
     use crate::audio::clap::tests::{fake_plugin_with_state_for_test, set_fake_state_for_test};
@@ -871,12 +866,9 @@ fn a_latency_change_republishes_without_the_audio_side() {
     });
 }
 
-/// The audio thread is held inside a CLAP effect's `process` (it holds the
-/// chain lock and the plugin's processor) while the UI sets a control
-/// 10 000 times and services, reads and captures the plugin.  None of it
-/// may wait for the audio side: it all finishes while the block is still
-/// held.  Released, the audio side delivers the newest value, and the
-/// effect was never paused or skipped.
+/// The UI sets a control, services, reads, and captures while `process`
+/// still holds the chain.  None of that waits.  Released, the audio side
+/// delivers the newest value, and the effect was not paused.
 #[test]
 fn clap_controls_never_wait_for_the_audio_side() {
     use crate::audio::clap::tests::{

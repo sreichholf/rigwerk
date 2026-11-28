@@ -1,11 +1,6 @@
-//! REAL-style playback for WASAPI outputs.
-//!
-//! Windows mixes every shared-mode stream in fixed steps, 10 ms by default.
-//! Since Windows 10 a driver may allow smaller steps; a stream opened through
-//! IAudioClient3 at the smallest one pulls the whole device down to it while
-//! the stream runs.  That is all the REAL tool does.  Here the same stream
-//! also carries the bridge's audio, so the output side shrinks from about
-//! 10-20 ms to a few milliseconds and other apps on that device benefit too.
+//! Windows mixes shared-mode streams in fixed steps, 10 ms by default.
+//! IAudioClient3 at the driver's smallest step pulls the whole device down
+//! to it while the stream runs.  This stream also carries the bridge.
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::write_frame;
@@ -37,12 +32,11 @@ const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 const SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 
-/// What the driver actually granted.
 #[derive(Clone, Debug)]
 pub struct RealInfo {
     pub rate: u32,
     pub channels: usize,
-    /// The step the device now runs at, in frames.
+    /// The step in effect, in frames.
     pub step_frames: u32,
     pub min_frames: u32,
     pub default_frames: u32,
@@ -59,9 +53,8 @@ impl RealInfo {
                 self.min_frames
             )
         } else if self.min_frames >= self.default_frames {
-            // The driver's smallest shared-mode step is its 10 ms default.
-            // REAL itself cannot go lower here either; say so plainly instead
-            // of pretending the attempt failed.
+            // The driver's minimum is its 10 ms default.  Say so: REAL
+            // cannot go lower here either, and the attempt did not fail.
             format!(
                 "REAL-style · {} smp step ({:.1} ms) · no smaller step: the driver's minimum is its default",
                 self.step_frames,
@@ -83,8 +76,7 @@ impl RealInfo {
     }
 }
 
-/// The running REAL-style stream.  Dropping it stops playback and hands
-/// the device back to its normal step.
+/// Drop stops playback and hands the device back to its normal step.
 pub struct RealOutput {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -99,8 +91,7 @@ impl Drop for RealOutput {
     }
 }
 
-/// Opens `endpoint_id` (a WASAPI endpoint id) at its smallest engine step.
-/// Returns why not when the driver refuses, so the caller can fall back.
+/// The error is why the driver refused, so the caller can fall back.
 pub fn open(
     endpoint_id: &str,
     requested_rate: u32,
@@ -129,11 +120,8 @@ pub fn open(
             Err(reason)
         }
         Err(_) => {
-            // Wait for the driver instead of leaving the thread behind: a
-            // detached open could still claim the endpoint after the caller
-            // has fallen back to another stream on it.  This blocks only the
-            // bridge thread, which the engine's start timeout and teardown
-            // tracking already cover.
+            // Join the thread.  A detached open could still claim the
+            // endpoint after the caller has fallen back to another stream.
             stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
             Err("the driver did not answer in time".to_owned())
@@ -141,10 +129,8 @@ pub fn open(
     }
 }
 
-/// Asks Windows which engine steps this output's driver allows, without
-/// opening, initializing or starting a stream.  This is the "check again"
-/// path: after a driver is installed or removed it reports the new minimum
-/// straight away, so the app does not have to keep a stale result.
+/// No stream is opened.  A driver install or removal shows up at once,
+/// so the app does not keep a stale minimum.
 pub fn probe(endpoint_id: &str) -> Result<RealInfo, String> {
     unsafe {
         let com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
@@ -190,8 +176,8 @@ unsafe fn probe_session(endpoint: &str) -> Result<RealInfo, String> {
     })
 }
 
-/// Windows' "access denied" answer, which is what an endpoint whose driver
-/// was removed (or never bound) gives before anything can be opened.
+/// What an endpoint whose driver was removed (or never bound) returns
+/// before anything can be opened.
 fn access_denied(code: i32) -> bool {
     code as u32 == 0x8007_0005
 }
@@ -204,7 +190,7 @@ fn driver_message(context: &str, error: &windows::core::Error) -> String {
     }
 }
 
-/// The mix format block Windows allocated for us.
+/// Windows allocated this; drop frees it.
 struct MixFormat(*mut WAVEFORMATEX);
 
 impl Drop for MixFormat {
@@ -240,8 +226,7 @@ impl Drop for Session {
     }
 }
 
-/// Channel count and rate of a 32-bit float mix format, the format
-/// Windows' shared-mode engine uses on every current system.
+/// Shared mode is 32-bit float on every current system.
 unsafe fn float_layout(format: *const WAVEFORMATEX) -> Option<(usize, u32)> {
     let header = std::ptr::read_unaligned(format);
     let tag = header.wFormatTag;
@@ -288,18 +273,13 @@ unsafe fn open_session(endpoint: &str) -> Result<Session, String> {
         return Err("the driver reports no usable engine step".to_owned());
     }
 
-    // The smallest step the driver allows, exactly what REAL asks for.  Many
-    // drivers only offer their 10 ms default; that is still worth using here,
-    // because this stream queues one step of audio instead of letting the host
-    // fill a much larger buffer, so the output side stays at the driver's
-    // real minimum rather than growing to several periods.
+    // The driver's smallest step, which may be its 10 ms default.  Queuing
+    // one step still beats a host buffer of several periods.
     if let Err(error) =
         client.InitializeSharedAudioStream(AUDCLNT_STREAMFLAGS_EVENTCALLBACK, min, format.0, None)
     {
-        // The engine may already be running at a larger step because another
-        // app opened this device first (AUDCLNT_E_ENGINE_PERIODICITY_LOCKED).
-        // Joining that step still beats falling back to a host buffer that is
-        // several periods long, so ask what step is in effect and use it.
+        // `AUDCLNT_E_ENGINE_PERIODICITY_LOCKED`: another app opened first.
+        // Joining that step beats a host buffer of several periods.
         let mut current_format: *mut WAVEFORMATEX = std::ptr::null_mut();
         let mut current = 0u32;
         let _ = client.GetCurrentSharedModeEnginePeriod(&mut current_format, &mut current);
@@ -318,8 +298,7 @@ unsafe fn open_session(endpoint: &str) -> Result<Session, String> {
             })?;
     }
 
-    // Report the step really in effect, which may be larger if another app
-    // already held this device when the stream opened.
+    // The step in effect may be larger if another app already held the device.
     let mut current_format: *mut WAVEFORMATEX = std::ptr::null_mut();
     let mut current = min;
     if client
@@ -345,7 +324,7 @@ unsafe fn open_session(endpoint: &str) -> Result<Session, String> {
         .GetService()
         .map_err(|error| format!("no render client ({error})"))?;
 
-    // Start from one step of silence so the first wake-up is not a glitch.
+    // One step of silence, so the first wake-up is not a glitch.
     let lead = step.min(buffer_frames);
     if render.GetBuffer(lead).is_ok() {
         let _ = render.ReleaseBuffer(lead, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32);
@@ -403,22 +382,19 @@ unsafe fn run(
         return;
     }
 
-    // The same scheduling class pro audio apps use, so a busy UI cannot
-    // make the small step late.
+    // MMCSS "Pro Audio", so a busy UI cannot make the small step late.
     let mut task_index = 0u32;
     let mmcss = AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index).ok();
 
     let channels = session.info.channels;
     let mut mixer = OutputMixer::new(session.info.rate, channels);
-    // Design the filter before the loop starts, not during an audio step.
+    // The filter is designed before the loop, not during an audio step.
     mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
     mixer.prepare(session.buffer_frames.max(1) as usize);
-    // Keep exactly one step queued.  The host hands us a much larger buffer
-    // (about two steps), but filling it would add its whole size to the
-    // latency and throw away the low-latency stream's advantage.  One step is
-    // what the driver asks for each wake-up, so the step - not the buffer -
-    // sets the output delay.  MMCSS "Pro Audio" keeps the wake-up on time.
+    // Keep one step queued.  The host buffer is about two steps; filling
+    // it would add that size to the latency.  The step, not the buffer,
+    // sets the delay.
     let queue = session
         .info
         .step_frames
@@ -457,8 +433,8 @@ unsafe fn run(
         };
         let samples =
             std::slice::from_raw_parts_mut(data.cast::<f32>(), frames as usize * channels);
-        // This thread is the real-time callback for the device; a panic here
-        // must not end it silently while the app still says Running.
+        // This thread is the real-time callback.  A panic must not end it
+        // silently while the app still says Running.
         let panicked = contain(|| {
             mixer.render(&shared, frames as usize, |index, mapped| {
                 if channels > 0 {
@@ -471,8 +447,8 @@ unsafe fn run(
             });
         });
         if panicked {
-            // The voice is untrustworthy: release the buffer as silence and
-            // let the app stop the run.
+            // The render is untrustworthy: release silence and let the app
+            // stop the run.
             shared.note_callback_failure(CallbackFailure::Panic);
             samples.fill(0.0);
         }

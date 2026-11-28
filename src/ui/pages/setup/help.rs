@@ -1,8 +1,3 @@
-//! The guide for this platform, as collapsible sections, and About.
-//!
-//! The text is the old Guide page.  The step drawings are gone.  Windows
-//! and Linux each keep the notes that page showed for that system.
-
 use eframe::egui;
 use egui::RichText;
 

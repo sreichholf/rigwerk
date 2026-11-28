@@ -1,19 +1,10 @@
-//! The bridge thread: picks the path for the chosen devices (ASIO or
-//! system on either side), opens both sides and keeps them running.
+//! `select`'s order is the precedence: a later arm never sees a device an
+//! earlier one claimed.  Every arm exists on every target.  An arm this
+//! target does not build returns an error instead of falling through to
+//! cpal.  An ASIO clsid is a Windows registry entry.
 //!
-//! `select` decides which backend runs and nothing else: the order it asks
-//! in is the precedence, so a backend never gets a device an earlier one
-//! claimed.  Each arm of `Backend::run` only calls its backend.
-//!
-//! The clock target is still set in `run_bridge`, before dispatch, on
-//! purpose: only the ASIO output and ASIO duplex paths set it themselves, so
-//! the native PipeWire path, the ASIO input path and cpal rely on that line.
-//!
-//! Every arm exists on every target, so the table is whole everywhere; an arm
-//! whose backend is not built on this target returns an error instead of
-//! opening anything.  So a config that carries an ASIO clsid where there is no
-//! ASIO errors instead of falling through to cpal: a clsid comes from a Windows
-//! registry entry, so it cannot legitimately appear anywhere else.
+//! The bridge buffer is set here, before dispatch.  Only the ASIO output
+//! and ASIO duplex paths set it themselves.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -31,8 +22,6 @@ use super::types::StartConfig;
 #[cfg(target_os = "windows")]
 use super::win::asio::{run_asio_bridge, run_asio_output_bridge};
 
-/// "48000 Hz" when both sides share a rate, "44100 → 48000 Hz" when the
-/// output converts.
 pub(crate) fn rate_path(input: u32, output: u32) -> String {
     if input == output {
         format!("{input} Hz")
@@ -41,10 +30,6 @@ pub(crate) fn rate_path(input: u32, output: u32) -> String {
     }
 }
 
-/// Which backend a start goes to.  The variant carries the selection's
-/// result, so `run` dispatches without reading `config` again.  Every variant
-/// exists on every target; an arm whose backend is not built there returns an
-/// error.
 #[derive(Debug, PartialEq, Eq)]
 enum Backend {
     AsioOutput(u128),
@@ -53,23 +38,19 @@ enum Backend {
     Cpal,
 }
 
-/// The backend `config` selects.  Its order is the precedence: ASIO output
-/// first (one driver can carry both directions), then ASIO input, then a
-/// native `pipewire:` id on either side, then cpal.  It reads nothing but
-/// `config`, so it is the same table on every target.
 fn select(config: &StartConfig) -> Backend {
     if let Some(output_clsid) = config.output_asio_clsid {
+        // One driver can carry both directions, so this arm wins over input.
         return Backend::AsioOutput(output_clsid);
     }
     if let Some(clsid) = config.asio_clsid {
-        // The ASIO driver owns the clock.  Ask it for its real rate first and
-        // let the output follow or convert from that rate.
+        // This driver owns the clock.  The output follows its real rate,
+        // or converts from it.
         return Backend::AsioInput(clsid);
     }
 
-    // A `pipewire:{node.name}` id is a real PipeWire source or sink. The
-    // native client links RigWerk's own nodes to it. Mixed bridges still open
-    // the other side through cpal.
+    // A `pipewire:` id is a real node.  A mixed bridge still opens the
+    // other side through cpal.
     if config.input_id.as_deref().is_some_and(is_native_id) || is_native_id(&config.output_id) {
         return Backend::LinuxNative;
     }
@@ -121,15 +102,13 @@ pub(crate) fn run_bridge(
     select(&config).run(&config, shared, stop)
 }
 
-/// cpal capture and playback as two independent streams.
 fn run_cpal(
     config: &StartConfig,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    // Settle the input first.  A device that cannot run at the requested rate
-    // opens at its own; the output then converts from that real rate instead
-    // of playing the input too fast or too slow.
+    // The input opens first.  A device that refuses the requested rate
+    // opens at its own, and the output converts from that.
     shared.set_status("Opening input…");
     let input_device = open_input_device(config)?;
     let input_config = pick_input_config(&input_device, config.sample_rate)?;
@@ -146,8 +125,8 @@ fn run_cpal(
         config.low_latency_request,
         config.exclusive_output,
     )?;
-    // `open_output` already published `output.rate`.  The UI thread reloads
-    // plugins from that rate; this thread must not load or destroy them.
+    // `open_output` already published the rate.  This thread must not load
+    // or destroy plugins; the UI thread reloads them.
     shared.set_status("Waiting for input clock…");
     let input_stream = make_input_stream(
         &input_device,
@@ -168,8 +147,8 @@ fn run_cpal(
         output.channels
     ));
 
-    // Generic extra outputs: own cpal streams, synced live from the plan.
-    // PipeWire duplex never reaches this path; ASIO / native PW never do.
+    // Own cpal streams, synced from the plan.  PipeWire duplex, ASIO and
+    // native PipeWire never reach this path.
     let mut extra_outputs = ExtraOutputOutputs::new(config.output_buffer, output.rate);
     extra_outputs.sync(&shared);
 

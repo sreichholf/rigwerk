@@ -201,7 +201,6 @@ fn extra_output_sinks_link_from_preallocated_port_pairs() {
     assert!(links.contains(&(3, 33, 2, 21)));
     assert!(links.contains(&(3, 34, 6, 60)));
     assert!(links.contains(&(3, 35, 6, 61)));
-    // A missing extra output stays in the session: no link, bridge keeps going.
     let only_clock = graph.wanted_links(3, "missing", "speakers", &[(0, "gone")]);
     assert_eq!(only_clock, vec![(3, 32, 2, 20), (3, 33, 2, 21)]);
 }

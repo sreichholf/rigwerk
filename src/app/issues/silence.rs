@@ -1,66 +1,46 @@
-//! The watch behind "Output went silent under low latency": RigWerk sends a
-//! loud signal to the clock sink while PipeWire's monitor of that sink stays
-//! quiet.  Pure and platform-neutral; the sink monitor that feeds it is
-//! `audio::linux::sink_monitor`, and the time is passed in for tests.
-//!
-//! Guitar rests are common, so only a tick that is loud on the sending side
-//! counts as evidence: a rest (both quiet) proves nothing either way, and
-//! [`SILENCE_REST_RESET`] of rest drops the evidence gathered before it, so
-//! loud moments minutes apart do not add up.  The
-//! sent peak is the clock output's meter, after the gate, the map, the level
-//! and the mutes, so a closed gate reads as a rest.  Master or device mute,
-//! or no unmuted path reaching the clock output, disarms it outright.
-//! Without monitor data (not Linux, no PipeWire sink, monitor not linked)
-//! the watch is inert and never guesses.
-//!
-//! The sent peak is RigWerk's meter, before PipeWire's own stream volume:
-//! a RigWerk stream muted or turned down in the desktop mixer looks the
-//! same as a starved sink.  Recent dropouts are what tell them apart: with
-//! them the silence has to last [`SILENCE_RAISE_WITH_DROPOUTS`], without
-//! them [`SILENCE_RAISE_ALONE`], and the issue built on it is only an error
-//! with them.  Any monitor signal resets that evidence, and
-//! [`SILENCE_CLEAR_AFTER`] of monitor signal clears a raised watch.
+//! Only a tick that is loud on the send side counts.  A rest drops the
+//! evidence after [`SILENCE_REST_RESET`], so loud moments minutes apart
+//! do not add.  The sent peak is the clock-output meter, before
+//! PipeWire's stream volume, so a desktop mute looks like a starved sink.
+//! Recent dropouts tell them apart.  Without monitor data the watch
+//! never guesses.
 
 use std::time::{Duration, Instant};
 
-/// RigWerk counts as sending above this peak.
 pub(crate) const SILENCE_SENT_DBFS: f32 = -40.0;
-/// The sink's monitor counts as silent below this peak.
 pub(crate) const SILENCE_MONITOR_DBFS: f32 = -70.0;
-/// Loud-but-unheard time that raises the watch with recent dropouts.
 pub(crate) const SILENCE_RAISE_WITH_DROPOUTS: Duration = Duration::from_millis(1500);
-/// The same without dropouts: rarer, so it needs more evidence.
+/// Rarer than a dropout, so it needs more evidence.
 pub(crate) const SILENCE_RAISE_ALONE: Duration = Duration::from_secs(3);
-/// Monitor signal that clears a raised watch.
 pub(crate) const SILENCE_CLEAR_AFTER: Duration = Duration::from_secs(1);
-/// A rest (neither side loud) this long drops the gathered evidence.
+/// A rest this long drops the evidence, so loud moments minutes
+/// apart do not add.
 pub(crate) const SILENCE_REST_RESET: Duration = Duration::from_secs(2);
-/// The most one tick counts for, so a stalled frame does not raise it alone.
+/// A stalled frame must not raise the watch by itself.
 const MAX_STEP: Duration = Duration::from_millis(250);
 
-/// One tick's readings.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct SilenceInput {
-    /// Low latency is engaged and the bridge runs.
+    /// Low latency is on and the bridge runs.
     pub(crate) armed: bool,
-    /// The peak RigWerk sends to the clock output (linear).
+    /// Linear peak sent to the clock output.
     pub(crate) sent: f32,
-    /// The peak on the sink's monitor (linear), `None` without monitor data.
+    /// Linear peak on the sink monitor.  `None` without monitor data.
     pub(crate) monitor: Option<f32>,
     /// Master mute, the clock output muted, or no unmuted path reaching it.
     pub(crate) parked: bool,
-    /// The clock output has a run of dropouts that has not gone quiet.
+    /// A dropout run that has not gone quiet.
     pub(crate) dropouts: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SilenceWatch {
     silent: bool,
-    /// Loud-but-unheard time gathered toward raising.
+    /// Loud-but-unheard time toward raising.
     unheard: Duration,
-    /// Monitor-signal time gathered toward clearing.
+    /// Monitor-signal time toward clearing.
     heard: Duration,
-    /// Rest time since either side was last loud.
+    /// Since either side was last loud.
     rest: Duration,
     last: Option<Instant>,
 }
@@ -113,7 +93,6 @@ impl SilenceWatch {
         }
     }
 
-    /// Whether the sink is judged silent while RigWerk plays into it.
     pub(crate) fn silent(&self) -> bool {
         self.silent
     }

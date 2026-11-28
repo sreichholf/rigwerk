@@ -1,12 +1,6 @@
-//! The UI-thread side of the built-in cabinet: the impulse folder, the
-//! scan, and installing one response on a path.
-//!
-//! A [`CabKernel`](crate::audio::cab::CabKernel) is built and dropped here,
-//! never inside `set_mix` and never on the audio thread.  The same path,
-//! rate, cuts and polarity on the same run is not rebuilt.  A cut or a
-//! polarity change rebakes the cached samples and does not re-read the
-//! file.  A rate or path change does.  The folder window and the clipboard
-//! read run on the UI thread too.
+//! A kernel is built and dropped here, never inside `set_mix` and never
+//! on the audio thread.  A cut or a polarity change rebakes the cache
+//! and does not re-read the file.  A rate or path change does.
 
 use crate::app::nam::{
     browse_start, clipboard_models_folder, looks_pasted, normalize_models_folder, pasted_folder,

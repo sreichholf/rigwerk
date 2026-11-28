@@ -1,7 +1,5 @@
-//! Setup: devices on the left, time and preferences on the right.
-//!
-//! One scrolling screen.  *Done* returns to the console.  The page draws
-//! and calls `RigWerkApp`; it does not read `engine.shared`.
+//! Setup.  It only draws and calls `RigWerkApp`; it does not read
+//! `engine.shared`.
 
 mod appearance;
 mod clock;

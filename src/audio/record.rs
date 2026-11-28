@@ -1,30 +1,19 @@
-//! WAV capture of one armed endpoint.
+//! The `rigwerk-record` thread is the only disk I/O, and the only place
+//! that allocates the ring.  The callback copies one frame and returns:
+//! it never locks or writes.  [`Recorder::arm`] and [`Recorder::disarm`]
+//! only publish a request and do not join.  Drop only asks the thread to
+//! finish; its `Arc` keeps the ring and the file alive.
 //!
-//! A `rigwerk-record` thread is the only place that allocates the ring,
-//! creates directories, or writes the file.  The audio callback and the UI
-//! never call into that write, so a slow disk cannot block them.  The
-//! callback copies one frame into the ring and returns.  [`Recorder::arm`]
-//! and [`Recorder::disarm`] only publish a request and return.  Neither
-//! joins the thread.  Dropping a [`Recorder`] only asks it to finish, and
-//! the thread holds an `Arc` of the recorder state so the ring and the file
-//! outlive the handle.
+//! The ring holds [`RECORD_SECONDS`].  Past that, a frame is counted and
+//! dropped.  It is allocated when the file opens, and freed only after the
+//! phase has left [`RecordPhase::Recording`] and every in-flight
+//! [`Recorder::push`] has dropped its hold.  The WAV sizes are patched
+//! about once a second, so a crash leaves a readable file.
 //!
-//! The ring is the queue between the callback and that thread: five seconds
-//! at the armed rate ([`RECORD_SECONDS`]).  It is not what keeps either
-//! side realtime.  Past that depth a frame is counted and left out, and the
-//! callback still returns.  The ring is allocated when the writer opens the
-//! file, and freed only after the phase has left [`RecordPhase::Recording`]
-//! and every in-flight [`Recorder::push`] has dropped its hold.  The writer
-//! drains the queue as it runs and patches the WAV sizes about once a
-//! second, so a crash leaves a readable file of whatever already reached
-//! disk.
-//!
-//! A take is the endpoint's frame without the metronome tick and the
-//! calibration click, unless [`Recorder::set_with_click`] asks for the
-//! frame as played.  The flag is read per frame, so it applies mid-take.
-//! A generic extra output with more than 4 channels cannot carry the
-//! click-free frame through its ring, so its take keeps the click (see
-//! `extra_output::bus`).
+//! A take omits the metronome and the calibration click unless
+//! [`Recorder::set_with_click`] is set.  The flag is read per frame.  A
+//! generic extra output with more than 4 channels cannot carry the
+//! click-free frame, so its take keeps the click (`extra_output::bus`).
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -38,17 +27,17 @@ use std::time::{Duration, Instant};
 
 use super::output_map::{DeviceFrame, FRAME_LANES};
 
-/// How much audio the ring holds, at the rate the take was armed with.
+/// Ring depth at the armed rate.
 pub(crate) const RECORD_SECONDS: u32 = 5;
 
-/// Which endpoint's callback is allowed to feed the armed take.
+/// Which callback may feed the armed take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordSource {
     Clock,
     ExtraOutput(usize),
 }
 
-/// Where a take is.  The audio thread may read this; it never waits on it.
+/// The audio thread may read this.  It never waits on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum RecordPhase {
@@ -65,22 +54,21 @@ const PHASE_RECORDING: u8 = RecordPhase::Recording as u8;
 const PHASE_FINISHING: u8 = RecordPhase::Finishing as u8;
 const PHASE_FAILED: u8 = RecordPhase::Failed as u8;
 
-/// What the UI shows.  `frames` counts frames the callback pushed, which
-/// runs ahead of the file until the writer next drains.
+/// `frames` is what the callback pushed.  It runs ahead of the file until
+/// the writer drains.
 #[derive(Clone, Debug)]
 pub(crate) struct RecordStatus {
     pub(crate) phase: RecordPhase,
     pub(crate) overruns: u64,
     pub(crate) frames: u64,
     pub(crate) rate: u32,
-    /// Channel count the take was armed with.
-    #[cfg_attr(not(test), allow(dead_code))] // Live row; no non-test reader yet.
+    #[cfg_attr(not(test), allow(dead_code))] // For the Live row.
     pub(crate) channels: usize,
     pub(crate) error: Option<String>,
     pub(crate) path: Option<String>,
 }
 
-/// Bytes of a float WAVEFORMATEXTENSIBLE header, through the data-size field.
+/// Float WAVEFORMATEXTENSIBLE header, through the data-size field.
 const HEADER_LEN: u64 = 68;
 const RIFF_SIZE_OFFSET: u64 = 4;
 const DATA_SIZE_OFFSET: u64 = 64;
@@ -93,18 +81,16 @@ const IEEE_FLOAT_GUID: [u8; 16] = [
     0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
 ];
 
-/// Clock encodes as 0.  An extra output encodes as `index + 1`, so the two never
-/// share a value for any index a device list can hold.
+/// Clock is 0.  An extra output is `index + 1`, so the two never share a
+/// value.
 const SOURCE_CLOCK: u64 = 0;
 
-/// How often the writer patches the WAV sizes.  Samples are drained on
-/// every pass; this only rewrites the header.
+/// How often the WAV sizes are patched.  Samples drain every pass.
 const HEADER_INTERVAL: Duration = Duration::from_secs(1);
-/// How long the writer sleeps when the queue is empty.  The audio thread
-/// never sleeps; this is the writer thread only.
+/// Writer sleep when the queue is empty.  The audio thread never sleeps.
 const IDLE_POLL: Duration = Duration::from_millis(5);
 
-/// A take the UI asked for.  Copied out of the mutex before any file call.
+/// Copied out of the mutex before any file call.
 struct TakeRequest {
     path: PathBuf,
     rate: u32,
@@ -112,23 +98,21 @@ struct TakeRequest {
     source: RecordSource,
 }
 
-/// Strings and the pending request.  The audio thread never locks this.
-/// The writer holds it only long enough to move those fields.
+/// The audio thread never locks this.  The writer holds it only to move
+/// the fields.
 struct Meta {
     request: Option<TakeRequest>,
     error: Option<String>,
     path: Option<String>,
 }
 
-/// Shared by the handle, the callback, and the writer thread.
 struct Inner {
     phase: AtomicU8,
-    /// Pushes currently between their phase check and their last use of the
-    /// ring.  The writer spins on this after leaving `Recording`, and only
-    /// then frees the ring.
+    /// Pushes between their phase check and their last use of the ring.
+    /// The writer spins on this after leaving `Recording`, then frees it.
     inflight: AtomicUsize,
-    /// Writer threads that have not exited.  `Failed` is published before
-    /// the ring is freed, so phase alone would let a new arm start too soon.
+    /// Writer threads still running.  `Failed` is published before the ring
+    /// is freed, so phase alone would let a new arm start too soon.
     writers: AtomicUsize,
     overruns: AtomicU64,
     frames: AtomicU64,
@@ -162,10 +146,9 @@ impl Inner {
     }
 }
 
-/// SPSC ring of interleaved `f32` frames.  One producer (the armed
-/// callback), one consumer (the writer).  Slots are `f32` bits.  The
-/// producer writes a frame, then release-stores `head`.  The consumer
-/// acquire-loads `head`, reads, then release-stores `tail`.
+/// SPSC: the armed callback writes a frame, then release-stores `head`.
+/// The writer acquire-loads `head`, reads, then release-stores `tail`.
+/// Slots are `f32` bits.
 struct RecordRing {
     slots: Vec<AtomicU32>,
     capacity: u64,
@@ -191,8 +174,8 @@ impl RecordRing {
         }
     }
 
-    /// `false` when the ring is full.  The caller counts an overrun and
-    /// drops the frame.  Never blocks.
+    /// `false` when full: the caller counts an overrun and drops the frame.
+    /// Never blocks.
     fn push(&self, frame: &[f32]) -> bool {
         let capacity = self.capacity;
         let head = self.head.load(Ordering::Relaxed);
@@ -229,9 +212,8 @@ impl RecordRing {
     }
 }
 
-/// Frees the published ring unless [`Self::release`] already did.  A panic
-/// on the writer still leaves `Recording` and waits out in-flight pushes
-/// before the free, so the callback cannot observe a dangling pointer.
+/// Frees the ring unless [`Self::release`] did.  A panic still waits out
+/// in-flight pushes before the free.
 struct RingGuard<'a> {
     inner: &'a Inner,
     live: bool,
@@ -262,9 +244,9 @@ impl Drop for RingGuard<'_> {
         if !self.live {
             return;
         }
-        // `Finishing`, not `Failed`: the terminal phase is published only
-        // after `writers` hits zero, so a caller that sees `Failed` can arm
-        // again.  `Finishing` is enough to stop pushes before the free.
+        // `Finishing`, not `Failed`.  `Failed` is published only after
+        // `writers` hits zero, so a caller that sees it can arm again.
+        // `Finishing` stops pushes before the free.
         if self.inner.phase.load(Ordering::SeqCst) == PHASE_RECORDING {
             self.inner.phase.store(PHASE_FINISHING, Ordering::SeqCst);
         }
@@ -279,9 +261,8 @@ impl Drop for RingGuard<'_> {
 /// Not a real phase.  Left in place when the writer panics before deciding.
 const PHASE_UNSET: u8 = 255;
 
-/// Publishes `Idle` or `Failed` only after this thread has dropped
-/// `writers`.  A caller that observes either phase can arm again; the
-/// previous thread is no longer touching the ring or the file.
+/// Publishes `Idle` or `Failed` only after `writers` is dropped, so a
+/// caller that sees either can arm again.
 struct Publish<'a> {
     inner: &'a Inner,
     terminal: u8,
@@ -309,8 +290,7 @@ impl Drop for Publish<'_> {
     }
 }
 
-/// Hold across a push that might touch the ring.  Drop decrements, so a
-/// panic cannot leave the writer's spin waiting forever.
+/// Drop decrements, so a panic cannot leave the writer's spin waiting.
 struct Inflight<'a>(&'a AtomicUsize);
 
 impl Drop for Inflight<'_> {
@@ -319,17 +299,15 @@ impl Drop for Inflight<'_> {
     }
 }
 
-/// Handle the engine keeps.  Cheap to create: no thread, no ring, no file.
+/// Cheap to create: no thread, no ring, no file.
 pub(crate) struct Recorder {
     inner: Arc<Inner>,
-    /// Whether a take carries the metronome tick and the calibration click
-    /// ("Record the click").  Off by default.  Read per pushed frame, so a
-    /// change lands on the next frame, also mid-take.
+    /// Metronome and calibration click ("Record the click").  Read per
+    /// frame, so a change applies on the next frame, mid-take too.
     with_click: AtomicBool,
 }
 
 impl Recorder {
-    /// Cheap.  Does not spawn a thread and does not allocate the ring.
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Inner::new()),
@@ -337,24 +315,19 @@ impl Recorder {
         }
     }
 
-    /// Records the frame the endpoint plays (`true`) or the click-free one.
     pub(crate) fn set_with_click(&self, with_click: bool) {
         self.with_click.store(with_click, Ordering::Relaxed);
     }
 
-    /// Whether a take carries the metronome tick and the calibration click.
     pub(crate) fn with_click(&self) -> bool {
         self.with_click.load(Ordering::Relaxed)
     }
 
-    /// Audio thread.  Wait-free.  Copies `frame` (one sample per channel).
-    /// No-op unless the phase is `Recording` and `source` is the armed
-    /// source.  A full ring increments the overrun count and drops the
-    /// frame.  Never allocates, never locks, never writes.
+    /// Audio thread.  Wait-free: never allocates, locks, or writes.
     #[inline]
     pub(crate) fn push(&self, source: RecordSource, frame: &[f32]) {
         let inner = &self.inner;
-        // Stale "not recording" only drops a frame.  The slow path below
+        // A stale "not recording" only drops a frame.  The slow path
         // re-checks under `inflight` before it touches the pointer.
         if inner.phase.load(Ordering::Relaxed) != PHASE_RECORDING {
             return;
@@ -386,15 +359,9 @@ impl Recorder {
         }
     }
 
-    /// UI or engine thread.  Returns immediately.  Does not open a file,
-    /// allocate the ring, or join.  CAS phase from `Idle` or `Failed` to
-    /// `Arming` and hands the request to a writer thread.  Returns false if
-    /// a take is already arming, recording, or finishing (or the previous
-    /// writer has not exited).  `channels` is clamped to at least 1 and at
-    /// most [`FRAME_LANES`] (`output_map::SLOTS`).  A `rate` of 0 fails the
-    /// arm on the writer (phase `Failed`, error set) without blocking the
-    /// caller: this returns true once the request is accepted, and false
-    /// only when a take is already in progress.
+    /// Returns immediately: no file, no ring, no join.  `false` only when a
+    /// take is in progress or the previous writer has not exited.  A `rate`
+    /// of 0 fails on the writer without blocking; this still returns true.
     pub(crate) fn arm(
         &self,
         path: PathBuf,
@@ -446,8 +413,7 @@ impl Recorder {
         true
     }
 
-    /// UI or engine thread.  Returns immediately.  Does not join and does
-    /// not write.  The writer drains, patches the header, and goes `Idle`.
+    /// Returns immediately.  Does not join and does not write.
     pub(crate) fn disarm(&self) {
         self.inner.stop.store(true, Ordering::Release);
     }
@@ -468,7 +434,6 @@ impl Recorder {
         }
     }
 
-    /// False when a writer is still alive or the phase is not a terminal one.
     fn try_begin(&self) -> bool {
         if self.inner.writers.load(Ordering::Acquire) != 0 {
             return false;
@@ -498,11 +463,8 @@ impl Drop for Recorder {
     }
 }
 
-/// Audio thread helper.  Stack buffer only.  Copies `channels` samples via
-/// [`DeviceFrame::sample`], or [`DeviceFrame::record_sample`] while the
-/// recorder leaves the click out, and pushes them.  `channels` is the
-/// endpoint's channel count.  Past [`FRAME_LANES`] there is no distinct
-/// slot, and a take never arms more than that, so the copy stops there.
+/// Audio thread.  Stack buffer only.  Past [`FRAME_LANES`] there is no
+/// distinct slot, and a take never arms more than that, so the copy stops.
 #[inline]
 pub(crate) fn push_device_frame(
     recorder: &Recorder,
@@ -549,15 +511,14 @@ fn note_error(inner: &Inner, message: &str) {
     meta.error = Some(message.to_owned());
 }
 
-/// Spawn failed on the caller thread: there is no writer left to publish
-/// the phase.  `writers` has already been decremented.
+/// Spawn failed on the caller: no writer will publish the phase.
+/// `writers` is already decremented.
 fn fail_take(inner: &Inner, message: &str) {
     note_error(inner, message);
     inner.phase.store(PHASE_FAILED, Ordering::SeqCst);
 }
 
-/// Remember a writer-side failure.  Pushes stop immediately (`Finishing`);
-/// `Failed` itself is stored when the thread exits.
+/// Pushes stop now (`Finishing`).  `Failed` is stored when the thread exits.
 fn fail_writer(inner: &Inner, publish: &mut Publish<'_>, message: &str) {
     note_error(inner, message);
     if inner.phase.load(Ordering::SeqCst) == PHASE_RECORDING {
@@ -646,16 +607,15 @@ fn record_take(inner: &Inner, publish: &mut Publish<'_>) {
     }
 
     if let Some(message) = failed {
-        // `Finishing` stops pushes.  The guard then frees the ring.  Samples
-        // still queued are dropped; the header covers bytes already written.
-        // `Failed` is published when this thread exits.
+        // Queued samples are dropped.  The header covers bytes already
+        // written.  `Failed` is published when this thread exits.
         fail_writer(inner, publish, &message);
         let _ = patch_sizes(&mut file, data_bytes);
         return;
     }
 
-    // Stop accepting pushes before the final drain, then wait until every
-    // push that observed `Recording` has stored its frame.
+    // Leave `Recording` before the final drain, then wait out pushes that
+    // already observed it.
     inner.phase.store(PHASE_FINISHING, Ordering::SeqCst);
     while inner.inflight.load(Ordering::SeqCst) != 0 {
         std::hint::spin_loop();
@@ -747,7 +707,7 @@ fn patch_sizes(file: &mut File, data_bytes: u64) -> io::Result<()> {
     Ok(())
 }
 
-/// Pulls every queued frame into the file.  Runs on the writer thread.
+/// Writer thread only.  This is the disk write.
 fn drain_ring(
     inner: &Inner,
     file: &mut File,

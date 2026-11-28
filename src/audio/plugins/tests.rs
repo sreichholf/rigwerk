@@ -132,9 +132,8 @@ fn a_restored_state_takes_precedence_over_unchanged_values() {
     assert!(params_to_restore(&saved, Some(&saved)).is_empty());
 }
 
-/// The snapshot of a blob saved with values still queued restores them
-/// through the plain rule (`params_to_restore`, which an older build
-/// shares): no marker is needed.
+/// No marker: a blob saved with values still queued restores them through
+/// `params_to_restore`.
 #[test]
 fn a_snapshot_with_undelivered_values_restores_them_through_the_plain_rule() {
     use super::host::capture_snapshot;
@@ -157,7 +156,6 @@ fn a_snapshot_with_undelivered_values_restores_them_through_the_plain_rule() {
 
 #[test]
 fn a_saved_value_of_minus_one_restores_like_any_other() {
-    // -1.0 is a plain CLAP value like any other.
     let saved = [param(1, -1.0)];
     assert!(params_to_restore(&saved, Some(&[param(1, -1.0)])).is_empty());
     assert_eq!(
@@ -308,7 +306,6 @@ fn reported_changes_update_only_the_controls_they_name() {
             value: 0.7,
             display: Some("70 %".to_owned()),
         },
-        // Not a control this plugin lists: ignored.
         ParamChange {
             id: 4,
             value: 0.5,
@@ -324,11 +321,9 @@ fn reported_changes_update_only_the_controls_they_name() {
     ));
     assert_eq!(parameters[0].value, 0.7);
     assert_eq!(parameters[0].display, "70 %");
-    // The views and saved entries it did not name stay as they were.
     assert_eq!(parameters[1].value, 0.5);
     assert_eq!(parameters[2].value, 0.9);
     assert_eq!(saved, vec![param(1, 0.7), param(3, 0.9), param(9, 0.4)]);
-    // A batch of only known ids applies cleanly and asks for nothing.
     let mut fresh = vec![view(1, 0.2, 0.0)];
     let mut fresh_saved = Vec::new();
     let known = [ParamChange {
@@ -370,7 +365,6 @@ fn no_reported_changes_leave_everything_unchanged() {
     assert_eq!(saved, vec![param(1, 0.6)]);
 }
 
-/// A slot holding a fake CLAP plugin, the way a real load fills one in.
 fn fake_clap_slot(fail_process: bool) -> Slot {
     use super::super::clap::tests::fake_plugin_for_test;
     Slot::with_plugin_for_test(
@@ -419,7 +413,6 @@ fn a_failing_process_only_records_the_failure_and_the_view_formats_it() {
     assert!(slot.error.is_none());
     assert!(slot.failed());
     assert_eq!(chain.active(), 0, "the failed effect left the chain");
-    // The block is the input.
     assert!(left.iter().chain(&right).all(|&sample| sample == 0.5));
 
     // The text is written when the UI thread builds the views.
@@ -461,7 +454,8 @@ fn the_chain_latency_counts_bypassed_effects_but_not_failed_ones() {
     let mut chain = ChainRuntime::for_test(48_000);
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(16));
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(32));
-    // The fake loaded last is the one `restart_fake_with_latency_for_test` moves.
+    // The fake loaded last is the one
+    // `restart_fake_with_latency_for_test` moves.
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64));
     // A saved effect that was never opened.
     chain.push_for_test(Slot::empty(PluginPref::default()));
@@ -582,7 +576,6 @@ fn a_rate_rebuild_restores_what_the_handle_saved_since_load() {
     drop(chain.flush());
 }
 
-/// An impulse at frame `at` in a block of `frames`.
 fn impulse(frames: usize, at: usize) -> Vec<f32> {
     let mut block = vec![0.0f32; frames];
     block[at] = 1.0;
@@ -678,7 +671,6 @@ fn a_clap_effect_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
     chain.insert_clap_for_test(fake_plugin_with_latency_for_test(64));
     let mut left = vec![0.0f32; 128];
     let mut right = vec![0.0f32; 128];
-    // A normal block: the fake writes its constant.
     chain.process(&mut left, &mut right, 128);
     assert_eq!(left[0], 1.0);
 
@@ -693,7 +685,6 @@ fn a_clap_effect_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
         left
     });
     assert_eq!(ran, Some(vec![1.0; 128]));
-    // The normal block and the one under the editor: no skip.
     assert_eq!(
         chain.slot_mut_for_test(0).controls.lock_stats(),
         crate::audio::LockStats {
@@ -702,8 +693,6 @@ fn a_clap_effect_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
         }
     );
 
-    // A restart: the UI asks for a pause, the block passes through, 64
-    // frames late.
     restart_fake_with_latency_for_test(64);
     assert!(!handle.service());
     let mut left = impulse(128, 36);
@@ -723,7 +712,6 @@ fn a_clap_effect_keeps_processing_while_its_editor_works_and_keeps_its_latency_i
             skips: 1,
         }
     );
-    // Restarted and resumed: it processes again.
     handle.service();
     assert!(!handle.shared().restart_pending());
     chain.process(&mut left, &mut right, 128);
@@ -793,7 +781,6 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
     assert!(!chain.process(&mut left, &mut right, 64));
     assert!(!chain.slot_mut_for_test(0).controls.bypass());
     assert!(chain.slot_mut_for_test(1).controls.bypass());
-    // Turning chain bypass off runs the active effect again.
     assert_eq!(chain.slot_mut_for_test(0).controls.lock_stats().attempts, 1);
     assert_eq!(chain.slot_mut_for_test(1).controls.lock_stats().attempts, 0);
     assert_eq!(chain.latency_samples(), 24);
@@ -801,12 +788,8 @@ fn chain_bypass_skips_processing_and_keeps_each_slots_bypass_and_latency() {
     drop(chain.clear_for_test());
 }
 
-// Real VST3 plugins: Steinberg's SDK samples, built by
-// `scripts/vst3-fixtures.sh` (see `super::fixtures`).  Each test goes through
-// RigWerk's own entry points (`load_plugin`, `PathControls`, the saved
-// `PluginPref`), not the VST3 host underneath, so they keep passing when
-// that host is replaced.  With `RIGWERK_VST3_FIXTURES` unset they return at
-// once.
+// Through `load_plugin` and `PathControls`, not the VST3 host underneath,
+// so these still pass when that host is replaced.
 
 /// The class ids a scan stores in [`PluginPref::class_id`] for the three
 /// fixtures (32 hex digits, as `moduleinfo.json` writes them).  Saved
@@ -821,10 +804,9 @@ const FIXTURES: [(&str, &str); 3] = [
     ("host-checker", HOST_CHECKER_CLASS),
 ];
 
-/// The block the fixture tests process: well under [`super::MAX_BLOCK`].
+/// Under [`super::MAX_BLOCK`], so a fixture block is not split.
 const FIXTURE_BLOCK: usize = 256;
 
-/// The peak of the quiet test tone.
 const TONE_PEAK: f32 = 0.1;
 
 /// The saved effect a scan would add for fixture `name`, or `None` when
@@ -840,17 +822,12 @@ fn fixture_pref(name: &str, class_id: &str) -> Option<PluginPref> {
     })
 }
 
-/// A 440 Hz tone at [`TONE_PEAK`], continuing from frame `start`.
 fn tone(start: usize) -> Vec<f32> {
     (start..start + FIXTURE_BLOCK)
         .map(|frame| TONE_PEAK * (frame as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin())
         .collect()
 }
 
-/// Runs `blocks` blocks of the tone through the path's chain, the way the
-/// output callback does.  Fails on a missed chain lock (nothing else holds
-/// it here) and on a sample that is not finite.  Returns the last block's
-/// peak.
 fn run_tone(path: &crate::audio::path::PathControls, blocks: usize) -> f32 {
     let mut peak = 0.0f32;
     for block in 0..blocks {
@@ -872,14 +849,12 @@ fn run_tone(path: &crate::audio::path::PathControls, blocks: usize) -> f32 {
     peak
 }
 
-/// A path at 48 kHz with `pref` added the way the Plugins page adds it.
 fn fixture_path(pref: PluginPref) -> crate::audio::path::PathControls {
     let path = crate::audio::path::PathControls::new(48_000);
     path.add_plugin(pref).expect("add the fixture");
     path
 }
 
-/// The only effect's published view, with its error checked.
 fn only_view(path: &crate::audio::path::PathControls) -> super::PluginView {
     let views = path.plugin_views();
     assert_eq!(views.len(), 1);
@@ -888,7 +863,6 @@ fn only_view(path: &crate::audio::path::PathControls) -> super::PluginView {
     view
 }
 
-/// The id of the control called `name`.
 fn param_id(view: &super::PluginView, name: &str) -> u32 {
     view.parameters
         .iter()
@@ -897,7 +871,6 @@ fn param_id(view: &super::PluginView, name: &str) -> u32 {
         .id
 }
 
-/// The normalized value of the control called `name`.
 fn param_value(parameters: &[PluginParamView], name: &str) -> f64 {
     parameters
         .iter()
@@ -980,7 +953,6 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     let gain = param_id(&only_view(&path), "Gain");
     path.set_plugin_parameter(0, gain, 0.25).expect("set Gain");
     run_tone(&path, 2);
-    // What a preference save stores: the parameter and a fresh blob.
     let saved = path.plugin_prefs();
     assert_eq!(saved.len(), 1);
     let saved = saved.into_iter().next().expect("one effect");
@@ -1005,7 +977,6 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     assert!(component > 0, "AGain writes a component state");
     assert_eq!(blob.len(), STATE_HEADER + component + controller_len);
 
-    // A session restore: the saved effect reopens with the same value.
     let restored = crate::audio::path::PathControls::new(48_000);
     restored.restore_plugins(vec![saved.clone()]);
     restored.ensure_plugin_loaded(0);
@@ -1029,10 +1000,9 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
     drop(handle);
 
-    // An envelope built here, not by the writer: the reader is pinned on
-    // its own.  The writer is pinned above, and a new host has to keep
-    // writing this layout too, because an older RigWerk reads any other
-    // blob as raw component state.
+    // Built here, not by the writer, so the reader is pinned on its own.
+    // An older RigWerk reads any other blob as raw component state, so
+    // this layout has to stay.
     let component_bytes = &blob[STATE_HEADER..STATE_HEADER + component];
     let mut built = STATE_MAGIC.to_vec();
     built.extend_from_slice(&1u32.to_le_bytes());
@@ -1062,8 +1032,6 @@ fn vst3_fixture_again_state_round_trips_and_keeps_its_envelope() {
     assert!((param_value(&parameters, "Gain") - 0.25).abs() < 1e-6);
 }
 
-/// A value set after the load survives a rate change (the rebuilt AGain
-/// opens with it), and so does one set after that rebuild.
 #[test]
 fn vst3_fixture_again_a_rate_reload_keeps_values_set_since_load() {
     let _main = crate::audio::claim_main_thread();
@@ -1138,17 +1106,11 @@ fn vst3_fixture_adelay_delays_an_impulse_by_its_delay() {
     assert_eq!(only_view(&path).latency, 0, "ADelay reports no latency");
 }
 
-/// The host checker logs the host's call sequence for its own editor; none
-/// of that is readable as a control, and its "Scoring" counts supported
-/// features, not errors.  So this is mostly a call-sequence test: a load,
-/// many blocks, a latency change, a state capture and a restore, and
-/// nothing may fail.
-///
-/// Its "Latency" control (0..10 s) reaches the processor, which reports it
-/// on an output parameter; the controller gets that and asks for a
-/// `kLatencyChanged` restart, and the plugin applies the new latency on
-/// activation.  So the latency only reads 256 if output parameters reach
-/// the controller and the restart reads it after reactivating.
+/// "Scoring" counts supported features, not errors.  "Latency" (0..10 s)
+/// is reported on an output parameter; the controller asks for
+/// `kLatencyChanged`, and the plugin applies it on activation.  256 reads
+/// back only if those output parameters reach the controller and the
+/// restart reads them after reactivating.
 #[test]
 fn vst3_fixture_host_checker_survives_processing_and_a_state_round_trip() {
     let _main = crate::audio::claim_main_thread();
@@ -1179,7 +1141,6 @@ fn vst3_fixture_host_checker_survives_processing_and_a_state_round_trip() {
     let reported = only_view(&path).latency;
     eprintln!("[vst3_fixture] host-checker latency after asking for 256: {reported}");
     assert_eq!(reported, 256);
-    // It processes again after the restart.
     run_tone(&path, 8);
     path.service_plugins();
     assert_eq!(only_view(&path).latency, 256);
@@ -1195,10 +1156,7 @@ fn vst3_fixture_host_checker_survives_processing_and_a_state_round_trip() {
     only_view(&restored);
 }
 
-/// A latency restart while an audio thread processes the host checker
-/// waits for that thread: the UI asks for a pause, the audio side stops
-/// the plugin with its next block and skips it until the UI has
-/// reactivated it, and then it runs again.  No block fails.
+/// No block fails.  The plugin runs again after the UI reactivates it.
 #[test]
 fn vst3_fixture_restart_waits_for_the_audio_thread() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1466,7 +1424,6 @@ fn vst3_fixture_again_keeps_processing_while_the_ui_sets_controls() {
     only_view(&path);
 }
 
-/// A restart pauses the effect, and its view says so until it resumes.
 #[test]
 fn an_effect_in_a_restart_reads_paused() {
     use super::super::clap::tests::{
@@ -1611,8 +1568,6 @@ impl PluginHostUi for FakeHost {
     }
 }
 
-/// A handle over a [`FakeHost`]: the handle, the host state kept for the
-/// test, and the shared atomics.
 fn fake_handle(
     views: Vec<PluginParamView>,
     saved: Vec<PluginParamPref>,
@@ -1636,8 +1591,7 @@ fn fake_handle(
     (handle, state, shared)
 }
 
-/// A read-only control is still shown and saved, but never delivered: the
-/// rule used to live in the VST3 arm alone.
+/// Shown and saved, but never delivered.
 #[test]
 fn a_read_only_control_updates_the_view_and_saved_value_but_is_not_delivered() {
     let (handle, state, _shared) = fake_handle(vec![view(1, 0.2, 0.0)], Vec::new());
@@ -1698,9 +1652,8 @@ fn sync_full_merges_the_saved_values_from_the_returned_list() {
     );
 }
 
-/// The snapshot rule is a capability now, not a format name: a host whose
-/// blob holds no control values passes an empty snapshot, so the load
-/// applies every saved value on top of it.
+/// A host whose blob holds no control values passes an empty snapshot,
+/// so the load applies every saved value on top of it.
 #[test]
 fn a_capture_uses_the_hosts_snapshot_rule_and_a_deferred_one_stays_stale() {
     let saved = vec![param(1, 0.6)];

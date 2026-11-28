@@ -1,5 +1,3 @@
-//! Duplex `pw_filter` node: ports, process callback, and state listener.
-
 use std::ffi::{c_void, CString};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -23,7 +21,6 @@ use super::links::Observed;
 use super::virtual_source::{VirtualOutputSlot, VirtualWrite};
 use super::{properties, MAX_FRAMES};
 
-/// The node RigWerk publishes for the duplex path.
 const DUPLEX_NODE: &str = "RigWerk";
 /// Input FL/FR, clock output FL/FR, then one stereo pair per extra output slot.
 const INPUT_PORTS: usize = 2;
@@ -43,8 +40,7 @@ struct ProcessData {
     /// Finished mix for RigWerk Out, the virtual output.
     virtual_output: Arc<VirtualOutputSlot>,
     rate: u32,
-    /// The graph rate and quantum the callback last ran with, for the main
-    /// loop's status text.
+    /// Last cycle's rate, published for the main loop's status text.
     seen_rate: Arc<AtomicU32>,
     seen_quantum: Arc<AtomicU64>,
 }
@@ -66,29 +62,24 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa_sys::spa_i
         return;
     }
     if data.shared.callback_failure().is_some() {
-        // A previous cycle failed; the app is stopping the run and the chain
-        // must not be driven again.  Silencing goes through `contain` too:
-        // this is still PipeWire's callback, and nothing may unwind into it.
+        // A failed cycle must not drive the chain again.  Silence stays
+        // inside `contain`: this is still PipeWire's callback.
         let _ = contain(|| unsafe { silence_cycle(data, position) });
         return;
     }
-    // A panic must not unwind into PipeWire's own callback (Rust panics
-    // across `extern "C"` abort the process): catch it, silence this cycle
-    // and publish the failure for the app.
+    // A panic across `extern "C"` aborts.  Catch it, silence this cycle,
+    // and publish the failure.
     if contain(|| unsafe { process_cycle(data, position) }) {
         data.shared.note_callback_failure(CallbackFailure::Panic);
         // The panic path's silence must not unwind either.
         let _ = contain(|| unsafe { silence_cycle(data, position) });
-        // The cycle may have panicked before it opened the virtual-output
-        // write; publish an empty generation so RigWerk Out plays silence
-        // rather than repeating the last good buffer.
+        // The panic may precede the virtual-output write.  An empty
+        // generation plays silence instead of the last good buffer.
         data.virtual_output.publish_empty();
     }
 }
 
-/// Zeroes every output port of this cycle (clock, then each extra output).
-/// The panic path calls it so the graph plays silence rather than the
-/// samples the interrupted render left in the buffers.
+/// The panic path: the graph plays silence, not the interrupted render.
 unsafe fn silence_cycle(data: &ProcessData, position: *mut spa_sys::spa_io_position) {
     // SAFETY: PipeWire passes a valid position for this cycle.
     let frames = unsafe { (*position).clock.duration as usize };
@@ -104,15 +95,11 @@ unsafe fn silence_cycle(data: &ProcessData, position: *mut spa_sys::spa_io_posit
     }
 }
 
-/// One graph cycle: capture staging, the mix, and the output port copies.
 unsafe fn process_cycle(data: &mut ProcessData, position: *mut spa_sys::spa_io_position) {
-    // Flush-to-zero for the whole cycle, as in the other audio callbacks;
-    // `render_direct` re-asserts it around the chain.
+    // FTZ for the whole cycle.  `render_direct` re-asserts it around the chain.
     let _denormals = DenormalGuard::new();
-    // Nothing in this cycle may allocate: the input staging, the mix and the
-    // output copies all run under this guard.  `render_direct_devices` enters
-    // its own nested one, which keeps the count on this outermost block (see
-    // `audio::rt_guard`).
+    // No allocation (see `audio::rt_guard`).  The nested guard in
+    // `render_direct_devices` keeps the count on this block.
     let _no_allocations = RtGuard::enter();
     // SAFETY: PipeWire passes a valid position for this cycle.
     let clock = unsafe { &(*position).clock };
@@ -121,9 +108,8 @@ unsafe fn process_cycle(data: &mut ProcessData, position: *mut spa_sys::spa_io_p
         return;
     }
     let rate = clock.rate.denom;
-    // The step is a reading as soon as this cycle runs, while the graph rate
-    // is only just being read: store the step first so `output_read()` can
-    // never pair a measured rate with the quantum asked for at start.
+    // Store the step before the rate.  `output_read()` must not pair a
+    // measured rate with the quantum asked for at start.
     data.shared
         .note_output_step(frames.min(u32::MAX as usize) as u32);
     if rate > 0 && rate != data.rate {
@@ -157,21 +143,19 @@ unsafe fn process_cycle(data: &mut ProcessData, position: *mut spa_sys::spa_io_p
 
     let has_input = !in_l.is_null() || !in_r.is_null();
     if has_input {
-        // An unlinked input is not counted as delivered, so a source that
-        // has gone away trips the engine's input heartbeat as before.
+        // An unlinked input is not delivered, so a source that has gone
+        // away trips the input heartbeat.
         shared.note_input_block(frames);
         shared.note_input_frames(frames);
     }
     let mut stage = InputStage::new(shared);
     let virtual_output_active = (0..shared.extra_output_count())
         .any(|slot| shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot));
-    // The guard closes the seqlock even when the chain below panics; without
-    // it an abandoned write leaves the generation odd and RigWerk Out silent
-    // for the rest of the run.
+    // Drop closes the seqlock if the chain panics.  An odd generation
+    // would leave RigWerk Out silent for the rest of the run.
     let write = virtual_output_active.then(|| VirtualWrite::begin(virtual_output));
-    // A cycle longer than the scratch runs in scratch-sized pieces, so every
-    // output sample of the cycle is written.  The virtual output slot only keeps the
-    // first MAX_FRAMES; device ports still get the whole cycle.
+    // A cycle longer than the scratch is written in pieces.  The virtual
+    // slot keeps only the first `MAX_FRAMES`; device ports get the whole cycle.
     let mut offset = 0;
     let mut written = 0usize;
     while offset < frames {
@@ -187,9 +171,8 @@ unsafe fn process_cycle(data: &mut ProcessData, position: *mut spa_sys::spa_io_p
                 (Some(only), None) | (None, Some(only)) => (only, only),
                 (None, None) => (0.0, 0.0),
             };
-            // The stage captures calibration raw, before the gain: this
-            // callback both captures and plays, so that still sees the
-            // physical loop.
+            // Calibration raw is taken before the gain.  This callback
+            // both captures and plays, so the physical loop is still seen.
             let (left, right) = stage.frame(shared, raw_l, raw_r);
             shared.push_scope_in(left, right);
             scratch_l[index] = left;
@@ -216,9 +199,8 @@ unsafe fn process_cycle(data: &mut ProcessData, position: *mut spa_sys::spa_io_p
                         wrote = true;
                     }
                 }
-                // Stereo port pair (clock, then each extra output).  Record the
-                // frame written into that device buffer.  The RigWerk Out
-                // virtual output below is a different endpoint and is not recorded.
+                // Clock, then each extra output.  RigWerk Out is a different
+                // endpoint and is not recorded.
                 if wrote {
                     let source = if device == 0 {
                         RecordSource::Clock
@@ -268,7 +250,6 @@ unsafe extern "C" fn on_state_changed(
     }
 }
 
-/// Turns the filter's error message into the run's visible device loss.
 unsafe fn report_state_error(data: &StateData, error: *const std::os::raw::c_char) {
     let message = if error.is_null() {
         "unknown error".to_owned()
@@ -283,9 +264,8 @@ unsafe fn report_state_error(data: &StateData, error: *const std::os::raw::c_cha
         .set_device_lost(format!("PipeWire duplex node: {message}"));
 }
 
-/// The `pw_filter` with its ports, listener and callback state.  Dropping it
-/// destroys the filter first (which stops the realtime callback), then frees
-/// what the callback used.
+/// Drop destroys the filter first, which stops the realtime callback,
+/// then frees what the callback used.
 pub(super) struct Filter {
     raw: NonNull<pw_sys::pw_filter>,
     _hooks: [Box<spa_sys::spa_hook>; 2],
@@ -465,7 +445,7 @@ impl Filter {
         Ok(filter)
     }
 
-    /// The filter's node id once the server has bound it.
+    /// `None` until the server has bound the node.
     pub(super) fn node_id(&self) -> Option<u32> {
         // SAFETY: `raw` is live for `self`'s lifetime.
         let id = unsafe { pw_sys::pw_filter_get_node_id(self.raw.as_ptr()) };

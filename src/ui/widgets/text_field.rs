@@ -1,8 +1,5 @@
-//! The one-line text field: Body text, a hint, an accessible name, and
-//! [`CONTROL_H`] high with the text centred, so it lines up with an
-//! [`OutlineButton`] on one row.
-//!
-//! [`OutlineButton`]: super::OutlineButton
+//! The one-line text field, [`CONTROL_H`] high, so it lines up with an
+//! outline button.
 
 use eframe::egui;
 use egui::Vec2;

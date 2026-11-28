@@ -1,21 +1,15 @@
-//! The bridge-thread call that opens an ASIO driver's control panel.
-//!
-//! ASIO requires `controlPanel` on the thread that created the driver.
-//! That thread is the bridge (`run_asio_bridge`, `PreparedAsioInput::run`,
-//! `run_asio_duplex_bridge`, or `run_asio_output_loop`), and it only calls
-//! here between callbacks.  The UI sets a flag; this takes it.  A new
-//! buffer still arrives as `kAsioResetRequest`.  This does not start a
-//! second reset.
+//! ASIO requires `controlPanel` on the thread that created the driver,
+//! between callbacks.  A buffer change still arrives as `kAsioResetRequest`;
+//! opening the panel does not start a second reset.
 
 use azo::driver::Driver;
 
 use crate::audio::asio_panel::AsioPanelSide;
 use crate::audio::shared::Shared;
 
-/// Opens the panel when any of `sides` was requested.  One driver (a duplex
-/// bridge) passes both sides and opens once.  Returns whether the call ran,
-/// so the callback watchdog can ignore the time the panel held this thread.
-/// A driver with no panel, or one that refuses, does not end the run.
+/// A duplex driver passes both sides and opens once.  The bool is whether
+/// the call ran, so the watchdog ignores the time the panel held this
+/// thread.  A missing or refused panel does not end the run.
 pub(crate) fn service_asio_panel(
     driver: &impl Driver,
     shared: &Shared,
@@ -23,8 +17,8 @@ pub(crate) fn service_asio_panel(
 ) -> bool {
     let mut requested = false;
     for side in sides {
-        // `|=` takes every side.  `any` would stop at the first and leave
-        // the other request set, so a duplex bridge would open twice.
+        // `|=` takes every side.  `any` would leave the other request set,
+        // so a duplex bridge would open twice.
         requested |= shared.asio_panel.take(*side);
     }
     if !requested {

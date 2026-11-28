@@ -1,33 +1,11 @@
-//! RigWerk's own VST3 host on the `vst3` bindings: the pieces every loaded
-//! plugin shares.  Linux and Windows; elsewhere `module::acquire` refuses.
+//! VST3 host.  Linux and Windows; elsewhere `module::acquire` refuses.
 //!
-//! - `module`: one loaded bundle per process (`ModuleEntry`/`ModuleExit`
-//!   on Linux, `InitDll`/`ExitDll` on Windows) and the registry that keeps
-//!   it loaded once.
-//! - `factory`: class enumeration, class-id text, `createInstance`.
-//! - `host`: the one process-wide host context (`IHostApplication`,
-//!   `IPlugInterfaceSupport`, and on Linux `IRunLoop`).
-//! - `message`: `IMessage` and `IAttributeList` for `allocateMessage`.
-//! - `connection`: the component/controller proxies.
-//! - `stream`: the in-memory `IBStream` and the saved-state envelope.
-//! - `run_loop`: the Linux `IRunLoop` registry, serviced on the UI thread.
-//! - `editor`: the `IPlugFrame` and the editor view the window attaches.
-//! - `handler`: the `IComponentHandler` edits and restart requests reach.
-//! - `params`: the preallocated parameter change lists `process` uses.
-//! - `controller`: the main-thread half of a loaded plugin and its load
-//!   sequence.
-//! - `processor`: the audio-thread half.
-//! - `scan`: finding bundles and reading `moduleinfo.json`, without
-//!   loading a binary.
-//!
-//! Everything but `processor`, `params` and `scan` (the library scan's
-//! own thread) is UI-thread work.  The bindings mark every interface
-//! `Send + Sync`, so the compiler does not keep a pointer off the audio
-//! thread: the audio side only ever holds a [`Vst3Processor`], and the
-//! callbacks a plugin may make from another thread
-//! (`IConnectionPoint::notify`, `performEdit`, `restartComponent`, run-loop
-//! registration) use `try_lock`, atomics, or refuse, and never wait for the
-//! UI.
+//! Everything but `processor`, `params`, and the scan thread is UI-thread
+//! work.  The bindings are `Send + Sync`, so the audio side holds only a
+//! [`Vst3Processor`].  A callback from another thread (`notify`,
+//! `performEdit`, `restartComponent`, run-loop registration) `try_lock`s,
+//! stores atomics, or refuses, and never waits.  `scan` does not load a
+//! binary.
 
 mod connection;
 mod controller;
@@ -96,19 +74,17 @@ const NEED_TIME_SIGNATURE: u32 = Needs::kNeedTimeSignature as u32;
 #[cfg(test)]
 mod tests;
 
-/// Services the plugins' run-loop timers and file descriptors.  Call it
-/// once per UI frame.  Only Linux has a host run loop.
+/// Once per UI frame.  Only Linux has a host run loop.
 #[cfg(target_os = "linux")]
 pub(crate) fn service_run_loop() {
     run_loop::service_run_loop();
 }
 
-/// Services the plugins' run-loop timers and file descriptors.  Call it
-/// once per UI frame.  Only Linux has a host run loop.
+/// Once per UI frame.  Only Linux has a host run loop.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn service_run_loop() {}
 
-/// The text in a fixed-size, NUL-terminated UTF-16 field (`String128`).
+/// NUL-terminated UTF-16 (`String128`).
 fn utf16_text(field: &[u16]) -> String {
     let end = field
         .iter()
@@ -117,14 +93,12 @@ fn utf16_text(field: &[u16]) -> String {
     String::from_utf16_lossy(&field[..end])
 }
 
-/// How many run-loop timers and fd handlers are registered, for the
-/// editor tests.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn run_loop_counts() -> (usize, usize) {
     run_loop::counts()
 }
 
-/// The text in a fixed-size, NUL-terminated `char8` field of a VST3 struct.
+/// NUL-terminated `char8`.
 fn c_text(field: &[std::ffi::c_char]) -> String {
     let end = field.iter().position(|&c| c == 0).unwrap_or(field.len());
     // `c_char` is signed on some targets: reinterpret each unit as a byte.

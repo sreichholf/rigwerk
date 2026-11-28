@@ -1,15 +1,10 @@
-//! A popover anchored to a control (`docs/ui-spec.md` §4.5).
-//!
-//! It opens when `anchor` is clicked, closes on a click outside or Esc, and
-//! is drawn on `sheet` with a `line` stroke.  The closure paints the body.
+//! A popover anchored to a control.  It closes on a click outside or Esc.
 
 use eframe::egui;
 use egui::{CornerRadius, Margin, Stroke};
 
 use crate::ui::theme::palette;
 
-/// Shows `add` under `anchor` while the popover is open.  The anchor is
-/// usually the button that was just drawn.
 pub(crate) fn popover<R>(
     ui: &mut egui::Ui,
     anchor: &egui::Response,

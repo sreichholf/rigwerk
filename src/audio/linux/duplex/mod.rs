@@ -1,34 +1,12 @@
-//! One PipeWire node for a PipeWire → PipeWire bridge.
+//! Both sides already share the graph clock, so a ring would add a buffer
+//! and a quantum of ordering slack.  DSP ports run at the graph rate: no
+//! ring, no drift, no rate conversion.
 //!
-//! When both the input and the output are PipeWire nodes they already share
-//! one graph clock: PipeWire itself keeps any second device in step with the
-//! graph driver.  Two separate streams joined by RigWerk's ring would add a
-//! bridge buffer and drift steering that have nothing to correct, and because the
-//! two streams are not linked to each other the graph may run playback before
-//! capture in a cycle, which costs one more quantum.
-//!
-//! This path is a single `pw_filter` node, "RigWerk", with two DSP input
-//! ports and two DSP output ports.  One realtime callback reads the input
-//! ports, runs the mixer chain on that block and writes the output ports in
-//! the same graph cycle.  There is no ring, no bridge buffer, no priming, no drift
-//! steering and no rate conversion: DSP ports always run at the graph rate.
-//!
-//! A filter is not placed by the session manager the way a stream with
-//! `target.object` is, so RigWerk links its own ports.  It watches the
-//! registry for the chosen source and sink by `node.name` and creates links
-//! through `link-factory` whenever the ports it wants are present and not yet
-//! linked.  A device that disappears and comes back (a profile switch, a USB
-//! re-plug) is linked again as soon as its new ports show up.
-//!
-//! The delay past RigWerk's output (filters, Bluetooth, the device) is left
-//! unknown on this path.  A stream reports it through `pw_stream_get_time`;
-//! a filter's `pw_filter_get_time` reported 0 here, and PipeWire 1.0 did not
-//! pass the ports' Latency params to the filter, so there is nothing honest
-//! to show.
-//!
-//! The safe `pipewire` crate has no filter wrapper, so the filter itself goes
-//! through `pipewire-sys`.  Everything else (core, registry, links) uses the
-//! safe API.
+//! A filter is not placed like a `target.object` stream, so RigWerk links
+//! its own ports and relinks when a device comes back.  Delay past this
+//! node stays unknown: `pw_filter_get_time` reported 0, and PipeWire 1.0
+//! did not pass port Latency params.  The safe crate has no filter
+//! wrapper, so the filter goes through `pipewire-sys`.
 
 mod filter;
 mod graph;
@@ -55,14 +33,12 @@ use filter::Filter;
 use links::{MadeLink, Observed};
 use virtual_source::{VirtualOutputSlot, VirtualSource};
 
-/// The largest graph quantum the scratch is sized for.  PipeWire's own
-/// `clock.max-quantum` default is 8192.
+/// Scratch sized to PipeWire's default `clock.max-quantum`.
 const MAX_FRAMES: usize = 8192;
-/// How often the main loop checks the stop flag, links and the graph rate.
 const TICK: Duration = Duration::from_millis(50);
 
-/// Why the duplex path did not run.  `Setup` errors happen before any audio
-/// flowed, so the caller can still open the two-stream path instead.
+/// `Setup` is before any audio, so the caller can still open the two-stream
+/// path.
 pub(crate) enum DuplexError {
     Setup(String),
     Runtime(String),
@@ -76,8 +52,6 @@ fn properties(pairs: &[(&str, &str)]) -> pw::properties::PropertiesBox {
     props
 }
 
-/// Runs the duplex node until `stop`.  A `Setup` error means nothing was
-/// opened and the two-stream path can still be tried.
 pub(crate) fn run(
     config: &StartConfig,
     shared: Arc<Shared>,
@@ -130,11 +104,9 @@ pub(crate) fn run(
         error: Arc::new(AtomicBool::new(false)),
     };
     let virtual_feed = Arc::new(VirtualOutputSlot::new());
-    // Before the filter is created: `Filter::new` connects the node, so its
-    // first process callback can publish the graph's own rate straight away.
-    // A request never undoes a reading (see `Shared`), so a request made
-    // after that callback would be dropped and leave the mode line empty
-    // until the timer's first tick.  The request goes in first.
+    // Before the filter: `Filter::new` connects, so the first callback can
+    // publish the graph rate immediately.  A request never undoes a reading
+    // (`Shared`), so one made after that callback is dropped.
     shared.note_requested_direct_rate(rate);
     let low_latency = config.pipewire_low_latency;
     let mode = move |rate: u32, quantum: u64| {
@@ -166,8 +138,7 @@ pub(crate) fn run(
         "Bridging 2 ch · {rate} Hz · one PipeWire node (no bridge buffer)"
     ));
 
-    // Errors from the server (a link the factory refused, for one) show up
-    // in the status line while the bridge runs.
+    // A refused link and other server errors show in the status line.
     let error_shared = Arc::clone(&shared);
     let _core_listener = core
         .add_listener_local()
@@ -176,7 +147,6 @@ pub(crate) fn run(
         })
         .register();
 
-    // Links RigWerk asked for, by (output port, input port).
     let made: Rc<RefCell<HashMap<(u32, u32), MadeLink>>> = Rc::default();
     let shown = std::cell::Cell::new((rate, frames as u64));
     let filter_ref = Rc::clone(&filter);
@@ -198,9 +168,8 @@ pub(crate) fn run(
             return;
         }
         let shared = filter_ref.shared();
-        // The mode text follows the graph rate and quantum; the callback
-        // only stores them.  These are now readings, so this re-publication
-        // is the measured one and replaces the request made above.
+        // Readings, replacing the request above.  The callback only stores
+        // the rate and quantum.
         let rate = seen_rate.load(Ordering::Relaxed);
         let quantum = seen_quantum.load(Ordering::Relaxed);
         if rate > 0 && (rate, quantum) != shown.get() {
@@ -208,7 +177,6 @@ pub(crate) fn run(
             shared.note_direct_rate(rate);
             shared.set_output(rate, quantum as u32, opened, mode(rate, quantum));
         }
-        // Create or drop RigWerk Out when the virtual output is switched live.
         let want_virtual_output = (0..shared.extra_output_count())
             .any(|slot| shared.extra_output_is_virtual(slot) && shared.virtual_output_is_on(slot));
         let mut virtual_slot = tick_virtual.borrow_mut();

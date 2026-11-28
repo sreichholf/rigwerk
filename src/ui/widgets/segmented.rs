@@ -1,6 +1,5 @@
-//! A segmented control for exclusive choices (`docs/ui-spec.md` §4.5).  The
-//! chosen segment is filled with `accent_bg` and labelled in `accent_text`.
-//! Left and right arrows move the choice while a segment has focus.
+//! A segmented control for exclusive choices.  Left and right arrows move
+//! the choice while a segment has focus.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};

@@ -1,15 +1,11 @@
-//! The phase 0 harness (§4 of the plan), release only: with
-//! `RIGWERK_PITCH_RENDER=<dir>` it renders every case at every shift,
-//! writes the WAVs, prints the score table and the CPU score, and holds the
-//! whole set to the gate.  Without it nothing runs and the
-//! tests pass, like the plugin fixture tests.
+//! Release only.  `RIGWERK_PITCH_RENDER=<dir>` renders every case,
+//! writes the WAVs, and holds the set to the gate.  Without it nothing
+//! runs.
 //!
-//! `RIGWERK_PITCH_DI=<dir>` adds the mono WAVs in that folder, rendered for
-//! listening only.  `scripts/pitch-reference.sh <dir>` renders the inputs
-//! through Rubber Band R3 into `<dir>/reference`; when those files are
-//! there they are scored as well, as the best achievable.
-//! `RIGWERK_PITCH_ONLY=<case,case>` limits the score table to those cases
-//! and `RIGWERK_PITCH_SHIFTS=<-4,-12,…>` to those shifts, while tuning.
+//! `RIGWERK_PITCH_DI=<dir>` adds mono WAVs for listening.
+//! `scripts/pitch-reference.sh <dir>` renders Rubber Band R3 into
+//! `<dir>/reference`; those files are scored when present.
+//! `RIGWERK_PITCH_ONLY` and `RIGWERK_PITCH_SHIFTS` limit the table.
 //!
 //! ```bash
 //! RIGWERK_PITCH_RENDER=.pitch-render \

@@ -28,7 +28,8 @@ fn restore_prefers_id_over_a_renamed_display() {
     assert!(!hit.matched_by_name());
     assert!(!hit.saved_identity_unconfirmed());
 
-    // The other backend that still has the old name stays selectable by its own id.
+    // The other backend that still has the old name stays selectable
+    // by its own id.
     let asio = restore_device(&outputs, "asio-out:abc", "ASIO", "Speakers");
     assert_eq!(asio, DeviceRestore::ById(1));
 
@@ -115,7 +116,8 @@ fn preferences_without_device_ids_load_and_match_by_name() {
     assert_eq!(input_hit.index(), Some(0));
     assert!(input_hit.matched_by_name());
 
-    // No saved backend: the first display-name row wins, and it is reported as a name match.
+    // No saved backend: the first display-name row wins, and it is
+    // reported as a name match.
     let output_hit = restore_device(
         &outputs,
         &preferences.output_id,

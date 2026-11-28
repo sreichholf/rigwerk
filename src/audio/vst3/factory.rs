@@ -1,11 +1,8 @@
-//! A module's plugin factory: its classes, class-id text, and creating
-//! instances.
-//!
-//! Saved preferences hold class ids as the 32 hex digits `moduleinfo.json`
-//! writes, in canonical order.  On Windows a `TUID` is COM-compatible: the
-//! first three GUID fields are little-endian, so the text is reordered on
-//! the way in (the mapping vst3-host 0.11.1 used, `internal/utils.rs`, so
-//! the ids older builds saved still match).
+//! Saved class ids are the 32 canonical hex digits `moduleinfo.json`
+//! writes.  On Windows a `TUID` is COM order (first three fields
+//! little-endian).  The text is reordered on the way in, the mapping
+//! vst3-host 0.11.1 used (`internal/utils.rs`), so those saved ids still
+//! match.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -34,8 +31,6 @@ pub(crate) struct ClassInfo {
     pub(crate) category: String,
 }
 
-/// Every class the factory reports, in its order.  A class whose info
-/// cannot be read is left out.
 pub(crate) fn classes(factory: &ComPtr<IPluginFactory>) -> Vec<ClassInfo> {
     // SAFETY: a live factory; `countClasses` takes no arguments.
     let count = unsafe { factory.countClasses() }.max(0);
@@ -55,8 +50,8 @@ pub(crate) fn classes(factory: &ComPtr<IPluginFactory>) -> Vec<ClassInfo> {
         .collect()
 }
 
-/// The audio processor class to create: the one `class_id` names, or with
-/// no id (a bundle without `moduleinfo.json`), the first audio class.
+/// The class `class_id` names, or the first audio class when the bundle
+/// has no `moduleinfo.json`.
 pub(crate) fn audio_class(
     factory: &ComPtr<IPluginFactory>,
     class_id: Option<&str>,
@@ -81,7 +76,6 @@ pub(crate) fn audio_class(
     }
 }
 
-/// The `TUID` for class-id text in this platform's byte order.
 pub(crate) fn parse_class_id(text: &str) -> Option<TUID> {
     parse_class_id_for(text, cfg!(target_os = "windows"))
 }
@@ -104,8 +98,6 @@ pub(super) fn parse_class_id_for(text: &str, com: bool) -> Option<TUID> {
     Some(cid)
 }
 
-/// A new instance of class `cid` as interface `I`, or `None` when the
-/// factory refuses.
 pub(crate) fn create<I: Interface>(
     factory: &ComPtr<IPluginFactory>,
     cid: &TUID,
@@ -122,9 +114,7 @@ pub(crate) fn create<I: Interface>(
     unsafe { ComPtr::from_raw(object.cast::<I>()) }
 }
 
-/// Hands the factory the process-wide host context
-/// (`IPluginFactory3::setHostContext`).  A factory without the interface,
-/// or one that ignores it (`kNotImplemented` off Linux), is fine.
+/// Missing `IPluginFactory3`, or `kNotImplemented`, is fine.
 pub(crate) fn set_host_context(factory: &ComPtr<IPluginFactory>) {
     if let Some(factory) = factory.cast::<IPluginFactory3>() {
         // SAFETY: the context is a static, so it outlives the module that

@@ -1,10 +1,7 @@
-//! The host's `IMessage` and `IAttributeList`, which a plugin allocates
-//! through `IHostApplication::createInstance` to talk between its
-//! component and its controller.  Results follow the SDK's
-//! `hostclasses.cpp`.
-//!
-//! Used on the UI thread in practice; the mutexes are only there so the
-//! objects are `Sync`, and no plugin code runs while one is held.
+//! Host `IMessage` and `IAttributeList` for
+//! `IHostApplication::createInstance`.  Results follow the SDK's
+//! `hostclasses.cpp`.  The mutexes exist so the objects are `Sync`; no
+//! plugin code runs while one is held.
 
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -15,7 +12,6 @@ use ::vst3::Steinberg::Vst::{IAttributeList, IAttributeListTrait, IMessage, IMes
 use ::vst3::Steinberg::{kInvalidArgument, kResultFalse, kResultTrue, tresult, FIDString};
 use ::vst3::{Class, ComWrapper};
 
-/// One stored attribute.
 #[derive(Clone, Debug, PartialEq)]
 enum AttrValue {
     Int(i64),
@@ -25,7 +21,6 @@ enum AttrValue {
     Binary(Vec<u8>),
 }
 
-/// A typed key/value list (`IAttributeList`).
 #[derive(Default)]
 pub(crate) struct HostAttributeList {
     values: Mutex<BTreeMap<CString, AttrValue>>,
@@ -36,7 +31,6 @@ impl HostAttributeList {
         Self::default()
     }
 
-    /// Stores `text` as a string attribute under `id`.
     pub(crate) fn set_text(&self, id: &CStr, text: &CStr) {
         let units = text.to_string_lossy().encode_utf16().collect();
         self.values()
@@ -47,8 +41,6 @@ impl HostAttributeList {
         self.values.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stores `value` under `id`.
-    ///
     /// # Safety
     /// A non-null `id` must be a NUL-terminated string.
     unsafe fn set(&self, id: *const c_char, value: AttrValue) -> tresult {
@@ -61,8 +53,6 @@ impl HostAttributeList {
         kResultTrue
     }
 
-    /// The value under `id`, if any.
-    ///
     /// # Safety
     /// `id` must be a NUL-terminated string (null is checked by callers).
     unsafe fn get(&self, id: *const c_char) -> Option<AttrValue> {
@@ -214,7 +204,6 @@ impl IAttributeListTrait for HostAttributeList {
     }
 }
 
-/// A message: an id and its attributes (`IMessage`).
 pub(crate) struct HostMessage {
     id: Mutex<Option<CString>>,
     attributes: ComWrapper<HostAttributeList>,

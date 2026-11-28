@@ -1,5 +1,5 @@
-//! Starting, stopping and re-opening the bridge, and the live numbers the
-//! screens show about it.
+//! A restart waits until the engine is Idle: the previous run still owns
+//! the device.
 
 use std::sync::Arc;
 
@@ -12,14 +12,11 @@ use crate::audio::{
 };
 
 impl RigWerkApp {
-    /// Allocations the audio callbacks made since launch (`audio::rt_guard`).
-    /// Debug builds only.
     #[cfg(debug_assertions)]
     pub(crate) fn audio_thread_allocations(&self) -> u64 {
         audio::rt_guard::audio_thread_allocations()
     }
 
-    /// Logs once, from the UI thread, when the audio thread first allocates.
     #[cfg(debug_assertions)]
     pub(crate) fn log_audio_thread_allocations(&mut self) {
         if self.rt_allocations_logged || self.audio_thread_allocations() == 0 {
@@ -42,60 +39,49 @@ impl RigWerkApp {
         )
     }
 
-    /// The bridge's state, for the screens' labels and enable rules.
     pub(crate) fn engine_state(&self) -> EngineState {
         self.engine.state
     }
 
-    /// The live status line the running bridge last published.  Empty before
-    /// the first run.
+    /// Empty before the first run.
     pub(crate) fn engine_bridge_status(&self) -> String {
         self.engine.bridge_status()
     }
 
-    /// The note a graph-rate restore problem leaves behind, if any.
     pub(crate) fn engine_quantum_note(&self) -> Option<&str> {
         self.engine.quantum_note()
     }
 
-    /// Every live path's chain DSP time together.  `None` while no mixer
-    /// runs.
+    /// `None` while no mixer runs.
     pub(crate) fn engine_total_dsp_time(&self) -> Option<DspTime> {
         self.engine.total_dsp_time()
     }
 
-    /// Path `slot`'s chain DSP time.  `None` while no mixer runs the path.
+    /// `None` while no mixer runs the path.
     pub(crate) fn engine_path_dsp_time(&self, slot: usize) -> Option<DspTime> {
         self.engine.path_dsp_time(slot)
     }
 
-    /// Path `slot`'s published plugin views, in chain order.
     pub(crate) fn engine_plugin_views(&self, slot: usize) -> Arc<[PluginView]> {
         self.engine.plugin_views(slot)
     }
 
-    /// Path `slot`'s plugin lock counters.
     pub(crate) fn engine_plugin_lock_report(&self, slot: usize) -> PluginLockReport {
         self.engine.plugin_lock_report(slot)
     }
 
-    /// Posts the request to open one ASIO side's control panel.  The bridge
-    /// thread owns the call; this only sets the flag.
+    /// The bridge thread owns the call.  This only sets the flag.
     pub(crate) fn request_asio_panel(&mut self, side: AsioPanelSide) {
         self.engine.request_asio_panel(side);
     }
 
-    /// Clears every path's plugin lock counters.  A poisoned chain stays
-    /// poisoned.
+    /// A poisoned chain stays poisoned.
     pub(crate) fn reset_plugin_lock_counters(&mut self) {
         self.engine.reset_plugin_lock_counters();
     }
 
-    /// The *Driver panel* state for `side`: `None` when the selected device
-    /// on that side is not ASIO, so the button does not apply.  `Some(true)`
-    /// means the running bridge has that driver open and its control panel
-    /// can be opened; `Some(false)` means the driver is selected but the
-    /// bridge is not running on it yet.
+    /// `None` when the side is not ASIO.  `Some(true)` when that driver
+    /// is open.
     pub(crate) fn driver_panel(&self, side: AsioPanelSide) -> Option<bool> {
         let clsid = match side {
             AsioPanelSide::Input => self.active_input().asio_clsid,
@@ -104,9 +90,7 @@ impl RigWerkApp {
         Some(self.engine.open_asio_driver(side) == Some(clsid))
     }
 
-    /// The error worth showing.  While a stop is still releasing the device, a
-    /// late error written by that same session is teardown noise, not a bridge
-    /// failure; once a newer session starts it owns the snapshot again.
+    /// While Stopping, a late error from that session is teardown noise.
     pub(crate) fn visible_error(&self) -> Option<&str> {
         if self.engine.state == EngineState::Stopping {
             return None;
@@ -114,8 +98,7 @@ impl RigWerkApp {
         self.snapshot.error.as_deref()
     }
 
-    /// Identifies the exact routing the running bridge was opened with.  Any
-    /// change to this value means the bridge must be re-opened to take effect.
+    /// Any change means the bridge must be re-opened.
     pub(crate) fn current_bridge_signature(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -155,9 +138,7 @@ impl RigWerkApp {
         self.bridge_restart_pending = false;
         self.cancel_loudness_measurement();
         self.bridge_signature = self.current_bridge_signature();
-        // The new run is rebuilt from the saved effects (their
-        // preferences and state blobs), and a plugin may change a value
-        // without reporting it, so read the open editor in full here.
+        // A plugin may change a value without reporting it.
         self.sync_plugin_editor();
         self.driver_checked = false;
         self.issue_state.new_run();
@@ -207,10 +188,8 @@ impl RigWerkApp {
         #[cfg(target_os = "linux")]
         self.refresh_quantum_check(true);
         self.engine.start(config);
-        // The new run did not inherit the live model.  Install it again
-        // from the saved path before the first callback, if the device
-        // rate is already known; a rate that arrives later is picked up
-        // by `sync_nam_models` after `service_plugins`.
+        // The new run did not inherit the live model.  A rate that
+        // arrives later is picked up by `sync_nam_models`.
         self.sync_nam_models();
         self.sync_cab_files();
     }
@@ -233,10 +212,8 @@ impl RigWerkApp {
         }
     }
 
-    /// Re-opens the bridge as soon as the device, rate or buffer selection
-    /// changes, instead of waiting for the person to stop and start it.
-    /// Stopping is asynchronous, so the new start waits until the old driver
-    /// has actually released the device.
+    /// Stopping is asynchronous, so the new start waits until the old
+    /// driver has released the device.
     pub(crate) fn sync_bridge_config(&mut self) {
         if self.bridge_restart_pending && self.engine.state == EngineState::Idle {
             self.bridge_restart_pending = false;
@@ -260,24 +237,18 @@ impl RigWerkApp {
         self.bridge_restart_pending = true;
     }
 
-    /// The bridge stopped because a device went away or a callback caught a
-    /// failure: the alert window now, and the Live Issues row once that is
-    /// dismissed.  `reason` is what the row says happened.
+    /// The alert now, and the issues row once it is dismissed.
     pub(crate) fn alert_stopped_bridge(&mut self, alert: String, reason: StopReason) {
         self.issue_state.new_run();
         self.issue_state.stopped = Some((reason, alert.clone()));
         self.device_alert = Some((alert, Some(reason)));
     }
 
-    /// Pushes mix state, polls the bridge, and handles a lost device.
-    ///
-    /// Returns the master-mute flag captured before any stop this pass
-    /// performs.  [`Self::smooth_meters`] uses that same flag: recomputing
-    /// it after a disconnect would change the frame the device was lost.
+    /// The mute flag from before any stop this pass.  Recomputing it
+    /// after a disconnect would change the frame the device was lost.
     pub(crate) fn publish_engine(&mut self) -> bool {
-        // One mute for the engine and for the meters below.  Preview draws
-        // its levels here instead of reading them back, so a second check
-        // would leave those meters moving while the tuner layer holds.
+        // Preview draws its levels here, so a second check would leave
+        // those meters moving while the tuner layer holds.
         let output_muted = self.mute || self.tuner.auto_muted(self.page, self.engine.state);
         self.engine
             .set_master(output_muted, self.input_channels, self.drift);
@@ -303,9 +274,7 @@ impl RigWerkApp {
                 self.push_log(message, LogTone::Red);
             }
         }
-        // A quantum failure is stored beside the live status line, which moves
-        // on to "Opening…" or "Bridge stopped". Copy it into the log once so
-        // it survives that.
+        // The status line moves on.  Copy the failure into the log once.
         if let Some(note) = self.engine.quantum_note().map(str::to_owned) {
             if !self.log.iter().any(|entry| entry.text == note) {
                 self.push_log(note, LogTone::Amber);
@@ -316,8 +285,8 @@ impl RigWerkApp {
             && self.device_alert.is_none()
             && self.bridge_signature != 0
         {
-            // A callback failure arrives as `device_lost` too, but the device
-            // is fine and telling the person to reconnect it would be wrong.
+            // A callback failure arrives as `device_lost` too.  The device
+            // is fine, so do not ask for a reconnect.
             let reason = self
                 .snapshot
                 .error
@@ -354,10 +323,8 @@ impl RigWerkApp {
         output_muted
     }
 
-    /// Smooths the meters and copies the scope.  Does not start or stop
-    /// the bridge.  `time` is the egui clock, in seconds, for the preview
-    /// stand-in.  `output_muted` is the flag [`Self::publish_engine`]
-    /// captured before this pass.
+    /// `output_muted` is the flag [`Self::publish_engine`] captured
+    /// before this pass.
     pub(crate) fn smooth_meters(&mut self, time: f64, output_muted: bool) {
         let time = time as f32;
         let dt = self.meters.tick();
@@ -402,8 +369,7 @@ impl RigWerkApp {
             .peak_out_r
             .max(self.meters.out_r * 0.98)
             .max(0.0);
-        // Per clock-device channel, after its map and level. Preview has no
-        // engine reading, so the stand-in L/R goes through the same map.
+        // After the map and the level.  Preview has no engine reading.
         let live = self.live_path_mask();
         let path_gains = self.path_gains();
         let channel_targets = match self.engine.state {
@@ -423,7 +389,6 @@ impl RigWerkApp {
             let peak = &mut self.meters.peak_out_channels[channel];
             *peak = peak.max(*meter * 0.98).max(0.0);
         }
-        // Extra outputs / RigWerk Out: same smoothing as the clock output.
         let extra_output_targets = match self.engine.state {
             EngineState::Running => self.snapshot.extra_output_channels,
             EngineState::Preview => std::array::from_fn(|index| {
@@ -450,9 +415,8 @@ impl RigWerkApp {
                 *peak = peak.max(*meter * 0.98).max(0.0);
             }
         }
-        // Path meters: the engine's peak after the path's chain, times its
-        // level, mute and solo (what the path adds to the sum), before the
-        // master.  Preview has no chain, so the stand-in input goes through.
+        // After the chain, level, mute and solo, before the master.
+        // Preview has no chain.
         for (slot, gain) in path_gains.into_iter().enumerate() {
             let (left, right) = match self.engine.state {
                 EngineState::Running => self.engine.path_meters(slot),
@@ -498,12 +462,10 @@ impl RigWerkApp {
         }
     }
 
-    /// The parts of RigWerk's own path, as `latency_ms` and the latency
-    /// budget read them.  While stopped, the requested buffer and a planned
-    /// bridge buffer of twice that buffer stand in, so a bridge buffer left over from the
-    /// last run is not shown.  A native PipeWire path publishes the rate and
-    /// step it asked for before the graph reports, so the half that carries
-    /// them is only `*_read` once the graph has published its own.
+    /// While stopped, a planned buffer stands in so a leftover bridge
+    /// buffer is not shown.  A native PipeWire path publishes the rate
+    /// and step it asked for first, so that half is `*_read` only once
+    /// the graph has published its own.
     pub(crate) fn latency_parts(&self) -> LatencyParts {
         let running = self.engine.state == EngineState::Running;
         let pick = |live: u32, planned: u32| if running && live > 0 { live } else { planned };
@@ -536,17 +498,14 @@ impl RigWerkApp {
         }
     }
 
-    /// RigWerk's own path: input block + bridge buffer + output step.  AD/DA, the
-    /// driver, plugins, alignment trims, and anything past our playback node
-    /// are not included; see `app::budget` for the full reading.
+    /// Input block, bridge buffer and output step.  AD/DA, the driver,
+    /// plugins and alignment are not included.
     pub(crate) fn latency_ms(&self) -> f32 {
         self.latency_parts().bridge_ms()
     }
 
-    /// The step the running output really got, in frames and milliseconds.
-    /// None until both the rate and the step are readings: a native PipeWire
-    /// stream publishes the quantum it asked for before its first block, and
-    /// that is not a step a capture or the NAM block can be sized from.
+    /// `None` until both are readings.  The quantum asked for before
+    /// the first block is not a step a capture or a NAM block can use.
     pub(crate) fn output_step(&self) -> Option<(u32, f32)> {
         if self.engine.state != EngineState::Running {
             return None;
@@ -559,8 +518,7 @@ impl RigWerkApp {
         (frames > 0 && rate > 0).then(|| (frames, frames as f32 / rate as f32 * 1000.0))
     }
 
-    /// Pushes extra output settings, bridge buffers and the link / open plan into the
-    /// engine.  Live: not part of the bridge signature.
+    /// Live: not part of the bridge signature.
     pub(crate) fn push_extra_outputs_to_engine(&mut self) {
         use crate::app::settings::{bridge_buffer_from_pref, rematch_windows_virtual_output};
         use crate::audio::{ExtraOutputLink, ExtraOutputPlan, MAX_EXTRA_OUTPUTS};
@@ -621,7 +579,6 @@ impl RigWerkApp {
             .set_extra_outputs(&settings, &plan, &bridge_buffers);
     }
 
-    /// Turns the Low latency output on or off, and logs it.
     pub(crate) fn set_low_latency_output(&mut self, on: bool) {
         self.low_latency_output = on;
         self.push_log(
@@ -634,56 +591,45 @@ impl RigWerkApp {
         );
     }
 
-    /// Apply a Windows WASAPI clock mode and keep the legacy bool aligned
-    /// (`true` only for REAL-style, matching old saves).
+    /// `low_latency_output` stays true only for REAL-style, so an old
+    /// save still round-trips.
     pub(crate) fn set_wasapi_output_mode(&mut self, mode: audio::WasapiOutputMode) {
         self.wasapi_output_mode = mode;
         self.low_latency_output = matches!(mode, audio::WasapiOutputMode::RealStyle);
     }
 
-    /// The input rate, checked like a saved one.  The bridge signature carries
-    /// it, so `sync_bridge_config` re-opens the bridge on the next pass.
     pub(crate) fn set_sample_rate(&mut self, rate: u32) {
         self.sample_rate = crate::app::settings::sanitize_sample_rate(rate);
     }
 
-    /// The input buffer, checked like a saved one.  `sync_bridge_config`
-    /// re-opens the bridge on the next pass.
     pub(crate) fn set_buffer_size(&mut self, buffer: usize) {
         self.buffer_size = crate::app::settings::sanitize_buffer_size(buffer);
     }
 
-    /// The clock output rate (0 follows the input), checked like a saved one.
-    /// `sync_bridge_config` re-opens the bridge on the next pass.
+    /// 0 follows the input.
     pub(crate) fn set_output_rate(&mut self, rate: u32) {
         self.output_rate = crate::app::settings::sanitize_output_rate(rate);
     }
 
-    /// The clock output buffer, checked like a saved one.  0 means the default
-    /// buffer here, not "follow the input": only an old saved session reads it
-    /// that way.  `sync_bridge_config` re-opens the bridge on the next pass.
+    /// 0 is the default buffer here.  Only an old saved session reads
+    /// 0 as "follow the input".
     pub(crate) fn set_output_buffer(&mut self, buffer: usize) {
         self.output_buffer = crate::app::settings::sanitize_buffer_size(buffer);
     }
 
-    /// Turns drift correction on or off.  `publish_engine` pushes it with the
-    /// master switches on the next pass.
     pub(crate) fn set_drift(&mut self, on: bool) {
         self.drift = on;
     }
 
-    /// Flips the master mute.  `publish_engine` pushes it on the next pass,
-    /// and the tuner's auto-mute stays a layer on top.
+    /// The tuner's auto-mute stays a layer on top.
     pub(crate) fn toggle_mute(&mut self) {
         self.mute = !self.mute;
     }
 
-    /// Pushes the stored input and output gains.
     pub(crate) fn apply_gains(&self) {
         self.engine.set_gains(self.input_gain, self.output_gain);
     }
 
-    /// The input gain, clamped to its range and pushed now.
     pub(crate) fn set_input_gain(&mut self, gain_db: f32) {
         let gain_db = if gain_db.is_nan() { 0.0 } else { gain_db };
         self.input_gain = gain_db.clamp(
@@ -693,7 +639,6 @@ impl RigWerkApp {
         self.apply_gains();
     }
 
-    /// The master level, clamped to its range and pushed now.
     pub(crate) fn set_master_level(&mut self, level_db: f32) {
         let level_db = if level_db.is_nan() { 0.0 } else { level_db };
         self.output_gain = level_db.clamp(
@@ -703,23 +648,20 @@ impl RigWerkApp {
         self.apply_gains();
     }
 
-    /// *In 1* (`index` 0) or *In 2* on or off.  The frame pushes it.
     pub(crate) fn set_input_channel(&mut self, index: usize, on: bool) {
         if let Some(channel) = self.input_channels.get_mut(index) {
             *channel = on;
         }
     }
 
-    /// Whether the click plays.  The master mute leaves it ticking, but the
-    /// tuner's auto-mute silences it with the rig: tuning needs quiet.
+    /// The master mute leaves it ticking.  The tuner's auto-mute
+    /// silences it: tuning needs quiet.
     pub(crate) fn metronome_audible(&self) -> bool {
         self.metronome_running && !self.tuner.auto_muted(self.page, self.engine.state)
     }
 
-    /// Pushes the metronome transport.  Tempo and level are clamped on
-    /// these fields and when preferences load; the engine stores them.
-    /// `metronome_running` stays what the person chose; the engine gets
-    /// [`Self::metronome_audible`], so leaving the tuner restarts the click.
+    /// The engine gets [`Self::metronome_audible`], so leaving the
+    /// tuner restarts the click.
     pub(crate) fn apply_metronome(&mut self) {
         let audible = self.metronome_audible();
         self.metronome_pushed = Some(audible);
@@ -731,9 +673,8 @@ impl RigWerkApp {
         );
     }
 
-    /// Pushes the click again only when [`Self::metronome_audible`] moved
-    /// since the last push, which is the tuner's auto-mute.  The setters,
-    /// `start` and startup push their own edits.
+    /// Only when [`Self::metronome_audible`] moved.  The setters and
+    /// startup push their own edits.
     pub(crate) fn follow_metronome_audible(&mut self) {
         if self.metronome_pushed != Some(self.metronome_audible()) {
             self.apply_metronome();
@@ -760,33 +701,24 @@ impl RigWerkApp {
         self.apply_metronome();
     }
 
-    /// Pushes the stored bridge buffer mode and size.
     pub(crate) fn apply_bridge_buffer(&self) {
         self.engine
             .set_bridge_buffer(self.bridge_buffer_mode, self.bridge_buffer_ms);
     }
 
-    /// Stores the bridge buffer mode and pushes it now.
     pub(crate) fn set_bridge_buffer_mode(&mut self, mode: audio::BufferMode) {
         self.bridge_buffer_mode = mode;
         self.apply_bridge_buffer();
     }
 
-    /// Stores the fixed bridge buffer size, checked like a saved one, and
-    /// pushes it now.
     pub(crate) fn set_bridge_buffer_ms(&mut self, ms: f32) {
         self.bridge_buffer_ms = crate::app::settings::sanitize_bridge_buffer_ms(ms);
         self.apply_bridge_buffer();
     }
 
-    /// `(low_latency_request, exclusive_output)` for [`StartConfig`].
-    ///
-    /// An ASIO clock ignores the WASAPI mode and every low-latency request.
-    /// On Windows the mode enum decides; on Linux the one `low_latency_output`
-    /// preference drives both this request and `pipewire_low_latency` (the
-    /// PipeWire quantum ask, which additionally needs `is_pipewire_device`),
-    /// and ALSA reads the request as its smallest period.  Exclusive stays off
-    /// away from Windows.  Both persisted fields stay.
+    /// An ASIO clock ignores both.  On Windows the mode enum decides.
+    /// On Linux `low_latency_output` is the request and ALSA's smallest
+    /// period.  Exclusive stays off away from Windows.
     pub(crate) fn output_start_flags(&self) -> (bool, bool) {
         if self.selected_output().asio_clsid.is_some() {
             return (false, false);
@@ -806,52 +738,40 @@ impl RigWerkApp {
     }
 }
 
-/// The bridge's own latency, in the terms `latency_ms` has always used.
+/// Same terms as `latency_ms`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LatencyParts {
-    /// Whether a bridge runs, for the "planned" labels.
     pub(crate) running: bool,
-    /// Whether input and output share one PipeWire graph cycle (no ring).
+    /// Input and output share one PipeWire graph cycle, so there is no ring.
     pub(crate) direct: bool,
-    /// The block the input really delivers, frames.
     pub(crate) input_block: u32,
-    /// The ring's fill target, frames (0 on the duplex node).
+    /// 0 on the duplex node.
     pub(crate) bridge_buffer: u32,
-    /// The step the output really runs at, frames.
     pub(crate) output_step: u32,
     pub(crate) input_rate: u32,
     pub(crate) output_rate: u32,
-    /// The input callback has delivered a block: the size is the driver's,
-    /// while its rate may still be the one asked for until
-    /// [`Self::input_rate_reported`].
+    /// The size is the driver's.  The rate may still be the one asked
+    /// for until [`Self::input_rate_reported`].
     pub(crate) input_reported: bool,
-    /// The output side has delivered a step: it is the driver's or graph's,
-    /// not the quantum asked for before a native PipeWire stream ran.
+    /// The driver's or the graph's, not the quantum asked for first.
     pub(crate) output_reported: bool,
-    /// The input rate is a reading from the device or graph, not the rate
-    /// asked for before a native PipeWire stream negotiated.
+    /// A reading, not the rate asked for before the stream negotiated.
     pub(crate) input_rate_reported: bool,
-    /// The output rate is a reading from the device or graph.
     pub(crate) output_rate_reported: bool,
 }
 
 impl LatencyParts {
-    /// The input block and the rate it is counted at are both readings.  The
-    /// block alone is not enough: the label "INPUT BLOCK: N frames at R" names
-    /// both numbers, so a measured block over a rate the native path only
-    /// asked for is still shown as planned.
+    /// The label names both numbers, so a measured block over a rate
+    /// the path only asked for is still shown as planned.
     pub(crate) fn input_read(&self) -> bool {
         self.input_reported && self.input_rate_reported
     }
 
-    /// The output step and the rate it is counted at are both readings, for
-    /// the same reason as [`Self::input_read`].
+    /// Same reason as [`Self::input_read`].
     pub(crate) fn output_read(&self) -> bool {
         self.output_reported && self.output_rate_reported
     }
 
-    /// Input block + bridge buffer at the input rate, plus the output step at the
-    /// output rate.
     pub(crate) fn bridge_ms(&self) -> f32 {
         ((self.input_block + self.bridge_buffer) as f32 / self.input_rate.max(1) as f32
             + self.output_step as f32 / self.output_rate.max(1) as f32)

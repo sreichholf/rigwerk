@@ -93,7 +93,6 @@ fn a_pending_parameter_stays_in_order_across_the_overflow() {
     for _ in 0..receiver.capacity() {
         assert!(sender.push(0, 0.0, 0));
     }
-    // A, to the overflow.
     assert!(sender.push(1, 1.0, 0));
     let out = drain(&mut receiver);
     assert_eq!(out.last(), Some(&(1, 1.0, 0)));
@@ -112,7 +111,6 @@ fn discard_empties_the_ring_and_the_overflow() {
     assert!(sender.push(2, 0.25, 0));
     receiver.discard();
     assert!(drain(&mut receiver).is_empty());
-    // Both work as before afterwards.
     assert!(sender.push(2, 0.75, 1));
     assert_eq!(drain(&mut receiver), vec![(2, 0.75, 1)]);
 }
@@ -157,7 +155,6 @@ fn two_threads_deliver_every_parameter_in_order() {
     assert!(drain(&mut receiver).is_empty());
 }
 
-/// Values of parameter `index` in `changes`, in order.
 fn values_of(changes: &[(usize, f64, i32)], index: usize) -> Vec<f64> {
     changes
         .iter()
@@ -326,7 +323,6 @@ fn has_queued_until_drained() {
     assert!(!sender.has_queued());
     assert!(receiver.is_empty());
 
-    // The ring.
     assert!(sender.push(3, 0.5, 0));
     assert!(sender.has_queued());
     assert!(!receiver.is_empty());
@@ -356,7 +352,6 @@ fn has_queued_until_drained() {
     assert!(!sender.has_queued());
     assert!(receiver.is_empty());
 
-    // Discard empties it too.
     assert!(sender.push(5, 0.5, 0));
     receiver.discard();
     assert!(!sender.has_queued());

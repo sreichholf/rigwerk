@@ -1,8 +1,6 @@
-//! Exclusive-mode WASAPI playback for the clock output.
-//!
-//! Takes the endpoint for RigWerk alone so the driver can run below the
-//! shared-mode engine period.  Other apps go silent on that device while the
-//! stream holds it.  Extra outputs stay on shared streams.
+//! Takes the endpoint for RigWerk alone, so the driver can run below the
+//! shared-mode period.  Other apps go silent on that device.  Extra
+//! outputs stay on shared streams.
 
 use crate::audio::mixer::OutputMixer;
 use crate::audio::output::write_frame;
@@ -40,16 +38,15 @@ const SPEAKER_FRONT_RIGHT: u32 = 0x2;
 const SPEAKER_FRONT_CENTER: u32 = 0x4;
 const HNS_PER_SEC: i64 = 10_000_000;
 
-/// What exclusive mode actually opened.
 #[derive(Clone, Debug)]
 pub struct ExclusiveInfo {
     pub rate: u32,
     pub channels: usize,
     /// Frames written on each buffer-ready event (`GetBufferSize`).
     pub step_frames: u32,
-    /// Driver minimum exclusive period, for diagnostics.
+    /// Driver minimum exclusive period, for the mode line.
     pub min_period_frames: u32,
-    /// Driver default exclusive period, for diagnostics.
+    /// Driver default exclusive period, for the mode line.
     pub default_period_frames: u32,
 }
 
@@ -80,7 +77,7 @@ impl ExclusiveInfo {
     }
 }
 
-/// Running exclusive stream.  Dropping it stops playback and frees the device.
+/// Drop stops playback and frees the device.
 pub struct ExclusiveOutput {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -95,7 +92,7 @@ impl Drop for ExclusiveOutput {
     }
 }
 
-/// Opens `endpoint_id` in WASAPI exclusive mode at the driver's minimum period.
+/// At the driver's minimum exclusive period.
 pub fn open_exclusive(
     endpoint_id: &str,
     requested_rate: u32,
@@ -164,7 +161,6 @@ impl Drop for EventHandle {
     }
 }
 
-/// Device sample layout for the exclusive buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SampleKind {
     F32,
@@ -174,7 +170,7 @@ enum SampleKind {
     I32,
 }
 
-/// Owned WAVEFORMATEXTENSIBLE kept alive for the session.
+/// The client holds this pointer for the session.
 struct OwnedFormat {
     wave: WAVEFORMATEXTENSIBLE,
     kind: SampleKind,
@@ -268,8 +264,8 @@ fn make_float(channels: u16, rate: u32) -> WAVEFORMATEX {
 }
 
 unsafe fn format_supported(client: &IAudioClient, format: *const WAVEFORMATEX) -> bool {
-    // Exclusive: ppClosestMatch must be null; unsupported formats return an
-    // error HRESULT (not S_FALSE with a closest match).
+    // Exclusive: `ppClosestMatch` must be null.  Unsupported formats return
+    // an error, not `S_FALSE` with a closest match.
     client
         .IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, format, None)
         .is_ok()
@@ -283,7 +279,6 @@ unsafe fn pick_format(
     let channels = header.nChannels.max(1);
     let rate = header.nSamplesPerSec.max(1);
 
-    // Prefer float32 (mix-format variants), then common PCM exclusive layouts.
     let candidates: [(SampleKind, WAVEFORMATEXTENSIBLE); 4] = [
         (
             SampleKind::F32,
@@ -367,15 +362,10 @@ unsafe fn activate_client(device: &IMMDevice) -> Result<IAudioClient, String> {
         .map_err(|error| driver_message("could not open an audio client", &error))
 }
 
-/// Re-open when GetBufferSize is many times the period we asked for.
-///
-/// Event-driven exclusive must write a full `GetBufferSize()` buffer on every
-/// wake (MSDN / OpenAL Soft).  Some USB (UAC1) drivers allocate an endpoint
-/// buffer much larger than the requested period while still signaling at the
-/// short period — PortAudio documents this as ~8×.  Writing that many frames
-/// every short wake drains the ring many times realtime and sounds like a
-/// stutter / helicopter.  Matching the period to the buffer we actually got
-/// keeps the write size and the wake rate at 1:1.
+/// Event-driven exclusive writes a full `GetBufferSize()` every wake
+/// (MSDN).  Some UAC1 drivers allocate ~8× the period and still signal
+/// short (PortAudio); matching the period to that buffer keeps wake and
+/// write 1:1.
 unsafe fn match_period_to_buffer(
     device: &IMMDevice,
     format: &OwnedFormat,
@@ -427,7 +417,8 @@ unsafe fn initialize_exclusive(
             match_period_to_buffer(device, format, client, period_hns, frames)
         }
         Err(error) if error.code() == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => {
-            // Ask for the aligned frame count, then re-activate with that period.
+            // `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`: re-activate at the
+            // aligned period.
             let aligned = client
                 .GetBufferSize()
                 .map_err(|retry| format!("exclusive buffer not aligned ({error}; {retry})"))?;
@@ -461,7 +452,7 @@ unsafe fn open_session(endpoint: &str) -> Result<Session, String> {
         .GetDevice(&HSTRING::from(endpoint))
         .map_err(|error| format!("the output was not found ({error})"))?;
 
-    // Probe mix format / periods on a throwaway client, then open exclusive.
+    // Periods are probed on a throwaway client, then exclusive is opened.
     let probe = activate_client(&device)?;
     let mix = probe
         .GetMixFormat()
@@ -500,10 +491,9 @@ unsafe fn open_session(endpoint: &str) -> Result<Session, String> {
         .GetService()
         .map_err(|error| format!("no render client ({error})"))?;
 
-    // Exclusive + event callback: each wake writes the full GetBufferSize()
-    // buffer (MSDN).  That size — not the HNS period conversion — is the step.
-    // Start is deferred until the mixer thread is ready and has seeded the
-    // bridge buffer; otherwise the device is already draining an empty ring.
+    // Each wake writes the full `GetBufferSize()` (MSDN), not the HNS
+    // conversion.  Start waits until the mixer has seeded the ring, or the
+    // device drains an empty one.
     let step_frames = buffer_frames.max(1);
     let _ = used_hns;
     Ok(Session {
@@ -530,7 +520,6 @@ fn report_failure(shared: &Shared, error: &windows::core::Error) {
     }
 }
 
-/// Writes silence across a whole exclusive buffer, in the endpoint's format.
 unsafe fn silence_exclusive(dest: *mut u8, kind: SampleKind, samples: usize) {
     match kind {
         SampleKind::F32 => {
@@ -616,16 +605,13 @@ unsafe fn run(
     let mut mixer = OutputMixer::new(session.info.rate, channels);
     mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
-    // Exclusive event-driven: every signal requires a *full* endpoint buffer
-    // (IAudioClient::GetBufferSize).  Shared REAL-style keeps one engine step
-    // queued via GetCurrentPadding; that pattern drops out here and sounds
-    // like a stutter / helicopter.  GetCurrentPadding is meaningless here
-    // (MSDN / mpv): do not size the write from it.
+    // Every signal needs a full `GetBufferSize()` buffer.  Shared REAL
+    // queues one step via `GetCurrentPadding`; that stutters here.
+    // `GetCurrentPadding` is meaningless in exclusive (MSDN).
     let frames = session.buffer_frames.max(1);
     mixer.prepare(frames as usize);
-    // Seed the ring bridge buffer from this step before the device starts asking
-    // for audio.  set_output on the bridge thread does the same; doing it
-    // here covers the window before that call lands.
+    // Seed the ring before the device starts.  `set_output` on the bridge
+    // thread does the same; this covers the window before that call lands.
     let source = match shared.source_rate.load(Ordering::Relaxed) {
         0 => session.info.rate.max(1),
         rate => rate,
@@ -635,8 +621,8 @@ unsafe fn run(
         .max(1) as usize;
     shared.note_output_block(source_step);
 
-    // Prefill one silent buffer, then Start — same order as the MSDN exclusive
-    // event sample and OpenAL Soft.  Only then tell the bridge we are ready.
+    // Prefill one silent buffer, then Start (MSDN exclusive event sample).
+    // Only then tell the bridge we are ready.
     if session.render.GetBuffer(frames).is_ok() {
         let _ = session
             .render
@@ -686,8 +672,8 @@ unsafe fn run(
                 break;
             }
         };
-        // This thread is the real-time callback for the device; a panic here
-        // must not end it silently while the app still says Running.
+        // This thread is the real-time callback.  A panic must not end it
+        // silently while the app still says Running.
         let panicked = contain(|| {
             mixer.render(&shared, frames as usize, |index, mapped| {
                 if channels > 0 {
@@ -697,8 +683,8 @@ unsafe fn run(
             });
         });
         if panicked {
-            // The voice is untrustworthy: release the buffer as silence and
-            // let the app stop the run.
+            // The render is untrustworthy: release silence and let the app
+            // stop the run.
             shared.note_callback_failure(CallbackFailure::Panic);
             silence_exclusive(data, kind, frames as usize * channels);
         }

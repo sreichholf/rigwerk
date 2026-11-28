@@ -1,7 +1,4 @@
-//! A toggle chip for an independent switch (`docs/ui-spec.md` §4.5).
-//!
-//! On, it is filled with `accent_bg`, labelled in `accent_text` and stroked
-//! in `accent`.  The caller passes the current value; a click flips it.
+//! A toggle chip.  The caller owns the value; a click flips it.
 
 use eframe::egui;
 use egui::{CornerRadius, Sense, Stroke, Vec2};
@@ -10,7 +7,6 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{palette_focus, row_info};
 
-/// Draws `label` and toggles `on` when the chip is clicked.
 pub(crate) fn chip(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
     let colours = palette(ui.ctx());
     let text_font = font(Face::Sans, TypeRole::Control);

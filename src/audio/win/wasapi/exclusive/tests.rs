@@ -2,9 +2,8 @@ use super::{frames_to_hns, hns_to_frames, ExclusiveInfo, HNS_PER_SEC};
 
 #[test]
 fn an_oversized_endpoint_buffer_matches_its_period_in_hns() {
-    // UAC1-style: driver returns 8× the frames implied by the requested
-    // period.  Re-init uses that frame count as the new period so wakes
-    // and writes stay 1:1 (see match_period_to_buffer).
+    // UAC1-style: the driver returns 8× the requested period.  Re-init
+    // uses that frame count so wakes and writes stay 1:1.
     let requested = 48u32;
     let allocated = requested * 8;
     assert!(allocated >= requested.saturating_mul(2));

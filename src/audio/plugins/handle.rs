@@ -1,27 +1,10 @@
-//! A loaded plugin in its two halves: the [`PluginProcessor`] the audio
-//! thread runs inside the chain's slot ([`LoadedPlugin`]), and the
-//! [`PluginHandle`] the UI reaches through the published effect links and
-//! the editor window.  Format-neutral.
-//!
-//! The UI half keeps the control views, the saved values, the state blob
-//! and whether it is stale, next to the main-thread plugin object.  That
-//! sits behind [`PluginUi`]'s own mutex, a UI-only lock: the audio thread
-//! never takes it, so a control set, an editor sync, a state capture or a
-//! preference save never touches a lock the audio thread takes.  Lock
-//! order on the UI side: chain model → `UiSide` → `ParamOut`.  Never the
+//! The processor the audio thread runs, and the [`PluginHandle`] the UI
+//! holds.  The UI lock is UI-only: the audio thread never takes it.
+//! Lock order: chain model, then `UiSide`, then `ParamOut`.  Never the
 //! reverse.
 //!
-//! Every format is split along its thread rules: the processor holds
-//! `ClapProcessor`, `Lv2Processor` or `Vst3Processor`, the UI half a
-//! `Box<dyn PluginHostUi>` implemented once per host module, and they talk
-//! through the parameter transfers, [`PluginShared`] and the pause handshake
-//! (a restart, or a CLAP flush while not processing, pauses the plugin from
-//! the UI and resumes it).  Neither half ever waits for the other.
-//!
-//! The UI half's parameter, state and service operations never branch on the
-//! format: the control views, the saved values, the state blob and the stale
-//! flag stay here, and each host operation that needs its own object goes
-//! through [`PluginHostUi`] with the borrowed [`HostIo`].
+//! Neither half waits for the other.  A restart, or a CLAP flush while
+//! not processing, pauses from the UI and resumes.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -36,8 +19,8 @@ use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginState};
 use super::slot::SlotControls;
 use super::transfer::ParamReceiver;
 
-/// The audio half's plugin object (`Send`; it lives in the chain's slot).
-/// Boxed: each carries its buffers' descriptions inline.
+/// `Send`; it lives in the chain's slot.  Boxed: each carries its
+/// buffers' descriptions inline.
 pub(crate) enum PluginProcessor {
     Vst3(Box<Vst3Processor>),
     Clap(Box<ClapProcessor>),
@@ -87,7 +70,6 @@ impl PluginProcessor {
 
 pub(crate) struct PluginUi {
     shared: Arc<PluginShared>,
-    /// The UI→audio parameter producer.
     out: Arc<ParamOut>,
     ui: Mutex<UiSide>,
     format: PluginFormat,
@@ -95,61 +77,53 @@ pub(crate) struct PluginUi {
     has_editor: bool,
 }
 
-/// What the UI half owns; behind [`PluginUi::ui`].
+/// Behind [`PluginUi::ui`].
 struct UiSide {
-    /// The format's main-thread plugin object, through its UI contract.
+    /// The format's main-thread plugin object.
     host: Box<dyn PluginHostUi>,
-    /// The audio→UI parameter queue: CLAP output values, for the views.
     from_audio: ParamReceiver,
     ids: Arc<ParamIds>,
     views: Vec<PluginParamView>,
-    /// The control list the last published [`PluginView`] holds, kept beside
-    /// [`Self::views`], which it mirrors.  A republish that finds `views`
-    /// still equal hands this list back instead of copying a new one (see
-    /// [`PluginHandle::parameters`]).
+    /// The list [`PluginHandle::parameters`] last handed out.  While
+    /// `views` still equals it, a republish clones the `Arc` instead of
+    /// the controls.
     published: Option<Arc<[PluginParamView]>>,
-    /// The saved control values (was the slot's `pref.params`).
     saved: Vec<PluginParamPref>,
-    /// The saved state blob (was the slot's `pref.state`).
     state: Option<PluginState>,
     /// Whether `state` may no longer describe the live plugin: it was
     /// missing or did not restore, or a control changed since.  The next
     /// preference save captures a fresh blob.
     state_stale: bool,
-    /// A pause the UI is driving (see `drive_pause`), kept between frames.
+    /// Kept between frames of `drive_pause`.
     pause_wait: Option<(std::time::Instant, u64)>,
-    /// Editor edits taken from [`ParamOut`], reused every frame.
+    /// Reused every frame, so a service does not allocate the edit list.
     edits: Vec<(u32, f64)>,
-    /// Ids pushed to the processor whose values it has not applied yet
-    /// (see [`Undelivered`]).  A capture while there are any builds the
-    /// blob's snapshot so a restore applies them again (see
-    /// `capture_snapshot`).
+    /// A capture while any of these are outstanding builds the snapshot
+    /// so a restore applies them again (see `capture_snapshot`).
     undelivered: Undelivered,
 }
 
-/// The UI's reference to one loaded plugin.  Cheap to clone; the slot, the
-/// published link and an open editor each hold one.  UI thread only.
+/// UI thread only.  The slot, the published link and an open editor each
+/// hold one, so the plugin outlives the slot while an editor is open.
 #[derive(Clone)]
 pub(crate) struct PluginHandle(Arc<PluginUi>);
 
-/// One loaded plugin as the chain's slot holds it.
 pub(crate) struct LoadedPlugin {
     processor: PluginProcessor,
     handle: PluginHandle,
 }
 
-/// What one effect did with one chunk.
+/// What one effect did with one chunk, and what the buffers hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// The plugin's output (fully wet) is in the buffers.
+    /// Fully wet plugin output.
     Processed,
-    /// The buffers still hold the effect's input.
+    /// The effect's input, untouched.
     Skipped,
-    /// The plugin failed; the buffers hold its input.
+    /// The effect's input.  The failure is recorded on the shared state.
     Failed,
 }
 
-/// What a fresh instance starts with on the UI side.
 pub(crate) struct Saved {
     pub(crate) params: Vec<PluginParamPref>,
     pub(crate) state: Option<PluginState>,
@@ -157,8 +131,7 @@ pub(crate) struct Saved {
 }
 
 impl LoadedPlugin {
-    /// A loaded, activated VST3 plugin; `shared` is the one it was loaded
-    /// with.  Processing starts with the first block.
+    /// Processing starts with the first block.
     pub(crate) fn vst3(loaded: Vst3Loaded, shared: Arc<PluginShared>, saved: Saved) -> Self {
         let Vst3Loaded {
             controller,
@@ -185,8 +158,7 @@ impl LoadedPlugin {
         }
     }
 
-    /// A loaded, activated CLAP plugin; `shared` is the one it was loaded
-    /// with.  Processing starts with the first block.
+    /// Processing starts with the first block.
     pub(crate) fn clap(loaded: ClapLoaded, shared: Arc<PluginShared>, saved: Saved) -> Self {
         let ClapLoaded {
             instance,
@@ -213,8 +185,7 @@ impl LoadedPlugin {
         }
     }
 
-    /// A loaded, activated LV2 plugin; `shared` is the one it was loaded
-    /// with.  Processing starts with the first block.
+    /// Processing starts with the first block.
     pub(crate) fn lv2(loaded: Lv2Loaded, shared: Arc<PluginShared>, saved: Saved) -> Self {
         let Lv2Loaded {
             instance,
@@ -250,12 +221,11 @@ impl LoadedPlugin {
         &self.handle.0.shared
     }
 
-    /// The latency the plugin last reported (atomics; audio-safe).
+    /// Atomics.  The audio thread may call it.
     pub(crate) fn latency(&self) -> u32 {
         self.handle.0.shared.latency()
     }
 
-    /// The CLAP processor, for tests that look at its buffers.
     #[cfg(test)]
     pub(crate) fn clap_processor_for_test(&mut self) -> &mut ClapProcessor {
         match &mut self.processor {
@@ -264,7 +234,6 @@ impl LoadedPlugin {
         }
     }
 
-    /// The LV2 processor, for tests that look at its buffers.
     #[cfg(test)]
     pub(crate) fn lv2_processor_for_test(&mut self) -> &mut Lv2Processor {
         match &mut self.processor {
@@ -273,7 +242,7 @@ impl LoadedPlugin {
         }
     }
 
-    /// One fully wet [`Self::run`], with counters nobody reads.
+    /// Fully wet.  The counters are not the ones a test reads.
     #[cfg(test)]
     pub(crate) fn run_for_test(&mut self, left: &mut [f32], right: &mut [f32]) -> Outcome {
         let controls = SlotControls::new(&super::pref::PluginPref::default());
@@ -281,12 +250,11 @@ impl LoadedPlugin {
     }
 
     /// Audio thread, one chunk of at most [`MAX_BLOCK`](super::MAX_BLOCK)
-    /// frames, in place.  Every loaded effect is brought here every chunk,
-    /// so its pause handshake (start, stop, skip) is served even while it
-    /// is skipped; only `wet` runs the plugin, and a skipped effect flushes
-    /// the values queued for it.  A failure is recorded in [`PluginShared`]
-    /// and never allocates.  Neither format has a lock here that the UI
-    /// could hold: a restart pauses the effect instead.
+    /// frames.  Every loaded effect comes here every chunk, so its pause
+    /// handshake is served even while it is skipped; a skip still flushes
+    /// queued values.  A failure is recorded in [`PluginShared`] and never
+    /// allocates.  No lock here that the UI could hold: a restart pauses
+    /// the effect instead.
     pub(crate) fn run(
         &mut self,
         controls: &SlotControls,
@@ -356,12 +324,10 @@ impl LoadedPlugin {
 }
 
 impl Drop for LoadedPlugin {
-    /// UI thread, with the slot out of every chain, so no block can be
-    /// inside the plugin: stop it if it is processing (as its audio
-    /// thread), then drop the processor and the handle.  Deactivation and
-    /// destruction come with the last handle (`Vst3Controller` and
-    /// `ClapInstance` drop), which an open editor may hold a little longer:
-    /// its view is detached first, then the plugin deactivated.
+    /// The slot is out of every chain, so no block is inside: stop it if
+    /// it is processing (as its audio thread), then drop the processor.
+    /// Deactivation comes with the last handle, which an open editor may
+    /// hold longer: the view is detached first, then the plugin.
     fn drop(&mut self) {
         let pause = &self.handle.0.shared.pause;
         // A stranded plugin is still inside `process`: a stop would be a
@@ -402,9 +368,8 @@ impl PluginHandle {
         self.0.ui.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Identifies this plugin instance in [`super::PluginView::instance`].
-    /// It is the address of the shared UI half, so it stays unique for as
-    /// long as anyone (an open editor, for one) holds a clone of the handle.
+    /// The address of the shared UI half, unique while any clone (an open
+    /// editor, for one) still holds it.
     pub(crate) fn instance_id(&self) -> usize {
         Arc::as_ptr(&self.0) as *const () as usize
     }
@@ -413,22 +378,18 @@ impl PluginHandle {
         self.0.has_editor
     }
 
-    /// Atomics only.
     pub(crate) fn latency(&self) -> u32 {
         self.0.shared.latency()
     }
 
-    /// The first processing failure the audio thread recorded (atomics).
     pub(crate) fn failure(&self) -> Option<ProcessFailure> {
         self.0.shared.failure()
     }
 
-    /// What both halves share (atomics only).
     pub(in crate::audio) fn shared(&self) -> &PluginShared {
         &self.0.shared
     }
 
-    /// The buses a VST3 plugin's processor was built for, for the tests.
     #[cfg(test)]
     pub(crate) fn vst3_layout_for_test(&self) -> Option<super::super::vst3::BusLayout> {
         let mut ui = self.ui();
@@ -441,7 +402,6 @@ impl PluginHandle {
         )
     }
 
-    /// The LV2 instance's own control views, for the tests.
     #[cfg(test)]
     pub(crate) fn lv2_parameters_for_test(&self) -> Vec<PluginParamView> {
         let mut ui = self.ui();
@@ -452,26 +412,20 @@ impl PluginHandle {
             .unwrap_or_default()
     }
 
-    /// A restart request as the plugin's own callback makes it, for the
-    /// app's tests.
     #[cfg(test)]
     pub(crate) fn request_restart_for_test(&self, bits: u32) {
         self.0.shared.request_restart(bits);
     }
 
-    /// An edit as a VST3 editor's `performEdit` makes it, for the tests.
+    /// As a VST3 editor's `performEdit`.
     #[cfg(test)]
     pub(crate) fn edit_for_test(&self, id: u32, value: f64) -> bool {
         self.0.out.push_edit(id, value)
     }
 
-    /// The control views as last read or set, as a published [`PluginView`]
-    /// holds them.
-    ///
-    /// The list the last call produced is handed back while the views still
-    /// equal it, so a UI republish that finds nothing new here copies no
-    /// controls; a changed list is copied once and kept for the next call
-    /// (see [`PluginView::parameters`]).
+    /// The list from the last call, while the views still equal it, so a
+    /// republish copies no controls.  A changed list is copied once and
+    /// kept (see [`PluginView::parameters`]).
     pub(crate) fn parameters(&self) -> Arc<[PluginParamView]> {
         let mut ui = self.ui();
         if let Some(published) = &ui.published {
@@ -484,10 +438,8 @@ impl PluginHandle {
         published
     }
 
-    /// Reads every control again, so the panel shows the plugin's values
-    /// right now.  The host reports `None` when a read would be stale (a
-    /// value still queued) or the format has no read call; the views are
-    /// kept then.
+    /// `None` from the host (a read would be stale, or the format has no
+    /// read call) leaves the views as they are.
     pub(crate) fn refresh_parameters(&self) {
         let mut ui = self.ui();
         let views = {
@@ -522,8 +474,6 @@ impl PluginHandle {
         }
     }
 
-    /// Sets one normalized control and keeps the views and the saved value
-    /// in step.  Returns the plugin's own text for the new value.
     pub(crate) fn set_parameter(&self, id: u32, value: f64) -> Result<Option<String>, String> {
         let value = value.clamp(0.0, 1.0);
         let mut ui = self.ui();
@@ -576,9 +526,8 @@ impl PluginHandle {
         Ok(display)
     }
 
-    /// Returns every control to the plugin's own defaults and forgets the
-    /// saved overrides.  The list stays in the handle; the caller reads it
-    /// through [`Self::parameters`], which shares it with the next refresh.
+    /// Forgets the saved overrides.  The list stays here;
+    /// [`Self::parameters`] shares it with the next refresh.
     pub(crate) fn reset_parameters(&self) -> Result<(), String> {
         let mut ui = self.ui();
         let views = {
@@ -614,13 +563,9 @@ impl PluginHandle {
         Ok(())
     }
 
-    /// Reads every control and stores the result as the views and the
-    /// saved values.  A VST3 plugin's reported values go to its controller
-    /// first, and its editor edits are dropped: the controller already has
-    /// them, and this read is fresher.  `None` when the host says a read now
-    /// would be stale; nothing is stored then.  The list stays in the
-    /// handle; the caller reads it through [`Self::parameters`], which
-    /// shares it with the next refresh.
+    /// VST3 reported values go to the controller first, and its editor
+    /// edits are dropped: the controller already has them, and this read
+    /// is fresher.  `None` (a read would be stale) stores nothing.
     pub(crate) fn sync_full(&self) -> Option<()> {
         let mut ui = self.ui();
         let parameters = {
@@ -666,14 +611,9 @@ impl PluginHandle {
         self.0.format == PluginFormat::Clap
     }
 
-    /// The plugin's main-thread work, once per UI frame, under the UI lock
-    /// only (never the chain model's lock, never a lock the audio thread
-    /// takes).  What that is per format lives in the host's
-    /// [`PluginHostUi::service`]; this adds the latency change every host
-    /// reports.
-    ///
-    /// Returns whether the views need republishing: the latency or a
-    /// control the plugin reported changed, or a restart failed.
+    /// Once per UI frame, under the UI lock only: never the chain model's
+    /// lock, never a lock the audio thread takes.  The host's `service`
+    /// does the format work; this adds the latency change.
     pub(crate) fn service(&self) -> bool {
         let shared = &*self.0.shared;
         let mut ui = self.ui();
@@ -707,34 +647,25 @@ impl PluginHandle {
         changed | shared.take_latency_change()
     }
 
-    /// Whether the saved state blob needs a capture: stale, or the plugin
-    /// marked its state dirty.
     pub(crate) fn wants_capture(&self) -> bool {
         self.ui().state_stale || self.0.shared.state_dirty()
     }
 
-    /// Captures the plugin's opaque state into the saved blob, with the
-    /// saved values as its snapshot.  A failed capture keeps the previous
-    /// blob, whose snapshot still lets newer values win on restore, and is
-    /// not retried until a control changes again; a deferred one (values
-    /// still queued for the audio side, or a CLAP save off the main thread)
-    /// stays stale so the next save retries.  Both save under the UI lock
-    /// only, so the audio callback keeps the effect.
+    /// A failed capture keeps the previous blob and is not retried until a
+    /// control changes.  A deferred one (values still queued, or a CLAP
+    /// save off the main thread) stays stale so the next save retries.
+    /// Under the UI lock only, so the audio callback keeps the effect.
     ///
-    /// Every format captures anyway while values are queued: the processor
-    /// is owned by the audio side (in the chain's slot), so the UI cannot
-    /// deliver them itself, and with the stream stopped they would wait
-    /// forever, losing state that is not a parameter (a file the editor
-    /// loaded, say).  The blob then has the old values of those controls,
-    /// so its snapshot is built for a restore to apply their saved values
-    /// (or defaults) on top (see
-    /// [`capture_snapshot`](crate::audio::plugins::host::capture_snapshot)),
-    /// and the slot stays stale.
+    /// Captures even while values are queued: the processor is on the
+    /// audio side, so the UI cannot deliver them, and a stopped stream
+    /// would wait forever and lose state that is not a parameter.  The
+    /// snapshot is built so restore applies those saved values (or
+    /// defaults) on top, and the slot stays stale.
     ///
-    /// The snapshot must say what the blob holds, or a restore would skip
-    /// the newer saved values.  A format whose blob holds no control values
-    /// (LV2) says so through `state_holds_params`, so its snapshot is empty
-    /// and the load applies every saved parameter on top of it.
+    /// The snapshot must say what the blob holds, or restore skips the
+    /// newer saved values.  LV2's blob holds no controls
+    /// (`state_holds_params`), so its snapshot is empty and every saved
+    /// parameter is applied on top.
     pub(crate) fn capture_state(&self) {
         let mut ui = self.ui();
         let capture = {
@@ -772,30 +703,26 @@ impl PluginHandle {
         }
     }
 
-    /// The saved values and state blob, for a preference save.
     pub(crate) fn saved(&self) -> (Vec<PluginParamPref>, Option<PluginState>) {
         let ui = self.ui();
         (ui.saved.clone(), ui.state.clone())
     }
 
-    /// Marks the saved state as out of date (its editor closed), so the
-    /// next preference save captures it.
+    /// The editor closed, so the next preference save captures state.
     pub(crate) fn mark_state_stale(&self) {
         self.ui().state_stale = true;
     }
 
-    /// Runs `body` on the CLAP instance (its editor, its main-thread
-    /// callbacks), under the UI lock; `None` for another format.  UI
-    /// thread only.  The audio thread never waits for this.
+    /// Under the UI lock; `None` for another format.  UI thread only.
+    /// The audio thread never waits for this.
     pub(crate) fn with_clap<R>(&self, body: impl FnOnce(&mut ClapInstance) -> R) -> Option<R> {
         let mut ui = self.ui();
         let clap = ui.host.as_any_mut().downcast_mut::<ClapInstance>()?;
         Some(body(clap))
     }
 
-    /// A new editor view of a VST3 plugin, for its window
-    /// (`app::plugin_gui`).  The window keeps this handle for longer than
-    /// the view.  UI thread; it takes the UI lock only to create the view.
+    /// The window keeps this handle longer than the view.  UI thread; the
+    /// UI lock is taken only to create the view.
     pub(crate) fn open_vst3_editor(&self) -> Result<Vst3Editor, String> {
         let view = {
             let mut ui = self.ui();
@@ -814,8 +741,7 @@ impl PluginHandle {
 
 #[cfg(test)]
 impl PluginHandle {
-    /// Seeds the pause's wait past the stranded deadline, for the test that
-    /// proves the failure without a 2 s sleep.
+    /// Past the stranded deadline, so the test does not sleep 2 s.
     pub(crate) fn seed_pause_wait_for_test(&self) {
         use super::pause::PAUSE_STRANDED;
         let past = std::time::Instant::now()
@@ -824,8 +750,7 @@ impl PluginHandle {
         self.ui().pause_wait = Some((past, self.0.shared.pause.served()));
     }
 
-    /// A handle over `host` alone, for the tests that pin the shared
-    /// postludes; nothing can run it, as there is no processor behind it.
+    /// No processor behind it, so nothing can run it.
     pub(crate) fn with_host_for_test(
         host: Box<dyn PluginHostUi>,
         shared: Arc<PluginShared>,

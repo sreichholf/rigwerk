@@ -1,6 +1,4 @@
-//! Opening a cpal playback stream for one generic extra output.  Errors here
-//! never stop the bridge: the slot is marked missing and the supervisor
-//! retries later.
+//! A failed open marks the slot missing.  The clock bridge keeps running.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,14 +15,13 @@ use super::super::shared::{CallbackFailure, Shared};
 use super::super::thread_priority::PromoteOnce;
 use super::mixer::ExtraOutputMixer;
 
-/// A live extra output stream.  Dropping it stops playback on that device only.
+/// Dropping it stops that device only.
 pub(crate) struct OpenedExtraOutput {
     _stream: cpal::Stream,
 }
 
-/// Lays `slot`'s ring out for a `channels`-channel stream at `rate`.  The
-/// ring-active flag must be off, so the clock side is not feeding the ring
-/// while it changes.
+/// The ring-active flag must be off: the clock side is not feeding the
+/// ring while its layout changes.
 pub(crate) fn lay_out_ring(
     shared: &Shared,
     slot: usize,
@@ -39,8 +36,6 @@ pub(crate) fn lay_out_ring(
     bus.set_target_frames(super::super::shared::initial_target(buffer_frames));
 }
 
-/// Opens one extra output on its own cpal stream.  On failure the slot is marked
-/// missing and the error is returned; the clock bridge keeps running.
 pub(crate) fn open_extra_output(
     slot: usize,
     device_id: &str,
@@ -157,26 +152,22 @@ where
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
                 promote.run();
                 let Some(frames) = block_frames(data.len(), channels) else {
-                    // A block with no channel or a partial frame cannot be
-                    // written frame by frame: its whole-frame count is
-                    // unknown and its tail would stay unwritten.  Silence it
-                    // and publish the failure; the sample path failed, not
-                    // the device, so this stops the run even for an extra
-                    // output.
+                    // A partial frame has no whole-frame count.  The sample
+                    // path failed, not the device, so this stops the run.
                     data.fill(T::EQUILIBRIUM);
                     mix_shared.note_callback_failure(CallbackFailure::BadBlock);
                     return;
                 };
                 if mix_shared.callback_failure().is_some() {
-                    // The run already failed; the supervisor will see the
-                    // bridge stop and drop this stream.
+                    // The chain must not be driven again.  The supervisor
+                    // drops this stream when the bridge stops.
                     data.fill(T::EQUILIBRIUM);
                     return;
                 }
                 render_or_silence(&mix_shared, data, |block| {
                     mixer.render(&mix_shared, frames, |index, mapped| {
-                        // After this mixer's resampler and dropout fade: the
-                        // frame the cable (or any other extra output) actually plays.
+                        // After the resampler and the dropout fade: the frame
+                        // this extra output actually plays.
                         if channels > 0 {
                             push_device_frame(
                                 &mix_shared.recorder,
@@ -194,7 +185,7 @@ where
                     error.kind(),
                     cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated
                 ) {
-                    // Never stop the bridge for an extra output disconnect.
+                    // An extra output disconnect does not stop the bridge.
                     error_shared
                         .extra_output_bus(slot)
                         .missing

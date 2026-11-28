@@ -1,5 +1,3 @@
-//! PipeWire registry graph: nodes, ports, and the links RigWerk wants.
-
 use std::collections::HashMap;
 
 use pipewire as pw;
@@ -7,7 +5,6 @@ use pw::spa;
 
 use crate::audio::output_map::MAX_EXTRA_OUTPUTS;
 
-/// One audio port of another node, as the registry describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PortRef {
     pub(crate) id: u32,
@@ -15,12 +12,9 @@ pub(crate) struct PortRef {
     pub(crate) channel: String,
 }
 
-/// Chooses which of a node's ports feed (or take) RigWerk's left and right
-/// port.  `FL`/`FR` win; a `MONO` port, or a node with a single port, feeds
-/// both sides when `mono_to_both` is set (a mono source) and only the left
-/// side otherwise (a mono sink, so the two sides are not summed into it at
-/// double level).  Without channel names the first two ports in id order are
-/// used.
+/// `FL`/`FR` win; otherwise `MONO` or the first ports in id order.  A mono
+/// sink takes the left only, so both sides are not summed into it at
+/// double level.
 pub(crate) fn map_ports(ports: &[PortRef], mono_to_both: bool) -> [Option<u32>; 2] {
     let find = |name: &str| {
         ports
@@ -59,7 +53,7 @@ fn mono(port: u32, mono_to_both: bool) -> [Option<u32>; 2] {
     }
 }
 
-/// What the registry has told us about the graph, kept on the main loop.
+/// Kept on the main loop.
 #[derive(Default)]
 pub(crate) struct Graph {
     /// Node id → (`node.name`, `media.class`).
@@ -106,11 +100,9 @@ impl Graph {
         ports
     }
 
-    /// The output ports a source feeds RigWerk from.  Plain outputs come
-    /// first.  A node with only monitor outputs (a virtual source such as
-    /// `Audio/Source/Virtual` publishes its capture ports that way) uses
-    /// those, unless it is a sink: a sink's monitor is its own playback, and
-    /// taking it would feed RigWerk's output back into its input.
+    /// Plain outputs first.  Monitor outputs only when the node is not a
+    /// sink: a virtual source publishes capture that way, and a sink's
+    /// monitor would feed our output back into the input.
     fn source_ports(&self, node: u32) -> Vec<PortRef> {
         let plain = self.ports_of(node, true, false);
         if !plain.is_empty() {
@@ -127,7 +119,6 @@ impl Graph {
         }
     }
 
-    /// RigWerk's own port by name (`input_FL`, `output_FR`, …).
     fn own_port(&self, node: u32, name: &str) -> Option<u32> {
         self.ports
             .iter()
@@ -136,10 +127,9 @@ impl Graph {
             .min()
     }
 
-    /// The links the bridge needs, as (output node, output port, input node,
-    /// input port).  Empty until RigWerk's own ports and the device ports
-    /// are all known.  `extra_outputs` is `(slot, sink node.name)` for each
-    /// hardware extra output that should play; virtual slots are omitted.
+    /// `(output node, output port, input node, input port)`.  Empty until
+    /// our ports and the device ports are known.  `extra_outputs` is
+    /// `(slot, sink node.name)`; virtual slots are omitted.
     pub(crate) fn wanted_links(
         &self,
         own: u32,

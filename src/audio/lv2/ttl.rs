@@ -1,26 +1,18 @@
-//! A small in-memory Turtle triple store for the LV2 scan.
+//! In-memory Turtle triples for the LV2 scan, before any binary is loaded.
 //!
-//! The scan reads a bundle's `.ttl` files before anything is loaded, so the
-//! store keeps whole files: [`TtlStore::load_file`] appends one file's triples
-//! to the store it is called on, with the file's own `file://` URI as the base
-//! so relative IRIs and `rdfs:seeAlso` links resolve.  Several files can be
-//! appended to one store, which is how a manifest and the files it links
-//! are read together.
-//!
-//! Terms are kept as owned `String`s.  `oxrdf` is not a dependency of this
-//! crate, so a term is read through the parser's triple fields and their
-//! display form: a named node displays with its angle brackets, a literal as
-//! Turtle text with its quotes.  A `file://` URI becomes a [`PathBuf`] only
-//! through [`path_from_file_uri`]; the URI is never used as a path directly.
+//! [`TtlStore::load_file`] appends one file, with that file's `file://` URI
+//! as the base, so a relative IRI resolves against the file's folder.
+//! Terms are owned `String`s.  `oxrdf` is not a dependency, so a term is the
+//! parser's display form: a named node in angle brackets, a literal as
+//! quoted Turtle.  A `file://` URI becomes a path only through
+//! [`path_from_file_uri`].
 
 use std::path::{Path, PathBuf};
 
 use oxttl::TurtleParser;
 
-/// The predicate a type is declared with.
 pub(crate) const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
-/// One triple, with every term in its plain text form.
 #[derive(Clone, Debug)]
 struct Triple {
     subject: String,
@@ -30,17 +22,13 @@ struct Triple {
     literal: bool,
     /// A literal's datatype IRI; `None` for a plain or language-tagged one.
     datatype: Option<String>,
-    /// Whether a literal carries a language tag.
     language: bool,
 }
 
-/// One object as [`TtlStore::statements`] returns it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Object {
     Iri(String),
     Blank(String),
-    /// The lexical value, the datatype IRI of a typed literal, and whether
-    /// a language tag was given.
     Literal {
         value: String,
         datatype: Option<String>,
@@ -48,11 +36,10 @@ pub(crate) enum Object {
     },
 }
 
-/// The triples of one or more Turtle files.
 #[derive(Default)]
 pub(crate) struct TtlStore {
     triples: Vec<Triple>,
-    /// How many files were loaded, so blank node labels stay per file.
+    /// Blank node labels stay per file.
     files: usize,
 }
 
@@ -61,9 +48,8 @@ impl TtlStore {
         Self::default()
     }
 
-    /// Parses `path` and appends its triples to the store.  The file's own
-    /// `file://` URI is the base, so every relative IRI in it resolves
-    /// against the folder the file is in.
+    /// The file's own `file://` URI is the base, so a relative IRI resolves
+    /// against its folder.
     pub(crate) fn load_file(&mut self, path: &Path) -> Result<(), String> {
         let file = self.files;
         self.files += 1;
@@ -106,7 +92,6 @@ impl TtlStore {
         Ok(())
     }
 
-    /// Every object of `subject` under `predicate`, whatever its kind.
     pub(crate) fn objects(&self, subject: &str, predicate: &str) -> Vec<String> {
         self.triples
             .iter()
@@ -115,7 +100,6 @@ impl TtlStore {
             .collect()
     }
 
-    /// The IRI objects of `subject` under `predicate`, in file order.
     pub(crate) fn iris(&self, subject: &str, predicate: &str) -> Vec<String> {
         self.triples
             .iter()
@@ -126,7 +110,6 @@ impl TtlStore {
             .collect()
     }
 
-    /// The literal values of `subject` under `predicate`, unquoted.
     pub(crate) fn literals(&self, subject: &str, predicate: &str) -> Vec<String> {
         self.triples
             .iter()
@@ -137,17 +120,14 @@ impl TtlStore {
             .collect()
     }
 
-    /// The first literal of `subject` under `predicate`.
     pub(crate) fn literal(&self, subject: &str, predicate: &str) -> Option<String> {
         self.literals(subject, predicate).into_iter().next()
     }
 
-    /// The first IRI object of `subject` under `predicate`.
     pub(crate) fn iri(&self, subject: &str, predicate: &str) -> Option<String> {
         self.iris(subject, predicate).into_iter().next()
     }
 
-    /// The subjects whose `rdf:type` is `rdf_type`, in file order.
     pub(crate) fn subjects_of_type(&self, rdf_type: &str) -> Vec<String> {
         let mut seen = Vec::new();
         self.triples
@@ -164,8 +144,6 @@ impl TtlStore {
             .collect()
     }
 
-    /// Every predicate and object of `subject`, in file order, with each
-    /// object's kind.
     pub(crate) fn statements(&self, subject: &str) -> Vec<(String, Object)> {
         self.triples
             .iter()
@@ -187,13 +165,11 @@ impl TtlStore {
             .collect()
     }
 
-    /// Every `rdf:type` IRI of `subject`, in file order.
     pub(crate) fn types(&self, subject: &str) -> Vec<String> {
         self.iris(subject, RDF_TYPE)
     }
 }
 
-/// The text of a term, with a named node's angle brackets removed.
 fn iri_text(term: &impl std::fmt::Display) -> String {
     let text = term.to_string();
     match text
@@ -216,9 +192,6 @@ fn scoped(text: String, blank: bool, file: usize) -> String {
     }
 }
 
-/// The lexical value of a literal as the parser displays it, with the quotes
-/// and the Turtle escapes undone.  A language tag or datatype after the
-/// closing quote is dropped.
 fn literal_text(text: &str) -> String {
     let mut chars = text.chars();
     if chars.next() != Some('"') {
@@ -245,8 +218,7 @@ fn literal_text(text: &str) -> String {
     out
 }
 
-/// What follows a literal's closing quote in the parser's display form: the
-/// datatype IRI of `"v"^^<iri>`, and whether `"v"@tag` has a language tag.
+/// What follows the closing quote in the parser's display form.
 fn literal_suffix(text: &str) -> (Option<String>, bool) {
     let mut chars = text.char_indices();
     if !matches!(chars.next(), Some((_, '"'))) {
@@ -283,7 +255,7 @@ fn push_hex(out: &mut String, chars: &mut std::str::Chars<'_>, digits: u32) {
     }
 }
 
-/// The `file://` URI of `path`, escaped so it can be a Turtle base.
+/// Escaped so it can be a Turtle base.
 pub(crate) fn file_uri(path: &Path) -> String {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut text = absolute.to_string_lossy().replace('\\', "/");
@@ -326,14 +298,11 @@ pub(crate) fn file_uri(path: &Path) -> String {
 
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
-/// The path a `file:` URI names.  Linux `/usr/...` and the Windows
-/// `file:///C:/Program Files/...` form are both accepted.  RFC 8089 reads an
-/// empty authority, `localhost` (case-insensitive, as every host is) and no
-/// authority at all (`file:/usr/...`) as the local machine, so those three
-/// name the same path; a URI with another host, another scheme, or a
-/// relative path is refused.  `.` and `..` are resolved lexically, so a path
-/// compared against a bundle folder cannot climb out of it with
-/// `bundle/../elsewhere`.
+/// Linux `/usr/...` and Windows `file:///C:/...` are both accepted.  RFC
+/// 8089: an empty authority, `localhost` and no authority (`file:/...`) are
+/// local.  Another host, another scheme, or a relative path is refused.
+/// `.` and `..` resolve lexically, so `bundle/../elsewhere` cannot leave
+/// the bundle.
 pub(crate) fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
     let Some(scheme) = uri.get(..5) else {
         return Err(format!("not a file URI: {uri}"));
@@ -375,8 +344,7 @@ pub(crate) fn path_from_file_uri(uri: &str) -> Result<PathBuf, String> {
     Ok(lexical(Path::new(&path)))
 }
 
-/// `path` with `.` dropped and each `..` removing the component before it,
-/// without touching the file system.  `..` at the root stays at the root.
+/// Lexical only: no file system.  `..` at the root stays.
 pub(crate) fn lexical(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -396,8 +364,7 @@ pub(crate) fn lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// The absolute, lexically resolved form of a bundle folder, which the
-/// binaries it names must stay inside.
+/// Binaries a bundle names must stay inside this.
 pub(crate) fn bundle_root(bundle: &Path) -> PathBuf {
     lexical(&std::path::absolute(bundle).unwrap_or_else(|_| bundle.to_path_buf()))
 }

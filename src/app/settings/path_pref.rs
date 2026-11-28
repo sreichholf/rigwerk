@@ -1,4 +1,5 @@
-//! One saved signal path, as `Preferences` and `Session` store it.
+//! Sends are indexed by saved position, not by slot.  The app maps them
+//! in `install_paths`.
 
 use super::serde_util::skip_unreadable;
 use crate::audio::{
@@ -6,67 +7,43 @@ use crate::audio::{
     PathFeed, PathMix, PitchSettings, PluginPref, MAX_NAM_BLOCKS, MAX_PATHS, SEND_OFF_DB,
 };
 
-/// One signal path: its name and colour (UI data), its chain settings, its
-/// plugins, whether that effect chain is bypassed, and its level, mute and
-/// solo.  How it reaches each device lives with the device
-/// (`OutputDeviceSettings::path_map`, indexed by the path's position in the
-/// saved list).  Its sends are indexed the same way.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct PathPref {
     pub(crate) name: String,
-    /// Index into the path palette.
     pub(crate) colour: u8,
-    /// The 2 × 4 input routing; only taps 1/2 (the path's L/R) are used.
+    /// Only taps 1 and 2, the path's L and R, are used.
     pub(crate) routes: [[bool; 4]; 2],
     pub(crate) mono: bool,
-    /// Channel enable for the path's L and R.
     pub(crate) output_channels: [bool; 2],
-    /// The EQ before the plugin effects.
     pub(crate) eq: EqSettings,
-    /// The EQ after the plugin effects.
     pub(crate) eq_post: EqSettings,
     pub(crate) gate: GateSettings,
-    /// The built-in pitch shifter.  Missing on older saves (off), and
-    /// omitted while it is still the default.
     #[serde(default, skip_serializing_if = "PitchSettings::is_unset")]
     pub(crate) pitch: PitchSettings,
-    /// The NAM blocks in signal order, with their captures.  Missing on
-    /// older saves, and omitted while empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) nam_blocks: Vec<NamBlockSettings>,
-    /// The single NAM stage older saves have.  [`Self::sanitize`] folds it
+    /// An older save's single NAM stage.  [`Self::sanitize`] folds it
     /// into `nam_blocks` and clears it, so a save never writes it again.
     #[serde(default, skip_serializing_if = "LegacyNamSettings::is_unset")]
     pub(crate) amp: LegacyNamSettings,
-    /// Built-in cabinet, including the impulse path.  Missing on older
-    /// saves, and omitted while it is still the default.
     #[serde(default, skip_serializing_if = "CabSettings::is_unset")]
     pub(crate) cab: CabSettings,
-    /// The effect chain.  An entry that cannot be read is skipped.
     #[serde(deserialize_with = "skip_unreadable")]
     pub(crate) plugins: Vec<PluginPref>,
-    /// Skips every effect's processing without changing each effect's own
-    /// bypass.  Older saves have no field and stay off.
+    /// Skips every effect without changing each effect's own bypass.
     #[serde(default)]
     pub(crate) chain_bypass: bool,
-    /// Path level, dB.
     pub(crate) level_db: f32,
-    /// Loudness-match trim, dB.  One value per path; omitted while 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) match_db: f32,
     pub(crate) mute: bool,
     pub(crate) solo: bool,
-    /// What the chain runs on.  Omitted for a path fed by the input, which
-    /// is what older saves have.
+    /// An older save is the input.
     #[serde(default, skip_serializing_if = "is_input")]
     pub(crate) feed: PathFeed,
-    /// The send to each path, dB, by that path's position in the saved
-    /// list.  Omitted while every send is off.  [`Self::mix`] does not read
-    /// it: slots are not positions, so the app maps it (`install_paths`).
-    /// An entry that does not parse, or is written as RON's `()`, keeps its
-    /// index off, so the length and every later send still point at the path
-    /// they were saved for.
+    /// By saved position.  [`Self::mix`] does not read it.  A bad entry,
+    /// or RON `()`, keeps its index, so later sends do not move.
     #[serde(
         default,
         deserialize_with = "stored_sends",
@@ -75,16 +52,12 @@ pub(crate) struct PathPref {
     pub(crate) sends: Vec<f32>,
 }
 
-/// The value an unreadable send keeps until the clamp site turns it off.
-/// [`sanitize_send`] already reads NaN as off (not 0 dB), and it is the mark
-/// the load counts before sanitizing.  No saved file contains it.
+/// NaN, which [`sanitize_send`] reads as off.  No saved file contains it.
+/// The load counts it before sanitizing.
 fn unreadable_send() -> f32 {
     f32::NAN
 }
 
-/// Reads the sends by path position.  A bad entry, or one written as RON's
-/// `()`, keeps its index as [`unreadable_send`]; [`PathPref::sanitize`] then
-/// turns it into [`SEND_OFF_DB`].
 fn stored_sends<'de, D>(deserializer: D) -> Result<Vec<f32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -113,8 +86,6 @@ impl Default for PathPref {
     }
 }
 
-/// The name a path gets when nothing else names it: "Main" for the first,
-/// "Path N" after that.
 pub(crate) fn default_path_name(position: usize) -> String {
     if position == 0 {
         "Main".to_owned()
@@ -156,8 +127,6 @@ impl PathPref {
         }
     }
 
-    /// `sends` (indexed by slot) in the saved order `order`, as stored:
-    /// empty while every send is off.
     pub(crate) fn sends_in_order(sends: &[f32; MAX_PATHS], order: &[usize]) -> Vec<f32> {
         let saved: Vec<f32> = order
             .iter()
@@ -173,8 +142,7 @@ impl PathPref {
         }
     }
 
-    /// The stored sends by slot, the path at saved position `n` living in
-    /// `slots[n]`.  Positions past `slots` are dropped.
+    /// The path at saved position `n` lives in `slots[n]`.
     pub(crate) fn sends_by_slot(&self, slots: &[usize]) -> [f32; MAX_PATHS] {
         let mut sends = [SEND_OFF_DB; MAX_PATHS];
         for (&level, &slot) in self.sends.iter().zip(slots) {
@@ -185,7 +153,6 @@ impl PathPref {
         sends
     }
 
-    /// The chain settings the engine takes, sanitized.
     pub(crate) fn mix(&self) -> PathMix {
         PathMix {
             routes: self.routes,
@@ -206,10 +173,7 @@ impl PathPref {
         .sanitized()
     }
 
-    /// EQs, gate, pitch, level and sends in range, and a return without a solo or
-    /// sends; a blank name gets the default; the colour stays in the
-    /// palette.  An older save's single NAM stage
-    /// becomes the first block, once.
+    /// An older save's single NAM stage becomes the first block, once.
     pub(crate) fn sanitize(&mut self, position: usize) {
         if self.nam_blocks.is_empty() && !self.amp.is_unset() {
             self.nam_blocks
@@ -254,8 +218,7 @@ impl PathPref {
     }
 }
 
-/// Keeps at most [`MAX_PATHS`] paths and sanitizes each.  At least one
-/// path always remains.
+/// At least one path always remains.
 pub(crate) fn sanitize_paths(paths: &mut Vec<PathPref>) {
     paths.truncate(MAX_PATHS);
     if paths.is_empty() {

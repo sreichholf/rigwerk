@@ -1,13 +1,8 @@
-//! The parameter change lists `process` reads and writes
-//! (`IParameterChanges`, `IParamValueQueue`), and the empty event list.
-//!
-//! Built at load for the plugin's parameter table and never grown: one
-//! queue per parameter plus a scratch queue for ids the table does not
-//! know, each with a fixed number of points.  The audio thread fills and
-//! clears them, and the plugin calls them from inside `process`, so every
-//! field is a relaxed atomic: no lock, no allocation, and `Send + Sync`
-//! without an `unsafe impl`.  A full queue keeps its newest point by
-//! replacing the last one.
+//! Parameter change lists for `process`, built at load and never grown.
+//! The audio thread fills them and the plugin calls them from inside
+//! `process`, so every field is a relaxed atomic: no lock and no
+//! allocation.  A full queue keeps its newest point by replacing the
+//! last one.
 
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::Arc;
@@ -21,10 +16,9 @@ use ::vst3::{Class, ComWrapper};
 
 use crate::audio::plugins::ParamIds;
 
-/// Points per queue on the input side.  The transfer collapses a burst to
-/// the newest value per parameter, so a block rarely carries more than one.
+/// Points per input queue.  The transfer collapses a burst to the newest
+/// value, so a block rarely carries more than one.
 pub(crate) const IN_POINTS: usize = 4;
-/// Points per queue the plugin may write on the output side.
 pub(crate) const OUT_POINTS: usize = 16;
 
 /// A queue slot that is not claimed this block.
@@ -67,9 +61,8 @@ impl ParamValueQueue {
         self.values[at].store(value.to_bits(), Relaxed);
     }
 
-    /// `addPoint`: keeps offset order, replaces a point at the same
-    /// offset, and when full drops the last point to make room.  Returns
-    /// the new point's index.
+    /// `addPoint`: offset order, replace the same offset, drop the last
+    /// when full.
     pub(crate) fn add(&self, offset: i32, value: f64) -> usize {
         self.add_point(offset, value).0
     }
@@ -106,13 +99,11 @@ impl ParamValueQueue {
         (at, full)
     }
 
-    /// The value at the last offset, if any point was added.
     pub(crate) fn last(&self) -> Option<f64> {
         let len = self.len.load(Relaxed).min(self.offsets.len());
         (len > 0).then(|| self.point(len - 1).1)
     }
 
-    /// Every point, for the tests.
     #[cfg(test)]
     pub(crate) fn points(&self) -> Vec<(i32, f64)> {
         let len = self.len.load(Relaxed).min(self.offsets.len());
@@ -174,7 +165,7 @@ pub(crate) struct ParameterChanges {
 }
 
 impl ParameterChanges {
-    /// Lists for `ids`, `points` per queue (allocates; UI thread, at load).
+    /// Allocates.  UI thread, at load.
     pub(crate) fn new(ids: Arc<ParamIds>, points: usize) -> Self {
         let count = ids.len();
         Self {
@@ -191,7 +182,6 @@ impl ParameterChanges {
         self.used.load(Relaxed).min(self.slot_of.len())
     }
 
-    /// The queue of parameter `index`, claimed if it is not yet.
     fn claim(&self, index: usize) -> Option<usize> {
         let id = self.ids.id(index)?;
         let slot = self.slot_of[index].load(Relaxed);
@@ -208,10 +198,8 @@ impl ParameterChanges {
         Some(slot)
     }
 
-    /// Adds a point for parameter `index` (audio thread).
-    /// Adds a point for parameter `index` (audio thread).  False when the
-    /// parameter's queue was full and a point had to be dropped for it:
-    /// the block then does not carry every value it was given.
+    /// Audio thread.  False when a full queue dropped a point, so the
+    /// block does not carry every value it was given.
     pub(crate) fn push(&self, index: usize, offset: i32, value: f64) -> bool {
         match self.claim(index) {
             Some(slot) => !self.queues[slot].add_point(offset, value).1,
@@ -219,8 +207,6 @@ impl ParameterChanges {
         }
     }
 
-    /// Calls `emit(index, value)` with each claimed parameter's value at
-    /// its last offset.
     pub(crate) fn for_each_last(&self, mut emit: impl FnMut(usize, f64)) {
         for queue in &self.queues[..self.used()] {
             let id = queue.id.load(Relaxed);
@@ -230,13 +216,12 @@ impl ParameterChanges {
         }
     }
 
-    /// Whether no parameter has a point.
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.used() == 0
     }
 
-    /// Forgets every point; only the claimed queues are touched.
+    /// Only the claimed queues are touched.
     pub(crate) fn clear(&self) {
         for queue in &self.queues[..self.used()] {
             if let Some(index) = self.ids.index_of(queue.id.load(Relaxed)) {
@@ -247,7 +232,6 @@ impl ParameterChanges {
         self.used.store(0, Relaxed);
     }
 
-    /// The queue for parameter `index`, for the tests.
     #[cfg(test)]
     pub(crate) fn points(&self, index: usize) -> Vec<(i32, f64)> {
         match self.slot_of[index].load(Relaxed) {
@@ -305,8 +289,7 @@ impl IParameterChangesTrait for ParameterChanges {
     }
 }
 
-/// An event list with no events, which refuses new ones: RigWerk hosts
-/// effects and sends no notes.
+/// No events.  RigWerk hosts effects and sends no notes.
 pub(crate) struct EmptyEvents;
 
 impl Class for EmptyEvents {

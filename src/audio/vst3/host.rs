@@ -1,13 +1,8 @@
-//! The host context every factory and every `initialize` gets.
-//!
-//! One object for the whole process, never freed: the SDK factory keeps
-//! the context it was given in a module global without a reference and
-//! reads it during module teardown, and VSTGUI keeps the run loop it took
-//! from it for the module's lifetime (`pluginfactory.cpp`,
-//! `vstgui_linux_runloop_support.cpp`).  On Linux it is also the host's
-//! `IRunLoop`, which SDK 3.8 VSTGUI requires on the factory's context;
-//! the editor frame answers for the same registry, so a handler registered
-//! through either is serviced once.
+//! One process-wide host context, never freed.  The SDK factory stores it
+//! in a module global without a reference and reads it during teardown,
+//! and VSTGUI keeps the run loop for the module's life.  On Linux it is
+//! also `IRunLoop` (SDK 3.8 VSTGUI requires that on the factory context);
+//! the editor frame serves the same registry.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -26,11 +21,9 @@ use ::vst3::{com_scrape_types::Guid, Class, ComWrapper, Interface};
 
 use super::message::{HostAttributeList, HostMessage};
 
-/// The name `IHostApplication::getName` reports.
 const HOST_NAME: &str = "RigWerk";
 
-/// The process-wide host context.  Stateless: on Linux its run loop is the
-/// registry in `run_loop`.
+/// Stateless.  On Linux its run loop is the `run_loop` registry.
 pub(crate) struct HostApplication;
 
 impl Class for HostApplication {
@@ -44,7 +37,6 @@ impl Class for HostApplication {
     type Interfaces = (IHostApplication, IPlugInterfaceSupport);
 }
 
-/// The one host context, for `setHostContext` and every `initialize`.
 pub(crate) fn host_context() -> *mut FUnknown {
     static HOST: OnceLock<ComWrapper<HostApplication>> = OnceLock::new();
     HOST.get_or_init(|| ComWrapper::new(HostApplication))
@@ -54,9 +46,8 @@ pub(crate) fn host_context() -> *mut FUnknown {
         .as_ptr()
 }
 
-/// The plug-in side interfaces this host uses, for
-/// `IPlugInterfaceSupport` (the SDK's `PlugInterfaceSupport` lists the
-/// same kind: what the host will query on the plugin).
+/// Interfaces this host queries on the plugin (`IPlugInterfaceSupport`),
+/// as the SDK's `PlugInterfaceSupport` lists them.
 const SUPPORTED: [Guid; 6] = [
     IComponent::IID,
     IAudioProcessor::IID,

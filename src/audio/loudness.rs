@@ -1,55 +1,33 @@
-//! Loudness measurement for one output device, ITU-R BS.1770-4 / EBU R128.
+//! ITU-R BS.1770-4 loudness for one output.  Integrated is the last 60 s,
+//! not the whole run, so storage stays fixed.  The K-weighting biquads are
+//! bilinear transforms of the standard's analog prototypes.
 //!
-//! The mixer pushes each device's finished frame here, after its level, trim,
-//! safety ceiling and mute, and without the metronome.  The meter keeps the
-//! K-weighted mean square in 100 ms steps and publishes three readings:
-//! momentary (400 ms), short-term (3 s) and integrated (gated 400 ms blocks
-//! over the last 60 s).  Integrated is a 60 s window rather than the whole
-//! run, so its fixed storage stays small and it follows a changed rig.
-//!
-//! One [`LoudnessMeter`] lives in each `DeviceMapper`.  It is preallocated,
-//! never locks and never allocates, and all of its state is owned by the
-//! callback that feeds it.  A reading below the absolute gate is published
-//! as [`SILENCE_LUFS`], which the UI draws as no reading.
-//!
-//! # K-weighting
-//!
-//! The two biquads are the standard's high shelf and RLB high-pass.  Their
-//! coefficients come from the analog prototypes with a bilinear transform,
-//! so every supported rate gets the same curve; at 48 kHz they reproduce the
-//! published coefficients.  A 1 kHz sine at 0 dBFS peak therefore reads
-//! about -3.0 LUFS, and at -20 dBFS about -23.0 LUFS.
+//! Preallocated.  No lock, no allocation.  The callback that owns the meter
+//! is the only writer.  A reading at or below the absolute gate is
+//! [`SILENCE_LUFS`].
 
 use super::output_map::MAX_OUTPUT_CHANNELS;
 
-/// The absolute gate, LUFS.  A reading at or below this is silence.
+/// Absolute gate, LUFS.  At or below this the UI draws no reading.
 pub(crate) const SILENCE_LUFS: f32 = -70.0;
 
-/// 100 ms measurement step.  A 400 ms block is four steps, short-term is 30
-/// steps, and the integrated history is 600 steps (60 s).
 const STEP_MILLIS: u32 = 100;
 const MOMENTARY_STEPS: usize = 4;
 const SHORT_TERM_STEPS: usize = 30;
 const HISTORY_BLOCKS: usize = 600;
 
-/// Loudness offset of the standard: `-0.691 + 10 log10(mean square)`.
+/// BS.1770: `-0.691 + 10 log10(mean square)`.
 const LOUDNESS_OFFSET: f64 = -0.691;
 
-/// The absolute and relative gates of the integrated measurement, LU.
 const ABSOLUTE_GATE_LUFS: f64 = -70.0;
 const RELATIVE_GATE_LU: f64 = -10.0;
 
-/// One published set of readings for a device.  `trim_db` is the output
-/// trim the mapper applied in that block, not a measurement.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoudnessReading {
-    /// 400 ms window, LUFS.
     pub momentary_lufs: f32,
-    /// 3 s window, LUFS.
     pub short_term_lufs: f32,
-    /// Gated 400 ms blocks over the last 60 s, LUFS.
     pub integrated_lufs: f32,
-    /// The output trim in dB, as the mapper applied it: 0 at unity.
+    /// Mapper trim for this block, not a loudness figure.
     pub trim_db: f32,
 }
 
@@ -65,15 +43,14 @@ impl Default for LoudnessReading {
 }
 
 impl LoudnessReading {
-    /// Whether the meter has a momentary reading at all.  A silent device
-    /// still has a trim, so only the loudness figure decides this.
+    /// Trim does not count: a silent device still has one.
     #[cfg(test)]
     pub(crate) fn has_reading(&self) -> bool {
         self.momentary_lufs > SILENCE_LUFS
     }
 }
 
-/// A second-order section in transposed direct form II, `a0` normalised to 1.
+/// Transposed direct form II, `a0` = 1.
 #[derive(Clone, Copy, Debug, Default)]
 struct Biquad {
     b0: f32,
@@ -95,7 +72,6 @@ impl Biquad {
     }
 }
 
-/// The two K-weighting sections of one channel.
 #[derive(Clone, Copy, Debug, Default)]
 struct KWeight {
     shelf: Biquad,
@@ -104,8 +80,6 @@ struct KWeight {
 
 impl KWeight {
     fn new(rate: f32) -> Self {
-        // Analog prototypes from BS.1770-4.  The shelf's `Vb` is the
-        // standard's exponent, which places its mid-band gain correctly.
         let shelf = high_shelf(rate);
         let high_pass = high_pass(rate);
         Self { shelf, high_pass }
@@ -117,13 +91,14 @@ impl KWeight {
     }
 }
 
-/// The standard's high shelf, built from its analog prototype.
+/// BS.1770-4 high shelf.
 fn high_shelf(rate: f32) -> Biquad {
     const GAIN_DB: f64 = 3.999843853973347;
     const Q: f64 = 0.7071752369554196;
     const HZ: f64 = 1681.974450955533;
     let k = (std::f64::consts::PI * HZ / f64::from(rate)).tan();
     let vh = 10.0f64.powf(GAIN_DB / 20.0);
+    // The standard's exponent.  It places the mid-band gain.
     let vb = vh.powf(0.4996667741545416);
     let a0 = 1.0 + k / Q + k * k;
     Biquad {
@@ -137,7 +112,7 @@ fn high_shelf(rate: f32) -> Biquad {
     }
 }
 
-/// The RLB high-pass, built from its analog prototype.
+/// BS.1770-4 RLB high-pass.
 fn high_pass(rate: f32) -> Biquad {
     const Q: f64 = 0.5003270373238773;
     const HZ: f64 = 38.13547087602444;
@@ -154,9 +129,6 @@ fn high_pass(rate: f32) -> Biquad {
     }
 }
 
-/// Loudness of one mean-square energy, before clamping: the standard's
-/// `-0.691 + 10 log10(E)`.  Silence and non-finite values return the
-/// absolute gate.
 fn loudness(energy: f64) -> f64 {
     if energy <= 0.0 || !energy.is_finite() {
         ABSOLUTE_GATE_LUFS
@@ -165,22 +137,16 @@ fn loudness(energy: f64) -> f64 {
     }
 }
 
-/// One device's loudness meter.  The callback that owns the device calls
-/// [`Self::push`] for every frame and [`Self::reading`] once per block.
+/// [`Self::push`] every frame, [`Self::reading`] once per block.
 pub(crate) struct LoudnessMeter {
     rate: u32,
     channels: usize,
-    /// Frames in one 100 ms step.
     step_frames: u32,
-    /// Frames left in the current step.
     frames_left: u32,
-    /// Per-channel K filter and squared sum for the current step.
     filters: [KWeight; MAX_OUTPUT_CHANNELS],
     sums: [f64; MAX_OUTPUT_CHANNELS],
-    /// The last 30 steps' summed channel energies, oldest first in a ring.
     steps: [f32; SHORT_TERM_STEPS],
     step_head: u64,
-    /// The last 600 four-step block energies, oldest first in a ring.
     blocks: [f32; HISTORY_BLOCKS],
     block_head: u64,
     block_count: usize,
@@ -206,9 +172,7 @@ impl LoudnessMeter {
         }
     }
 
-    /// Points the meter at a device with `channels` real channels and a new
-    /// rate.  A change forgets every measurement: the filters and window
-    /// would not describe the new device.
+    /// A rate or channel change forgets every measurement.
     pub(crate) fn configure(&mut self, rate: u32, channels: usize) {
         let rate = rate.max(1);
         let channels = channels.min(MAX_OUTPUT_CHANNELS);
@@ -222,8 +186,7 @@ impl LoudnessMeter {
         self.reset();
     }
 
-    /// Forgets every window and reading.  The filters start clean too, so a
-    /// reset after a pause does not carry the old signal's state.
+    /// Filters restart clean, so a pause does not carry the old signal.
     pub(crate) fn reset(&mut self) {
         self.filters = std::array::from_fn(|_| KWeight::new(self.rate as f32));
         self.sums = [0.0; MAX_OUTPUT_CHANNELS];
@@ -236,8 +199,8 @@ impl LoudnessMeter {
         self.reading = LoudnessReading::default();
     }
 
-    /// One finished frame of `channels` real channels, already after the
-    /// device level, trim, ceiling and mute, and without the metronome.
+    /// One finished frame: after level, trim, ceiling and mute, and without
+    /// the metronome.
     #[inline]
     pub(crate) fn push(&mut self, frame: &[f32]) {
         let count = frame.len().min(self.channels);
@@ -263,7 +226,6 @@ impl LoudnessMeter {
         self.steps[(self.step_head % SHORT_TERM_STEPS as u64) as usize] = energy;
         self.step_head = self.step_head.wrapping_add(1);
 
-        // A 400 ms block is the mean of the last four 100 ms steps.
         if self.step_head >= MOMENTARY_STEPS as u64 {
             let mut block = 0.0f64;
             for offset in 0..MOMENTARY_STEPS {
@@ -279,7 +241,6 @@ impl LoudnessMeter {
         self.reading = self.measure();
     }
 
-    /// The current momentary, short-term and integrated figures.
     fn measure(&self) -> LoudnessReading {
         LoudnessReading {
             momentary_lufs: self.momentary(),
@@ -315,11 +276,7 @@ impl LoudnessMeter {
         loudness(energy / SHORT_TERM_STEPS as f64).max(SILENCE_LUFS as f64) as f32
     }
 
-    /// Integrated loudness over the last 60 s, gated exactly as BS.1770-4
-    /// says: drop blocks below the absolute gate, then those more than 10 LU
-    /// below the gated mean.  The count is the 400 ms blocks that passed the
-    /// absolute gate, for a caller that needs to know how much of the window
-    /// was real signal.
+    /// Last 60 s.  The count is blocks above the absolute gate.
     pub(crate) fn integrated_with_blocks(&self) -> (f32, usize) {
         if self.block_count == 0 {
             return (SILENCE_LUFS, 0);
@@ -366,8 +323,7 @@ impl LoudnessMeter {
         self.integrated_with_blocks().0
     }
 
-    /// The latest reading with `trim_db` filled in.  The caller publishes it
-    /// once per block; the audio thread never allocates here.
+    /// Once per block.  No allocation.
     pub(crate) fn reading(&self, trim_db: f32) -> LoudnessReading {
         LoudnessReading {
             trim_db,

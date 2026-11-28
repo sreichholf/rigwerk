@@ -1,11 +1,5 @@
-//! The headless screenshot mode used by checks (`--screenshot <file>`).
-//!
-//! This is the driver: it waits for the window to settle, captures one frame,
-//! writes the file and records the run's ending, so `main` can return that
-//! ending's exit code once the window has closed.  A watchdog in `main` bounds
-//! a run whose repaints stop, and a draw pass never ends the process.  The
-//! fake state a checked screen shows is in [`fixtures`], which only a
-//! screenshot run builds.
+//! A draw pass never ends the process.  A watchdog in `main` bounds a
+//! run whose repaints stop.  [`fixtures`] is built only for a screenshot run.
 
 mod fixtures;
 

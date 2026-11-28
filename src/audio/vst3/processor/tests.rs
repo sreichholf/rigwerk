@@ -15,9 +15,8 @@ use crate::audio::plugins::{param_transfer, ParamIds, ParamReceiver, ParamSender
 const GAIN: u32 = 5;
 const METER: u32 = 6;
 
-/// A Rust `IAudioProcessor` with one stereo bus each way.  It applies the
-/// last gain point it was sent, reports the gain on its meter output
-/// parameter, and records each block's length.
+/// One stereo bus each way.  Applies the last gain point, reports it on
+/// the meter, and records each block's length.
 struct FakeProcessor {
     gain: AtomicU64,
     blocks: Mutex<Vec<i32>>,
@@ -244,9 +243,8 @@ fn a_mono_main_bus_gets_the_average_and_feeds_both_sides() {
     assert_eq!(right, left);
 }
 
-/// More points for one parameter than its queue holds: the block keeps the
-/// newest, sends it again with the next block, and only that block counts
-/// the values as applied.
+/// Past the queue: the block keeps the newest and sends it again next
+/// time.  Only that later block counts the values as applied.
 #[test]
 fn a_block_whose_queue_dropped_a_point_is_not_counted_applied() {
     let mut rig = rig(kResultOk);

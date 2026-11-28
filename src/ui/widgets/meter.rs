@@ -1,10 +1,5 @@
-//! Level meters (`docs/ui-spec.md` §4.1 and the 4 pt strip meter in §4.3).
-//!
-//! Bars are 5 pt for one or two channels and 2–3 pt for more, up to eight.
-//! The scale is 0, 6, 12, 24 and 48 dB below full scale.  The peak is a 2 pt
-//! line held for 1.5 s.  A sample at or above 0 dBFS latches `error` on that
-//! bar until the bar is clicked.  `meter` is the fill up to −6 dBFS,
-//! `meter_hot` from there to −1, and `error` above −1.
+//! Level meters.  A sample at or above 0 dBFS latches `error` until the bar
+//! is clicked.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};
@@ -18,7 +13,6 @@ const PEAK_HOLD_S: f64 = 1.5;
 const MAX_CHANNELS: usize = 8;
 const SCALE_W: f32 = 22.0;
 
-/// One channel's held peak and clip latch.  The widget advances it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MeterChannel {
     pub(crate) peak_db: f32,
@@ -83,9 +77,8 @@ pub(super) fn zone_colour(colours: &Palette, db: f32) -> egui::Color32 {
     }
 }
 
-/// Vertical bars for `levels` (linear amplitudes, one per channel).
-/// `state` is resized to the channels drawn.  `show_scale` is the 0–48
-/// scale; narrow strips turn it off.
+/// `state` is resized to the channels drawn.  Narrow strips turn the
+/// scale off.
 pub(crate) fn vertical_meter(
     ui: &mut egui::Ui,
     levels: &[f32],

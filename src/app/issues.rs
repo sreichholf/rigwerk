@@ -1,113 +1,6 @@
-//! Issues: the judgments the console, Setup and the sheets raise.  A
-//! problem becomes one row in the issues drawer, with a severity, the
-//! strip or Setup section it is about ([`Anchor`]) and one action that
-//! only runs on a click.
-//!
-//! An error means the audio itself is about to break (a buffer nearly
-//! late); anything that only colours the sound, such as a comb filter, is
-//! a warning.
-//!
-//! Producers so far are the signal paths':
-//! - unaligned paths that add up on one device channel (the output sheet's
-//!   `Sum` warning, `app::alignment`): a warning,
-//! - a device playing a path whose chain latency is past what the
-//!   alignment covers ([`MAX_ALIGN`]),
-//! - an unmuted path that no unmuted device plays, also when it is the only
-//!   path (a muted one is parked on purpose, e.g. right after Add path, and
-//!   does not warn),
-//! - the paths' DSP time not fitting the buffer (the PipeWire graph buffer
-//!   on the duplex path, the output buffer otherwise), with hysteresis so
-//!   the row does not flicker: the smoothed share raises the warning, the
-//!   decaying peak share the error.  Both shares come from the mixer's
-//!   total per buffer (`AudioEngine::total_dsp_time`), never from adding up
-//!   the paths' peaks, which may be seconds apart; the per-path times only
-//!   name the heaviest path.
-//!
-//! The output's own:
-//! - a PipeWire buffer change that failed (`AudioEngine::quantum_note`),
-//!   an output buffer that does not line up with the graph buffer, or a
-//!   graph buffer still too large while Low latency runs (`QuantumInfo`),
-//! - an output driver with no reading while a low-latency mode is chosen,
-//! - dropouts in this bridge run ([`DropoutWatch`]): a warning that
-//!   clears after [`DROPOUT_QUIET`] without a new one, and an error once
-//!   [`DROPOUT_BURST`] of them fall within [`DROPOUT_BURST_WINDOW`], held
-//!   until the output goes quiet.
-//! - the clock output went silent under Low latency ([`SilenceWatch`]):
-//!   RigWerk sends a loud signal while PipeWire's monitor of that output
-//!   stays quiet.  An error with recent dropouts, since the graph is starving;
-//!   the fix is Low latency off.  Without them a warning that also names
-//!   the desktop mixer: RigWerk's meter is read before PipeWire's stream
-//!   volume, so a muted or turned-down RigWerk stream looks the same.
-//!   Only while Low latency runs and the monitor delivers readings: without
-//!   that reading there is no row, never a guess.
-//! - a playing device against the safety ceiling (−1.0 dBFS): one warning
-//!   while any unmuted device is reducing by at least 0.5 dB, naming the
-//!   one with the most reduction.  It cannot be dismissed while it holds
-//!   and clears once the signal drops.
-//!
-//! Each extra output's own (a device that plays the master, by its slot),
-//! anchored to that output, and only while the bridge runs:
-//! - an extra output that failed to open, was lost, or is not among the output
-//!   devices: a warning, since the clock output and the others play on and
-//!   the extra output is retried.  The button opens its output sheet, where it can
-//!   be pointed at another device or removed.
-//! - dropouts of its own ring (`ExtraOutputBus::dropouts`, counted since its
-//!   stream opened: a reopen starts over), one [`DropoutWatch`] per slot
-//!   with the clock output's rules.  The safer
-//!   step names the extra output's own controls: its bridge buffer (Auto), then the
-//!   output buffer its stream asks for.  Never Low latency or the WASAPI
-//!   mode: those govern the clock output only.
-//! - a drift loop pinned at [`EXTRA_OUTPUT_DRIFT_LIMIT_PPM`]: its clock is
-//!   further off than the loop can follow.  A warning to Open diagnostics,
-//!   held by a [`HeldFlag`] so an integral hovering at the limit does not
-//!   flicker: raised after [`DRIFT_RAISE_AFTER`] pinned, cleared after
-//!   [`DRIFT_CLEAR_AFTER`] free.
-//!
-//! PipeWire in-graph extra outputs have no ring of their own; the graph keeps
-//! them in step and only the missing check applies to them.
-//!
-//! A slot that holds another extra output than the last tick saw (one removed,
-//! reordered or pointed at another device while the bridge runs) starts
-//! its watches over and drops its dismissals: they were about the old one.
-//! Its dropout watch starts at the slot's current count, which may still
-//! be the old stream's until the new one opens.
-//!
-//! The bridge's own:
-//! - the bridge stopped because a device was disconnected, or because a
-//!   real-time callback caught a failure, once the `device_alert` window is
-//!   dismissed: an error row, so the drawer says why it emptied instead of
-//!   vanishing.  The row names which of the two happened and the next step:
-//!   a lost device opens Setup, a failed callback opens Diagnostics (the
-//!   anchor stays Setup until there is a diagnostics anchor).  The window
-//!   stays the hard stop, and the row clears with the next bridge start.
-//!
-//! The state behind the rows ([`IssueState`]) moves once per update tick in
-//! [`RigWerkApp::tick_issues`], whether or not the console is drawn, and
-//! [`RigWerkApp::live_issues`] only reads it.  The tick keeps the issues it
-//! computed, and the drawer draws those ([`RigWerkApp::issue_view`]), so
-//! they are judged once per tick, not again for each frame drawn.  The DSP
-//! latches and the dropout watches start over with each bridge start and
-//! stop.  A new error (a title not among the last tick's errors) sets the
-//! error banner; warnings do not.
-//!
-//! What the person does with the drawer is app state too, never persisted:
-//! - the filter (All, Warnings, Errors).  It falls back to All when nothing
-//!   is left to show, and when a new error arrives while it shows only
-//!   warnings.
-//! - dismissed warnings, by their stable [`IssueKey`] (the kind and the
-//!   device or path slot, never the title, which carries numbers).  One
-//!   stays hidden until a tick no longer has it as a warning (it cleared,
-//!   or it became an error), or until the bridge run changes.  Errors
-//!   cannot be dismissed: audio is breaking, so they stay until fixed.
-//!   Showing the dismissed ones again is one click.
-//! - *Show* closes the drawer and selects the row's [`Anchor`].  A visible
-//!   issue marks that strip the whole time it is visible.
-//!
-//! The console keeps the readings; none of these judgments is drawn on the
-//! strips except the marker.  The fixes the output rows offer are the
-//! controls Setup and the output sheet already have: Check driver, the
-//! output buffer, Low latency, the WASAPI mode and the bridge buffer, and
-//! an extra output's own bridge buffer in the output sheet.
+//! An error means the audio is about to break.  A warning only colours
+//! the sound.  Dismissals and latches reset when the bridge run or the
+//! extra-output slot changes.
 
 use crate::app::LogTone;
 use std::collections::VecDeque;
@@ -127,25 +20,16 @@ use crate::audio::{
 #[cfg(target_os = "linux")]
 use crate::audio::{QuantumInfo, PIPEWIRE_LOW_QUANTUM};
 
-/// The smoothed DSP share of the buffer that raises the warning, and the
-/// share it has to drop under to clear it.
 pub(crate) const DSP_WARN_SHARE: f32 = 0.70;
 pub(crate) const DSP_WARN_CLEAR: f32 = 0.60;
-/// The peak DSP share that raises the error (the buffer is nearly late),
-/// and the share it has to drop under to clear it.
 pub(crate) const DSP_ERROR_SHARE: f32 = 0.95;
 pub(crate) const DSP_ERROR_CLEAR: f32 = 0.85;
 
-/// How long the output has to play without a new dropout before its
-/// issue clears.
 pub(crate) const DROPOUT_QUIET: Duration = Duration::from_secs(10);
-/// This many dropouts within [`DROPOUT_BURST_WINDOW`] turn the warning
-/// into an error: the audio is breaking up, not clicking once.
+/// This many within [`DROPOUT_BURST_WINDOW`] turn the warning into an error.
 pub(crate) const DROPOUT_BURST: usize = 3;
 pub(crate) const DROPOUT_BURST_WINDOW: Duration = Duration::from_secs(5);
 
-/// How long an extra output's drift loop has to stay pinned before it warns,
-/// and how long free before the warning clears.
 pub(crate) const DRIFT_RAISE_AFTER: Duration = Duration::from_secs(1);
 pub(crate) const DRIFT_CLEAR_AFTER: Duration = Duration::from_secs(3);
 
@@ -155,7 +39,7 @@ pub(crate) enum IssueSeverity {
     Warning,
 }
 
-/// The DSP overload latches, kept between frames for the hysteresis.
+/// Latches between frames.  The share has to fall before one clears.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DspAlarm {
     pub(crate) warning: bool,
@@ -163,8 +47,6 @@ pub(crate) struct DspAlarm {
 }
 
 impl DspAlarm {
-    /// The latches after one reading of the smoothed (`avg`) and peak
-    /// share of the buffer.
     pub(crate) fn next(self, avg: f32, peak: f32) -> Self {
         Self {
             warning: if self.warning {
@@ -191,33 +73,27 @@ impl DspAlarm {
     }
 }
 
-/// A run of dropouts that has not yet gone quiet for [`DROPOUT_QUIET`].
+/// A run that has not yet gone quiet for [`DROPOUT_QUIET`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DropoutEpisode {
-    /// Dropouts since the run began.
     pub(crate) count: u64,
-    /// Time since the latest one, as of the last update.
     pub(crate) since_last: Duration,
-    /// Whether a burst was seen in this run.  Held until the run ends.
+    /// Held until the run ends.
     pub(crate) burst: bool,
     last: Instant,
 }
 
-/// Follows the run's dropout count from frame to frame.  Time is
-/// passed in, so the clearing and the burst rule can be tested.
+/// Time is passed in, so a test can move the quiet period and the burst.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DropoutWatch {
-    /// The run count at the last update.
     seen: u64,
-    /// When the latest dropouts arrived, oldest first, at most
-    /// [`DROPOUT_BURST`] of them.
+    /// Oldest first, at most [`DROPOUT_BURST`].
     recent: VecDeque<Instant>,
     episode: Option<DropoutEpisode>,
 }
 
 impl DropoutWatch {
-    /// Takes the run's dropout count at `now`.  A count lower than the
-    /// last one is a new run and starts over.
+    /// A count lower than the last one is a new run and starts over.
     pub(crate) fn update(&mut self, count: u64, now: Instant) {
         if count < self.seen {
             *self = Self::default();
@@ -254,7 +130,7 @@ impl DropoutWatch {
         }
     }
 
-    /// A watch that takes `count` as already seen: no episode from it.
+    /// `count` is already seen, so it starts no episode.
     pub(crate) fn starting_at(count: u64) -> Self {
         Self {
             seen: count,
@@ -262,31 +138,26 @@ impl DropoutWatch {
         }
     }
 
-    /// The current run of dropouts, if the output has not gone quiet.
     pub(crate) fn episode(&self) -> Option<&DropoutEpisode> {
         self.episode.as_ref()
     }
 
-    /// The count it was last given: dropouts in this bridge run, or
-    /// for an extra output since its stream opened.
+    /// Dropouts in this bridge run, or since an extra output's stream opened.
     pub(crate) fn run_count(&self) -> u64 {
         self.seen
     }
 }
 
-/// A raw per-tick flag with a hold: it raises once the input has been set
-/// for `raise_after`, and clears once it has been clear for `clear_after`.
-/// A flip back before then restarts the wait.  Time is passed in, so the
-/// hold can be tested.
+/// Raises after the input stays set for `raise_after` and clears after it
+/// stays clear for `clear_after`.  A flip back restarts the wait.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HeldFlag {
     raised: bool,
-    /// Since when the input has disagreed with `raised`.
+    /// Since the input last disagreed with `raised`.
     pending: Option<Instant>,
 }
 
 impl HeldFlag {
-    /// Takes the raw flag at `now` and returns the held one.
     pub(crate) fn update(
         &mut self,
         input: bool,
@@ -312,7 +183,6 @@ impl HeldFlag {
     }
 }
 
-/// Which rows the drawer lists.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum IssueFilter {
     #[default]
@@ -341,7 +211,6 @@ impl IssueFilter {
         }
     }
 
-    /// The muted line for a filter with no rows.
     pub(crate) fn empty_note(self) -> &'static str {
         match self {
             IssueFilter::All => "No issues",
@@ -351,51 +220,36 @@ impl IssueFilter {
     }
 }
 
-/// What an issue is, apart from its wording: the kind and the device or
-/// path slot it is about.  Dismissing goes by this, since titles carry
-/// counts and names that change while the problem stays the same.  One
-/// row that can say different things gets a key for each, so dismissing
-/// one does not hide another.
+/// Dismissing goes by this.  Titles carry counts and names that change
+/// while the problem stays.  One row that can say different things gets
+/// a key for each, so dismissing one does not hide another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IssueKey {
-    /// The bridge stopped: a lost device or a caught callback failure.
+    /// A lost device or a caught callback failure.
     BridgeStopped,
-    /// Output device row.
     UnalignedSum(usize),
-    /// Output device row.
     PastAlignment(usize),
-    /// Path slot.
     RoutedNowhere(usize),
     Dsp,
-    /// PipeWire did not take the buffer change.
     QuantumNotTaken,
-    /// The graph buffer size cannot be read (PipeWire, so Linux only).
     #[cfg(target_os = "linux")]
     QuantumUnknown,
-    /// The output buffer does not line up with the graph buffer.
     #[cfg(target_os = "linux")]
     QuantumMisfit,
-    /// Low latency runs on a graph buffer that is not low.
     #[cfg(target_os = "linux")]
     QuantumNotLow,
     Driver,
     Dropouts,
-    /// Extra output slot: failed to open or lost, and being retried.
     ExtraOutputRetrying(usize),
-    /// Extra output slot: not among the output devices.
     ExtraOutputNotListed(usize),
-    /// Extra output slot.
     ExtraOutputDropouts(usize),
-    /// Extra output slot.
     ExtraOutputDrift(usize),
     SinkSilent,
-    /// A playing device is against the safety ceiling.  One row: the device
-    /// with the most reduction.
+    /// One row: the device with the most reduction.
     SafetyCeiling,
 }
 
 impl IssueKey {
-    /// The extra output slot the issue is about, if it is an extra output's.
     pub(crate) fn extra_output_slot(self) -> Option<usize> {
         match self {
             IssueKey::ExtraOutputRetrying(slot)
@@ -407,14 +261,12 @@ impl IssueKey {
     }
 }
 
-/// Where *Show* goes, and which strip carries the marker while the issue
-/// is visible.  `Output(0)` is the clock output, then the extra outputs in
-/// order, the same index as [`crate::app::screen::Sheet::Output`].
+/// `Output(0)` is the clock output, then the extra outputs, the same
+/// index as [`crate::app::screen::Sheet::Output`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Anchor {
     Input,
     Path(usize),
-    /// Show can open one stage.  No issue is about a single stage yet.
     #[allow(dead_code, reason = "Show accepts it; no issue constructs it yet")]
     Stage {
         path: usize,
@@ -425,22 +277,19 @@ pub(crate) enum Anchor {
     Setup(crate::app::screen::SetupSection),
 }
 
-/// The rows the drawer can show: every issue except dismissed warnings.
+/// Every issue except dismissed warnings.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct IssueView {
-    /// Errors first, as [`RigWerkApp::live_issues`] orders them.
+    /// Errors first.
     pub(crate) visible: Vec<LiveIssue>,
-    /// Current issues that are dismissed.
     pub(crate) hidden: usize,
 }
 
 impl IssueView {
-    /// Nothing to report and nothing hidden: the strip is not drawn.
     pub(crate) fn is_empty(&self) -> bool {
         self.visible.is_empty() && self.hidden == 0
     }
 
-    /// The visible rows `filter` lets through.
     pub(crate) fn filtered(&self, filter: IssueFilter) -> impl Iterator<Item = &LiveIssue> {
         self.visible
             .iter()
@@ -452,14 +301,9 @@ impl IssueView {
     }
 }
 
-/// Why a bridge run stopped and left an alert: a device went away, or a
-/// real-time callback caught a failure.  The row says which, and what to do
-/// next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StopReason {
-    /// A device the bridge used was disconnected.
     DeviceLost,
-    /// A callback caught this failure.
     Callback(CallbackFailure),
 }
 
@@ -471,9 +315,8 @@ impl StopReason {
         }
     }
 
-    /// The row's next step, when the alert does not already carry one.  A
-    /// lost device's alert ends with its reconnect step; a malformed block is
-    /// not a plugin's fault, so it must not blame one.
+    /// A lost device's alert already ends with its reconnect step.  A
+    /// malformed block is not a plugin's fault, so it must not blame one.
     fn next_step(self) -> Option<&'static str> {
         match self {
             Self::DeviceLost => None,
@@ -488,37 +331,32 @@ impl StopReason {
     }
 }
 
-/// The issue state the drawer keeps between frames (not persisted).
+/// Not persisted.  The drawer shows the last tick instead of judging
+/// again per frame.
 #[derive(Debug, Default)]
 pub(crate) struct IssueState {
     pub(crate) dsp: DspAlarm,
     pub(crate) dropouts: DropoutWatch,
-    /// One watch per extra output slot, on that extra output's own ring.
+    /// That extra output's own ring.
     pub(crate) extra_output_dropouts: [DropoutWatch; MAX_EXTRA_OUTPUTS],
-    /// One held drift-at-limit flag per extra output slot.
     pub(crate) extra_output_drift: [HeldFlag; MAX_EXTRA_OUTPUTS],
-    /// The extra output id each slot's state is about, `None` until the first
-    /// tick adopts the slots as they are.
+    /// `None` until the first tick adopts the slots as they are.
     extra_output_ids: Option<[String; MAX_EXTRA_OUTPUTS]>,
-    /// Whether the clock sink went silent under Low latency.
     pub(crate) silence: SilenceWatch,
-    /// The alert of a bridge stopped on a lost device or a failed callback,
-    /// with the detail to show, until the next bridge start.
+    /// Until the next bridge start.
     pub(crate) stopped: Option<(StopReason, String)>,
-    /// The error titles of the last tick, to tell a new error from one
+    /// Titles from the last tick, so a new error is distinct from one
     /// already announced.
     seen_errors: Vec<String>,
-    /// Which rows the drawer lists.
     pub(crate) filter: IssueFilter,
-    /// Warnings the person dismissed, until they clear or the run ends.
+    /// Until they clear or the run ends.
     dismissed: Vec<IssueKey>,
-    /// The issues of the last tick, errors first: what the drawer shows.
+    /// Errors first.
     current: Vec<LiveIssue>,
 }
 
 impl IssueState {
-    /// A bridge started or stopped: the DSP latches, the dropout count and
-    /// the dismissed warnings belong to the run that ended.
+    /// The latches, dropout count and dismissals belong to the run that ended.
     pub(crate) fn new_run(&mut self) {
         self.dsp = DspAlarm::default();
         self.dropouts = DropoutWatch::default();
@@ -528,9 +366,8 @@ impl IssueState {
         self.dismissed.clear();
     }
 
-    /// Extra output `slot` holds another device now: its watches and its
-    /// dismissals were about the old one.  The dropout watch takes the
-    /// slot's current `count` as seen.
+    /// Its watches and dismissals were about the old device.  The dropout
+    /// watch takes `count` as already seen.
     fn forget_extra_output(&mut self, slot: usize, count: u64) {
         self.extra_output_dropouts[slot] = DropoutWatch::starting_at(count);
         self.extra_output_drift[slot] = HeldFlag::default();
@@ -538,14 +375,13 @@ impl IssueState {
             .retain(|key| key.extra_output_slot() != Some(slot));
     }
 
-    /// Whether `issue` is a dismissed warning.  Errors always show.
+    /// Errors always show.
     pub(crate) fn hides(&self, issue: &LiveIssue) -> bool {
         issue.severity == IssueSeverity::Warning && self.dismissed.contains(&issue.key)
     }
 
-    /// Once per tick: forgets dismissals whose warning is gone (cleared, or
-    /// now an error), so it shows when it comes back, and returns the
-    /// filter to All when the drawer has nothing left to show.
+    /// A dismissal whose warning cleared, or became an error, comes back.
+    /// The filter returns to All when nothing is left to show.
     fn settle(&mut self, issues: &[LiveIssue]) {
         self.dismissed.retain(|key| {
             issues
@@ -558,34 +394,22 @@ impl IssueState {
     }
 }
 
-/// What an issue's button does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IssueAction {
-    /// Turn the alignment on for output device `device`.
     AlignDevice(usize),
-    /// Open the output sheet for `device`.
     ShowRouting(usize),
-    /// Open the clock output's sheet.
     OpenRouting,
     OpenDiagnostics,
-    /// Open Setup at the devices section (reconnect or pick another device).
     OpenDevices,
-    /// Run the stand-alone output driver check.
     CheckDriver,
-    /// Set the clock output's buffer to this many samples.
     SetOutputBuffer(usize),
-    /// Turn the Low latency output off (PipeWire / ALSA).
     LowLatencyOff,
-    /// Put the WASAPI clock output back to Shared.
     SharedOutput,
-    /// Set the input-to-output bridge buffer to Auto.
     AutoBridgeBuffer,
-    /// Open extra output `extra_output`'s sheet (index into the extra outputs).
     ShowExtraOutput(usize),
-    /// Set extra output `extra_output`'s own bridge buffer to Auto.
     ExtraOutputAutoBridgeBuffer(usize),
-    /// Open the output the limiter is reducing.  The safety ceiling has no
-    /// control of its own.  The index matches [`Anchor::Output`].
+    /// The safety ceiling has no control of its own.  The index matches
+    /// [`Anchor::Output`].
     ShowOutput(usize),
 }
 
@@ -612,53 +436,41 @@ impl IssueAction {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LiveIssue {
-    /// What it is, apart from the wording (dismissing goes by this).
     pub(crate) key: IssueKey,
     pub(crate) severity: IssueSeverity,
     pub(crate) title: String,
     pub(crate) detail: String,
-    /// Where it is, in sentence case: a path name, "Clock output", an extra
-    /// output's name, "Master" or "Setup".
+    /// Sentence case: a path name, "Clock output", an extra output,
+    /// "Master" or "Setup".
     pub(crate) place: String,
-    /// Where *Show* goes, and which strip the marker sits on.
     pub(crate) anchor: Anchor,
     pub(crate) action: IssueAction,
 }
 
 impl LiveIssue {
-    /// The button's accessible name: its label and the issue it acts on.
     pub(crate) fn action_name(&self) -> String {
         format!("{}: {}", self.action.label(), self.title)
     }
 
-    /// Only warnings can be dismissed.  The safety ceiling stays while a
-    /// device is still against it: it clears when the signal drops, not
-    /// when someone clicks.
+    /// The safety ceiling stays while a device is still against it.
     pub(crate) fn dismissable(&self) -> bool {
         self.severity == IssueSeverity::Warning && self.key != IssueKey::SafetyCeiling
     }
 
-    /// The Dismiss button's accessible name.
     pub(crate) fn dismiss_name(&self) -> String {
         format!("Dismiss: {}", self.title)
     }
 
-    /// The *Show* button's label.  It is separate from the action.
     pub(crate) fn show_label(&self) -> &'static str {
         "Show"
     }
 
-    /// The *Show* button's accessible name.
     pub(crate) fn show_name(&self) -> String {
         format!("Show: {}", self.title)
     }
 }
 
 impl RigWerkApp {
-    /// Moves the issue state once per update tick: the dropout watches,
-    /// the extra output drift holds and the DSP latches from the engine,
-    /// then the dismissals and the filter settle, and a new error sets the
-    /// banner.
     pub(crate) fn tick_issues(&mut self, now: Instant) {
         self.follow_extra_output_slots();
         if self.engine.state == EngineState::Running {
@@ -695,8 +507,7 @@ impl RigWerkApp {
         self.issue_state.current = issues;
     }
 
-    /// Starts an extra output slot's state over when it holds another extra output
-    /// than the last tick saw.
+    /// Another device in the slot starts its watches over.
     fn follow_extra_output_slots(&mut self) {
         let id = |slot: usize| {
             self.extra_outputs
@@ -721,10 +532,8 @@ impl RigWerkApp {
         }
     }
 
-    /// This tick's readings for the silence watch.  Armed while a PipeWire
-    /// Low latency bridge runs (Linux only: the sink monitor and its
-    /// Turn Low latency off action are PipeWire's, not WASAPI's); parked when nothing should reach the clock
-    /// output (master mute, its own mute, or no unmuted path routed to it).
+    /// Armed only for a PipeWire low-latency bridge: the sink monitor is
+    /// not WASAPI's.  Parked when nothing should reach the clock output.
     fn silence_input(&mut self, now: Instant) -> SilenceInput {
         let monitor = self.engine.sink_monitor_peak(now);
         let channels =
@@ -748,26 +557,21 @@ impl RigWerkApp {
         }
     }
 
-    /// [`Self::open_on_new_error`] over the issues as they are now.  For
-    /// tests that check the banner without moving the watches.
+    /// Checks the banner without moving the watches.
     #[cfg(test)]
     pub(crate) fn expand_on_new_error(&mut self) {
         let issues = self.live_issues();
         self.open_on_new_error(&issues);
     }
 
-    /// Takes the issues the drawer shows from the state as it is now, as a
-    /// tick would, without moving the watches or latches.  For tests that
-    /// set the state by hand.
+    /// Refreshes the drawer's rows without moving the watches or latches.
     #[cfg(test)]
     pub(crate) fn refresh_issues(&mut self) {
         self.issue_state.current = self.live_issues();
     }
 
-    /// [`Self::expand_on_new_error`] over this tick's issues.  Errors are
-    /// never dismissed, so every one counts; a drawer filtered to warnings
-    /// goes back to All so the new error is in view.  A new error also
-    /// sets the banner.  A warning does not.
+    /// A new error sets the banner and returns a warnings-only filter to
+    /// All.  A warning does not.
     fn open_on_new_error(&mut self, issues: &[LiveIssue]) {
         let errors: Vec<String> = issues
             .iter()
@@ -797,8 +601,6 @@ impl RigWerkApp {
         self.issue_state.seen_errors = errors;
     }
 
-    /// The rows the drawer can show and how many are dismissed, from the
-    /// last tick's issues.
     pub(crate) fn issue_view(&self) -> IssueView {
         let issues = &self.issue_state.current;
         let total = issues.len();
@@ -813,14 +615,10 @@ impl RigWerkApp {
         }
     }
 
-    /// Lists only the rows `filter` lets through.
     pub(crate) fn set_issue_filter(&mut self, filter: IssueFilter) {
         self.issue_state.filter = filter;
     }
 
-    /// Hides the warning with `key` until it clears and comes back, or the
-    /// bridge run changes.  An error is not hidden.  Goes by the last
-    /// tick's issues, the ones the drawer shows.
     pub(crate) fn dismiss_issue(&mut self, key: IssueKey) {
         let warning = self
             .issue_state
@@ -832,14 +630,10 @@ impl RigWerkApp {
         }
     }
 
-    /// Shows the dismissed warnings again.
     pub(crate) fn restore_dismissed_issues(&mut self) {
         self.issue_state.dismissed.clear();
     }
 
-    /// Closes the drawer and selects `anchor`: the console strip, its
-    /// sheet, or a Setup section.  The marker stays for as long as a
-    /// visible issue is anchored there.
     pub(crate) fn show_issue(&mut self, anchor: Anchor) {
         self.close_drawer();
         match anchor {
@@ -862,9 +656,8 @@ impl RigWerkApp {
         self.chrome.setup_section = None;
     }
 
-    /// The worst severity of a visible issue on the same strip as `anchor`.
-    /// An issue on a path's stage marks that path.  Errors sort before
-    /// warnings.
+    /// Errors sort before warnings, so `min` is the worst.  A stage marks
+    /// its path.
     pub(crate) fn anchor_severity(&self, anchor: Anchor) -> Option<IssueSeverity> {
         self.issue_view()
             .visible
@@ -874,8 +667,7 @@ impl RigWerkApp {
             .min()
     }
 
-    /// Every current issue, errors first.  Only reads: the state behind
-    /// the rows moves in [`Self::tick_issues`].
+    /// Only reads.  The state moves in [`Self::tick_issues`].
     pub(crate) fn live_issues(&self) -> Vec<LiveIssue> {
         let infos = self.path_infos();
         let rows = self.output_device_rows();
@@ -895,9 +687,8 @@ impl RigWerkApp {
         issues
     }
 
-    /// A bridge stopped on a disconnected device or a caught callback
-    /// failure.  Not while the alert window is up: that is the hard stop, and
-    /// the row is what stays once it is dismissed.
+    /// Not while the alert window is up.  The row is what stays once it
+    /// is dismissed.
     fn stopped_bridge_issue(&self, issues: &mut Vec<LiveIssue>) {
         let Some((reason, detail)) = &self.issue_state.stopped else {
             return;
@@ -925,7 +716,6 @@ impl RigWerkApp {
         });
     }
 
-    /// (a) Paths that add up unaligned on a device.
     fn unaligned_sum_issues(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
         if self.path_count() < 2 {
             return;
@@ -983,8 +773,6 @@ impl RigWerkApp {
         }
     }
 
-    /// A device with alignment on that plays a path longer than the
-    /// alignment covers: that path arrives late against the others.
     fn clamped_issues(
         &self,
         infos: &[PathInfo],
@@ -1027,10 +815,8 @@ impl RigWerkApp {
         }
     }
 
-    /// (b) An unmuted path that no unmuted device plays: its chain runs
-    /// for nothing.  A muted path is parked on purpose and does not warn.
-    /// Also checked with one path: then nothing is heard at all.  A path
-    /// whose send reaches an unmuted return that is heard is heard too.
+    /// A muted path is parked on purpose and does not warn.  A path whose
+    /// send reaches an unmuted return that is heard is heard too.
     fn unheard_path_issues(&self, infos: &[PathInfo], issues: &mut Vec<LiveIssue>) {
         let devices = self.device_settings();
         let played = |slot: usize| {
@@ -1074,10 +860,8 @@ impl RigWerkApp {
         }
     }
 
-    /// (c) The paths' DSP time against the buffer they have to fit in: the
-    /// mixer's total per buffer, so peaks of different buffers never add
-    /// up.  The anchor is the path with the largest share, or Master when
-    /// there is no path.
+    /// The mixer's total per buffer, so peaks from different buffers never
+    /// add.  The anchor is the heaviest path, or Master when there is none.
     fn dsp_issue(&self, infos: &[PathInfo], issues: &mut Vec<LiveIssue>) {
         // The screenshot renderer's startup peak is not the rig's: a shot
         // waits on Xvfb's software GL, not on audio.
@@ -1139,10 +923,8 @@ impl RigWerkApp {
         });
     }
 
-    /// (d) The PipeWire graph buffer against the output: a buffer change
-    /// that failed, then whether the two buffer sizes line up, then a
-    /// graph buffer still too large while Low latency runs.  One row at
-    /// most: it is one problem.
+    /// One row: a failed change, a misfit and a buffer that is not low are
+    /// one problem.
     fn quantum_issue(&self, issues: &mut Vec<LiveIssue>) {
         if let Some(note) = self.engine.quantum_note() {
             issues.push(LiveIssue {
@@ -1166,10 +948,8 @@ impl RigWerkApp {
         }
     }
 
-    /// The row for one graph-buffer comparison, if it is worth one.  A
-    /// large graph buffer with Low latency off is what the person chose,
-    /// and before the bridge runs the buffer is still the idle desktop
-    /// one; neither is a problem.
+    /// A large graph buffer with Low latency off is the chosen one.  Before
+    /// the bridge runs it is still the idle desktop buffer.  Neither warns.
     #[cfg(target_os = "linux")]
     pub(crate) fn quantum_info_issue(&self, info: &QuantumInfo) -> Option<LiveIssue> {
         let graph_samples = info.quantum;
@@ -1232,8 +1012,7 @@ impl RigWerkApp {
         })
     }
 
-    /// (e) A low-latency output whose driver has no reading yet: the output
-    /// mode shows what was asked for, not what the driver allows.  Not
+    /// The mode shows what was asked for, not what the driver allows.  Not
     /// while a check is running.
     fn driver_issue(&self, issues: &mut Vec<LiveIssue>) {
         if !self.output_driver_checkable()
@@ -1254,8 +1033,6 @@ impl RigWerkApp {
         });
     }
 
-    /// (f) Dropouts in this bridge run: the output played a gap.  An
-    /// error while they come in a burst.
     fn dropout_issue(&self, issues: &mut Vec<LiveIssue>) {
         if self.engine.state != EngineState::Running {
             return;
@@ -1302,10 +1079,8 @@ impl RigWerkApp {
         });
     }
 
-    /// The clock output went silent while RigWerk plays into it under Low
-    /// latency.  Turning Low latency off gives the graph a larger buffer.
-    /// An error only with recent dropouts: without them the RigWerk
-    /// stream may just be muted in the desktop mixer.
+    /// An error only with recent dropouts.  Without them the stream may
+    /// just be muted in the desktop mixer.
     fn silence_issue(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
         if self.engine.state != EngineState::Running || !self.issue_state.silence.silent() {
             return;
@@ -1340,11 +1115,7 @@ impl RigWerkApp {
         });
     }
 
-    /// A playing device held at the safety ceiling.  One warning, for the
-    /// device reducing the most.  Muted, missing and switched-off virtual
-    /// devices are not playing.  The row cannot be dismissed while the
-    /// reduction holds; the next tick drops it once every device is under
-    /// the threshold.
+    /// Muted, missing and switched-off virtual devices are not playing.
     fn safety_ceiling_issue(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
         if self.engine.state != EngineState::Running {
             return;
@@ -1376,9 +1147,7 @@ impl RigWerkApp {
         });
     }
 
-    /// (g) Each extra output on its own: missing, then its ring's dropouts,
-    /// then its drift loop.  A missing extra output plays nothing, so it gets
-    /// that one row only.
+    /// A missing extra output plays nothing, so it gets that one row only.
     fn extra_output_issues(&self, rows: &[OutputDeviceRow], issues: &mut Vec<LiveIssue>) {
         if self.engine.state != EngineState::Running {
             return;
@@ -1469,9 +1238,7 @@ impl RigWerkApp {
         }
     }
 
-    /// The extra output's own safer step: its bridge buffer to Auto, then the next
-    /// larger output buffer (its stream asks for that one).  Low latency
-    /// and the WASAPI mode only govern the clock output.
+    /// Low latency and the WASAPI mode govern the clock output only.
     pub(crate) fn extra_output_safer_action(&self, extra_output: usize) -> IssueAction {
         let safe = self.extra_outputs.get(extra_output).is_none_or(|pref| {
             bridge_buffer_from_pref(pref.bridge_buffer_mode) == BufferMode::Auto
@@ -1486,10 +1253,8 @@ impl RigWerkApp {
             .map_or(IssueAction::OpenDiagnostics, IssueAction::SetOutputBuffer)
     }
 
-    /// The control that buys the output the most safety for the least
-    /// latency: the Auto bridge buffer, then Low latency (or the smallest
-    /// WASAPI buffer, or Exclusive) off, then the next larger output
-    /// buffer.
+    /// Auto bridge buffer, then low latency off, then a larger output
+    /// buffer: the most room for the least added latency.
     pub(crate) fn safer_latency_action(&self) -> IssueAction {
         if !self.snapshot.direct && self.bridge_buffer_mode != BufferMode::Auto {
             return IssueAction::AutoBridgeBuffer;
@@ -1511,7 +1276,6 @@ impl RigWerkApp {
             .map_or(IssueAction::OpenDiagnostics, IssueAction::SetOutputBuffer)
     }
 
-    /// Runs an issue's action (a click on its button).
     pub(crate) fn apply_issue_action(&mut self, action: IssueAction) {
         match action {
             IssueAction::AlignDevice(device) => {
@@ -1579,8 +1343,6 @@ impl RigWerkApp {
     }
 }
 
-/// The place name for output `device`: "Clock output", or the extra
-/// output's name.
 fn output_place(rows: &[OutputDeviceRow], device: usize) -> String {
     if device == 0 {
         "Clock output".to_owned()
@@ -1592,7 +1354,7 @@ fn output_place(rows: &[OutputDeviceRow], device: usize) -> String {
     }
 }
 
-/// Whether `issue` marks the strip `anchor` names.  A stage marks its path.
+/// A stage marks its path.
 fn same_strip(issue: Anchor, anchor: Anchor) -> bool {
     match anchor {
         Anchor::Path(slot) => match issue {
@@ -1608,7 +1370,6 @@ fn same_strip(issue: Anchor, anchor: Anchor) -> bool {
     }
 }
 
-/// "1 dropout", "3 dropouts".
 fn dropout_text(count: u64) -> String {
     if count == 1 {
         "1 dropout".to_owned()
@@ -1617,7 +1378,6 @@ fn dropout_text(count: u64) -> String {
     }
 }
 
-/// How long ago the latest dropout was, in whole seconds.
 fn ago_text(since: Duration) -> String {
     match since.as_secs() {
         0 => "just now".to_owned(),

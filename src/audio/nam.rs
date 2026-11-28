@@ -1,65 +1,19 @@
-//! Stackable Neural Amp Modeler blocks, up to [`MAX_NAM_BLOCKS`] per signal
-//! path.
+//! The callback never builds, parses, or drops a [`nam_rs::Model`].  The
+//! UI thread builds one and queues it; the callback only `try_lock`s.
+//! A model it replaces is parked, and only the UI thread drains [`NamPark`].
 //!
-//! A `.nam` file is a frozen capture: there are no amp knobs.  The audio
-//! callback never builds, parses, or drops a [`nam_rs::Model`].  The UI
-//! thread (or the loader thread it owns) builds one, resets it, and prewarms
-//! `receptive_field()` samples of silence before queueing it.  The callback
-//! only `try_lock`s that queue at the start of a block.  A model it replaces
-//! is moved into [`NamPark`] the same way, and only the UI thread drains that
-//! park.
+//! Runtime state stays with the block id, so a reorder does not move a
+//! model.
 //!
-//! [`NamStack`] is the published order of the blocks: each carries an `id`
-//! (the UI's handle on one block), a position (before or after the plugin
-//! effects), its trims and whether it matches the level of the block before
-//! it.  A block's runtime state — its model, its fades, its warmth — stays
-//! with the id, so reordering the stack never moves a model and never
-//! restarts one.
+//! An oversampled group of two or more delays wet and dry by the 2x
+//! pair's group delay.  A single capture, or a group of one, adds none.
 //!
-//! The path is stereo.  Each model hears `(L + R) * 0.5` and its mono result
-//! is written to both channels.  Input, output and level-match gains ramp.
-//! A model is causal, and the receptive field is only how much history it
-//! needs, so one block adds no latency of its own.  A group of two or more
-//! captures that can be oversampled runs every block at twice the output
-//! rate through a fixed 2x up/down pair ([`OversampleFilters`]); such a
-//! block delays its wet and dry output by the pair's group delay, and the
-//! path reports that as latency.  A single capture, or a group of one, runs
-//! the model as it was captured, with no resampler and no added latency.
-//! Bypass plays the dry signal, delayed by the same amount when its block
-//! is oversampled.
+//! One swap at a time.  The model fading out is parked before another is
+//! written, so the callback never overwrites a model.
 //!
-//! A model is not heard before it has heard the signal: one taken from the
-//! queue, or one leaving bypass, first runs `receptive_field()` samples of
-//! the live input silently, then crossfades in.  A swap fades from the old
-//! model (or the dry signal) to the new one over [`SWAP_FADE_SECONDS`]; a
-//! clear fades back to dry.  One swap at a time: a new model or a clear
-//! waits until the model the last one faded out is parked, so the callback
-//! never lets go of a model by overwriting it.  The width dial of a slimmable capture is applied
-//! by the UI, which queues a model built at that width.  A sample rate that
-//! is not the file's rate does not install: the only resampling here is the
-//! fixed 2x pair of an oversampled group, and it is never used to move a
-//! capture to another rate.
-//!
-//! The stack changes without a click.  A block that leaves it keeps running
-//! at its old place and fades to dry over the bypass fade; only then is its
-//! model parked.  A reorder, or a move between `Pre` and `Post`, that changes
-//! the order of blocks that are heard dips the groups it touches to silence
-//! over the bypass fade, switches the order there, and fades back in.  The
-//! models keep running through the dip, so none restarts.
-//!
-//! Level matching: a capture only reacts as it was trained to when its input
-//! sits at the level the capture was made at.  The calibration levels are the
-//! analog level, in dBu, that 0 dBFS stands for.  A signal at x dBFS out of
-//! block A is `x + out_A` dBu, which block B reads as `x + out_A - in_B`
-//! dBFS, so B gets `out_A - in_B` dB.  A is the nearest block before B in
-//! the same group that runs: a bypassed block, or one without a model, passes
-//! the signal dry and is skipped.  Without the metadata the gain is 0 dB.
-//!
-//! Normalization: a capture's `loudness` metadata is plain RMS, not LUFS.
-//! Only the last running block of a position group applies it, because
-//! normalizing a middle block would change the level the next capture hears.
-//! Its gain is [`NAM_NORMALIZED_LOUDNESS_DB`] minus the file's loudness,
-//! clamped to the trim range and ramped with the output gain.
+//! Level match, dB: `out_A - in_B`, where calibration levels are the dBu
+//! that 0 dBFS stands for.  A is the nearest running block before B in
+//! the same group.  Missing metadata is 0 dB.
 
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
@@ -67,40 +21,31 @@ use serde::{Deserialize, Serialize};
 
 use super::mixer::ramp::Ramp;
 
-/// The most NAM blocks one path runs.  Memory and load-time protection only,
-/// not a product decision: 16 models of one medium capture are already more
-/// than the DSP budget of a small buffer.
+/// 16 models of one medium capture already miss a small buffer.
 pub const MAX_NAM_BLOCKS: usize = 16;
 
-/// From this many NAM blocks on, the sheet asks once more before adding one.
+/// The sheet asks once more before adding another.
 pub const NAM_SOFT_LIMIT: usize = 5;
 
-/// How long bypass, and leaving bypass, crossfade.  Long enough that the
-/// switch does not click.
+/// Long enough that the switch does not click.
 const BYPASS_FADE_SECONDS: f32 = 0.010;
-/// How long replacing the model of one block crossfades.  Longer than a
-/// bypass, because both sides are models with their own tails.
+/// Longer than a bypass: both sides are models with their own tails.
 const SWAP_FADE_SECONDS: f32 = 0.035;
-/// The widest level match two calibrations can ask for, dB.  A file with
-/// nonsense levels must not blow the chain up.
+/// Nonsense levels must not blow the chain up.
 pub const NAM_MAX_MATCH_DB: f32 = 36.0;
 
-/// Soft limits for the trims and for [`NamBlockControls::sanitized`].
 pub const NAM_MIN_TRIM_DB: f32 = -24.0;
 pub const NAM_MAX_TRIM_DB: f32 = 24.0;
 
-/// The output loudness a normalised capture is brought to, dB RMS.  This is
-/// the fixed target in NeuralAmpModelerPlugin's Normalized output mode:
-/// `_SetOutputGain`, case 1 of `kOutputMode`, in
-/// `NeuralAmpModeler/NeuralAmpModeler.cpp`.  It is not LUFS.
+/// Normalised output target, dB RMS, not LUFS.  NeuralAmpModelerPlugin
+/// `_SetOutputGain`, case 1 of `kOutputMode`,
+/// `NeuralAmpModeler/NeuralAmpModeler.cpp`.
 pub const NAM_NORMALIZED_LOUDNESS_DB: f32 = -18.0;
 
-/// Where a NAM block sits relative to the plugin effects.  Blocks in the same
-/// position run in stack order.
+/// Before or after the plugin effects.  One position is one group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NamPosition {
-    /// Before the effects.  The default.
     #[default]
     Pre,
     /// After the effects, before a post gate and the post EQ.
@@ -108,7 +53,6 @@ pub enum NamPosition {
 }
 
 impl NamPosition {
-    /// The two groups, in signal order.
     pub const ALL: [Self; 2] = [Self::Pre, Self::Post];
 
     fn index(self) -> usize {
@@ -119,40 +63,30 @@ impl NamPosition {
     }
 }
 
-/// Numeric controls one block shares with the callback.  The `.nam` path is
-/// not here: copying it into the callback would allocate, and [`NamStack`]
-/// stays [`Copy`].
+/// The callback's copy.  The `.nam` path is not here: copying it would
+/// allocate, and [`NamStack`] stays [`Copy`].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NamBlockControls {
-    /// The UI's handle on this block.  Unique within a path, and never
-    /// reused, so a reorder or a removal cannot be mistaken for a swap.
-    /// Not saved: a loaded path numbers its blocks itself.
+    /// Unique in the path and never reused, so a reorder is not a swap.
+    /// Not saved: a loaded path numbers its blocks.
     #[serde(skip)]
     pub id: u32,
-    /// Header On/Bypass.  Off skips the model.
     pub enabled: bool,
     pub position: NamPosition,
-    /// Gain into the model, dB.
     pub input_db: f32,
-    /// Gain on the model output, dB.
     pub output_db: f32,
-    /// SlimmableContainer width, 0..=1.  Ignored by other models.  The
-    /// stage does not read it: the UI queues a model built at this width.
+    /// 0..=1.  The stage ignores it; the UI queues a model at this width.
     pub slim: f32,
-    /// Match this block's input to the block before it when both carry
-    /// calibration levels.
     pub auto_level: bool,
-    /// The capture's analog input level at 0 dBFS, dBu.  `None` when the
-    /// file does not say.
+    /// dBu that 0 dBFS stands for.  `None` when the file does not say.
     pub level_in_dbu: Option<f32>,
-    /// The capture's analog output level at 0 dBFS, dBu.
+    /// dBu that 0 dBFS stands for.  `None` when the file does not say.
     pub level_out_dbu: Option<f32>,
-    /// The capture's `loudness` metadata: RMS, in dBFS, not LUFS.
+    /// File `loudness`: RMS, dBFS, not LUFS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loudness_db: Option<f32>,
-    /// Normalize this block's output from its file loudness.  Only the last
-    /// running block of a position group applies it.
+    /// Only the last running block of a position group applies it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub normalize: bool,
 }
@@ -191,17 +125,13 @@ impl NamBlockControls {
         }
     }
 
-    /// Whether both sides of a level match are known.
     fn calibrated(&self) -> bool {
         self.level_in_dbu.is_some() && self.level_out_dbu.is_some()
     }
 }
 
-/// The published blocks of one path, in signal order: the `Pre` group first,
-/// then the `Post` group.  Only the first `count` entries are live.
-///
-/// [`Copy`], so the callback can take it with one `try_lock` and the mixer
-/// needs no allocation to pass it on.
+/// [`Copy`], so one `try_lock` hands it on with no allocation.  `Pre`
+/// then `Post`; only the first `count` entries are live.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NamStack {
     blocks: [NamBlockControls; MAX_NAM_BLOCKS],
@@ -234,12 +164,10 @@ impl NamStack {
         self.blocks().get(index)
     }
 
-    /// The index of the block with `id`, if it is in the stack.
     pub fn index_of(&self, id: u32) -> Option<usize> {
         self.blocks().iter().position(|block| block.id == id)
     }
 
-    /// The blocks of one position, in signal order, with their stack index.
     pub fn in_position(
         &self,
         position: NamPosition,
@@ -250,8 +178,6 @@ impl NamStack {
             .filter(move |(_, block)| block.position == position)
     }
 
-    /// Adds `block` at the end of its position group.  `false` when the stack
-    /// is full.
     pub fn push(&mut self, block: NamBlockControls) -> bool {
         if self.count() >= MAX_NAM_BLOCKS {
             return false;
@@ -261,8 +187,7 @@ impl NamStack {
         true
     }
 
-    /// Swaps the block at `index` with its neighbour in its group (`-1` is
-    /// the one before it).  `false` at the edge of a group.
+    /// `-1` is the neighbour before it in the group.
     pub fn move_block(&mut self, index: usize, by: isize) -> bool {
         let Some(block) = self.get(index).copied() else {
             return false;
@@ -289,8 +214,6 @@ impl NamStack {
         }
     }
 
-    /// Moves the block at `index` to the end of `position`'s group.
-    /// `false` when it is already there.
     pub fn set_position(&mut self, index: usize, position: NamPosition) -> bool {
         if self
             .get(index)
@@ -319,8 +242,7 @@ impl NamStack {
         Some(removed)
     }
 
-    /// The stack index one past the last block of `position`'s group.  A
-    /// `Pre` block with nothing before the effects goes in front of them.
+    /// An empty `Pre` group starts at 0, in front of the effects.
     fn group_end(&self, position: NamPosition) -> usize {
         match self
             .blocks()
@@ -344,7 +266,7 @@ impl NamStack {
         self.count += 1;
     }
 
-    /// Every value in range, and every id present once.
+    /// A repeated id is dropped.
     pub fn sanitized(self) -> Self {
         let mut out = Self::default();
         for block in self.blocks() {
@@ -359,17 +281,8 @@ impl NamStack {
         out
     }
 
-    /// The level match each block applies, in dB, by stack index: the
-    /// nearest running block before it in the same position group gives its
-    /// output level, this one takes it as its input level
-    /// (`out_previous - in_this`).  A bypassed block passes the signal dry:
-    /// it gets 0 dB and the block after it matches the one before it.  A
-    /// block without a running neighbour, without calibration data, or with
-    /// auto level off gets 0 dB.
-    ///
-    /// `runs(id)` says whether a block has a model: one without passes the
-    /// signal dry and is skipped like a bypassed one.  The stage knows which
-    /// blocks have one; the stack does not.
+    /// `runs` is whether the block has a model; the stack does not know.
+    /// A bypassed block, or one that does not run, is skipped.
     pub(crate) fn level_matches(&self, runs: impl Fn(u32) -> bool) -> [f32; MAX_NAM_BLOCKS] {
         let mut matches = [0.0f32; MAX_NAM_BLOCKS];
         for position in NamPosition::ALL {
@@ -390,13 +303,8 @@ impl NamStack {
         matches
     }
 
-    /// The normalization gain each block applies, in dB, by stack index.
-    ///
-    /// Only the last running block of a `Pre` or `Post` group normalizes:
-    /// normalizing a middle block would change what the next capture hears
-    /// and break the level match.  `runs(id)` has the same meaning as in
-    /// [`Self::level_matches`].  A block without file loudness, or with its
-    /// switch off, gets 0 dB.
+    /// Only the last running block of a group.  A middle one would change
+    /// what the next capture hears.
     pub(crate) fn normalization_gains(&self, runs: impl Fn(u32) -> bool) -> [f32; MAX_NAM_BLOCKS] {
         let mut gains = [0.0f32; MAX_NAM_BLOCKS];
         for position in NamPosition::ALL {
@@ -444,19 +352,16 @@ fn rates_match(expected: f64, rate: u32) -> bool {
     expected.is_finite() && expected.round() as u32 == rate
 }
 
-/// One saved NAM block: the capture file and the controls it runs with.
-/// The pair a [`PathPref`](crate::app::settings::PathPref) stores per block;
-/// a path's blocks are in signal order.
+/// One block of a path's save, in signal order.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NamBlockSettings {
-    /// Empty means the block has no capture and passes its input through.
+    /// Empty passes the input through.
     pub model: String,
     pub controls: NamBlockControls,
 }
 
 impl NamBlockSettings {
-    /// Trims the path and puts every value in range.
     pub fn sanitized(&self) -> Self {
         Self {
             model: self.model.trim().to_owned(),
@@ -464,7 +369,6 @@ impl NamBlockSettings {
         }
     }
 
-    /// The settings that reproduce a legacy single stage.
     pub fn from_legacy(legacy: &LegacyNamSettings) -> Self {
         let legacy = legacy.sanitized();
         Self {
@@ -474,14 +378,12 @@ impl NamBlockSettings {
     }
 }
 
-/// The single NAM stage older saves and sessions have (`PathPref::amp`).
-/// [`PathPref`](crate::app::settings::PathPref) reads it once and folds it
-/// into the block list; nothing writes it again.
+/// An old save's single stage (`PathPref::amp`).  Read once into the
+/// block list; nothing writes it again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LegacyNamSettings {
     pub enabled: bool,
-    /// What this field was called before the blocks: `slot`.
     #[serde(alias = "position")]
     pub slot: NamPosition,
     pub input_db: f32,
@@ -505,7 +407,7 @@ impl Default for LegacyNamSettings {
 }
 
 impl LegacyNamSettings {
-    /// Whether an old save actually holds a stage worth migrating.
+    /// Defaults have nothing to migrate.
     pub fn is_unset(&self) -> bool {
         self == &Self::default()
     }
@@ -534,24 +436,20 @@ impl LegacyNamSettings {
     }
 }
 
-/// One `.nam` in a models folder, as the sheet lists it.  Built on the UI
-/// thread by [`scan_nam_folder`]; the runtime [`nam_rs::Model`] is not.
+/// Built on the UI thread.  The runtime model is not.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NamCatalogEntry {
     pub path: String,
     pub name: String,
-    /// The file's `architecture`, e.g. `WaveNet`.
     pub arch: String,
-    /// The rate the capture was made at, Hz.
     pub file_rate: u32,
-    /// A capture whose width can be dialled (SlimmableContainer).
+    /// SlimmableContainer.
     pub slimmable: bool,
-    /// The estimated share of one block it takes, before it is measured.
+    /// Share of a block, before it is measured.
     pub load: NamLoad,
 }
 
-/// Lists `*.nam` files directly in `folder`.  Reads and parses each file for
-/// its display name and architecture.  UI thread only: this does file I/O.
+/// UI thread: this reads files.
 pub(crate) fn scan_nam_folder(folder: &str) -> Vec<NamCatalogEntry> {
     let folder = folder.trim();
     if folder.is_empty() {
@@ -621,14 +519,12 @@ fn short_error(error: &nam_rs::Error) -> String {
     }
 }
 
-/// What loading one capture produced.  [`NamFile::Ready`] is the only
-/// variant that holds a runtime model, and it has already been prewarmed.
-// The big variant is the finished capture; this crosses a channel to the UI
-// thread once per load, never a per-block path.
+/// [`Ready`] is prewarmed.  It crosses a channel once per load, not on
+/// the block path, which is why the variant may be large.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum NamFile {
     Ready(LoadedNam),
-    /// The file parsed, and its rate is not `rate`.  Nothing was installed.
+    /// The file's rate is not the output rate, so nothing was installed.
     RateMismatch {
         file_rate: u32,
         name: String,
@@ -636,9 +532,8 @@ pub(crate) enum NamFile {
     Failed(String),
 }
 
-/// What one capture costs, as a share of the block period: `peak` is the
-/// 95th percentile of the measured buffers and `mean` the average of the
-/// buffers up to it (see [`load_from_times`]).
+/// Share of the block period.  `peak` leaves out the slowest buffers:
+/// on the loader those are preemptions.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct NamLoad {
     pub mean: f32,
@@ -646,42 +541,34 @@ pub(crate) struct NamLoad {
 }
 
 impl NamLoad {
-    /// The share of the block the block is expected to take: the mean, and
-    /// at least the peak, so a projection does not flatter a model.
+    /// Not under the peak, so a projection does not flatter the model.
     pub(crate) fn share(self) -> f32 {
         self.peak.max(self.mean)
     }
 }
 
-/// A model the UI may queue.  `slim_steps` are the width thresholds of a
-/// slimmable capture (empty otherwise), for [`slim_submodel`].
+/// `slim_steps` are the width thresholds, empty when it is not slimmable.
 pub(crate) struct LoadedNam {
     pub prepared: PreparedNam,
     pub name: String,
     pub slim_steps: Vec<f32>,
     pub file_rate: u32,
-    /// `metadata.gear_type`, trimmed.  Empty becomes [`None`].  UI state
-    /// only: the audio thread never reads it.
+    /// UI only.  The audio thread never reads it.
     pub gear_type: Option<String>,
-    /// The file's `architecture`.
     pub arch: String,
-    /// Calibration levels of the capture, dBu at 0 dBFS, when the file has
-    /// them.
+    /// dBu at 0 dBFS, when the file has them.
     pub level_in_dbu: Option<f32>,
     pub level_out_dbu: Option<f32>,
-    /// The file's `loudness` metadata: RMS, dBFS, not LUFS.
+    /// RMS, dBFS, not LUFS.
     pub loudness_db: Option<f32>,
-    /// What the model measured as at this rate and block size.  `None` when
-    /// the caller asked for no measurement.
+    /// `None` when the caller asked for no measurement.
     pub load: Option<NamLoad>,
-    /// Whether every submodel is a WaveNet whose time constants a doubled
-    /// rate scales.  The UI counts these to decide a group's factor.
+    /// Every submodel is a WaveNet a doubled rate can scale.
     pub oversample: bool,
 }
 
-/// The submodel a slimmable capture runs at width `slim`: the first whose
-/// threshold is above it, else the last (NAM Core's `SetSlimmableSize`).
-/// 0 for a capture with no steps.
+/// First threshold above `slim`, else the last.  NAM Core's
+/// `SetSlimmableSize`.  0 when there are no steps.
 pub(crate) fn slim_submodel(steps: &[f32], slim: f32) -> usize {
     steps
         .iter()
@@ -689,34 +576,29 @@ pub(crate) fn slim_submodel(steps: &[f32], slim: f32) -> usize {
         .unwrap_or(steps.len().saturating_sub(1))
 }
 
-/// A runtime model the audio thread may take.  Built only on the loader or
-/// UI thread.
+/// Built on the loader or the UI thread.  The callback only takes it.
 pub(crate) struct PreparedNam {
     pub model: nam_rs::Model,
-    /// The file's rate.  A model is only built when this is the output rate;
-    /// the factor is not a rate and never goes here.
+    /// The file's rate.  The oversampling factor never goes here.
     pub rate: u32,
-    /// 1, or 2 for a model built with every layer dilation doubled for an
-    /// oversampled group.  The slot runs it through the 2x pair.
+    /// 1, or 2 when every layer dilation was doubled.  The slot runs a
+    /// 2 through the 2x pair.
     pub factor: u8,
 }
 
-/// What the UI queues for the next block.  `Clear` drops the live model out
-/// of the processor without the callback destroying it.  Both name the block
-/// they are for.
+/// `Clear` takes the live model out without the callback dropping it.
 pub(crate) enum NamCommand {
     Install(PreparedNam),
     Clear,
 }
 
-/// Parses `json`, and builds a model only when its sample rate is `rate`.
-/// UI thread only.  Tests build a capture without a file.
+/// UI thread.  Tests build a capture without a file.
 #[cfg(test)]
 pub(crate) fn prepare_nam_json(json: &str, rate: u32, slim: f32) -> NamFile {
     prepare_nam_json_at(json, rate, slim, 1)
 }
 
-/// [`prepare_nam_json`] at an explicit oversampling factor.
+/// [`prepare_nam_json`] at an oversampling factor.
 #[cfg(test)]
 pub(crate) fn prepare_nam_json_at(json: &str, rate: u32, slim: f32, factor: u8) -> NamFile {
     let model = match nam_rs::NamModel::from_json_str(json) {
@@ -726,11 +608,8 @@ pub(crate) fn prepare_nam_json_at(json: &str, rate: u32, slim: f32, factor: u8) 
     prepare_parsed(model, "Capture", rate, slim, None, factor)
 }
 
-/// Reads `path` and builds a model only when its sample rate is `rate`.
-/// The loader thread only: this does file I/O and allocates the runtime.
-/// `frames` is the block size to measure the model at; `None` skips the
-/// measurement.  `factor` 2 builds the dilated copy an oversampled group
-/// runs; a capture that cannot be oversampled stays at 1.
+/// Loader thread: file I/O and the runtime allocation.  `None` skips
+/// the measurement.  A capture that cannot be oversampled stays at 1.
 pub(crate) fn prepare_nam_file(
     path: &str,
     rate: u32,
@@ -812,16 +691,10 @@ fn prepare_parsed(
     })
 }
 
-/// Whether a capture's time constants scale with a doubled rate, so a
-/// dilated copy of it plays the same tone at twice the samples.
-///
-/// Only a WaveNet can be scaled.  Every layer array's dilations (and the
-/// dilation of a nested `condition_dsp`) are the model's time constants.
-/// A conv head — a `head_kernel_size` above 1, or a post-stack head with a
-/// kernel above 1 — is a dilation-1 convolution inside `nam-rs`, so scaling
-/// the layers alone would leave it at half its time; such a capture stays
-/// at 1x.  A `SlimmableContainer` is eligible only when every submodel is.
-/// An LSTM recurs in samples and has no dilation to scale.
+/// A doubled rate keeps the tone only when every time constant scales.
+/// Only a WaveNet.  A conv head (`head_kernel_size` or a post-stack
+/// kernel above 1) is a dilation-1 conv in `nam-rs`, so it stays at 1x.
+/// A `SlimmableContainer` needs every submodel.  An LSTM has no dilation.
 pub(crate) fn can_oversample(parsed: &nam_rs::NamModel) -> bool {
     match &parsed.config {
         nam_rs::ModelConfig::WaveNet(config) => {
@@ -850,10 +723,9 @@ pub(crate) fn can_oversample(parsed: &nam_rs::NamModel) -> bool {
     }
 }
 
-/// `parsed` with every layer dilation doubled, recursively.  The weight blob
-/// is left alone: a convolution's weight count depends on its kernel size,
-/// not its dilation, so `Model::from_nam` still builds.  Call it only for a
-/// capture [`can_oversample`] accepts.
+/// Weights are untouched: their count follows the kernel, not the
+/// dilation, so `Model::from_nam` still builds.  Only for a capture
+/// [`can_oversample`] accepts.
 fn oversampled(parsed: &nam_rs::NamModel) -> nam_rs::NamModel {
     let mut scaled = parsed.clone();
     double_dilations(&mut scaled);
@@ -881,8 +753,7 @@ fn double_dilations(model: &mut nam_rs::NamModel) {
     }
 }
 
-/// Runs the model's receptive field of silence through it, so a live model
-/// does not start from an empty history.
+/// Silence for the receptive field, so a live model does not start empty.
 fn warm_up(model: &mut nam_rs::Model) {
     let warmup = model.receptive_field();
     if warmup > 0 {
@@ -891,31 +762,18 @@ fn warm_up(model: &mut nam_rs::Model) {
     }
 }
 
-/// How many buffers [`measure_load`] times, and how many it runs first
-/// without timing (the first buffers pay for cache misses the steady state
-/// does not).
 const LOAD_BUFFERS: usize = 200;
+/// Untimed: those buffers pay for cache misses.
 const LOAD_WARMUP: usize = 8;
-/// The least time [`measure_load`] runs the model before it starts timing.
-/// The loader thread wakes for the job on a core that may be at its idle
-/// clock; timed from the first buffer, a capture read up to twice its cost.
+/// The loader may wake on an idle clock.  Timing from the first buffer
+/// read a capture at up to twice its cost.
 const LOAD_WARMUP_SECONDS: f64 = 0.05;
-/// The percentile of the timed buffers that is the measured peak.  The
-/// loader is not a realtime thread: the longest buffer is often a
-/// preemption, not the model.
+/// The loader is not realtime: the longest buffer is often a preemption.
 const LOAD_PEAK_PERCENTILE: usize = 95;
 
-/// Runs a quiet sine through `model`, at least [`LOAD_WARMUP`] buffers and
-/// [`LOAD_WARMUP_SECONDS`] untimed, then [`LOAD_BUFFERS`] timed, and returns
-/// their 95th percentile and the mean below it as a share of the block
-/// period
-/// ([`load_from_times`]).  The loader thread only: this is the one place a
-/// model is timed.  The model is left reset and prewarmed, so it can go live
-/// as it is.
-///
-/// A factor-2 model runs `2 * frames` samples per output block, so it is
-/// timed on that many samples against the same block period: the sheet then
-/// shows the share it really takes at twice the rate.
+/// Loader thread, the one place a model is timed.  Left reset and
+/// prewarmed, so it can go live as it is.  Factor 2 is timed on
+/// `2 * frames` samples against the same block period.
 pub(crate) fn measure_load(
     model: &mut nam_rs::Model,
     rate: u32,
@@ -950,11 +808,8 @@ pub(crate) fn measure_load(
     load_from_times(&mut times, block_seconds)
 }
 
-/// The [`LOAD_PEAK_PERCENTILE`]th percentile of `times` (seconds per
-/// buffer, nearest rank) and the mean of the buffers up to it, as shares of
-/// `block_seconds`.  The slowest buffers above the percentile are left out
-/// of both: on the loader thread they are preemptions, which the realtime
-/// audio thread does not see.  Sorts `times`.
+/// Buffers above the percentile are left out of both figures: on the
+/// loader they are preemptions the audio thread does not see.
 fn load_from_times(times: &mut [f64], block_seconds: f64) -> NamLoad {
     if times.is_empty() || block_seconds <= 0.0 {
         return NamLoad::default();
@@ -970,13 +825,8 @@ fn load_from_times(times: &mut [f64], block_seconds: f64) -> NamLoad {
     }
 }
 
-/// The share of one block a capture will take before it is measured.  The
-/// reference machine measured a standard WaveNet at about 12 % at 48 kHz
-/// before the vendored nam-rs kernels; they made it 2.6 times faster and a
-/// standard LSTM 3.5 times (7 % before), so about 5 % and 2 % there.  A
-/// slower machine needs more; `measure_load` replaces this once the model
-/// is loaded.  A model's cost is per sample, so its share of the block
-/// follows the rate and not the buffer size.
+/// Before [`measure_load`]: about 5% for a WaveNet and 2% for an LSTM
+/// at 48 kHz.  Cost is per sample, so the share follows the rate.
 pub(crate) fn estimate_load(arch: &str, rate: f64) -> NamLoad {
     let base = match arch {
         "LSTM" => 0.02,
@@ -996,13 +846,11 @@ pub(crate) fn estimate_load(arch: &str, rate: f64) -> NamLoad {
     }
 }
 
-/// How many models the park can hold without allocating.  The callback
-/// refuses to grow it.  A swap that does not fit stays in the processor
-/// until [`NamPark::flush`] has made room.
+/// The callback never grows this.  A swap that does not fit stays in
+/// the processor until [`NamPark::flush`] has made room.
 const PARK_SLOTS: usize = 2 * MAX_NAM_BLOCKS;
 
-/// Models the audio side has let go of.  The UI thread is the only place
-/// that drops them ([`NamPark::flush`]).
+/// The UI thread is the only place that drops a model.
 pub(crate) struct NamPark {
     models: Mutex<Vec<nam_rs::Model>>,
 }
@@ -1014,8 +862,8 @@ impl NamPark {
         })
     }
 
-    /// Drops every parked model.  Call it from the UI thread.  The queue
-    /// keeps its spare capacity, so the next retire does not allocate.
+    /// UI thread.  The spare capacity stays, so the next retire does not
+    /// allocate.
     pub(crate) fn flush(&self) {
         let mut queue = self.models.lock().unwrap_or_else(PoisonError::into_inner);
         let models = std::mem::replace(&mut *queue, Vec::with_capacity(PARK_SLOTS));
@@ -1023,7 +871,7 @@ impl NamPark {
         drop(models);
     }
 
-    /// How many models wait here, for the tests that watch a retirement.
+    /// For the tests that watch a retirement.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.models
@@ -1032,8 +880,7 @@ impl NamPark {
             .len()
     }
 
-    /// Whether a model still fits.  `true` while the queue is busy, so a
-    /// caller does not wait for an answer it cannot get.
+    /// `true` while the queue is busy, so the caller does not wait.
     pub(crate) fn has_room(&self) -> bool {
         match self.models.try_lock() {
             Ok(queue) => queue.len() < queue.capacity(),
@@ -1041,9 +888,7 @@ impl NamPark {
         }
     }
 
-    /// Moves `model` into the park.  One try, and no allocation: a full
-    /// queue or a busy lock hands the model back.  The callback holds it
-    /// and tries again next block.
+    /// One try, no allocation.  A full queue or a busy lock hands it back.
     pub(crate) fn try_retire(&self, model: nam_rs::Model) -> Result<(), nam_rs::Model> {
         match self.models.try_lock() {
             Ok(mut queue) => park_into(&mut queue, model),
@@ -1052,13 +897,9 @@ impl NamPark {
         }
     }
 
-    /// Moves `model` into the park, retrying while the UI holds the lock.
-    ///
-    /// Not for the realtime callback.  The UI holds this mutex only inside
-    /// [`Self::flush`] and does not wait on the caller, so a busy lock
-    /// ends.  A full queue cannot grow here: the model is leaked rather
-    /// than dropped on this thread or spun on forever.  That is the bridge
-    /// thread tearing a run down while the park is already full.
+    /// Not for the realtime callback.  A full queue leaks the model rather
+    /// than dropping it here or spinning: the bridge is tearing a run
+    /// down while the park is already full.
     pub(crate) fn retire(&self, model: nam_rs::Model) {
         let mut waiting = Some(model);
         while let Some(model) = waiting.take() {
@@ -1089,8 +930,8 @@ impl NamPark {
     }
 }
 
-/// Pushes `model` only when `queue` has spare capacity, so `push` cannot
-/// allocate.  `Err` hands it back when the queue is full.
+/// `push` cannot allocate.  `Err` hands the model back when the queue
+/// is full.
 fn park_into(queue: &mut Vec<nam_rs::Model>, model: nam_rs::Model) -> Result<(), nam_rs::Model> {
     if queue.len() == queue.capacity() {
         Err(model)
@@ -1100,24 +941,20 @@ fn park_into(queue: &mut Vec<nam_rs::Model>, model: nam_rs::Model) -> Result<(),
     }
 }
 
-/// How many commands [`NamPending`] holds: one per live block, and as many
-/// again for blocks that left the stack before the callback took theirs.
+/// One per live block, and as many again for blocks that left before
+/// the callback took their command.
 const PENDING_SLOTS: usize = 2 * MAX_NAM_BLOCKS;
 
-/// The models the UI has queued for the next block, and which block each is
-/// for.  The UI pushes (and may allocate); the callback only removes, which
-/// moves the rest down in place.  One command per block is the most the UI
-/// ever queues: a newer state replaces the older one.
+/// The UI pushes and may allocate.  The callback only removes, in
+/// place.  One command per block: a newer one replaces the older.
 #[derive(Default)]
 pub(crate) struct NamPending {
     commands: Vec<(u32, NamCommand)>,
 }
 
 impl NamPending {
-    /// Queues `command` for block `id`, replacing a command that block still
-    /// has waiting.  Returns the replaced one, which the caller (the UI
-    /// thread) drops.  `live` is the published stack: when the queue is
-    /// full, a command for a block that left it goes first.
+    /// The replaced command is returned for the UI thread to drop.  When
+    /// the queue is full, a block that left the stack loses its place first.
     pub(crate) fn queue(
         &mut self,
         id: u32,
@@ -1128,10 +965,9 @@ impl NamPending {
             return Some(std::mem::replace(&mut slot.1, command));
         }
         if self.commands.len() >= PENDING_SLOTS {
-            // More ids wait than a stack can hold, so at least half of them
-            // left it.  Only a callback that has not run for a while gets
-            // here.  A block that left the stack loses its place; the
-            // oldest command is the last resort.
+            // More ids than a stack holds, so at least half have left.
+            // Only a callback that has not run for a while gets here.
+            // A departed block goes first; the oldest command is last.
             let stale = self
                 .commands
                 .iter()
@@ -1153,69 +989,53 @@ impl NamPending {
         self.commands.get(index).map(|(id, command)| (*id, command))
     }
 
-    /// Takes the command at `index`.  `remove` does not allocate.
+    /// `remove` does not allocate.
     fn take(&mut self, index: usize) -> Option<(u32, NamCommand)> {
         (index < self.commands.len()).then(|| self.commands.remove(index))
     }
 
-    /// Empties the queue, handing every command back to the caller.
+    /// Hands every command back.  The caller drops them.
     pub(crate) fn drain(&mut self) -> Vec<(u32, NamCommand)> {
         std::mem::take(&mut self.commands)
     }
 
-    /// Puts a command the callback could not apply back at the end.  One
-    /// entry just left the queue, so the `Vec` has room and does not grow.
+    /// One entry just left, so the `Vec` has room and does not grow.
     fn requeue(&mut self, id: u32, command: NamCommand) {
         self.commands.push((id, command));
     }
 }
 
-/// Stopband attenuation the 2x pair is designed for, dB.  The same figure
-/// as the clock bridge's resampler.
+/// Same figure as the clock bridge's resampler.
 const OVERSAMPLE_STOPBAND_DB: f64 = 80.0;
 
-/// The most taps the 2x pair designs.  A rate near 44.1 kHz needs about 215;
-/// the clamp only ever bites on a rate far below any device's.  513 is 1
-/// modulo 4, so a clamped kernel still has an integer output-sample delay.
+/// 1 mod 4, so a clamped kernel still has an integer sample delay.
+/// The clamp only bites far below any device rate.
 const OVERSAMPLE_MAX_TAPS: usize = 513;
 
-/// Taps per polyphase half.  One half is one of the two 2x phases; together
-/// they are the whole kernel.
+/// One half is one of the two 2x phases.
 const OVERSAMPLE_HALF: usize = OVERSAMPLE_MAX_TAPS.div_ceil(2);
 
-/// The longest delay one block's pair can add, output samples: two filters
-/// of `(length - 1) / 4` each.
+/// Two filters of `(length - 1) / 4`, in output samples.
 const OVERSAMPLE_MAX_DELAY: usize = (OVERSAMPLE_MAX_TAPS - 1) / 2;
 
-/// The fixed 2x up/down pair an oversampled block runs through.
+/// Kaiser-windowed sinc at 2x: passband to 20 kHz, stopband from the
+/// output Nyquist.  Not [`FrameResampler`](super::resampler::FrameResampler):
+/// that stopband starts at the lower rate minus 20 kHz, so a harmonic
+/// in between would fold into the audio band.
 ///
-/// Both directions use the same linear-phase Kaiser-windowed sinc at twice
-/// the output rate: passband to 20 kHz (or 0.45 of the output rate when that
-/// is lower), stopband from the output Nyquist, 80 dB down.  It is not
-/// [`FrameResampler`](super::resampler::FrameResampler): that one's stopband
-/// starts at the lower rate minus 20 kHz, so a harmonic between that and the
-/// output Nyquist would fold back into the audio band.
-///
-/// The kernel is odd with `(length - 1)` divisible by 4, so each direction
-/// delays by a whole number of output samples and the two together delay by
-/// `(length - 1) / 2`.  At 48 kHz that is 60 samples, kernel 121.
-///
-/// The coefficients are designed in [`Self::retune`], off the sample loop;
-/// [`Self::upsample`] and [`Self::downsample`] allocate nothing.  Everything
-/// here lives on the heap: `NamStage` sits inline in `OutputMixer`, and a
-/// debug stack does not carry its kernels.
+/// `(length - 1)` is divisible by 4, so the pair delays by a whole
+/// number of output samples.  `retune` is off the sample loop and
+/// reuses its buffers.  The kernels are on the heap: the stage sits
+/// inline in the mixer.
 struct OversampleFilters {
-    /// The two polyphase halves.  `even[0]` multiplies the current input
-    /// sample, `odd[0]` the half sample between it and the last one.
+    /// `even[0]` is the current input sample, `odd[0]` the half sample
+    /// before it.
     even: Vec<f32>,
     odd: Vec<f32>,
-    /// Design scratch, so [`Self::retune`] does not put the f64 kernel on the
-    /// stack.  Never read outside that call.
+    /// Scratch for [`Self::retune`], so the f64 kernel is not on the stack.
     kernel: Vec<f64>,
-    /// Taps per half.
     taps: usize,
-    /// Delay of the whole pair, output samples: one filter each way, each
-    /// `(length - 1) / 4`.
+    /// Output samples: one filter each way, `(length - 1) / 4` each.
     delay: usize,
 }
 
@@ -1232,9 +1052,8 @@ impl OversampleFilters {
         filters
     }
 
-    /// Designs the kernel for `rate`.  Called from [`NamStage::new`] and
-    /// where the stage recomputes its fade lengths, so never in a sample
-    /// loop.  Reuses its buffers, so a rate change allocates nothing.
+    /// Off the sample loop.  Reuses its buffers, so a rate change
+    /// allocates nothing.
     fn retune(&mut self, rate: u32) {
         let rate = rate.max(1) as f64;
         let pass = 20_000.0_f64.min(0.45 * rate);
@@ -1242,14 +1061,14 @@ impl OversampleFilters {
         let cutoff = 0.5 * (pass + stop);
         let transition = (stop - pass).max(1.0);
         let beta = 0.1102 * (OVERSAMPLE_STOPBAND_DB - 8.7);
-        // Kaiser's estimate for the taps a window of this attenuation needs
-        // across that transition, then up to the next length of 1 mod 4.
+        // Kaiser's length for this attenuation and transition, then up
+        // to the next length of 1 mod 4.
         let estimate = (OVERSAMPLE_STOPBAND_DB - 8.0)
             / (2.285 * std::f64::consts::TAU * transition / (2.0 * rate));
         let boot = estimate.ceil().max(0.0) as usize;
         let length = (4 * boot.saturating_sub(1).div_ceil(4) + 1).clamp(5, OVERSAMPLE_MAX_TAPS);
-        // `scale` is the cutoff as a fraction of the 2x rate: the ideal
-        // lowpass, whose windowed form is normalised to unity DC gain.
+        // Cutoff as a fraction of the 2x rate.  The windowed sinc is
+        // normalised to unity DC gain below.
         let scale = cutoff / rate;
         let center = (length - 1) as f64 * 0.5;
         let mut sum = 0.0;
@@ -1283,9 +1102,7 @@ impl OversampleFilters {
         self.delay = (length - 1) / 2;
     }
 
-    /// `N` input samples become `2N` in `wide`, whose first `2N` must be
-    /// writable.  The interpolation gain is 2, as the zeroes halve the
-    /// average; `history` keeps the last `taps - 1` input samples.
+    /// Gain 2: the inserted zeroes halve the average.
     fn upsample(&self, input: &[f32], wide: &mut [f32], history: &mut [f32]) {
         let frames = input.len();
         debug_assert!(history.len() + 1 == self.taps, "up history length");
@@ -1307,15 +1124,13 @@ impl OversampleFilters {
         push_history(history, input);
     }
 
-    /// `2N` samples of `wide` become `N` in `output`.  `history` keeps the
-    /// last `taps - 1` input pairs.
+    /// `history` keeps the last `taps - 1` input pairs.
     fn downsample(&self, wide: &[f32], output: &mut [f32], history: &mut [f32]) {
         let frames = output.len();
         let pairs = history.len() / 2;
         debug_assert_eq!(history.len(), 2 * (self.taps - 1), "down history length");
-        // `even_at(p)` is the sample at 2x index `2p`, `odd_at(p)` the one
-        // after it.  A tap `j` pairs `even(n - j)` with `odd(n - j - 1)`,
-        // because the kernel is symmetric about a half sample at 2x.
+        // The kernel is symmetric about a half sample at 2x, so tap `j`
+        // pairs `even(n - j)` with `odd(n - j - 1)`.
         let even_at = |p: isize| -> f32 {
             if p >= 0 {
                 wide[2 * p as usize]
@@ -1344,9 +1159,7 @@ impl OversampleFilters {
     }
 }
 
-/// Kaiser's zero-order modified Bessel function, by its series.  The window
-/// and its normalisation are wanted to a few parts in `1e-12`; the loop ends
-/// when the next term is below that.
+/// The window is wanted to a few parts in `1e-12`.
 fn bessel_i0(x: f64) -> f64 {
     let half = 0.5 * x;
     let mut total = 1.0;
@@ -1361,14 +1174,13 @@ fn bessel_i0(x: f64) -> f64 {
     total
 }
 
-/// Kaiser's window at `position`, in `-1..=1` across the kernel.
+/// `position` is `-1..=1` across the kernel.
 fn kaiser_window(beta: f64, position: f64) -> f64 {
     let r = position.clamp(-1.0, 1.0);
     bessel_i0(beta * (1.0 - r * r).max(0.0).sqrt()) / bessel_i0(beta)
 }
 
-/// Keeps the last `history.len()` samples of `samples` (or all of them when
-/// the block is shorter than the history).
+/// The tail of `samples`, or all of them when the block is shorter.
 fn push_history(history: &mut [f32], samples: &[f32]) {
     let len = history.len();
     if len == 0 {
@@ -1382,7 +1194,7 @@ fn push_history(history: &mut [f32], samples: &[f32]) {
     }
 }
 
-/// [`push_history`] for the downsampler's history of input pairs.
+/// [`push_history`] for pairs.
 fn push_pairs(history: &mut [f32], wide: &[f32], frames: usize) {
     let pairs = history.len() / 2;
     if pairs == 0 {
@@ -1396,9 +1208,7 @@ fn push_pairs(history: &mut [f32], wide: &[f32], frames: usize) {
     }
 }
 
-/// A fixed-length mono delay line.  Length 0 passes its input through and
-/// keeps nothing.  The backing store is allocated once, when the slot is
-/// built; retuning and resetting only touch its length and contents.
+/// Length 0 passes its input through.  Allocated once, with the slot.
 struct MonoDelay {
     samples: Vec<f32>,
     len: usize,
@@ -1417,8 +1227,7 @@ impl MonoDelay {
         }
     }
 
-    /// Changes the delay without allocating, when the new length fits the
-    /// capacity the slot was built with.
+    /// No allocation: the length stays inside the slot's capacity.
     fn set_len(&mut self, len: usize) {
         let len = len.min(OVERSAMPLE_MAX_DELAY);
         self.samples.clear();
@@ -1432,7 +1241,7 @@ impl MonoDelay {
         self.at = 0;
     }
 
-    /// Pushes `sample` and returns the one that left the line.
+    /// The sample that left the line.
     fn push(&mut self, sample: f32) -> f32 {
         if self.len == 0 {
             return sample;
@@ -1446,7 +1255,7 @@ impl MonoDelay {
         out
     }
 
-    /// Advances the line without reading it.
+    /// Advances the line.  The samples that leave are discarded.
     fn feed(&mut self, samples: &[f32]) {
         if self.len == 0 {
             return;
@@ -1457,15 +1266,13 @@ impl MonoDelay {
     }
 }
 
-/// One side's resampler history: the live model's, or the model fading out.
-/// It moves with the model when a swap starts, so a side keeps its filter
-/// and alignment history exactly as long as it keeps its history of sound.
+/// Moves with the model when a swap starts, so the filter history
+/// stays with the sound it belongs to.
 struct OversampleState {
     up: Vec<f32>,
     down: Vec<f32>,
-    /// The output's delay while the block carries the pair's latency.  Fed
-    /// even when the block is not delayed, so a swap that starts one has
-    /// the model's past output to place in front of it.
+    /// Fed even while the block is not delayed, so a swap that starts
+    /// one has the past output to place in front of it.
     align: MonoDelay,
 }
 
@@ -1496,11 +1303,8 @@ impl OversampleState {
     }
 }
 
-/// One model's pass over one block, either through the 2x pair or as it was
-/// captured.  `input` holds the side's mono signal.  A factor-2 side's
-/// output is the pair's delayed one, in place.  A factor-1 side's output is
-/// the model's own, and when `crossfade` asks for it its delayed copy goes
-/// to `aligned`: the mix moves between the two when the time base changes.
+/// A factor-1 side's delayed copy goes to `aligned` when `crossfade`,
+/// so the mix can move between the two time bases.
 #[allow(clippy::too_many_arguments)]
 fn run_model(
     model: &mut nam_rs::Model,
@@ -1529,9 +1333,8 @@ fn run_model(
     }
 }
 
-/// The buffers one slot's block may use, shared by every block of a path
-/// because they run one after the other.  The first three are twice a block;
-/// the aligned copies are one block each, one per side.
+/// Shared: the blocks of a path run one after the other.  The first
+/// three are twice a block.
 struct NamScratch<'a> {
     live: &'a mut [f32],
     outgoing: &'a mut [f32],
@@ -1540,68 +1343,49 @@ struct NamScratch<'a> {
     out_aligned: &'a mut [f32],
 }
 
-/// One block's runtime: the model it runs, the one it fades out of, and the
-/// gains that take the block from one to the other.  Kept with its id, so a
-/// reorder moves nothing.
-///
-/// Every slot is built with the stage and reused in place.  A released slot
-/// keeps its buffers for the next block, so the callback never frees one.
+/// Kept with its id, so a reorder moves nothing.  Built with the stage
+/// and reused, so the callback never frees one.
 struct NamSlot {
     id: u32,
-    /// The slot holds a block.  A released slot waits for the next id.
+    /// A released slot waits for the next id.
     live: bool,
     model: Option<nam_rs::Model>,
-    /// The model fading out during a swap or a clear.  `None` while a swap
-    /// fades in from the dry signal.  Never overwritten: the next swap or
-    /// clear waits until this one is parked.
+    /// Never overwritten.  `None` while a swap fades in from dry.
     outgoing: Option<nam_rs::Model>,
-    /// A model [`NamPark::try_retire`] could not take.  Held until a later
-    /// block.  Two slots: the one already waiting, and the one just replaced.
+    /// [`NamPark::try_retire`] could not take it.  Two slots: one already
+    /// waiting, and the one just replaced.
     held: [Option<nam_rs::Model>; 2],
-    /// The rate `model` was built for.  0 when it must not run: a restart
-    /// could not park it, and the next block keeps trying.
+    /// 0 when it must not run: a restart could not park it.
     model_rate: u32,
     controls: NamBlockControls,
     adopted: bool,
     input_gain: Ramp,
     output_gain: Ramp,
-    /// The level match this block applies, from [`NamStack::level_matches`].
     level_gain: Ramp,
-    /// Model against dry: 0 is bypass.
+    /// 0 is bypass.
     wet: Ramp,
     wet_target: f32,
-    /// New side against old side of a swap: 1 when no swap runs.
+    /// 1 when no swap runs.
     swap: Ramp,
-    /// Samples `model` still runs unheard before it fades in.  Model samples:
-    /// a factor-2 block runs two per output frame.
+    /// Model samples still unheard.  Factor 2 runs two per output frame.
     warm: usize,
-    /// Leaving bypass waits for [`Self::warm`] before the wet fade starts.
+    /// The wet fade waits for [`Self::warm`].
     enabling: bool,
-    /// The block left the published stack.  It keeps running at its old
-    /// place in [`NamRun`] while `wet` fades to 0, and is released after.
+    /// Left the stack.  Keeps its old place in [`NamRun`] until `wet` is 0.
     departing: bool,
-    /// The dilation scale the live model was built with: 1, or 2 when its
-    /// group is oversampled.  The UI decided it when it queued the model.
+    /// 1, or 2.  The UI chose it when it queued the model.
     factor: u8,
-    /// The same, for the model fading out.
     out_factor: u8,
-    /// The block's output, wet and dry alike, carries [`OversampleFilters`]'
-    /// delay this block: it runs at factor 2, or a fade to or from one has
-    /// not settled yet.
+    /// Wet and dry carry the pair's delay: factor 2, or a fade not settled.
     delayed: bool,
-    /// 0 is the direct time base, 1 the pair's full delay.  It moves between
-    /// them over the bypass fade when [`Self::delayed`] changes, so the
-    /// output never jumps by the delay in one sample.
+    /// 0 is direct, 1 is the pair's delay.  Moves over the bypass fade,
+    /// so one sample never jumps by the delay.
     delay_mix: Ramp,
-    /// The input's delay, one line per channel, so a bypassed or fading
-    /// block plays dry at the same place as its wet side.  Fed every block
-    /// the slot runs, even while it does not delay, so the change of time
-    /// base has history to crossfade into.
+    /// Fed even while the block does not delay, so a time-base change
+    /// has history to crossfade into.
     dry_l: MonoDelay,
     dry_r: MonoDelay,
-    /// The resampler and alignment history of each side.  The live model's
-    /// state moves to `out` when a swap starts, so a fading model keeps the
-    /// history it was running with.
+    /// Moves to `out_state` when a swap starts.
     live_state: OversampleState,
     out_state: OversampleState,
 }
@@ -1640,8 +1424,7 @@ impl NamSlot {
         }
     }
 
-    /// Takes an id and starts over, keeping the buffers.  Only a released
-    /// slot is reused, so it holds no model.
+    /// Keeps the buffers.  Only a released slot is reused.
     fn reset(&mut self, id: u32) {
         debug_assert!(
             self.model.is_none()
@@ -1678,8 +1461,7 @@ impl NamSlot {
         self.out_state.reset();
     }
 
-    /// Rebuilds the resampler history for a new filter length.  A rate
-    /// change; every model restarts, so nothing here is heard through it.
+    /// A rate change.  Every model restarts, so this is not heard.
     fn retune(&mut self, filters: &OversampleFilters) {
         self.dry_l.set_len(filters.delay);
         self.dry_r.set_len(filters.delay);
@@ -1687,9 +1469,7 @@ impl NamSlot {
         self.out_state.retune(filters);
     }
 
-    /// Drops the model and its fades, for a block that starts over: a new
-    /// rate, a reactivated path.  Kept out of `Drop` because parking can
-    /// fail and the block is retried.
+    /// Not `Drop`: parking can fail, and the block is retried.
     fn restart(&mut self, park: Option<&Arc<NamPark>>) {
         if !self.retire_active(park) {
             self.model_rate = 0;
@@ -1719,23 +1499,20 @@ impl NamSlot {
             && (self.enabling || self.wet_target > 0.0 || !self.wet.is_settled_at(0.0))
     }
 
-    /// Whether the model is heard now or about to be: a swap must fade.
+    /// Heard now or about to be, so a swap must fade.
     fn audible(&self) -> bool {
         self.wet_target > 0.0 || !self.wet.is_settled_at(0.0)
     }
 
-    /// How long a model runs unheard before it fades in.
+    /// Samples the model runs unheard before it fades in.
     fn warmup(&self) -> usize {
         self.model
             .as_ref()
             .map_or(0, nam_rs::Model::receptive_field)
     }
 
-    /// Whether an install or a clear may be applied now without parking
-    /// more than the block can hold.  One swap at a time: a command waits
-    /// while a model still fades out, or is not parked yet, so `outgoing`
-    /// is never overwritten.  An audible block also waits for a fade in
-    /// from dry to end, which a new swap would cut.
+    /// One swap at a time, so `outgoing` is never overwritten.  An
+    /// audible fade in from dry is not cut either.
     fn ready(&self, park_room: bool) -> bool {
         if self.outgoing.is_some() {
             return false;
@@ -1747,12 +1524,12 @@ impl NamSlot {
         }
     }
 
-    /// Whether the block has a model it will play, for the level match.
+    /// Has a model it will play.  The level match skips the rest.
     fn has_live_model(&self) -> bool {
         !self.departing && self.model.is_some() && self.model_rate != 0
     }
 
-    /// Starts the fade to dry of a block that left the stack.
+    /// Fade to dry.  The block has left the stack.
     fn depart(&mut self, xfade: f32) {
         self.departing = true;
         self.enabling = false;
@@ -1769,15 +1546,12 @@ impl NamSlot {
         self.factor = if prepared.factor >= 2 { 2 } else { 1 };
         self.model = Some(prepared.model);
         if self.factor == 2 {
-            // The pair delays the wet side from its first sample.  Report and
-            // apply that from the start of the fade.
+            // The pair delays the wet side from its first sample.
             self.delayed = true;
         }
     }
 
-    /// Installs a prepared model: crossfades from the one it replaces when
-    /// that one is heard, else swaps with a fade-in.  `None` when the model
-    /// it would replace cannot be parked yet, or a model still fades out.
+    /// `None` when the model it replaces cannot be parked yet.
     fn install(
         &mut self,
         prepared: PreparedNam,
@@ -1790,15 +1564,15 @@ impl NamSlot {
             self.outgoing = self.model.take();
             self.out_factor = self.factor;
             self.swap.snap(0.0);
-            // The state follows the model that fades out.
+            // The filter state follows the model that fades out.
             std::mem::swap(&mut self.live_state, &mut self.out_state);
         } else if !self.retire_active(park) {
             return Some(NamCommand::Install(prepared));
         } else {
             self.live_state.reset();
             if prepared.factor < 2 {
-                // Nothing fades, so a block that is no longer oversampled
-                // drops the pair's delay at once.
+                // Nothing is fading, so a block no longer oversampled drops
+                // the pair's delay at once.
                 self.delayed = false;
             }
         }
@@ -1807,8 +1581,7 @@ impl NamSlot {
         None
     }
 
-    /// Fades the model out (or parks it when it is not heard).  Waits, like
-    /// [`Self::install`], while a model still fades out.
+    /// Waits, like [`Self::install`], while a model still fades out.
     fn clear(&mut self, park: Option<&Arc<NamPark>>) -> Option<NamCommand> {
         if self.outgoing.is_some() {
             return Some(NamCommand::Clear);
@@ -1836,8 +1609,7 @@ impl NamSlot {
         None
     }
 
-    /// Moves the live model into the park (or a held slot).  `false` when
-    /// both are busy and the model is still here.
+    /// `false` when the park and the held slots are both busy.
     fn retire_active(&mut self, park: Option<&Arc<NamPark>>) -> bool {
         let Some(model) = self.model.take() else {
             self.model_rate = 0;
@@ -1855,8 +1627,7 @@ impl NamSlot {
         }
     }
 
-    /// Parks the model a swap faded out.  One that cannot be parked yet
-    /// stays, silent, until a later block.
+    /// One that cannot be parked yet stays, silent.
     fn retire_outgoing(&mut self, park: Option<&Arc<NamPark>>) {
         if let Some(model) = self.outgoing.take() {
             if let Err(model) = self.park_model(model, park) {
@@ -1865,8 +1636,7 @@ impl NamSlot {
         }
         self.swap.snap(1.0);
         if self.factor == 1 {
-            // The fade back to 1x has settled: both sides are the unscaled
-            // model now, and the block stops delaying its output.
+            // Both sides are the unscaled model, so the delay can stop.
             self.delayed = false;
         }
     }
@@ -1885,8 +1655,7 @@ impl NamSlot {
         }
     }
 
-    /// Moves models the block no longer runs into the park.  `true` when
-    /// nothing is left here, so the block may be dropped.
+    /// `true` when nothing is left, so the block may be dropped.
     fn release(&mut self, park: Option<&Arc<NamPark>>) -> bool {
         self.drain_held(park);
         let active = self.retire_active(park);
@@ -1894,9 +1663,7 @@ impl NamSlot {
         active && self.outgoing.is_none() && self.held.iter().all(Option::is_none)
     }
 
-    /// Moves `model` into the park, or into a held slot.  `Err` returns the
-    /// model when both are busy: the caller still owns it, and it is not
-    /// dropped.
+    /// `Err` returns it.  The caller still owns it, so it is not dropped.
     fn park_model(
         &mut self,
         model: nam_rs::Model,
@@ -1914,9 +1681,8 @@ impl NamSlot {
                 }
             }
         }
-        // No park yet: this stage has not been attached to a run.  The
-        // caller is the owner thread (a unit test).  The model waits in a
-        // held slot and drops with the stage.
+        // No park yet: a unit test, still on the thread that built it.
+        // The model waits in a held slot and drops with the stage.
         if let Some(slot) = self.held.iter_mut().find(|slot| slot.is_none()) {
             *slot = Some(model);
             Ok(())
@@ -1925,9 +1691,7 @@ impl NamSlot {
         }
     }
 
-    /// Follows the published controls: trims, the level match, the
-    /// normalization on the output gain, and the bypass fade with its
-    /// warm-up.
+    /// Trims, the level match, and normalization, on the output gain.
     fn follow(
         &mut self,
         controls: &NamBlockControls,
@@ -1944,7 +1708,7 @@ impl NamSlot {
             self.input_gain.snap(input);
             self.output_gain.snap(output);
             self.level_gain.snap(level);
-            // A model taken this block has not heard the signal yet.
+            // Taken this block: it has not heard the signal yet.
             let cold = controls.enabled && self.warm > 0;
             let wet = if controls.enabled && !cold { 1.0 } else { 0.0 };
             self.wet.snap(wet);
@@ -1959,7 +1723,7 @@ impl NamSlot {
         if controls.enabled {
             if self.wet_target == 0.0 && !self.enabling {
                 if self.model_runs() {
-                    // Still fading out: its history is the live signal.
+                    // Still fading out, so its history is the live signal.
                     self.wet_target = 1.0;
                     self.wet.set_target(1.0, xfade.max(1.0));
                 } else if self.model.is_some() {
@@ -1976,16 +1740,9 @@ impl NamSlot {
         }
     }
 
-    /// One block of one model, in place on channels 0 and 1.  No allocation.
-    /// The stage's buffers are shared: blocks run one after the other, so one
-    /// set serves them all.
-    ///
-    /// The block's input becomes the model's mono signal before the block's
-    /// own channels are delayed, so a factor-2 model hears the undelayed
-    /// signal and the pair contributes the delay, not the input.  When the
-    /// time base moves, the dry and any factor-1 side mix the direct and
-    /// delayed copies with [`NamSlot::delay_mix`], so no sample jumps by the
-    /// pair's delay.
+    /// The mono sum is taken before the dry delay, so a factor-2 model
+    /// hears the undelayed signal and the pair contributes the delay.
+    /// [`NamSlot::delay_mix`] moves between the two time bases.
     fn process_block(
         &mut self,
         block: &mut [[f32; 4]],
@@ -2011,8 +1768,7 @@ impl NamSlot {
         {
             return;
         }
-        // True while the time base is not settled on "no delay": both copies
-        // are needed for the mix below.
+        // Not settled on "no delay": the mix below needs both copies.
         let sweep = !self.delay_mix.is_settled_at(0.0);
         for (index, frame) in block.iter().enumerate().take(frames) {
             let input =
@@ -2062,8 +1818,7 @@ impl NamSlot {
             let mix = self.wet.next();
             let time = self.delay_mix.next();
             let direct = [frame[0], frame[1]];
-            // The lines always run, so a block that starts or stops
-            // delaying has the input history to crossfade through.
+            // Always fed, so starting or stopping the delay has history.
             let delayed = [self.dry_l.push(direct[0]), self.dry_r.push(direct[1])];
             for (channel, sample) in frame.iter_mut().take(2).enumerate() {
                 let dry = direct[channel] + (delayed[channel] - direct[channel]) * time;
@@ -2095,8 +1850,7 @@ impl NamSlot {
         }
     }
 
-    /// Installs a prepared model directly, without a fade or a warm-up.
-    /// Tests only; the caller is the owner thread.
+    /// No fade and no warm-up.  Tests only; the caller owns the thread.
     #[cfg(test)]
     fn install_prepared(&mut self, prepared: PreparedNam) {
         self.accept(prepared);
@@ -2105,13 +1859,11 @@ impl NamSlot {
     }
 }
 
-/// How many blocks the stage keeps runtime state for: the published stack,
-/// and as many again that left it and still fade out.
+/// The published stack, and as many again that left it and still fade.
 const RUN_SLOTS: usize = 2 * MAX_NAM_BLOCKS;
 
-/// The order the stage runs its blocks in, by id and group: the published
-/// stack, with the blocks that left it still at their old place.  [`Copy`]
-/// and fixed-size, so the callback builds one without allocating.
+/// The published order, with a block that left still at its old place.
+/// [`Copy`] and fixed-size, so the callback builds one without allocating.
 #[derive(Clone, Copy)]
 struct NamRun {
     entries: [(u32, NamPosition); RUN_SLOTS],
@@ -2136,8 +1888,7 @@ impl NamRun {
         self.entries().iter().position(|entry| entry.0 == id)
     }
 
-    /// The index of the first entry of `position`'s group.  `Pre` entries
-    /// always come first.
+    /// `Pre` entries always come first.
     fn group_start(&self, position: NamPosition) -> usize {
         match position {
             NamPosition::Pre => 0,
@@ -2167,49 +1918,33 @@ impl NamRun {
     }
 }
 
-/// The NAM blocks of one path, inside a
-/// [`PathProcessor`](super::mixer::path::PathProcessor).
-///
-/// Scratch buffers are sized in [`Self::reserve`].  Every slot, with its
-/// resampler and delay history, is built with the stage and reused in place,
-/// so creating or letting go of a block never calls the heap on the audio
-/// thread.  [`Self::begin`] is the only place the callback touches the
-/// queues, and it only `try_lock`s.  [`Self::process`] runs [`NamRun`], not
-/// the published stack: the two differ while a removed block fades out and
-/// while a reorder waits for its dip.
+/// Slots are built with the stage and reused, so the audio thread
+/// never allocates one.  [`Self::begin`] is the only place the callback
+/// touches the queues, and it only `try_lock`s.  [`Self::process`] runs
+/// [`NamRun`], which still holds a block that left until its fade ends.
 pub(crate) struct NamStage {
-    /// One entry per block that has (or had) runtime state, in any order;
-    /// [`Self::run`] says which order they run in.  Every slot is built with
-    /// the stage and reused in place, so creating or letting go of a block
-    /// never calls the heap on the audio thread.  They are boxed because a
-    /// stage sits inline in the mixer, and its slot history is far larger
-    /// than a debug stack should carry.
+    /// Boxed: the stage sits inline in the mixer, and a slot's history
+    /// is larger than a debug stack should carry.
     slots: [Box<NamSlot>; RUN_SLOTS],
-    /// The published stack, kept so [`Self::process`] needs no lock.
+    /// Kept so [`Self::process`] needs no lock.
     stack: NamStack,
-    /// The order the blocks run in now.
     run: NamRun,
-    /// The published stack changed and [`Self::run`] has not followed yet.
+    /// The published stack changed and [`Self::run`] has not followed.
     order_dirty: bool,
-    /// Per group, in [`NamPosition::index`] order: the gain on the group's
-    /// output.  1 except while a reorder dips it.
+    /// Per group.  1 except while a reorder dips the group's output.
     dip: [Ramp; 2],
-    /// The controls version last applied.  0 until the first block, which
-    /// the published version never is.
+    /// 0 until the first block, which the published version never is.
     version: u64,
     park: Option<Arc<NamPark>>,
     rate: u32,
     xfade: f32,
     swap_xfade: f32,
-    /// The 2x pair an oversampled block runs through, designed for
-    /// [`Self::rate`].
     filters: OversampleFilters,
     scratch: Vec<f32>,
     outgoing_scratch: Vec<f32>,
-    /// Twice a block: where a factor-2 model's samples go.
+    /// Twice a block: a factor-2 model's samples.
     wide: Vec<f32>,
-    /// One block each, one per side: the delayed copy of a factor-1 side
-    /// while the time base moves.
+    /// The delayed copy of a factor-1 side while the time base moves.
     live_aligned: Vec<f32>,
     out_aligned: Vec<f32>,
 }
@@ -2238,8 +1973,7 @@ impl NamStage {
         }
     }
 
-    /// Grows the scratch once, outside the sample loop.  A larger block than
-    /// prepared allocates here, once.
+    /// Outside the sample loop.  A larger block allocates here, once.
     pub(crate) fn reserve(&mut self, frames: usize) {
         let wide = frames.saturating_mul(2);
         if self.scratch.len() < wide {
@@ -2253,8 +1987,7 @@ impl NamStage {
         }
     }
 
-    /// Forgets the applied controls so the next [`Self::begin`] reads them
-    /// again.  Does not touch the models.
+    /// The next [`Self::begin`] reads the controls again.  Models stay.
     pub(crate) fn invalidate(&mut self) {
         self.version = 0;
         for slot in self.slots.iter_mut().filter(|slot| slot.live) {
@@ -2262,9 +1995,8 @@ impl NamStage {
         }
     }
 
-    /// A slot was activated again.  The live models belong to the path that
-    /// just left: park them, and let the UI queue new ones.  A model that
-    /// cannot be parked yet does not run; the next block parks it.
+    /// The live models belong to the path that just left.  One that
+    /// cannot be parked yet does not run.
     pub(crate) fn restart(&mut self, rate: u32) {
         self.rate = rate.max(1);
         self.xfade = BYPASS_FADE_SECONDS * self.rate as f32;
@@ -2279,13 +2011,8 @@ impl NamStage {
         self.version = 0;
     }
 
-    /// Takes the queued models, applies the published stack and follows the
-    /// controls.  Callback: `try_lock` only.
-    ///
-    /// An oversampled block's factor came with the model the UI queued; the
-    /// stage never picks it.  It counts what is really installed for
-    /// [`Self::latency_samples`], so a block that is still fading in or out
-    /// of 2x is counted while it carries the pair's delay.
+    /// Callback: `try_lock` only.  The UI chose each model's factor.
+    /// A block still fading to or from 2x counts while it carries the delay.
     pub(crate) fn begin(
         &mut self,
         controls: &super::path::PathControls,
@@ -2305,17 +2032,14 @@ impl NamStage {
                 slot.retune(&self.filters);
             }
         }
-        // The published stack first: a block that left it starts to fade
-        // out, and a block that joined it gets its runtime state.
+        // A block that left starts to fade; one that joined gets a slot.
         if self.follow_published(controls) {
             self.order_dirty = true;
         }
         self.mark_departing();
         self.ensure_slots();
-        // Park what the last swap or clear faded out before a new one may
-        // take its place.  A block that is not heard has nothing to fade:
-        // its old side goes now, so it cannot come back when the block is
-        // heard again.
+        // Park the faded-out side before a new swap.  An unheard block
+        // has nothing to fade, so its old side goes now.
         let park = self.park.clone();
         for slot in self.slots.iter_mut().filter(|slot| slot.live) {
             slot.drain_held(park.as_ref());
@@ -2342,11 +2066,11 @@ impl NamStage {
                     .any(|slot| slot.id == id && slot.has_live_model())
             })
         };
-        // Retire the model a swap or a clear faded out, and settle the fades.
+        // Park what faded out, then settle the fades.
         for slot in self.slots.iter_mut().filter(|slot| slot.live) {
             if slot.model.is_some() && slot.model_rate != rate {
-                // A rate change restarts the device: there is nothing to
-                // fade, and a model built for another rate must not run.
+                // A rate change restarts the device.  Nothing to fade, and a
+                // model built for another rate must not run.
                 slot.restart(park.as_ref());
             }
             slot.drain_held(park.as_ref());
@@ -2363,7 +2087,7 @@ impl NamStage {
                 slot.follow(block, level_db, normalization_db, ramp_samples, xfade);
             }
         }
-        // A model that has heard its warm-up fades in.
+        // Warm-up done: fade in.
         for slot in self.slots.iter_mut().filter(|slot| slot.live) {
             if slot.warm == 0 {
                 if slot.swap.is_settled_at(0.0) {
@@ -2376,8 +2100,7 @@ impl NamStage {
                 }
             }
         }
-        // The time base follows the decision made above: a block that starts
-        // or stops delaying moves between the two over the bypass fade, so
+        // Starting or stopping the delay moves over the bypass fade, so
         // the output never jumps by the pair's delay.
         let xfade = self.xfade.max(1.0);
         for slot in self.slots.iter_mut().filter(|slot| slot.live) {
@@ -2388,8 +2111,7 @@ impl NamStage {
         self.release_departed();
     }
 
-    /// One group of the path's NAM blocks, in place on channels 0 and 1.  No
-    /// allocation.
+    /// No allocation.
     pub(crate) fn process(&mut self, block: &mut [[f32; 4]], frames: usize, position: NamPosition) {
         let Self {
             slots,
@@ -2429,10 +2151,8 @@ impl NamStage {
         }
     }
 
-    /// The delay this block's blocks add together, output samples: one
-    /// block's pair delay for each block whose output is delayed this block
-    /// ([`NamSlot::delayed`]).  A group that is not oversampling adds none.
-    /// The path adds this to its plugin latency.
+    /// One pair delay per block whose output is delayed.  A group that
+    /// is not oversampling adds none.
     pub(crate) fn latency_samples(&self) -> u32 {
         let delay = self.filters.delay as u32;
         let blocks = self
@@ -2457,15 +2177,13 @@ impl NamStage {
             .map(Box::as_mut)
     }
 
-    /// The slot of a block in the stack.  A departing block takes no new
-    /// command: what is queued for it is parked like one for a block that
-    /// is gone.
+    /// A departing block takes no new command.  What is queued for it
+    /// is parked, as for a block that is already gone.
     fn live_slot_mut(&mut self, id: u32) -> Option<&mut NamSlot> {
         self.slot_mut(id).filter(|slot| !slot.departing)
     }
 
-    /// Starts the fade-out of every block that left the stack, and takes
-    /// back one that returned to it before it was released.
+    /// A block that returned before it was released is taken back.
     fn mark_departing(&mut self) {
         let stack = self.stack;
         let xfade = self.xfade;
@@ -2479,10 +2197,8 @@ impl NamStage {
         }
     }
 
-    /// Lets go of blocks that left the stack once they have faded to dry and
-    /// their models are parked.  A block that cannot be parked yet stays,
-    /// silent, and is retried next block.  The slot keeps its buffers and
-    /// waits for another id.
+    /// One that cannot be parked yet stays, silent.  The slot keeps
+    /// its buffers for another id.
     fn release_departed(&mut self) {
         let park = self.park.clone();
         for index in 0..self.slots.len() {
@@ -2490,8 +2206,7 @@ impl NamStage {
             if !slot.live || !slot.departing {
                 continue;
             }
-            // A block that never ran (it left during a reorder's dip,
-            // before it joined the run) has nothing to fade.
+            // Left during a reorder's dip, before it joined: nothing to fade.
             let in_run = self.run.index_of(slot.id).is_some();
             if in_run && !slot.wet.is_settled_at(0.0) {
                 continue;
@@ -2504,9 +2219,8 @@ impl NamStage {
         }
     }
 
-    /// Moves [`Self::run`] to the published order.  At once when the blocks
-    /// that are heard keep their order; else the groups whose order changes
-    /// dip to silence first, switch there, and fade back in.
+    /// At once when the heard blocks keep their order.  Otherwise the
+    /// groups that change dip to silence, switch, and fade back in.
     fn follow_order(&mut self) {
         let mut dipping = [false; 2];
         if self.order_dirty {
@@ -2529,8 +2243,7 @@ impl NamStage {
         }
     }
 
-    /// The published stack in order, with each departing block put back
-    /// after the block it followed (or at the start of its group).
+    /// A departing block stays after the one it followed.
     fn next_run(&self) -> NamRun {
         let mut next = NamRun::default();
         for block in self.stack.blocks() {
@@ -2554,10 +2267,7 @@ impl NamStage {
         next
     }
 
-    /// Whether `position`'s group plays the blocks it shares with `next`
-    /// that are heard in another order, or loses or gains one to the other
-    /// group.  A block that joins or leaves the stack does not count: it
-    /// fades on its own.
+    /// A block that joins or leaves fades on its own and does not count.
     fn order_changes(&self, next: &NamRun, position: NamPosition) -> bool {
         let heard = |id: u32| self.slot(id).is_some_and(NamSlot::audible);
         let before = self
@@ -2576,9 +2286,7 @@ impl NamStage {
         !before.eq(after)
     }
 
-    /// Reads the published stack when the UI changed it.  A busy lock keeps
-    /// last block's order, which is correct: the models match it.  `true`
-    /// when a new stack was taken.
+    /// A busy lock keeps last block's order: the models match it.
     fn follow_published(&mut self, controls: &super::path::PathControls) -> bool {
         let version = controls.nam_version();
         if version == self.version {
@@ -2592,7 +2300,7 @@ impl NamStage {
         true
     }
 
-    /// Keeps one runtime block per published id.
+    /// One runtime block per published id.
     fn ensure_slots(&mut self) {
         let blocks = self.stack;
         for block in blocks.blocks() {
@@ -2606,19 +2314,13 @@ impl NamStage {
         }
     }
 
-    /// Whether the park takes one more model now.  `true` without a park
-    /// (a unit test's stage) and while the UI holds the lock.
+    /// `true` with no park (a unit test) and while the UI holds the lock.
     fn park_room(&self) -> bool {
         self.park.as_ref().is_none_or(|park| park.has_room())
     }
 
-    /// Applies the models the UI queued.  A command that cannot be applied
-    /// yet (one swap at a time, a park that is full, a block in the stack
-    /// that has no runtime slot yet) stays queued.
-    ///
-    /// One pass over the commands queued at entry, so it ends: a command
-    /// that fails is put back at the end, past the pass, and after a
-    /// failure the park counts as full for the rest of it.
+    /// One pass over the commands queued at entry, so it ends.  A failure
+    /// is put back past the pass, and the park counts as full after it.
     fn take_commands(&mut self, controls: &super::path::PathControls) {
         let Ok(mut pending) = controls.pending_nam_mut() else {
             return;
@@ -2632,11 +2334,9 @@ impl NamStage {
             let in_stack = self.stack.index_of(id).is_some();
             let ready = match self.live_slot_mut(id) {
                 Some(slot) => slot.ready(room),
-                // In the stack, and no slot yet (every slot is held by a
-                // block still letting go): the model waits for its slot.
+                // In the stack, no slot yet: every slot is still letting go.
                 None if in_stack => false,
-                // The block left the stack before its model arrived: park
-                // it, or wait until the park has room.
+                // Left the stack before its model arrived.
                 None => matches!(command, NamCommand::Clear) || room,
             };
             if !ready {
@@ -2649,10 +2349,8 @@ impl NamStage {
             match self.apply(id, command) {
                 None => room = self.park_room(),
                 Some(command) => {
-                    // A park that filled up (or got busy) between the check
-                    // and the apply: the command waits a block.  One entry
-                    // left the queue, so pushing it back cannot grow the
-                    // `Vec`.
+                    // The park filled between the check and the apply.  One
+                    // entry left, so pushing it back cannot grow the `Vec`.
                     pending.requeue(id, command);
                     room = false;
                 }
@@ -2666,10 +2364,9 @@ impl NamStage {
         match command {
             NamCommand::Install(prepared) => match self.live_slot_mut(id) {
                 Some(slot) => slot.install(prepared, park.as_ref()),
-                // A block of the stack without its slot yet keeps it.
+                // In the stack, and still waiting for a slot.
                 None if in_stack => Some(NamCommand::Install(prepared)),
-                // The block left the stack before its model arrived:
-                // `ready` made sure the park has room.
+                // Left before its model arrived.  `ready` checked the park.
                 None => match park.as_ref() {
                     Some(park) => match park.try_retire(prepared.model) {
                         Ok(()) => None,
@@ -2688,8 +2385,7 @@ impl NamStage {
         }
     }
 
-    /// Puts a prepared model straight into block `id`, without a queue or a
-    /// fade.  Tests only; the caller is the owner thread.
+    /// No queue and no fade.  Tests only; the caller owns the thread.
     #[cfg(test)]
     pub(crate) fn install_for_test(&mut self, id: u32, prepared: PreparedNam) {
         if self.slot_mut(id).is_none() {
@@ -2702,7 +2398,7 @@ impl NamStage {
         }
     }
 
-    /// Whether block `id` has a live model, for the tests.
+    /// For the tests.
     #[cfg(test)]
     pub(crate) fn has_model(&self, id: u32) -> bool {
         self.slots
@@ -2713,18 +2409,10 @@ impl NamStage {
 
 impl Drop for NamStage {
     fn drop(&mut self) {
-        // `OutputMixer` (and these processors) is moved into the output
-        // callback: `output::build_output`, the PipeWire duplex
-        // `ProcessData`, the native playback stream, and the ASIO / WASAPI
-        // callback state.  That closure is dropped when the stream or
-        // filter is dropped.  `bridge::run_bridge` drops the stream on the
-        // `rigwerk-bridge` thread after the stop loop, and cpal stops the
-        // callback before dropping the closure, so this `Drop` is not the
-        // realtime callback.  It is also not the UI thread when a bridge
-        // is running.  A model is therefore moved into the park here and
-        // dropped later by `NamPark::flush` on the UI thread.  With no
-        // park the stage never left the thread that built it (a unit
-        // test); that thread may drop the model.
+        // The mixer is dropped on the bridge thread after the callback
+        // has returned, so this is not the realtime callback and not the
+        // UI thread.  Models are parked for `NamPark::flush`.  With no
+        // park the stage never left the thread that built it.
         let Some(park) = self.park.clone() else {
             return;
         };

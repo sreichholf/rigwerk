@@ -1,16 +1,11 @@
-//! A plugin's editor view ([`Vst3Editor`]) and the frame it is attached
-//! with (`IPlugFrame`).  The window it lives in is the app's; the view only
-//! needs its native handle.
+//! `IPlugFrame` for an editor view.  The window is the app's; the view
+//! only gets the native handle.
 //!
-//! `resizeView` records the size the view asked for, for the window to
-//! pick up on its next frame, and then calls the view's `onSize` in the
-//! same call stack, as the SDK requires.  It does nothing when the view
-//! already has that size (`onSize` only on a change, `iplugview.h`), and a
-//! `resizeView` from inside that `onSize` is refused, as the SDK's editor
-//! host does (`resizeViewRecursionGard`).  No lock is held around the
-//! call.  On Linux the
-//! frame is also an `IRunLoop` (older VSTGUI and JUCE look for it here);
-//! it registers into the same registry as the host context.
+//! `resizeView` calls `onSize` in the same stack, skips it when the size
+//! is unchanged (`iplugview.h`), and refuses a nested call
+//! (`resizeViewRecursionGard`) with no lock held across it.  On Linux the
+//! frame is also `IRunLoop` (older VSTGUI and JUCE) on the same registry
+//! as the host context.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -32,7 +27,6 @@ pub(crate) struct PlugFrame {
     resizing: AtomicBool,
 }
 
-/// Clears [`PlugFrame::resizing`] when the outer `resizeView` returns.
 struct Resizing<'a>(&'a AtomicBool);
 
 impl Drop for Resizing<'_> {
@@ -46,7 +40,6 @@ impl PlugFrame {
         Self::default()
     }
 
-    /// The size the view last asked for, once.
     pub(crate) fn take_request(&self) -> Option<(u32, u32)> {
         match self.request.swap(0, Ordering::AcqRel) {
             0 => None,
@@ -152,13 +145,11 @@ impl ::vst3::Steinberg::Linux::IRunLoopTrait for PlugFrame {
     }
 }
 
-/// The window type this platform attaches editors to.
 #[cfg(target_os = "windows")]
 const PLATFORM: FIDString = ::vst3::Steinberg::kPlatformTypeHWND;
 #[cfg(not(target_os = "windows"))]
 const PLATFORM: FIDString = ::vst3::Steinberg::kPlatformTypeX11EmbedWindowID;
 
-/// A rect `width` × `height` at the origin.
 fn rect(width: u32, height: u32) -> ViewRect {
     ViewRect {
         left: 0,
@@ -168,17 +159,14 @@ fn rect(width: u32, height: u32) -> ViewRect {
     }
 }
 
-/// The size of `rect`, if it has one.
 fn rect_size(rect: &ViewRect) -> Option<(u32, u32)> {
     let width = u32::try_from(rect.right.checked_sub(rect.left)?).ok()?;
     let height = u32::try_from(rect.bottom.checked_sub(rect.top)?).ok()?;
     (width > 0 && height > 0).then_some((width, height))
 }
 
-/// An editor view of one plugin, and its frame.  UI thread only.  The
-/// owner keeps the plugin's handle alive for longer (the view belongs to
-/// its controller), and drops this before the native window it attached
-/// to: dropping it detaches the view.
+/// UI thread only.  Drop detaches the view, so the owner drops this
+/// before the native window.  The controller outlives the view.
 pub(crate) struct Vst3Editor {
     view: ComPtr<IPlugView>,
     scale: Option<ComPtr<IPlugViewContentScaleSupport>>,
@@ -187,8 +175,6 @@ pub(crate) struct Vst3Editor {
 }
 
 impl Vst3Editor {
-    /// Wraps a view `createView` returned, if it can attach to this
-    /// platform's windows.
     pub(crate) fn new(view: ComPtr<IPlugView>) -> Result<Self, String> {
         // SAFETY: a live view and a static platform string.
         if unsafe { view.isPlatformTypeSupported(PLATFORM) } != kResultTrue {
@@ -211,8 +197,7 @@ impl Vst3Editor {
             .flatten()
     }
 
-    /// Tells the view the display scale (before attaching, and on a
-    /// change).  A view without content scaling ignores it.
+    /// Before attach, and again when the scale changes.
     pub(crate) fn set_scale(&self, scale: f64) {
         if let Some(support) = &self.scale {
             // SAFETY: a live view.
@@ -220,7 +205,6 @@ impl Vst3Editor {
         }
     }
 
-    /// Attaches the view to `parent` through the frame.
     pub(crate) fn attach(&mut self, parent: ParentWindow) -> Result<(), String> {
         let handle = match parent {
             ParentWindow::X11(window) => window as usize as *mut std::ffi::c_void,
@@ -243,13 +227,11 @@ impl Vst3Editor {
         Ok(())
     }
 
-    /// Whether the user may resize the view.
     pub(crate) fn can_resize(&self) -> bool {
         // SAFETY: a live view.
         (unsafe { self.view.canResize() }) == kResultTrue
     }
 
-    /// The nearest size to `width` × `height` the view accepts.
     pub(crate) fn fit(&self, width: u32, height: u32) -> (u32, u32) {
         let mut size = rect(width, height);
         // SAFETY: a live view and a writable rect.
@@ -257,14 +239,12 @@ impl Vst3Editor {
         rect_size(&size).unwrap_or((width, height))
     }
 
-    /// Gives the view a new size (`onSize`).
     pub(crate) fn resize(&self, width: u32, height: u32) {
         let mut size = rect(width, height);
         // SAFETY: a live view and a readable rect.
         unsafe { self.view.onSize(&mut size) };
     }
 
-    /// The size the view asked for through `resizeView`, once.
     pub(crate) fn take_resize_request(&self) -> Option<(u32, u32)> {
         self.frame.take_request()
     }

@@ -1,13 +1,6 @@
-//! The output sheet's body (`docs/ui-spec.md` §6.2): the device's name and
-//! badge, its meters, level and mute, the channel map with its presets, the
-//! metronome's channels, the paths that play here (level, polarity, trim
-//! and how late they arrive) with the align switch, and the extra output's
-//! own buffer or the virtual output's switch.
-//!
-//! Map edits go through [`MapEdit`] and [`RigWerkApp::apply_map_edit`], the
-//! same path Signal Routing uses.  The click channels and the align switch
-//! are device settings, not path maps.  The clock output's rate and buffer
-//! stay in Setup; the sheet changes routing and levels, never the device.
+//! The output sheet.  It changes routing and levels, never the device.
+//! The clock output's rate and buffer stay in Setup.  Click channels and
+//! the align switch are device settings, not path maps.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
@@ -40,7 +33,7 @@ const MIN_TWO_COLUMNS_W: f32 = 760.0;
 const LIMITER_RANGE_DB: f32 = 12.0;
 
 impl RigWerkApp {
-    /// The output sheet body for output `device` (0 is the clock output).
+    /// `0` is the clock output.
     pub(crate) fn output_sheet(&mut self, ui: &mut egui::Ui, device: usize) {
         let rows = self.output_device_rows();
         let Some(row) = rows.get(device).cloned() else {
@@ -227,7 +220,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The measured loudness and the output trim.
     fn loudness_section(&mut self, ui: &mut egui::Ui, device: usize, row: &OutputDeviceRow) {
         let colours = palette(ui.ctx());
         heading(ui, "Loudness", colours);
@@ -374,8 +366,6 @@ impl RigWerkApp {
         );
     }
 
-    /// The paths that play here, each with its level, polarity and trim on
-    /// this output and when it arrives, then the align switch.
     fn clock_and_paths(
         &mut self,
         ui: &mut egui::Ui,
@@ -529,8 +519,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The channel matrix, its presets, the click row and what unreached
-    /// channels play.
     fn channel_map(
         &mut self,
         ui: &mut egui::Ui,
@@ -693,8 +681,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The clock's Setup line, the extra output's own buffer, or the
-    /// virtual output's switch.
     fn output_kind(
         &mut self,
         ui: &mut egui::Ui,
@@ -822,7 +808,6 @@ fn badge_word(ui: &mut egui::Ui, badge: OutputBadge, colours: &Palette) {
     );
 }
 
-/// One meter row per device channel.
 fn meters(ui: &mut egui::Ui, levels: &[f32], channels: usize, device: &str, colours: &Palette) {
     heading(ui, "Meters", colours);
     for channel in 0..channels.min(MAX_OUTPUT_CHANNELS) {

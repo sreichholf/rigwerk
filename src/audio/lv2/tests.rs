@@ -136,8 +136,6 @@ fn an_unsupported_required_feature_is_listed_with_its_error() {
     );
 }
 
-/// `lv2:inPlaceBroken`, `lv2:isLive` and `lv2:hardRTCapable` are met by
-/// how the host runs a plugin, so requiring them lists the plugin cleanly.
 #[test]
 fn required_features_the_host_meets_without_data_are_accepted() {
     let found = scan_bundle(&testdata("satisfied.lv2")).expect("scan");
@@ -145,8 +143,6 @@ fn required_features_the_host_meets_without_data_are_accepted() {
     assert_eq!(found[0].scan_error, None);
 }
 
-/// `opts:requiredOption`: an option the host does not supply blocks the
-/// plugin in the scan and at load; the ones it supplies do not.
 #[test]
 fn a_required_option_the_host_does_not_supply_is_an_error() {
     let bundle = testdata("required-option.lv2");
@@ -188,9 +184,7 @@ fn a_file_uri_resolves_dot_segments_lexically() {
     );
 }
 
-/// A binary named as `bundle/../elsewhere` is outside the bundle even though
-/// its text starts with the bundle's path: neither the scan nor the loader
-/// may pick it.
+/// Its text starts with the bundle path.  A prefix check must not accept it.
 #[test]
 fn a_binary_that_climbs_out_of_the_bundle_is_refused() {
     let base = std::env::temp_dir().join(format!("rigwerk-lv2-climb-{}", std::process::id()));
@@ -333,8 +327,7 @@ fn a_localhost_file_uri_names_the_same_path() {
 
 const FIX_B_REFUSED: &str = "http://example.com/lv2/fix-b/";
 
-/// The error `Lv2Instance::load` gives for `uri`.  Every plugin it is used
-/// on is refused before its (empty) binary would be opened.
+/// Refused before its empty binary would be opened.
 fn fix_b_load_error(bundle: &std::path::Path, uri: &str) -> String {
     let shared = Arc::new(PluginShared::new(0));
     let pref = PluginPref::default();
@@ -344,8 +337,7 @@ fn fix_b_load_error(bundle: &std::path::Path, uri: &str) -> String {
     }
 }
 
-/// Every plugin the loader refuses for its Turtle is listed, and its scan
-/// error is the loader's own error, word for word.
+/// The scan error and the loader's error are the same text.
 #[test]
 fn a_plugin_the_loader_refuses_is_listed_with_the_loaders_error() {
     let bundle = testdata("fix-b-refused.lv2");
@@ -380,8 +372,7 @@ fn a_plugin_the_loader_refuses_is_listed_with_the_loaders_error() {
     }
 }
 
-/// More ports than the table takes, and more audio ports than the chain
-/// wires, are listed with the loader's error too.
+/// Both the table's port cap and the chain's audio-port cap.
 #[test]
 fn a_plugin_over_a_port_limit_is_listed_with_the_loaders_error() {
     let base = std::env::temp_dir().join(format!("rigwerk-lv2-fix-b-{}", std::process::id()));
@@ -441,8 +432,7 @@ fn a_plugin_over_a_port_limit_is_listed_with_the_loaders_error() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Every plugin-level reason is named, then the port the loader cannot
-/// connect, in the scan and at load alike.
+/// Plugin-level reasons first, then the port, in the scan and at load.
 #[test]
 fn every_reason_a_plugin_is_refused_for_is_named() {
     let bundle = testdata("fix-b-refused.lv2");
@@ -459,8 +449,7 @@ fn every_reason_a_plugin_is_refused_for_is_named() {
     assert_eq!(fix_b_load_error(&bundle, &uri), expected);
 }
 
-/// An `lv2:sampleRate` bound far past a float is kept in a float's range at
-/// every rate, so whether the plugin loads never depends on the rate.
+/// Whether the plugin loads never depends on the rate.
 #[test]
 fn a_scaled_bound_stays_in_a_floats_range_at_every_rate() {
     let bundle = testdata("fix-b-refused.lv2");
@@ -585,9 +574,7 @@ fn a_urid_round_trips_through_map_and_unmap() {
     assert!(map.uri(0).is_none());
 }
 
-/// `urid.h`: a URI maps to the same id for the life of an instance.  A
-/// lookup on the audio thread inserts, so its answer is the one every later
-/// lookup gets, whichever thread asks.
+/// `urid.h`: the id is stable for the process, whichever thread mapped it.
 #[test]
 fn a_urid_first_mapped_on_the_audio_thread_keeps_its_id() {
     let map = urid::global();
@@ -616,8 +603,7 @@ fn an_audio_thread_lookup_answers_an_already_mapped_uri() {
     );
 }
 
-/// Threads that map the same new URIs at once, in different orders, agree
-/// on every id, and different URIs never share one.
+/// Different URIs never share an id.
 #[test]
 fn concurrent_lookups_of_new_uris_agree() {
     const URIS: usize = 64;
@@ -1042,8 +1028,8 @@ fn the_schedule_callback_reports_success_and_no_space() {
     assert_eq!(status, LV2_WORKER_ERR_UNKNOWN);
 }
 
-/// The worker thread is one per process, so the tests that block it take
-/// turns; otherwise a `work` that waits would stall another test's request.
+/// One worker thread per process.  Tests that block it take turns, or a
+/// waiting `work` would stall another test's request.
 static WORKER_TESTS: Mutex<()> = Mutex::new(());
 
 fn worker_tests() -> std::sync::MutexGuard<'static, ()> {
@@ -1052,7 +1038,6 @@ fn worker_tests() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Pops one response, waiting up to two seconds for the worker thread.
 fn wait_for_response(rings: &WorkerRings, out: &mut [u8]) -> usize {
     for _ in 0..2000 {
         if let Some(size) = rings.pop_response(out) {
@@ -1063,12 +1048,9 @@ fn wait_for_response(rings: &WorkerRings, out: &mut [u8]) -> usize {
     panic!("the worker thread sent no response");
 }
 
-/// How many `work` calls are inside right now.
 static WORK_INSIDE: AtomicU32 = AtomicU32::new(0);
-/// How many `work` calls a test's instance has seen.
 static WORK_CALLS: AtomicU32 = AtomicU32::new(0);
 
-/// A fake `work` that echoes every request back through `respond`.
 unsafe extern "C" fn echoing_work(
     _instance: LV2_Handle,
     respond: LV2_Worker_Respond_Function,
@@ -1137,8 +1119,7 @@ fn the_worker_thread_echoes_requests_in_order_and_forgets_an_unregistered_one() 
     );
 }
 
-/// With nothing registered the worker thread parks without a timeout, so an
-/// idle process has no thread waking up every 50 ms.
+/// Parks without a timeout, so an idle process does not wake every 50 ms.
 #[test]
 fn the_worker_thread_sleeps_while_no_instance_is_registered() {
     let _serial = worker_tests();
@@ -1172,9 +1153,8 @@ fn the_worker_thread_sleeps_while_no_instance_is_registered() {
     unregister(&instance);
 }
 
-/// `worker.h`: a request `schedule_work` accepted must reach `work`.  The
-/// gate is held while the instance is removed, so the worker thread skips it
-/// and only `unregister` can serve the request.
+/// `worker.h`: an accepted request must reach `work`.  The gate is held, so
+/// the worker thread skips the instance and only `unregister` can serve it.
 #[test]
 fn unregister_serves_the_requests_still_queued() {
     let _serial = worker_tests();
@@ -1256,12 +1236,9 @@ fn a_worker_response_is_refused_when_the_response_ring_is_full() {
     );
 }
 
-/// The sender a blocking `work` reports its start on.
 static BLOCK_STARTED: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
-/// The receiver a blocking `work` waits on before it returns.
 static BLOCK_RELEASE: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
 
-/// A fake `work` that waits until the test releases it.
 unsafe extern "C" fn blocking_work(
     _instance: LV2_Handle,
     _respond: LV2_Worker_Respond_Function,
@@ -1394,10 +1371,8 @@ fn one_instances_gate_does_not_block_another_and_unregistering_it_leaves_the_res
     );
 }
 
-/// How many requests a failing `work` has seen.
 static WORK_ERRORS: AtomicU32 = AtomicU32::new(0);
 
-/// A fake `work` that refuses every request.
 unsafe extern "C" fn failing_work(
     _instance: LV2_Handle,
     _respond: LV2_Worker_Respond_Function,
@@ -1535,9 +1510,7 @@ fn control_ranges_read_bounds_defaults_units_and_scale_points() {
     assert!(table.ranges.iter().all(|range| range.name != "Latency"));
 }
 
-/// Every control input buffer starts at its `lv2:default`, scaled with the
-/// sample rate, including a `notOnGUI` one that has no panel control: a
-/// hidden "enable" that defaults to 1 must not run at 0.
+/// A hidden enable that defaults to 1 must not run at 0.
 #[test]
 fn every_control_input_starts_at_its_default_even_when_hidden() {
     let table = params_table();
@@ -1673,10 +1646,8 @@ fn the_main_pair_is_the_first_two_audio_ports_and_the_rest_is_silent() {
     assert_eq!(out_right, [9.0, 10.0, 11.0, 12.0]);
 }
 
-/// `lv2:isSideChain` ports are never the main pair, even when they come
-/// first: the key input hears silence and the key output is ignored, and
-/// the scan neither counts them as channels nor lists a plugin whose only
-/// input is a side chain.
+/// Even when they come first.  The scan neither counts them nor lists a
+/// plugin whose only input is a side chain.
 #[test]
 fn side_chain_ports_are_not_the_main_pair_or_channels() {
     let bundle = testdata("side-chain.lv2");
@@ -1753,9 +1724,8 @@ fn a_mono_plugin_sums_its_input_and_feeds_both_sides() {
     assert_eq!(right, [0.75; 4]);
 }
 
-/// The atom spec: an empty input sequence has the size of its body header,
-/// as `lv2_atom_sequence_clear` leaves it, and an output is an `atom:Chunk`
-/// sized to the space after its header before every `run`.
+/// As `lv2_atom_sequence_clear` leaves an input, and an output is an
+/// `atom:Chunk` of the space after its header, before every `run`.
 #[test]
 fn atom_ports_are_rearmed_for_every_block() {
     let table = params_table();
@@ -1788,9 +1758,8 @@ fn atom_ports_are_rearmed_for_every_block() {
     }
 }
 
-/// `rsz:minimumSize` counts the whole buffer, so an atom port's buffer is
-/// at least that large, never below the default capacity, and the
-/// `sequenceSize` option names the largest one.
+/// `rsz:minimumSize` counts the whole buffer.  The buffer is never below
+/// the default capacity, and `sequenceSize` names the largest one.
 #[test]
 fn atom_buffers_honour_the_minimum_size() {
     let table = params_table();
@@ -1814,10 +1783,8 @@ fn atom_buffers_honour_the_minimum_size() {
     assert!(huge.contains("buffer of more than"), "{huge}");
 }
 
-/// The host may only connect an atom port to a type it lists, and this host
-/// only supplies `atom:Sequence`: another type (or none) refuses the plugin
-/// at scan and load, unless the port is optional, which is connected to
-/// NULL.
+/// Only `atom:Sequence` is supplied.  Another type, or none, refuses the
+/// plugin unless the port is optional, which is connected to NULL.
 #[test]
 fn an_atom_port_that_does_not_take_a_sequence_is_refused_or_left_unconnected() {
     let bundle = testdata("atom-types.lv2");
@@ -2075,9 +2042,7 @@ fn an_inactive_lv2_instance_does_not_process() {
     );
 }
 
-/// Every response body the fake `work_response` saw.
 static WORK_RESPONSES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
-/// How many responses the fake `run` had already seen when it was called.
 static RESPONSES_BEFORE_RUN: AtomicU32 = AtomicU32::new(u32::MAX);
 static END_RUN_CALLS: AtomicU32 = AtomicU32::new(0);
 
@@ -2434,7 +2399,6 @@ fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
     // the views from the instance's older native value.
     handle.refresh_parameters();
     assert!((handle.parameters()[gain].value - 0.5).abs() < 1e-9);
-    // The instance's own values follow the panel.
     assert!((handle.lv2_parameters_for_test()[gain].value - 0.5).abs() < 1e-9);
 
     let (mut left, mut right) = (vec![0.0f32; 8], vec![0.0f32; 8]);
@@ -2480,16 +2444,13 @@ fn a_handle_sets_an_lv2_control_and_services_the_reported_output() {
         "an LV2 blob claimed control values it does not hold"
     );
 
-    // A reset returns the instance's own values to the defaults too.
     handle.reset_parameters().expect("reset");
     let default = table.ranges[gain].normalise(table.ranges[gain].default);
     assert!((handle.lv2_parameters_for_test()[gain].value - default).abs() < 1e-9);
 }
 
-// The fake state extension the state tests drive.  It has no plugin behind it:
-// `save` stores two POD properties, one non-POD property and one under a URID
-// the map never handed out; `restore` reads two back and asks for an absent
-// key.  Statics, because an `extern "C"` function pointer cannot capture.
+// No plugin behind it.  Statics, because an `extern "C"` function pointer
+// cannot capture.
 const STATE_GAIN_KEY: &CStr = c"http://rigwerk.test/state/gain";
 const STATE_NAME_KEY: &CStr = c"http://rigwerk.test/state/name";
 const STATE_FILE_KEY: &CStr = c"http://rigwerk.test/state/file";
@@ -2500,15 +2461,12 @@ const STATE_ATOM_STRING: &CStr = c"http://lv2plug.in/ns/ext/atom#String";
 const STATE_ATOM_PATH: &CStr = c"http://lv2plug.in/ns/ext/atom#Path";
 const STATE_MAP_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#mapPath";
 const STATE_FREE_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#freePath";
-/// A URID the map never handed out.
 const STATE_UNKNOWN_URID: u32 = 0xDEAD_BEEF;
 
-/// The feature array a real load passes to the state calls.
 fn state_host() -> Box<HostFeatures> {
     HostFeatures::new(48_000.0, 8, ATOM_CAPACITY, None, false)
 }
 
-/// Whether `uri` is in the null-terminated feature array `features`.
 fn feature_present(features: *const *const LV2_Feature, uri: &CStr) -> bool {
     if features.is_null() {
         return false;
@@ -2527,7 +2485,6 @@ fn feature_present(features: *const *const LV2_Feature, uri: &CStr) -> bool {
     false
 }
 
-/// What the last fake save saw of its own call, for the tests that assert it.
 static SAVE_FLAGS: AtomicU32 = AtomicU32::new(0);
 static SAVE_SAW_MAP_PATH: AtomicBool = AtomicBool::new(false);
 static SAVE_SAW_FREE_PATH: AtomicBool = AtomicBool::new(false);
@@ -2542,7 +2499,6 @@ fn native_flag() -> u32 {
     u32::from(LV2_State_Flags::LV2_STATE_IS_NATIVE)
 }
 
-/// The unwrapped `store` callback type the fake save calls.
 type StoreFn = unsafe extern "C" fn(
     lv2_sys::LV2_State_Handle,
     u32,
@@ -2631,7 +2587,6 @@ unsafe extern "C" fn fake_state_save(
     LV2_STATE_SUCCESS
 }
 
-/// What [`fake_state_restore`] read, for the test to assert.
 #[derive(Default)]
 struct RestoredState {
     gain: Vec<u8>,
@@ -2930,8 +2885,7 @@ unsafe extern "C" fn urid_state_restore(
     LV2_STATE_SUCCESS
 }
 
-/// One record's type URI and value bytes, walking the blob the state module
-/// writes.  The test owns the layout check so a URID is not compared by its
+/// The test walks the blob itself, so a URID is not compared by its
 /// numeric id.
 fn state_record<'a>(blob: &'a [u8], key: &[u8]) -> (&'a [u8], &'a [u8]) {
     assert_eq!(&blob[..8], b"RWL2ST01");
@@ -3200,7 +3154,6 @@ fn a_non_pod_state_value_is_dropped_from_the_blob() {
     let host = state_host();
     let interface = state_interface();
     let bytes = state::save(ptr::null_mut(), &interface, host.as_ptr()).expect("save the state");
-    // Only the two POD values, gain and name, are in the blob.
     assert_eq!(
         u32::from_le_bytes(bytes[12..16].try_into().expect("the count")),
         2
@@ -3213,7 +3166,6 @@ fn a_non_pod_state_value_is_dropped_from_the_blob() {
     );
 }
 
-/// The statuses a save got for values that must not be stored.
 static NON_POD_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
 static NATIVE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
 static NULL_VALUE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
@@ -3338,8 +3290,6 @@ fn an_empty_state_blob_saves_and_restores() {
     assert_eq!(EMPTY_RESTORES.load(Ordering::Relaxed), 1);
 }
 
-/// What the empty-value restore read: size, type, flags, and whether the
-/// pointer was null.
 static EMPTY_RETRIEVED: Mutex<Option<(usize, u32, u32, bool)>> = Mutex::new(None);
 
 unsafe extern "C" fn empty_value_save(
@@ -3435,7 +3385,6 @@ fn an_empty_state_value_saves_and_restores() {
     assert!(!null, "an empty value must not look absent");
 }
 
-/// A blob with the same key twice must restore the later value.
 static DUPLICATE_VALUE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
 unsafe extern "C" fn duplicate_save(
@@ -3521,7 +3470,6 @@ fn a_duplicate_state_key_restores_the_last_value() {
     );
 }
 
-/// The status [`oversized_save`] got from the store callback.
 static OVERSIZE_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
 
 unsafe extern "C" fn oversized_save(
@@ -3569,7 +3517,6 @@ fn a_state_value_larger_than_the_cap_is_refused() {
     );
 }
 
-/// A plugin that refuses every save, and the last status it returned.
 static REFUSED_STATUS: AtomicI32 = AtomicI32::new(i32::MAX);
 
 unsafe extern "C" fn refusing_save(
@@ -3715,21 +3662,17 @@ fn an_lv2_instance_saves_through_its_state_interface() {
     }
 }
 
-// Real LV2 plugins: the LV2 repository's examples, built by
-// `scripts/lv2-fixtures.sh` (see `crate::audio::plugins::fixtures`).  Each
-// test goes through `Lv2Instance::load` with the preference a browser add
-// would save, not through a fake descriptor, so it covers the binary, the
-// parsed ports and the host features together.  With `RIGWERK_LV2_FIXTURES`
-// unset they return at once.
+// The LV2 repository's examples, from `scripts/lv2-fixtures.sh`.  Each test
+// loads through `Lv2Instance::load`, not a fake descriptor.  With
+// `RIGWERK_LV2_FIXTURES` unset they return at once.
 
 const EG_AMP_URI: &str = "http://lv2plug.in/plugins/eg-amp";
 const EG_PARAMS_URI: &str = "http://lv2plug.in/plugins/eg-params";
 
-/// The block the fixture tests process: well under [`MAX_BLOCK`].
+/// Well under [`MAX_BLOCK`].
 const FIXTURE_BLOCK: usize = 64;
 
-/// The saved effect a browser add would store for fixture `name`, or `None`
-/// when the fixtures are not configured.
+/// `None` when the fixtures are not configured.
 fn fixture_pref(name: &str, uri: &str) -> Option<PluginPref> {
     let path = lv2_fixture(name)?;
     Some(PluginPref {
@@ -3874,8 +3817,8 @@ fn lv2_fixture_saves_and_restores_eg_params_state() {
 
 const EG_SAMPLER_URI: &str = "http://lv2plug.in/plugins/eg-sampler";
 
-/// Appends one atom (`type_`, `body`) at frame 0 to the input sequence `seq`,
-/// which a block's re-arm left empty, padding to 8 bytes as `atom.h` asks.
+/// Padded to 8 bytes, as `atom.h` asks.  The sequence was left empty by
+/// the block's re-arm.
 fn push_event(seq: *mut lv2_sys::LV2_Atom_Sequence, type_: u32, body: &[u8]) {
     let padded = body.len().div_ceil(8) * 8;
     unsafe {
@@ -3892,7 +3835,7 @@ fn push_event(seq: *mut lv2_sys::LV2_Atom_Sequence, type_: u32, body: &[u8]) {
     }
 }
 
-/// The body of a `patch:Set` object for eg-sampler's `eg:sample` to `path`.
+/// A `patch:Set` of eg-sampler's `eg:sample` to `path`.
 fn sample_set_body(path: &str) -> Vec<u8> {
     let map = urid::global();
     let urid = |uri: &CStr| map.map(uri).to_ne_bytes();
@@ -3925,10 +3868,9 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// eg-sampler requires `state:loadDefaultState` and `worker:schedule`: the
-/// load restores its default sample, a `patch:Set` from `run` loads another
-/// through the worker thread, and the saved state names it and restores.
-/// It has no audio input, so it is loaded directly, as eg-params is.
+/// No audio input, so it is loaded directly.  The load restores the
+/// default sample; a `patch:Set` from `run` loads another through the
+/// worker, and the saved state names it.
 #[test]
 fn lv2_fixture_loads_a_sample_through_eg_samplers_worker() {
     let Some(pref) = fixture_pref("eg-sampler", EG_SAMPLER_URI) else {
@@ -4030,8 +3972,7 @@ fn lv2_fixture_loads_a_sample_through_eg_samplers_worker() {
     assert_eq!(registered_for_test(), 0, "eg-sampler stayed registered");
 }
 
-/// The port an optional port of an unknown kind must be left as: NULL.  LV2
-/// does not allow the host to skip `connect_port` for a declared port.
+/// LV2 does not allow skipping `connect_port` for a declared port.
 #[test]
 fn an_optional_port_of_an_unknown_kind_is_connected_to_null() {
     static SEEN: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -4067,8 +4008,7 @@ fn an_optional_port_of_an_unknown_kind_is_connected_to_null() {
     );
 }
 
-// A fake plugin that keeps the bundle path `instantiate` gave it, as LV2
-// allows, and reads it again in `cleanup`.
+// A plugin may keep the bundle path and read it again in `cleanup`.
 static KEPT_PATH: AtomicUsize = AtomicUsize::new(0);
 static PATH_AT_CLEANUP: Mutex<Option<String>> = Mutex::new(None);
 static PATH_KEEPER: u8 = 0;
@@ -4096,8 +4036,7 @@ unsafe extern "C" fn path_reading_cleanup(_handle: LV2_Handle) {
     *PATH_AT_CLEANUP.lock().expect("the cleanup record") = Some(text);
 }
 
-/// The bundle path a plugin was instantiated with stays valid until after
-/// `cleanup`: the core owns it, as lilv does.
+/// The core owns it until after `cleanup`, as lilv does.
 #[test]
 fn the_bundle_path_outlives_the_plugin() {
     let descriptor = LV2_Descriptor {
@@ -4138,8 +4077,7 @@ fn the_bundle_path_outlives_the_plugin() {
     );
 }
 
-// A fake plugin that remembers where its gain control was connected and
-// reads it in `deactivate` and `cleanup`, as a plugin may.
+// A plugin may read a connected port in `deactivate` and `cleanup`.
 static GAIN_PORT: AtomicUsize = AtomicUsize::new(0);
 static GAIN_AT_CLEANUP: Mutex<Option<f32>> = Mutex::new(None);
 static PORT_KEEPER: u8 = 0;
@@ -4165,8 +4103,8 @@ unsafe extern "C" fn gain_reading_cleanup(_handle: LV2_Handle) {
     *GAIN_AT_CLEANUP.lock().expect("the cleanup record") = Some(unsafe { *gain });
 }
 
-/// The port buffers outlive `cleanup` even when the processor goes first
-/// and the instance keeps the core: the processor hands them to the core.
+/// They outlive `cleanup` when the processor goes first: it hands them to
+/// the core.
 #[test]
 fn the_port_buffers_outlive_cleanup() {
     let descriptor = LV2_Descriptor {
@@ -4222,8 +4160,8 @@ fn the_port_buffers_outlive_cleanup() {
     );
 }
 
-// A fake plugin that keeps the `worker:schedule` feature it was given and
-// schedules one request from its first `run`, the load's zero-frame one.
+// Keeps `worker:schedule` and schedules from its first `run`, the load's
+// zero-frame one.
 static SCHEDULE_FEATURE: AtomicUsize = AtomicUsize::new(0);
 static ZERO_RUN_STATUS: AtomicI64 = AtomicI64::new(i64::MAX);
 static SCHEDULER: u8 = 0;
@@ -4249,7 +4187,6 @@ unsafe extern "C" fn schedule_keeping_instantiate(
     &SCHEDULER as *const u8 as LV2_Handle
 }
 
-/// Calls the kept `schedule_work` with `message`.
 fn schedule_kept(message: &[u8]) -> LV2_Worker_Status {
     let schedule = SCHEDULE_FEATURE.load(Ordering::SeqCst) as *const LV2_Worker_Schedule;
     let schedule = unsafe { schedule.as_ref() }.expect("the plugin kept worker:schedule");
@@ -4315,16 +4252,14 @@ fn load_scheduling(descriptor: &LV2_Descriptor) -> Lv2Loaded {
     .expect("load the fake plugin")
 }
 
-/// `worker.h`: the host must pass every request it accepts to `work`.  A
-/// plugin without a worker interface has no `work`, so `schedule_work`
-/// refuses instead of accepting a request nothing will serve.
+/// `worker.h`: an accepted request must reach `work`.  With no `work`,
+/// `schedule_work` refuses instead of accepting one nothing will serve.
 #[test]
 fn schedule_work_refuses_a_plugin_without_a_worker() {
     let _serial = worker_tests();
-    // The descriptor must outlive the loaded instance: the core keeps the
-    // pointer, and its `Drop` calls `cleanup` through it.  A temporary here
-    // leaves the core pointing at a dead stack slot, which only crashes in
-    // a release build.
+    // The descriptor must outlive the instance: `Drop` calls `cleanup`
+    // through the pointer.  A temporary leaves that call on a dead stack
+    // slot, which only crashes in a release build.
     let descriptor = scheduling_descriptor(None);
     let loaded = load_scheduling(&descriptor);
     assert_eq!(
@@ -4338,13 +4273,13 @@ fn schedule_work_refuses_a_plugin_without_a_worker() {
     assert_eq!(registered_for_test(), 0);
 }
 
-/// A request scheduled before the worker is registered (here from the
-/// load's zero-frame run) is accepted and reaches `work` once it is.
+/// From the load's zero-frame `run`.  It is accepted and reaches `work`
+/// once the worker is registered.
 #[test]
 fn a_request_scheduled_before_registration_reaches_work() {
     let _serial = worker_tests();
-    // See `schedule_work_refuses_a_plugin_without_a_worker`: the descriptor
-    // is borrowed for the whole life of the instance, not just the load.
+    // Borrowed for the life of the instance, not just the load.  A
+    // temporary leaves `Drop` calling `cleanup` on a dead stack slot.
     let descriptor = scheduling_descriptor(Some(worker_extension));
     let calls = WORK_CALLS.load(Ordering::SeqCst);
     let loaded = load_scheduling(&descriptor);
@@ -4363,12 +4298,9 @@ fn a_request_scheduled_before_registration_reaches_work() {
     assert_eq!(registered_for_test(), 0);
 }
 
-/// Responses `work_response` saw during the load's zero-frame run.
 static RESTORE_RESPONSES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
-/// How many responses were already delivered when `run(0)` started.
 static RESPONSES_BEFORE_RUN0: AtomicU32 = AtomicU32::new(u32::MAX);
-/// How many `work` calls `run(0)` itself made.  A request it schedules must
-/// stay queued.
+/// A request `run(0)` schedules must stay queued.
 static WORK_DURING_RUN0: AtomicU32 = AtomicU32::new(u32::MAX);
 static RESTORE_WORK_CALLS: AtomicU32 = AtomicU32::new(0);
 
@@ -4464,8 +4396,8 @@ unsafe extern "C" fn restore_worker_extension(uri: *const std::ffi::c_char) -> *
     }
 }
 
-/// A header-only state blob: magic, version 1, no records.  Enough for the
-/// host to call `restore`, which is what schedules the request.
+/// Magic, version 1, no records.  Enough for `restore` to run, which is
+/// what schedules the request.
 fn empty_state_blob() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(b"RWL2ST01");
@@ -4474,9 +4406,8 @@ fn empty_state_blob() -> Vec<u8> {
     bytes
 }
 
-/// A restore that calls `schedule_work` is served before `run(0)`, and the
-/// response is delivered before that run.  A request `run(0)` itself
-/// schedules stays queued.
+/// Served before `run(0)`, and the response is delivered before that run.
+/// A request `run(0)` itself schedules stays queued.
 #[test]
 fn a_restore_runs_worker_requests_before_the_zero_frame_run() {
     let _serial = worker_tests();
@@ -4535,7 +4466,6 @@ fn a_restore_runs_worker_requests_before_the_zero_frame_run() {
     assert_eq!(registered_for_test(), 0);
 }
 
-/// The buffer slot of the range for `symbol`.
 fn table_slot(processor: &Lv2Processor, symbol: &str) -> usize {
     let index = processor
         .ids
@@ -4544,7 +4474,6 @@ fn table_slot(processor: &Lv2Processor, symbol: &str) -> usize {
     processor.ranges[index].slot
 }
 
-// A fake library descriptor with one plugin, which counts its cleanups.
 static LIB_CLEANUPS: AtomicU32 = AtomicU32::new(0);
 static LIB_HANDLE: u8 = 0;
 
@@ -4620,9 +4549,8 @@ unsafe extern "C" fn plain_descriptor(_index: u32) -> *const LV2_Descriptor {
     ptr::null()
 }
 
-/// `lv2.h`: a library may export `lv2_lib_descriptor` instead of
-/// `lv2_descriptor`.  It is preferred, its plugins are found through
-/// `get_plugin`, and its `cleanup` runs once, when the module goes.
+/// `lv2.h`: `lv2_lib_descriptor` is preferred.  Its `cleanup` runs once,
+/// when the module goes.
 #[test]
 fn a_library_descriptor_is_preferred_and_cleaned_up() {
     let features: [*const LV2_Feature; 1] = [ptr::null()];
@@ -4674,8 +4602,8 @@ fn a_failing_library_descriptor_is_an_error_and_lv2_descriptor_is_the_fallback()
     assert!(resolve(None, None, c"/b/", features.as_ptr()).is_err());
 }
 
-/// A module over a fake library whose `cleanup` marks a release in progress,
-/// so the release/acquire overlap test can tell whether a load ran under it.
+/// `cleanup` marks a release in progress, so the overlap test can tell
+/// whether a load ran under it.
 static OVERLAP_LIB_HANDLE: u8 = 0;
 static CLEANUPS: AtomicUsize = AtomicUsize::new(0);
 static INSIDE_MODULE_CALL: AtomicBool = AtomicBool::new(false);
@@ -4690,7 +4618,6 @@ fn enter_and_wait_for_module_call() {
     INSIDE_MODULE_CALL.store(false, Ordering::SeqCst);
 }
 
-/// Waits until the fake module is inside a load or its `cleanup`.
 fn wait_until_inside_module_call() {
     for _ in 0..5_000 {
         if INSIDE_MODULE_CALL.load(Ordering::SeqCst) {
@@ -4713,7 +4640,7 @@ static OVERLAP_LIB: SyncLib = SyncLib(lv2_sys::LV2_Lib_Descriptor {
     get_plugin: None,
 });
 
-/// Opens the fake overlap module (see [`OVERLAP_LIB`]), as a slow load.
+/// A slow load of [`OVERLAP_LIB`].
 fn open_overlap_module() -> Result<Lv2Module, String> {
     enter_and_wait_for_module_call();
     Ok(Lv2Module::for_test(Descriptors::Library(
@@ -4755,7 +4682,7 @@ fn a_slow_load_of_one_module_does_not_block_another() {
     });
 }
 
-/// Two acquires of one module open it once and share it until both let go.
+/// They share it until both let go.
 #[test]
 fn concurrent_acquires_of_one_module_open_it_once() {
     static REGISTRY: ModuleRegistry = ModuleRegistry::new();
@@ -4805,8 +4732,7 @@ fn a_release_and_a_reacquire_of_one_module_never_overlap() {
     assert!(!OVERLAPPED_MODULE_CALL.load(Ordering::SeqCst));
 }
 
-/// What the default-state fake's `restore` retrieved: key URI to type URI
-/// and value bytes.
+/// Key URI, type URI, and value bytes.
 static DEFAULT_RETRIEVED: Mutex<Vec<(String, String, Vec<u8>)>> = Mutex::new(Vec::new());
 
 const DEFAULT_KEYS: [&CStr; 7] = [
@@ -4846,9 +4772,8 @@ unsafe extern "C" fn default_recording_restore(
     LV2_STATE_SUCCESS
 }
 
-/// `state:loadDefaultState`: the bundle's `state:state` restores as the atoms
-/// lilv makes of it.  A value with no atom form (a nested blank node) is
-/// left out, and a plugin that does not ask for its default gets none.
+/// The atoms lilv makes of the bundle's `state:state`.  A nested blank
+/// node is left out.  A plugin that does not ask gets none.
 #[test]
 fn a_default_state_restores_as_atoms() {
     let bundle = testdata("default-state.lv2");
@@ -4976,14 +4901,13 @@ fn a_mapped_path_is_c_heap_that_free_or_free_path_releases() {
     }
 }
 
-/// What a teardown fake's instance handle points at: the schedule feature
-/// its `work_response` answers with, as `eg-sampler` schedules the old
-/// sample's free from the response that installs the new one.
+/// As `eg-sampler` does: `work_response` schedules the old sample's free
+/// from the response that installs the new one.
 struct TeardownPlugin {
     schedule: LV2_Worker_Schedule,
 }
 
-/// Every call the teardown fakes saw, in order.
+/// In the order the fakes saw them.
 static TEARDOWN_CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn teardown_log(entry: String) {
@@ -5001,7 +4925,7 @@ unsafe fn teardown_bytes(size: u32, data: *const c_void) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// `work` that answers "load" with the new sample and frees nothing back.
+/// Answers "load" with the new sample and frees nothing itself.
 unsafe extern "C" fn teardown_work(
     _instance: LV2_Handle,
     respond: LV2_Worker_Respond_Function,
@@ -5027,7 +4951,7 @@ unsafe extern "C" fn teardown_work(
     LV2_WORKER_SUCCESS
 }
 
-/// `work_response` that installs the sample and schedules the old one's free.
+/// Installs the sample and schedules the old one's free.
 unsafe extern "C" fn teardown_work_response(
     instance: LV2_Handle,
     size: u32,
@@ -5052,11 +4976,9 @@ unsafe extern "C" fn teardown_end_run(_instance: LV2_Handle) -> LV2_Worker_Statu
     LV2_WORKER_SUCCESS
 }
 
-/// `worker.h`: a response `respond` accepted must reach `work_response`.
-/// The gate keeps the worker thread out, so the load request, its response
-/// and the free that response schedules are all finished by `unregister`.
-/// `end_run` closes a `run` cycle, and no `run` precedes these, so the fake
-/// `end_run` is never called.
+/// `worker.h`: an accepted response must reach `work_response`.  The gate
+/// keeps the worker thread out, so `unregister` finishes the exchange.
+/// `end_run` closes a `run` cycle, and no `run` precedes these.
 #[test]
 fn unregister_delivers_the_responses_and_serves_what_they_schedule() {
     let _serial = worker_tests();
@@ -5102,10 +5024,8 @@ fn unregister_delivers_the_responses_and_serves_what_they_schedule() {
     assert!(!rings.response_pending());
 }
 
-/// How many `work` calls the endless fake has seen.
 static ENDLESS_WORK: AtomicU32 = AtomicU32::new(0);
 
-/// `work` that always answers.
 unsafe extern "C" fn endless_work(
     _instance: LV2_Handle,
     respond: LV2_Worker_Respond_Function,
@@ -5121,7 +5041,6 @@ unsafe extern "C" fn endless_work(
     }
 }
 
-/// `work_response` that always schedules another request.
 unsafe extern "C" fn endless_work_response(
     instance: LV2_Handle,
     _size: u32,
@@ -5139,8 +5058,6 @@ unsafe extern "C" fn endless_work_response(
     }
 }
 
-/// A plugin that answers every response with a new request cannot keep the
-/// teardown going forever.
 #[test]
 fn unregister_stops_a_worker_exchange_that_never_ends() {
     let _serial = worker_tests();

@@ -10,8 +10,7 @@ use super::{
 use crate::audio::BufferMode;
 use crate::ui::theme;
 
-/// Inner width of the old bridge column at the 1040 px minimum window.
-/// The strip is the full page now; this width is only the "tabs do not fit" case.
+/// A width where the three tabs do not fit.
 const NARROW_W: f32 = 150.0;
 
 fn run_column(width: f32, height: f32, draw: impl FnOnce(&mut egui::Ui)) -> Rect {
@@ -90,7 +89,6 @@ fn wide_strip_keeps_the_three_mode_tabs() {
         "tab row {:.1} px, predicted {predicted:.1}",
         picker.width()
     );
-    // Auto, Minimum and Fixed on one row.
     assert!(
         picker.width() > 160.0 && picker.width() < 200.0,
         "tab row {:.1} px",

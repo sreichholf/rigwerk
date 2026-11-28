@@ -1,23 +1,15 @@
-//! The RigWerk mark, embedded from the `.ico` files in `assets`.
-//!
-//! The full icon carries the wordmark and is the native window icon and the
-//! mark in About.  The compact `RW` icon is only for the title-bar mark,
-//! where the wordmark would be too small to read.
+//! The RigWerk mark, from the `.ico` files in `assets`.  The compact `RW`
+//! is for marks at 64 px and below, where the wordmark does not read.
 
 use eframe::egui;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 
-/// The app icon with the wordmark on the pedal.
 const FULL: &[u8] = include_bytes!("../../assets/rigwerk.ico");
-/// The `RW` variant, for marks at 64 px and below.
 const COMPACT: &[u8] = include_bytes!("../../assets/rigwerk-rw.ico");
 
-/// Which embedded icon a caller wants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mark {
-    /// The full wordmark.
     Full,
-    /// The `RW` variant.
     Compact,
 }
 
@@ -37,7 +29,6 @@ impl Mark {
     }
 }
 
-/// The mark as a texture, uploaded on first use and kept for later frames.
 pub(crate) fn texture(ctx: &egui::Context, mark: Mark) -> TextureHandle {
     let id = egui::Id::unique(("rigwerk-icon", mark.name()));
     if let Some(texture) = ctx.data(|data| data.get_temp::<TextureHandle>(id)) {
@@ -48,7 +39,6 @@ pub(crate) fn texture(ctx: &egui::Context, mark: Mark) -> TextureHandle {
     texture
 }
 
-/// The RGBA image for the native window icon.
 pub(crate) fn window_icon() -> egui::IconData {
     let rgba = decode(FULL);
     egui::IconData {
@@ -66,7 +56,7 @@ fn color_image(mark: Mark) -> ColorImage {
     )
 }
 
-/// The largest frame of an embedded `.ico`.
+/// An `.ico` load returns the largest frame.
 fn decode(bytes: &[u8]) -> image::RgbaImage {
     image::load_from_memory_with_format(bytes, image::ImageFormat::Ico)
         .expect("the embedded RigWerk icon decodes")

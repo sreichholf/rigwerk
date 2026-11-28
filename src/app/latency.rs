@@ -1,15 +1,7 @@
-//! The measured loopback and the conditions it was measured under.
-//!
-//! A [`MeasuredLatency`] is per hardware pair, not per session: it stores the
-//! input and output, the rates the bridge really ran at, the input block and
-//! output step, and how the output opened.  [`MeasuredLatency::stale_reason`]
-//! changes one of those and the result is marked stale instead of being
-//! silently reused.  `app::budget` adds the estimate beside it; nothing in
-//! this file estimates anything.
-//!
-//! The type is stored in the preferences, so every field reads through
-//! `#[serde(default)]` and [`MeasuredLatency::sanitized`] drops a value that
-//! cannot describe a real path.
+//! Per hardware pair, not per session.  A change of device, rate, block
+//! or output mode marks the result stale instead of reusing it.
+//! [`MeasuredLatency::sanitized`] drops a stored value that cannot
+//! describe a real path.
 
 use serde::Deserialize;
 
@@ -17,15 +9,13 @@ use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
 use crate::audio::{OutputMode, MAX_ROUND_TRIP_MS};
 
-/// How the person closed the loop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LoopbackKind {
-    /// A cable from the output to the input.  The default: the cleanest
-    /// measurement, with no room or microphone in the way.
+    /// The cleanest measurement: no room or microphone in the way.
     #[default]
     Cable,
-    /// A microphone in front of the speaker, for a rig with no return path.
+    /// A rig with no return path.
     Microphone,
 }
 
@@ -49,40 +39,33 @@ impl LoopbackKind {
     }
 }
 
-/// A measured loopback, with the conditions it was measured under.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct MeasuredLatency {
-    /// The measured loopback, milliseconds.
     pub(crate) latency_ms: f32,
-    /// The same delay in samples at [`Self::input_rate`], the rate the click
-    /// arrived at.
+    /// At [`Self::input_rate`], the rate the click arrived at.
     pub(crate) samples: u32,
     pub(crate) input_id: String,
     pub(crate) input_name: String,
     pub(crate) output_id: String,
     pub(crate) output_name: String,
-    /// The rates the bridge actually ran at.
+    /// What the bridge actually ran at, not what was asked for.
     pub(crate) input_rate: u32,
+    /// What the bridge actually ran at, not what was asked for.
     pub(crate) output_rate: u32,
-    /// The block the input delivered, frames.
     pub(crate) input_buffer: u32,
-    /// The step the output ran at, frames.
     pub(crate) output_step: u32,
-    /// The output mode this was measured in: `real-style`, `shared`,
-    /// `exclusive`, `asio`, `low-latency` or `standard`.
+    /// The stored token, not the display label.
     pub(crate) output_mode: String,
     /// Unix seconds, UTC.
     pub(crate) measured_at: u64,
-    /// The normalised correlation of the loopback click, 0..1.
+    /// Normalised correlation of the loopback click, 0..1.
     pub(crate) confidence: f32,
     pub(crate) loopback: LoopbackKind,
 }
 
 impl MeasuredLatency {
-    /// Drops a stored measurement that cannot describe a real path.  A
-    /// damaged or older entry is skipped, not fatal, like every other saved
-    /// list entry.
+    /// A damaged entry is skipped, not fatal.
     pub(crate) fn sanitized(mut self) -> Option<Self> {
         if !self.latency_ms.is_finite()
             || self.latency_ms <= 0.0
@@ -105,9 +88,8 @@ impl MeasuredLatency {
         Some(self)
     }
 
-    /// Why this measurement no longer describes the rig, or `None` while it
-    /// still does.  Device identity is the id, not the display name: a
-    /// renamed device measured the same path.
+    /// Device identity is the id, not the display name: a renamed device
+    /// measured the same path.
     pub(crate) fn stale_reason(&self, now: &LatencyConditions) -> Option<String> {
         if self.input_id != now.input_id {
             return Some(format!(
@@ -156,8 +138,6 @@ impl MeasuredLatency {
         None
     }
 
-    /// The measurement in the diagnostics/summary form: value, conditions,
-    /// date.  `stale` is the reason from [`Self::stale_reason`].
     pub(crate) fn summary(&self, stale: Option<&str>) -> String {
         let mut text = format!(
             "{:.1} ms · {} smp · OUT {} → {} → IN {} · {} / {} · {} in, {} out · {}",
@@ -180,8 +160,6 @@ impl MeasuredLatency {
     }
 }
 
-/// What the rig is set to right now.  Built from the running snapshot when a
-/// bridge runs, from the app's planned settings otherwise.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LatencyConditions {
     pub(crate) input_id: String,
@@ -196,8 +174,7 @@ pub(crate) struct LatencyConditions {
 }
 
 impl LatencyConditions {
-    /// Whether two readings describe the same measurement rig.  Display names
-    /// are deliberately not compared: a renamed device is the same device.
+    /// Display names are not compared: a renamed device is the same device.
     pub(crate) fn same_rig(&self, other: &Self) -> bool {
         self.input_id == other.input_id
             && self.output_id == other.output_id
@@ -217,8 +194,6 @@ pub(crate) fn display_name(name: &str, id: &str) -> String {
     }
 }
 
-/// Formats Unix seconds as `YYYY-MM-DD HH:MM UTC`, without a date crate.
-/// The civil-date arithmetic is Howard Hinnant's `civil_from_days`.
 pub(crate) fn utc_stamp(unix_secs: u64) -> String {
     let days = (unix_secs / 86_400) as i64;
     let seconds = unix_secs % 86_400;
@@ -230,7 +205,7 @@ pub(crate) fn utc_stamp(unix_secs: u64) -> String {
     )
 }
 
-/// `days` since 1970-01-01 to a proleptic Gregorian date.
+/// Howard Hinnant's `civil_from_days`, proleptic Gregorian.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -245,7 +220,8 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 impl RigWerkApp {
-    /// What the rig is set to now, for measuring and for staleness.
+    /// From the running snapshot while a bridge runs, otherwise the
+    /// planned settings.
     pub(crate) fn latency_conditions(&self) -> LatencyConditions {
         let parts = self.latency_parts();
         LatencyConditions {
@@ -261,17 +237,12 @@ impl RigWerkApp {
         }
     }
 
-    /// A short, stable name for how the clock output opened, so a measurement
-    /// made in one mode is not reused in another.  While the bridge runs this
-    /// is the mode the driver actually opened, not the one that was asked
-    /// for: a refused exclusive or low-latency open is the fallback.  The
-    /// long status line stays display-only.
     pub(crate) fn output_mode_key(&self) -> &'static str {
         output_mode_key(self.output_mode())
     }
 
-    /// The mode the clock output runs in: the one the driver published while
-    /// the bridge runs, otherwise the one the settings ask for.
+    /// While the bridge runs, the mode the driver opened.  A refused
+    /// exclusive or low-latency open is the fallback, not what was asked.
     pub(crate) fn output_mode(&self) -> OutputMode {
         if self.engine.state == crate::audio::EngineState::Running {
             if let Some(opened) = self.snapshot.opened_output_mode {
@@ -281,8 +252,6 @@ impl RigWerkApp {
         self.requested_output_mode()
     }
 
-    /// The mode the settings ask for, used before the driver has published
-    /// what it opened and while the bridge is stopped.
     fn requested_output_mode(&self) -> OutputMode {
         if self.selected_output().asio_clsid.is_some() {
             return OutputMode::Asio;
@@ -304,9 +273,8 @@ impl RigWerkApp {
     }
 }
 
-/// The comparison token stored in [`MeasuredLatency::output_mode`].  Saved
-/// measurements hold these strings, so a token never changes, even when the
-/// mode's label does.
+/// Saved measurements hold these strings, so a token never changes when
+/// the mode's label does.
 pub(crate) fn output_mode_key(mode: OutputMode) -> &'static str {
     match mode {
         OutputMode::Standard => "standard",
@@ -318,7 +286,6 @@ pub(crate) fn output_mode_key(mode: OutputMode) -> &'static str {
     }
 }
 
-/// The mode a stored key names.  Unknown keys are not a mode.
 pub(crate) fn output_mode_from_key(key: &str) -> Option<OutputMode> {
     Some(match key {
         "standard" => OutputMode::Standard,
@@ -331,8 +298,7 @@ pub(crate) fn output_mode_from_key(key: &str) -> Option<OutputMode> {
     })
 }
 
-/// The output mode as Setup and the Live readings say it.  The stored key
-/// stays [`output_mode_key`].
+/// Display text.  The stored key stays [`output_mode_key`].
 pub(crate) fn output_mode_phrase(mode: OutputMode) -> &'static str {
     match mode {
         OutputMode::Standard => "Standard",

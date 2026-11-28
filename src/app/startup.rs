@@ -1,4 +1,4 @@
-//! Device restore helpers applied once the first inventory arrives.
+//! Applied once the first inventory arrives.
 
 use crate::app::devices::{
     default_index, device_restore_note, held_device, restore_device, HeldDevice,
@@ -6,12 +6,10 @@ use crate::app::devices::{
 use crate::app::settings::Preferences;
 use crate::audio::{self, Inventory};
 
-/// Saved device choices applied once the first background device scan finishes.
 pub(crate) struct StartupGate {
     pub(crate) preferences: Preferences,
 }
 
-/// Indices and held identities from one startup restore.
 pub(crate) struct RestoredDevices {
     pub(crate) asio_idx: usize,
     pub(crate) input_idx: usize,
@@ -22,11 +20,9 @@ pub(crate) struct RestoredDevices {
     pub(crate) notes: Vec<String>,
 }
 
-/// Selects the saved devices, and holds any stored identity the scan did not confirm.
-///
-/// The window still shows a fallback (the system default, or the first real
-/// device; the system input stays at index 0) so the app can be used. `save`
-/// writes a held identity back instead of that fallback.
+/// The window still shows a fallback, so the app can be used.  `save`
+/// writes a held identity back instead of that fallback.  The system
+/// input stays at index 0.
 pub(crate) fn restore_saved_devices(
     inventory: &Inventory,
     preferences: &Preferences,

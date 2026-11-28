@@ -1,6 +1,4 @@
-//! The Windows open policy: the line the shared stream publishes after a
-//! refused WASAPI attempt, and the one Windows error that gets a sentence of
-//! its own.  Nothing here opens a device.
+//! Nothing here opens a device.
 
 use super::{describe, explain_device_in_use};
 use crate::audio::output::FIXED_BUFFER_REFUSED;
@@ -21,9 +19,9 @@ fn a_refused_fixed_buffer_is_named_after_the_standard_line() {
     assert_eq!(line, format!("Standard output{FIXED_BUFFER_REFUSED}"));
 }
 
-/// `attempt` builds both refusals and `app/driver_check` recovers the reason by
-/// splitting the published line on the prefix.  The prefix has to survive the
-/// trip byte for byte, so this reads the line the way that file does.
+/// `app/driver_check` splits the published line on the prefix.  The prefix
+/// has to survive byte for byte, so this reads the line the way that file
+/// does.
 #[test]
 fn the_mode_line_carries_the_refusal_the_driver_check_parses() {
     let exclusive = " · Exclusive refused: the card is taken";

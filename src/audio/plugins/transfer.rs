@@ -1,18 +1,13 @@
-//! Parameter changes between the UI thread and the audio thread, one
-//! queue per plugin and direction (the VST3 SDK's `ParameterChangeTransfer`
-//! with an overflow that never drops a change).
+//! One SPSC parameter queue per plugin and direction.  The VST3 SDK's
+//! `ParameterChangeTransfer`, with an overflow slot per parameter that
+//! keeps the newest value instead of dropping a change.
 //!
-//! UI to audio carries panel edits, editor `performEdit` and resets; audio
-//! to UI carries VST3 `outputParameterChanges` and CLAP output events.
-//! Exactly one thread pushes and one drains: [`param_transfer`] hands out
-//! one [`ParamSender`] and one [`ParamReceiver`], neither is `Clone`, and
-//! both take `&mut self`.  Everything is allocated there; `push` and `drain`
-//! never allocate or lock, so either side may be the audio thread.
+//! `push` and `drain` never allocate or lock.
 
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// The smallest ring, in entries, whatever the parameter count.
+/// Floor for the ring, whatever the parameter count.
 const MIN_RING: usize = 64;
 
 /// An empty overflow slot.  A NaN, so no value [`ParamSender::push`]
@@ -72,19 +67,16 @@ impl Inner {
     }
 }
 
-/// The pushing side of a [`param_transfer`].
 pub(crate) struct ParamSender {
     inner: Arc<Inner>,
 }
 
-/// The draining side of a [`param_transfer`].
 pub(crate) struct ParamReceiver {
     inner: Arc<Inner>,
 }
 
-/// A queue for `params` parameters (indices `0..params`).  The ring holds
-/// the next power of two of `2 * params` entries, at least 64; behind it is
-/// one overflow slot per parameter.  All of it is allocated here.
+/// Indices `0..params`.  The ring is the next power of two of `2 * params`
+/// entries, at least 64, and every byte of it is allocated here.
 pub(crate) fn param_transfer(params: usize) -> (ParamSender, ParamReceiver) {
     assert!(
         u32::try_from(params).is_ok(),
@@ -119,31 +111,18 @@ pub(crate) fn param_transfer(params: usize) -> (ParamSender, ParamReceiver) {
 }
 
 impl ParamSender {
-    /// Parameters this queue was made for.
     pub(crate) fn params(&self) -> usize {
         self.inner.values.len()
     }
 
-    /// Queues `value` for parameter `index` at sample `offset` in the
-    /// consumer's next block (a negative offset is stored as 0).  `false`,
-    /// and nothing queued, when `index` is out of range or `value` is not
-    /// finite.
+    /// False, and nothing queued, when `index` is out of range or `value`
+    /// is not finite.  A negative offset is stored as 0.
     ///
-    /// A full ring does not drop the change: it goes to the parameter's
-    /// overflow slot, which keeps only the newest value.  Once a parameter
-    /// has a pending overflow value, its later changes go there too, even
-    /// when the ring has room again, until the consumer has taken it.  That
-    /// keeps each parameter in order.  A ring entry is only pushed while the
-    /// slot is empty, so it is newer than every overflow value already
-    /// taken and older than every one stored after it.  The consumer drains
-    /// the ring before the overflow, and when a slot fills it records
-    /// `head`, so a value stored while the consumer is mid-drain waits until
-    /// the ring entries pushed before it have been delivered.
-    ///
-    /// A VST3 `ParameterValueQueue` needs each parameter's points in offset
-    /// order.  Keeping the offsets of one parameter non-decreasing within a
-    /// block is the producer's job: [`ParamReceiver::drain`] does not
-    /// reorder.
+    /// A full ring, or a parameter that already has an overflow value,
+    /// keeps only the newest in that slot, so the parameter stays in
+    /// order even after the ring has room.  [`ParamReceiver::drain`] does
+    /// not reorder: offsets of one parameter must stay non-decreasing in
+    /// a block (VST3 `ParameterValueQueue`).
     pub(crate) fn push(&mut self, index: usize, value: f64, offset: i32) -> bool {
         if index >= self.params() || !value.is_finite() {
             return false;
@@ -175,25 +154,19 @@ impl ParamSender {
         true
     }
 
-    /// Changes pushed so far.
     pub(crate) fn pushed(&self) -> u64 {
         self.inner.pushed.0.load(Ordering::Relaxed)
     }
 
-    /// The push count up to which the consumer has reported every change
-    /// applied: drained and accepted by the plugin.
+    /// Drained and accepted by the plugin, not merely queued.
     pub(crate) fn applied(&self) -> u64 {
         self.inner.applied.0.load(Ordering::Acquire)
     }
 
-    /// True until the consumer has drained every change pushed so far.
-    /// False means drained, handed to a block; not that the plugin has
-    /// applied it.  No allocation, no lock.
-    ///
-    /// This scans every overflow slot (O(params)), not the pending bits: a
-    /// drain clears a word's bits before it puts back the ones it defers,
-    /// so from this thread the bits can read zero while a value still
-    /// waits.
+    /// False means drained into a block, not that the plugin applied it.
+    /// Scans every overflow slot: a drain clears a word's bits before
+    /// putting back the ones it defers, so the bits can read zero while a
+    /// value still waits.
     pub(crate) fn has_queued(&self) -> bool {
         let inner = &*self.inner;
         inner.ring_queued()
@@ -205,46 +178,37 @@ impl ParamSender {
 }
 
 impl ParamReceiver {
-    /// Parameters this queue was made for.
     pub(crate) fn params(&self) -> usize {
         self.inner.values.len()
     }
 
-    /// Changes pushed so far.  Read it before a [`Self::drain`]: every
-    /// change it counts is visible to that drain.
+    /// Read it before a [`Self::drain`]: every change it counts is visible
+    /// to that drain.
     pub(crate) fn pushed(&self) -> u64 {
         self.inner.pushed.0.load(Ordering::Acquire)
     }
 
-    /// Reports every change up to push count `pushed` applied: a drain
-    /// taken after reading it left nothing deferred, and the plugin
-    /// accepted the block it went into.  Never moves back.
+    /// A drain after this count left nothing deferred, and the plugin
+    /// accepted that block.  Never moves back.
     pub(crate) fn mark_applied(&self, pushed: u64) {
         self.inner.applied.0.fetch_max(pushed, Ordering::Release);
     }
 
-    /// Entries the ring holds before changes go to the overflow.
     pub(crate) fn capacity(&self) -> usize {
         self.inner.entries.len()
     }
 
-    /// Hands every queued change to `emit` as `(index, value, offset)`:
-    /// first the ring, in push order, then each pending overflow value at
-    /// the highest offset the ring part emitted (0 if it emitted none).
-    /// That keeps the points of one block in offset order, which a VST3
-    /// `ParameterValueQueue` needs; a point at the same offset replaces the
-    /// one before it.
+    /// Ring first, in push order, then each overflow value at the highest
+    /// offset the ring part emitted (0 if none).  VST3
+    /// `ParameterValueQueue` needs that order; a point at the same offset
+    /// replaces the one before it.
     ///
-    /// No change is lost, and each parameter's changes arrive in the order
-    /// they were pushed.  Overflow values do not keep their order relative
-    /// to other parameters' changes, and of several overflow values for one
-    /// parameter only the newest arrives.  A value the producer stores while
-    /// this runs arrives now or in a later drain, never twice: the slot is
-    /// emptied with a swap.
+    /// Each parameter stays in push order.  Overflow keeps only the newest
+    /// per parameter and does not order it against other parameters.  A
+    /// value stored during this drain arrives now or later, never twice.
     ///
-    /// Returns whether it deferred an overflow value behind ring entries
-    /// pushed after its `head` snapshot (that value arrives with a later
-    /// drain).
+    /// True when an overflow value was behind ring entries pushed after
+    /// this drain's `head` snapshot.  That value waits for the next drain.
     pub(crate) fn drain(&mut self, mut emit: impl FnMut(usize, f64, i32)) -> bool {
         let inner = &*self.inner;
         let mut deferred = false;
@@ -298,13 +262,8 @@ impl ParamReceiver {
         deferred
     }
 
-    /// Drops what is queued, as after a state load (the restored state
-    /// replaces any change still in flight).  It is a [`Self::drain`] that
-    /// emits nothing: one `head` snapshot, the ring up to it and every
-    /// overflow value whose ring entries all lie below it are dropped.  A
-    /// slot the producer fills after the snapshot is kept, with the ring
-    /// entries ahead of it, so each parameter loses only its oldest changes
-    /// and keeps its newest whenever it keeps any.
+    /// A [`Self::drain`] that emits nothing.  A slot filled after this
+    /// drain's `head` snapshot is kept, so a parameter loses only a prefix.
     // Only the tests call it: a state is loaded only while its plugin
     // loads, before any value is queued for it.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -355,7 +314,6 @@ impl Retry {
         }
     }
 
-    /// Keeps `value` for parameter `index`, replacing an older one.
     pub(crate) fn put(&mut self, index: usize, value: f64) {
         if let Some(slot) = self.values.get_mut(index) {
             *slot = value;
@@ -367,8 +325,7 @@ impl Retry {
         self.pending.iter().all(|&word| word == 0)
     }
 
-    /// Hands every kept value to `offer` as `(index, value)`; it stays
-    /// kept only where `offer` returns true.
+    /// Stays kept only where `offer` returns true.
     pub(crate) fn retain(&mut self, mut offer: impl FnMut(usize, f64) -> bool) {
         for (word_index, word) in self.pending.iter_mut().enumerate() {
             let mut bits = *word;

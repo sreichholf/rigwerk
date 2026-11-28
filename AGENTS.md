@@ -230,10 +230,82 @@ scripts/nam-rs-parity.sh .nam-rs-parity
   kind of type. The UI holds plugin descriptors and published views,
   never the plugin instances.
 
-Read the `//!` at the top of a file before editing it. That comment is
-the contract. Match the comment style around you: module docs say what
-the file is for and the constraint that is easy to miss, and sentences
-in those comments are separated by two spaces.
+## Comments
+
+A comment says what the code cannot.  That is the why, special handling
+the types do not express, or the source of an algorithm that is not a
+common one.  Write it for an engineer who can already read the function.
+Terse.  Two spaces between sentences.  The same rule covers `//!`, `///`,
+and `//`, in tests as well as in the implementation.
+
+Do not restate the code underneath.  Do not narrate the control flow, the
+order of the steps, or what a function returns when its name and body
+already say it.  Do not record history: what a field used to be called,
+what an older build did, how the design got here.  A `serde` alias, a
+generation counter, or a second buffer is the handling.  When a comment
+is still needed, it states the constraint that handling exists for, in
+one or two lines.
+
+A module doc is the constraint that is easy to miss, not a tour of the
+file.  Read it before editing the file, and change it when that
+constraint changes.  Name an uncommon algorithm and where it comes from.
+The NAM normalised-loudness target cites NeuralAmpModelerPlugin's
+`_SetOutputGain`; a bubble sort, a clamp, a fade, or a ring pop needs
+nothing.  Do not copy a longer comment beside the code you are editing.
+Cut it to this section.  `vendor/` keeps its upstream comments.
+
+Cut a true comment down to the why and the handling.  The subnormal
+guard's module doc also walked through what `DenormalGuard` already
+does:
+
+```rust
+//! Flushing subnormal floats to zero on the audio threads.
+//!
+//! When a signal decays into silence, IIR filter states (the EQ biquads) and
+//! envelope extra outputs (the gate) pass through the subnormal range on their way
+//! to zero.  On x86 every operation on such a value takes a slow microcode
+//! path, often a hundred times slower than a normal one, and a decay can stay
+//! there for seconds.  At small buffers that is enough to miss a deadline.
+//!
+//! [`DenormalGuard`] switches the current thread to flush-to-zero (and, on
+//! x86, denormals-are-zero) for as long as it lives and restores the previous
+//! mode when it is dropped.  The audio callbacks hold one for the length of a
+//! block, so the plugin effects processed inside that block see the same mode
+//! a DAW would give them, while the driver's own code on that thread runs
+//! with whatever mode it had before.  Reading and writing the control register
+//! is a couple of instructions and never enters the kernel.
+//!
+//! Changing the floating-point mode is formally outside Rust's model, which
+//! assumes the default environment.  The asm blocks below are not `nomem` or
+//! `readonly`, so the compiler cannot move memory accesses (and the float work
+//! that feeds them) across the switch; arithmetic between the switches is what
+//! the mode is meant to affect, and nothing here depends on subnormal results.
+//!
+//! On 32-bit x86 only FTZ is set: DAZ is missing on the earliest SSE CPUs,
+//! where setting it faults.  Every x86_64 CPU has it.
+```
+
+That becomes:
+
+```rust
+//! FTZ/DAZ for one audio block.  A decaying IIR or envelope sits in the
+//! x86 subnormal microcode path long enough to miss a short buffer.
+//!
+//! The asm is not `nomem`, so float work cannot move across the mode
+//! switch.  32-bit x86 sets FTZ only: DAZ faults on early SSE.
+```
+
+The first paragraph is why the guard exists.  The second is handling the
+type cannot express: float work must not move across the mode switch, and
+DAZ faults on early 32-bit SSE.
+
+Delete a comment that only describes the next item.  `sanitized` trims
+and clamps:
+
+```rust
+/// Trims the path and puts every value in range.
+pub fn sanitized(&self) -> Self {
+```
 
 ## Separation
 

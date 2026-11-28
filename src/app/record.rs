@@ -1,11 +1,6 @@
-//! The Live record transport: the folder, the take name, and arming the engine.
-//!
-//! The UI thread never opens, writes, or joins the wav.  `start_recording`
-//! builds a path and calls `AudioEngine::arm_recording`, which returns
-//! immediately.  The writer creates parent directories.  Phase, elapsed
-//! time, and overruns are read from `AudioEngine::recording_status`.
-//! "Record the click" is one preference the engine reads per frame, so it
-//! is set straight through, never re-armed.
+//! The UI thread never opens, writes, or joins the wav.
+//! `start_recording` returns immediately.  "Record the click" is set
+//! straight through and never re-armed.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -15,10 +10,6 @@ use crate::app::settings::ExtraOutputPref;
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{is_vb_cable_render, EngineState, RecordPhase, RecordSource, RecordStatus};
 
-/// Where an empty recordings folder lands.
-///
-/// `$HOME/Recordings`, then `$USERPROFILE/Recordings`.  When neither variable
-/// is set, `recordings` in the current directory.
 pub(crate) fn default_record_folder() -> String {
     folder_from_env(
         std::env::var_os("HOME").as_deref(),
@@ -39,16 +30,14 @@ fn folder_from_env(home: Option<&OsStr>, userprofile: Option<&OsStr>) -> String 
 }
 
 impl RigWerkApp {
-    /// The recordings folder, as typed.  An empty folder becomes the
-    /// default when a take is armed and when preferences are saved.
+    /// An empty folder becomes the default when a take is armed and when
+    /// preferences are saved.
     pub(crate) fn set_record_folder(&mut self, folder: String) {
         self.record_folder = folder;
     }
 }
 
-/// An empty or blank folder becomes [`default_record_folder`].  Anything
-/// else is kept, with surrounding whitespace removed.  The directory is not
-/// created here.
+/// The directory is not created here.
 pub(crate) fn resolved_record_folder(folder: &str) -> String {
     let trimmed = folder.trim();
     if trimmed.is_empty() {
@@ -58,8 +47,6 @@ pub(crate) fn resolved_record_folder(folder: &str) -> String {
     }
 }
 
-/// Letters, numbers, spaces, and hyphens.  Anything else is dropped.
-/// Empty, once the ends are trimmed, becomes `take`.
 pub(crate) fn sanitize_take_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -73,9 +60,7 @@ pub(crate) fn sanitize_take_name(name: &str) -> String {
     }
 }
 
-/// `{session} {YYYYMMDD-HHMMSS}.wav` inside `folder`.  A path that is already
-/// there gets `-2`, then `-3`, and so on.  This only stats.  It does not
-/// create the file or the folder.
+/// This only stats.  It does not create the file or the folder.
 pub(crate) fn recording_path(folder: &Path, session_name: &str, stamp: &str) -> PathBuf {
     let stem = format!("{} {stamp}", sanitize_take_name(session_name));
     let mut path = folder.join(format!("{stem}.wav"));
@@ -90,7 +75,6 @@ pub(crate) fn recording_path(folder: &Path, session_name: &str, stamp: &str) -> 
     path
 }
 
-/// `m:ss` from `frames / rate`.  A rate of 0 is `0:00` (no division).
 pub(crate) fn format_elapsed(frames: u64, rate: u32) -> String {
     if rate == 0 {
         return "0:00".to_owned();
@@ -99,7 +83,6 @@ pub(crate) fn format_elapsed(frames: u64, rate: u32) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-/// A short lost-sample count.  `1 lost sample`, otherwise `N lost samples`.
 pub(crate) fn lost_samples_label(count: u64) -> String {
     match count {
         1 => "1 lost sample".to_owned(),
@@ -107,11 +90,9 @@ pub(crate) fn lost_samples_label(count: u64) -> String {
     }
 }
 
-/// The endpoint the take should capture.
-///
-/// On Windows the virtual output is the virtual cable, and its saved name
-/// is "RigWerk Out", not "CABLE Input".  A cable added as an ordinary
-/// extra output is still matched by name.  Every other case is the clock output.
+/// On Windows the virtual output's saved name is "RigWerk Out", not
+/// "CABLE Input", so a cable added as an ordinary extra output is still
+/// matched by name.
 pub(crate) fn record_source(extra_outputs: &[ExtraOutputPref]) -> RecordSource {
     record_source_for(cfg!(target_os = "windows"), extra_outputs)
 }
@@ -255,15 +236,10 @@ fn local_stamp() -> Option<String> {
 }
 
 impl RigWerkApp {
-    /// The recording writer's latest phase, counts and error, for the *Rec*
-    /// control and its menu.
     pub(crate) fn engine_recording_status(&self) -> RecordStatus {
         self.engine.recording_status()
     }
 
-    /// Arm a take of whatever the endpoint is writing.  Does nothing while
-    /// the bridge is not running, or while a take is already arming,
-    /// recording, or finishing.  Returns immediately; the writer owns the file.
     pub(crate) fn start_recording(&mut self) {
         if self.engine.state != EngineState::Running {
             return;
@@ -295,15 +271,12 @@ impl RigWerkApp {
         }
     }
 
-    /// "Record the click": whether takes carry the metronome tick and the
-    /// calibration click.  Saved with the preferences; the engine applies
-    /// it from the next frame, also during a take.
+    /// The engine applies it from the next frame, including during a take.
     pub(crate) fn set_record_click(&mut self, with_click: bool) {
         self.record_click = with_click;
         self.engine.set_record_click(with_click);
     }
 
-    /// Ask the writer to finish.  Returns immediately and does not join it.
     pub(crate) fn stop_recording(&mut self) {
         self.engine.disarm_recording();
         self.push_log("Recording stopped.", LogTone::Muted);

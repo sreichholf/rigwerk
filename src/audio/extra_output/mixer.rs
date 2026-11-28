@@ -1,18 +1,10 @@
-//! Playback for one generic extra output: ring → resampler → drift → device.
-//! No EQ, gate, plugins, master, sum or channel map — the clock output's
-//! callback already ran those and pushed the extra output's finished device
-//! channels into its ring.  This side only crosses the clock: it follows the
-//! fill, converts the rate and fades around a dropout, on every lane.
-//! Those lanes include the click-free half when the ring carries one
-//! ([`carries_record`]), and the frame is split back into both.  A wider
-//! device has none, so its take records the click.
+//! Ring, resampler, drift, dropout fade.  The clock callback already
+//! mapped the frame.  With drift steering off and a matching rate, this
+//! plays those samples bit for bit.
 //!
-//! What the Live Issues strip reads comes back through the slot's
-//! [`ExtraOutputBus`](super::ExtraOutputBus) as atomics: the dropout count and
-//! whether the drift integral is pinned at [`DRIFT_LIMIT_PPM`].  Closing a
-//! large step of the target (a new bridge buffer) can wind the integral to its
-//! limit with nothing wrong with the clock, so the pin is not published
-//! while such a step explains it.
+//! A large step of the bridge-buffer target can pin the integral with
+//! nothing wrong with the clock, so that pin is not published while the
+//! step explains it.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -26,7 +18,6 @@ use super::super::rt_guard::RtGuard;
 use super::super::shared::Shared;
 use super::bus::{carries_record, ring_lanes};
 
-/// The shared loop's limit, re-exported for the Live Issues strip.
 pub(crate) use super::super::mixer::drift::DRIFT_LIMIT_PPM;
 
 use super::super::mixer::drift::{
@@ -48,17 +39,14 @@ fn take_extra_output_frame(
     frame
 }
 
-/// Turns one extra output ring into device frames.
 pub(crate) struct ExtraOutputMixer {
     slot: usize,
     output_rate: u32,
     source_rate: u32,
-    /// The device's channel count, and the ring lanes that carry them
-    /// (see [`ring_lanes`]).
     channels: usize,
     lanes: usize,
-    /// Whether the second half of those lanes is the click-free frame.
-    /// Fixed when the extra output opens.
+    /// Click-free lanes in the second half.  Fixed when the extra output
+    /// opens.
     split: bool,
     resampler: FrameResampler<LaneFrame>,
     last: LaneFrame,
@@ -71,10 +59,9 @@ pub(crate) struct ExtraOutputMixer {
     drift_ppm: f32,
     drift_integral: f32,
     drift_error: Option<f32>,
-    /// The target the loop steered to last block.
     steer_target: usize,
-    /// The ring error (seconds) a large target step left, while the loop
-    /// closes it: until the error crosses zero or outgrows the step.
+    /// Ring error (seconds) left by a large target step, until it crosses
+    /// zero or outgrows the step.
     step_error: Option<f32>,
     resampling: bool,
     stable_since: Instant,
@@ -112,16 +99,14 @@ impl ExtraOutputMixer {
         }
     }
 
-    /// Publishes the device's channel count for the UI (the meters come from
-    /// the clock side's mapper for this slot).
+    /// The count only.  Meters come from the clock side's mapper.
     pub(crate) fn publish_channels(&self, shared: &Shared) {
         shared.extra_outputs[self.slot].set_channels(self.channels);
     }
 
-    /// Follows the clock output's rate, which is what feeds this ring.  The
-    /// worker that publishes the new rate plans the kernel; this callback only
-    /// installs it, and plays the current pair until it is ready (a small
-    /// pitch error for those blocks, not a rebuild inside the block).
+    /// Installs a kernel planned off this thread.  Until it is ready the
+    /// current pair plays, a small pitch error rather than a rebuild in
+    /// the block.
     pub(crate) fn follow_source_rate(&mut self, shared: &Shared) {
         let source = self.followed_source(shared);
         if source == self.source_rate {
@@ -138,7 +123,6 @@ impl ExtraOutputMixer {
         }
     }
 
-    /// The rate the clock side feeds this ring at, as `Shared` publishes it.
     fn followed_source(&self, shared: &Shared) -> u32 {
         match shared.output_rate.load(Ordering::Relaxed) {
             0 => match shared
@@ -153,9 +137,8 @@ impl ExtraOutputMixer {
         }
     }
 
-    /// Builds the filter for the rate `Shared` already published.  Call it when
-    /// the stream opens, before it drains the ring; a callback adopts a
-    /// planned table instead.
+    /// Before the stream drains the ring.  A callback adopts a planned
+    /// table instead of building one.
     pub(crate) fn configure_source_rate(&mut self, shared: &Shared) {
         let source = self.followed_source(shared);
         if source == self.source_rate {
@@ -170,13 +153,11 @@ impl ExtraOutputMixer {
         self.step_error = None;
     }
 
-    /// For tests: how many kernels the resampler built.
     #[cfg(test)]
     pub(crate) fn configure_calls(&self) -> usize {
         self.resampler.configure_calls()
     }
 
-    /// The rate pair the resampler is playing, for tests.
     #[cfg(test)]
     pub(crate) fn resampler_pair(&self) -> (u32, u32) {
         self.resampler.pair()
@@ -212,11 +193,9 @@ impl ExtraOutputMixer {
         self.drift_ppm
     }
 
-    /// Follows a large step of the target outside priming (see
-    /// [`DRIFT_STEP_SECONDS`]) until the ring error crosses zero, or grows
-    /// past the step by more than `margin` seconds (the step no longer
-    /// explains it), and returns whether the integral's pin is one the
-    /// clock caused.  Call after [`Self::steer_drift`].
+    /// True when the pin is the clock's.  A step of at least
+    /// [`DRIFT_STEP_SECONDS`] explains it until the error crosses zero or
+    /// outgrows the step.  Call after [`Self::steer_drift`].
     fn drift_pinned(&mut self, shared: &Shared, target: usize, margin: f32) -> bool {
         let rate = self.source_rate as f32;
         let previous = std::mem::replace(&mut self.steer_target, target);
@@ -235,7 +214,6 @@ impl ExtraOutputMixer {
         self.drift_integral.abs() >= DRIFT_LIMIT_RATIO && self.step_error.is_none()
     }
 
-    /// Renders `frames` onto the extra output device.
     pub(crate) fn render(
         &mut self,
         shared: &Shared,
@@ -243,7 +221,6 @@ impl ExtraOutputMixer {
         mut write: impl FnMut(usize, &DeviceFrame),
     ) {
         let _denormals = DenormalGuard::new();
-        // Nothing in this block may allocate (see `audio::rt_guard`).
         let _no_allocations = RtGuard::enter();
         self.follow_source_rate(shared);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);

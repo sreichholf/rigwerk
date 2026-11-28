@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use super::{tracked_slots_alive, Slot, SlotPark};
 
-/// Each engine owns its park: a slot deferred into one owner is not visible
-/// to another, and only the owner that holds it frees it.
 #[test]
 fn a_deferred_slot_drains_through_its_own_park() {
     let _main = crate::audio::claim_main_thread();
@@ -26,9 +24,6 @@ fn a_deferred_slot_drains_through_its_own_park() {
     assert_eq!(first.len(), 0);
 }
 
-/// The park's own drop follows the same destroy-thread rule as
-/// `release_slot`: a park dropped where plugins may not be destroyed forgets
-/// what is left instead of destroying it there.
 #[test]
 fn a_park_dropped_off_the_main_thread_destroys_nothing() {
     let _main = crate::audio::claim_main_thread();

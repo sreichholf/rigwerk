@@ -1,13 +1,7 @@
-//! The drift loop's constants, shared by the clock output and every extra
-//! output.
+//! One copy of the drift-loop gains, so a tune cannot move one mixer only.
 //!
-//! [`OutputMixer`](super::OutputMixer) and the
-//! [`extra_output`](super::super::extra_output) mixer each run their own PI
-//! loop, on their own ring, in the same units: the error is
-//! seconds of fill, the correction is a ratio.  The limit, the low-pass and
-//! the gains are the same loop and live here once, so a tune cannot move one
-//! copy only.  What differs stays with each mixer: the ring it reads, the
-//! priming state, and the extra output's step that a new bridge buffer takes.
+//! The error is seconds of fill and the correction is a ratio.  Each mixer
+//! keeps its own ring, priming and buffer-step handling.
 
 /// The most drift steering may trim the conversion ratio.  500 ppm is under
 /// one cent of pitch.  Real clock offsets between two interfaces are a few
@@ -34,13 +28,9 @@ pub(crate) const DRIFT_KI: f32 = 0.0012;
 /// pinned.
 pub(crate) const DRIFT_STEP_SECONDS: f32 = DRIFT_LIMIT_RATIO / DRIFT_KP;
 
-// The fill low-pass makes the closed loop cubic: T·s³ + s² + Kp·s + Ki with
-// T = `DRIFT_FILTER_SECONDS`.  Routh–Hurwitz keeps every root left of the
-// imaginary axis while `T < Kp / Ki`, and the model rings past that.  The
-// loop itself runs once per block, so this is the continuous condition as a
-// coarse tripwire and nothing more: not a discrete-time stability proof, not
-// a margin, not a settling-time claim, only that a retune has not driven the
-// model to ring outright.
+// The fill low-pass makes the closed loop cubic.  Routh–Hurwitz
+// stays stable while `T < Kp / Ki`.  The loop runs once per block,
+// so this only trips a retune that makes the model ring.
 const _: () = assert!(DRIFT_FILTER_SECONDS < DRIFT_KP / DRIFT_KI);
 
 // The resampler clips the ratio at `MAX_CORRECTION_PPM`, so this loop's limit

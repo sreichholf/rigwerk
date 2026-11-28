@@ -1,16 +1,8 @@
-//! Routing layouts (the starting points of the sum matrix).
-//!
-//! A layout sets the input routing of the first paths (in display order) and
-//! their map, level and polarity on every output device.  It never removes
-//! a path or an effect: missing paths are added (empty, or for Blend and
-//! Dual-amp as a copy of the first path), and paths past the layout's count
-//! are kept but routed nowhere.  Any edit afterwards reads as Custom
-//! ([`RigWerkApp::current_layout`] returns `None`).  A layout counts and
-//! routes only the paths fed by the input: a return keeps its own maps.
-//!
-//! Blend and Dual-amp sum two paths on every channel; the per-device
-//! latency alignment (on by default, `app::alignment`) lines them up, so a
-//! latent amp sim on one of them does not comb filter.
+//! A layout never removes a path or an effect.  Missing paths are added
+//! (empty, or a copy of the first for Blend and Dual-amp); paths past
+//! its count stay but route nowhere.  Any later edit reads as Custom.
+//! A return keeps its own maps.  Blend and Dual-amp sum on every channel
+//! and rely on alignment, so a latent amp does not comb-filter.
 
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
@@ -20,19 +12,12 @@ const STEREO_IN: [[bool; 4]; 2] = [[true, false, false, false], [false, true, fa
 /// IN 1 on both L and R (a mono guitar).
 const MONO_IN: [[bool; 4]; 2] = [[true, true, false, false], [false, false, false, false]];
 
-/// One routing layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathLayout {
-    /// One path, L/R on Out 1/2: today's routing.
     Single,
-    /// Path 1 on the left channels, path 2 on the right; both on RigWerk
-    /// Out.  No sum.
     DryWet,
-    /// Clean path at −6 dB under a driven one, summed on every device.
     Blend,
-    /// Two amp paths summed, the second with its polarity flipped.
     DualAmp,
-    /// Path 1 on the clock output, path 2 on every extra output.
     PerDevice,
 }
 
@@ -55,14 +40,10 @@ impl PathLayout {
         }
     }
 
-    /// Layouts that sum paths on one channel (they rely on the latency
-    /// alignment, on by default per device).  Their missing second path
-    /// starts as a copy of the first.
     pub(crate) fn sums_paths(self) -> bool {
         matches!(self, PathLayout::Blend | PathLayout::DualAmp)
     }
 
-    /// How many paths the layout sets up.
     pub(crate) fn path_count(self) -> usize {
         match self {
             PathLayout::Single => 1,
@@ -70,7 +51,6 @@ impl PathLayout {
         }
     }
 
-    /// The one-line summary beside the name in a menu.
     pub(crate) fn caption(self) -> &'static str {
         match self {
             PathLayout::Single => "today · one chain",
@@ -88,8 +68,6 @@ impl PathLayout {
         }
     }
 
-    /// Layout path `path`'s map, level and polarity on a device; `None` past
-    /// the layout's paths (routed nowhere).
     fn entry(self, path: usize, device: &DeviceShape) -> (ChannelMap, f32, bool) {
         let stereo = ChannelMap::default();
         let none = ChannelMap { left: 0, right: 0 };
@@ -121,7 +99,6 @@ impl PathLayout {
     }
 }
 
-/// The tag shown when the routing matches no layout.
 pub(crate) fn custom_label(last: Option<PathLayout>) -> String {
     match last {
         Some(layout) => format!("Custom · edited from {}", layout.label()),
@@ -129,7 +106,6 @@ pub(crate) fn custom_label(last: Option<PathLayout>) -> String {
     }
 }
 
-/// What a layout needs to know about one output device.
 struct DeviceShape {
     channels: usize,
     clock: bool,
@@ -148,10 +124,7 @@ impl RigWerkApp {
             .collect()
     }
 
-    /// Applies `layout`: input routing of its paths and every path's map,
-    /// level and polarity on every device (trims stay).  Adds the paths it
-    /// is missing, playing (unmuted); never removes a path or an effect.
-    /// `false` if a path it needs could not be added.
+    /// Trims stay.  `false` when a path it needs could not be added.
     pub(crate) fn apply_layout(&mut self, layout: PathLayout) -> bool {
         let selected = self.selected_path;
         while self.sender_slots().len() < layout.path_count() {
@@ -195,7 +168,6 @@ impl RigWerkApp {
         true
     }
 
-    /// The layout the routing matches exactly, or `None` (Custom).
     pub(crate) fn current_layout(&self) -> Option<PathLayout> {
         let slots = self.sender_slots();
         let shapes = self.device_shapes();

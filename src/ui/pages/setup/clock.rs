@@ -1,5 +1,3 @@
-//! Drift, drift correction, the bridge buffer and dropouts.
-
 use eframe::egui;
 use egui::{Align, Layout, Rect, RichText};
 
@@ -110,7 +108,6 @@ fn dropout_text(count: u64) -> String {
     }
 }
 
-/// Auto, Minimum, Fixed, in the order they are offered.
 fn bridge_buffer_choices() -> [(BufferMode, &'static str, &'static str); 3] {
     [
         (
@@ -131,8 +128,7 @@ fn bridge_buffer_choices() -> [(BufferMode, &'static str, &'static str); 3] {
     ]
 }
 
-/// Width of the three modes as one segmented control (`widgets::segmented`
-/// measures each segment as its label plus 24 pt).
+/// `widgets::segmented` measures each segment as its label plus 24 pt.
 fn bridge_buffer_tab_row_width(ui: &egui::Ui) -> f32 {
     let text_font = font(Face::Sans, TypeRole::Control);
     bridge_buffer_choices()
@@ -151,14 +147,13 @@ fn bridge_buffer_tab_row_width(ui: &egui::Ui) -> f32 {
         .sum()
 }
 
-/// The three tabs fit the strip when this is true.  What is left of the line
-/// after the readings is the width that matters.
+/// What is left of the line after the readings is the width that matters.
 fn bridge_buffer_modes_fit(ui: &egui::Ui) -> bool {
     bridge_buffer_tab_row_width(ui) <= ui.available_width()
 }
 
-/// A segmented control when it fits.  A combo of the same three modes when
-/// it does not, so the last label is not clipped.
+/// A combo of the same three modes when the segmented control would clip
+/// the last label.
 fn bridge_buffer_mode_picker(ui: &mut egui::Ui, mode: &mut BufferMode) -> Rect {
     let choices = bridge_buffer_choices();
     if bridge_buffer_modes_fit(ui) {
@@ -196,7 +191,7 @@ fn bridge_buffer_mode_picker(ui: &mut egui::Ui, mode: &mut BufferMode) -> Rect {
     }
 }
 
-/// The fixed size.  The number and the slider; the caller stores and applies it.
+/// The caller stores and applies the value.
 fn fixed_bridge_buffer_size(ui: &mut egui::Ui, ms: &mut f32) -> egui::Response {
     let colours = palette(ui.ctx());
     ui.add_space(4.0);

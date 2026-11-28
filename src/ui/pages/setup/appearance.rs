@@ -1,5 +1,3 @@
-//! Start, theme, size, effects and the recordings folder.
-
 use eframe::egui;
 use egui::RichText;
 

@@ -1,17 +1,14 @@
-//! The pause handshake for plugin work that must not overlap processing:
-//! VST3 `setActive`, `setupProcessing`, a `restartComponent` for latency or
-//! I/O, a state load; CLAP `deactivate` / `activate`.  Format-neutral.
+//! Pause handshake so plugin work does not overlap processing (VST3
+//! `setActive`, `setupProcessing`, `restartComponent`, a state load; CLAP
+//! `deactivate` / `activate`).
 //!
-//! Only the stop and start calls belong to the audio thread (VST3
-//! `setProcessing` may be called there, as may CLAP `stop_processing` /
-//! `start_processing`); the work in between is UI-thread work.  The
-//! handshake is atomics only, so the audio side never blocks or allocates.
+//! Stop and start are the audio thread's (VST3 `setProcessing`, CLAP
+//! `stop_processing` / `start_processing`).  The work between them is the
+//! UI thread's.  Atomics only: the audio side never blocks or allocates.
 //!
-//! The audio side brackets every block with [`PauseHandshake::begin_block`]
-//! and the [`BlockGuard`] it returns, so the UI can tell when no audio
-//! thread is inside the plugin and may force a pause without waiting for
-//! one (no bridge, a lingering one, a path that went inactive).
-//! [`drive_pause`] is the UI side, one call per frame.
+//! The UI may force a pause when no block is inside the plugin.  Unquiet
+//! for [`PAUSE_STRANDED`] is stranded: the slot is not destroyed while a
+//! thread may still be inside `process`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -33,7 +30,6 @@ pub(crate) const PAUSE_STALL: Duration = Duration::from_millis(500);
 /// debugger stop on the audio thread or severe preemption.
 pub(crate) const PAUSE_STRANDED: Duration = Duration::from_secs(2);
 
-/// Processing as usual.
 const RUNNING: u8 = 0;
 /// The UI asked for a pause; the audio side has not seen it yet.
 const REQUESTED: u8 = 1;
@@ -48,11 +44,8 @@ const PAUSED: u8 = 3;
 /// finished its work, or the plugin is new and has not started yet.
 const RESUMING: u8 = 4;
 
-/// What the audio side does with this block, from
-/// [`BlockGuard::action`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockAction {
-    /// Process as usual.
     Process,
     /// Make the stop call (`setProcessing(false)` / `stop_processing`),
     /// then call [`PauseHandshake::stopped`].  The effect plays this block
@@ -69,55 +62,30 @@ pub(crate) enum BlockAction {
     Start,
 }
 
-/// One plugin's pause handshake.  The sequence:
+/// One plugin's pause handshake.  Atomics only.
 ///
-/// 1. The UI calls [`Self::request`].
-/// 2. The audio side's next [`Self::begin_block`] returns
-///    [`BlockAction::Stop`]; it makes the stop call and calls
-///    [`Self::stopped`], which marks the plugin paused.
-/// 3. The UI waits for [`Self::quiet`], does its work and calls
-///    [`Self::resume`].
-/// 4. The next `begin_block` returns [`BlockAction::Start`]: the audio
-///    side makes the start call, calls [`Self::started`] and processes the
-///    block.
+/// The paused mark is stored after the stop call, and `quiet` acquires the
+/// guard's release, so UI work happens after the stop and the start call
+/// (which sees `RESUMING`) happens after that work.
 ///
-/// The paused mark is stored after the stop call and the UI's `quiet` load
-/// acquires the guard's release, so the UI's work happens after the stop
-/// call, and the start call (which sees `RESUMING`) after the UI's work.
+/// A new handshake is an activated plugin that is not processing yet: its
+/// first block returns [`BlockAction::Start`].  [`Self::resume`] before
+/// the audio side stopped cancels the request.  [`Self::request`] before
+/// the restart cancels the start, and the next block marks paused with no
+/// stop call.  After [`Self::force`], `resume` refuses until `quiet` and
+/// the stop call: a block still inside, or a plugin still processing,
+/// would get a second start.
 ///
-/// Processing starts lazily on the audio thread: a new handshake is for
-/// an activated plugin that is not processing yet, so its first block
-/// returns [`BlockAction::Start`].
+/// Forcing is Dekker.  `begin_block` stores `in_block` then reads `state`;
+/// `force` swaps `state` to paused and `quiet` loads `in_block`.  All four
+/// are `SeqCst`.  Either the audio side's state access is after the swap
+/// (it sees paused and skips) or its `in_block` store is before the UI's
+/// load (the UI waits for the guard).
 ///
-/// A [`Self::resume`] before the audio side stopped cancels the request
-/// with no Stop/Start pair; one during its stop call turns into a Start on
-/// the next block.  A [`Self::request`] before the audio side restarted
-/// (or before its first block) cancels the start, and the next block marks
-/// the plugin paused with no stop call.
-///
-/// When no block comes to serve the request, the UI calls [`Self::force`],
-/// waits for [`Self::quiet`], and makes the stop call itself when
-/// [`Self::take_processing`] returns true.  It leaves with
-/// [`Self::resume`] as usual: the next block makes the start call.  After a
-/// force, `resume` refuses until `quiet` has returned true and the stop
-/// call is taken: a block still inside the plugin, or a plugin still
-/// processing, would otherwise get a second start call.
-///
-/// Forcing is safe whatever the audio side does (Dekker): `begin_block`
-/// stores `in_block = true` and then reads or moves `state`; `force` swaps
-/// `state` to paused and `quiet` then loads `in_block`.  All four are
-/// `SeqCst`, so in their single total order either the audio's state
-/// access comes after the swap (it sees paused and returns
-/// [`BlockAction::Skip`]), or its `in_block` store comes before the UI's
-/// load (the UI sees the block, and waits for the guard's release).
-///
-/// One block at a time per handshake: `in_block` is a bool, not a count.
-/// The processor's `&mut`, held by whoever holds the chain's runtime, gives
-/// that.  A guard
-/// kept too long, or leaked, only keeps a pause from finishing (`quiet`
-/// stays false); it never makes one unsafe.  A pause that stays unquiet for
-/// [`PAUSE_STRANDED`] is taken to be stranded: it is marked (see
-/// [`Self::stranded`]) and the effect fails instead of waiting forever.
+/// One block at a time: `in_block` is a bool.  The processor's `&mut`
+/// gives that.  A guard held too long only keeps `quiet` false.  Unquiet
+/// for [`PAUSE_STRANDED`] is stranded: the effect fails and the slot is
+/// not destroyed.
 pub(crate) struct PauseHandshake {
     state: AtomicU8,
     paused_blocks: AtomicU64,
@@ -149,7 +117,6 @@ pub(crate) struct BlockGuard<'a> {
 }
 
 impl BlockGuard<'_> {
-    /// What to do with this block.
     pub(crate) fn action(&self) -> BlockAction {
         self.action
     }
@@ -177,10 +144,8 @@ impl PauseHandshake {
         }
     }
 
-    /// Moves the state through `next` and returns the state it moved from
-    /// (or the current one, when `next` leaves it alone).  `SeqCst` both
-    /// ways: when `next` leaves the state alone this is a plain load, and
-    /// [`Self::begin_block`] needs that load in the total order too.
+    /// `SeqCst` both ways.  When `next` leaves the state alone this is a
+    /// load, and [`Self::begin_block`] needs that load in the total order.
     fn step(&self, next: impl FnMut(u8) -> Option<u8>) -> u8 {
         match self
             .state
@@ -190,8 +155,7 @@ impl PauseHandshake {
         }
     }
 
-    /// UI side: asks the audio side to stop.  A no-op while a pause is
-    /// already requested or in place.
+    /// UI side.  A no-op while a pause is already requested or in place.
     pub(crate) fn request(&self) {
         self.step(|state| match state {
             RUNNING => Some(REQUESTED),
@@ -288,12 +252,10 @@ impl PauseHandshake {
         }
     }
 
-    /// True while the plugin is processing (started and not stopped).
     pub(crate) fn processing(&self) -> bool {
         self.processing.load(Ordering::Acquire)
     }
 
-    /// Blocks the audio side has begun, ever.
     pub(crate) fn served(&self) -> u64 {
         self.served.load(Ordering::Relaxed)
     }
@@ -342,8 +304,7 @@ impl PauseHandshake {
         }
     }
 
-    /// Audio side, after a successful start call a [`BlockAction::Start`]
-    /// asked for.
+    /// Audio side, after a successful [`BlockAction::Start`].
     pub(crate) fn started(&self) {
         self.processing.store(true, Ordering::Release);
     }
@@ -365,16 +326,14 @@ impl PauseHandshake {
         self.step(|state| (state == STOPPING).then_some(PAUSED));
     }
 
-    /// Blocks the audio side played dry because of a pause, ever.
-    // Read by the tests; Diagnostics counts pauses per effect instead
-    // (`SlotControls`), so a reset there does not clear this.
+    // Diagnostics counts pauses per effect (`SlotControls`), so a reset
+    // there does not clear this.  The tests read it.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn paused_blocks(&self) -> u64 {
         self.paused_blocks.load(Ordering::Relaxed)
     }
 }
 
-/// One frame of [`drive_pause`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PauseStep {
     /// Not paused yet: call again next frame.
@@ -389,22 +348,14 @@ pub(crate) enum PauseStep {
     Stranded,
 }
 
-/// UI side: one frame of a pause the UI wants, for any format.  `wait`
-/// starts as `None` and is kept between frames; [`PauseStep::Ready`] sets
-/// it back to `None`, so the same one serves the next pause.
+/// UI side, one frame.  `wait` starts as `None` and [`PauseStep::Ready`]
+/// clears it, so the same slot serves the next pause.
 ///
-/// The first call requests the pause.  A plugin that is not processing
-/// (never started, or already stopped) is forced at once; so is one whose
-/// blocks have not been served for [`PAUSE_STALL`] (the stream stopped).
-/// Otherwise the audio side's next block makes the stop call.  Once
-/// [`PauseHandshake::quiet`], `stop` runs if the plugin is still
-/// processing: the stop call the audio side did not make.
-///
-/// A pause that stays unquiet for [`PAUSE_STRANDED`], counted from the last
-/// served block or the request, is [`PauseStep::Stranded`]: the plugin is
-/// still inside `process` and never drops its guard.  The handshake is
-/// marked stranded and the wait cleared; every later call returns
-/// [`PauseStep::Stranded`] at once, even after a late `quiet`.
+/// Not processing, or unserved for [`PAUSE_STALL`], is forced at once.
+/// Once [`PauseHandshake::quiet`], `stop` runs only if the plugin is still
+/// processing.  Unquiet for [`PAUSE_STRANDED`] (from the last served block
+/// or the request) is [`PauseStep::Stranded`] and stays so after a late
+/// `quiet`: no stop call was made and none may be.
 pub(crate) fn drive_pause(
     pause: &PauseHandshake,
     wait: &mut Option<(Instant, u64)>,

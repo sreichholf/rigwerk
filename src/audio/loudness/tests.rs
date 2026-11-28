@@ -8,7 +8,6 @@ fn meter(channels: usize) -> LoudnessMeter {
     meter
 }
 
-/// Feeds `seconds` of a 1 kHz sine at `amplitude` peak on every channel.
 fn feed_sine(meter: &mut LoudnessMeter, seconds: f32, amplitude: f32, channels: usize) {
     let frames = (RATE as f32 * seconds) as usize;
     let step = 2.0 * std::f64::consts::PI * 1000.0 / RATE as f64;
@@ -97,9 +96,9 @@ fn the_relative_gate_ignores_a_quiet_tail() {
     let mut meter = meter(1);
     feed_sine(&mut meter, 2.0, 0.1, 1);
     feed_sine(&mut meter, 2.0, 0.01, 1);
-    // The tail is about -43 LUFS: above the absolute gate, but more than
-    // 10 LU below the loud block, so only the relative gate removes it.  An
-    // ungated mean of both halves would read about -26 LUFS.
+    // The tail is about -43 LUFS: above the absolute gate, more than 10 LU
+    // under the loud half, so only the relative gate removes it.  An ungated
+    // mean would read about -26 LUFS.
     let integrated = meter.reading(0.0).integrated_lufs;
     assert!(
         (-23.6..=-22.8).contains(&integrated),
@@ -121,8 +120,7 @@ fn a_reset_forgets_the_windows() {
 
 #[test]
 fn the_history_keeps_sixty_seconds_of_blocks() {
-    // One block per 100 ms, so 600 blocks is 60 s.  Feeding more must not
-    // grow the reading's backing store or count blocks past its ring.
+    // 61 s is past the 600-block ring; the count must stop there.
     let mut meter = meter(1);
     feed_sine(&mut meter, 61.0, 0.1, 1);
     let reading = meter.reading(0.0);

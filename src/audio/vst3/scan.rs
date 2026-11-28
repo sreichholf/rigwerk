@@ -1,24 +1,11 @@
-//! Finding VST3 bundles and reading what they declare, without loading
-//! them.
+//! Bundle discovery without loading a binary.  A bundle is listed only
+//! when `module::binary_path` finds a loadable binary; classes come from
+//! `moduleinfo.json`.
 //!
-//! The scan runs on the `rigwerk-plugin-scan` thread, and the module
-//! registry (`module.rs`) loads and drops binaries on the UI thread only,
-//! so nothing here loads a binary.  A bundle is listed when it has a
-//! binary this build can load (`module::binary_path`, the same lookup a
-//! load uses: the architecture folder, then the binary's header), and its
-//! classes come from `moduleinfo.json`.
-//!
-//! A bundle without `moduleinfo.json` (SDKs before 3.7) is not asked for
-//! its classes here.  Listing them would mean loading every such binary on
-//! the UI thread when the scan finishes, where a slow or crashing plugin
-//! would stall or take down the app before anyone picked it.  The app
-//! lists that bundle as one row without a class id instead, and the load
-//! takes the factory's first audio class (`factory::audio_class`).
-//!
-//! `moduleinfo.json` is what Steinberg calls JSON5; `moduleinfotool`
-//! writes JSON with trailing commas, and comments may appear.  Those two
-//! are stripped before `serde_json` reads it; other JSON5 forms are
-//! refused, and the bundle then gets the same one-row fallback.
+//! A bundle without that file (SDK before 3.7) is one row with no class
+//! id.  Loading every such binary to list classes would stall or crash
+//! the UI.  Trailing commas and comments (`moduleinfotool`) are stripped;
+//! other JSON5 is refused and gets the same one-row fallback.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -46,7 +33,6 @@ pub(crate) struct FactoryInfo {
     pub(crate) vendor: String,
 }
 
-/// One class of the module.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ModuleClass {
     /// 32 hex digits in canonical order, as preferences save it.
@@ -62,8 +48,7 @@ pub(crate) struct ModuleClass {
     pub(crate) sub_categories: Vec<String>,
 }
 
-/// The folders to scan: the platform's standard VST3 folders, then the
-/// `;`-separated folders in `RIGWERK_VST3_PATH`.
+/// Standard VST3 folders, then `;`-separated `RIGWERK_VST3_PATH`.
 pub(crate) fn search_roots() -> Vec<PathBuf> {
     let mut roots = standard_roots();
     if let Ok(extra) = std::env::var("RIGWERK_VST3_PATH") {
@@ -72,8 +57,6 @@ pub(crate) fn search_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// The folders in a `RIGWERK_VST3_PATH` value: `;`-separated, trimmed,
-/// empty parts skipped.
 pub(super) fn extra_roots(value: &str) -> Vec<PathBuf> {
     value
         .split(';')
@@ -83,8 +66,7 @@ pub(super) fn extra_roots(value: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The VST3 SDK's standard folders on Linux: the user's, then the
-/// system's.
+/// SDK folders: the user's, then the system's.
 #[cfg(target_os = "linux")]
 fn standard_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -96,9 +78,8 @@ fn standard_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// The VST3 SDK's standard folders on Windows: the user's, then Common
-/// Files.  `CommonProgramFiles` is the folder for this build's bitness, so
-/// a 64-bit build does not scan the 32-bit plugins in `Program Files (x86)`.
+/// User folder, then Common Files.  `CommonProgramFiles` matches this
+/// build's bitness, so a 64-bit build skips `Program Files (x86)`.
 #[cfg(target_os = "windows")]
 fn standard_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -118,10 +99,9 @@ fn standard_roots() -> Vec<PathBuf> {
     Vec::new()
 }
 
-/// Every `.vst3` under `roots`, sorted.  A folder is searched recursively,
-/// but a bundle is not searched inside: on Windows its binary is a `.vst3`
-/// too.  A root that is itself a bundle is taken as one.  Each folder is
-/// read once, so a symlink back to a parent ends instead of looping.
+/// A bundle is not searched inside: on Windows its binary is a `.vst3`
+/// too.  A root that is itself a bundle is one hit.  Each folder is
+/// canonicalized once, so a symlink to a parent stops.
 pub(crate) fn find_bundles(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut visited = HashSet::new();
@@ -157,23 +137,20 @@ fn walk(dir: &Path, visited: &mut HashSet<PathBuf>, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// A `.vst3` bundle folder or single-file plugin, by its name.
 fn is_bundle_name(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("vst3"))
 }
 
-/// Whether the bundle holds a binary this build can load.  A bundle that
-/// only ships another architecture's binary is left out of the library.
-/// Reads the start of the binary, never loads it.
+/// Reads the binary header, never loads it.  Another architecture is
+/// left out of the library.
 pub(crate) fn has_loadable_binary(bundle: &Path) -> bool {
     super::module::binary_path(bundle).is_ok()
 }
 
-/// The bundle's `moduleinfo.json` (`Contents/Resources`, or the SDK 3.7.5
-/// `Contents` location), or `None` when there is none.  `path` is the
-/// bundle, or a file inside it.
+/// `Contents/Resources/moduleinfo.json`, or the SDK 3.7.5 `Contents`
+/// location.  `path` is the bundle or a file inside it.  `None` if absent.
 pub(crate) fn read_module_info(path: &Path) -> Result<Option<ModuleInfo>, String> {
     let Some(bundle) = bundle_root(path) else {
         return Ok(None);
@@ -207,7 +184,6 @@ pub(crate) fn read_module_info(path: &Path) -> Result<Option<ModuleInfo>, String
         .map_err(|error| format!("{}: {error}", file.display()))
 }
 
-/// The bundle folder `path` names or lies in.
 fn bundle_root(path: &Path) -> Option<&Path> {
     if path.is_dir() {
         Some(path)
@@ -218,8 +194,6 @@ fn bundle_root(path: &Path) -> Option<&Path> {
     }
 }
 
-/// `moduleinfo.json` text into its classes.  A class whose id is not 32
-/// hex digits is dropped; the others keep their order.
 pub(super) fn parse_module_info(text: &str) -> Result<ModuleInfo, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let json = strip_json5(text)?;
@@ -233,8 +207,7 @@ pub(super) fn parse_module_info(text: &str) -> Result<ModuleInfo, String> {
     Ok(info)
 }
 
-/// JSON with comments and trailing commas as plain JSON.  Strings are
-/// copied as they are; a comment becomes whitespace.
+/// Comments and trailing commas only.  Strings are copied unchanged.
 pub(super) fn strip_json5(text: &str) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();

@@ -1,6 +1,5 @@
-//! One ASIO driver carrying both directions: one callback moves input into
-//! the ring and output out of it.  Either side's Panel request opens this
-//! driver's control panel, on this thread, between callbacks.
+//! One driver, one callback, both directions.  Either side's panel request
+//! opens this driver's panel, on this thread, between callbacks.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -56,8 +55,8 @@ pub(crate) fn run_asio_duplex_bridge(
         return Err("The ASIO driver has no output channels".to_owned());
     }
     let input_channels = (counts.in_ as usize).min(2);
-    // Cap at the map's addressable width so routing layer ② can reach every
-    // open channel.  Unused channels follow the clock output's unused mode.
+    // Capped so routing layer ② can reach every open channel.  Unused
+    // channels follow the clock output's unused mode.
     let output_channels = (counts.out as usize).min(crate::audio::MAX_OUTPUT_CHANNELS);
 
     let buffer = driver
@@ -79,7 +78,8 @@ pub(crate) fn run_asio_duplex_bridge(
         OutputMode::Asio,
         format!("ASIO in and out · one driver, {buffer_frames} smp"),
     );
-    // The UI thread reloads plugins from the rate published above.
+    // The UI thread reloads plugins from the rate above.  This thread
+    // must not.
 
     let mut input_types = Vec::new();
     let mut output_types = Vec::new();

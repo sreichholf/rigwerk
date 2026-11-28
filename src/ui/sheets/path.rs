@@ -1,16 +1,5 @@
-//! The path sheet's body (`docs/ui-spec.md` §6.1): the name and colour,
-//! the source (*Input* or *Sends*; for the input a 2 × 2 grid and *Stereo*
-//! / *Mono*), the sends, the path's L/R output channels, level, mute and
-//! solo, *Duplicate (muted)*, *Apply layout ▸*, *Remove*, and the path's
-//! latency on every output it plays on.
-//!
-//! A path fed by the input lists its send to each return; a return lists
-//! the send from each path fed by the input.  Both edit the same value.
-//! A return has no solo: it is solo-safe.
-//!
-//! The header above (`sheets.rs`) names the path and its dot.  Every edit
-//! goes through a `RigWerkApp` method; the sheet selects its path before it
-//! draws (`sheets.rs`), so the selected-path setters name this path.
+//! The path sheet.  A path and a return edit the same send.  A return has
+//! no solo: it is solo-safe.  Every edit goes through a `RigWerkApp` method.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
@@ -31,7 +20,6 @@ use crate::ui::widgets::OutlineButton;
 const COLUMN_GAP: f32 = 24.0;
 
 impl RigWerkApp {
-    /// The path sheet body for path `slot`.
     pub(crate) fn path_sheet(&mut self, ui: &mut egui::Ui, slot: usize) {
         let Some(path) = self.paths.get(slot).and_then(Option::as_ref).cloned() else {
             return;

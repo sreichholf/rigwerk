@@ -8,9 +8,8 @@ use super::{
 use crate::audio::vst3::module::tests::this_build_binary;
 use crate::audio::vst3::module::{ARCH_FOLDERS, BINARY_EXTENSION};
 
-/// A temp folder of fake bundles, removed on drop.  Each bundle holds a
-/// binary header for this build where it looks for one; nothing loads it.  Also
-/// used by the app's scan tests.
+/// Removed on drop.  Each bundle has a header for this build; nothing
+/// loads it.  The app's scan tests use it too.
 pub(crate) struct TestBundles {
     pub(crate) root: PathBuf,
 }

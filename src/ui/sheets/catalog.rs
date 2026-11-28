@@ -1,10 +1,5 @@
-//! The file list the NAM and cab sheets share.
-//!
-//! Both sheets pick one file from a folder.  [`catalog_columns`] is that
-//! picker: the list is the left half of whatever height is left in the
-//! sheet, and it scrolls, and the settings are the right half at the same
-//! width and the same height.  A long folder scrolls inside the list
-//! instead of pushing the settings down.
+//! The file list the NAM and cab sheets share.  A long folder scrolls
+//! inside the list instead of pushing the settings down.
 
 use eframe::egui;
 use egui::{Align2, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
@@ -45,13 +40,7 @@ pub(crate) fn catalog_empty_note(folder: &str, no_files: &str) -> String {
     }
 }
 
-/// The list on the left and `settings` on the right, equal columns filling
-/// the height left in `ui`.
-///
-/// `id` keeps the two sheets' scroll positions apart.  `leading` is an
-/// extra first row (the cab sheet's *None*).  `empty` is shown under the
-/// rows when there are no files.  The returned pick is the row clicked
-/// this frame.
+/// `id` keeps the two sheets' scroll positions apart.
 pub(crate) fn catalog_columns(
     ui: &mut egui::Ui,
     id: &str,
@@ -164,11 +153,9 @@ fn catalog_list(
     pick
 }
 
-/// Bring `response` into view when this sheet has not already revealed `key`.
-///
-/// The scroll area keeps its parent's scope, so the sheet `id` has to be
-/// part of the memory id.  `key` is the file path, not the row index:
-/// two sheets can both be on row 20, and a new folder can reuse an index.
+/// The scroll area keeps its parent's scope, so the sheet `id` is part of
+/// the memory id.  `key` is the file path, not the row index: two sheets
+/// can both be on row 20, and a new folder can reuse an index.
 fn reveal(ui: &egui::Ui, id: &str, response: &egui::Response, key: &str) {
     let memory = ui.scope_id().with((id, "catalog_revealed"));
     let seen = ui.data(|data| data.get_temp::<String>(memory));

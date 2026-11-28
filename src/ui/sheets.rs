@@ -1,10 +1,4 @@
-//! Bottom sheets: the header every sheet shares (`docs/ui-spec.md` §4.3)
-//! and the dispatch to each sheet's body.
-//!
-//! The shell draws the sheet's frame, height and drag edge.  This file
-//! draws the header (the path dot and name, `/`, the item, *On* /
-//! *Bypass* for a stage, *On* / *Bypass* / *Off* for the pitch shifter,
-//! ‹ › through the chain, ×) and picks the body.
+//! Bottom sheets.  The shell draws the frame, height and drag edge.
 
 pub(crate) mod cab;
 pub(crate) mod catalog;
@@ -30,8 +24,6 @@ use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{row_info, segmented, OutlineButton, CONTROL_H};
 
 impl RigWerkApp {
-    /// The open sheet's title, without the path: *Pre EQ*, an effect's
-    /// name, an output's name.
     pub(crate) fn sheet_title(&self, sheet: Sheet) -> String {
         match sheet {
             Sheet::Diagnostics => "Diagnostics".to_owned(),
@@ -57,8 +49,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The header row: path dot and name, `/`, the item, its *On* /
-    /// *Bypass*, then ‹ › and × on the right.
     pub(crate) fn sheet_header(&mut self, ui: &mut egui::Ui) {
         let Some(sheet) = self.chrome.sheet else {
             return;
@@ -167,11 +157,8 @@ impl RigWerkApp {
         }
     }
 
-    /// The open sheet's body, at most `height` tall; it scrolls inside.
-    ///
-    /// The NAM and cab sheets fill that height instead of scrolling as one
-    /// column.  Their file list and their settings each scroll in
-    /// [`catalog::catalog_columns`].
+    /// The NAM and cab sheets fill `height` instead of scrolling as one
+    /// column.  Their lists scroll in [`catalog::catalog_columns`].
     pub(crate) fn sheet_body(&mut self, ui: &mut egui::Ui, height: f32) {
         let Some(sheet) = self.chrome.sheet else {
             return;

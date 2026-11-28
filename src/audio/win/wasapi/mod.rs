@@ -1,7 +1,4 @@
-//! WASAPI clock output: REAL-style shared minimum step, and exclusive mode.
-//!
-//! Extra outputs stay on shared cpal streams; only the bridge clock output uses
-//! these paths.
+//! Only the bridge clock output.  Extra outputs stay on shared cpal streams.
 
 mod exclusive;
 mod real;

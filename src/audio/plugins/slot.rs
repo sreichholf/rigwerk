@@ -1,5 +1,5 @@
-//! Effect slots, the links the UI reaches them by, and deferred plugin
-//! teardown.
+//! A slot the audio thread may still be inside is leaked, not destroyed.
+//! Teardown off the recorded main thread goes through [`SlotPark`].
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -13,15 +13,12 @@ use super::pref::{PluginPref, PluginView};
 use super::MAX_ALIGN;
 use crate::audio::LockStats;
 
-/// An effect's mix and bypass as atomics: the UI sets them through the
-/// effect's link and the audio thread reads them every chunk, without a
-/// chain edit.  The slot's `pref.mix` / `pref.bypass` are only the values it
-/// was made with; [`SlotLink::saved_pref`] and the views read these.
+/// Mix and bypass as atomics: the UI sets them and the audio thread reads
+/// them every chunk, with no chain edit.  `pref.mix` / `pref.bypass` are
+/// only what the slot was made with; [`SlotLink::saved_pref`] reads these.
 ///
-/// It also counts how often the audio thread tried to run the effect's
-/// plugin, and how many of those chunks found it paused (a restart, a
-/// failed start).  Measurement only: the audio thread writes these
-/// relaxedly and Diagnostics reads them.
+/// Attempt and paused counts are measurement only.  The audio thread
+/// writes them relaxed; Diagnostics reads them.
 pub(crate) struct SlotControls {
     mix: AtomicU32,
     bypass: AtomicBool,
@@ -34,7 +31,6 @@ pub(crate) struct SlotControls {
     reload_window_ms: AtomicU64,
 }
 
-/// Milliseconds since the first call, for [`SlotControls::reload_window_ms`].
 fn now_ms() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START
@@ -89,13 +85,11 @@ impl SlotControls {
         self.bypass.store(bypass, Ordering::Relaxed);
     }
 
-    /// Counts one attempt to run the effect's plugin (audio thread, once
-    /// per chunk the effect runs).
+    /// Audio thread, once per chunk the effect runs.
     pub(crate) fn note_attempt(&self) {
         self.attempts.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Whether the window of rebuilds on request has run out.
     fn reload_window_over(&self) -> bool {
         match self.reload_window_ms.load(Ordering::Relaxed) {
             0 => true,
@@ -103,7 +97,6 @@ impl SlotControls {
         }
     }
 
-    /// Notes that the slot was just rebuilt on its plugin's request.
     pub(crate) fn note_rebuilt(&self) {
         if self.reload_window_over() {
             self.reload_window_ms.store(now_ms(), Ordering::Relaxed);
@@ -113,21 +106,18 @@ impl SlotControls {
         }
     }
 
-    /// Whether another rebuild on request is allowed (see
-    /// [`RELOAD_LIMIT`]).
     pub(crate) fn may_reload(&self) -> bool {
         self.reload_window_over() || self.reloads.load(Ordering::Relaxed) < RELOAD_LIMIT
     }
 
-    /// Starts the count again: the user changed the slot (a rate change
-    /// rebuilt it).
+    /// The user changed the slot (a rate change rebuilt it), so the
+    /// count starts again.
     pub(crate) fn reset_reloads(&self) {
         self.reloads.store(0, Ordering::Relaxed);
         self.reload_window_ms.store(0, Ordering::Relaxed);
     }
 
-    /// Moves the current window `ms` into the past, for tests that would
-    /// otherwise wait it out.
+    /// Moves the window into the past so a test does not wait it out.
     #[cfg(test)]
     pub(crate) fn age_reload_window_for_test(&self, ms: u64) {
         let start = self.reload_window_ms.load(Ordering::Relaxed);
@@ -137,7 +127,7 @@ impl SlotControls {
         }
     }
 
-    /// Counts an attempt that found the plugin paused (audio thread).
+    /// Audio thread: the chunk found the plugin paused.
     pub(crate) fn note_paused(&self) {
         self.paused.fetch_add(1, Ordering::Relaxed);
     }
@@ -161,34 +151,26 @@ pub(crate) struct Slot {
     /// handle (see [`SlotLink::saved_pref`]) and these are left empty.
     /// Shared with the published link, so a publish copies nothing.
     pub(crate) pref: Arc<PluginPref>,
-    /// Mix and bypass as the UI sets them (see [`SlotControls`]).  Kept
-    /// when the slot is reopened or rebuilt for a new rate.
+    /// Kept when the slot is reopened or rebuilt for a new rate.
     pub(crate) controls: Arc<SlotControls>,
-    /// The loaded plugin.  A processing failure is recorded in its
-    /// [`super::link::PluginShared`]; the effect then stays out of the
-    /// chain like one with an `error`.
+    /// A processing failure lives in its [`super::link::PluginShared`].
+    /// The effect then stays out of the chain, as with `error`.
     pub(crate) plugin: Option<LoadedPlugin>,
-    /// A load failure.
     pub(crate) error: Option<String>,
     /// Sample rate passed to the last load attempt.  `None` until then, so a
     /// restored slot stays distinguishable from one opened at a rate.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) built_rate: Option<u32>,
-    /// The effect's input, read back delayed by its latency through
-    /// `dry_tap`: the dry side of a partial mix, and the whole output of a
-    /// block the effect skips, so the chain delays by
-    /// [`Self::latency_samples`] whatever the effect does.  Sized for
-    /// [`MAX_ALIGN`] plus one chunk when a plugin loads (on the UI thread);
-    /// empty (silent, never written) while nothing is loaded.
+    /// Dry side of a partial mix, and the output of a skipped block.
+    /// Sized for [`MAX_ALIGN`] plus one chunk on load (UI thread); empty,
+    /// and never written, while nothing is loaded.
     pub(crate) dry: DelayLine,
     pub(crate) dry_tap: DelayTap,
-    /// Whether `dry_tap` has adopted a delay (else the next block snaps).
+    /// Else the next block snaps `dry_tap` instead of fading to the delay.
     pub(crate) dry_started: bool,
-    /// Whether the last chunk ran the plugin (else it was skipped): a
-    /// switch between the two is smoothed by `declick` instead of stepping.
+    /// The last chunk ran the plugin.  A switch is declicked.
     pub(crate) was_processed: bool,
     pub(crate) declick: Declick,
-    /// A pure delay standing in for a plugin, for tests.
     #[cfg(test)]
     pub(crate) test_delay: Option<TestDelay>,
     /// Whether this slot's plugin is stranded, for the tests that prove the
@@ -203,7 +185,6 @@ pub(crate) struct Slot {
     track: SlotTrack,
 }
 
-/// See [`Slot::delay_for_test`].
 #[cfg(test)]
 pub(crate) struct TestDelay {
     /// Shared with the slot's links, so a test can change it while an
@@ -249,14 +230,12 @@ impl Slot {
         }
     }
 
-    /// The dry delay line a loaded effect needs (allocates; UI thread).
+    /// Allocates.  UI thread.
     pub(crate) fn dry_line() -> DelayLine {
         DelayLine::new(MAX_ALIGN as usize + MAX_BLOCK)
     }
 
-    /// An effect that delays its input by `latency` frames and reports that
-    /// latency, like a lookahead plugin with nothing to do: lets the tests
-    /// check the alignment sample by sample.
+    /// Reports `latency`, so alignment tests can check it sample by sample.
     #[cfg(test)]
     pub(crate) fn delay_for_test(latency: u32) -> Self {
         let mut slot = Self::empty(PluginPref {
@@ -279,8 +258,7 @@ impl Slot {
         slot
     }
 
-    /// A slot whose plugin is stranded, for the tests that prove it is
-    /// leaked rather than destroyed.
+    /// Stranded, so the leak tests can prove it is not destroyed.
     #[cfg(test)]
     pub(crate) fn stranded_for_test() -> Self {
         let mut slot = Self::empty(PluginPref::default());
@@ -309,7 +287,7 @@ impl Slot {
         }
     }
 
-    /// A slot holding `plugin`, the way a real load fills one in.
+    /// Filled the way a real load fills one.
     #[cfg(test)]
     pub(crate) fn with_plugin_for_test(pref: PluginPref, plugin: LoadedPlugin, rate: u32) -> Self {
         Self {
@@ -328,7 +306,6 @@ impl Slot {
         !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.reload_wanted()
     }
 
-    /// A saved slot that has never been opened and has not failed.
     pub(crate) fn needs_open(&self) -> bool {
         #[cfg(test)]
         if self.test_delay.is_some() {
@@ -337,10 +314,8 @@ impl Slot {
         self.plugin.is_none() && self.error.is_none()
     }
 
-    /// Whether this slot's plugin asked to be rebuilt (see
-    /// `PluginShared::want_reload`) and has not failed.  It stays out of
-    /// the chain, still counting its latency, until the path's service
-    /// replaces it.  Atomics only.
+    /// Asked to be rebuilt, and has not failed.  Stays out of the chain,
+    /// still counting its latency, until service replaces it.  Atomics only.
     pub(crate) fn reload_wanted(&self) -> bool {
         !self.failed()
             && self
@@ -349,22 +324,13 @@ impl Slot {
                 .is_some_and(|plugin| plugin.shared().reload_wanted())
     }
 
-    /// The latency in samples this effect adds to the chain, as the plugin
-    /// last reported it.  Lock-free (atomics only), so the audio thread may
-    /// call it.
+    /// Atomics only, so the audio thread may call it.
     ///
-    /// A bypassed effect still counts: bypass only skips the processing,
-    /// while the alignment around the chain is sized for the plugin's
-    /// latency, so toggling bypass never moves the alignment (and never
-    /// makes the paths jump against each other).  So does one waiting for
-    /// a reload.  An effect that is not loaded or failed counts 0: it stays
-    /// out of the chain until it is loaded again.
-    ///
-    /// Whenever the chain skips the effect (bypass, mix at 0, a restart's
-    /// pause) it plays the effect's input
-    /// delayed by this many frames instead, and a partial mix delays its
-    /// dry side by it, so the chain always delays by its reported total.
-    /// Values are clamped to [`MAX_ALIGN`] where they are read.
+    /// A bypassed effect still counts, and so does one waiting for a
+    /// reload: toggling bypass must not move the alignment.  An unloaded
+    /// or failed effect counts 0.  A skip and a partial mix delay by this,
+    /// so the chain always delays by its reported total.  Clamped to
+    /// [`MAX_ALIGN`] where the value is read.
     pub(crate) fn latency_samples(&self) -> u32 {
         #[cfg(test)]
         if let Some(test) = &self.test_delay {
@@ -376,8 +342,7 @@ impl Slot {
         }
     }
 
-    /// Whether the slot failed to load or to process.  Lock and allocation
-    /// free, so the audio thread may call it.
+    /// Lock and allocation free, so the audio thread may call it.
     pub(crate) fn failed(&self) -> bool {
         self.error.is_some()
             || self
@@ -386,10 +351,8 @@ impl Slot {
                 .is_some_and(|plugin| plugin.shared().failure().is_some())
     }
 
-    /// Whether a pause of this slot's plugin was stranded (see
-    /// [`PauseHandshake::stranded`](super::pause::PauseHandshake::stranded)):
-    /// a block never came out of `process`.  Lock and allocation free; a
-    /// stranded slot is never destroyed.
+    /// A block never came out of `process`.  Lock and allocation free.
+    /// A stranded slot is never destroyed.
     pub(crate) fn stranded(&self) -> bool {
         #[cfg(test)]
         if self.test_stranded {
@@ -400,11 +363,8 @@ impl Slot {
             .is_some_and(|plugin| plugin.shared().pause.stranded())
     }
 
-    /// Destroys the slot, unless its plugin is stranded: that plugin is
-    /// still inside `process`, so no processor call follows it (no stop, no
-    /// deactivate, no destroy).  Such a slot and its instance are leaked for
-    /// the rest of the process; a restart builds fresh slots.  See
-    /// `docs/open-items.md`.
+    /// Leaks the slot when its plugin is stranded.  It is still inside
+    /// `process`, so nothing may stop, deactivate, or destroy it.
     pub(crate) fn destroy(self) {
         if self.stranded() {
             std::mem::forget(self);
@@ -413,7 +373,6 @@ impl Slot {
         }
     }
 
-    /// The first error the slot should show (see [`SlotLink::resolved_error`]).
     /// UI thread only.
     #[cfg(test)]
     pub(crate) fn resolved_error(&self) -> Option<String> {
@@ -425,8 +384,7 @@ impl Slot {
         self.link().view()
     }
 
-    /// What the UI needs to reach this effect while the runtime holds it (UI
-    /// thread; allocates).
+    /// UI thread; allocates.  What the UI needs while the runtime holds it.
     pub(crate) fn link(&self) -> SlotLink {
         SlotLink {
             base: Arc::clone(&self.pref),
@@ -444,10 +402,9 @@ impl Slot {
     }
 }
 
-/// One effect as the UI reaches it while the runtime holds it, published with
-/// the views (see `PathControls::slot_links`).  Everything it reads is the
-/// handle's UI-side state or atomics, so the views, the saved prefs and the
-/// latency total can be rebuilt from the links alone.
+/// Everything it reads is the handle's UI-side state or atomics, so the
+/// views, the saved prefs and the latency can be rebuilt from the links
+/// alone, with the runtime held.
 #[derive(Clone)]
 pub(crate) struct SlotLink {
     /// The slot's pref (see [`Slot::pref`]): identity, plus the saved
@@ -455,19 +412,14 @@ pub(crate) struct SlotLink {
     pub(crate) base: Arc<PluginPref>,
     pub(crate) controls: Arc<SlotControls>,
     pub(crate) plugin: Option<PluginHandle>,
-    /// A load failure.
     pub(crate) error: Option<String>,
-    /// A test delay's latency (see [`Slot::delay_for_test`]).
     #[cfg(test)]
     test_latency: Option<Arc<AtomicU32>>,
-    /// As [`Slot::built_rate`].
     #[cfg(test)]
     pub(crate) built_rate: Option<u32>,
 }
 
 impl SlotLink {
-    /// A link over `handle` alone, for the tests that pin a failure's text
-    /// and paused state without building a slot.
     #[cfg(test)]
     pub(crate) fn with_handle_for_test(handle: PluginHandle) -> Self {
         let pref = PluginPref::default();
@@ -481,8 +433,6 @@ impl SlotLink {
         }
     }
 
-    /// Moves a test delay's latency (see [`Slot::delay_for_test`]), as a
-    /// plugin moves its own.
     #[cfg(test)]
     pub(crate) fn set_test_latency(&self, latency: u32) {
         if let Some(cell) = &self.test_latency {
@@ -490,7 +440,6 @@ impl SlotLink {
         }
     }
 
-    /// As [`Slot::needs_open`].
     pub(crate) fn needs_open(&self) -> bool {
         #[cfg(test)]
         if self.test_latency.is_some() {
@@ -499,9 +448,9 @@ impl SlotLink {
         self.plugin.is_none() && self.error.is_none()
     }
 
-    /// What a rebuilt instance restores with: the pref with a loaded
-    /// plugin's saved values and state blob, but the mix and bypass it was
-    /// made with (the rebuild keeps the live [`SlotControls`]).
+    /// Saved values and state from a loaded plugin.  Mix and bypass stay
+    /// the ones the slot was made with; the rebuild keeps the live
+    /// [`SlotControls`].
     pub(crate) fn restore_pref(&self) -> PluginPref {
         let mut pref = (*self.base).clone();
         if let Some(plugin) = &self.plugin {
@@ -510,7 +459,6 @@ impl SlotLink {
         pref
     }
 
-    /// As [`Slot::reload_wanted`].
     pub(crate) fn reload_wanted(&self) -> bool {
         !self.failed()
             && self
@@ -527,8 +475,7 @@ impl SlotLink {
                 .is_some_and(|plugin| plugin.failure().is_some())
     }
 
-    /// Whether the effect is paused for a restart or a reactivation, and
-    /// not failed (see [`PluginView::paused`]).  Atomics only.
+    /// Atomics only.  A failed effect is not paused.
     pub(crate) fn paused(&self) -> bool {
         !self.failed()
             && self
@@ -537,7 +484,6 @@ impl SlotLink {
                 .is_some_and(|plugin| plugin.shared().pause.in_pause())
     }
 
-    /// As [`Slot::latency_samples`].
     pub(crate) fn latency(&self) -> u32 {
         #[cfg(test)]
         if let Some(latency) = &self.test_latency {
@@ -549,7 +495,6 @@ impl SlotLink {
         }
     }
 
-    /// As [`Slot::active`].
     pub(crate) fn active(&self) -> bool {
         #[cfg(test)]
         if self.test_latency.is_some() {
@@ -558,9 +503,8 @@ impl SlotLink {
         !self.controls.bypass() && !self.failed() && self.plugin.is_some() && !self.reload_wanted()
     }
 
-    /// The first error the effect should show: a load or processing
-    /// failure.  Allocates: UI thread only, which is where a processing
-    /// failure gets its text.
+    /// Allocates.  UI thread only: that is where a processing failure
+    /// gets its text.
     pub(crate) fn resolved_error(&self) -> Option<String> {
         self.error.clone().or_else(|| {
             self.plugin
@@ -597,7 +541,6 @@ impl SlotLink {
         }
     }
 
-    /// As [`Slot::saved_pref`].
     pub(crate) fn saved_pref(&self) -> PluginPref {
         let mut pref = PluginPref {
             mix: self.controls.mix(),
@@ -614,11 +557,9 @@ impl SlotLink {
 #[cfg(test)]
 static TRACKED_SLOTS: AtomicUsize = AtomicUsize::new(0);
 
-/// The slots one engine's runs have let go of that must not be destroyed on
-/// the thread that dropped them: a bridge thread hands them here, and the
-/// recorded main thread drains them ([`Self::drain`]).  One park per engine,
-/// shared by every run it starts, so an old bridge that defers after the
-/// engine swapped its run still has a live owner.
+/// Slots a bridge thread must not destroy.  One park per engine, shared
+/// by every run, so a bridge that defers after the engine swapped its run
+/// still has an owner.  The recorded main thread drains it.
 pub(crate) struct SlotPark {
     slots: Mutex<Vec<Slot>>,
 }
@@ -630,10 +571,9 @@ impl SlotPark {
         })
     }
 
-    /// Adds `slots` for the main thread to destroy.  Only a `Drop` comes
-    /// here (see `chain::release_slot`), and the owners that may drop a
-    /// chain are the UI thread and the bridge, not an audio callback:
-    /// `release_slot` asserts that before it reaches this lock.
+    /// Only a `Drop` comes here (`chain::release_slot`).  The owners are
+    /// the UI thread and the bridge, not an audio callback: that lock is
+    /// asserted before it is taken.
     pub(crate) fn defer(&self, slots: Vec<Slot>) {
         if slots.is_empty() {
             return;
@@ -644,10 +584,9 @@ impl SlotPark {
         }
     }
 
-    /// Drops the plugins a bridge thread deferred.  Only the recorded main
-    /// thread destroys them; any other caller leaves the queue alone.  A
-    /// slot whose plugin was stranded is leaked instead: the bridge released
-    /// it while a block was still inside `process`.
+    /// Only the recorded main thread destroys them; any other caller
+    /// leaves the queue.  A stranded slot is leaked: it was released
+    /// while a block was still inside `process`.
     pub(crate) fn drain(&self) {
         if !super::is_main_thread() {
             return;
@@ -661,7 +600,6 @@ impl SlotPark {
         }
     }
 
-    /// How many slots wait for [`Self::drain`].
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         match self.slots.lock() {
@@ -672,9 +610,8 @@ impl SlotPark {
 }
 
 impl Drop for SlotPark {
-    /// The last owner is gone.  On a thread that may destroy plugins, what
-    /// is left is destroyed as [`SlotPark::drain`] would (a stranded slot is
-    /// leaked).  Any other thread forgets it instead: the park has no later
+    /// A thread that may destroy plugins does, and a stranded slot is
+    /// leaked.  Any other thread forgets the slots: there is no later
     /// owner to defer to, and this thread may not destroy a plugin.
     fn drop(&mut self) {
         let pending = match self.slots.get_mut() {

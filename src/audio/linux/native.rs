@@ -1,30 +1,12 @@
-//! RigWerk as a PipeWire client.
+//! Links by `target.object` name: ids change, names do not.  Both sides
+//! native is one duplex node and no ring; two streams stay for mixed
+//! bridges and as the fallback.  `node.latency` is ours only;
+//! `clock.force-quantum` stays in the metadata path.
 //!
-//! The device menu lists real sources and sinks from the PipeWire registry.
-//! Starting the bridge creates our own nodes, "RigWerk Capture" and "RigWerk
-//! Playback", and links them to the chosen node by name (`target.object`).
-//! Names stay valid when ids change, so a device that comes back is linked
-//! again. When both sides are PipeWire nodes, `duplex` replaces the two
-//! streams with one node and no ring; the streams remain for mixed bridges
-//! and as the fallback. `node.latency` is set on our streams only. The desktop-wide
-//! `clock.force-quantum` switch stays in the metadata path.
-//!
-//! The two-stream bridge plays to generic (cpal) extra outputs when its clock is
-//! a cpal output, from a supervisor thread as in `bridge.rs`.  With a
-//! PipeWire clock it plays each PipeWire node extra output on its own playback
-//! stream ("RigWerk Extra output n"), made and retried from the main loop's
-//! timer.  That stream drains the slot's ring through a `ExtraOutputMixer`,
-//! like a cpal extra output: the extra output node may run on another driver, so
-//! the ring and the drift loop cross the two clocks.  RigWerk Out is
-//! published by the duplex node only, so it stays silent here.
-//!
-//! `hw:` and `plughw:` are untouched: they are the exclusive ALSA path. When
-//! the server is not running, listing fails and the ALSA `pipewire` device
-//! stays in the menu so something can still be opened.
-//!
-//! The `pipewire:{node.name}` id grammar is `devices`'s; this module
-//! re-exports it, because that file is the copy that compiles on every
-//! platform.
+//! A PipeWire clock's extra outputs are separate playback streams (another
+//! driver, so the ring crosses two clocks), retried from the main-loop
+//! timer.  RigWerk Out is duplex only.  `hw:` / `plughw:` stay exclusive
+//! ALSA.  No server: listing fails and the ALSA `pipewire` device remains.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -61,7 +43,7 @@ pub(crate) use super::super::devices::{is_native_id, node_name, NATIVE_PREFIX};
 
 const CAPTURE_NODE: &str = "RigWerk Capture";
 const PLAYBACK_NODE: &str = "RigWerk Playback";
-/// Extra output streams are named this plus the slot number from 1.
+/// Plus the slot number from 1.
 const EXTRA_OUTPUT_NODE: &str = "RigWerk Extra output";
 /// Front left / front right in `spa_audio_channel`.
 const CHANNEL_FL: u32 = 3;
@@ -70,7 +52,6 @@ const CHANNEL_FR: u32 = 4;
 /// this size; a graph quantum above it is rendered in several chunks.
 const PREPARED_BLOCK: usize = 8192;
 
-/// One registry pass. Sources are capture endpoints, sinks are playback.
 pub(crate) struct NativeNodes {
     pub(crate) sources: Vec<DeviceItem>,
     pub(crate) sinks: Vec<DeviceItem>,
@@ -82,9 +63,8 @@ pub(crate) enum EndpointKind {
     Sink,
 }
 
-/// The ALSA `pipewire` plugin and a PipeWire-backed `default` PCM.
-///
-/// These are the single shim row. Native node ids are a different path.
+/// The ALSA `pipewire` plugin and a PipeWire-backed `default`.  Native
+/// node ids are a different path.
 pub(crate) fn is_alsa_shim(device_id: &str) -> bool {
     if is_native_id(device_id) {
         return false;
@@ -95,8 +75,8 @@ pub(crate) fn is_alsa_shim(device_id: &str) -> bool {
         || (alsa_pcm_is_default(device_id) && pipewire::is_pipewire_endpoint(device_id, ""))
 }
 
-/// Frames written into `node.latency`. Low latency asks for the same 64-frame
-/// quantum as the metadata switch. The ordinary path uses the output buffer.
+/// Frames for `node.latency`.  Low latency matches the metadata switch's
+/// 64-frame quantum; otherwise the output buffer.
 pub(crate) fn node_latency_frames(low_latency: bool, buffer_frames: usize) -> u32 {
     if low_latency {
         LOW_QUANTUM
@@ -105,8 +85,6 @@ pub(crate) fn node_latency_frames(low_latency: bool, buffer_frames: usize) -> u3
     }
 }
 
-/// Keep hardware and virtual sources and sinks. Skip monitors, our own nodes,
-/// streams that are not endpoints, and nodes with no name.
 pub(crate) fn endpoint_kind(name: &str, class: &str, monitor: bool) -> Option<EndpointKind> {
     if name.is_empty() || name.to_ascii_lowercase().starts_with("rigwerk") || monitor {
         return None;
@@ -123,9 +101,7 @@ pub(crate) fn endpoint_kind(name: &str, class: &str, monitor: bool) -> Option<En
     }
 }
 
-/// Sources and sinks currently published by the server.
-///
-/// Fails when no server is running. Callers keep the ALSA shim in that case.
+/// Fails when no server is running.  Callers keep the ALSA shim then.
 pub(crate) fn list_nodes() -> Result<NativeNodes, String> {
     ensure_init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|error| error.to_string())?;
@@ -237,10 +213,8 @@ pub(crate) fn list_nodes() -> Result<NativeNodes, String> {
     Ok(NativeNodes { sources, sinks })
 }
 
-/// Opens whichever sides are native PipeWire nodes and runs them until `stop`.
-///
-/// A side whose id is not native is opened through cpal, so PipeWire input
-/// with an ALSA output (and the other way around) stays one bridge.
+/// A side that is not a native id opens through cpal, so a mixed PipeWire
+/// and ALSA bridge stays one bridge.
 pub(crate) fn run(
     config: &StartConfig,
     shared: Arc<Shared>,
@@ -250,8 +224,8 @@ pub(crate) fn run(
     let input_native = config.input_id.as_deref().is_some_and(is_native_id);
     let output_native = is_native_id(&config.output_id);
 
-    // Both sides in the PipeWire graph: one duplex node, no ring.  If that
-    // node cannot be set up, fall back to the two-stream bridge below.
+    // Both sides native: one duplex node, no ring.  Setup failure falls
+    // back to the two-stream bridge.
     let mut fallback_note = None;
     if input_native && output_native {
         match super::duplex::run(config, Arc::clone(&shared), Arc::clone(&stop)) {
@@ -269,8 +243,8 @@ pub(crate) fn run(
     if input_native {
         input_rate = config.sample_rate;
         input_channels = 2;
-        // Requested: the capture stream's `param_changed` publishes the rate
-        // the graph negotiated through `set_source_rate`.
+        // Requested only.  `param_changed` publishes the rate the graph
+        // negotiated.
         shared.set_requested_source_rate(input_rate);
     } else {
         shared.set_status("Opening input…");
@@ -309,9 +283,8 @@ pub(crate) fn run(
         } else {
             OutputMode::Standard
         };
-        // Requested: the playback stream's format handler publishes the rate
-        // it negotiated (`set_output_rate`) and its process callback the step
-        // it really feeds (`note_output_step`), each as its own reading.
+        // Requested only.  The format handler publishes the negotiated rate
+        // and the process callback the step, each as its own reading.
         shared.set_requested_output(output_rate, frames, opened, mode);
     } else {
         shared.set_status("Opening independent output…");
@@ -444,8 +417,7 @@ fn run_graph(
                         data.channels.store(channels, Ordering::Relaxed);
                         let rate = info.rate();
                         if rate > 0 {
-                            // The graph negotiated this rate: a reading, not the
-                            // request `run` published.
+                            // The graph's rate, not the request `run` published.
                             data.shared.set_source_rate(rate);
                         }
                     });
@@ -498,10 +470,8 @@ fn run_graph(
 
     let playback_listener = if let Some(stream) = playback.as_ref() {
         let state_shared = Arc::clone(&shared);
-        // The playback stream is always negotiated as F32LE stereo (FL/FR,
-        // see `enum_format`), so the device map applies to two channels.
-        // The Mixer offers click chips for those two only, so a chip for
-        // channel 3 or 4 is not shown.
+        // Always F32LE stereo (FL/FR, `enum_format`), so the device map and
+        // its click chips cover two channels only.
         let mut mixer = OutputMixer::new(output_rate, 2);
         mixer.configure_source_rate(&shared);
         mixer.publish_device_channels(&shared);
@@ -537,9 +507,8 @@ fn run_graph(
                         }
                         let rate = info.rate();
                         if rate > 0 {
-                            // The stream negotiated this rate: a reading, not the
-                            // request `run` published.  The step stays its own
-                            // reading, marked by `note_output_step` below.
+                            // Negotiated rate, not the request.  The step is its
+                            // own reading (`note_output_step`).
                             data.shared.set_output_rate(rate);
                         }
                     });
@@ -548,10 +517,8 @@ fn run_graph(
                     }
                 })
                 .process(|stream, data| {
-                    // Every read on the stream, the dequeue and the delay
-                    // sample included, stays inside the guard: a binding
-                    // panic that unwinds through here would otherwise leave
-                    // the process callback.
+                    // Dequeue and the delay sample stay inside the guard: a
+                    // binding panic must not leave this process callback.
                     let mut buffer = None;
                     let mut delay = None;
                     let panicked = contain(|| {
@@ -572,7 +539,7 @@ fn run_graph(
                             data.shared.note_output_step(frames as u32);
                             let mut clock = |offset: usize, index: usize, mapped: &DeviceFrame| {
                                 if write_stereo(bytes, offset + index, mapped) {
-                                    // Two channels, eight bytes: the clock node only.
+                                    // Clock node only: two channels.
                                     push_device_frame(
                                         &data.shared.recorder,
                                         RecordSource::Clock,
@@ -582,7 +549,6 @@ fn run_graph(
                                 }
                             };
                             if frames <= PREPARED_BLOCK {
-                                // The quantum fits the scratch: one whole block.
                                 data.mixer.render(&data.shared, frames, |index, mapped| {
                                     clock(0, index, mapped)
                                 });
@@ -601,7 +567,7 @@ fn run_graph(
                         if filled == 0 {
                             return;
                         }
-                        // Graph + device delay past this node (BT A2DP, filters, …).
+                        // Delay past this node: graph, device, Bluetooth.
                         if let Ok(time) = stream.time() {
                             let rate = time.rate();
                             delay = path_delay_ns(time.delay(), rate.num, rate.denom);
@@ -609,9 +575,8 @@ fn run_graph(
                     });
                     if panicked {
                         data.shared.note_callback_failure(CallbackFailure::Panic);
-                        // The interrupted render left a part-written block:
-                        // silence whatever was dequeued before the graph plays
-                        // it.
+                        // Silence the part-written block before the graph
+                        // plays it.
                         if let Some(block) = buffer.as_mut() {
                             let _ = contain(|| {
                                 fill_silence(block);
@@ -659,16 +624,10 @@ fn run_graph(
                 .map_err(|error| format!("Connecting PipeWire output: {error}"))?;
         }
 
-        // Generic extra outputs, for a cpal clock only (a PipeWire clock is offered
-        // PipeWire node extra outputs): their own cpal streams, synced from a
-        // supervisor thread as in `bridge.rs`.  Opening a cpal device blocks, so
-        // it stays off this main loop.  The scope joins that thread, which drops
-        // the extra outputs, before the streams below go.
-        //
-        // PipeWire node extra outputs, for a PipeWire clock: one playback stream
-        // each, created and retried from the main loop's timer (a stream
-        // connects without blocking).  The timer owns them, so they close
-        // before the streams below too.
+        // cpal extra outputs (cpal clock only): opening blocks, so a
+        // supervisor thread owns them and the scope joins it before the
+        // streams below go.  PipeWire extra outputs come from this timer
+        // (connect does not block) and close first too.
         let tick: Box<dyn Fn(bool)> = if output_native {
             let nodes = RefCell::new(ExtraOutputSlots::<NodeExtraOutput>::new());
             let shared = Arc::clone(&shared);
@@ -728,9 +687,6 @@ fn run_graph(
     result
 }
 
-/// Runs `mainloop` until `stop` is set, calling `tick(false)` on each 50 ms
-/// timer tick before that and `tick(true)` once on the way out.  `tick` is
-/// dropped before this returns.
 fn run_until_stop(
     mainloop: &pw::main_loop::MainLoopRc,
     stop: &Arc<AtomicBool>,
@@ -777,13 +733,9 @@ struct PlaybackData {
     mixer: OutputMixer,
 }
 
-/// Fills a dequeued playback buffer with F32LE stereo, the format
-/// `enum_format` negotiates.  `render` gets the mapped bytes and the frame
-/// count; returns that count, or 0 when nothing was written.
-///
-/// PipeWire maps buffers to the session max quantum.  Fill only `requested`
-/// frames for this cycle; maxsize alone is what made playback drain the ring
-/// in one shot and then stutter.
+/// PipeWire maps buffers to the session max quantum.  Fill only
+/// `requested` frames this cycle; the mapped size drains the ring in one
+/// shot and stutters.
 fn fill_stereo(
     buffer: &mut pw::buffer::Buffer<'_>,
     render: impl FnOnce(&mut [u8], usize),
@@ -807,13 +759,11 @@ fn fill_stereo(
     frames
 }
 
-/// Silences a dequeued playback buffer for this cycle.  The panic path calls
-/// it so the graph plays silence, not whatever the interrupted render left.
+/// The panic path: the graph plays silence, not the interrupted render.
 fn fill_silence(buffer: &mut pw::buffer::Buffer<'_>) {
     fill_stereo(buffer, |bytes, frames| bytes[..frames * 8].fill(0));
 }
 
-/// Writes stereo frame `index` into `bytes`; false when it does not fit.
 fn write_stereo(bytes: &mut [u8], index: usize, mapped: &DeviceFrame) -> bool {
     let start = index * 8;
     let Some(frame) = bytes.get_mut(start..start + 8) else {
@@ -824,7 +774,6 @@ fn write_stereo(bytes: &mut [u8], index: usize, mapped: &DeviceFrame) -> bool {
     true
 }
 
-/// The plan's PipeWire node extra outputs, with the node each one plays to.
 /// RigWerk Out is not one: only the duplex node plays it.
 fn node_extra_outputs(plan: &ExtraOutputPlan) -> Vec<(usize, String)> {
     plan.slots
@@ -836,13 +785,10 @@ fn node_extra_outputs(plan: &ExtraOutputPlan) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// The node name of extra output `slot`'s playback stream.
 fn extra_output_node_name(slot: usize) -> String {
     format!("{EXTRA_OUTPUT_NODE} {}", slot + 1)
 }
 
-/// One PipeWire node extra output: a playback stream linked to the node by name
-/// that drains the slot's ring, like a generic extra output's cpal stream.
 struct NodeExtraOutput {
     stream: pw::stream::StreamRc,
     listener: Option<pw::stream::StreamListener<ExtraOutputData>>,
@@ -863,8 +809,7 @@ struct ExtraOutputData {
     mixer: ExtraOutputMixer,
 }
 
-/// Opens extra output `slot` as a stereo playback stream to `node` at the clock
-/// rate.  PipeWire converts to the node's own rate; the extra output mixer steers
+/// PipeWire converts to the node's rate.  The extra-output mixer steers
 /// the ring fill across the two drivers' clocks.
 fn open_node_extra_output(
     core: &pw::core::CoreRc,
@@ -878,10 +823,9 @@ fn open_node_extra_output(
     lay_out_ring(shared, slot, 2, rate, buffer_frames);
     let name = extra_output_node_name(slot);
     let mut props = stream_properties("Playback", &name, Some(node), latency);
-    // A missing or removed node must not play to the default sink (the
-    // clock's, often): the stream errors, the slot shows missing, and a later
-    // open finds the node again.  WirePlumber 0.4 falls back whenever it may
-    // reconnect, so it needs `dont-reconnect`; 0.5 reads `dont-fallback`.
+    // A missing node must not play the default sink (often the clock's):
+    // the stream errors, the slot shows missing, and a later open finds it.
+    // WirePlumber 0.4 needs `dont-reconnect`; 0.5 reads `dont-fallback`.
     props.insert("node.dont-reconnect", "true");
     props.insert("node.dont-fallback", "true");
     let stream = pw::stream::StreamRc::new(core.clone(), &name, props)
@@ -900,8 +844,8 @@ fn open_node_extra_output(
         .state_changed(move |_, _, _, new| {
             let panicked = contain(|| {
                 if let pw::stream::StreamState::Error(_) = new {
-                    // Never stop the bridge for an extra output: the supervisor drops
-                    // this stream and retries.
+                    // An extra output must not stop the bridge: the
+                    // supervisor drops this stream and retries.
                     state_shared
                         .extra_output_bus(slot)
                         .missing
@@ -913,9 +857,8 @@ fn open_node_extra_output(
             }
         })
         .process(|stream, data| {
-            // The dequeue and the render stay inside the guard: a binding
-            // panic that unwinds through here would otherwise leave the
-            // process callback.
+            // Dequeue and render stay inside the guard: a binding panic
+            // must not leave this process callback.
             let mut buffer = None;
             let panicked = contain(|| {
                 let Some(dequeued) = stream.dequeue_buffer() else {
@@ -946,9 +889,8 @@ fn open_node_extra_output(
                 });
             });
             if panicked {
-                // A panic ends the run, not just this extra output: the app
-                // stops the bridge once it reads the flag.  Silence what the
-                // interrupted render left behind.
+                // A panic ends the run, not just this extra output.  Silence
+                // what the interrupted render left behind.
                 data.shared.note_callback_failure(CallbackFailure::Panic);
                 if let Some(block) = buffer.as_mut() {
                     let _ = contain(|| {
@@ -982,7 +924,6 @@ fn open_node_extra_output(
     Ok(extra_output)
 }
 
-/// Where the valid capture frames sit in a mapped buffer.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CaptureWindow {
     /// Byte offset of the first frame.
@@ -992,12 +933,9 @@ pub(crate) struct CaptureWindow {
     pub(crate) frames: usize,
 }
 
-/// Reads a `spa_chunk` the way PipeWire defines it: the valid data starts at
-/// `offset` (taken modulo the mapped size), is `size` bytes long, and frames
-/// are `stride` bytes apart.  A stride of 0, or one too small for the
-/// negotiated channels, falls back to packed f32 frames.  The frame count is
-/// bounded by what is mapped after the offset, so a bogus chunk can never make
-/// the reader run past the buffer.
+/// PipeWire `spa_chunk`: `offset` modulo the mapping, `size` bytes, frames
+/// `stride` apart.  A short stride falls back to packed f32 so a bogus
+/// chunk cannot read past the buffer.
 pub(crate) fn capture_window(
     mapped: usize,
     offset: u32,
@@ -1034,9 +972,8 @@ pub(crate) fn capture_window(
 
 fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, stride: usize, frames: usize) {
     let _denormals = DenormalGuard::new();
-    // Nothing in this block may allocate (see `audio::rt_guard`).  The
-    // callback's buffer dequeue and window arithmetic run before this, so
-    // only RigWerk's own sample work is counted.
+    // No allocation (see `audio::rt_guard`).  Dequeue and the window ran
+    // before this, so only our sample work is counted.
     let _no_allocations = RtGuard::enter();
     let channels = channels.max(1);
     shared.note_input_block(frames);
@@ -1058,7 +995,6 @@ fn push_capture(shared: &Shared, bytes: &[u8], channels: usize, stride: usize, f
     stage.publish(shared);
 }
 
-/// The f32 sample starting at byte `start`, or silence past the end.
 fn sample_at(bytes: &[u8], start: usize) -> f32 {
     let Some(chunk) = bytes.get(start..start + 4) else {
         return 0.0;
@@ -1089,12 +1025,9 @@ fn latency_text(frames: u32, rate: u32) -> String {
     format!("{frames}/{}", rate.max(1))
 }
 
-/// How many stereo frames to write into one playback buffer.
-///
-/// `max_bytes / stride` is the mapped capacity (often the session max quantum).
-/// `requested` is what this graph cycle actually wants; 0 means no hint, so the
-/// capacity is used. Matching the PipeWire audio-src tutorial keeps the ring
-/// and the graph on the same step size.
+/// `requested` 0 means no hint, so the mapped capacity is used (often the
+/// session max quantum).  Matching PipeWire's audio-src tutorial keeps the
+/// ring and the graph on the same step.
 pub(crate) fn playback_frames(max_bytes: usize, stride: usize, requested: u64) -> usize {
     if stride == 0 {
         return 0;
@@ -1107,8 +1040,8 @@ pub(crate) fn playback_frames(max_bytes: usize, stride: usize, requested: u64) -
     }
 }
 
-/// Converts `pw_time.delay` into nanoseconds. Negative delay (sync offset) is
-/// clamped to zero; a zero-denominator rate is rejected.
+/// `pw_time.delay` in nanoseconds.  A negative delay is a sync offset and
+/// clamps to zero; a zero rate denominator is rejected.
 pub(crate) fn path_delay_ns(delay_ticks: i64, rate_num: u32, rate_denom: u32) -> Option<u64> {
     if rate_denom == 0 {
         return None;

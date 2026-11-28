@@ -1,8 +1,7 @@
-//! ASIO input into a system output, and an ASIO input on its own (feeding
-//! a separate ASIO output).  This thread creates the input driver, so its
-//! control panel is opened here between callbacks, not from the UI thread.
-//! The input on its own is prepared before the output opens and started
-//! after it, so the output knows the source rate before its first callback.
+//! This thread creates the input driver, so its panel is opened here,
+//! between callbacks, not from the UI thread.  A standalone input is
+//! prepared before the output opens and started after it, so the output
+//! knows the source rate before its first callback.
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -44,8 +43,8 @@ pub(crate) fn run_asio_bridge(
         return Err("The ASIO driver refused to initialize".to_owned());
     }
 
-    // The driver decides the clock.  If it will not take the requested rate we
-    // follow whatever it is actually running at.
+    // The driver decides the clock.  If it refuses the requested rate we
+    // follow the rate it is actually running at.
     let _ = driver.set_sample_rate(requested_rate as f64);
     let asio_rate = driver
         .get_sample_rate()
@@ -209,13 +208,11 @@ pub(crate) fn run_asio_bridge(
     Ok(())
 }
 
-/// An ASIO input driver that is open at its real rate, with buffers and a
-/// callback in place, but not started.  The bridge opens it before a
-/// separate ASIO output, so the output designs its resampler for the real
-/// source rate before its own driver starts.  Dropping it stops and
-/// disposes the driver and clears the callback.  It stays on the thread
-/// that created it, as ASIO requires.  `D` is azo's driver proxy, which
-/// azo does not export by name.
+/// Open at its real rate, with buffers and a callback, but not started.
+/// The output designs its resampler for that rate before its own driver
+/// starts.  Drop stops and disposes the driver and clears the callback.
+/// It stays on the thread that created it, as ASIO requires.  `D` is
+/// azo's driver proxy, which azo does not export by name.
 pub(crate) struct PreparedAsioInput<D: Driver> {
     driver: D,
     registration: Option<CallbackRegistration>,
@@ -240,8 +237,7 @@ impl<D: Driver> Drop for PreparedAsioInput<D> {
     }
 }
 
-/// Opens an ASIO input that feeds a separate ASIO output and publishes its
-/// rate.  Nothing calls back until [`PreparedAsioInput::run`].
+/// Nothing calls back until [`PreparedAsioInput::run`].
 pub(crate) fn prepare_asio_input(
     clsid: u128,
     requested_rate: u32,
@@ -256,7 +252,7 @@ pub(crate) fn prepare_asio_input(
         return Err("The ASIO input driver refused to initialize".to_owned());
     }
 
-    // Two ASIO drivers keep two clocks.  If they do not agree on a rate the
+    // Two ASIO drivers keep two clocks.  If they disagree on a rate the
     // output converts instead of refusing to bridge.
     let _ = driver.set_sample_rate(requested_rate as f64);
     let rate = driver
@@ -342,8 +338,7 @@ pub(crate) fn prepare_asio_input(
 }
 
 impl<D: Driver> PreparedAsioInput<D> {
-    /// Starts the input driver and bridges until `stop`.  Call it once the
-    /// output has opened.
+    /// Call once the output has opened.
     pub(crate) fn run(
         mut self,
         output_rate: u32,
@@ -354,8 +349,8 @@ impl<D: Driver> PreparedAsioInput<D> {
         let Some(registration) = self.registration.as_ref() else {
             return Ok(());
         };
-        // The output side already set its target; this input's blocks feed
-        // into the bridge buffer's floor on top of it.
+        // The output side already set its target; these blocks feed the
+        // bridge buffer's floor on top of it.
         shared.note_input_block(self.buffer_frames);
 
         if let Err(error) = self.driver.start() {

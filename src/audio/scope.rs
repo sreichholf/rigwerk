@@ -1,27 +1,23 @@
-//! Decimated peak-hold scope lanes for the Live page.
+//! Single-writer peak-hold lanes for the Live page.  The hot path does not
+//! allocate or take a lock.  Only a finished bin publishes atomics.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-/// Decimated scope bins shown in the Live page. About 250 ms of audio when
-/// the hop follows the stream rate.
+/// About 250 ms when the hop follows the stream rate.
 pub(crate) const SCOPE_LEN: usize = 256;
 
-/// Peak-hold state touched only by the lane's writer thread. Kept out of the
-/// atomics so the audio callback does not RMW every sample.
+/// Plain data, not atomics: the callback does not RMW every sample.
 #[repr(align(64))]
 struct ScopeWriter {
     accum: f32,
     count: u32,
 }
 
-/// Single-writer peak-hold scope lane. Capture fills [`Shared::scope_in`]; the
-/// mixer fills [`Shared::scope_out`]. The UI only reads `bins` / `head`.
-///
-/// Decimation state is plain data behind [`UnsafeCell`]: one producer thread
-/// owns each lane, so the hot path stays lock-free and allocation-free. Only
-/// publishing a finished bin hits atomics (and `hop`, which the control
-/// thread may retune with the stream rate).
+/// Capture fills [`Shared::scope_in`]; the mixer fills
+/// [`Shared::scope_out`].  One producer owns `writer` and publishes
+/// `bins` / `head`.  The UI only loads those.  `hop` may be retuned off
+/// the audio thread.
 pub(super) struct ScopeLane {
     bins: Vec<AtomicU32>,
     head: AtomicU64,
@@ -29,8 +25,8 @@ pub(super) struct ScopeLane {
     writer: UnsafeCell<ScopeWriter>,
 }
 
-// SAFETY: each lane has a single designated writer thread for `writer` and
-// for publishing into `bins`/`head`. The UI only loads those atomics.
+// SAFETY: one writer thread owns `writer` and publishes `bins` / `head`.
+// The UI only loads those atomics.
 unsafe impl Sync for ScopeLane {}
 
 impl ScopeLane {
@@ -87,7 +83,7 @@ impl ScopeLane {
             bin.store(0.0f32.to_bits(), Ordering::Relaxed);
         }
         self.head.store(0, Ordering::Relaxed);
-        // SAFETY: reset runs before callbacks touch a fresh run.
+        // SAFETY: `clear` runs before callbacks touch a fresh run.
         let writer = unsafe { &mut *self.writer.get() };
         writer.accum = 0.0;
         writer.count = 0;

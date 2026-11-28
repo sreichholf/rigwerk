@@ -1,11 +1,10 @@
-//! The latency alignment of one device: the delay each path gets there
-//! (see the module docs, "Alignment"), and the report the UI reads.
+//! One device's alignment delays, and the report the UI reads.
 
 use super::super::path::MAX_PATHS;
 use super::super::plugins::MAX_ALIGN;
 use super::PATH_TRIM_MAX_MS;
 
-/// A trim in ms as whole frames at `rate`, clamped to the trim range.
+/// A NaN trim is 0.
 pub(crate) fn trim_frames(trim_ms: f32, rate: u32) -> i32 {
     if trim_ms.is_nan() {
         return 0;
@@ -14,38 +13,22 @@ pub(crate) fn trim_frames(trim_ms: f32, rate: u32) -> i32 {
     (trim_ms * rate as f32 / 1000.0).round() as i32
 }
 
-/// The longest alignment delay, in frames: the longest chain latency
-/// ([`MAX_ALIGN`]) plus room for the trims (twice the trim range at
-/// 384 kHz), so a trim never has to be cut short.
+/// [`MAX_ALIGN`] plus the trim range at 384 kHz, so a trim is never
+/// cut short.
 pub(crate) const MAX_ALIGN_DELAY: u32 = MAX_ALIGN + 4096;
 
-/// What the alignment does on one device: the delay each routed path gets
-/// there, in frames, and which path the others wait for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AlignmentPlan {
-    /// Per path slot: the delay added on this device, `None` for a path the
-    /// device does not play.
+    /// `None` for a path the device does not play.
     pub(crate) delays: [Option<u32>; MAX_PATHS],
-    /// The path the others wait for: the slowest routed one, when align is
-    /// on and some other routed path is faster.
+    /// The slowest routed path, when align is on and another path is faster.
     pub(crate) waits_for: Option<usize>,
-    /// The delay a routed path with no chain latency and no trim would get
-    /// here: the slowest latency with align on (0 with it off), plus the
-    /// shift a negative trim gives every path.  The metronome waits this.
+    /// The delay a dry, untrimmed path gets.  The metronome waits this.
     pub(crate) dry: u32,
 }
 
-/// Works out one device's alignment from which paths it plays (`routed`),
-/// their chain latency (frames, clamped to [`MAX_ALIGN`]) and their trims
-/// (frames, signed).  Allocation free, for the audio thread.
-///
-/// With `align` on, path `p` waits `max(latency) − latency(p) + trim(p)`,
-/// the maximum taken over the routed paths: every one of them, muted or
-/// un-soloed included, so muting never moves the latency.  With it off,
-/// only the trim applies.  Negative results shift every routed path by the
-/// same amount, so the smallest delay is 0 (a negative trim makes the
-/// others wait instead).  Delays are clamped to [`MAX_ALIGN_DELAY`].  The
-/// same rule for a dry, untrimmed path gives [`AlignmentPlan::dry`].
+/// Muted paths count, so mute does not move the latency.  A negative
+/// trim shifts every path so the smallest delay is 0.  Allocation free.
 pub(crate) fn plan_alignment(
     align: bool,
     routed: [bool; MAX_PATHS],
@@ -78,30 +61,21 @@ pub(crate) fn plan_alignment(
     plan
 }
 
-/// One device's alignment as the UI shows it, in frames at `rate`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AlignmentReport {
-    /// The device's align switch.
     pub align: bool,
-    /// The rate the frames are counted at.
     pub rate: u32,
-    /// The path slot this device waits for (see [`AlignmentPlan`]).
     pub waits_for: Option<usize>,
-    /// Per path slot: the alignment delay it gets on this device, `None`
-    /// when the device does not play it.
+    /// `None` when the device does not play the path.
     pub delays: [Option<u32>; MAX_PATHS],
-    /// Per path slot: its chain latency plus its delay here, what the
-    /// person hears it late by on this device.  `None` when not played.
+    /// Chain latency plus the delay here: how late the path is heard.
+    /// `None` when not played.
     pub arrivals: [Option<u32>; MAX_PATHS],
-    /// The largest of `arrivals`: the device's latency from the chains and
-    /// the alignment (the slowest routed path, plus any trim).
     pub total: u32,
-    /// The largest alignment delay on the device: what aligning (and the
-    /// trims) adds on top of a path's own chain.
+    /// What aligning and the trims add on top of a path's own chain.
     pub added: u32,
-    /// Some path this device plays has a chain latency above
-    /// [`MAX_ALIGN`]: it is aligned (and counted here) as if it had
-    /// exactly that much, so it arrives later than shown.
+    /// A chain past [`MAX_ALIGN`] is aligned as if it had exactly that,
+    /// so it arrives later than shown.
     pub clamped: bool,
 }
 
@@ -128,7 +102,6 @@ impl AlignmentReport {
         }
     }
 
-    /// Frames at this report's rate in ms.
     pub fn ms(&self, frames: u32) -> f32 {
         if self.rate == 0 {
             0.0

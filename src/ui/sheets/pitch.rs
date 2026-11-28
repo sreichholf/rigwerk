@@ -1,12 +1,6 @@
-//! The pitch sheet's body (`docs/ui-spec.md` §6.1): the summary with the
-//! latency and *Reset*, then the shift in semitones and cents, the wet and
-//! the delay, and what the shifter is for.
-//!
-//! The header above (`sheets.rs`) holds *On* / *Bypass* / *Off*, drawn by
-//! [`state_switch`]: off takes the stage and its latency out of the chain,
-//! bypass plays the dry signal at the same delay and keeps it.  *Reset*
-//! keeps all three.  The sheet commits through
-//! [`RigWerkApp::apply_pitch`], which clamps; the widgets do not.
+//! The pitch sheet.  Off takes the stage and its latency out; bypass plays
+//! dry at the same delay and keeps the stage.  [`RigWerkApp::apply_pitch`]
+//! clamps; the widgets do not.
 
 use eframe::egui;
 use egui::{Align, Layout, RichText, Vec2};
@@ -33,7 +27,6 @@ pub(crate) const RESET_HINT: &str =
 pub(crate) const USE_HINT: &str = "Attacks stay intact. Best for single notes and power chords; \
      full chords chorus, less with a longer delay.";
 
-/// The line above the controls, with the latency at the shown rate.
 pub(crate) fn summary(latency: &str) -> String {
     format!("First in the chain · sums a stereo source to mono · the path waits {latency}")
 }
@@ -157,7 +150,6 @@ pub(crate) fn reset_pitch(pitch: PitchSettings) -> PitchSettings {
 }
 
 impl RigWerkApp {
-    /// The pitch sheet body for path `path`.
     pub(crate) fn pitch_sheet(&mut self, ui: &mut egui::Ui, path: usize) {
         let Some(signal) = self.paths.get(path).and_then(Option::as_ref) else {
             return;
@@ -231,7 +223,6 @@ impl RigWerkApp {
     }
 }
 
-/// One row: name, then what `add` draws (the track), then the value.
 fn row(
     ui: &mut egui::Ui,
     name: &str,
@@ -277,7 +268,6 @@ fn row(
     );
 }
 
-/// Semitones (a track with − and + beside it), cents, wet and delay.
 fn controls(ui: &mut egui::Ui, pitch: &mut PitchSettings, colours: &Palette, path: usize) {
     ui.spacing_mut().item_spacing.y = 4.0;
     let semitones_text = format_semitones(pitch.semitones);
@@ -395,7 +385,6 @@ fn controls(ui: &mut egui::Ui, pitch: &mut PitchSettings, colours: &Palette, pat
     );
 }
 
-/// A note in the secondary text colour.
 fn hint(ui: &mut egui::Ui, text: &str, colours: &Palette) {
     ui.add(
         egui::Label::new(

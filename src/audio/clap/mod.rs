@@ -1,15 +1,7 @@
-//! A small CLAP effect host.
-//!
-//! CLAP is a plain C ABI.  The host opens the `.clap` bundle, hands the plugin
-//! a `clap_host` with the callbacks and extensions it implements, and then uses
-//! the plugin's parameter, audio-port and GUI extensions.
-//!
-//! A loaded plugin is split in two: `instance` is the main-thread half,
-//! reached only through its `PluginHandle` on the UI thread, and
-//! `processor` is the audio-thread half the chain's slot owns.  The two
-//! never share a lock: values cross in the transfer queues, and a
-//! restart or reactivation waits for the pause handshake to stop the
-//! processor first.
+//! CLAP effect host.  `instance` is the UI-thread half, through
+//! `PluginHandle`; `processor` is the audio-thread half the slot owns.
+//! They share no lock: values cross in the transfer queues, and a restart
+//! waits until the pause handshake has stopped the processor.
 
 mod gui;
 mod host;

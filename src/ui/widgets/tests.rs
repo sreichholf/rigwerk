@@ -58,7 +58,7 @@ fn a_focused_slider_changes_with_arrow_keys_and_stays_focused() {
     let _ = run_frame(&ctx, test_input(None), |ui| {
         show(ui, &mut value).request_focus();
     });
-    // One idle frame installs the arrow-key filter egui applies on the next pass.
+    // One idle frame installs the arrow-key filter egui applies next.
     let _ = run_frame(&ctx, test_input(None), |ui| {
         show(ui, &mut value);
     });

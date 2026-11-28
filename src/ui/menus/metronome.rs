@@ -1,5 +1,3 @@
-//! The metronome control and its menu.
-
 use eframe::egui;
 use egui::{CornerRadius, RichText, Stroke};
 
@@ -11,7 +9,6 @@ use crate::ui::theme::{font, palette, Face, TypeRole};
 use crate::ui::widgets::{format_db, styled_slider, SliderStyle};
 
 impl RigWerkApp {
-    /// Tempo and rhythm.  A click starts or stops; the arrow opens the menu.
     pub(crate) fn metronome_control(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         let running = self.metronome_running;

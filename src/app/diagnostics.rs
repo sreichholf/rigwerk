@@ -1,13 +1,6 @@
-//! The diagnostics export: where the file goes, what it is called, and the
-//! write.
-//!
-//! The sheet builds the report's text; this module owns the folder policy
-//! and the filesystem calls, so the UI never chooses a path or writes a
-//! file.  On Windows `%USERPROFILE%\Downloads` comes first, because Git Bash
-//! and MSYS set `HOME` to a POSIX path that `Path` reads as drive-relative;
-//! on Unix `$HOME/Downloads` comes first.  The other one follows, then the
-//! temp directory.  The writer creates the folder and never replaces a
-//! report another export already wrote.
+//! On Windows `%USERPROFILE%` comes first: Git Bash and MSYS set `HOME`
+//! to a POSIX path that `Path` reads as drive-relative.  Unix takes
+//! `$HOME` first.  An existing report is never replaced.
 
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Write};

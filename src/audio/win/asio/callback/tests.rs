@@ -11,12 +11,9 @@ use super::{
 };
 use crate::audio::shared::Shared;
 
-/// One input-side buffer switch over f32 channel buffers.  It calls
-/// `process_input` directly rather than through `dispatch`: that keeps the
-/// test off the driver's process-global callback slot, and a panic fails the
-/// test instead of being silenced by the callback's `catch_unwind`.  What
-/// `dispatch` adds - the buffer-index clamp and the denormal guard - is not
-/// what these tests measure.
+/// Calls `process_input` directly, not `dispatch`: that stays off the
+/// process-global callback slot, and a panic fails the test instead of
+/// being caught.  The clamp and the denormal guard are not measured here.
 fn run_input(shared: &Arc<Shared>, left: &[f32], right: Option<&[f32]>) {
     let mut buffers = vec![[left.as_ptr().cast_mut().cast::<c_void>(), ptr::null_mut()]];
     let mut types = vec![SampleType::PCM_F32_LSB];
@@ -33,7 +30,7 @@ fn ring(shared: &Shared) -> Vec<(f32, f32)> {
     std::iter::from_fn(|| shared.pop_frame()).collect()
 }
 
-/// The tuner's tap, which is taken before the channel enable.
+/// Taken before the channel enable.
 fn tap(shared: &Shared, frames: usize) -> Vec<(f32, f32)> {
     let mut samples = vec![0.0; frames * 2];
     assert_eq!(shared.copy_tap(&mut samples, frames), frames);
@@ -50,12 +47,9 @@ fn peaks(shared: &Shared) -> (f32, f32) {
     )
 }
 
-/// Every value is an exact power-of-two fraction, so the gain product is
-/// exact and the comparison is on the numbers, not on a tolerance.
-///
-/// Gain 2 and a muted left side keep the raw, tapped and pushed values
-/// distinct: the tap is pre-mute, the ring is post-mute, and the peaks follow
-/// the ring.
+/// Powers of two, so the gain product is exact.  Gain 2 and a muted left
+/// keep the raw, tapped and pushed values distinct: the tap is pre-mute,
+/// the ring is post-mute, and the peaks follow the ring.
 #[test]
 fn a_stereo_input_pushes_the_driver_frames_and_publishes_the_peaks() {
     let shared = Arc::new(Shared::new(48_000));
@@ -72,13 +66,12 @@ fn a_stereo_input_pushes_the_driver_frames_and_publishes_the_peaks() {
         vec![(1.0, -0.25), (-0.5, 1.5), (0.25, -1.0)]
     );
     assert_eq!(peaks(&shared), (0.0, 1.5));
-    // The block's frames are counted: one add for the block and one per frame
-    // give the same total.
+    // One add for the block and one per frame give the same total.
     assert_eq!(shared.snapshot().input_frames, 3);
 }
 
-/// A driver with one input channel only gives a left buffer; the right side
-/// repeats that sample rather than reading past the channel list.
+/// One input channel gives only a left buffer; the right side repeats
+/// that sample rather than reading past the channel list.
 #[test]
 fn a_mono_input_copies_its_only_channel_to_both_sides() {
     let shared = Arc::new(Shared::new(48_000));
@@ -87,15 +80,13 @@ fn a_mono_input_copies_its_only_channel_to_both_sides() {
     run_input(&shared, &left, None);
 
     assert_eq!(ring(&shared), vec![(0.5, 0.5), (-0.25, -0.25)]);
-    // Peaks are block maxima and a mono source repeats its sample, so both
-    // sides hold the louder sample's level.
+    // Peaks are block maxima, and a mono source repeats its sample.
     assert_eq!(peaks(&shared), (0.5, 0.5));
     assert_eq!(shared.snapshot().input_frames, 2);
 }
 
-/// Installs one idle session on `slot` and hands back the registration.  Every
-/// test leaks its own host, so a registration never lands in the production
-/// `ASIO_HOST`.
+/// Every test leaks its own host, so a registration never lands in the
+/// production `ASIO_HOST`.
 fn install(
     host: &'static AsioHost,
     slot: AsioCallbackSlot,
@@ -106,9 +97,9 @@ fn install(
     CallbackRegistration::install(host, slot, Box::new(context), Arc::clone(signal))
 }
 
-/// A reset belongs to the registration that was installed when it arrived: it
-/// reaches every installed role once, and a session installed later baselines
-/// the bump away.
+/// A reset belongs to the registration installed when it arrived.  It
+/// reaches every installed role once, and a later session baselines the
+/// bump away.
 #[test]
 fn a_reset_request_reaches_the_installed_session_only() {
     let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));
@@ -132,7 +123,7 @@ fn a_reset_request_reaches_the_installed_session_only() {
         "a fresh install captures a fresh baseline"
     );
 
-    // One bump reaches both roles that are installed when it arrives.
+    // One bump reaches both roles installed when it arrives.
     let output_signal = AsioSignal::new();
     let output = install(host, AsioCallbackSlot::Output, &shared, &output_signal)
         .expect("the empty output slot takes a session");
@@ -147,9 +138,8 @@ fn a_reset_request_reaches_the_installed_session_only() {
     output.clear();
 }
 
-/// The host, not the engine start path, is what refuses a second session per
-/// role: the first context stays installed and keeps receiving resets while
-/// the second is turned away without a slot or a baseline.
+/// The host refuses a second session per role.  The first context stays
+/// installed and keeps receiving resets; the second gets no slot.
 #[test]
 fn a_second_install_on_the_same_slot_is_refused_by_the_owner() {
     let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));
@@ -169,8 +159,8 @@ fn a_second_install_on_the_same_slot_is_refused_by_the_owner() {
         "The previous ASIO session is still shutting down and has not released its driver callbacks."
     );
 
-    // The refusal did not disturb the installed context: it still owns the
-    // slot and still sees the reset the refused session never existed for.
+    // The refusal leaves the installed context in place: it still owns
+    // the slot and still sees the reset.
     host.request_reset();
     assert!(first.take_reset());
 
@@ -188,8 +178,8 @@ fn a_second_install_on_the_same_slot_is_refused_by_the_owner() {
     second.clear();
 }
 
-/// A reset that arrives between `install` and the first wait is pending, and
-/// after one wait consumed it a later wait does not fire again.
+/// A reset between `install` and the first wait stays pending.  After
+/// one wait consumes it, a later wait does not fire again.
 #[test]
 fn a_reset_before_the_wait_is_still_reported() {
     let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));
@@ -205,9 +195,8 @@ fn a_reset_before_the_wait_is_still_reported() {
         "the gap reset is pending"
     );
 
-    // The consumed bump does not fire a second wait: the wait must pass
-    // through at least one `take_reset()` check first, or this would only
-    // prove that `stopped` is read before the reset.
+    // The wait must pass through `take_reset()` before `stopped`, or this
+    // would only prove that `stopped` is read first.
     let ticks = std::cell::Cell::new(0);
     let wait = wait_for_callbacks(
         &registration,
@@ -225,8 +214,8 @@ fn a_reset_before_the_wait_is_still_reported() {
     registration.clear();
 }
 
-/// `Drop` detaches the slot without freeing the context, so the role can be
-/// installed again and the new session starts from its own baseline.
+/// `Drop` detaches the slot without freeing the context.  The role can
+/// be installed again, from its own baseline.
 #[test]
 fn dropping_a_registration_lets_the_slot_be_installed_again() {
     let host: &'static AsioHost = Box::leak(Box::new(AsioHost::new()));

@@ -449,7 +449,8 @@ fn the_click_mask_follows_the_device_when_a_session_swaps_clock_and_extra_output
     app.extra_outputs = vec![as_extra_output("hw:Monitor", "Monitor")];
     app.save_session();
 
-    // Now Monitor is the clock and Speaker an extra output, each with its click.
+    // Monitor is the clock and Speaker an extra output, each with
+    // its click.
     app.devices.output_idx = 1;
     app.clock_output.click_mask = 0b0011;
     app.extra_outputs = vec![as_extra_output("hw:Speaker", "Speaker")];

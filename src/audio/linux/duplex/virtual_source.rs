@@ -1,5 +1,3 @@
-//! RigWerk Out virtual source and the virtual output slot that feeds it.
-
 use std::ffi::{c_void, CString};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -17,8 +15,7 @@ use crate::audio::rt_guard::RtGuard;
 
 use super::{properties, MAX_FRAMES};
 
-/// Stereo block the duplex callback writes for RigWerk Out; the virtual
-/// source filter reads it.  Seqlock: odd `gen` means a write is in flight.
+/// Seqlock: odd `gen` means a write is in flight.
 pub(super) struct VirtualOutputSlot {
     gen: AtomicU64,
     frames: AtomicUsize,
@@ -60,9 +57,8 @@ impl VirtualOutputSlot {
         self.gen.fetch_add(1, Ordering::Release);
     }
 
-    /// Copies up to `max` frames into `out_l`/`out_r`.  Returns how many.
-    /// Spins only briefly: an abandoned odd `gen` (writer never finished)
-    /// must not livelock the virtual source callback.
+    /// Spins only briefly: an abandoned odd `gen` must not livelock the
+    /// virtual source callback.
     pub(super) fn read(&self, out_l: &mut [f32], out_r: &mut [f32], max: usize) -> usize {
         for _ in 0..64 {
             let start = self.gen.load(Ordering::Acquire);
@@ -97,26 +93,23 @@ impl VirtualOutputSlot {
         self.gen.load(Ordering::Relaxed)
     }
 
-    /// Publishes an empty generation.  The panic path uses it when the cycle
-    /// may not have opened a write at all, so the reader plays silence instead
-    /// of repeating the last good buffer.
+    /// The panic path, when the cycle may not have opened a write.  The
+    /// reader plays silence instead of the last good buffer.
     pub(super) fn publish_empty(&self) {
         self.begin_write();
         self.end_write(0);
     }
 }
 
-/// One RigWerk Out write in flight.  Dropping it without [`Self::finish`]
-/// closes the generation with zero frames, which is the panic path: the
-/// reader then plays silence instead of spinning on an odd generation, and
-/// the last good buffer is not replayed as if it were current.
+/// Drop without [`Self::finish`] closes the generation with zero frames.
+/// The reader plays silence instead of spinning on an odd generation, and
+/// the last good buffer is not replayed.
 pub(super) struct VirtualWrite<'a> {
     slot: &'a VirtualOutputSlot,
     finished: bool,
 }
 
 impl<'a> VirtualWrite<'a> {
-    /// Opens the seqlock for one cycle.
     pub(super) fn begin(slot: &'a VirtualOutputSlot) -> Self {
         slot.begin_write();
         Self {
@@ -125,7 +118,7 @@ impl<'a> VirtualWrite<'a> {
         }
     }
 
-    /// Publishes `frames` and closes the generation exactly once.
+    /// Closes the generation exactly once.
     pub(super) fn finish(mut self, frames: usize) {
         self.slot.end_write(frames);
         self.finished = true;
@@ -140,7 +133,6 @@ impl Drop for VirtualWrite<'_> {
     }
 }
 
-/// Process data for the RigWerk Out virtual source filter.
 struct VirtualProcess {
     virtual_output: Arc<VirtualOutputSlot>,
     ports: [*mut c_void; 2],
@@ -160,9 +152,8 @@ unsafe extern "C" fn on_virtual_process(
     if frames == 0 {
         return;
     }
-    // A panic must not unwind into PipeWire's own callback (Rust panics
-    // across `extern "C"` abort the process).  This source has no status
-    // channel of its own; silence is the whole answer here.
+    // A panic across `extern "C"` aborts.  This source has no status
+    // channel; silence is the whole answer.
     if contain(|| unsafe { process_virtual(data, frames) }) {
         unsafe { silence_ports(data, frames) };
     }
@@ -204,7 +195,7 @@ unsafe fn process_virtual(data: &mut VirtualProcess, frames: usize) {
     }
 }
 
-/// Zeroes both output ports of this cycle after a caught panic.
+/// After a caught panic, so the graph plays silence.
 unsafe fn silence_ports(data: &VirtualProcess, frames: usize) {
     let buffer = |port: *mut c_void| unsafe {
         pw_sys::pw_filter_get_dsp_buffer(port, frames as u32) as *mut f32
@@ -217,8 +208,7 @@ unsafe fn silence_ports(data: &VirtualProcess, frames: usize) {
     }
 }
 
-/// RigWerk Out: a virtual source other apps can capture.  Created and
-/// destroyed live when the virtual output is switched.
+/// Created and destroyed live when the virtual output is switched.
 pub(super) struct VirtualSource {
     raw: NonNull<pw_sys::pw_filter>,
     _hooks: Box<spa_sys::spa_hook>,

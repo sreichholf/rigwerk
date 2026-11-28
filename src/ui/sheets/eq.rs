@@ -1,13 +1,6 @@
-//! The EQ sheet's body (`docs/ui-spec.md` §6.1): the response curve with
-//! its five band handles on the left, the band table on the right, *Flat*
-//! above them.
-//!
-//! The header above (`sheets.rs`) already holds the EQ's *On* / *Bypass*.
-//! The curve is the filter math the engine runs
-//! ([`EqSettings::response_db`]); a handle sits at its band's frequency and
-//! gain, so a drag moves exactly those two.  Every edit is one
-//! [`RigWerkApp::set_path_eq`] after the frame, never an engine call.  The
-//! selected band is view state and lives in egui's memory.
+//! The EQ sheet.  The curve is [`EqSettings::response_db`]; a drag moves
+//! that band's frequency and gain.  Every edit is one
+//! [`RigWerkApp::set_path_eq`] after the frame.
 
 use eframe::egui;
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
@@ -224,8 +217,6 @@ fn paint_badge(
 }
 
 impl RigWerkApp {
-    /// The EQ sheet body for path `path`: the pre EQ, or the post EQ when
-    /// `post`.
     pub(crate) fn eq_sheet(&mut self, ui: &mut egui::Ui, path: usize, post: bool) {
         let slot = if post { EqSlot::Post } else { EqSlot::Pre };
         let Some(signal) = self.paths.get(path).and_then(Option::as_ref) else {
@@ -745,10 +736,9 @@ fn paint_grid(painter: &egui::Painter, plot: Plot, colours: &Palette) {
     }
 }
 
-/// The curve across the plot, `db` read at each point.  Generic, so a curve
-/// is one specialised loop and not a call through a `dyn Fn` per point.  The
-/// `Vec` is the shape's own: `Shape::line` takes it, so a caller cannot hand
-/// a buffer back in.
+/// Generic, so a curve is one loop and not a `dyn Fn` per point.  The
+/// `Vec` is the shape's own: `Shape::line` takes it, so a caller cannot
+/// hand a buffer back in.
 fn sample(plot: Plot, db: impl Fn(f32) -> f32) -> Vec<egui::Pos2> {
     const STEPS: usize = 240;
     (0..=STEPS)

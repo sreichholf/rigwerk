@@ -1,9 +1,7 @@
-//! Keeps extra output streams in step with the live extra output plan.
-//! Add/remove/reconnect never stops the clock bridge.
+//! Add, remove and reconnect never stop the clock.
 //!
-//! [`ExtraOutputSlots`] is the open / close / retry bookkeeping for one kind of
-//! stream: cpal here, PipeWire node streams in `linux::native`.  A table
-//! only touches the flags of a slot it opened or is retrying.
+//! A table only touches the flags of a slot it opened or is retrying.
+//! PipeWire node streams use the same bookkeeping.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -13,10 +11,9 @@ use super::super::output_map::MAX_EXTRA_OUTPUTS;
 use super::super::shared::{ExtraOutputPlan, Shared};
 use super::stream::{open_extra_output, OpenedExtraOutput};
 
-/// How long to wait after a failed open before trying again.
 const RETRY_AFTER: Duration = Duration::from_millis(750);
 
-/// Live generic (cpal) extra output streams owned by the bridge thread.
+/// Owned by the bridge thread.
 pub(crate) struct ExtraOutputOutputs {
     streams: ExtraOutputSlots<OpenedExtraOutput>,
     buffer_frames: usize,
@@ -32,10 +29,8 @@ impl ExtraOutputOutputs {
         }
     }
 
-    /// Opens, closes and reconnects extra outputs to match the plan.  Safe to call
-    /// every bridge tick.
     pub(crate) fn sync(&mut self, shared: &Arc<Shared>) {
-        // PipeWire duplex fans out in-graph; never open cpal extra outputs there.
+        // Duplex fans out in the graph.  Do not open cpal streams there.
         if shared.direct.load(Ordering::Relaxed) {
             self.streams.close_all(shared);
             return;
@@ -48,11 +43,9 @@ impl ExtraOutputOutputs {
     }
 }
 
-/// One open stream per extra output slot, keyed by what it was opened for (a
-/// device id or a node name), with the retry backoff of a slot that failed.
+/// Keyed by the device id or node name it was opened for.
 pub(crate) struct ExtraOutputSlots<T> {
     slots: [Option<(String, T)>; MAX_EXTRA_OUTPUTS],
-    /// Next time a missing slot may be retried.
     retry_at: [Option<Instant>; MAX_EXTRA_OUTPUTS],
 }
 
@@ -64,12 +57,8 @@ impl<T> ExtraOutputSlots<T> {
         }
     }
 
-    /// Opens, closes and reopens streams so exactly the `wanted` (slot, key)
-    /// pairs play.  `open` lays the slot's ring out and starts the stream; the
-    /// ring-active flag is off while it runs.  A failed open marks the slot
-    /// missing and is retried after [`RETRY_AFTER`]; a stream that set the
-    /// missing flag itself is dropped and retried the same way, missing until
-    /// it reopens.
+    /// `open` runs with the ring-active flag off.  A failure stays missing
+    /// until [`RETRY_AFTER`] elapses.
     pub(crate) fn sync(
         &mut self,
         shared: &Shared,
@@ -81,7 +70,7 @@ impl<T> ExtraOutputSlots<T> {
             .filter(|(slot, _)| *slot < MAX_EXTRA_OUTPUTS)
             .collect();
 
-        // Close slots that left the plan or changed device.
+        // A slot that left the plan, or changed device.
         for slot in 0..MAX_EXTRA_OUTPUTS {
             let key = wanted.iter().find(|(s, _)| *s == slot).map(|(_, key)| key);
             let keep = key.is_some_and(|key| {
@@ -94,13 +83,12 @@ impl<T> ExtraOutputSlots<T> {
             }
             let owned = self.slots[slot].is_some() || self.retry_at[slot].is_some();
             if self.slots[slot].take().is_some() {
-                // Stop the producer; do not reset the ring here — the clock
-                // callback may still finish a push.  `open` resets before the
-                // next open.
+                // The clock callback may still finish a push.  The next open
+                // resets the ring.
                 stop_feeding(shared, slot);
             }
-            // A slot still wanted keeps its backoff.  One that left this
-            // table's plan clears the missing flag only if it was ours.
+            // A slot still wanted keeps its backoff.  One that left clears
+            // `missing` only if this table owned it.
             if key.is_none() && owned {
                 self.retry_at[slot] = None;
                 shared
@@ -121,10 +109,9 @@ impl<T> ExtraOutputSlots<T> {
                 {
                     continue;
                 }
-                // Device reported lost: drop it and retry after the backoff.
-                // A PipeWire stream connects asynchronously, so an immediate
-                // reopen would succeed and fail again every tick.  The slot
-                // stays missing until the reopen.
+                // Lost device.  A PipeWire stream connects asynchronously, so
+                // an immediate reopen would fail again every tick.  The slot
+                // stays missing until the backoff.
                 self.slots[slot].take();
                 stop_feeding(shared, slot);
                 self.retry_at[slot] = Some(now + RETRY_AFTER);
@@ -146,8 +133,7 @@ impl<T> ExtraOutputSlots<T> {
                         .extra_output_bus(slot)
                         .missing
                         .store(false, Ordering::Relaxed);
-                    // Tell the producer the clock's block size once we know the
-                    // output rate (open_output already published it).
+                    // The producer sizes its bridge buffer from the clock step.
                     let clock_step = shared.output_step_frames.load(Ordering::Relaxed) as usize;
                     if clock_step > 0 {
                         shared.extra_output_bus(slot).note_input_block(clock_step);
@@ -179,7 +165,6 @@ impl<T> ExtraOutputSlots<T> {
     }
 }
 
-/// The clock side stops pushing into `slot`'s ring.
 fn stop_feeding(shared: &Shared, slot: usize) {
     shared
         .extra_output_ring_active(slot)
@@ -187,9 +172,8 @@ fn stop_feeding(shared: &Shared, slot: usize) {
     shared.extra_output_bus(slot).set_playback_rate(0);
 }
 
-/// The plan's slots that play on their own cpal stream, with their device
-/// ids.  A PipeWire node extra output is not one: the duplex node links it, and
-/// the native two-stream bridge opens a node stream for it.
+/// A PipeWire node is not one of these: duplex links it, and the native
+/// bridge opens a node stream for it.
 fn generic_extra_outputs(plan: &ExtraOutputPlan) -> Vec<(usize, String)> {
     plan.slots
         .iter()
@@ -199,8 +183,8 @@ fn generic_extra_outputs(plan: &ExtraOutputPlan) -> Vec<(usize, String)> {
             if link.device_id.is_empty() || !super::is_generic_extra_output(&link.device_id) {
                 return None;
             }
-            // PipeWire RigWerk Out is in-graph.  The Windows VB-Cable virtual
-            // output is a WASAPI extra output that only plays while it is on.
+            // RigWerk Out is in-graph.  The Windows VB-Cable virtual output
+            // is a WASAPI extra output and only plays while it is on.
             if link.virtual_output {
                 #[cfg(target_os = "windows")]
                 if link.virtual_output_on {

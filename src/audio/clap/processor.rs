@@ -1,17 +1,11 @@
-//! The audio-thread half of a loaded CLAP plugin: `start_processing`,
-//! `process`, `stop_processing`, and an active `params.flush` for a skipped
-//! effect.  UI parameter values arrive through the transfer queue and go
-//! into the input event list; the plugin's output `PARAM_VALUE` events go
-//! back to the UI through the other queue.
+//! Audio-thread half: `start_processing`, `process`, `stop_processing`,
+//! and an active `params.flush` for a skipped effect.  Nothing here
+//! allocates, locks, or frees, and it never touches the main-thread
+//! instance or its UI lock.
 //!
-//! A value the event list could not take, or that went into a block the
-//! plugin failed, is kept and goes with the next block; values count as
-//! applied only once a block (or flush) carried them all.
-//!
-//! Nothing here allocates, locks or frees: the buffers, the event list and
-//! the kept values are sized at load, the queues never allocate, and a
-//! failure is a static [`ClapFailure`].  The processor never touches the
-//! main-thread instance or its UI lock.
+//! A value the event list could not take, or that a failed block took,
+//! is kept for the next block.  Values count as applied only once a
+//! block or flush carried them all.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -33,8 +27,7 @@ use crate::audio::plugins::{
 use super::instance::ClapCore;
 use super::ports::PortBuffers;
 
-/// One parameter's range, by index in the load-time table.  Immutable, so
-/// both halves read it without a lock.
+/// Immutable, so both halves read it without a lock.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ClapRange {
     pub(super) id: u32,
@@ -63,9 +56,8 @@ impl ClapRange {
     }
 }
 
-/// The input event list for `process` and `params.flush`.  Its capacity is
-/// reserved at load and a push past it is dropped, so the audio thread
-/// never grows it.
+/// Capacity is reserved at load.  A push past it is dropped, so the
+/// audio thread never grows it.
 pub(super) struct EventBuffer {
     events: Vec<clap_event_param_value>,
 }
@@ -142,10 +134,8 @@ unsafe extern "C" fn input_events_get(
         })
 }
 
-/// Where a plugin's output events go: `PARAM_VALUE` for a known id is
-/// normalised and handed to `emit` as `(index, value)`; every other event
-/// is accepted and dropped.  Binary search and a call, so the audio thread
-/// may use it.
+/// A known `PARAM_VALUE` is normalised and emitted.  Every other event
+/// is accepted and dropped.  No allocation, so the audio thread may use it.
 pub(super) struct OutputSink<'a> {
     pub(super) ids: &'a ParamIds,
     pub(super) ranges: &'a [ClapRange],
@@ -186,8 +176,8 @@ unsafe extern "C" fn output_try_push(
     true
 }
 
-/// `stop_processing`, as the audio thread.  Shared by the processor and a
-/// forced stop on the UI thread (no block is inside the plugin then).
+/// As the audio thread.  A forced stop on the UI thread uses it only
+/// when no block is inside the plugin.
 pub(super) fn stop_processing(plugin: *const clap_plugin) {
     let _audio_thread = AudioThreadScope::enter();
     if let Some(stop) = unsafe { (*plugin).stop_processing } {
@@ -195,8 +185,8 @@ pub(super) fn stop_processing(plugin: *const clap_plugin) {
     }
 }
 
-/// The audio-thread half.  It lives in the chain's slot; the UI only drops
-/// it, on teardown, after the slot left every chain.
+/// Lives in the chain's slot.  The UI drops it on teardown, after the
+/// slot has left every chain.
 pub(crate) struct ClapProcessor {
     /// The instance's pointer, owned by `core`.
     pub(super) plugin: *const clap_plugin,
@@ -226,7 +216,7 @@ pub(crate) struct ClapProcessor {
 unsafe impl Send for ClapProcessor {}
 
 impl ClapProcessor {
-    /// `start_processing`, as the audio thread.
+    /// As the audio thread.
     pub(crate) fn start(&mut self) -> Result<(), ClapFailure> {
         let _audio_thread = AudioThreadScope::enter();
         match unsafe { (*self.plugin).start_processing } {
@@ -235,15 +225,12 @@ impl ClapProcessor {
         }
     }
 
-    /// `stop_processing`, as the audio thread.
     pub(crate) fn stop(&mut self) {
         stop_processing(self.plugin);
     }
 
-    /// Runs the plugin over one buffer in place, in sub-blocks of at most
-    /// the block size it was activated with.  The queued UI values go into
-    /// the first sub-block's input events; output values go to the UI.
-    /// Only call it between a successful [`Self::start`] and [`Self::stop`].
+    /// In place, in sub-blocks of at most the activation block size.
+    /// Only between a successful [`Self::start`] and [`Self::stop`].
     pub(crate) fn process(
         &mut self,
         left: &mut [f32],
@@ -347,11 +334,9 @@ impl ClapProcessor {
         Ok(())
     }
 
-    /// For a processing effect the chain skips (bypass, mix at 0): hands
-    /// queued UI values, or a flush the plugin asked for, to
-    /// `params.flush` on the audio thread, so a value set while bypassed
-    /// still reaches the plugin (and its state).  A plugin without `flush`
-    /// keeps them queued for its next processed block.
+    /// Bypass or mix at 0.  Queued values, or a flush the plugin asked
+    /// for, go to `params.flush` on the audio thread.  Without `flush`
+    /// they stay queued for the next processed block.
     pub(crate) fn flush_if_queued(&mut self) {
         let host = &*self.core.host;
         let requested = host.flush_requested.load(Ordering::Relaxed);
@@ -394,20 +379,17 @@ impl ClapProcessor {
         }
     }
 
-    /// Makes the event list hold only `capacity` events, for the tests of
-    /// a full list.
     #[cfg(test)]
     pub(super) fn limit_events_for_test(&mut self, capacity: usize) {
         self.events = EventBuffer::with_capacity(capacity);
     }
 }
 
-/// Fills `events` with the values `retry` kept, then the transfer's (a
-/// newer one for the same parameter follows the kept one, so it wins).  A
-/// value the full list cannot take is kept in `retry` for the next block,
-/// replacing an older kept one; once the list is full nothing newer gets
-/// in, so a kept value is never older than one that went.  Returns
-/// whether the drain deferred a value.
+/// Kept values first, then the transfer: a newer one for the same
+/// parameter follows, so it wins.  A value the full list cannot take
+/// stays in `retry`, and nothing newer gets in after that, so a kept
+/// value is never older than one that went.  True when the drain
+/// deferred a value.
 fn fill_events(
     retry: &mut Retry,
     from_ui: &mut ParamReceiver,

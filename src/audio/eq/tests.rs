@@ -6,8 +6,6 @@ fn settings_with(band: usize, gain_db: f32) -> EqSettings {
     settings
 }
 
-/// Feeds a steady sine through the EQ and returns the output level in dB
-/// relative to the input.
 fn measured_gain_db(settings: EqSettings, hz: f32) -> f32 {
     let rate = 48_000;
     let mut eq = Equalizer::new(rate);
@@ -35,7 +33,6 @@ fn flat_eq_changes_nothing() {
 fn mid_bell_boosts_its_own_frequency_by_its_gain() {
     let gain = measured_gain_db(settings_with(2, 9.0), 800.0);
     assert!((gain - 9.0).abs() < 0.3, "{gain}");
-    // Far away from the bell the level is untouched.
     let far = measured_gain_db(settings_with(2, 9.0), 60.0);
     assert!(far.abs() < 0.5, "{far}");
 }

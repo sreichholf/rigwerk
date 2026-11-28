@@ -1,12 +1,6 @@
-//! The `IComponentHandler` a plugin's controller reports to: editor edits
-//! and restart requests.
-//!
-//! The callbacks never do the work themselves.  `performEdit` queues the
-//! value for the audio side and the edit log ([`ParamOut::push_edit`]), and
-//! `restartComponent` only records its flags in [`PluginShared`]; the UI's
-//! next service frame acts on both.  A plugin may call from any thread:
-//! off the UI thread an edit only try-locks and is dropped when busy, and
-//! the restart flags are atomics, so no callback ever waits.
+//! `IComponentHandler`.  A plugin may call from any thread.  `performEdit`
+//! try-locks and drops the edit when busy; `restartComponent` only stores
+//! atomic flags.  The UI frame acts on both.
 
 use std::sync::Arc;
 

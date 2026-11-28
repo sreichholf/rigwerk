@@ -1,9 +1,7 @@
-//! Opening the playback side: the platform's own clock output when it has one,
-//! and the shared cpal stream fed by the mixer behind it.
-//!
-//! What each platform tries there lives in its own folder: `win/output` owns
-//! the WASAPI exclusive and REAL-style attempt and Windows' "device in use"
-//! answer, `linux/alsa` owns the period and the mode line Linux asks for.
+//! The platform's own clock output opens first, when it has one.  A
+//! refusal falls back to the shared cpal stream, retried once at the
+//! driver's default.  On Windows, exclusive falls back to shared cpal
+//! with `buffer_frames`, not REAL-style.
 
 use std::sync::Arc;
 
@@ -26,16 +24,13 @@ use super::win::output as win_output;
 #[cfg(target_os = "windows")]
 use super::win::wasapi;
 
-/// What `open_output` hands back: the live stream plus the rate and channel
-/// count it really runs at.
 pub(crate) struct OpenedOutput {
     pub(crate) _stream: OutputStream,
     pub(crate) rate: u32,
     pub(crate) channels: usize,
 }
 
-/// Either a cpal stream or RigWerk's own WASAPI stream (REAL-style or
-/// exclusive).  Both keep playing until they are dropped.
+/// Both keep playing until dropped.
 #[allow(dead_code)]
 pub(crate) enum OutputStream {
     Cpal(cpal::Stream),
@@ -45,17 +40,6 @@ pub(crate) enum OutputStream {
     Exclusive(wasapi::ExclusiveOutput),
 }
 
-/// Opens the playback side.
-///
-/// On Windows, `exclusive` tries WASAPI exclusive mode first (clock output
-/// only).  On refuse it falls back to shared cpal with `buffer_frames`, not
-/// REAL-style.  `low_latency` asks the platform's clock output for the lowest
-/// latency it can open: IAudioClient3 at the driver's smallest shared engine
-/// step on Windows, ALSA's smallest usable period on Linux.  A refusal falls
-/// back to the shared cpal stream (at `buffer_frames` on Windows, at ALSA's
-/// requested period on Linux); when that stream does not open at the
-/// requested buffer, it is retried once at the driver's default, and only a
-/// second failure is an error.
 pub(crate) fn open_output(
     output_id: &str,
     sample_rate: u32,
@@ -68,8 +52,7 @@ pub(crate) fn open_output(
         .parse()
         .map_err(|error| format!("Output device id: {error}"))?;
 
-    // A platform with a clock output of its own opens that first, and says
-    // what it fell back from when the attempt is refused.
+    // A platform clock output opens first and reports what it fell back from.
     #[cfg(target_os = "windows")]
     let refusal = match win_output::attempt(&id, sample_rate, shared, low_latency, exclusive) {
         win_output::Attempt::Opened(opened) => return Ok(opened),
@@ -77,8 +60,7 @@ pub(crate) fn open_output(
     };
     #[cfg(not(target_os = "windows"))]
     let _ = exclusive;
-    // A host with neither a clock output nor a period of its own keeps the
-    // neutral open below.
+    // No clock output and no period of its own: the shared open below.
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let _ = low_latency;
 
@@ -89,8 +71,7 @@ pub(crate) fn open_output(
     let config = pick_output_config(&device, sample_rate)?;
     let channels = config.channels() as usize;
     let rate = config.sample_rate();
-    // What the shared stream asks for and the mode it then runs in: the
-    // platform owns both, because a refused request is a platform's answer.
+    // A refused request is that platform's answer, so it owns the mode line.
     #[cfg(target_os = "linux")]
     let requested = alsa::requested_output_buffer(&config, buffer_frames, low_latency);
     #[cfg(not(target_os = "linux"))]
@@ -114,8 +95,8 @@ pub(crate) fn open_output(
             stream
         }
         Err(error) => {
-            // A host or driver that cannot give us a fixed small buffer still
-            // gets to play; the buffer request simply does not apply.
+            // A driver that cannot give a fixed buffer still plays.  The
+            // request simply does not apply.
             let (mode, line) = describe(false);
             shared.set_output(rate, 0, mode, line);
             make_output_stream(&device, config, channels, Arc::clone(shared), None).map_err(
@@ -135,12 +116,10 @@ pub(crate) fn open_output(
     })
 }
 
-/// What the mode line carries when the fixed buffer was refused and the stream
-/// runs at whatever the driver defaults to.
 pub(crate) const FIXED_BUFFER_REFUSED: &str = " · fixed buffer refused, driver default";
 
-/// Turns a Windows "device in use" answer into a sentence; every other error
-/// is passed through as it came.
+/// A Windows "device in use" answer becomes a sentence.  Every other
+/// error is passed through.
 pub(crate) fn explain_output_error(error: String) -> String {
     #[cfg(target_os = "windows")]
     if let Some(explained) = win_output::explain_device_in_use(&error) {
@@ -158,22 +137,15 @@ pub(crate) fn clamp_output_buffer(config: &cpal::SupportedStreamConfig, frames: 
     }
 }
 
-/// How many whole interleaved frames one output block holds.  `None` when the
-/// block does not end on a frame boundary, or has no channels: a partial frame
-/// has no whole-frame count, so the loop that writes
-/// `data[index * channels..(index + 1) * channels]` would leave its tail
-/// unwritten, and a zero channel count would divide by zero.  The caller
-/// refuses such a block instead of playing a partly written buffer.
-///
-/// The refusal is the chain's failure, not the device's, so it stops the run on
-/// an extra output too.  The rule that an extra output never stops the bridge
-/// covers a device that goes away, not a bad block.
+/// `None` for a partial frame or no channels.  That is the chain's
+/// failure, not the device's, so it stops the run on an extra output too.
+/// An extra output that goes away does not.
 pub(crate) fn block_frames(samples: usize, channels: usize) -> Option<usize> {
     if channels == 0 {
         return None;
     }
     let frames = samples / channels;
-    // No `%`: a block is whole only when every sample belongs to a frame.
+    // Whole only when every sample belongs to a frame.
     (frames * channels == samples).then_some(frames)
 }
 
@@ -203,10 +175,8 @@ pub(crate) fn make_output_stream(
     }
 }
 
-/// Runs one interleaved output block's sample body.  A caught panic silences
-/// the block and marks the run failed, so a stream that cannot be trusted
-/// plays nothing rather than the half-written mix.  Both cpal output callbacks
-/// go through this, and `output/tests` fails if the guard is removed here.
+/// A caught panic silences the block.  A stream that cannot be trusted
+/// plays nothing rather than a half-written mix.
 pub(crate) fn render_or_silence<T: Sample>(
     shared: &Shared,
     block: &mut [T],
@@ -218,22 +188,18 @@ pub(crate) fn render_or_silence<T: Sample>(
     }
 }
 
-/// Copies a mapped device frame into one interleaved frame of the device
-/// buffer.  The channel map, level and mute were applied by the mixer's
-/// [`DeviceMapper`](super::output_map::DeviceMapper); this only converts.
+/// Conversion only.  The mixer already applied the map, level and mute.
 pub(crate) fn write_frame<T: Sample + FromSample<f32>>(frame: &mut [T], mapped: &DeviceFrame) {
     for (channel, sample) in frame.iter_mut().enumerate() {
         *sample = T::from_sample(mapped.sample(channel));
     }
 }
 
-/// The block size the cpal output's scratch is sized for up front.  Hosts with
-/// a default buffer hand over at most a few thousand frames.
+/// A default-buffer host hands over at most a few thousand frames.
 const PREPARED_BLOCK: usize = 8192;
 
-/// Splits one host block into prepared-size chunks, with the offset of each.
-/// A block larger than the scratch is rendered in several calls instead of
-/// growing it inside the callback.
+/// A block larger than the scratch is rendered in several calls, so the
+/// callback does not grow it.
 pub(crate) fn block_chunks(frames: usize, limit: usize) -> impl Iterator<Item = (usize, usize)> {
     (0..frames)
         .step_by(limit)
@@ -254,12 +220,11 @@ where
     let channels = channels.max(1);
     let mut promote = PromoteOnce::default();
     let mut mixer = OutputMixer::new(config.sample_rate, channels);
-    // Design the filter before the stream starts: the first callback must not
-    // spend a millisecond building the kernel.
+    // The first callback must not build the kernel.
     mixer.configure_source_rate(&shared);
     mixer.publish_device_channels(&shared);
-    // cpal only knows the block size once it calls back; size the scratch for
-    // the requested buffer or, with the host's default, for a generous one.
+    // cpal reports the block size in the callback.  Size the scratch for the
+    // request, or for a generous one when the host picks.
     mixer.prepare(match config.buffer_size {
         cpal::BufferSize::Fixed(frames) => (frames as usize).max(PREPARED_BLOCK),
         cpal::BufferSize::Default => PREPARED_BLOCK,
@@ -272,32 +237,27 @@ where
                 // cpal's stream thread starts at normal priority on Linux.
                 promote.run();
                 let Some(frames) = block_frames(data.len(), channels) else {
-                    // A block with no channel or a partial frame cannot be
-                    // written frame by frame: its whole-frame count is
-                    // unknown and its tail would stay unwritten.  Silence it
-                    // and publish the failure.  This stops the run even on an
-                    // extra output: the sample path failed, not the device.
+                    // A partial frame has no whole-frame count.  The sample
+                    // path failed, not the device, so this stops the run.
                     data.fill(T::EQUILIBRIUM);
                     mix_shared.note_callback_failure(CallbackFailure::BadBlock);
                     return;
                 };
                 if mix_shared.callback_failure().is_some() {
-                    // A previous callback failed; the app is stopping this
-                    // run, and the chain must not be driven again.
+                    // The chain must not be driven again.
                     data.fill(T::EQUILIBRIUM);
                     return;
                 }
-                // The block the host hands over is the step the device really
-                // runs at, whatever buffer was asked for.
+                // The host block is the step the device really runs, whatever
+                // buffer was asked for.
                 mix_shared.note_output_step(frames as u32);
-                // The bridge buffer floor follows the whole host block, also
-                // when it is rendered in prepared-size pieces.
+                // The floor follows the whole host block, also when it is
+                // rendered in prepared-size pieces.
                 mixer.note_host_block(&mix_shared, frames);
                 render_or_silence(&mix_shared, data, |block| {
                     for (offset, count) in block_chunks(frames, PREPARED_BLOCK) {
                         mixer.render_chunk(&mix_shared, count, |index, mapped| {
-                            // The frame write_frame is about to convert: channel map,
-                            // level, limiter, mute and the calibration duck.
+                            // The take records the mapped frame, duck included.
                             if channels > 0 {
                                 push_device_frame(
                                     &mix_shared.recorder,

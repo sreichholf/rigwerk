@@ -1,9 +1,6 @@
-//! One line under each clock row: what the driver really runs at, and why it
-//! differs from the chosen setting.  The explanation is in the hover text.
-//! It is a reading only: no amber and no button.  On the output side a
-//! click on the line asks the sound system about the driver again without
-//! opening any audio; "Output driver not checked yet" and the quantum fit
-//! are issues rows (`app::issues`), not this line.
+//! What the driver really runs at.  A reading only: no amber and no button.
+//! A click on the output line asks again without opening audio.  "Output
+//! driver not checked yet" and the quantum fit are issues rows, not this line.
 
 use eframe::egui;
 use egui::{Align, Color32, Layout, RichText, Sense};
@@ -18,11 +15,9 @@ fn reading(text: impl Into<String>, colour: Color32) -> RichText {
         .color(colour)
 }
 
-/// Draws the line.  `checking` is `Some(busy)` only on the output side, where
-/// a stand-alone check is possible; the return value says the line was
-/// clicked to check again.
-/// `stopped` makes it plain that a reading was taken without the bridge
-/// running, so the value is not mistaken for a live measurement.
+/// `checking` is `Some` only on the output side, where a stand-alone check
+/// is possible.  `stopped` is a reading taken with the bridge stopped, so
+/// it is not a live measurement.
 pub(crate) fn driver_line(
     ui: &mut egui::Ui,
     actual: Option<&DriverActual>,

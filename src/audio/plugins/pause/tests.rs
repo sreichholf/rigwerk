@@ -4,12 +4,10 @@ use std::time::{Duration, Instant};
 
 use super::{drive_pause, BlockAction, PauseHandshake, PauseStep, PAUSE_STALL, PAUSE_STRANDED};
 
-/// One whole block: begin it, return its action, end it.
 fn block(pause: &PauseHandshake) -> BlockAction {
     pause.begin_block().action()
 }
 
-/// A handshake past its first block: processing.
 fn running() -> PauseHandshake {
     let pause = PauseHandshake::new();
     let first = pause.begin_block();
@@ -20,7 +18,6 @@ fn running() -> PauseHandshake {
     pause
 }
 
-/// A handshake that went through a Stop block: stopped and paused.
 fn stopped() -> PauseHandshake {
     let pause = running();
     pause.request();
@@ -162,8 +159,6 @@ fn request_before_the_restart_cancels_the_resume() {
 
 #[test]
 fn forcing_stops_only_a_processing_plugin_once_the_block_is_over() {
-    // Forced while a block is inside the plugin: paused at once, quiet
-    // only once the block is over; the UI makes the stop call.
     let pause = running();
     let inside = pause.begin_block();
     assert_eq!(inside.action(), BlockAction::Process);
@@ -176,14 +171,12 @@ fn forcing_stops_only_a_processing_plugin_once_the_block_is_over() {
     assert!(!pause.take_processing(), "the stop call is made once");
     assert_eq!(block(&pause), BlockAction::Skip);
 
-    // Forced with a request pending and no block coming: the UI stops it.
     let pause = running();
     pause.request();
     pause.force();
     assert!(pause.quiet());
     assert!(pause.take_processing());
 
-    // Forced during the audio side's stop call: that call is the one.
     let pause = running();
     pause.request();
     let stop = pause.begin_block();
@@ -195,7 +188,6 @@ fn forcing_stops_only_a_processing_plugin_once_the_block_is_over() {
     assert!(pause.quiet());
     assert!(!pause.take_processing());
 
-    // Forced during a start call: the UI stops what the block started.
     let pause = PauseHandshake::new();
     let start = pause.begin_block();
     assert_eq!(start.action(), BlockAction::Start);
@@ -206,7 +198,6 @@ fn forcing_stops_only_a_processing_plugin_once_the_block_is_over() {
     assert!(pause.quiet());
     assert!(pause.take_processing());
 
-    // Already stopped: paused, not yet restarted, or never started.
     let pause = stopped();
     pause.force();
     assert!(pause.quiet());
@@ -220,7 +211,6 @@ fn forcing_stops_only_a_processing_plugin_once_the_block_is_over() {
     assert!(new.quiet());
     assert!(!new.take_processing());
 
-    // The way out is `resume`: the next block starts it.
     assert!(pause.resume());
     assert!(!pause.is_paused());
     assert_eq!(block(&pause), BlockAction::Start);
@@ -228,7 +218,6 @@ fn forcing_stops_only_a_processing_plugin_once_the_block_is_over() {
 
 #[test]
 fn resume_after_a_force_waits_for_quiet_and_the_stop_call() {
-    // Forced while a block processes: no start before the block is over.
     let pause = running();
     let inside = pause.begin_block();
     assert_eq!(inside.action(), BlockAction::Process);
@@ -244,7 +233,6 @@ fn resume_after_a_force_waits_for_quiet_and_the_stop_call() {
     assert!(pause.resume());
     assert_eq!(block(&pause), BlockAction::Start);
 
-    // Forced during a start call: the start that block made is the one.
     let pause = PauseHandshake::new();
     let start = pause.begin_block();
     assert_eq!(start.action(), BlockAction::Start);
@@ -258,7 +246,6 @@ fn resume_after_a_force_waits_for_quiet_and_the_stop_call() {
     assert!(pause.resume());
     assert_eq!(block(&pause), BlockAction::Start);
 
-    // A pause the audio side made needs no confirmation.
     let pause = running();
     pause.request();
     let stop = pause.begin_block();
@@ -314,12 +301,10 @@ fn drive_pause_resets_its_wait_for_the_next_pause() {
     pause.started();
     drop(start);
 
-    // The same `wait` requests the next pause.
     assert_eq!(drive(&pause, &mut wait, &stops), PauseStep::Waiting);
     assert_eq!(block(&pause), BlockAction::Stop);
 }
 
-/// One [`drive_pause`] frame whose stop call counts into `stops`.
 fn drive(
     pause: &PauseHandshake,
     wait: &mut Option<(Instant, u64)>,
@@ -389,7 +374,6 @@ fn a_pause_after_the_stream_stopped_is_forced_after_the_stall() {
         "the UI made the stop call"
     );
     assert!(!pause.processing());
-    // A later bridge skips, then starts after the resume.
     assert_eq!(block(&pause), BlockAction::Skip);
     assert!(pause.resume());
     assert_eq!(block(&pause), BlockAction::Start);
@@ -551,7 +535,6 @@ impl FakePlugin {
         self.call(|plugin| assert!(plugin.processing.load(Ordering::SeqCst), "not started"));
     }
 
-    /// The UI's work: the plugin must be stopped.
     fn work(&self) {
         self.call(|plugin| {
             assert!(

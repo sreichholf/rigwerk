@@ -35,10 +35,9 @@ use crate::audio::plugins::{
     MAX_AUDIO_PORTS,
 };
 
-/// A save while a value is still queued for the plugin captures anyway
-/// (the stream may never deliver it), marks that value undelivered in the
-/// snapshot and keeps the slot stale; once a block delivered it, the next
-/// save captures a blob that holds it.
+/// A save while a value is still queued captures anyway: the stream may
+/// never deliver it.  The value stays out of the snapshot until a block
+/// carries it.
 #[test]
 fn state_save_with_values_queued_marks_them_undelivered() {
     let _main = crate::audio::claim_main_thread();
@@ -78,10 +77,9 @@ fn state_save_with_values_queued_marks_them_undelivered() {
     );
 }
 
-/// A block that fails does not count the values it took as applied: the
-/// next save still leaves them out of the snapshot.
-/// A value the full event list could not take is kept and goes with the
-/// next block; only after that block are the values applied.
+/// A failed block does not count its values as applied.  A value the
+/// full event list could not take is kept for the next block, and only
+/// that block counts them applied.
 #[test]
 fn a_value_a_full_event_list_dropped_arrives_with_the_next_block() {
     let _main = crate::audio::claim_main_thread();
@@ -2301,7 +2299,7 @@ fn port_layout_follows_the_declared_ports() {
         port_layout(Some((&surround, &surround))),
         Ok(layout(&[6], &[6], 0, 0))
     );
-    // No extension: one stereo input and output, as before.
+    // No extension: one stereo pair.
     assert_eq!(port_layout(None), Ok(layout(&[2], &[2], 0, 0)));
     // An auxiliary port without channels is fine.
     let empty_aux = [port(2, MAIN), port(0, 0)];
@@ -2614,9 +2612,8 @@ fn a_latency_change_while_active_is_read_again() {
     assert_eq!(fake::count("deactivate"), 0, "no restart was asked for");
 }
 
-/// The restart is a pause: the UI asks, the audio thread stops processing
-/// on its next block, the UI deactivates, reactivates, reads the latency
-/// and resumes, and the next block starts processing again.
+/// A restart while processing is a pause: the audio thread stops before
+/// the main thread reactivates.
 #[test]
 fn a_restart_stops_on_the_audio_thread_then_reactivates_on_the_main_thread() {
     let mut plugin = fake_plugin_with_latency_for_test(64);
@@ -2640,14 +2637,12 @@ fn a_restart_stops_on_the_audio_thread_then_reactivates_on_the_main_thread() {
     assert_eq!(fake::count("deactivate"), 0);
     assert_eq!(handle.latency(), 64);
 
-    // The audio thread stops processing and passes the block through.
     left.fill(0.5);
     assert_eq!(plugin.run_for_test(&mut left, &mut right), Outcome::Skipped);
     assert!(fake::seen().is_none(), "the plugin was not processed");
     assert!(left.iter().all(|sample| *sample == 0.5));
     assert_eq!(fake::count("stop_processing"), 1);
 
-    // The main thread restarts it, reads the new latency and republishes.
     assert!(handle.service());
     assert_eq!(handle.latency(), 128);
     assert_eq!(fake::count("deactivate"), 1);
@@ -2660,7 +2655,6 @@ fn a_restart_stops_on_the_audio_thread_then_reactivates_on_the_main_thread() {
     let activate = events.iter().rposition(|event| *event == "activate");
     assert!(stop < deactivate && activate < get, "{events:?}");
 
-    // Processing starts again.
     assert_eq!(
         plugin.run_for_test(&mut left, &mut right),
         Outcome::Processed
@@ -3306,9 +3300,8 @@ fn last_log_for_test(state: &HostState) -> Option<(String, bool)> {
     state.log_message()
 }
 
-/// The slot keeps the latest message whole when it fits, cuts one that is
-/// too long at a character boundary, and replaces invalid UTF-8 the way the
-/// old lossy decode did.
+/// A message that fits is kept whole.  A long one is cut at a character
+/// boundary.  Invalid UTF-8 becomes U+FFFD.
 #[test]
 fn a_log_message_round_trips_through_the_fixed_slot() {
     let state = Arc::new(HostState::new(Arc::new(PluginShared::new(0))));
@@ -3346,7 +3339,7 @@ fn a_log_message_round_trips_through_the_fixed_slot() {
         Some(("😀".repeat(LOG_BYTES / 4), true))
     );
 
-    // Bytes that are not UTF-8 become U+FFFD, as the old lossy decode did.
+    // Bytes that are not UTF-8 become U+FFFD.
     log_for_test(&state, &CString::new(vec![0xFF, b'a']).expect("no NUL"));
     assert_eq!(
         last_log_for_test(&state),

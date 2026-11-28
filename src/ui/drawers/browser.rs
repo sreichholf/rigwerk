@@ -1,9 +1,5 @@
-//! The effect browser (`docs/ui-spec.md` §6.3).
-//!
-//! The body only: the shell (or, until that lands, the Mixer page) draws
-//! the drawer's frame and its close.  Search, the category chips, the
-//! format filter and the list read the state in [`crate::app::plugins`].
-//! Rows are 52 pt and only the visible ones are built.
+//! The effect browser body.  The shell draws the frame and the close.
+//! Only the visible rows are built.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Rect, RichText, Sense, Stroke, Vec2};
@@ -27,7 +23,6 @@ enum RowAction {
 }
 
 impl RigWerkApp {
-    /// The effect browser's body.  Open it with [`Self::open_effect_browser`].
     pub(crate) fn effect_browser(&mut self, ui: &mut egui::Ui) {
         let path = self.plugin_browser.path;
         let path_name = self
@@ -463,7 +458,7 @@ fn effect_row(
     None
 }
 
-/// A five-point star.  Plex has no star glyph, so this is drawn.
+/// Plex has no star glyph, so this is drawn.
 fn paint_star(
     painter: &egui::Painter,
     centre: egui::Pos2,
@@ -521,8 +516,7 @@ fn paint_name(
     }
 }
 
-/// The query inside `name`, for the semibold span.  Only ASCII is split;
-/// anything else is drawn in the body face.
+/// Only ASCII is split.  Anything else is drawn in the body face.
 fn split_match<'a>(name: &'a str, query: &str) -> (&'a str, &'a str, &'a str) {
     let query = query.trim();
     if query.is_empty() || !name.is_ascii() || !query.is_ascii() {

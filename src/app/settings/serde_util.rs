@@ -1,15 +1,10 @@
-//! Serde helpers for tolerant preference loading.
-//!
-//! The placeholder read itself lives in `audio/serde_util`: the saved device
-//! rows need the same read, and `audio` may not reach in here.  The
-//! [`Placeholder`] values and the policy that reports a replacement stay in
-//! this layer.
+//! The placeholder read lives in `audio/serde_util`: `audio` cannot
+//! import here.
 
 use serde::de::{Deserializer, IgnoredAny};
 use serde::Deserialize;
 
-/// One stored list entry, readable or not.  `IgnoredAny` takes whatever the
-/// entry is, so only the type mismatch fails.
+/// `IgnoredAny` takes whatever the entry is, so only a type mismatch fails.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Entry<T> {
@@ -17,18 +12,15 @@ enum Entry<T> {
     Bad(IgnoredAny),
 }
 
-/// A value [`placeholder_unreadable`] leaves where a stored entry could not be
-/// read.  The load has to recognize it in the parsed list, because the parse
-/// itself is the only record of which slots it filled.
+/// The parse is the only record of which slots were filled, so the
+/// load has to recognize the placeholder in the parsed list.
 pub(super) trait Placeholder: Default {
     /// The replacement for an entry that does not parse.  It must be safe to
     /// keep if the load never reaches it.
     fn placeholder() -> Self;
 }
 
-/// Reads an optional entry, treating one that does not parse as missing.
-/// Used for the stored measurement: a damaged value must not cost the rest
-/// of the preferences.
+/// A damaged measurement must not cost the rest of the preferences.
 pub(super) fn skip_unreadable_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -41,8 +33,7 @@ where
     }))
 }
 
-/// Reads a list entry by entry, dropping the entries that do not parse, so
-/// one damaged session or effect does not cost the rest of the preferences.
+/// One damaged session or effect does not cost the rest.
 pub(super) fn skip_unreadable<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -58,14 +49,9 @@ where
         .collect())
 }
 
-/// Reads a list entry by entry, replacing the entries that do not parse with
-/// [`Placeholder::placeholder`] in their own slot.  For a list whose positions
-/// carry the meaning a skip would be a silent edit: dropping one path would
-/// move every later path.  The replacement keeps the index and marks itself,
-/// so the load reports it from the same parse.
-///
-/// RON's `()` is an entry written as an empty struct, not damage: it reads as
-/// `T::default()` and stays unmarked, so it raises no notice and no backup.
+/// A skip would move every later path, so a bad entry keeps its slot
+/// as [`Placeholder::placeholder`].  RON `()` is an empty struct, not
+/// damage: it reads as `T::default()` and stays unmarked.
 pub(super) fn placeholder_unreadable<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,

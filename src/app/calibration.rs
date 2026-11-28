@@ -1,17 +1,10 @@
-//! The measured-loopback calibration: the app's side of the state machine.
+//! Decides when a measurement may run.  The click, capture and correlator
+//! live in `audio::calibration`.  A preview opens no hardware, and a
+//! stopped bridge has no callback to duck or hear the click.
 //!
-//! The audio side (the click, the capture buffer and the correlator) lives in
-//! `audio::calibration`; this only decides when a measurement may run, arms
-//! it, and turns the correlation into the stored [`MeasuredLatency`].  The
-//! measurement needs the bridge live with both devices open: a preview opens
-//! no hardware, and a stopped bridge has no callback to duck or to hear the
-//! click.
-//!
-//! Nothing here changes a setting.  The duck and the click live in the mixer,
-//! which ramps the mix back as soon as the measurement leaves its running
-//! states.  The audio side's shared transitions are compare-and-exchange, and
-//! `poll_calibration` clears any measurement state the app is not tracking,
-//! so a cancel racing a callback cannot leave the clock output ducked.
+//! Nothing here changes a setting.  `poll_calibration` clears measurement
+//! state the app is not tracking, so a cancel racing a callback cannot
+//! leave the clock output ducked.
 
 use crate::app::LogTone;
 use std::time::{Duration, Instant};
@@ -19,37 +12,31 @@ use std::time::{Duration, Instant};
 use crate::app::latency::{LatencyConditions, LoopbackKind, MeasuredLatency};
 use crate::app::RigWerkApp;
 use crate::audio::{self, analyze_channels, CalibrationFailure, CalibrationState, EngineState};
-/// How long a measurement may take before the app gives up.  The capture
-/// window is shorter; this covers the input starting and any callback stall.
+/// Longer than the capture window: the input starting, and a callback stall.
 pub(crate) const CALIBRATION_TIMEOUT: Duration = Duration::from_secs(4);
 
-/// The calibration panel's state, kept apart from the audio side.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CalibrationPhase {
-    /// The panel is closed or showing the last result.
+    /// The panel is closed, or showing the last result.
     Idle,
-    /// A measurement is armed or running.
     Measuring {
         started: Instant,
         conditions: LatencyConditions,
-        /// How the loop was closed when this measurement started; changing
-        /// the tab mid-capture must not relabel the result.
+        /// Changing the tab mid-capture must not relabel the result.
         loopback: LoopbackKind,
     },
-    /// The last measurement completed; the result is in `measured_latency`.
     Done,
-    /// The last attempt failed, with the reason to show and retry from.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
-/// The panel's own state.  Not persisted.
+/// Not persisted.
 pub(crate) struct CalibrationUi {
     pub(crate) open: bool,
     pub(crate) phase: CalibrationPhase,
-    /// How the loop is closed, stored with a result.
     pub(crate) loopback: LoopbackKind,
-    /// Scratch for the captured loopback, one buffer per channel, reused
-    /// between measurements so the UI thread does not allocate every time.
+    /// Reused so the UI thread does not allocate on every measurement.
     pub(crate) capture_l: Vec<f32>,
     pub(crate) capture_r: Vec<f32>,
 }
@@ -73,10 +60,8 @@ impl CalibrationUi {
 }
 
 impl RigWerkApp {
-    /// Why a measurement cannot start right now, or `None` when it can.
-    /// A rate or step a native PipeWire path only asked for is not enough:
-    /// the click, the capture window and the conditions the result is stored
-    /// under are timed from what the graph reported.
+    /// A rate or step a native PipeWire path only asked for is not enough.
+    /// The click and the stored conditions use what the graph reported.
     pub(crate) fn calibration_blocker(&self) -> Option<String> {
         if self.is_preview() {
             return Some(
@@ -106,7 +91,6 @@ impl RigWerkApp {
         None
     }
 
-    /// Arms a measurement with the click for the running output rate.
     pub(crate) fn start_calibration(&mut self) {
         // The app is not measuring, so any state the audio side still holds
         // is a stray from a cancelled or timed-out attempt.  Clear it before
@@ -150,8 +134,7 @@ impl RigWerkApp {
         }
     }
 
-    /// Cancels a running measurement (or closes a failed one).  The last
-    /// stored result is kept.
+    /// The last stored result is kept.
     pub(crate) fn cancel_calibration(&mut self) {
         self.engine.cancel_calibration();
         if self.calibration.is_measuring() {
@@ -160,8 +143,6 @@ impl RigWerkApp {
         self.calibration.phase = CalibrationPhase::Idle;
     }
 
-    /// Advances a running measurement.  Called once per tick from `logic`,
-    /// after the engine polled the bridge.
     pub(crate) fn poll_calibration(&mut self) {
         let CalibrationPhase::Measuring { started, .. } = self.calibration.phase.clone() else {
             // Nothing of ours is running.  A state left by a race is cleared
@@ -193,7 +174,6 @@ impl RigWerkApp {
         }
     }
 
-    /// Correlates the finished capture and stores the result.
     fn finish_calibration(&mut self) {
         let CalibrationPhase::Measuring {
             conditions,
@@ -309,7 +289,6 @@ impl RigWerkApp {
         self.calibration.phase = CalibrationPhase::Failed { reason };
     }
 
-    /// Stops a measurement the app cannot finish and says why.
     fn abort_calibration(&mut self, reason: &str) {
         self.engine.cancel_calibration();
         self.push_log(
@@ -321,7 +300,6 @@ impl RigWerkApp {
         };
     }
 
-    /// How far the capture has filled, 0..1, for the panel's progress line.
     pub(crate) fn calibration_progress(&self) -> f32 {
         let (captured, limit) = self.engine.calibration_progress();
         if limit == 0 {

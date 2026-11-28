@@ -1,15 +1,5 @@
-//! Console: the home screen (spec §3.3).  Input, the paths, Master and the
-//! outputs side by side, each group under a small label, strips inside a
-//! group 1 pt apart, and a dashed add column after Paths and Outputs.
-//!
-//! Every strip ends in the same row (meter and fader, value, *M* / *S*), so
-//! the faders line up across the screen: [`StripLayout`] gives every strip
-//! the same bottom block.  The density step (`density.rs`) sets the strip
-//! widths for the window width; at step 5 only the paths group scrolls
-//! sideways, between Input on the left and Master and Outputs on the right.
-//! While a sheet is open it covers the lower part of the strips, so each
-//! strip shows a 4 pt meter under its name.  Every change goes through a
-//! `RigWerkApp` method in `app/`; this module only draws.
+//! The console.  It only draws; every change goes through a `RigWerkApp`
+//! method.
 
 mod add_output;
 mod chain;
@@ -33,8 +23,6 @@ use crate::ui::widgets::{
 
 use density::{density, DensityStep};
 
-/// A ring around each strip a visible issue is anchored to, for as long
-/// as that issue is visible.
 fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issues::Anchor)]) {
     use crate::app::issues::IssueSeverity;
     let colours = palette(ui.ctx());
@@ -55,26 +43,17 @@ fn issue_rings(app: &RigWerkApp, ui: &egui::Ui, rects: &[(Rect, crate::app::issu
     }
 }
 
-/// The group labels' row, and the margin above the strips.
 const LABEL_H: f32 = 26.0;
-/// Breathing room between the labels and the strip caps.
 const LABEL_GAP: f32 = 6.0;
-/// Between groups, and between a group and its add column.
 const GROUP_GAP: f32 = 12.0;
 const ADD_GAP: f32 = 8.0;
 const ADD_W: f32 = 32.0;
-/// *M* and *S*.
 const TOGGLE_H: f32 = 24.0;
 const TOGGLE_W: f32 = 28.0;
-/// Inside a strip, left and right.
 const PAD: f32 = 8.0;
-/// The fader's own width at least, readout included.
 const FADER_MIN_W: f32 = 56.0;
-/// The trim line under the fader readout, on every strip.
 const TRIM_ROW_H: f32 = 15.0;
 
-/// What every strip shares: its height and the bottom block that holds the
-/// meter, the fader, the value and the toggles.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StripLayout {
     pub(crate) height: f32,
@@ -93,14 +72,11 @@ impl StripLayout {
         }
     }
 
-    /// The bottom block: fader, the trim line, a gap, the toggles and the
-    /// bottom padding.
     pub(crate) fn bottom_h(self) -> f32 {
         self.fader_h + TRIM_ROW_H + 6.0 + TOGGLE_H + 8.0
     }
 }
 
-/// The x of each strip of one group, `count` strips of `width` 1 pt apart.
 fn strip_rects(left: f32, top: f32, count: usize, width: f32, height: f32) -> Vec<Rect> {
     (0..count)
         .map(|index| {
@@ -112,7 +88,6 @@ fn strip_rects(left: f32, top: f32, count: usize, width: f32, height: f32) -> Ve
         .collect()
 }
 
-/// `count` strips of `width` with the 1 pt gaps.
 fn strips_width(count: usize, width: f32) -> f32 {
     if count == 0 {
         0.0
@@ -122,7 +97,6 @@ fn strips_width(count: usize, width: f32) -> f32 {
 }
 
 impl RigWerkApp {
-    /// The console, filling `ui`.
     pub(crate) fn console_page(&mut self, ui: &mut egui::Ui) {
         self.open_browser_for_screenshot();
         let colours = palette(ui.ctx());
@@ -154,7 +128,6 @@ impl RigWerkApp {
         x += strips_width(outputs, widths.output) + ADD_GAP;
         let add_output_rect = Rect::from_min_size(egui::pos2(x, top), Vec2::new(ADD_W, strip_h));
 
-        // Group labels.
         group_label(ui, egui::pos2(input_rect.left(), full.top()), "Input");
         let paths_label = format!("Paths · {} of {MAX_PATHS}", slots.len());
         let label_end = group_label(ui, egui::pos2(paths_left, full.top()), &paths_label);
@@ -164,8 +137,7 @@ impl RigWerkApp {
         // Matching one path to itself means nothing.
         if slots.len() >= 2 {
             let width = 100.0;
-            // The label row less a margin above and below, so the button
-            // keeps clear of the path colour caps underneath it.
+            // Clear of the path colour caps under the label row.
             let button_h = LABEL_H - 6.0;
             let dots = if layout_density.scroll.is_some() {
                 16.0 * slots.len() as f32
@@ -183,8 +155,8 @@ impl RigWerkApp {
                         .max_rect(rect)
                         .layout(Layout::right_to_left(Align::Center)),
                 );
-                // Right-to-left adds its item spacing before the first item;
-                // the mockup puts the button's right edge on the group edge.
+                // Right-to-left adds its spacing before the first item, so zero
+                // it and the button's right edge sits on the group edge.
                 header.spacing_mut().item_spacing.x = 0.0;
                 let text_font = font(Face::SansMedium, TypeRole::Secondary);
                 let text_h = header.fonts_mut(|fonts| fonts.row_height(&text_font));
@@ -222,7 +194,6 @@ impl RigWerkApp {
 
         self.input_strip(ui, input_rect, layout);
 
-        // Paths, scrolling sideways at step 5.
         let paths_rect = Rect::from_min_size(
             egui::pos2(paths_left, top),
             Vec2::new(paths_visible, strip_h),
@@ -325,8 +296,6 @@ impl RigWerkApp {
         );
     }
 
-    /// Step 5: a dot per path after the *Paths* label; a click scrolls that
-    /// path into view.
     fn path_label_dots(&mut self, ui: &mut egui::Ui, slots: &[usize], at: egui::Pos2) {
         let rect = Rect::from_min_size(at, Vec2::new(16.0 * slots.len() as f32, LABEL_H));
         let mut dots = ui.new_child(
@@ -349,8 +318,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The dashed column after the paths: *Empty path*, *Effects return*,
-    /// *Duplicate ▸* and *Apply layout ▸*.  Disabled at the limit, with the reason on hover.
     fn add_path_column(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let blocked = self.add_path_blocker().map(console_reason);
         let response = add_column(ui, rect, blocked, "Add path");
@@ -380,7 +347,6 @@ impl RigWerkApp {
         });
     }
 
-    /// *Apply layout ▸*: the layouts, each applied to the current setup.
     pub(crate) fn layout_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Apply layout ▸", |ui| {
             for layout in crate::app::layouts::PathLayout::ALL {
@@ -397,7 +363,6 @@ impl RigWerkApp {
         });
     }
 
-    /// The dashed column after the outputs: the device list of the platform.
     fn add_output_column(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let blocked = self.add_output_disabled_reason().map(console_reason);
         let response = add_column(ui, rect, blocked, "Add output");
@@ -405,7 +370,6 @@ impl RigWerkApp {
     }
 }
 
-/// The spec's short reasons for the add columns (§3.3).
 fn console_reason(reason: &'static str) -> &'static str {
     if reason.starts_with("Four paths") {
         "Four paths is the most"
@@ -418,8 +382,6 @@ fn console_reason(reason: &'static str) -> &'static str {
     }
 }
 
-/// A group's small label at `at`, centred in the label row.  Returns where
-/// it ends.
 fn group_label(ui: &egui::Ui, at: egui::Pos2, text: &str) -> f32 {
     let colours = palette(ui.ctx());
     let galley = ui.painter().layout_no_wrap(
@@ -434,7 +396,6 @@ fn group_label(ui: &egui::Ui, at: egui::Pos2, text: &str) -> f32 {
     at.x + width
 }
 
-/// The 1 pt lines between neighbouring strips of one group.
 fn separators(
     ui: &egui::Ui,
     left: f32,
@@ -451,7 +412,6 @@ fn separators(
     }
 }
 
-/// A dashed add column.  `blocked` disables it with that reason on hover.
 fn add_column(ui: &mut egui::Ui, rect: Rect, blocked: Option<&str>, name: &str) -> egui::Response {
     let colours = palette(ui.ctx());
     let sense = if blocked.is_none() {
@@ -487,7 +447,6 @@ fn add_column(ui: &mut egui::Ui, rect: Rect, blocked: Option<&str>, name: &str) 
     response
 }
 
-/// One plain entry of a popover menu.
 pub(crate) fn menu_entry(ui: &mut egui::Ui, label: &str) -> bool {
     let colours = palette(ui.ctx());
     ui.add(
@@ -501,8 +460,6 @@ pub(crate) fn menu_entry(ui: &mut egui::Ui, label: &str) -> bool {
     .clicked()
 }
 
-/// A strip's background and its two parts: the top (name, controls) and
-/// the bottom block every strip shares.
 fn strip_parts(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -526,7 +483,7 @@ fn strip_parts(
             .max_rect(top)
             .layout(Layout::top_down(Align::Min)),
     );
-    // Inside the strip, and inside a scrolling paths group.
+    // Clip to the strip, and to a scrolling paths group.
     top_ui.shrink_clip_rect(top.expand2(Vec2::new(PAD - 1.0, 4.0)));
     top_ui.spacing_mut().item_spacing.y = 6.0;
     let bottom_ui = ui.new_child(
@@ -537,14 +494,12 @@ fn strip_parts(
     (response, top_ui, bottom_ui)
 }
 
-/// A strip's name in the strip face, cut to fit.
 fn strip_name(ui: &mut egui::Ui, name: &str, colour: egui::Color32) -> egui::Response {
     let text_font = font(Face::SansMedium, TypeRole::Control);
     let shown = fit_text(ui, name, &text_font, ui.available_width());
     ui.label(RichText::new(shown).font(text_font).color(colour))
 }
 
-/// A secondary line under a strip's name.
 fn strip_detail(ui: &mut egui::Ui, text: &str) {
     let colours = palette(ui.ctx());
     let text_font = font(Face::Sans, TypeRole::Secondary);
@@ -552,8 +507,6 @@ fn strip_detail(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(shown).font(text_font).color(colours.text3));
 }
 
-/// The line under a strip's fader readout: *match +2.5* or *trim −1.5*,
-/// or nothing at 0.
 pub(super) fn trim_line(prefix: &str, db: f32) -> Option<String> {
     let tenths = (db * 10.0).round();
     if tenths == 0.0 {
@@ -565,39 +518,29 @@ pub(super) fn trim_line(prefix: &str, db: f32) -> Option<String> {
     }
 }
 
-/// What the bottom block reports.
 #[derive(Default)]
 struct LevelEvents {
     level: Option<f32>,
     mute: bool,
     solo: bool,
-    /// A click on the match or trim line under the readout.
     trim_line: bool,
 }
 
-/// What the bottom block shows.
 struct LevelBlock<'a> {
     /// Keeps the meter's peak hold.
     id: egui::Id,
     levels: &'a [f32],
     level_db: f32,
     range: FaderRange,
-    /// The fader's and the meter's AccessKit names start with this.
     name: &'a str,
-    /// The 0–48 scale, where the strip has room for it.
     show_scale: bool,
-    /// `Some` draws *M*, lit while true.
     mute: Option<bool>,
     solo: Option<bool>,
-    /// Dims the fader (muted, or another path soloed).
+    /// Muted, or another path soloed.
     dim: bool,
-    /// A match or trim line under the readout; nothing is drawn when `None`.
     trim_line: Option<&'a str>,
 }
 
-/// The bottom block every strip ends in: meter and fader side by side (the
-/// meter over the fader's left edge when the strip is narrow), then the
-/// toggles.
 fn level_block(ui: &mut egui::Ui, layout: StripLayout, block: &LevelBlock<'_>) -> LevelEvents {
     let mut events = LevelEvents::default();
     let area = ui.max_rect();
@@ -608,7 +551,7 @@ fn level_block(ui: &mut egui::Ui, layout: StripLayout, block: &LevelBlock<'_>) -
         _ => 2.0,
     };
     let bars_w = channels as f32 * bar + (channels - 1) as f32 * 2.0;
-    // The scale goes first when the strip is too narrow for it.
+    // The scale is the first thing dropped when the strip is narrow.
     let show_scale = block.show_scale && area.width() >= 22.0 + bars_w + 6.0 + FADER_MIN_W;
     let meter_w = if show_scale { 22.0 + bars_w } else { bars_w };
     let side_by_side = area.width() >= meter_w + 6.0 + FADER_MIN_W;
@@ -709,8 +652,6 @@ fn level_block(ui: &mut egui::Ui, layout: StripLayout, block: &LevelBlock<'_>) -
     events
 }
 
-/// A small toggle: *M*, *S*.  `name` says what it does for screen readers
-/// and on hover.
 fn toggle(ui: &mut egui::Ui, on: bool, label: &str, name: &str) -> egui::Response {
     let colours = palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(Vec2::new(TOGGLE_W, TOGGLE_H), Sense::click());

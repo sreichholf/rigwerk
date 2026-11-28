@@ -1,9 +1,6 @@
-//! Plugin preferences, opaque state, and UI views.
-
 use std::sync::Arc;
 
-/// Which plugin format an effect uses.  Saved effects written before CLAP
-/// support default to VST3.
+/// Saved effects written before CLAP support default to VST3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginFormat {
@@ -22,42 +19,34 @@ impl PluginFormat {
         }
     }
 
-    /// Whether a plugin of this format can draw its own editor here.  The
-    /// host has no LV2 UI support, so an LV2 effect only shows its controls.
+    /// The host has no LV2 UI, so an LV2 effect only shows its controls.
     pub(crate) fn has_editor_support(self) -> bool {
         !matches!(self, Self::Lv2)
     }
 }
 
-/// A parameter value the person changed, kept with the effect so the plugin
-/// opens with the same settings after a restart or a sample-rate change.
+/// A value the person changed, so a restart or a sample-rate change
+/// reopens the plugin with it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PluginParamPref {
     pub id: u32,
     pub value: f64,
 }
 
-/// The layout of [`PluginState::data`] this build writes and reads: the bytes
-/// the format's own state call produced (CLAP `clap_plugin_state.save`, or
-/// the VST3 envelope in `vst3::stream`, the layout older builds wrote
-/// through `vst3-host`), base64-encoded.  A blob with any other version is
-/// ignored and the effect falls back to its parameters.
+/// Layout of [`PluginState::data`]: the format's own state bytes,
+/// base64-encoded.  Any other version is ignored and the effect falls
+/// back to its parameters.
 pub(crate) const PLUGIN_STATE_VERSION: u32 = 1;
 
-/// A plugin's opaque state, captured on the UI thread whenever preferences
-/// are saved.  It covers what parameters cannot (loaded samples, internal
-/// modes, a plugin's own preset), so it is restored before the parameters.
+/// Opaque state: what parameters cannot cover (samples, internal modes,
+/// the plugin's preset).  Restored before the parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PluginState {
     pub version: u32,
-    /// Base64 of the plugin's state bytes.
     pub data: String,
-    /// [`PluginPref::params`] as it was when the state was captured.  A
-    /// parameter changed after the capture differs from this snapshot, and is
-    /// applied on top of the restored state so the newer value wins.  A
-    /// value still queued for the plugin when the state was saved is left
-    /// out of it, so it counts as changed; one that went back to its
-    /// default meanwhile is listed, so it is reset.
+    /// [`PluginPref::params`] at capture.  A value that differs, or was
+    /// still queued (left out), is applied on top; one back at its default
+    /// is listed here so restore resets it.
     #[serde(default)]
     pub params: Vec<PluginParamPref>,
 }
@@ -71,7 +60,6 @@ impl PluginState {
         }
     }
 
-    /// The state bytes, or `None` when this build cannot use the blob.
     pub(crate) fn bytes(&self) -> Option<Vec<u8>> {
         if self.version != PLUGIN_STATE_VERSION {
             return None;
@@ -148,7 +136,6 @@ pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One effect in the effect chain, in the form that is saved to preferences.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PluginPref {
     pub path: String,
@@ -167,13 +154,11 @@ pub struct PluginPref {
     pub bypass: bool,
     #[serde(default = "default_mix")]
     pub mix: f32,
-    /// The controls the person adjusted, so the plugin reopens with the same
-    /// settings after a restart or a sample-rate change.
     #[serde(default)]
     pub params: Vec<PluginParamPref>,
-    /// The plugin's opaque state from the last save.  When it restores, it
-    /// takes precedence over `params` (see [`super::params_to_restore`]).  Older
-    /// preferences have none, and a damaged one is read as none.
+    /// Opaque state from the last save.  On restore it takes precedence
+    /// over `params` (see [`super::params_to_restore`]).  A damaged blob
+    /// is read as none.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -203,12 +188,11 @@ impl Default for PluginPref {
     }
 }
 
-/// One adjustable control of a loaded plugin, normalized to 0..1 for the UI.
+/// One control, normalized to 0..1.
 ///
-/// `PartialEq` is what lets a republish keep the control list it already has
-/// (see [`PluginView::parameters`]).  It compares values, not their bits, so
-/// `-0.0` equals `0.0`; a `NaN` never equals itself, so an effect that reports
-/// one copies its list on every republish.
+/// `PartialEq` compares values, not bits, so `-0.0` equals `0.0`.  A `NaN`
+/// never equals itself, so an effect that reports one copies its list on
+/// every republish (see [`PluginView::parameters`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PluginParamView {
     pub id: u32,
@@ -224,15 +208,8 @@ pub struct PluginParamView {
     pub read_only: bool,
 }
 
-/// What the UI shows for a slot; independent of the plugin.  Cloning it shares
-/// the control list, so a published set costs no per-control copy.
-///
-/// The list itself is shared between published generations, on both paths
-/// that write one: `SlotLink::view` hands back the list a slot's handle last
-/// published while nothing there changed, and `PathControls::patch_view`
-/// rebuilds only the effect a change is for.  A bypass or mix change copies no
-/// controls at all; a control change or a refresh copies only the effects
-/// whose controls actually moved.
+/// What the UI shows for a slot, with no plugin instance.  Cloning shares
+/// the control list, so a republish copies controls only when they moved.
 #[derive(Clone, Debug, Default)]
 pub struct PluginView {
     pub path: String,
@@ -244,28 +221,21 @@ pub struct PluginView {
     pub bypass: bool,
     pub mix: f32,
     pub error: Option<String>,
-    /// The effect's controls, shared with every published view set it was in.
-    /// Read it as a slice (`iter`, indexing, `len`).
+    /// Shared with every published view set it was in.
     pub parameters: Arc<[PluginParamView]>,
-    /// Whether the plugin can draw its own graphical editor.
     pub has_editor: bool,
-    /// Which loaded instance this view describes (see
-    /// [`super::PluginHandle::instance_id`]); `None` while the slot is not loaded.
-    /// An open editor checks it to notice that its effect was replaced.
+    /// [`super::PluginHandle::instance_id`].  `None` while the slot is not
+    /// loaded.  An open editor checks it to notice a replaced effect.
     pub(crate) instance: Option<usize>,
-    /// The latency in samples the effect adds (see
-    /// `ChainRuntime::latency_samples`); 0 when it reports none, is not
-    /// loaded, or failed.  Bypassed effects keep theirs.
+    /// Samples of latency.  0 when it reports none, is not loaded, or
+    /// failed.  A bypassed effect keeps its latency.
     pub latency: u32,
-    /// The plugin is paused for a restart or a reactivation (see
-    /// `plugins::pause`): its blocks play dry, delayed by its latency,
-    /// until it resumes.  False for a failed effect, which shows its error
-    /// instead.
+    /// Restart or reactivation pause: blocks play dry, delayed by its
+    /// latency.  A failed effect is false and shows its error instead.
     pub paused: bool,
 }
 
 impl PluginView {
-    /// Whether the effect has been opened, so its plugin instance exists.
     /// A saved effect stays unopened until the bridge starts or something
     /// asks for its editor or controls.
     pub(crate) fn loaded(&self) -> bool {

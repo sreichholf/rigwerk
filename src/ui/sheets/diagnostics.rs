@@ -1,12 +1,5 @@
-//! Diagnostics: the activity log, scan notes, the bridge status line, the
-//! signal paths' DSP time (per path, against the block it must fit), the
-//! chunks the audio thread could not run a path's chain (it did not hold
-//! the chain's runtime), the chunks it found an effect paused, and, in a
-//! debug build, how often the audio callbacks allocated.
-//!
-//! The header pill still follows the engine state.  This page shows the
-//! bridge's own status string beside that, and keeps scan notes and quantum
-//! failures that the live status line replaces.
+//! Diagnostics.  It keeps scan notes and quantum failures that the live
+//! status line replaces.
 
 use crate::app::LogTone;
 
@@ -20,8 +13,6 @@ use crate::ui::widgets::{engine_state_label, segmented, status_dot};
 
 use crate::ui::widgets::OutlineButton;
 
-/// One path's DSP line: "0.21 ms avg · 0.40 ms peak of 10.7 ms · 2% / 4%",
-/// or why there is none.
 pub(crate) fn dsp_text(dsp: Option<crate::audio::DspTime>) -> String {
     match dsp {
         Some(time) if time.block_ns > 0 => format!(
@@ -36,7 +27,6 @@ pub(crate) fn dsp_text(dsp: Option<crate::audio::DspTime>) -> String {
     }
 }
 
-/// The debug build's count of what the audio callbacks allocated.
 #[cfg(debug_assertions)]
 fn allocation_text(count: u64) -> String {
     format!("Audio-thread allocations and frees (debug build): {count}")
@@ -52,8 +42,8 @@ fn chunk_text(count: u64) -> String {
     }
 }
 
-/// The skip (or pause) share as text.  A non-zero skip that rounds to nothing reads
-/// "<1%", so a rare skip is not reported as none.
+/// A non-zero skip that rounds to nothing reads "<1%", so a rare skip
+/// is not reported as none.
 fn percent_text(stats: &crate::audio::LockStats) -> String {
     // Before any attempt `share` is 0, so the zero-skip case covers it.
     if stats.skipped() == 0 {
@@ -67,30 +57,23 @@ fn percent_text(stats: &crate::audio::LockStats) -> String {
     }
 }
 
-/// Why the chain count and the effect counts differ; the card and the export
-/// say the same thing.
+/// The card and the export share this wording.
 const COUNTS_CAPTION: &str = "Chain counts are chunks the path tried to process. Effect counts cover only chunks the chain ran. An effect pauses while it restarts, and stays paused after a failed start.";
 
-/// The line under a chain whose effects were never reached.  A bypassed
-/// effect or one at mix 0 never runs its plugin, which is normal, and a
-/// chain that never ran also keeps the effects out.
+/// Normal, not a fault.
 const NO_EFFECT_TRIED: &str = "(no effect ran — bypassed, at mix 0, or the chain never ran)";
 
-/// Whether the path got chunks through its chain but none through an effect,
-/// so nothing below the chain line explains what happened.  A poisoned chain
-/// never processed its chunks, so it does not read as "no effect ran".  A
-/// bypassed effect or one at mix 0 never runs its plugin either, which is
-/// normal, so the line names those causes instead of
-/// reading as a fault.
+/// A poisoned chain never processed its chunks, so it does not read as
+/// "no effect ran".  A bypassed effect, or one at mix 0, never runs its
+/// plugin either, which is normal, so the line names those causes.
 fn no_effect_ran(report: &crate::audio::PluginLockReport) -> bool {
     !report.chain_poisoned
         && report.chain.attempts > 0
         && report.effects.iter().all(|effect| effect.attempts == 0)
 }
 
-/// One path's chain line: its skip share, or why there is none.  A dead
-/// chain (a panicking edit) is not contention, so its counters would read
-/// as a misleading skip rate.
+/// A dead chain (a panicking edit) is not contention, so its counters
+/// would read as a misleading skip rate.
 fn chain_lock_text(report: &crate::audio::PluginLockReport) -> String {
     if report.chain_poisoned {
         "chain unavailable after an internal error".to_owned()
@@ -104,7 +87,6 @@ fn chain_lock_text(report: &crate::audio::PluginLockReport) -> String {
     }
 }
 
-/// The log dot on the active palette.
 fn log_mark(colours: &Palette, tone: LogTone) -> Color32 {
     match tone {
         LogTone::Muted => colours.text2,
@@ -116,7 +98,6 @@ fn log_mark(colours: &Palette, tone: LogTone) -> Color32 {
     }
 }
 
-/// A path's saved colour on the active palette.
 fn path_mark(colours: &Palette, index: u8) -> Color32 {
     colours.path[index as usize % colours.path.len()]
 }
@@ -139,7 +120,6 @@ fn kicker(text: &str, colours: &Palette) -> RichText {
         .color(colours.text3)
 }
 
-/// The diagnostics ribbon: one label and tab per row, in order.
 const TABS: [(&str, crate::app::screen::DiagnosticsTab); 5] = [
     ("Log", crate::app::screen::DiagnosticsTab::Log),
     (
@@ -170,7 +150,6 @@ fn tab_index(tab: crate::app::screen::DiagnosticsTab) -> usize {
 // it, but the row in `TABS` is then a manual step.
 const _: () = assert!(TABS.len() == crate::app::screen::DiagnosticsTab::Status as usize + 1);
 
-/// A group on the sheet: strip fill, a line, 4 pt corners.
 fn group(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui)) {
     let colours = palette(ui.ctx());
     egui::Frame::new()
@@ -179,14 +158,11 @@ fn group(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui)) {
         .corner_radius(CornerRadius::same(4))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
-            // 12 pt margin and a 1 pt stroke on each side.
             ui.set_width((width - 26.0).max(0.0));
             body(ui);
         });
 }
 
-/// One latency-budget line: part, value, where the number comes from, and
-/// what it covers.
 fn budget_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -223,7 +199,6 @@ impl RigWerkApp {
         }
     }
 
-    /// One line per path: name, chain latency, DSP time per block.
     fn path_dsp_lines(&self) -> Vec<(crate::app::paths::PathInfo, String)> {
         self.path_infos()
             .into_iter()
@@ -234,7 +209,6 @@ impl RigWerkApp {
             .collect()
     }
 
-    /// Plain-text report: oldest activity first, plus the live status and notes.
     pub(crate) fn diagnostics_text(&self) -> String {
         let mut lines = Vec::new();
         lines.push("RigWerk diagnostics".to_owned());

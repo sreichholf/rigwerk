@@ -40,9 +40,6 @@ fn a_home_hands_its_runtime_to_one_holder_at_a_time() {
     ));
 }
 
-/// While an audio thread holds the runtime, edits queue; the runtime
-/// applies them in order with its next block and hands back what it let
-/// go of, which the next flush collects.
 #[test]
 fn held_edits_apply_in_order_and_come_back_to_the_ui() {
     let mut model = model();
@@ -67,8 +64,6 @@ fn held_edits_apply_in_order_and_come_back_to_the_ui() {
     drop(runtime);
 }
 
-/// With the runtime parked (no bridge), an edit applies at once and its
-/// slots come back in the same flush.
 #[test]
 fn a_parked_runtime_applies_edits_in_the_flush() {
     let mut model = model();
@@ -83,9 +78,9 @@ fn a_parked_runtime_applies_edits_in_the_flush() {
     assert_eq!(names(&runtime), ["c"]);
 }
 
-/// The runtime never drops a slot itself: a command that would hand one
-/// back waits while the return queue is full, and the commands behind it
-/// wait too, in the backlog when their own queue is full.
+/// The runtime never drops a slot.  A command that would hand one back
+/// waits while the return queue is full, and the commands behind it wait
+/// too.
 #[test]
 fn a_full_return_queue_holds_commands_back_until_the_ui_collects() {
     let mut model = model();

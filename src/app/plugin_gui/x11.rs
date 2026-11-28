@@ -1,9 +1,6 @@
-//! The X11 window a CLAP editor embeds in, on its own XCB connection.
-//!
-//! The plugin reparents its view into [`X11Frame::parent`] over a connection
-//! of its own, so this one only sees the frame's events: the close button
-//! (`WM_DELETE_WINDOW`) and size changes (`ConfigureNotify`).  Size limits go
-//! to the window manager as `WM_NORMAL_HINTS`.
+//! The plugin reparents its view over a connection of its own, so this
+//! one only sees the frame's events.  Size limits go to the window
+//! manager as `WM_NORMAL_HINTS`.
 
 use xcb::{x, Xid};
 

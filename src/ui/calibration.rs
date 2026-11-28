@@ -1,10 +1,5 @@
-//! The measured loopback: the panel window that arms, explains, retries and
-//! cancels a loopback measurement (`docs/ui-spec.md` §6.6).
-//!
-//! A measured number and the estimate are never shown as one value.  The
-//! panel says which device pair, rates and buffers it measured under, and
-//! marks the stored result stale (with the reason) as soon as the rig no
-//! longer matches.
+//! The measured loopback panel.  A measurement and the estimate are never
+//! shown as one value.
 
 use eframe::egui;
 use egui::{
@@ -21,15 +16,11 @@ use crate::ui::theme::{font, palette, with_alpha, Palette, TypeRole};
 use crate::ui::widgets::{micro_label, mono, progress_line, segmented_hinted};
 
 impl RigWerkApp {
-    /// One row in the Live health card: the stored measurement, what it is
-    /// read, and closes without leaving the mix ducked.
     pub(crate) fn calibration_window(&mut self, ctx: &egui::Context) {
         if !self.calibration.open {
             return;
         }
         let colours = palette(ctx);
-        // A quiet button's frame and label are the same token; the accent's
-        // two differ, because `accent` is a fill and `accent_text` reads.
         let quiet = colours.text2;
         let mut close = false;
         let mut start = false;
@@ -50,7 +41,7 @@ impl RigWerkApp {
         let progress = self.calibration_progress();
         let phase = self.calibration.phase.clone();
         // The loopback the measurement started with, not a tab clicked during
-        // it; the tabs are disabled while it runs.
+        // it.  The tabs are disabled while it runs.
         let loopback = match &phase {
             CalibrationPhase::Measuring { loopback, .. } => *loopback,
             _ => self.calibration.loopback,
@@ -124,7 +115,6 @@ impl RigWerkApp {
                 });
                 ui.add_space(12.0);
 
-                // How the loop is closed.
                 ui.label(micro_label("LOOPBACK", colours.text3));
                 ui.add_space(4.0);
                 ui.add_enabled_ui(!measuring, |ui| {
@@ -145,7 +135,6 @@ impl RigWerkApp {
                 );
                 ui.add_space(12.0);
 
-                // The exact rig this measures, and whether it may run.
                 egui::Frame::new()
                     .fill(colours.bg)
                     .stroke(Stroke::new(1.0, colours.line2))
@@ -274,8 +263,8 @@ impl RigWerkApp {
                 }
             });
 
-        // A start and a close in the same frame must not close the panel on a
-        // measurement that just began; the start wins.
+        // A start and a close in the same frame must not close a measurement
+        // that just began.  The start wins.
         if start && self.calibration_blocker().is_none() {
             self.start_calibration();
             self.calibration.open = true;
@@ -291,8 +280,7 @@ impl RigWerkApp {
     }
 }
 
-/// The stored result: value, conditions, date, confidence, and the estimate
-/// beside it.  The two cover different legs, so they are never subtracted.
+/// The estimate covers a different leg, so the two are never subtracted.
 fn measured_summary(
     ui: &mut egui::Ui,
     measured: &crate::app::latency::MeasuredLatency,
@@ -383,9 +371,8 @@ fn condition_row(ui: &mut egui::Ui, label: &str, value: &str, colours: &Palette)
     });
 }
 
-/// A small panel button.  `frame` tints its fill and border, `text` labels it:
-/// the accent's two tokens differ, because `accent` is a fill and
-/// `accent_text` reads on the light theme.
+/// `frame` and `text` differ: `accent` is a fill and `accent_text` reads
+/// on the light theme.
 fn small_button(ui: &mut egui::Ui, label: &str, frame: Color32, text: Color32) -> bool {
     ui.add(
         egui::Button::new(
@@ -400,7 +387,6 @@ fn small_button(ui: &mut egui::Ui, label: &str, frame: Color32, text: Color32) -
     .clicked()
 }
 
-/// The panel's larger button.  `frame` and `text` as [`small_button`].
 fn panel_button(ui: &mut egui::Ui, label: &str, frame: Color32, text: Color32) -> bool {
     ui.add(
         egui::Button::new(

@@ -49,7 +49,7 @@ fn quiet_text_reads_on_a_panel_and_stays_quieter_than_body_text() {
         );
     }
 
-    // The blue-grey the quiet token replaced, on the panel it was drawn on.
+    // That blue-grey on the dark strip is below 4.5.
     let previous = Color32::from_rgb(89, 102, 122);
     assert!(contrast(previous, DARK.strip) < 4.5);
 }

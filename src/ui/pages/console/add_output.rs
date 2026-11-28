@@ -1,10 +1,5 @@
-//! The add column's device list (`docs/ui-spec.md` §6.2): what can join as
-//! an extra output of the clock, per platform, with the devices already in
-//! the session disabled.
-//!
-//! The list is a popover from the console's dashed column, not a page.  It
-//! only offers devices the audio side can really open for this clock; the
-//! rules are the ones the old Mixer list had.
+//! The add column's device list.  A popover, and only devices this clock
+//! can really open.
 
 use eframe::egui;
 use egui::{CornerRadius, RichText, Stroke, Vec2};
@@ -15,12 +10,10 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::row_info;
 
-/// Soft warn when adding a WASAPI extra output while the clock is ASIO.
 pub(crate) const ASIO_WASAPI_CONFLICT_HINT: &str =
     "ASIO may have locked this card — Windows can refuse the stream as in use";
 
 impl RigWerkApp {
-    /// The device list of the add column.
     pub(crate) fn add_output_list(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         let clock_name = self.selected_output().name.clone();
@@ -106,7 +99,7 @@ impl RigWerkApp {
                         {
                             return None;
                         }
-                        // VB-Cable is offered under Virtual, not as a plain extra.
+                        // VB-Cable is under Virtual, not a plain extra.
                         if crate::audio::is_vb_cable_render(&device.name) {
                             return None;
                         }
@@ -205,7 +198,6 @@ impl RigWerkApp {
     }
 }
 
-/// A titled group of entries.
 fn panel(ui: &mut egui::Ui, title: &str, colours: &Palette, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(6.0);
     ui.label(
@@ -217,7 +209,6 @@ fn panel(ui: &mut egui::Ui, title: &str, colours: &Palette, add: impl FnOnce(&mu
     add(ui);
 }
 
-/// One device entry, 44 pt high: name over its detail.
 fn device_entry(
     ui: &mut egui::Ui,
     name: &str,

@@ -1,6 +1,3 @@
-//! What survives a restart: preferences, saved sessions and the choices
-//! offered for rates and buffers.
-
 mod path_pref;
 mod preferences;
 mod serde_util;

@@ -1,5 +1,3 @@
-//! Unit tests for the extra output mixer's drift step handling.
-
 use super::super::super::mixer::drift::{DRIFT_LIMIT_RATIO, DRIFT_STEP_SECONDS};
 use super::super::super::shared::Shared;
 use super::ExtraOutputMixer;

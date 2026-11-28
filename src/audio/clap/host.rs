@@ -1,13 +1,7 @@
-//! CLAP host state and host extension callbacks.
-//!
-//! A plugin may call any host callback from any thread (its audio thread
-//! included), so every callback here only sets an atomic, or try-locks a
-//! list the UI services.  `request_restart`, `request_callback`,
-//! `latency.changed` and the rest leave the work to the main-thread
-//! service (`ClapInstance` behind the plugin's UI lock); none of them
-//! calls into the plugin or blocks.  The recorded main thread and the rule
-//! for where a plugin may be destroyed are format-neutral and live in
-//! `audio::plugins` (`plugins::thread`); this host only copies the id.
+//! Host callbacks.  A plugin may call any of them from any thread, so
+//! each only sets an atomic or try-locks a list the UI services.  None
+//! calls into the plugin or blocks.  The main-thread id is copied from
+//! `plugins::thread`.
 
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
@@ -48,24 +42,22 @@ pub(super) struct TimerEntry {
     pub(super) next: Instant,
 }
 
-/// The capacity of one [`LogSlot`].  A CLAP message is a short line; the
-/// slot is fixed so `host_log` can run on the plugin's process thread
-/// without allocating.  The UI builds its `String` when it reads the slot.
+/// Fixed so `host_log` can run on the process thread without allocating.
+/// The UI builds the `String` when it reads the slot.
 pub(super) const LOG_BYTES: usize = 256;
 
 /// How many file-descriptor unregister requests may wait for a busy list.
 #[cfg(target_os = "linux")]
 pub(super) const PENDING_UNREGISTER: usize = 8;
 
-/// An empty slot in [`HostState::pending_unregister`]; a descriptor is never
-/// negative (`host_register_fd` refuses those).
+/// An empty slot.  A descriptor is never negative (`host_register_fd`
+/// refuses those).
 #[cfg(target_os = "linux")]
 const EMPTY_PENDING_FD: i32 = -1;
 
-/// The latest log message, in a fixed buffer.  `host_log` may run on the
-/// plugin's process thread, so writing it never allocates and never waits:
-/// the message is cut at the first character that does not fit, and
-/// [`truncated`](Self::truncated) records that.
+/// `host_log` may run on the process thread, so a write never allocates
+/// and never waits.  The message is cut at the first character that does
+/// not fit, and [`truncated`](Self::truncated) records that.
 pub(super) struct LogSlot {
     bytes: [u8; LOG_BYTES],
     len: usize,
@@ -81,11 +73,9 @@ impl LogSlot {
         }
     }
 
-    /// Replaces the stored message with `bytes`.  Invalid UTF-8 becomes
-    /// U+FFFD, as the UI's old lossy decode did, and the copy stops before
-    /// a character that would cross the end.  Only the bytes that can still
-    /// reach the slot are validated (plus three for the character at its
-    /// edge): a long message is not scanned past where it is cut.
+    /// Invalid UTF-8 becomes U+FFFD.  The copy stops before a character
+    /// that would cross the end.  Only the bytes that can still reach the
+    /// slot are validated, plus three for the character at its edge.
     fn write(&mut self, bytes: &[u8]) {
         self.len = 0;
         self.truncated = false;
@@ -110,11 +100,9 @@ impl LogSlot {
                     let skipped = match error.error_len() {
                         Some(len) => len,
                         None => {
-                            // An incomplete sequence at the end.  If the
-                            // message was cut to the limit, the character
-                            // continues past it: drop it whole, as the slot's
-                            // end does.  A real trailing fragment becomes
-                            // U+FFFD.
+                            // An incomplete sequence at the end.  Cut to
+                            // the limit, the character continues past it:
+                            // drop it whole.  A real fragment is U+FFFD.
                             if cut_by_limit {
                                 self.truncated = true;
                                 return;
@@ -133,8 +121,8 @@ impl LogSlot {
         }
     }
 
-    /// Appends `text` while every character fits.  `false` once one does
-    /// not; the message is then marked truncated and stops there.
+    /// `false` once a character does not fit.  The message is then
+    /// truncated and stops.
     fn push(&mut self, text: &str) -> bool {
         for character in text.chars() {
             let mut encoded = [0u8; 4];
@@ -158,9 +146,8 @@ impl LogSlot {
     }
 }
 
-/// `mutex.try_lock()` with a poisoned lock recovered and a busy one `None`.
-/// A callback answers a busy lock as "not now"; it never waits behind the
-/// UI or the plugin.
+/// A poisoned lock is recovered.  A busy one is `None`: a callback
+/// never waits behind the UI or the plugin.
 fn try_lock_now<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     match mutex.try_lock() {
         Ok(guard) => Some(guard),
@@ -169,11 +156,9 @@ fn try_lock_now<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     }
 }
 
-/// Callback state shared with the plugin.  The plugin may call into this from
-/// its main, audio or helper threads, so everything here is atomics or a mutex
-/// that callbacks only try to take.  What both halves of the plugin share
-/// (restart requests, latency, ports, the dirty mark) lives in
-/// [`PluginShared`], which the callbacks write directly.
+/// A plugin may call in from any thread, so this is atomics or a mutex
+/// callbacks only try to take.  Restart, latency, ports, and the dirty
+/// mark live in [`PluginShared`].
 pub(crate) struct HostState {
     pub(super) main_thread: std::thread::ThreadId,
     pub(super) shared: Arc<PluginShared>,
@@ -183,9 +168,9 @@ pub(crate) struct HostState {
     pub(super) latency_changed: AtomicBool,
     pub(super) callback_requested: AtomicBool,
     pub(super) params_rescan: AtomicBool,
-    /// Set by `clap_host_params.request_flush`.  A processed block delivers
-    /// it (and clears it); a skipped one flushes on the audio thread, and a
-    /// plugin that is not processing is flushed by the main-thread service.
+    /// `request_flush`.  A processed block delivers it; a skipped one
+    /// flushes on the audio thread; an idle plugin is flushed by the
+    /// main-thread service.
     pub(super) flush_requested: AtomicBool,
     /// Set once the port buffers are built: from then on a rescan that
     /// changes the ports stops the effect (see `host_audio_ports_rescan`).
@@ -201,10 +186,9 @@ pub(crate) struct HostState {
     /// with the flags it watches.  Main-thread only, like the extension.
     #[cfg(target_os = "linux")]
     pub(super) fds: Mutex<Vec<(i32, clap_posix_fd_flags)>>,
-    /// Unregister requests a busy `fds` could not take yet.  A slot holds a
-    /// descriptor, `EMPTY_PENDING_FD` is free.  The next service drains them
-    /// before it polls; when all slots are full a request is refused and its
-    /// descriptor stays registered.
+    /// Unregisters a busy `fds` could not take.  The next service drains
+    /// them before it polls.  A full queue refuses and leaves the
+    /// descriptor registered.
     #[cfg(target_os = "linux")]
     pub(super) pending_unregister: [AtomicI32; PENDING_UNREGISTER],
     pub(super) timers: Mutex<Vec<TimerEntry>>,
@@ -217,9 +201,9 @@ pub(crate) struct HostState {
 impl HostState {
     pub(super) fn new(shared: Arc<PluginShared>) -> Self {
         Self {
-            // Prefer the thread `plugins::thread::mark_main_thread` recorded.
-            // Do not publish the loader's thread: a plugin opened off the UI
-            // thread must still answer the thread check for the UI thread.
+            // The thread `plugins::thread::mark_main_thread` recorded.
+            // Not the loader's thread: a plugin opened off the UI thread
+            // must still answer the check for the UI thread.
             main_thread: recorded_main_thread().unwrap_or_else(|| std::thread::current().id()),
             shared,
             process_requested: AtomicBool::new(false),
@@ -255,7 +239,6 @@ impl HostState {
         self.gui_closed.swap(false, Ordering::Relaxed)
     }
 
-    /// The show or hide the plugin asked for since the last call.
     pub(crate) fn take_gui_visibility(&self) -> Option<GuiVisibility> {
         match self.gui_visibility.swap(0, Ordering::Relaxed) {
             GUI_SHOW => Some(GuiVisibility::Show),
@@ -264,15 +247,12 @@ impl HostState {
         }
     }
 
-    /// Whether the plugin's resize hints changed since the last call.
     pub(crate) fn take_gui_hints_changed(&self) -> bool {
         self.gui_hints_changed.swap(false, Ordering::Relaxed)
     }
 
-    /// The latest log message and whether it was cut, built on the caller's
-    /// (UI) thread.  `None` before the first message, and while the plugin's
-    /// callback holds the slot: the read never waits, so that frame skips the
-    /// message.  Nothing draws it yet.
+    /// Built on the caller's thread.  `None` before the first message,
+    /// and while the plugin holds the slot: the read never waits.
     #[cfg_attr(not(test), allow(dead_code))] // No reader in the tree yet.
     pub(crate) fn log_message(&self) -> Option<(String, bool)> {
         let last = try_lock_now(&self.last_log)?;
@@ -280,13 +260,12 @@ impl HostState {
             .map(|slot| (slot.text().to_owned(), slot.truncated()))
     }
 
-    /// Whether this is the plugin's main thread.
     pub(super) fn on_main_thread(&self) -> bool {
         std::thread::current().id() == self.main_thread
     }
 
-    /// The timers due now, rescheduled.  The list is released before the
-    /// caller calls the plugin, which may (un)register timers from there.
+    /// Due now, and rescheduled.  The list is released before the caller
+    /// calls the plugin, which may register or unregister from there.
     pub(super) fn due_timers(&self) -> Vec<u32> {
         // Never wait: a plugin may be registering a timer from another
         // thread.  The due ones stay due for the next service.
@@ -306,10 +285,9 @@ impl HostState {
 }
 
 impl HostState {
-    /// Queues an unregister for the next service.  `true` once `fd` is in a
-    /// slot (or already was); `false` when all slots are full, which leaves
-    /// the descriptor registered.  A conforming plugin unregisters on the
-    /// main thread, where the list is free, so this is the overflow path.
+    /// `false` when every slot is full, which leaves the descriptor
+    /// registered.  A conforming plugin unregisters on the main thread,
+    /// where the list is free, so this is the overflow path.
     #[cfg(target_os = "linux")]
     fn queue_unregister(&self, fd: i32) -> bool {
         for slot in &self.pending_unregister {
@@ -326,11 +304,10 @@ impl HostState {
         false
     }
 
-    /// Applies queued unregisters to `fds`, whose lock the caller holds, before
-    /// the caller polls or edits it.  A request queued after this swap waits for
-    /// the next service, so this pass still polls that descriptor once.  CLAP
-    /// asks the plugin to unregister on the main thread, where the list is free,
-    /// so only a plugin off that thread reaches that window.
+    /// The caller holds `fds`.  A request queued after this swap waits
+    /// for the next service, so this pass still polls that descriptor
+    /// once.  CLAP asks for unregister on the main thread, so only a
+    /// plugin off that thread hits the window.
     #[cfg(target_os = "linux")]
     fn apply_pending_unregister(&self, fds: &mut Vec<(i32, clap_posix_fd_flags)>) {
         for slot in &self.pending_unregister {
@@ -341,9 +318,8 @@ impl HostState {
         }
     }
 
-    /// Polls the registered file descriptors without waiting and returns
-    /// the ready ones with their CLAP flags.  The list is released before
-    /// the caller hands them to `on_fd`.
+    /// Does not wait.  The list is released before the caller hands the
+    /// ready descriptors to `on_fd`.
     #[cfg(target_os = "linux")]
     pub(super) fn ready_fds(&self) -> Vec<(i32, clap_posix_fd_flags)> {
         let mut polled: Vec<libc::pollfd> = {
@@ -375,8 +351,8 @@ impl HostState {
     }
 }
 
-/// `poll` events for the CLAP flags a plugin registered.  Errors are always
-/// reported by `poll`, so `CLAP_POSIX_FD_ERROR` needs no event bit.
+/// `poll` reports errors on its own, so `CLAP_POSIX_FD_ERROR` needs no
+/// event bit.
 #[cfg(target_os = "linux")]
 pub(super) fn poll_events(flags: clap_posix_fd_flags) -> libc::c_short {
     let mut events = 0;
@@ -389,7 +365,6 @@ pub(super) fn poll_events(flags: clap_posix_fd_flags) -> libc::c_short {
     events
 }
 
-/// The CLAP flags for what `poll` returned.
 #[cfg(target_os = "linux")]
 pub(super) fn fd_flags(revents: libc::c_short) -> clap_posix_fd_flags {
     let mut flags = 0;
@@ -452,8 +427,8 @@ pub(super) unsafe extern "C" fn host_get_extension(
     }
 }
 
-/// Any thread.  The main-thread service pauses the plugin, deactivates and
-/// reactivates it, and resumes it (see `PluginHandle::service`).
+/// Any thread.  The main-thread service does the pause, the
+/// reactivation, and the resume.
 pub(super) unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     if let Some(state) = unsafe { state(host) } {
         state.shared.request_restart(RESTART_ACTIVATION);
@@ -477,8 +452,9 @@ pub(super) static HOST_THREAD_CHECK: clap_host_thread_check = clap_host_thread_c
     is_audio_thread: Some(host_is_audio_thread),
 };
 
-/// The UI thread, except while it stands in as the audio thread (a forced
-/// stop, teardown, a flush with no block inside): one thread is never both.
+/// The UI thread, except while it stands in as the audio thread (a
+/// forced stop, teardown, a flush with no block inside).  One thread
+/// is never both.
 pub(super) unsafe extern "C" fn host_is_main_thread(host: *const clap_host) -> bool {
     unsafe { state(host) }.is_some_and(|state| state.on_main_thread() && !on_audio_thread())
 }
@@ -545,8 +521,8 @@ pub(super) static HOST_GUI: clap_host_gui = clap_host_gui {
     closed: Some(host_gui_closed),
 };
 
-/// Thread-safe in CLAP: only a flag is set, and the editor window re-reads
-/// the hints on its next service.
+/// Only a flag is set.  The editor window re-reads the hints on its
+/// next service.
 pub(super) unsafe extern "C" fn host_gui_resize_hints_changed(host: *const clap_host) {
     if let Some(state) = unsafe { state(host) } {
         state.gui_hints_changed.store(true, Ordering::Relaxed);
@@ -566,8 +542,8 @@ pub(super) unsafe extern "C" fn host_gui_request_resize(
     true
 }
 
-/// Thread-safe in CLAP: the open editor window shows itself and the view on
-/// its next service.  The later of a show and a hide wins.
+/// The open editor follows this on its next service.  The later of a
+/// show and a hide wins.
 pub(super) unsafe extern "C" fn host_gui_request_show(host: *const clap_host) -> bool {
     request_visibility(host, GUI_SHOW)
 }
@@ -595,11 +571,9 @@ pub(super) static HOST_AUDIO_PORTS: clap_host_audio_ports = clap_host_audio_port
     rescan: Some(host_audio_ports_rescan),
 };
 
-/// Every rescan flag is "supported" in the only way RigWerk can: the buffers
-/// are fixed once the plugin is active.  A request that changes the port
-/// layout or channel counts stops the effect until it is loaded again (see
-/// `process`); requests about names, port type, or in-place pairing are
-/// absorbed without touching the buffers.
+/// The buffers are fixed once the plugin is active.  A change of port
+/// layout or channel count stops the effect until it is loaded again.
+/// Names, port type, and in-place pairing are absorbed.
 pub(super) unsafe extern "C" fn host_audio_ports_flag_supported(
     _host: *const clap_host,
     flag: u32,
@@ -607,14 +581,12 @@ pub(super) unsafe extern "C" fn host_audio_ports_flag_supported(
     flag != 0 && flag & !AUDIO_PORTS_RESCAN_ALL == 0
 }
 
-/// Asks for a reload when the change would make the port buffers wrong.
-/// Only a flag is set, so nothing is reallocated under the audio thread;
-/// the path rebuilds the effect with the new ports.  Before
-/// the buffers are built (during load) a rescan is harmless: the ports are
-/// read after it.
+/// Only a flag is set, so nothing is reallocated on the audio thread.
+/// Before the buffers exist (during load) a rescan is harmless: the
+/// ports are read after it.
 pub(super) unsafe extern "C" fn host_audio_ports_rescan(host: *const clap_host, flags: u32) {
-    // An unknown flag means the plugin is asking for something this host did
-    // not agree to handle; stop rather than risk stale buffers.
+    // An unknown flag is something this host did not agree to handle.
+    // Stop rather than risk stale buffers.
     if flags & (AUDIO_PORTS_RESCAN_STOPS | !AUDIO_PORTS_RESCAN_ALL) == 0 {
         return;
     }
@@ -690,11 +662,10 @@ pub(super) static HOST_LATENCY: clap_host_latency = clap_host_latency {
     changed: Some(host_latency_changed),
 };
 
-/// `clap_host_latency.changed` is a main-thread call, and CLAP only lets the
-/// latency change while the plugin is inactive (inside `activate`) or through
-/// `request_restart`.  Only a flag is set here: the main-thread service reads
-/// the new value once the plugin is active again (it may be in the middle of
-/// `activate` right now, where `latency.get` is not allowed yet).
+/// CLAP only lets latency change while inactive (inside `activate`) or
+/// through `request_restart`.  Only a flag is set: the service reads the
+/// value once the plugin is active again.  `latency.get` is not allowed
+/// mid-`activate`.
 pub(super) unsafe extern "C" fn host_latency_changed(host: *const clap_host) {
     if let Some(state) = unsafe { state(host) } {
         state.latency_changed.store(true, Ordering::Release);
@@ -722,8 +693,8 @@ pub(super) static HOST_POSIX_FD: clap_host_posix_fd_support = clap_host_posix_fd
     unregister_fd: Some(host_unregister_fd),
 };
 
-/// Registers `fd` once; a second registration of the same descriptor is
-/// refused, as CLAP asks the plugin to use `modify_fd` for that.
+/// A second registration of the same descriptor is refused.  CLAP asks
+/// the plugin to use `modify_fd` for that.
 #[cfg(target_os = "linux")]
 pub(super) unsafe extern "C" fn host_register_fd(
     host: *const clap_host,
@@ -737,9 +708,9 @@ pub(super) unsafe extern "C" fn host_register_fd(
         return false;
     }
     let Some(mut fds) = try_lock_now(&state.fds) else {
-        // CLAP calls this on the main thread.  A service pass owns the list
-        // briefly; answer false without changing anything, so the plugin can
-        // retry, and the next service drains queued unregisters first.
+        // CLAP calls this on the main thread.  A service pass owns the
+        // list briefly; answer false and change nothing, so the plugin
+        // can retry.  The next service drains queued unregisters first.
         return false;
     };
     state.apply_pending_unregister(&mut fds);
@@ -781,9 +752,9 @@ pub(super) unsafe extern "C" fn host_unregister_fd(host: *const clap_host, fd: i
         return false;
     }
     let Some(mut fds) = try_lock_now(&state.fds) else {
-        // Never wait: queue it, and the next service removes it before it
-        // polls.  A full queue refuses (`false`) and leaves the descriptor
-        // registered; a plugin that follows CLAP never fills it.
+        // Never wait: queue it, and the next service removes it before
+        // it polls.  A full queue refuses and leaves the descriptor
+        // registered.
         return state.queue_unregister(fd);
     };
     state.apply_pending_unregister(&mut fds);

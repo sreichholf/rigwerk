@@ -1,23 +1,15 @@
-//! One signal path's effect chain on the audio side: the [`ChainRuntime`]
-//! the audio thread owns and runs, the [`ChainCommand`]s that change it,
-//! and the [`ChainHome`] it waits in while no audio thread holds it.  The
-//! UI side is `model` ([`super::ChainModel`]).
+//! Audio side of one path's effect chain.  The UI never touches the
+//! runtime while an audio thread holds it.
 //!
-//! The UI never touches the runtime while an audio thread holds it.  Every
-//! structural edit (insert, remove, move, replace, a new rate) reaches it
-//! as a command through a queue, with any new slot already built, loaded
-//! and activated on the UI thread.  The runtime applies the commands at the
-//! start of a block and hands every slot it lets go of back through the
-//! return queue, for the UI thread to destroy.  So the audio thread never
-//! waits, never allocates, and never loads or destroys a plugin for an edit.
+//! A structural edit arrives as a command, with the new slot already
+//! loaded and activated on the UI thread.  The runtime applies commands
+//! at the start of a block and hands every slot it lets go of back through
+//! the return queue.  The audio thread never waits, allocates, loads, or
+//! destroys a plugin.
 //!
-//! The mixer takes the runtime out of its path's home with its first block
-//! of the path, as a [`ChainLease`], and parks it again when the path stops
-//! being live or the mixer goes away (the lease's `Drop`).  While it is
-//! parked, the UI takes it and applies its commands itself.  A block that
-//! finds the home empty because the UI holds it for that moment, or another
-//! mixer still does, plays the chain's input delayed by its latency
-//! (`mixer::PathProcessor::run_effects`).
+//! While the runtime is parked, the UI applies commands itself.  A block
+//! that finds the home empty plays the input delayed by the chain's
+//! latency.
 
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
@@ -43,53 +35,54 @@ use super::slot::{Slot, SlotPark};
 #[cfg(test)]
 use super::MAX_ALIGN;
 
-/// The most effects one path holds.  The runtime's slot list is allocated
-/// for this many, so an effect never grows it on the audio thread.
+/// The runtime's slot list is allocated for this many, so an insert never
+/// grows it on the audio thread.
 pub(crate) const MAX_EFFECTS: usize = 32;
 
-/// Room in the command queue.  A full queue is not an error: the model
-/// keeps the rest in its backlog and sends it once the runtime caught up.
+/// A full queue is not an error: the model keeps the rest and sends it
+/// once the runtime has caught up.
 pub(super) const COMMAND_QUEUE: usize = 4 * MAX_EFFECTS;
 
-/// Room in the return queue.  The runtime applies a command that lets go of
-/// a slot only while the queue has room for it, so it never has to drop one.
+/// A command that lets go of a slot is applied only while this has room,
+/// so the runtime never drops one.
 pub(super) const RETURN_QUEUE: usize = 2 * MAX_EFFECTS;
 
-/// One structural edit, as the UI sends it to the runtime.  Indices are
-/// positions in the chain as it stands once every earlier command applied,
-/// which is the model's own list.  A slot travels boxed, so moving it in or
-/// out of the runtime never allocates.
+/// Indices are positions once every earlier command has applied, which is
+/// the model's list.  A slot travels boxed, so moving it never allocates
+/// on the audio thread.
 pub(crate) enum ChainCommand {
-    /// Puts `slot` at `index` (at the end if past it).
-    Insert { index: usize, slot: Box<Slot> },
-    /// Takes the slot at `index` out and returns it.
-    Remove { index: usize },
-    /// Swaps two slots.
-    Swap { a: usize, b: usize },
-    /// Puts `slot` at `index` and returns the slot it replaces.
-    Replace { index: usize, slot: Box<Slot> },
-    /// The rate the slots are now built for (fades and declicks).
+    Insert {
+        index: usize,
+        slot: Box<Slot>,
+    },
+    Remove {
+        index: usize,
+    },
+    Swap {
+        a: usize,
+        b: usize,
+    },
+    Replace {
+        index: usize,
+        slot: Box<Slot>,
+    },
+    /// Fades and declicks use this rate.
     SetRate(u32),
 }
 
-/// Destroys a slot here if this thread may destroy plugins, else hands it
-/// to `park` for the engine's main thread to drain.  Every teardown of a
-/// slot that may have run goes through here: what a queue does with the
-/// values left in it when both its ends are gone, and what a chain edit does
-/// with the slots the runtime handed back.  A debug build asserts that this
-/// is not inside an audio callback.
+/// Destroys the slot on a thread that may, otherwise parks it for the
+/// main thread.  Every teardown of a slot that may have run goes through
+/// here.  A debug build asserts this is not inside an audio callback.
 ///
-/// A stranded slot is leaked here instead, on any thread: its plugin is
-/// still inside `process`, so it is never deferred and never destroyed (see
-/// [`Slot::destroy`]).
+/// A stranded slot is leaked on any thread: its plugin is still inside
+/// `process`, so it is never deferred and never destroyed.
 pub(crate) fn release_slot(slot: Box<Slot>, park: &SlotPark) {
     debug_assert!(
         !super::super::rt_guard::in_audio_callback(),
         "a plugin slot was released inside an audio callback: it would destroy a plugin or take the deferred-slot lock"
     );
     if slot.stranded() {
-        // The plugin is still inside `process`: leak it here on any thread,
-        // never defer it to a drain that would destroy it.
+        // Still inside `process`: leak it here.  A drain would destroy it.
         slot.destroy();
         return;
     }
@@ -100,7 +93,7 @@ pub(crate) fn release_slot(slot: Box<Slot>, park: &SlotPark) {
     }
 }
 
-/// As [`release_slot`], for a command that never reached the runtime.
+/// A command that never reached the runtime.  Same rule as [`release_slot`].
 pub(super) fn release_command(command: ChainCommand, park: &SlotPark) {
     match command {
         ChainCommand::Insert { slot, .. } | ChainCommand::Replace { slot, .. } => {
@@ -110,34 +103,24 @@ pub(super) fn release_command(command: ChainCommand, park: &SlotPark) {
     }
 }
 
-/// One path's effect chain as the audio thread runs it.  It holds the
-/// slots, each with its plugin's processor, and is touched by one thread at
-/// a time: the audio thread through a [`ChainLease`], or the UI while it is
-/// parked.
+/// Touched by one thread at a time: the audio thread through a
+/// [`ChainLease`], or the UI while parked.
 ///
-/// Latency: every effect reports the samples it delays the signal by (VST3
-/// `getLatencySamples`, CLAP `latency.get`, read after each activation and
-/// again when the plugin reports a change).  The chain total, bypassed
-/// effects included (see [`Slot::latency_samples`]), is
-/// [`Self::latency_samples`].  A path-level chain bypass skips every effect
-/// the same way and still counts in that total.
+/// The chain total includes bypassed effects (see [`Slot::latency_samples`]).
+/// A path-level bypass skips every effect and still counts in that total.
 pub(crate) struct ChainRuntime {
-    /// Allocated for [`MAX_EFFECTS`]; never grows.  Boxed: a slot arrives
-    /// and leaves through the queues as a `Box`, built and freed on the UI
-    /// thread, so moving one in or out here never allocates.
+    /// Allocated for [`MAX_EFFECTS`]; never grows.  Slots arrive and leave
+    /// as a `Box`, so moving one here never allocates.
     #[allow(clippy::vec_box)]
     slots: Vec<Box<Slot>>,
     sample_rate: u32,
-    /// The total [`Self::publish_latency`] last saw.
     latency: u32,
-    /// Skips every effect's processing.  The UI stores it; [`Self::process`]
-    /// loads it.  It does not write each slot's own bypass.
+    /// The UI stores it; [`Self::process`] loads it.  It does not write
+    /// each slot's own bypass.
     chain_bypass: Arc<AtomicBool>,
     commands: Consumer<ChainCommand>,
     returns: Producer<Box<Slot>>,
-    /// Where a slot this runtime lets go of is released when it drops on a
-    /// thread that may not destroy plugins.  The engine owns it, so the
-    /// park outlives every run.
+    /// The engine owns it, so a drop off the UI thread still has a park.
     slot_park: Arc<SlotPark>,
 }
 
@@ -160,8 +143,7 @@ impl ChainRuntime {
         }
     }
 
-    /// A runtime with no model, for tests that build and run a chain
-    /// directly.  Nothing ever sends it a command.
+    /// No model.  Nothing sends this a command.
     #[cfg(test)]
     pub(crate) fn for_test(sample_rate: u32) -> Self {
         let slot_park = SlotPark::new();
@@ -179,10 +161,8 @@ impl ChainRuntime {
         )
     }
 
-    /// Applies the commands the UI queued, in order, without allocating.
-    /// It stops early, leaving the rest queued for the next call, when the
-    /// return queue has no room for a slot one would hand back.  Returns
-    /// whether it applied any.
+    /// Stops early, leaving the rest queued, when the return queue has no
+    /// room for a slot one would hand back.  Does not allocate.
     pub(crate) fn apply_commands(&mut self) -> bool {
         let mut applied = false;
         while let Some(command) = self.commands.peek() {
@@ -198,7 +178,6 @@ impl ChainRuntime {
         applied
     }
 
-    /// Whether applying `command` hands a slot back.
     fn hands_back(&self, command: &ChainCommand) -> bool {
         match command {
             ChainCommand::Remove { .. } | ChainCommand::Replace { .. } => true,
@@ -213,7 +192,7 @@ impl ChainRuntime {
                 if self.slots.len() < self.slots.capacity() {
                     self.slots.insert(index.min(self.slots.len()), slot);
                 } else {
-                    // The model never sends more than MAX_EFFECTS.
+                    // The model never sends more than `MAX_EFFECTS`.
                     self.hand_back(slot);
                 }
             }
@@ -239,24 +218,20 @@ impl ChainRuntime {
         }
     }
 
-    /// Queues a slot for the UI to destroy.  [`Self::apply_commands`] made
-    /// sure there is room; were there none, the slot is leaked rather than
-    /// destroyed here.
+    /// [`Self::apply_commands`] checked there is room.  Were there none,
+    /// the slot is leaked rather than destroyed here.
     fn hand_back(&mut self, slot: Box<Slot>) {
         if let Err(slot) = self.returns.push(slot) {
             std::mem::forget(slot);
         }
     }
 
-    /// The latency in samples the chain *should* have: the sum over its
-    /// effects (see [`Slot::latency_samples`]).  A bypassed effect still
-    /// counts (so bypass does not move the alignment); one that is not
-    /// loaded or failed counts 0.  Atomics only.
+    /// Sum of [`Slot::latency_samples`].  Atomics only.  A bypassed effect
+    /// still counts, so bypass does not move the alignment; an unloaded or
+    /// failed one counts 0.
     ///
-    /// It is also the delay the chain really has, block by block: an effect
-    /// skipped for a block (bypass, mix at 0, a restart's pause) plays its
-    /// input delayed by its latency, and a partial mix delays its dry side
-    /// by it (see [`Self::process`]).
+    /// This is also the delay the chain really has: a skipped effect and a
+    /// partial mix delay by that latency (see [`Self::process`]).
     pub(crate) fn latency_samples(&self) -> u32 {
         self.slots
             .iter()
@@ -264,9 +239,8 @@ impl ChainRuntime {
             .fold(0u32, u32::saturating_add)
     }
 
-    /// Sums the latency again and returns whether it moved since the last
-    /// call.  A plugin that changes its latency on the main thread shows up
-    /// here by the next block.
+    /// A plugin that changes its latency on the main thread shows up here
+    /// by the next block.
     pub(crate) fn publish_latency(&mut self) -> bool {
         let latency = self.latency_samples();
         let changed = latency != self.latency;
@@ -274,7 +248,6 @@ impl ChainRuntime {
         changed
     }
 
-    /// The total as [`Self::publish_latency`] last summed it.
     pub(crate) fn latency(&self) -> u32 {
         self.latency
     }
@@ -283,7 +256,6 @@ impl ChainRuntime {
         self.slots.iter().filter(|slot| slot.active()).count()
     }
 
-    /// Whether a restored slot is still waiting for its first open.
     pub(crate) fn has_unopened(&self) -> bool {
         self.slots.iter().any(|slot| slot.needs_open())
     }
@@ -303,15 +275,11 @@ impl ChainRuntime {
         self.chain_bypass.store(bypass, Ordering::Relaxed);
     }
 
-    /// Adds an already loaded CLAP plugin as a slot, the way a real load
-    /// fills one in.
     #[cfg(test)]
     pub(crate) fn insert_clap_for_test(&mut self, plugin: LoadedPlugin) {
         self.push_for_test(clap_slot_for_test(plugin, self.sample_rate));
     }
 
-    /// Adds a test effect that is a pure delay of `latency` frames and
-    /// reports that latency (see [`Slot::delay_for_test`]).
     #[cfg(test)]
     pub(crate) fn insert_delay_for_test(&mut self, latency: u32) {
         self.push_for_test(Slot::delay_for_test(latency));
@@ -323,7 +291,6 @@ impl ChainRuntime {
         self.publish_latency();
     }
 
-    /// Mutable access to one slot, for tests that put it in a state.
     #[cfg(test)]
     pub(crate) fn slot_mut_for_test(&mut self, index: usize) -> &mut Slot {
         &mut self.slots[index]
@@ -349,8 +316,7 @@ impl ChainRuntime {
         self.slots.iter().map(|slot| slot.link()).collect()
     }
 
-    /// Takes every slot out, so a test destroys them on its own thread
-    /// rather than through the engine's park.
+    /// The test destroys them on its own thread, not through the park.
     #[cfg(test)]
     pub(crate) fn clear_for_test(&mut self) -> Vec<Slot> {
         let slots = self.slots.drain(..).map(|slot| *slot).collect();
@@ -358,21 +324,16 @@ impl ChainRuntime {
         slots
     }
 
-    /// Runs the enabled effects over one stereo block, in chunks of at most
-    /// [`MAX_BLOCK`] frames.  A paused plugin (a restart) is skipped for
-    /// that chunk, and a plugin that fails is left in the chain with its
-    /// error so the person can see why it is silent.  Every skipped effect
-    /// still delays by its latency, and an effect's dry/wet mix blends with
-    /// its input delayed by that latency, so the block comes out
-    /// [`Self::latency_samples`] late, with the dry and wet sides of every
-    /// effect lined up.  The path's chain bypass skips every effect for the
-    /// block the same way, without writing each slot's bypass.
+    /// Chunks of at most [`MAX_BLOCK`].  A skipped effect (bypass, mix at
+    /// 0, a pause, the path's chain bypass) and a partial mix still delay
+    /// by the effect's latency, so the block comes out
+    /// [`Self::latency_samples`] late.  Chain bypass does not write each
+    /// slot's own bypass.
     ///
-    /// Returns whether a slot gained an error in this block, or the chain
-    /// latency changed, so the caller can ask the UI thread to republish
-    /// the effect views (the audio thread does not build them itself).
+    /// True when a slot failed or the latency changed, so the UI can
+    /// republish.  The audio thread does not build views.
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) -> bool {
-        // One relaxed load: an atomic, so this does not lock or allocate.
+        // Relaxed: an atomic, so this does not lock or allocate.
         let chain_bypass = self.chain_bypass.load(Ordering::Relaxed);
         let failed = self.process_effects(left, right, frames, chain_bypass);
         let latency_changed = self.publish_latency();
@@ -413,14 +374,11 @@ impl ChainRuntime {
 }
 
 impl Drop for ChainRuntime {
-    /// The last owner may be a bridge thread that outlived its run:
-    /// plugins are destroyed on the UI thread, so the slots go to the
-    /// engine's park there (see [`release_slot`]).  Queued commands and
-    /// returned slots go the same way when their queue drops.
+    /// The last owner may be a bridge thread.  Plugins are destroyed on
+    /// the UI thread, so the slots go to the park ([`release_slot`]).
     ///
-    /// That park takes a lock, which no audio callback may take.  The last
-    /// owner is the UI thread or the bridge, never a callback;
-    /// [`release_slot`] says so in a debug build instead of relying on that.
+    /// The park takes a lock no audio callback may take.  The last owner
+    /// is the UI thread or the bridge; [`release_slot`] asserts that.
     fn drop(&mut self) {
         for slot in self.slots.drain(..) {
             release_slot(slot, &self.slot_park);
@@ -450,10 +408,8 @@ const _: fn() = || {
     send::<ChainRuntime>();
 };
 
-/// Where one path's [`ChainRuntime`] waits while no audio thread holds it:
-/// one pointer, swapped in and out, so taking and parking it is lock and
-/// allocation free.  There is exactly one runtime per home, either parked
-/// here or in a [`ChainLease`].
+/// One pointer, swapped in and out, so taking and parking is lock and
+/// allocation free.  Exactly one runtime: parked here or in a [`ChainLease`].
 pub(crate) struct ChainHome {
     parked: AtomicPtr<ChainRuntime>,
 }
@@ -465,8 +421,8 @@ impl ChainHome {
         })
     }
 
-    /// Takes the runtime, or `None` while someone else holds it.  Lock and
-    /// allocation free, so the audio thread may call it.
+    /// `None` while someone else holds it.  Lock and allocation free, so
+    /// the audio thread may call it.
     pub(crate) fn take(self: &Arc<Self>) -> Option<ChainLease> {
         let runtime = self.parked.swap(ptr::null_mut(), Ordering::AcqRel);
         if runtime.is_null() {
@@ -499,15 +455,13 @@ impl Drop for ChainHome {
     }
 }
 
-/// The runtime while one thread holds it.  Dropping the lease parks the
-/// runtime in its home again (lock and allocation free).
+/// Dropping the lease parks the runtime again, lock and allocation free.
 pub(crate) struct ChainLease {
     runtime: ManuallyDrop<Box<ChainRuntime>>,
     home: Arc<ChainHome>,
 }
 
 impl ChainLease {
-    /// Whether this lease was taken from `home`.
     pub(crate) fn is_from(&self, home: &Arc<ChainHome>) -> bool {
         Arc::ptr_eq(&self.home, home)
     }
@@ -535,26 +489,14 @@ impl Drop for ChainLease {
     }
 }
 
-/// Per-chunk constants for [`process_slot`], in frames.
 #[derive(Clone, Copy)]
 struct SlotTiming {
-    /// How long a change of the dry delay crossfades.
     fade: f32,
-    /// How long a switch between plugin output and delayed input is
-    /// smoothed.
     declick: u32,
 }
 
-/// Runs one effect over one chunk (at most [`MAX_BLOCK`] frames) in place.
-/// The input always goes into the effect's dry line first.  A processed
-/// chunk with a partial mix is blended with that dry side delayed by the
-/// effect's latency; a skipped chunk (the path's chain bypass, the slot's
-/// own bypass, mix at 0, a restart's pause) plays the input delayed by that
-/// latency.  So the effect delays by its reported latency whatever happens
-/// to it.  A switch between the plugin running and being skipped (bypass
-/// toggled, mix through 0, a restart) cannot crossfade, since only one of
-/// the two exists for the chunk; its step is smoothed over
-/// `DECLICK_SECONDS` instead.  Returns whether the effect failed.
+/// A switch between the plugin and the delayed input cannot crossfade:
+/// only one of the two exists for the chunk, so the step is declicked.
 fn process_slot(
     slot: &mut Slot,
     left: &mut [f32],
@@ -600,7 +542,6 @@ fn process_slot(
         }
         Outcome::Skipped | Outcome::Failed => {
             if latency == 0 && slot.dry_tap.is_settled() {
-                // Nothing to delay: the input passes as it is.
                 slot.dry_tap.snap(0);
             } else {
                 for index in 0..count {
@@ -611,9 +552,8 @@ fn process_slot(
             }
         }
     }
-    // A switch between the plugin's output and the delayed input (bypass,
-    // mix through 0, a skipped chunk, a CLAP restart) would step: the step
-    // fades out over a few ms instead.
+    // Cannot crossfade: only the plugin or the delayed input exists for
+    // this chunk (bypass, mix through 0, a skip, a restart).
     if !first && processed != slot.was_processed {
         slot.declick.start([left[0], right[0]], timing.declick);
     }
@@ -627,11 +567,8 @@ fn process_slot(
     failed
 }
 
-/// Runs the effect's plugin over one chunk, fully wet when `wet`.  A loaded
-/// plugin is brought here every chunk, so its pause handshake is served even
-/// while it is skipped (see [`LoadedPlugin::run`](super::handle::LoadedPlugin::run)).
-/// A paused plugin is skipped for this chunk; a plugin that fails keeps its
-/// failure so the person can see why it is silent.
+/// Every loaded plugin is brought here every chunk, so its pause
+/// handshake is served even while it is skipped.
 fn run_plugin(slot: &mut Slot, left: &mut [f32], right: &mut [f32], wet: bool) -> Outcome {
     #[cfg(test)]
     if let Some(test) = slot.test_delay.as_mut() {

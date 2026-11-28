@@ -1,30 +1,16 @@
-//! The process-wide LV2 URID map.
+//! Process-wide LV2 URID map.  Some plugins map a URI from inside `run`, so
+//! it answers and inserts from the audio thread without a lock or an
+//! allocation.  One append-only table: the same URI has the same id in every
+//! instance, as `urid.h` requires.  Blobs store URIs, not numbers.
 //!
-//! A plugin maps its URIs once and then passes the numbers around, but some
-//! plugins map a URI from inside `run`.  The map therefore has to answer,
-//! and insert, from the audio thread without a lock and without allocating.
-//! It is one append-only table for the whole process, so the same URI has
-//! the same id in every instance and from every thread, as `urid.h`
-//! requires.  State blobs store URIs, not numbers, so nothing depends on the
-//! numbers across runs.
-//!
-//! The table is lock-free.  A new URI's bytes are copied into a fixed arena
-//! (a bump allocator over a static buffer, claimed with a compare-exchange
-//! on its fill), and the entry is claimed with a compare-exchange from null
-//! on the first empty slot.  A writer that loses a slot to another URI tries
-//! the next; one that loses it to the same URI returns that slot's id.  Ids
-//! are slot index + 1, and slots fill without holes, so a lookup walks the
-//! entries until the first null.  The CAS publishes the bytes with
-//! `Release`; a reader loads an entry with `Acquire`.  Nothing is ever freed
-//! or moved, so every pointer `unmap` hands out lives for the process.
-//!
-//! A full table or arena answers 0, which the spec allows as failure, and
-//! keeps answering 0 for every URI it did not already hold, so an id never
-//! changes.  The one exception is a race at the moment it fills: a thread
-//! refused for want of space can answer 0 while another, which claimed the
-//! last space for the same URI, answers its id.  The limits are far above
-//! what a host maps.  [`seed`] maps RigWerk's own URIs at startup, so they
-//! have the lowest ids.
+//! A new URI is copied into a fixed arena claimed by compare-exchange, then
+//! published with `Release`.  A reader loads with `Acquire`.  Nothing is
+//! freed or moved, so every pointer `unmap` hands out lives for the process.
+//! A full table answers 0, which the spec allows, and keeps answering 0 for
+//! a URI it does not hold, so an id never changes.  The exception is a race
+//! as it fills: a thread refused for space can answer 0 while another, which
+//! claimed the last space for the same URI, answers its id.  [`seed`] maps
+//! RigWerk's URIs first, so they have the lowest ids.
 
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, CStr};
@@ -34,16 +20,12 @@ use std::sync::Once;
 
 use lv2_sys::{LV2_URID_Map_Handle, LV2_URID_Unmap_Handle, LV2_URID};
 
-/// How many URIs one process may map.  A host sees a few hundred; the limit
-/// only exists so the table can be preallocated.  A full table answers 0.
+/// Preallocated, so a map from `run` cannot allocate.  Full answers 0.
 const CAPACITY: usize = 4096;
 
-/// The bytes every mapped URI shares, NUL terminators included.  A static
-/// buffer, so it costs address space and only the pages that are used.
+/// Static arena: address space only, pages paid as they are used.
 const ARENA_BYTES: usize = 1 << 20;
 
-/// The URIs RigWerk's own features use, mapped at startup.  Public to the
-/// LV2 module so the test can tie the host's URIs to it.
 pub(super) const SEEDED: &[&CStr] = &[
     c"http://lv2plug.in/ns/ext/urid#map",
     c"http://lv2plug.in/ns/ext/urid#unmap",
@@ -73,15 +55,14 @@ pub(super) const SEEDED: &[&CStr] = &[
     c"http://lv2plug.in/ns/ext/atom#Object",
 ];
 
-/// The append-only URI table.  Ids start at 1; 0 is failure.
+/// Append-only.  Ids start at 1; 0 is failure.
 pub(crate) struct UridMap {
-    /// Published entries; index `id - 1`.  Each is set once, from null, by a
-    /// compare-exchange, and points into `arena`.
+    /// Index `id - 1`.  Set once, from null, and points into `arena`.
     entries: [AtomicPtr<c_char>; CAPACITY],
-    /// The URI bytes.  A writer owns the span it claimed through `used` and
-    /// writes it before the entry that points at it is published.
+    /// A writer owns the span it claimed through `used` and writes it before
+    /// the entry is published.
     arena: UnsafeCell<[u8; ARENA_BYTES]>,
-    /// How many arena bytes are claimed.  Only grows.
+    /// Only grows.
     used: AtomicUsize,
 }
 
@@ -100,9 +81,8 @@ impl UridMap {
         }
     }
 
-    /// The id of `uri`, mapping it if it is new.  Safe from any thread, the
-    /// audio thread included: it neither locks nor allocates.  Returns 0
-    /// only when the table or the arena is full.
+    /// Safe from any thread, including the audio thread: no lock, no
+    /// allocation.  0 only when the table or the arena is full.
     pub(crate) fn map(&self, uri: &CStr) -> LV2_URID {
         let (found, mut index) = self.find(uri);
         if let Some(id) = found {
@@ -135,8 +115,7 @@ impl UridMap {
         0
     }
 
-    /// The stored string for `id`, or null.  The pointer never moves, so the
-    /// caller may keep it for as long as the process lives.
+    /// The pointer never moves, so the caller may keep it for the process.
     pub(crate) fn unmap(&self, id: LV2_URID) -> *const c_char {
         if id == 0 || id as usize > CAPACITY {
             return ptr::null();
@@ -144,7 +123,6 @@ impl UridMap {
         self.entries[(id - 1) as usize].load(Ordering::Acquire)
     }
 
-    /// The safe form of [`Self::unmap`] for state code.
     pub(crate) fn uri(&self, id: LV2_URID) -> Option<&CStr> {
         let pointer = self.unmap(id);
         if pointer.is_null() {
@@ -154,8 +132,6 @@ impl UridMap {
         }
     }
 
-    /// The id of `uri` if it is published, and the index of the first empty
-    /// slot the walk reached (`CAPACITY` when the table is full).
     fn find(&self, uri: &CStr) -> (Option<LV2_URID>, usize) {
         for index in 0..CAPACITY {
             let pointer = self.entries[index].load(Ordering::Acquire);
@@ -170,9 +146,8 @@ impl UridMap {
         (None, CAPACITY)
     }
 
-    /// Copies `uri` with its NUL into a span of the arena this call claims,
-    /// or `None` when it no longer fits.  The span is unpublished until the
-    /// caller's compare-exchange stores a pointer to it.
+    /// The claimed span stays unpublished until the caller's
+    /// compare-exchange.
     fn copy(&self, uri: &CStr) -> Option<*mut c_char> {
         let bytes = uri.to_bytes_with_nul();
         let start = self
@@ -197,14 +172,12 @@ impl UridMap {
     }
 }
 
-/// The one map for the whole process.
 pub(crate) fn global() -> &'static UridMap {
     static MAP: UridMap = UridMap::new();
     &MAP
 }
 
-/// Maps the URIs RigWerk's features use, so they have the lowest ids.
-/// Idempotent and cheap after the first call.
+/// Maps RigWerk's feature URIs first, so they have the lowest ids.
 pub(crate) fn seed() {
     static SEEDED_ONCE: Once = Once::new();
     SEEDED_ONCE.call_once(|| {
@@ -215,7 +188,7 @@ pub(crate) fn seed() {
     });
 }
 
-/// `LV2_URID_Map.map`: the handle is the process-wide map.
+/// `LV2_URID_Map.map`.  The handle is ignored; the map is process-wide.
 pub(crate) unsafe extern "C" fn map_callback(
     _handle: LV2_URID_Map_Handle,
     uri: *const c_char,
@@ -226,7 +199,7 @@ pub(crate) unsafe extern "C" fn map_callback(
     global().map(unsafe { CStr::from_ptr(uri) })
 }
 
-/// `LV2_URID_Unmap.unmap`: the handle is the process-wide map.
+/// `LV2_URID_Unmap.unmap`.  The handle is ignored; the map is process-wide.
 pub(crate) unsafe extern "C" fn unmap_callback(
     _handle: LV2_URID_Unmap_Handle,
     urid: LV2_URID,

@@ -1,14 +1,5 @@
-//! The strip fader (`docs/ui-spec.md` §4.1).
-//!
-//! The rail is 3 pt and the cap is 24 × 12 pt, with a tick at unity that
-//! shows on both sides of the cap.  Every fader shares one taper: unity
-//! sits at three quarters of the travel whatever the strip's range, so
-//! caps at 0.0 line up across the console.
-//! Dragging moves 0.1 dB per point while the level is within 12 dB of
-//! unity, and 0.5 dB per point further away.  Shift drags at 0.01 dB per
-//! point.  A double-click on the rail sets 0.0, a double-click on the
-//! value types one, and the wheel steps 0.5 dB (0.1 dB with Shift).
-//! [`fader_height`] is the whole control, readout included.
+//! The strip fader.  Unity sits at three quarters of the travel whatever
+//! the range, so caps at 0.0 line up.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, FontId, Layout, Rect, Sense, Stroke, Vec2};
@@ -76,8 +67,6 @@ pub(super) fn scroll_delta_db(lines: f32, fine: bool) -> f32 {
     lines * if fine { 0.1 } else { 0.5 }
 }
 
-/// Rail, cap, unity tick and the typed readout.  `height` is the whole
-/// control; pass [`fader_height`].
 pub(crate) fn fader(
     ui: &mut egui::Ui,
     value_db: &mut f32,
@@ -364,7 +353,6 @@ pub(super) fn travel_at_db(db: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-/// The inverse of [`travel_at_db`].
 pub(super) fn db_at_travel(travel: f32, min: f32, max: f32) -> f32 {
     let travel = travel.clamp(0.0, 1.0);
     let db = if max > 0.0 && min < 0.0 {

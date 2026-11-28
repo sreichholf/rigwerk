@@ -1,142 +1,85 @@
-//! The *Tight* engine: a time-domain shifter in the style of a delay-line
-//! "whammy" or "drop" pedal, for single notes, power chords and chugs at a
-//! few ms (the delay setting, 4 … 40 ms).
+//! Time-domain delay-line shifter.  Up to three read heads move at ratio
+//! `r` (Catmull-Rom).  A YIN estimate on a decimated copy makes each
+//! splice a whole number of periods; its difference function is spread
+//! over the hop, a few lags a sample, so no block carries the whole of
+//! it.  A full-rate correlation then refines the jump so the heads are
+//! in phase.
 //!
-//! The input runs through a delay line; up to three read heads read it at
-//! `r` samples per sample (four-point Catmull-Rom interpolation), so the
-//! pitch moves by `r` with no frame and no resolution limit.  A head that
-//! reads slower than the input falls behind (a drop), one that reads faster
-//! catches up, so now and then the playing head is replaced by a new one a
-//! jump `J` nearer (or further), crossfaded.  The splice is
-//! period-synchronous: a YIN period estimate on a decimated copy (about
-//! 8 kHz, every hop, 20 Hz … 1.3 kHz; its difference function spread over
-//! three quarters of the hop, a few lags a sample, so no block carries the
-//! whole of it) makes `J` a whole number of periods, and a normalised
-//! correlation of the two heads' last samples at full rate refines it, so
-//! the two heads are in phase and a note does not warble.
-//! The range reaches the common period of a low power chord (drop A's A5
-//! is 27.5 Hz, an eight-string's F#5 23 Hz) and of most barre chords (an
-//! octave or two under the root), so those splice in phase too.  A signal
-//! without a clear period takes a jump of at least 30 ms while it rings (a
-//! longer delay leaves more room, so it splices less often: a few splices a
-//! second at 4 ms), and the range about `D` while it falls fast (a
-//! palm-muted chug), so a chug's tail is not read late into the gap before
-//! the next.  The chorusing left on a chord no period fits is slow at the
-//! default and slower with a longer delay.
+//! The crossfade is a raised cosine divided by `sqrt(a² + b² + 2ρab)`:
+//! in-phase heads sum to one, and uncorrelated ones keep their power.
 //!
-//! The crossfade's shape follows the correlation `ρ` of the two heads at
-//! the splice: a raised cosine whose gains are divided by
-//! `sqrt(a² + b² + 2ρab)`, so heads in phase (`ρ = 1`) sum to one and do
-//! not dip, and uncorrelated ones (`ρ ≤ 0`) keep their power.
+//! An onset places a new head at `D` and reads the attack at ratio 1,
+//! so every attack lands on the reported latency.  No periodic splice
+//! starts while the envelope is rising: a nearer head would play the
+//! pick early.
 //!
-//! Delay.  The playing head's delay sweeps the jump around `D` (the
-//! reported latency, [`spec`]: the delay setting), `D ± J/2`, but never
-//! nearer the input than 0.25 ms on a drop, or on a rise than 0.25 ms plus
-//! what the outgoing head reads through the crossfade (`r − 1` times its
-//! length).  A long jump (a low period, the ringing jump) is pushed up by
-//! that: a ringing chord an octave up at 4 ms sweeps about 15 … 45 ms.  An onset re-anchors the heads: a new
-//! head is placed `D` behind the input and reads the attack at a ratio of 1
-//! for 3 ms of input past the onset, then glides to `r` over 5 ms, so every
-//! attack is heard at exactly the reported latency and keeps its own
-//! length, whatever the shift (a pick's timing matters more than its
-//! pitch).  An onset is a fast power envelope jumping four times over a
-//! slow one and twice over the loudest of the last 45 ms (so a low note's
-//! own peaks, once a period, never count), on the whole signal or on its
-//! top (above the decimation's low-pass: the pick, which the last note's
-//! tail lacks, so it is called within a millisecond).  No periodic splice
-//! starts while the power is rising or until the new head has read the
-//! attack: a head nearer the input than `D` would play the pick early.  At
-//! a ratio of 1 the playing head sits at exactly `D`: the output is the
-//! input, delayed.  Between attacks the head drifts about `D` before it
-//! splices, so a longer `D` splices less often: a ringing chord choruses
-//! less.
-//!
-//! Real-time safety: [`TightState::new`] allocates for 192 kHz and the
-//! longest delay; `configure`, `set_delay`, `clear` and `tick` never
-//! allocate.  The output depends on the samples since the last clear and
-//! on where the clear fell on the hop grid (`due`), never on the block
-//! size.
+//! [`TightState::new`] allocates for 192 kHz.  `configure`, `set_delay`,
+//! `clear`, and `tick` do not.  The output depends on the samples since
+//! the last clear and on the hop phase (`due`), not on the block size.
 
 use std::f64::consts::PI;
 
-/// How long a shift change glides.
 const GLIDE_SECONDS: f32 = 0.020;
-/// How often the period is estimated, at 48 kHz.
+/// At 48 kHz.  The sizes scale with the rate.
 const HOP: usize = 128;
-/// The nearest a head may read to the input, at 48 kHz (0.25 ms).
+/// Nearest a head may read, at 48 kHz (0.25 ms).
 const MIN_DELAY: usize = 12;
-/// The decimation of the period estimate at 48 kHz (to 8 kHz); it scales
-/// with the rate like the sizes.
+/// To about 8 kHz at 48 kHz.  Scales with the rate.
 const DECIMATION: usize = 6;
-/// YIN on the decimated signal: the window, the lag range (20 Hz …
-/// 1.3 kHz) and the dip that counts as a clear period.  20 Hz takes in the
-/// common period of a low power chord (drop A's A5 is 27.5 Hz, an
-/// eight-string's F#5 23 Hz), so its splices keep both notes in phase.
+/// YIN on the decimated signal.  20 Hz takes in a low power chord
+/// (drop A at 27.5 Hz, an eight-string F# at 23 Hz), so those splices
+/// keep both notes in phase.  `YIN_THRESHOLD` is the dip that counts.
 const YIN_WINDOW: usize = 192;
 const YIN_MAX_LAG: usize = 400;
 const YIN_MIN_LAG: usize = 6;
 const YIN_THRESHOLD: f32 = 0.2;
 /// Hops a period is kept after the estimate loses it.
 const PERIOD_HOLD: u32 = 4;
-/// The decimated ring, a power of two above `YIN_WINDOW + YIN_MAX_LAG`.
+/// A power of two above `YIN_WINDOW + YIN_MAX_LAG`.
 const DECIMATED_LEN: usize = 1024;
-/// The delay line at 192 kHz (170 ms).  At a 40 ms `D` the furthest read is
-/// a drop's head held to `max_delay` (85 ms, past its latest splice point,
-/// `D + J/2` ≈ 80 ms) plus its drift through a 20 ms crossfade: about
-/// 95 ms.
+/// At 192 kHz the furthest read is about 95 ms: a 40 ms `D`, a drop held
+/// past `D + J/2`, and its drift through a 20 ms crossfade.
 pub(super) const BUFFER_LEN: usize = 1 << 15;
-/// The longest crossfade of a periodic splice, seconds.
 const MAX_CROSSFADE_SECONDS: f64 = 0.010;
-/// A splice without a period (a ringing chord, noise): the least jump and
-/// the longest crossfade, seconds.  The jump grows with the room a longer
+/// No period (a ringing chord).  The jump grows with the room a longer
 /// delay leaves, so a longer delay splices less often.
 const CHORD_JUMP_SECONDS: f64 = 0.030;
 const CHORD_CROSSFADE_SECONDS: f64 = 0.020;
-/// A chord takes the long jump only while it rings: its level falls by less
-/// than this, dB per second (a palm-muted chug falls by hundreds).  Faster,
-/// it takes the short one, so the sweep stays near `D` and a chug's tail
-/// does not reach into the gap before the next.
+/// A chord takes the long jump only while it falls slower than this.
+/// A palm-muted chug falls by hundreds and stays near `D`, so its tail
+/// does not reach the gap before the next note.
 const RINGING_DB_PER_SECOND: f32 = 60.0;
-/// An anchor's crossfade, seconds, and how long before the detection the
-/// onset is taken to start.
 const ANCHOR_CROSSFADE_SECONDS: f64 = 0.001;
+/// How long before the detection the onset is taken to start.
 const ANCHOR_LAG_SECONDS: f64 = 0.0005;
-/// How far an anchor may move to land in phase with the playing head,
-/// seconds.
+/// How far an anchor may move to land in phase with the playing head.
 const ANCHOR_ALIGN_SECONDS: f64 = 0.0005;
-/// After an onset: how much of the input is read at a ratio of 1, and how
-/// long the ratio then glides to the shift, seconds.
+/// After an onset, input read at ratio 1, then the glide to the shift.
 const ATTACK_HOLD_SECONDS: f64 = 0.003;
 const ATTACK_GLIDE_SECONDS: f64 = 0.005;
-/// After an onset, how much of the input no periodic splice may start in.
+/// After an onset, no periodic splice may start in this much input.
 const GUARD_SECONDS: f64 = 0.008;
-/// The onset detector: the fast and the slow power envelope, the jump of
-/// the first over the second that counts, an absolute floor (about
-/// −80 dBFS) and the hold-off.
+/// Fast envelope, slow envelope, the jump that counts, about −80 dBFS,
+/// and the hold-off.
 const FAST_SECONDS: f32 = 0.001;
 const SLOW_SECONDS: f32 = 0.020;
 const ONSET_RATIO: f32 = 4.0;
 const ONSET_FLOOR: f32 = 1e-8;
 const HOLDOFF_SECONDS: f32 = 0.030;
-/// While the fast envelope is over this many times the slow one (and over
-/// the window's peak, below) the input is rising (an attack the detector
-/// has not yet called): no periodic splice starts, so a new head nearer
-/// the input cannot read it early.
+/// Over this, against the slow envelope, the input is still rising and
+/// no periodic splice starts: a nearer head would read the attack early.
 const RISING_RATIO: f32 = 2.0;
-/// An onset must also be this far over the loudest the fast envelope was
-/// in the last `PEAK_WINDOW` blocks of 1 ms but the newest `PEAK_SKIP`: a
-/// low note's or a power chord's own peaks, once a period (down to about
-/// 22 Hz), never count.
+/// Also this far over the loudest of the last `PEAK_WINDOW` 1 ms blocks,
+/// skipping the newest `PEAK_SKIP`.  A low note's own peaks, once a
+/// period (down to about 22 Hz), never count.
 const PEAK_RATIO: f32 = 2.0;
 const PEAK_WINDOW: usize = 45;
 const PEAK_SKIP: usize = 2;
 const PEAK_BLOCKS: usize = 64;
-/// The widest a periodic splice's refinement searches.  It only binds on
-/// jumps of many short periods, where half a period, all an in-phase point
-/// needs, is well inside it; it keeps a long *Delay* from searching
-/// thousands of positions in one sample.
+/// Half a period of a short splice fits inside this.  A long delay
+/// must not search thousands of positions in one sample.
 const MAX_SEARCH_SECONDS: f64 = 0.002;
-/// The correlation segment of a splice's refinement, at 48 kHz (2 ms).
+/// At 48 kHz, 2 ms.
 const MATCH_LEN: usize = 96;
 
 /// Tight's sizes at one rate.
@@ -186,10 +129,8 @@ pub(super) fn rate_scale(rate: u32) -> usize {
     }
 }
 
-/// One read head.
 #[derive(Clone, Copy, Debug, Default)]
 struct Head {
-    /// The (fractional) input index it reads next.
     pos: f64,
     gain: f32,
     /// Its gain when the running crossfade started.

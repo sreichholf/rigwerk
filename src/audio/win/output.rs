@@ -1,11 +1,5 @@
-//! The Windows open policy for the clock output: WASAPI exclusive and
-//! REAL-style first, the shared cpal stream behind them.
-//!
-//! `audio/output` owns the cpal stream, the config and `OpenedOutput`; this
-//! file owns what Windows tries before that stream, what it says when the
-//! attempt is refused, and the one Windows error that has a meaning of its
-//! own.  Extra outputs never use this open policy; they do use the
-//! device-in-use sentence.
+//! Exclusive and REAL-style run before the shared cpal stream.  Extra
+//! outputs never use this policy; they do use the device-in-use sentence.
 
 use std::sync::Arc;
 
@@ -14,22 +8,17 @@ use crate::audio::shared::Shared;
 use crate::audio::types::OutputMode;
 use crate::audio::win::wasapi;
 
-/// What the WASAPI attempt before the shared stream decided.
 pub(crate) enum Attempt {
-    /// WASAPI opened the clock output.
     Opened(OpenedOutput),
-    /// Shared cpal next; what its mode line adds, when an attempt was made.
+    /// What the shared stream's mode line adds, or `None` when no WASAPI
+    /// attempt was made.
     Refused(Option<String>),
 }
 
-/// Tries the WASAPI clock output `exclusive` or `low_latency` asked for, and
-/// returns it when it opened.
-///
-/// `exclusive` asks for WASAPI exclusive mode and `low_latency` for
-/// IAudioClient3 at the driver's smallest shared engine step (Windows'
-/// REAL-style attempt), in that order; neither is retried.  A refusal is a
-/// `Refused` carrying the reason, so the shared stream that follows can say
-/// what it fell back from.
+/// `exclusive` is WASAPI exclusive; `low_latency` is IAudioClient3 at the
+/// driver's smallest shared step (REAL-style).  Neither is retried.  A
+/// refusal carries the reason so the shared stream can say what it fell
+/// back from.
 pub(crate) fn attempt(
     id: &cpal::DeviceId,
     sample_rate: u32,
@@ -90,8 +79,7 @@ pub(crate) fn attempt(
     }
 }
 
-/// The mode and the line the bridge publishes once the shared cpal stream is
-/// the one that runs; `refused` is what the WASAPI attempt left behind.
+/// `refused` is what the WASAPI attempt left behind.
 pub(crate) fn describe(refused: Option<&str>, fixed_buffer: bool) -> (OutputMode, String) {
     let note = if fixed_buffer {
         ""
@@ -104,12 +92,12 @@ pub(crate) fn describe(refused: Option<&str>, fixed_buffer: bool) -> (OutputMode
     )
 }
 
-/// Windows' "device in use" answer (AUDCLNT_E_DEVICE_IN_USE, 0x8889000A) as
-/// cpal prints it.  Measured: with ASIO4ALL as the input, the Realtek card it
-/// drives refused every shared output stream with exactly this code.
+/// `AUDCLNT_E_DEVICE_IN_USE` (0x8889000A) as cpal prints it.  With ASIO4ALL
+/// holding the input, the Realtek card it drives refused every shared
+/// output with this code.
 const DEVICE_IN_USE: &str = "-2004287478";
 
-/// The sentence to show instead of that code, or `None` for any other error.
+/// The sentence for that code, or `None` for any other error.
 pub(crate) fn explain_device_in_use(error: &str) -> Option<&'static str> {
     error.contains(DEVICE_IN_USE).then_some(
         "This output is in use: another driver or app has taken the sound card for itself",

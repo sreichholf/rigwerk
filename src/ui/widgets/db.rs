@@ -1,15 +1,11 @@
-//! One decibel readout: signed, with the unit, the real minus sign, and
-//! `−∞` at the floor.  A level, gain or trim prints through [`format_db`].
+//! One decibel readout, with the real minus, and `−∞` at the floor.
 
 /// A NaN or anything at or below this reads `−∞`.  That is this readout's
 /// own floor, not the scale the meters draw.
 const FLOOR_DB: f32 = -120.0;
 const SILENCE: &str = "−∞";
 
-/// `+3.0 dB`, `−3.0 dB`, `0.0 dB`, `−∞`.  `decimals` is the printed
-/// precision; the sign and the unit do not vary.  Values round half away
-/// from zero at that precision, so `2.25` reads `+2.3` and a `−30.5`
-/// chain threshold reads `−31`.
+/// Rounds half away from zero, so `2.25` reads `+2.3`.
 pub(crate) fn format_db(db: f32, decimals: usize) -> String {
     if db.is_nan() || db <= FLOOR_DB {
         return SILENCE.to_owned();

@@ -1,24 +1,8 @@
-//! The UI-thread side of the NAM blocks: the models folder, the scan, the
-//! loader thread, and the block edits the sheet and the console call.
-//!
-//! A [`nam_rs::Model`](nam_rs::Model) is built, warmed and measured on the
-//! loader thread ([`NamLoader`]), never inside `set_mix` and never on the
-//! audio thread.  The loader hands a finished model back; the UI queues it
-//! for the block's id, and a stale answer (the block changed while the model
-//! was being built) is dropped here, where a model is safe to drop.
-//!
-//! The same path at the same sample rate, run and dilation factor is not
-//! rebuilt.  Neither is a width change that keeps the same submodel; one
-//! that picks another queues a model built at it.  When a path's NAM series
-//! crosses into oversampling (two or more eligible captures in a row), every
-//! block of it is rebuilt at factor 2 and fades in through the same install;
-//! back at one, it is rebuilt at factor 1.  The folder window and the
-//! clipboard read run on the UI thread too.
-//!
-//! A capture is timed once per bridge run.  One never measured is measured
-//! before its model goes live.  One measured in an earlier run goes live at
-//! once with that figure and is measured again when the loader has no
-//! install waiting, so a start never plays dry while a figure is refreshed.
+//! A model is built, warmed and measured on the loader thread, never
+//! inside `set_mix` and never on the audio thread.  A stale answer is
+//! dropped here.  Crossing into oversampling rebuilds every block of
+//! the series.  A capture measured in an earlier run goes live at once
+//! and is measured again when nothing is waiting to install.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};

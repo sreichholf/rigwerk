@@ -1,39 +1,23 @@
-//! The LV2 host features RigWerk supplies.
+//! Features handed to `instantiate`.  [`HostFeatures`] is boxed before the
+//! pointers are taken, so a moved handle never moves what a plugin holds.
 //!
-//! A plugin receives one null-terminated `LV2_Feature` array at
-//! `instantiate`.  Every string and struct that array points at is owned by
-//! [`HostFeatures`], which is boxed before the pointers are taken, so a
-//! moved handle never moves what a plugin holds.
+//! `state:mapPath` returns a C-heap copy: a plugin may `free()` it (the
+//! contract before 1.18) or call `state:freePath`.  `state:loadDefaultState`
+//! is in the array only when the bundle has a `state:state`.  A saved blob
+//! still gets it, because a plugin that requires the feature must see it at
+//! instantiate; with nothing to restore, the load fails.  It stays in
+//! [`SUPPORTED`], so the scan still allows a plugin that requires it.
+//! `buf-size:minBlockLength` is 0 because the load calls `run(handle, 0)`.
+//! There is no `nominalBlockLength`: a load does not know the bridge's
+//! block.  `schedule_work` refuses until the load has found `work`.
+//! `log:log` is omitted: its variadic callbacks cannot be written in stable
+//! Rust.  A required feature outside [`SUPPORTED`] is a scan error and the
+//! loader refuses it.
 //!
-//! Supplied: `urid:map` and `urid:unmap` (the process-wide map, seeded
-//! here), `options:options` (the block bounds, the sequence size and the
-//! sample rate), `buf-size:boundedBlockLength`, `worker:schedule` when the
-//! instance has rings, and `state:mapPath`/`state:freePath` as identity
-//! paths.  A mapped path is a C-heap copy, so a plugin may release it with
-//! `free()` (the contract before 1.18) or with `state:freePath`.
-//! `state:loadDefaultState` (no data) is supplied only when the bundle has a
-//! `state:state`.  A saved blob still gets the feature: that blob is the
-//! restore before `run`, and a plugin that requires the feature must see it
-//! at instantiate.  It stays in [`SUPPORTED`], so a plugin that requires it
-//! is still allowed by the scan; a required feature with no state to restore
-//! fails the load instead of instantiating without it.
-//! `buf-size:minBlockLength` is 0, because the load calls
-//! `run(handle, 0)` and the buf-size spec allows a minimum of zero.  There
-//! is no `buf-size:nominalBlockLength`: a plugin runs the bridge's block,
-//! which a load does not know, so no value would be true.  The loader
-//! always passes the instance's rings, so the scan's claim that
-//! `worker:schedule` is supplied holds for every load; its `schedule_work`
-//! refuses requests until the load has found the plugin's `work`.  `log:log`
-//! is not supplied: its variadic callbacks cannot be written in stable Rust.
-//! A plugin that requires a feature outside [`SUPPORTED`] is still listed by
-//! the scan, with a scan error, and the loader refuses to instantiate it.
-//!
-//! Three core features carry no data and are met by how the host runs a
-//! plugin, so they are accepted as required but not put in the array, as
-//! jalv does: `lv2:inPlaceBroken` (every port has a buffer of its own, so
-//! no input shares an output's memory), `lv2:isLive` (the plugin runs on the
-//! live audio thread, block by block) and `lv2:hardRTCapable` (a promise the
-//! plugin makes, which asks nothing of the host).
+//! `lv2:inPlaceBroken`, `lv2:isLive` and `lv2:hardRTCapable` are accepted as
+//! required but not put in the array, as jalv does.  Each port has its own
+//! buffer, the plugin runs on the live audio thread, and `hardRTCapable` is
+//! the plugin's promise.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
@@ -48,9 +32,7 @@ use lv2_sys::{
 use super::urid;
 use super::worker::{self, WorkerRings};
 
-/// The features the host supports in phase 1: the ones it supplies plus the
-/// three it meets without data.  A required feature outside this list is listed with a
-/// scan error and refuses to load later.
+/// A required feature outside this list is a scan error and refuses to load.
 pub(crate) const SUPPORTED: &[&str] = &[
     "http://lv2plug.in/ns/ext/urid#map",
     "http://lv2plug.in/ns/ext/urid#unmap",
@@ -65,8 +47,7 @@ pub(crate) const SUPPORTED: &[&str] = &[
     HARD_RT_CAPABLE,
 ];
 
-/// The supported features that are met without an entry in the feature
-/// array (see the module doc), for the test that checks the array.
+/// Supported, but met without an array entry.
 #[cfg(test)]
 pub(super) const SATISFIED: &[&str] = &[IN_PLACE_BROKEN, IS_LIVE, HARD_RT_CAPABLE];
 
@@ -83,9 +64,7 @@ const STATE_MAP_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#mapPath";
 const STATE_FREE_PATH: &CStr = c"http://lv2plug.in/ns/ext/state#freePath";
 const STATE_LOAD_DEFAULT: &CStr = c"http://lv2plug.in/ns/ext/state#loadDefaultState";
 
-/// The options the host supplies in `options:options`.  A plugin that names
-/// another as `opts:requiredOption` is listed with a scan error and refuses
-/// to load, like an unsupported required feature.
+/// A required option outside this list is a scan error and refuses to load.
 pub(crate) const SUPPLIED_OPTIONS: &[&str] = &[
     "http://lv2plug.in/ns/ext/buf-size#minBlockLength",
     "http://lv2plug.in/ns/ext/buf-size#maxBlockLength",
@@ -100,42 +79,35 @@ const PARAMETERS_SAMPLE_RATE: &CStr = c"http://lv2plug.in/ns/ext/parameters#samp
 const ATOM_INT: &CStr = c"http://lv2plug.in/ns/ext/atom#Int";
 const ATOM_FLOAT: &CStr = c"http://lv2plug.in/ns/ext/atom#Float";
 
-/// The features one load hands to `instantiate`, with every string, value
-/// and struct they point at.
+/// Owns every string and struct the feature array points at.
 pub(crate) struct HostFeatures {
-    /// The C strings the feature array points at.  A `CString` buffer does
-    /// not move when this `Vec` reallocates.
+    /// A `CString` buffer does not move when this `Vec` reallocates.
     strings: Vec<CString>,
     urid_map: LV2_URID_Map,
     urid_unmap: LV2_URID_Unmap,
-    /// The zero-terminated option array.  Boxed before the feature array is
-    /// built, so its address is final.
+    /// Boxed before the feature array is built, so its address is final.
     options: Box<[LV2_Options_Option]>,
     min_block: i32,
     max_block: i32,
     sequence_size: i32,
     sample_rate: f32,
-    /// The instance's rings, owned so the schedule struct's handle cannot
-    /// outlive them.
+    /// Owned so the schedule struct's handle cannot outlive the rings.
     rings: Option<Arc<WorkerRings>>,
-    /// The `worker:schedule` feature data.  Its handle is the `Arc` above.
+    /// Its handle is the rings `Arc`.
     schedule: Option<LV2_Worker_Schedule>,
     map_path: LV2_State_Map_Path,
     free_path: LV2_State_Free_Path,
     features: Vec<LV2_Feature>,
-    /// `&features[i]` plus the null terminator `as_ptr` returns.
+    /// `&features[i]`, plus the null terminator `as_ptr` returns.
     pointers: Vec<*const LV2_Feature>,
 }
 
 impl HostFeatures {
-    /// Builds the feature set for one instance.  `sequence_size` is the
-    /// largest atom port buffer in bytes, header included
-    /// (`PortTable::sequence_size`).  The loader always passes the
-    /// instance's rings; `None` only exists so the feature-set tests can
-    /// build the same array without `worker:schedule`.  `load_default` is
-    /// whether the bundle has a `state:state`: only then is
-    /// `state:loadDefaultState` in the array.  `urid::seed` runs here so
-    /// the host's URIs have the lowest ids.
+    /// `sequence_size` is the largest atom port buffer in bytes, header
+    /// included.  `rings` is `None` only so tests can omit `worker:schedule`.
+    /// `load_default` puts `state:loadDefaultState` in the array only when
+    /// the bundle has a `state:state`.  `urid::seed` runs here so the host's
+    /// URIs have the lowest ids.
     pub(crate) fn new(
         sample_rate: f64,
         max_block: usize,
@@ -183,18 +155,15 @@ impl HostFeatures {
         host
     }
 
-    /// The null-terminated feature array `instantiate` receives.
     pub(crate) fn as_ptr(&self) -> *const *const LV2_Feature {
         self.pointers.as_ptr()
     }
 
-    /// The option array, terminator included.
     #[cfg(test)]
     pub(crate) fn options(&self) -> &[LV2_Options_Option] {
         &self.options
     }
 
-    /// The path callbacks, for the test that round-trips a string.
     #[cfg(test)]
     pub(crate) fn paths(&self) -> (&LV2_State_Map_Path, &LV2_State_Free_Path) {
         (&self.map_path, &self.free_path)
@@ -261,8 +230,7 @@ impl HostFeatures {
                 STATE_FREE_PATH,
                 &self.free_path as *const LV2_State_Free_Path as *mut c_void,
             );
-            // No data: the host meets it by restoring `state:state` at load.
-            // Absent when this load has no default state to restore.
+            // No data: met by restoring `state:state` at load.
             if load_default {
                 push(STATE_LOAD_DEFAULT, ptr::null_mut());
             }
@@ -279,8 +247,7 @@ impl HostFeatures {
     }
 }
 
-/// Every URI the host maps or advertises, for the test that ties the seeds
-/// to the feature set.  No second copy of the strings.
+/// By reference, so the seed test and the feature set share one copy.
 #[cfg(test)]
 pub(super) fn used_uris() -> &'static [&'static CStr] {
     &[
@@ -312,16 +279,13 @@ fn option<T>(key: LV2_URID, type_: LV2_URID, size: u32, value: *const T) -> LV2_
     }
 }
 
-/// `state:mapPath` identity: hand out a copy of `path` on the C heap.
-/// Only called by the plugin from inside a state call, on the UI thread,
-/// never from `run`, so the copy needs no lock.
+/// `state:mapPath`: a C-heap copy of `path`.  Called only from a state call
+/// on the UI thread, never from `run`.
 ///
-/// The copy comes from `malloc`, never from Rust's allocator: `state.h`
-/// before 1.18 says the caller frees the returned path "with free()", and
-/// a plugin written to it (LV2's own `eg-sampler` and `eg-params` still
-/// are) never calls `state:freePath`.  A null return is the allocation
-/// failure `malloc` reports; the plugin sees no path.  Not `strdup`:
-/// the MSVC C runtime only exports it as `_strdup`.
+/// `malloc`, not Rust's allocator: `state.h` before 1.18 says the caller
+/// frees the path with `free()`, and `eg-sampler` and `eg-params` still do,
+/// never calling `state:freePath`.  Null is `malloc` failure.  Not
+/// `strdup`: MSVC exports it as `_strdup`.
 unsafe extern "C" fn map_path(
     _handle: LV2_State_Map_Path_Handle,
     path: *const c_char,
@@ -342,8 +306,7 @@ unsafe extern "C" fn map_path(
     }
 }
 
-/// `state:freePath`: release a path [`map_path`] handed out, with the C
-/// `free` it was allocated for, so either way of freeing it is the same.
+/// `state:freePath`: `free` a path [`map_path`] allocated, matching `free()`.
 unsafe extern "C" fn free_path(_handle: LV2_State_Free_Path_Handle, path: *mut c_char) {
     // SAFETY: `path` came from `map_path`'s `malloc`, or is null, which
     // `free` ignores.

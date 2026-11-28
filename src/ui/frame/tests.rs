@@ -10,10 +10,8 @@ use crate::app::latency::LoopbackKind;
 use crate::app::screen::{Drawer, Sheet};
 use crate::ui::widgets::{run_frame, test_input};
 
-/// The calibration window is drawn before `handle_shell_keys` and consumes
-/// its own Escape, so Esc closes the panel and cancels the measurement
-/// without also closing the overlay underneath.  Driving `App::ui` pins that
-/// order in the frame, not just in this test's two calls.
+/// The calibration window consumes its own Escape before `handle_shell_keys`,
+/// so Esc does not also close the overlay underneath.
 #[test]
 fn escape_closes_the_calibration_panel_before_the_overlay_below() {
     let ctx = egui::Context::default();

@@ -1,5 +1,3 @@
-//! The clock-output estimate, the measurement, and Measure latency.
-
 use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Vec2};
 

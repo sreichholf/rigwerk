@@ -1,10 +1,7 @@
-//! The plugin side of a CLAP editor: which window API it opens with, and the
-//! `clap_plugin_gui` calls that create, attach, size, scale and close it.
-//!
-//! Win32, X11 and Wayland all use physical pixels.  CLAP has no embedding
-//! for Wayland, so there the plugin opens a floating toplevel on its own
-//! connection and the host only creates, shows and destroys it.  Every call
-//! here is a main-thread call, made under the plugin's UI-only lock.
+//! CLAP editor calls, all main-thread under the plugin's UI-only lock.
+//! Win32, X11, and Wayland use physical pixels.  CLAP has no Wayland
+//! embedding, so there the plugin opens a floating toplevel and the host
+//! only creates, shows, and destroys it.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
@@ -16,7 +13,6 @@ use clap_sys::plugin::clap_plugin;
 
 use super::instance::ClapInstance;
 
-/// The size an editor falls back to when the plugin does not report one.
 const FALLBACK_SIZE: (u32, u32) = (640, 480);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +35,6 @@ impl WindowApi {
     }
 }
 
-/// A window API and mode the plugin agreed to through `is_api_supported`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EditorApi {
     pub(crate) api: WindowApi,
@@ -63,7 +58,6 @@ impl EditorApi {
     }
 }
 
-/// The native window an embedded editor is attached to.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ParentWindow {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -72,8 +66,6 @@ pub(crate) enum ParentWindow {
     X11(u64),
 }
 
-/// How the user may resize an embedded editor, from `can_resize` and
-/// `get_resize_hints`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ResizeHints {
     pub(crate) horizontal: bool,
@@ -94,9 +86,8 @@ impl ResizeHints {
     }
 }
 
-/// The window APIs a Linux session can serve, best first.  With an X server
-/// (`DISPLAY`, XWayland included) the editor embeds in an X11 window, or
-/// floats on X11.  A pure Wayland session can only float.
+/// Best first.  `DISPLAY` (XWayland included) embeds in X11, or floats
+/// on X11.  A pure Wayland session can only float.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn linux_candidates(x11: bool, wayland: bool) -> Vec<EditorApi> {
     let mut candidates = Vec::new();
@@ -110,7 +101,7 @@ pub(crate) fn linux_candidates(x11: bool, wayland: bool) -> Vec<EditorApi> {
     candidates
 }
 
-/// The window APIs this session can serve, best first.
+/// Best first.
 pub(crate) fn session_candidates() -> Vec<EditorApi> {
     #[cfg(target_os = "windows")]
     {
@@ -130,8 +121,6 @@ pub(crate) fn session_candidates() -> Vec<EditorApi> {
     }
 }
 
-/// The first candidate the plugin supports, or `None` when it has no
-/// editor this session can open.
 pub(super) fn choose_editor_api(
     plugin: *const clap_plugin,
     gui: *const clap_plugin_gui,
@@ -155,12 +144,10 @@ impl ClapInstance {
         self.editor_api.is_some()
     }
 
-    /// The window API and mode the editor opens with.
     pub(crate) fn editor_api(&self) -> Option<EditorApi> {
         self.editor_api
     }
 
-    /// Creates the plugin's GUI resources and asks how large its view is.
     pub(crate) fn prepare_editor(&mut self) -> Result<(u32, u32), String> {
         if self.editor_open {
             return Ok(self.editor_size().unwrap_or(FALLBACK_SIZE));
@@ -189,8 +176,8 @@ impl ClapInstance {
         }
     }
 
-    /// Tells the editor the display scale (2.0 is 200 %).  False when the
-    /// plugin ignored it, which CLAP allows for one that reads the OS.
+    /// False when the plugin ignores it.  CLAP allows that for a plugin
+    /// that reads the scale from the OS.
     pub(crate) fn set_editor_scale(&mut self, scale: f64) -> bool {
         if !self.editor_open || !scale.is_finite() || scale <= 0.0 {
             return false;
@@ -201,7 +188,6 @@ impl ClapInstance {
         }
     }
 
-    /// Attaches the prepared view to a native window and shows it.
     pub(crate) fn attach_editor(&mut self, parent: ParentWindow, scale: f64) -> Result<(), String> {
         let (api, specific) = match parent {
             ParentWindow::Win32(hwnd) => (WindowApi::Win32, clap_window_handle { win32: hwnd }),
@@ -230,7 +216,6 @@ impl ClapInstance {
         Ok(())
     }
 
-    /// Shows a floating editor the plugin owns, titled `title`.
     pub(crate) fn show_floating_editor(&mut self, title: &str, scale: f64) -> Result<(), String> {
         if !self.editor_api.is_some_and(|api| api.floating) {
             return Err("The plugin's interface was not created as its own window.".to_owned());
@@ -262,8 +247,7 @@ impl ClapInstance {
         }
     }
 
-    /// How the user may resize the embedded editor.  A plugin without
-    /// `can_resize`, or one that says no, is fixed.
+    /// No `can_resize`, or a no, is fixed.
     pub(crate) fn editor_resize_hints(&self) -> ResizeHints {
         let Ok(gui) = self.gui() else {
             return ResizeHints::FIXED;
@@ -302,10 +286,8 @@ impl ClapInstance {
         }
     }
 
-    /// Follows a resize of the parent window.  The plugin first rounds the
-    /// size through `adjust_size`, then takes it through `set_size`.
-    /// Returns the size the window must have: the adjusted size, or the
-    /// editor's own size when it cannot or will not resize.
+    /// The size the window must take: the adjusted size, or the editor's
+    /// own when it will not resize.
     pub(crate) fn resize_editor(&mut self, width: u32, height: u32) -> (u32, u32) {
         let current = self.editor_size().unwrap_or((width, height));
         let Ok(gui) = self.gui() else {

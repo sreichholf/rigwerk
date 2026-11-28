@@ -1,8 +1,5 @@
-//! Which sheet and drawer are open, and the title-bar drafts.
-//!
-//! The page (`Page`) is the console, the tuner or Setup.  The sheet and the
-//! drawer sit over it.  *Setup* opens the Setup screen at a section; Done
-//! and Esc come back to the console.
+//! One sheet at a time.  A path in a sheet is its engine slot.  *Setup*
+//! opens Setup at a section; Done and Esc return to the console.
 
 use std::time::{Duration, Instant};
 

@@ -1,5 +1,3 @@
-//! The master strip: *Master*, the master level and *M*.
-
 use eframe::egui;
 use egui::{Rect, RichText, Sense};
 

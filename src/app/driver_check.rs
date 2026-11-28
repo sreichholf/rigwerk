@@ -1,9 +1,5 @@
-//! What each driver really runs at, compared with the chosen settings.
-//!
-//! Drivers are free to ignore a requested rate or buffer: an ASIO driver may
-//! only accept the sizes set in its own panel, Windows shared mode delivers
-//! in its own steps, and a device may be locked to one rate.  The screens show
-//! the real values and explain every difference in plain words.
+//! A driver may ignore a requested rate or buffer.  The screens show
+//! what it opened.
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::sync::mpsc;

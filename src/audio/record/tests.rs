@@ -26,7 +26,7 @@ impl TempTake {
         Self { dir }
     }
 
-    /// A path whose parent does not exist yet.  The writer creates it.
+    /// Parent does not exist yet.  The writer creates it.
     fn wav(&self) -> PathBuf {
         self.dir.join("nested").join("take.wav")
     }
@@ -115,9 +115,7 @@ fn finish(recorder: &Recorder) -> RecordStatus {
     wait_phase(recorder, RecordPhase::Idle)
 }
 
-/// No writer thread, so these are the only producer and consumer.  This is
-/// the deterministic pin on the overrun path: a full ring refuses, and the
-/// refused frame never reaches the queue.
+/// No writer thread, so this is the only producer and consumer.
 #[test]
 fn a_full_ring_refuses_the_next_frame_and_keeps_the_rest_in_order() {
     let rate = 8u32;
@@ -157,9 +155,8 @@ fn a_full_ring_accounts_for_every_frame() {
     assert!(recorder.arm(temp.wav(), rate, 1, RecordSource::Clock));
     wait_phase(&recorder, RecordPhase::Recording);
 
-    // Twice the ring.  The writer drains while this burst runs, so which
-    // frames it accepts depends on timing; only the accounting and the
-    // order are fixed.
+    // Twice the ring.  The writer drains during the burst, so which frames
+    // land depends on timing; only the accounting and the order are fixed.
     let total = 2 * capacity;
     let mut pushed = Vec::with_capacity(total);
     for index in 0..total {
@@ -179,15 +176,14 @@ fn a_full_ring_accounts_for_every_frame() {
     assert_eq!(done.overruns, live.overruns);
     assert_eq!(done.rate, rate);
     assert_eq!(done.channels, 1);
-    // Every push is either kept or counted, and never both.
     assert_eq!(done.frames + done.overruns, total as u64, "{done:?}");
 
     let wav = read_wav(&temp.wav());
     assert_eq!(wav.rate, rate);
     assert_eq!(wav.channels, 1);
     assert_eq!(wav.mask, 0x1);
-    // The file holds every accepted frame, once, in push order: a dropped
-    // frame is absent, not reordered, repeated, or replaced by a later one.
+    // Every accepted frame, once, in push order.  A dropped frame is absent,
+    // not reordered, repeated, or replaced.
     assert_eq!(wav.samples.len(), done.frames as usize);
     // Frame 0 is always accepted: the burst starts while the status is
     // Recording and nothing has been pushed yet, so the ring is empty.

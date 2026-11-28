@@ -1,18 +1,10 @@
-//! One signal path's effect chain on the UI side: the [`ChainModel`].  It
-//! is the chain as the UI edits and shows it, one [`SlotLink`] per effect,
-//! and the only sender of [`ChainCommand`]s to the path's
-//! [`ChainRuntime`](super::ChainRuntime) (see `chain`).
+//! UI side of one path's effect chain.  Slots are loaded and activated
+//! here before a command sends them.  The audio thread never takes this
+//! model's lock.
 //!
-//! Every edit changes the links at once and queues the command that makes
-//! the runtime match.  Slots are built here, on the UI thread: a plugin is
-//! loaded and activated before its slot is sent.  [`ChainModel::flush`]
-//! sends what is queued, applies it itself while the runtime is parked (no
-//! bridge, or a path that is not live), and collects the slots the runtime
-//! handed back, which the caller destroys on the UI thread.
-//!
-//! The model is UI-only.  `PathControls` keeps it behind a mutex the audio
-//! thread never takes; the links it publishes are what drawing, servicing
-//! and saving read.
+//! [`ChainModel::flush`] never waits on the audio side.  A live runtime
+//! applies commands on its next block, and returned slots come back on a
+//! later flush, for the caller to destroy on the UI thread.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
@@ -29,8 +21,8 @@ use super::pref::PluginPref;
 use super::queue::{queue, Consumer, Producer};
 use super::slot::{Slot, SlotLink, SlotPark};
 
-/// Slots [`ChainModel::reload_plan`] wants opened at a new or first rate.
-/// The caller builds them and hands them to [`ChainModel::install`].
+/// Slots to open.  The caller builds them and passes them to
+/// [`ChainModel::install`]; this plan does not load.
 pub(crate) struct ReloadPlan {
     pub(crate) previous_rate: u32,
     pub(crate) jobs: Vec<(usize, PluginPref)>,
@@ -38,27 +30,23 @@ pub(crate) struct ReloadPlan {
     pub(crate) requested: Vec<usize>,
 }
 
-/// One path's effect chain as the UI edits it.
 pub(crate) struct ChainModel {
-    /// One per effect, in chain order: the chain as it stands once every
-    /// queued command applied.
+    /// The chain as it stands once every queued command has applied.
+    /// Ahead of the runtime until then.
     links: Vec<SlotLink>,
-    /// The rate the slots are built for.
     rate: u32,
     commands: Producer<ChainCommand>,
     /// Commands that did not fit the queue yet, oldest first.
     backlog: VecDeque<ChainCommand>,
     returns: Consumer<Box<Slot>>,
     home: Arc<ChainHome>,
-    /// Where a slot this model or its queues let go of is released.  The
-    /// engine owns it, so the park outlives every run.
+    /// The engine owns it, so a slot released here outlives every run.
     slot_park: Arc<SlotPark>,
 }
 
 impl ChainModel {
-    /// An empty chain at `sample_rate` (0 means 48 kHz) and its runtime,
-    /// parked in [`Self::home`].  `chain_bypass` is the path's bypass flag,
-    /// which the runtime loads every block.
+    /// `sample_rate` 0 means 48 kHz.  `chain_bypass` is the path's bypass
+    /// flag; the runtime loads it every block.
     pub(crate) fn new(
         sample_rate: u32,
         chain_bypass: Arc<AtomicBool>,
@@ -94,7 +82,6 @@ impl ChainModel {
         }
     }
 
-    /// Where the runtime waits for the audio thread.
     pub(crate) fn home(&self) -> Arc<ChainHome> {
         Arc::clone(&self.home)
     }
@@ -111,7 +98,6 @@ impl ChainModel {
         self.links.len() >= MAX_EFFECTS
     }
 
-    /// Whether a restored slot is still waiting for its first open.
     pub(crate) fn has_unopened(&self) -> bool {
         self.links.iter().any(SlotLink::needs_open)
     }
@@ -120,11 +106,9 @@ impl ChainModel {
         self.backlog.push_back(command);
     }
 
-    /// Sends the queued commands, applies them at once if the runtime is
-    /// parked, and returns the boxes the runtime handed back, for the caller
-    /// to release through [`release_slot`] on this (the UI) thread.  Never
-    /// waits for the audio side: a runtime it holds applies the commands
-    /// with its next block, and the slots come back with a later flush.
+    /// Never waits on the audio side.  A runtime this does not hold applies
+    /// the commands on its next block; those slots come back on a later
+    /// flush.  The caller releases what comes back, on the UI thread.
     #[must_use]
     #[allow(clippy::vec_box)] // The boxes travel queued: collecting them moves no slot.
     pub(crate) fn flush(&mut self) -> Vec<Box<Slot>> {
@@ -158,14 +142,12 @@ impl ChainModel {
         returned
     }
 
-    /// Whether commands are still on their way to the runtime.
     #[cfg(test)]
     pub(crate) fn pending(&self) -> bool {
         !self.backlog.is_empty() || !self.commands.is_empty()
     }
 
-    /// Replaces every effect with unopened slots for `prefs`.  Only the
-    /// first [`MAX_EFFECTS`] are kept.
+    /// Only the first [`MAX_EFFECTS`] prefs are kept.
     pub(crate) fn restore(&mut self, mut prefs: Vec<PluginPref>) {
         for index in (0..self.links.len()).rev() {
             self.send(ChainCommand::Remove { index });
@@ -183,8 +165,7 @@ impl ChainModel {
         }
     }
 
-    /// Adds `slot` at the end, or hands it back when the chain is full
-    /// (see [`Self::is_full`]).
+    /// Hands `slot` back when the chain is full.
     #[allow(clippy::result_large_err)] // The caller drops the slot it gets back.
     pub(crate) fn push(&mut self, slot: Slot) -> Result<(), Slot> {
         if self.is_full() {
@@ -203,7 +184,7 @@ impl ChainModel {
         });
     }
 
-    /// Takes the effect at `index` out.  The runtime hands its slot back.
+    /// The runtime hands the slot back; this does not destroy it.
     pub(crate) fn remove(&mut self, index: usize) {
         if index < self.links.len() {
             self.links.remove(index);
@@ -211,8 +192,6 @@ impl ChainModel {
         }
     }
 
-    /// Swaps the effect at `index` with its neighbour `delta` places away
-    /// (clamped to the chain).
     pub(crate) fn move_slot(&mut self, index: usize, delta: isize) {
         if index >= self.links.len() {
             return;
@@ -227,8 +206,8 @@ impl ChainModel {
         }
     }
 
-    /// Puts `slot` in place of the effect at `index`.  It keeps that
-    /// effect's controls, so mix, bypass and the counters carry over.
+    /// Keeps the replaced effect's controls, so mix, bypass and the
+    /// counters carry over.
     fn replace(&mut self, index: usize, mut slot: Slot) {
         let Some(link) = self.links.get_mut(index) else {
             return;
@@ -248,11 +227,9 @@ impl ChainModel {
         }
     }
 
-    /// Lists slots to rebuild at `rate` without loading them: every slot
-    /// when the rate changed, else the never-opened ones and those whose
-    /// plugin asked to be rebuilt.  When the rate changed and nothing is
-    /// installed, the rate is updated here.  The caller loads
-    /// [`ReloadPlan::jobs`] and installs them with [`Self::install`].
+    /// Does not load.  Every slot when the rate changed, otherwise the
+    /// never-opened ones and those whose plugin asked to be rebuilt.  A
+    /// rate change with nothing installed is applied here.
     pub(crate) fn reload_plan(&mut self, rate: u32) -> Option<ReloadPlan> {
         let rate_changed = rate != self.rate;
         let jobs: Vec<(usize, PluginPref)> = self
@@ -278,8 +255,8 @@ impl ChainModel {
         })
     }
 
-    /// Lists only the slots whose plugin asked to be rebuilt, at the
-    /// chain's rate: a reload request opens nothing else.
+    /// Only slots whose plugin asked to be rebuilt.  A reload request
+    /// opens nothing else.
     pub(crate) fn request_plan(&mut self) -> Option<ReloadPlan> {
         let jobs: Vec<(usize, PluginPref)> = self
             .links
@@ -295,8 +272,6 @@ impl ChainModel {
         })
     }
 
-    /// Puts slots built for a [`ReloadPlan`] in place, then moves the chain
-    /// to `rate`.  Each keeps the controls of the effect it replaces.
     pub(crate) fn install(&mut self, rate: u32, built: Vec<(usize, Slot)>) {
         for (index, slot) in built {
             self.replace(index, slot);
@@ -304,8 +279,8 @@ impl ChainModel {
         self.set_rate(rate);
     }
 
-    /// Opens a saved slot so its controls can be shown before playback
-    /// starts, or reads a loaded one's control list again.
+    /// Opens a saved slot so its controls can be shown before playback,
+    /// or reads a loaded one's control list again.
     pub(crate) fn ensure_loaded(&mut self, index: usize) {
         if self.open_if_needed(index) {
             return;
@@ -315,8 +290,8 @@ impl ChainModel {
         }
     }
 
-    /// Opens the never-opened slot at `index`.  Returns whether it loaded
-    /// one (failed or not), which also read the fresh control list.
+    /// True when it opened one, failed or not.  That read the fresh
+    /// control list.
     fn open_if_needed(&mut self, index: usize) -> bool {
         let Some(link) = self.links.get(index) else {
             return false;
@@ -329,9 +304,8 @@ impl ChainModel {
         true
     }
 
-    /// Sets one normalized plugin control, opening a never-opened slot
-    /// first.  A loaded slot is reached through its link instead (see
-    /// `PathControls::set_plugin_parameter`).
+    /// Opens a never-opened slot first.  A loaded slot is reached through
+    /// its link (`PathControls::set_plugin_parameter`).
     pub(crate) fn set_parameter(
         &mut self,
         index: usize,
@@ -343,13 +317,12 @@ impl ChainModel {
             .map(|_| ())
     }
 
-    /// Returns every control to the plugin's own defaults and forgets the
-    /// saved overrides, opening a never-opened slot first.
+    /// The plugin's own defaults, and the saved overrides are forgotten.
+    /// Opens a never-opened slot first.
     pub(crate) fn reset_parameters(&mut self, index: usize) -> Result<(), String> {
         self.open_handle(index)?.reset_parameters()
     }
 
-    /// The handle of slot `index`, opened if it never was.
     fn open_handle(&mut self, index: usize) -> Result<PluginHandle, String> {
         self.open_if_needed(index);
         let Some(link) = self.links.get(index) else {
@@ -364,8 +337,8 @@ impl ChainModel {
         }
     }
 
-    /// Sets one effect's bypass.  The UI goes through the published links
-    /// instead (`PathControls::set_plugin_bypass`).
+    /// The UI sets bypass through the published links
+    /// (`PathControls::set_plugin_bypass`).
     #[cfg(test)]
     pub(crate) fn set_bypass(&mut self, index: usize, bypass: bool) {
         if let Some(link) = self.links.get(index) {
@@ -373,14 +346,11 @@ impl ChainModel {
         }
     }
 
-    /// Adds an already loaded CLAP plugin as a slot, the way a real load
-    /// fills one in.
     #[cfg(test)]
     pub(crate) fn insert_clap_for_test(&mut self, plugin: LoadedPlugin) {
         self.append(super::chain::clap_slot_for_test(plugin, self.rate));
     }
 
-    /// Adds the pure-delay test effect (see `Slot::delay_for_test`).
     #[cfg(test)]
     pub(crate) fn insert_delay_for_test(&mut self, latency: u32) {
         self.append(Slot::delay_for_test(latency));
@@ -398,8 +368,6 @@ impl ChainModel {
 }
 
 impl Drop for ChainModel {
-    /// Commands that never reached the runtime and slots it handed back go
-    /// where a chain edit's leftovers go (see `chain::release_slot`).
     fn drop(&mut self) {
         // The links hold handles of the plugins in those slots: gone first,
         // so a slot released to the park is its plugin's last owner, and the

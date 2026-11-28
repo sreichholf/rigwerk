@@ -1,41 +1,27 @@
-//! The LV2 port table, the control ranges and the port buffers.
+//! The port table, the control ranges and the port buffers.
 //!
-//! The table is read once from the bundle's parsed Turtle
-//! (`scan::read_bundle` is shared with the scan, so manifest and
-//! `rdfs:seeAlso` handling exists once) and never changes afterwards: both
-//! halves of an instance read the same immutable ranges, exactly as the CLAP
-//! host shares its range table.  Every rule a load is refused by that the
-//! Turtle decides lives here, and the scan reports the same refusal
-//! (`PortTable::check`) as its `scan_error`.  Whether a plugin is refused
-//! never depends on the sample rate: an `lv2:sampleRate` bound is scaled and
-//! kept in a float's range, never refused for it.
+//! Read once from the bundle's Turtle and never changed: both halves share
+//! the ranges, and the audio thread takes no lock.  Every Turtle rule a load
+//! is refused by lives here, and the scan reports the same refusal
+//! (`PortTable::check`).  Refusal never depends on the sample rate: an
+//! `lv2:sampleRate` bound is scaled and kept in a float's range.
 //!
-//! A port is identified by its `lv2:index`.  Indices must be unique but need
-//! not be contiguous: a bundle with a gap is accepted, the buffer slot is the
-//! port's position in the table and `PortSlot::port` keeps the declared
-//! index for `connect_port`.  Audio ports are mono, so the main pair is the
-//! first up to two audio inputs and the first up to two outputs in index
-//! order that are not `lv2:isSideChain`; side chains, further audio inputs
-//! and outputs, CV ports and atom ports get buffers of their own and are
-//! otherwise ignored, so an auxiliary input only ever hears silence.  Control inputs become the
-//! writable parameters, control outputs the read-only views, and a control
-//! output with `lv2:latency`/`lv2:reportsLatency` is the latency report.  A
-//! `pprops:notOnGUI` control is not a parameter, but its buffer still starts
-//! at its `lv2:default`, like every control input's: a hidden "enable" that
-//! defaults to 1 must not run at 0.
+//! Indices must be unique but need not be contiguous.  The buffer slot is
+//! the port's position; `PortSlot::port` keeps the declared index for
+//! `connect_port`.  Audio ports are mono.  The main pair is the first up to
+//! two inputs and outputs that are not `lv2:isSideChain`; anything else
+//! gets a buffer and is otherwise ignored, so an auxiliary input only hears
+//! silence.  A `pprops:notOnGUI` control is not a parameter, but its buffer
+//! still starts at `lv2:default`: a hidden enable that defaults to 1 must
+//! not run at 0.
 //!
 //! An atom port is connected to an `atom:Sequence`, the only buffer type
-//! this host supplies: a port that lists only other `atom:bufferType`s is a
-//! load error, or connected to NULL when it is `lv2:connectionOptional`.
-//! Its buffer holds at least [`ATOM_CAPACITY`] bytes of events, more when
-//! the port's `rsz:minimumSize` asks for it.  Before every `run` an input is
-//! an empty sequence and an output an `atom:Chunk` whose size is the space
-//! the plugin may write, as the atom spec requires.
-//!
-//! [`PortBuffers`] owns one buffer per declared port, sized at load.  Pointers
-//! handed to `connect_port` are the addresses of those buffers, which never
-//! move, so connecting once after `instantiate` and before the first `run` is
-//! enough; nothing here allocates after construction.
+//! supplied: another `atom:bufferType` is a load error, or NULL when the
+//! port is `lv2:connectionOptional`.  Before every `run` an input is an
+//! empty sequence and an output an `atom:Chunk` sized to the space the
+//! plugin may write, as the atom spec requires.  Pointers handed to
+//! `connect_port` never move, so connecting once is enough, and nothing
+//! here allocates after construction.
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -101,32 +87,26 @@ const RSZ_MINIMUM_SIZE: &str = "http://lv2plug.in/ns/ext/resize-port#minimumSize
 const UNITS_UNIT: &str = "http://lv2plug.in/ns/extensions/units#unit";
 const UNITS_SYMBOL: &str = "http://lv2plug.in/ns/extensions/units#symbol";
 
-/// The type of an atom input, which is cleared to an empty sequence.
+/// An input is cleared to an empty sequence of this type.
 const ATOM_SEQUENCE: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Sequence";
 
-/// The type of an atom output before `run`: space the plugin may fill.
+/// An output's type before `run`: space the plugin may fill.
 const ATOM_CHUNK: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Chunk";
 
-/// The event bytes every atom port buffer can hold at least, sequence header
-/// excluded.  A port's `rsz:minimumSize` can only raise it.
+/// Event bytes, sequence header excluded.  `rsz:minimumSize` can only
+/// raise it.
 pub(super) const ATOM_CAPACITY: u32 = 8192;
 
-/// The largest `rsz:minimumSize` a port may ask for.  Far above any effect's
-/// event buffer; the cap only keeps a broken description from sizing a
-/// buffer without bound.
+/// A broken description must not size a buffer without bound.
 const MAX_ATOM_BYTES: u64 = 16 * 1024 * 1024;
 
-/// The most ports one plugin may declare, whatever their kind.  Far above
-/// any effect; the cap only keeps a broken description from sizing buffers
-/// without bound.
+/// A broken description must not size buffers without bound.
 const MAX_PORTS: usize = 512;
 
-/// Why a plugin that requires `state:loadDefaultState` cannot load without
-/// a `state:state` in its bundle.
 const NO_DEFAULT_STATE: &str =
     "The LV2 plugin requires state:loadDefaultState, but its bundle has no state:state to restore.";
 
-/// The most audio ports that form the main pair, one mono port per channel.
+/// One mono port per channel of the main pair.
 const MAIN_CHANNELS: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,7 +120,6 @@ pub(super) enum PortKind {
     Other,
 }
 
-/// One declared port, in index order.
 #[derive(Clone, Debug)]
 pub(super) struct PortInfo {
     pub(super) index: u32,
@@ -148,31 +127,27 @@ pub(super) struct PortInfo {
     pub(super) input: bool,
     /// `lv2:isSideChain`: never part of the main pair.
     pub(super) side_chain: bool,
-    /// An atom port's event capacity in bytes, sequence header excluded:
-    /// [`ATOM_CAPACITY`] or its `rsz:minimumSize`, whichever is larger.  0
-    /// for any other port.
+    /// Event bytes, header excluded: [`ATOM_CAPACITY`] or
+    /// `rsz:minimumSize`, whichever is larger.  0 for any other port.
     pub(super) capacity: u32,
-    /// A control input's `lv2:default`, clamped and scaled like its range;
-    /// what its buffer holds until a value is set.  0 for any other port.
+    /// A control input's `lv2:default`, scaled like its range, until a value
+    /// is set.  0 for any other port.
     pub(super) default: f32,
 }
 
-/// One `lv2:scalePoint`: the value the port reports and the label to show.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ScalePoint {
     pub(super) value: f64,
     pub(super) label: String,
 }
 
-/// One control port's range, normalisation and display text.  Immutable after
-/// load, so the processor and the UI both read it without a lock.  Bounds
+/// Immutable after load, so both halves read it without a lock.  Bounds
 /// already carry any `lv2:sampleRate` scaling.
 #[derive(Clone, Debug)]
 pub(super) struct Lv2Range {
-    /// [`Self::view`]'s id: the 32-bit FNV-1a of the port symbol.
+    /// 32-bit FNV-1a of the port symbol.
     pub(super) id: u32,
-    /// The port's buffer slot in [`PortBuffers`]; the control buffer to read
-    /// or write.
+    /// The control buffer in [`PortBuffers`].
     pub(super) slot: usize,
     pub(super) name: String,
     pub(super) min: f64,
@@ -182,7 +157,7 @@ pub(super) struct Lv2Range {
     pub(super) stepped: bool,
     pub(super) logarithmic: bool,
     pub(super) read_only: bool,
-    /// 0 for a continuous control, otherwise the number of steps.
+    /// 0 when the control is continuous.
     pub(super) step_count: i32,
     pub(super) unit: String,
     pub(super) points: Vec<ScalePoint>,
@@ -228,9 +203,7 @@ impl Lv2Range {
         }
     }
 
-    /// The nearest scale-point label for a stepped control, else the value
-    /// with its unit.  An integer or toggle without a unit shows no
-    /// decimals; a continuous control with points still shows its value.
+    /// A continuous control shows its value even when it has scale points.
     pub(super) fn display(&self, native: f64) -> String {
         let native = if native.is_finite() {
             native
@@ -276,35 +249,28 @@ impl Lv2Range {
     }
 }
 
-/// Everything an instance needs from a bundle's description.
 pub(super) struct PortTable {
-    /// Every declared port, in index order.  Its position is also the port's
-    /// buffer slot.
+    /// Index order.  The position is the buffer slot, not `lv2:index`.
     pub(super) ports: Vec<PortInfo>,
-    /// The writable control inputs, then the read-only control outputs.
+    /// Writable inputs, then read-only outputs.
     pub(super) ranges: Vec<Lv2Range>,
     pub(super) ids: Arc<ParamIds>,
-    /// The buffer slot of the latency report, if there is one.
+    /// The latency report's buffer slot.
     pub(super) latency: Option<usize>,
 }
 
 impl PortTable {
-    /// Parses the bundle and builds the table for `plugin_uri`.  The loader
-    /// parses once and calls [`Self::read_store`] for both the table and the
-    /// binary; this is the form the tests and any caller with only a bundle
-    /// use.
+    /// The loader parses once and calls [`Self::read_store`].  This is the
+    /// form a caller with only a bundle uses.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn read(bundle: &Path, plugin_uri: &str, sample_rate: u32) -> Result<Self, String> {
         let (store, plugins) = read_bundle(bundle)?;
         Self::read_store(&store, &plugins, plugin_uri, sample_rate)
     }
 
-    /// Builds the table from an already parsed bundle, so the loader parses
-    /// the Turtle once for both the table and the binary.  This is every
-    /// rule the Turtle decides a load by: the scan lists a plugin with this
-    /// error ([`Self::check`]), so the two cannot disagree.  Every
-    /// plugin-level reason is named, joined by "; ", then the first port
-    /// rule the plugin breaks.
+    /// Every Turtle rule a load is refused by.  The scan lists the same
+    /// error ([`Self::check`]).  Plugin-level reasons, joined by "; ", then
+    /// the first port rule.
     pub(super) fn read_store(
         store: &TtlStore,
         plugins: &[String],
@@ -337,15 +303,12 @@ impl PortTable {
         }
     }
 
-    /// Why the loader would refuse `plugin_uri`, without loading anything.
-    /// The answer never depends on the sample rate (a scaled bound is kept
-    /// in a float's range, never refused), so the rate checked with is
-    /// arbitrary.
+    /// Without loading anything.  The answer never depends on the sample
+    /// rate, so the rate checked with is arbitrary.
     pub(super) fn check(store: &TtlStore, plugins: &[String], plugin_uri: &str) -> Option<String> {
         Self::read_store(store, plugins, plugin_uri, 48_000).err()
     }
 
-    /// The ports, ranges and ids, or the first port rule the plugin breaks.
     fn read_table(store: &TtlStore, plugin_uri: &str, sample_rate: u32) -> Result<Self, String> {
         let (mut ports, nodes) = read_ports(store, plugin_uri)?;
         if ports.len() > MAX_PORTS {
@@ -353,9 +316,8 @@ impl PortTable {
                 "This LV2 plugin declares more than {MAX_PORTS} ports."
             ));
         }
-        // The CLAP host's limit is per direction: the main pair only ever
-        // consumes two, but a bundle with dozens of inputs or outputs is not
-        // an effect this chain can wire.
+        // Per direction.  The chain cannot wire more than this many inputs
+        // or outputs.
         let audio_inputs = ports
             .iter()
             .filter(|port| port.kind == PortKind::Audio && port.input)
@@ -380,9 +342,8 @@ impl PortTable {
             }
         }
 
-        // The writable inputs first, then the read-only outputs, each in
-        // index order.  A latency or `notOnGUI` control is not a parameter,
-        // but a hidden input still gets its default.
+        // A latency or `notOnGUI` control is not a parameter, but a hidden
+        // input still gets its default.
         let mut ranges = Vec::new();
         let mut symbols = Vec::new();
         let mut indexes = Vec::new();
@@ -421,9 +382,8 @@ impl PortTable {
         })
     }
 
-    /// The largest atom port buffer in bytes, header included: what the
-    /// `buf-size:sequenceSize` option advertises.  Without an atom port it is
-    /// the size a default buffer would have.
+    /// Header included: what `buf-size:sequenceSize` advertises.  Without an
+    /// atom port, the size a default buffer would have.
     pub(super) fn sequence_size(&self) -> u32 {
         let capacity = self
             .ports
@@ -436,11 +396,8 @@ impl PortTable {
     }
 }
 
-/// Gives every range its stable id: the 32-bit FNV-1a of the port symbol.  A
-/// symbol that hashes to 0 becomes 1.  Two symbols that hash alike (the same
-/// symbol on two ports) fall back to the port's declared `lv2:index` for the
-/// later one, with one log line; if even that is taken, the next free id is
-/// used.
+/// A hash of 0 becomes 1.  A collision falls back to the declared
+/// `lv2:index`, then the next free id.
 fn assign_ids(plugin_uri: &str, ranges: &mut [Lv2Range], symbols: &[String], indexes: &[u32]) {
     let mut used: Vec<u32> = Vec::with_capacity(ranges.len());
     for ((range, symbol), index) in ranges.iter_mut().zip(symbols).zip(indexes) {
@@ -473,8 +430,6 @@ pub(super) fn symbol_id(symbol: &str) -> u32 {
     hash
 }
 
-/// Reads and validates every `lv2:port` the plugin declares, in index order,
-/// with each port's subject node in the same order.
 fn read_ports(store: &TtlStore, plugin_uri: &str) -> Result<(Vec<PortInfo>, Vec<String>), String> {
     let mut ports = Vec::new();
     for node in store.iris(plugin_uri, LV2_PORT) {
@@ -568,10 +523,8 @@ fn read_ports(store: &TtlStore, plugin_uri: &str) -> Result<(Vec<PortInfo>, Vec<
     Ok((ports, nodes))
 }
 
-/// An atom port's event capacity: [`ATOM_CAPACITY`], or the port's
-/// `rsz:minimumSize` when that is larger.  The minimum counts the whole
-/// buffer, header included, so a capacity of that many bytes after the
-/// header always satisfies it.
+/// `rsz:minimumSize` counts the whole buffer, header included, so a
+/// capacity of that many bytes after the header satisfies it.
 fn atom_capacity(store: &TtlStore, node: &str, label: &str) -> Result<u32, String> {
     let Some(text) = store.literal(node, RSZ_MINIMUM_SIZE) else {
         return Ok(ATOM_CAPACITY);
@@ -588,10 +541,8 @@ fn atom_capacity(store: &TtlStore, node: &str, label: &str) -> Result<u32, Strin
     Ok((minimum as u32).max(ATOM_CAPACITY))
 }
 
-/// Reads one control port's range.  A stated bound that cannot be read or is
-/// not finite is a load error; swapped bounds are put in order and the
-/// default is clamped into the range, so the audio thread only ever sees a
-/// finite, ordered range.
+/// A bound that cannot be read or is not finite is a load error.  The
+/// audio thread only ever sees a finite, ordered range.
 fn read_range(
     store: &TtlStore,
     node: &str,
@@ -644,10 +595,8 @@ fn read_range(
     })
 }
 
-/// A `units:unit`'s display symbol: the unit node's own `units:symbol` when
-/// the bundle states it, else the conventional symbol for the common units.
-/// The unit definitions are not part of a plugin bundle, so a bundle almost
-/// never carries `units:symbol` itself.
+/// The unit node's `units:symbol` when the bundle states it, else the
+/// conventional symbol.  Unit definitions are not part of a plugin bundle.
 fn unit_symbol(store: &TtlStore, node: &str) -> String {
     let Some(unit) = store.iri(node, UNITS_UNIT) else {
         return String::new();
@@ -686,10 +635,6 @@ fn read_points(store: &TtlStore, node: &str, scale: f64) -> Vec<ScalePoint> {
     points
 }
 
-/// One of a control range's bounds, scaled to the sample rate.  A value the
-/// bundle states must parse and be finite; both are load errors, so no NaN
-/// or infinity ever reaches the audio math.  Whether a bound is refused
-/// never depends on the rate: the scaled value is kept in a float's range.
 fn parsed_bound(
     store: &TtlStore,
     node: &str,
@@ -712,16 +657,13 @@ fn parsed_bound(
     Ok(Some(scaled(value, scale)))
 }
 
-/// A finite stated value times the `lv2:sampleRate` scale, within the range
-/// of the single `float` a control port holds (lv2core: "A port connected to
-/// a single `float`").  The port cannot hold more, and an overflow at a high
-/// rate must not turn into an infinity.
+/// lv2core: a control port is a single `float`.  An overflow at a high rate
+/// must not become an infinity, and refusal never depends on the rate.
 fn scaled(value: f64, scale: f64) -> f64 {
     let limit = f64::from(f32::MAX);
     (value * scale).clamp(-limit, limit)
 }
 
-/// Whether a control output reports latency, by designation or port property.
 fn is_latency_port(store: &TtlStore, node: &str) -> bool {
     store
         .iris(node, LV2_DESIGNATION)
@@ -730,10 +672,8 @@ fn is_latency_port(store: &TtlStore, node: &str) -> bool {
         || has_property(store, node, LV2_REPORTS_LATENCY)
 }
 
-/// Whether `node` declares `property` as a port property.  The spec writes a
-/// port property as `lv2:portProperty <property>`; the property's own IRI as
-/// a direct predicate (with `true`) is accepted too, which older bundles and
-/// some of the test fixtures use.
+/// The spec writes `lv2:portProperty`.  The property IRI as a direct
+/// predicate is accepted too: older bundles and some fixtures use it.
 pub(super) fn has_property(store: &TtlStore, node: &str, property: &str) -> bool {
     store
         .iris(node, LV2_PORT_PROPERTY)
@@ -745,10 +685,9 @@ pub(super) fn has_property(store: &TtlStore, node: &str, property: &str) -> bool
             .any(|value| !value.eq_ignore_ascii_case("false"))
 }
 
-/// Why an atom port cannot be connected, or `None` when it lists
-/// `atom:Sequence`, the only buffer type this host supplies.  The atom spec
-/// forbids connecting a port to a type it does not list, so a port that
-/// lists none cannot be connected either.
+/// `None` when the port lists `atom:Sequence`.  The atom spec forbids
+/// connecting a port to a type it does not list, so a port that lists none
+/// cannot be connected either.
 fn unsupported_atom_type(store: &TtlStore, node: &str) -> Option<String> {
     let types = store.iris(node, ATOM_BUFFER_TYPE);
     if types.iter().any(|kind| kind == ATOM_SEQUENCE_IRI) {
@@ -765,7 +704,6 @@ fn unsupported_atom_type(store: &TtlStore, node: &str) -> Option<String> {
     })
 }
 
-/// Why each `opts:requiredOption` the host does not supply blocks the plugin.
 fn missing_options(store: &TtlStore, plugin: &str) -> Vec<String> {
     store
         .iris(plugin, OPTS_REQUIRED_OPTION)
@@ -775,7 +713,6 @@ fn missing_options(store: &TtlStore, plugin: &str) -> Vec<String> {
         .collect()
 }
 
-/// Why a required feature is not supplied, in words the browser can show.
 fn blocked_reason(uri: &str) -> String {
     match uri {
         BUF_SIZE_FIXED => "Needs a fixed block length".to_owned(),
@@ -794,8 +731,8 @@ fn local_name(uri: &str) -> &str {
     uri.rsplit(['#', '/']).next().unwrap_or(uri)
 }
 
-/// One port's storage.  Pointers into it never move: the buffers are sized
-/// at load and the `Vec` is never resized.
+/// Pointers into it never move: sized at load, and the `Vec` is never
+/// resized.
 #[derive(Debug)]
 pub(super) enum Buffer {
     Audio(Vec<f32>),
@@ -815,12 +752,10 @@ impl Buffer {
     }
 }
 
-/// One atom port's storage: the `LV2_Atom_Sequence` header followed by the
-/// port's capacity, in one aligned allocation that never moves.
 #[derive(Debug)]
 pub(super) struct AtomBuffer {
-    /// 8-byte aligned, so the header and every aligned atom event inside are
-    /// naturally aligned.  Never resized.
+    /// 8-byte aligned, so the header and every atom event inside are.
+    /// Never resized.
     storage: Vec<u64>,
     capacity: u32,
 }
@@ -834,27 +769,23 @@ impl AtomBuffer {
         }
     }
 
-    /// For the tests: the whole buffer's size in bytes, header included.
     #[cfg(test)]
     pub(super) fn bytes(&self) -> usize {
         self.storage.len() * 8
     }
 
-    /// The sequence header, at the start of the storage.
     pub(super) fn sequence(&mut self) -> *mut LV2_Atom_Sequence {
         self.storage.as_mut_ptr().cast()
     }
 
-    /// The bytes after the `LV2_Atom` header: the sequence body header and
-    /// the events.  What an output's `atom:Chunk` offers the plugin.
+    /// What an output's `atom:Chunk` offers the plugin.
     fn body_space(&self) -> u32 {
         std::mem::size_of::<LV2_Atom_Sequence_Body>() as u32 + self.capacity
     }
 
-    /// An input is an empty `atom:Sequence` in frames, as
-    /// `lv2_atom_sequence_clear` leaves it: its size is the body header's.
-    /// An output is an `atom:Chunk` sized to the space after its header, so
-    /// the plugin knows how much it may write.
+    /// An input is an empty `atom:Sequence`, as `lv2_atom_sequence_clear`
+    /// leaves it: its size is the body header's.  An output is an
+    /// `atom:Chunk` sized to the space after its header.
     fn reset(&mut self, types: AtomTypes, input: bool) {
         let space = self.body_space();
         // SAFETY: the storage starts with a live sequence header followed by
@@ -874,36 +805,30 @@ impl AtomBuffer {
     }
 }
 
-/// One declared port's slot.
 pub(super) struct PortSlot {
-    /// The port index the plugin knows it by, for `connect_port`.
+    /// The index the plugin knows, for `connect_port`.  Not the buffer slot.
     pub(super) port: u32,
     pub(super) input: bool,
-    /// Whether `connect_port` gets its buffer.  False for an optional port
-    /// of a kind this host has no buffer for, which is connected to NULL.
+    /// False for an optional port this host has no buffer for.  It is
+    /// connected to NULL.
     pub(super) connect: bool,
     pub(super) buffer: Buffer,
 }
 
-/// Every buffer an instance owns, in port index order.  The default is the
-/// empty set a processor leaves behind when it hands its buffers to the
-/// core.  The buffer slot of a port is its position here; its `lv2:index`
-/// is `PortSlot::port`, which differs when the indices have a gap.
+/// `Default` is the empty set a processor leaves when it hands its buffers
+/// to the core.  A port's slot is its position here; `lv2:index` is
+/// `PortSlot::port`, which differs when the indices have a gap.
 #[derive(Default)]
 pub(super) struct PortBuffers {
     pub(super) slots: Vec<PortSlot>,
-    /// The buffer slots of the first up to two audio inputs and outputs that
-    /// are not side chains, in index order.
+    /// The first up to two audio inputs that are not side chains.
     pub(super) audio_inputs: Vec<usize>,
     pub(super) audio_outputs: Vec<usize>,
-    /// The buffer slot of the latency report.
     pub(super) latency: Option<usize>,
-    /// The atom types the headers are re-armed to, mapped once at load so
-    /// the audio thread only stores them.
+    /// Mapped once at load, so the audio thread only stores them.
     types: AtomTypes,
 }
 
-/// `atom:Sequence` and `atom:Chunk`, as URIDs.
 #[derive(Clone, Copy, Default)]
 struct AtomTypes {
     sequence: u32,
@@ -934,9 +859,9 @@ impl PortBuffers {
                 PortKind::Control => Buffer::Control(vec![port.default; 1]),
                 PortKind::Cv => Buffer::Cv(vec![0.0; block]),
                 PortKind::Atom => Buffer::Atom(AtomBuffer::new(port.capacity)),
-                // Connected to NULL: `lv2:connectionOptional` says the
-                // plugin handles that.  The one-float slot only keeps
-                // positions equal to the port order; it is never read.
+                // Connected to NULL: `lv2:connectionOptional` says the plugin
+                // handles that.  The one-float slot keeps positions equal
+                // to the port order; it is never read.
                 PortKind::Other => Buffer::Cv(vec![0.0; 1]),
             };
             slots.push(PortSlot {
@@ -960,9 +885,8 @@ impl PortBuffers {
         }
     }
 
-    /// Calls `connect_port` for every declared port: with its buffer, or
-    /// with NULL for an optional port of a kind this host has no buffer for.
-    /// UI thread, at load, when no block is inside the plugin.
+    /// Every declared port, NULL for one this host has no buffer for.  UI
+    /// thread, at load, when no block is inside the plugin.
     pub(super) fn connect(&mut self, handle: LV2_Handle, descriptor: *const LV2_Descriptor) {
         // SAFETY: the loader passes a live descriptor from the module, which
         // the core keeps loaded for as long as the instance lives.
@@ -972,9 +896,8 @@ impl PortBuffers {
             return;
         };
         for slot in &mut self.slots {
-            // An optional port of a kind this host has no buffer for must be
-            // explicitly connected to NULL: the spec does not allow leaving
-            // `connect_port` out for a declared port.
+            // The spec does not allow skipping `connect_port` for a declared
+            // port, so an optional port with no buffer is connected to NULL.
             let data = if slot.connect {
                 slot.buffer.data()
             } else {
@@ -987,9 +910,8 @@ impl PortBuffers {
         }
     }
 
-    /// Clears every audio and CV buffer for `frames`.  Auxiliary inputs and
-    /// outputs past the main pair stay silent; the plugin may write into any
-    /// output.
+    /// Auxiliary inputs and outputs past the main pair stay silent.  The
+    /// plugin may write any output.
     pub(super) fn silence(&mut self, frames: usize) {
         for slot in &mut self.slots {
             match &mut slot.buffer {
@@ -1002,8 +924,6 @@ impl PortBuffers {
         }
     }
 
-    /// Copies the signal into the main audio inputs: one input gets the mono
-    /// sum, two get left and right.  The other inputs were silenced.
     pub(super) fn copy_input(&mut self, left: &[f32], right: &[f32], frames: usize) {
         let Some(first) = self.audio_inputs.first().copied() else {
             return;
@@ -1031,8 +951,6 @@ impl PortBuffers {
         }
     }
 
-    /// Copies the main audio outputs back: one output goes to both sides,
-    /// two carry left and right.  The other outputs are ignored.
     pub(super) fn copy_output(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let Some(first) = self.audio_outputs.first().copied() else {
             return;
@@ -1059,8 +977,6 @@ impl PortBuffers {
         }
     }
 
-    /// Re-arms every atom port for a block: empty input sequences, output
-    /// chunks offering their whole space.
     pub(super) fn reset_atoms(&mut self) {
         let types = self.types;
         for slot in &mut self.slots {
@@ -1070,7 +986,6 @@ impl PortBuffers {
         }
     }
 
-    /// The value of a control buffer.
     pub(super) fn control(&self, slot: usize) -> f32 {
         match self.slots.get(slot).map(|slot| &slot.buffer) {
             Some(Buffer::Control(samples)) => samples.first().copied().unwrap_or(0.0),
@@ -1078,7 +993,6 @@ impl PortBuffers {
         }
     }
 
-    /// Writes a control buffer.
     pub(super) fn set_control(&mut self, slot: usize, value: f32) {
         if let Some(Buffer::Control(samples)) =
             self.slots.get_mut(slot).map(|slot| &mut slot.buffer)
@@ -1089,7 +1003,6 @@ impl PortBuffers {
         }
     }
 
-    /// The latency report, in frames; 0 without a latency port.
     pub(super) fn latency(&self) -> f32 {
         self.latency.map_or(0.0, |slot| self.control(slot))
     }
@@ -1101,7 +1014,6 @@ impl PortBuffers {
         }
     }
 
-    /// For the tests: a port's atom sequence header, if it has one.
     #[cfg(test)]
     pub(super) fn atom(&mut self, slot: usize) -> Option<*mut LV2_Atom_Sequence> {
         match &mut self.slots.get_mut(slot)?.buffer {

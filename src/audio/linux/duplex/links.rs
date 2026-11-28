@@ -1,5 +1,3 @@
-//! Link factory requests and values observed from the filter callbacks.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
@@ -15,23 +13,20 @@ use super::properties;
 /// How long a requested link may take to appear before it is asked again.
 const LINK_GRACE: Duration = Duration::from_secs(1);
 
-/// A link RigWerk asked `link-factory` for.  Dropping the proxy before the
-/// link appears abandons it; once it exists it lives as long as this client.
+/// Dropping the proxy before the link appears abandons it.  Once it
+/// exists it lives as long as this client.
 pub(super) struct MadeLink {
     link: pw::link::Link,
     asked: std::time::Instant,
-    /// Whether the link has shown up in the registry.
     seen: bool,
 }
 
-/// Values the realtime and main-loop callbacks report to the run loop.
 pub(super) struct Observed {
     pub(super) rate: Arc<AtomicU32>,
     pub(super) quantum: Arc<AtomicU64>,
     pub(super) error: Arc<AtomicBool>,
 }
 
-/// Create, refresh, or tear down links so the graph matches `wanted_links`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sync_wanted_links(
     core: &pw::core::CoreRc,
@@ -43,10 +38,8 @@ pub(super) fn sync_wanted_links(
     extra_outputs: &[(usize, &str)],
     shared: &Shared,
 ) {
-    // Nothing changed and no link is still waiting to appear.
     if !graph.dirty && made.values().all(|link| link.seen) {
-        // Still re-check when the extra output list may have changed: compare
-        // against what we would want now.
+        // The extra-output list can change without `dirty`.
         let wanted = graph.wanted_links(own, source, sink, extra_outputs);
         let wanted_ports: HashSet<(u32, u32)> =
             wanted.iter().map(|link| (link.1, link.3)).collect();
@@ -58,8 +51,8 @@ pub(super) fn sync_wanted_links(
     graph.dirty = false;
     let wanted = graph.wanted_links(own, source, sink, extra_outputs);
     let wanted_ports: HashSet<(u32, u32)> = wanted.iter().map(|link| (link.1, link.3)).collect();
-    // Links that are no longer wanted (a device came back with other
-    // ports) are removed, on the server too if they still exist.
+    // A device that came back with other ports: drop the link on the
+    // server too, if it still exists.
     let stale: Vec<(u32, u32)> = made
         .keys()
         .filter(|ports| !wanted_ports.contains(ports))
@@ -80,10 +73,8 @@ pub(super) fn sync_wanted_links(
                 link.seen = true;
                 continue;
             }
-            // Still on its way to the registry.
             Some(link) if !link.seen && link.asked.elapsed() < LINK_GRACE => continue,
-            // Removed (by hand, or by the server) or never appeared:
-            // ask again.
+            // Removed, or never appeared: ask again.
             Some(_) => {
                 made.remove(&ports);
             }
