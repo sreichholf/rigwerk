@@ -91,7 +91,7 @@ impl RtGuard {
     }
 
     /// The callback does not act on the count.  The real-time tests read it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn allocations(&self) -> usize {
         #[cfg(debug_assertions)]
         {
@@ -103,7 +103,7 @@ impl RtGuard {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn frees(&self) -> usize {
         #[cfg(debug_assertions)]
         {

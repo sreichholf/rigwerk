@@ -51,8 +51,7 @@ const LENGTH_BYTES: usize = 4;
 struct MessageRing {
     /// The hot path never reads this: a reference to the whole buffer would
     /// alias the producer's and consumer's disjoint spans.
-    #[allow(dead_code)]
-    buffer: UnsafeCell<Box<[u8]>>,
+    _buffer: UnsafeCell<Box<[u8]>>,
     /// Fixed in [`MessageRing::new`].  Each side has its own index, so no
     /// byte needs an atomic.
     storage: *mut u8,
@@ -88,7 +87,7 @@ impl MessageRing {
         // buffer is never moved afterwards.
         let storage = buffer.as_mut_ptr();
         Self {
-            buffer: UnsafeCell::new(buffer),
+            _buffer: UnsafeCell::new(buffer),
             storage,
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),

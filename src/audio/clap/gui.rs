@@ -3,12 +3,15 @@
 //! embedding, so there the plugin opens a floating toplevel and the host
 //! only creates, shows, and destroys it.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+#[cfg(target_os = "windows")]
+use std::ffi::c_void;
+use std::ffi::{c_char, CStr, CString};
 
-use clap_sys::ext::gui::{
-    clap_gui_resize_hints, clap_plugin_gui, clap_window, clap_window_handle,
-    CLAP_WINDOW_API_WAYLAND, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11,
-};
+#[cfg(target_os = "windows")]
+use clap_sys::ext::gui::CLAP_WINDOW_API_WIN32;
+use clap_sys::ext::gui::{clap_gui_resize_hints, clap_plugin_gui, clap_window, clap_window_handle};
+#[cfg(any(target_os = "linux", test))]
+use clap_sys::ext::gui::{CLAP_WINDOW_API_WAYLAND, CLAP_WINDOW_API_X11};
 use clap_sys::plugin::clap_plugin;
 
 use super::instance::ClapInstance;
@@ -17,19 +20,30 @@ const FALLBACK_SIZE: (u32, u32) = (640, 480);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WindowApi {
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg(target_os = "windows")]
     Win32,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     X11,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     Wayland,
 }
 
 impl WindowApi {
     pub(super) fn id(self) -> &'static CStr {
+        // A Windows build has one variant.  The match covers the builds that
+        // have more.
+        #[cfg(all(target_os = "windows", not(test)))]
+        {
+            let Self::Win32 = self;
+            CLAP_WINDOW_API_WIN32
+        }
+        #[cfg(any(not(target_os = "windows"), test))]
         match self {
+            #[cfg(target_os = "windows")]
             Self::Win32 => CLAP_WINDOW_API_WIN32,
+            #[cfg(any(target_os = "linux", test))]
             Self::X11 => CLAP_WINDOW_API_X11,
+            #[cfg(any(target_os = "linux", test))]
             Self::Wayland => CLAP_WINDOW_API_WAYLAND,
         }
     }
@@ -60,9 +74,9 @@ impl EditorApi {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ParentWindow {
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg(target_os = "windows")]
     Win32(*mut c_void),
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     X11(u64),
 }
 
@@ -88,7 +102,7 @@ impl ResizeHints {
 
 /// Best first.  `DISPLAY` (XWayland included) embeds in X11, or floats
 /// on X11.  A pure Wayland session can only float.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn linux_candidates(x11: bool, wayland: bool) -> Vec<EditorApi> {
     let mut candidates = Vec::new();
     if x11 {
@@ -189,15 +203,7 @@ impl ClapInstance {
     }
 
     pub(crate) fn attach_editor(&mut self, parent: ParentWindow, scale: f64) -> Result<(), String> {
-        let (api, specific) = match parent {
-            ParentWindow::Win32(hwnd) => (WindowApi::Win32, clap_window_handle { win32: hwnd }),
-            ParentWindow::X11(window) => (
-                WindowApi::X11,
-                clap_window_handle {
-                    x11: window as clap_sys::ext::gui::clap_xwnd,
-                },
-            ),
-        };
+        let (api, specific) = parent_handle(parent);
         if self.editor_api != Some(EditorApi::embedded(api)) {
             return Err("The plugin's interface was not created for this window.".to_owned());
         }
@@ -325,5 +331,40 @@ impl ClapInstance {
             }
         }
         self.editor_open = false;
+    }
+}
+
+/// Windows tests still construct the X11 parent.  Every other build has
+/// one variant, and a one-arm match is rejected.
+fn parent_handle(parent: ParentWindow) -> (WindowApi, clap_window_handle) {
+    #[cfg(not(all(target_os = "windows", test)))]
+    {
+        #[cfg(target_os = "windows")]
+        {
+            let ParentWindow::Win32(hwnd) = parent;
+            (WindowApi::Win32, clap_window_handle { win32: hwnd })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let ParentWindow::X11(window) = parent;
+            (
+                WindowApi::X11,
+                clap_window_handle {
+                    x11: window as clap_sys::ext::gui::clap_xwnd,
+                },
+            )
+        }
+    }
+    #[cfg(all(target_os = "windows", test))]
+    {
+        match parent {
+            ParentWindow::Win32(hwnd) => (WindowApi::Win32, clap_window_handle { win32: hwnd }),
+            ParentWindow::X11(window) => (
+                WindowApi::X11,
+                clap_window_handle {
+                    x11: window as clap_sys::ext::gui::clap_xwnd,
+                },
+            ),
+        }
     }
 }

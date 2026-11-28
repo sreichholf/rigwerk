@@ -85,7 +85,6 @@ pub(crate) struct ExtraOutputLink {
     /// Empty when virtual.
     pub(crate) device_id: String,
     /// PipeWire `node.name`, or empty when missing or virtual.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) node_name: String,
     pub(crate) virtual_output: bool,
     /// Ignored for a hardware extra output.
@@ -670,7 +669,7 @@ impl Shared {
         self.asio_panel.clear_requests();
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn set_path_delay_ns(&self, ns: u64) {
         self.path_delay_ns.store(ns, Ordering::Relaxed);
     }
@@ -695,7 +694,7 @@ impl Shared {
     }
 
     /// Not a reading, and never replaces one.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn set_requested_source_rate(&self, rate: u32) {
         if self.source_rate_is_read() {
             return;
@@ -724,13 +723,14 @@ impl Shared {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn source_rate_is_read(&self) -> bool {
         self.input_rate_reported.load(Ordering::Relaxed)
     }
 
     /// Atomics only, so the audio thread may call it.  Does not lift the
     /// bridge buffer: the duplex node has no ring.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn note_direct_rate(&self, rate: u32) {
         self.store_source_rate(rate, true, false);
         self.store_output_rate(rate, true, false);
@@ -738,7 +738,7 @@ impl Shared {
 
     /// Not a reading, and it never undoes [`Self::note_direct_rate`] or
     /// [`Self::set_output`].
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn note_requested_direct_rate(&self, rate: u32) {
         if !self.source_rate_is_read() {
             self.store_source_rate(rate, false, false);
@@ -761,7 +761,7 @@ impl Shared {
     }
 
     /// Not a reading, and it never overwrites one.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn set_requested_output(
         &self,
         rate: u32,
@@ -776,7 +776,7 @@ impl Shared {
     }
 
     /// The step and the mode line stay as published.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn set_output_rate(&self, rate: u32) {
         self.store_output_rate(rate, true, true);
     }
@@ -833,10 +833,12 @@ impl Shared {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn output_rate_is_read(&self) -> bool {
         self.output_rate_reported.load(Ordering::Relaxed)
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn output_step_is_read(&self) -> bool {
         self.output_step_reported.load(Ordering::Relaxed)
     }
@@ -1149,19 +1151,18 @@ impl Shared {
     }
 
     /// Whether extra output `index` is the virtual RigWerk Out source.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn extra_output_is_virtual(&self, index: usize) -> bool {
         index < MAX_EXTRA_OUTPUTS && self.extra_output_virtual[index].load(Ordering::Relaxed)
     }
 
     /// Whether the virtual source at `index` should be advertised.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn virtual_output_is_on(&self, index: usize) -> bool {
         index < MAX_EXTRA_OUTPUTS && self.virtual_output_on[index].load(Ordering::Relaxed)
     }
 
     /// A clone of the live extra output plan for the PipeWire linker.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn extra_output_plan(&self) -> ExtraOutputPlan {
         self.extra_output_plan
             .lock()
@@ -1285,7 +1286,7 @@ impl Shared {
 
     /// Peak-hold into the input scope for a path that does not go through
     /// the ring (the PipeWire duplex node).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn push_scope_in(&self, left: f32, right: f32) {
         self.scope_in.push(0.5 * (left + right));
     }
@@ -1383,6 +1384,7 @@ impl Shared {
             out_reduction_db: self.clock_output.reduction_db(),
             out_loudness: self.clock_output.loudness(),
             output_channels: self.clock_output.channels(),
+            #[cfg(test)]
             extra_output_count: self
                 .extra_output_count
                 .load(Ordering::Relaxed)
@@ -1440,7 +1442,7 @@ impl Shared {
                 }
             }),
             dropouts: self.dropouts.load(Ordering::Relaxed),
-            overruns: self.overruns.load(Ordering::Relaxed),
+            #[cfg(test)]
             input_frames: self.input_frames.load(Ordering::Relaxed),
             frames: self.frames.load(Ordering::Relaxed),
             ring_fill: self.ring_fill(),
@@ -1449,6 +1451,7 @@ impl Shared {
             error,
             device_lost,
             callback_failure,
+            #[cfg(test)]
             status: self
                 .status
                 .lock()
@@ -1530,6 +1533,7 @@ impl Shared {
     }
 
     /// Bumped on every publish of [`Self::plugin_views`].
+    #[cfg(test)]
     pub(crate) fn plugin_views_version(&self) -> u64 {
         self.main_path().plugin_views_version()
     }

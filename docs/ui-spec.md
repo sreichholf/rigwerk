@@ -686,8 +686,8 @@ it (not the limiter warning, as today).  Filter: *All*, *Warnings*,
 *Errors*.  *Show dismissed* at the bottom.
 
 - *Show* closes the drawer and selects the issue's anchor, which also
-  carries the marker: `Anchor::{Input, Path(slot), Stage(slot, stage),
-  Master, Output(id), Setup(section)}` replaces today's Live card.  The
+  carries the marker: `Anchor::{Input, Path(slot), Master,
+  Output(id), Setup(section)}` replaces today's Live card.  The
   navigation actions map to anchors: `OpenRouting` → `Output(id)`,
   `OpenDevices` → `Setup(Devices)`, `OpenDiagnostics` → the diagnostics
   sheet, `ShowFollower` and `ShowOutput` → `Output(id)`.

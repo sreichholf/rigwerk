@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use cpal::traits::{DeviceTrait, HostTrait};
 
 use super::super::types::OutputMode;
@@ -63,6 +64,7 @@ pub(crate) fn describe(low_latency: bool, fixed_buffer: bool) -> (OutputMode, St
 
 /// The period asked for, without opening a stream.  `0` is a missing or
 /// demo device.
+#[cfg(target_os = "linux")]
 pub(crate) fn planned_output_period(
     device_id: &str,
     low_latency: bool,

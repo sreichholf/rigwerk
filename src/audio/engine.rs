@@ -223,7 +223,7 @@ impl AudioEngine {
     }
 
     /// A later status write may replace the line.  The note remains.
-    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn note_quantum_failure(&mut self, note: String) {
         self.shared.set_status(note.clone());
         self.quantum_note = Some(note);

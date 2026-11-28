@@ -508,6 +508,13 @@ fn create_frame(
     title: &str,
     size: (u32, u32),
 ) -> Result<Box<dyn EditorFrame>, String> {
+    // One variant on a Windows build.  Windows tests still have X11 and Wayland.
+    #[cfg(all(target_os = "windows", not(test)))]
+    {
+        let WindowApi::Win32 = api;
+        Ok(Box::new(win32::Win32Frame::create(title, size)?))
+    }
+    #[cfg(any(not(target_os = "windows"), test))]
     match api {
         #[cfg(target_os = "windows")]
         WindowApi::Win32 => Ok(Box::new(win32::Win32Frame::create(title, size)?)),

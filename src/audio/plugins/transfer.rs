@@ -266,7 +266,7 @@ impl ParamReceiver {
     /// drain's `head` snapshot is kept, so a parameter loses only a prefix.
     // Only the tests call it: a state is loaded only while its plugin
     // loads, before any value is queued for it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn discard(&mut self) {
         self.drain(|_, _, _| {});
     }

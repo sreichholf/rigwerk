@@ -137,9 +137,11 @@ fn hardware_bridge() {
         buffer_size: 128,
         output_rate: None,
         output_buffer: 128,
+        #[cfg(target_os = "windows")]
         asio_wrapper: input.name.to_lowercase().contains("asio4all"),
         low_latency_request: true,
         exclusive_output: false,
+        #[cfg(target_os = "linux")]
         pipewire_low_latency: false,
     });
     let mut ring_seen = 0.0f32;

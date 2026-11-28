@@ -13,9 +13,11 @@ fn plain() -> StartConfig {
         buffer_size: 128,
         output_rate: None,
         output_buffer: 128,
+        #[cfg(target_os = "windows")]
         asio_wrapper: false,
         low_latency_request: false,
         exclusive_output: false,
+        #[cfg(target_os = "linux")]
         pipewire_low_latency: false,
     }
 }

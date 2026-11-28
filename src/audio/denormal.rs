@@ -6,14 +6,6 @@
 
 #[must_use = "the mode is restored when the guard is dropped"]
 pub(crate) struct DenormalGuard {
-    #[cfg_attr(
-        not(any(
-            target_arch = "x86_64",
-            all(target_arch = "x86", target_feature = "sse"),
-            target_arch = "aarch64"
-        )),
-        allow(dead_code)
-    )]
     previous: usize,
 }
 

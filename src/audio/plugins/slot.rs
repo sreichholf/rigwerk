@@ -159,7 +159,7 @@ pub(crate) struct Slot {
     pub(crate) error: Option<String>,
     /// Sample rate passed to the last load attempt.  `None` until then, so a
     /// restored slot stays distinguishable from one opened at a rate.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) built_rate: Option<u32>,
     /// Dry side of a partial mix, and the output of a skipped block.
     /// Sized for [`MAX_ALIGN`] plus one chunk on load (UI thread); empty,
@@ -181,7 +181,6 @@ pub(crate) struct Slot {
     /// this field so `Slot` itself does not implement [`Drop`] (a `Drop`
     /// impl would reject the struct-update syntax the loaders use).
     #[cfg(test)]
-    #[allow(dead_code)]
     track: SlotTrack,
 }
 
@@ -217,6 +216,7 @@ impl Slot {
             pref: Arc::new(pref),
             plugin: None,
             error: None,
+            #[cfg(test)]
             built_rate: None,
             dry: DelayLine::empty(),
             dry_tap: DelayTap::default(),
@@ -271,6 +271,7 @@ impl Slot {
             Ok((plugin, _)) => Self {
                 plugin: Some(plugin),
                 dry: Self::dry_line(),
+                #[cfg(test)]
                 built_rate: Some(sample_rate),
                 // The handle owns the saved values and state from here on.
                 ..Self::empty(PluginPref {
@@ -281,6 +282,7 @@ impl Slot {
             },
             Err(error) => Self {
                 error: Some(error),
+                #[cfg(test)]
                 built_rate: Some(sample_rate),
                 ..Self::empty(pref)
             },

@@ -32,9 +32,8 @@ impl AsioPanelRequests {
         self.flag(side).store(true, Ordering::Release);
     }
 
-    /// `true` once per request.  Linux keeps the method so the flag can be
-    /// tested without a driver.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    /// `true` once per request.  Tests take the flag without a driver.
+    #[cfg(any(target_os = "windows", test))]
     pub(crate) fn take(&self, side: AsioPanelSide) -> bool {
         self.flag(side).swap(false, Ordering::AcqRel)
     }
@@ -46,7 +45,7 @@ impl AsioPanelRequests {
     }
 
     /// The guard drops on unwind too.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg(any(target_os = "windows", test))]
     pub(crate) fn enter(&self) -> AsioPanelOpen<'_> {
         let _ = self.open.fetch_add(1, Ordering::AcqRel);
         AsioPanelOpen(self)
@@ -67,9 +66,10 @@ impl AsioPanelRequests {
 }
 
 #[must_use = "the panel stays marked open until this guard drops"]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(any(target_os = "windows", test))]
 pub(crate) struct AsioPanelOpen<'a>(&'a AsioPanelRequests);
 
+#[cfg(any(target_os = "windows", test))]
 impl Drop for AsioPanelOpen<'_> {
     fn drop(&mut self) {
         let _ = self.0.open.fetch_sub(1, Ordering::AcqRel);

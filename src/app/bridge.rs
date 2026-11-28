@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+#[cfg(target_os = "windows")]
 use crate::app::devices::is_wrapper_driver;
 use crate::app::issues::StopReason;
 use crate::app::LogTone;
@@ -155,8 +156,6 @@ impl RigWerkApp {
         let output = self.selected_output().clone();
         #[cfg(target_os = "linux")]
         let pipewire_low_latency = self.low_latency_output && audio::is_pipewire_device(&output);
-        #[cfg(not(target_os = "linux"))]
-        let pipewire_low_latency = false;
         let (low_latency_request, exclusive_output) = self.output_start_flags();
         let config = StartConfig {
             asio_clsid: input.asio_clsid,
@@ -171,9 +170,11 @@ impl RigWerkApp {
             buffer_size: self.buffer_size,
             output_rate: (self.output_rate > 0).then_some(self.output_rate),
             output_buffer: self.output_buffer,
+            #[cfg(target_os = "windows")]
             asio_wrapper: input.asio_clsid.is_some() && is_wrapper_driver(&input),
             low_latency_request,
             exclusive_output,
+            #[cfg(target_os = "linux")]
             pipewire_low_latency,
         };
         self.push_log(

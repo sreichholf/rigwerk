@@ -267,11 +267,6 @@ impl IssueKey {
 pub(crate) enum Anchor {
     Input,
     Path(usize),
-    #[allow(dead_code, reason = "Show accepts it; no issue constructs it yet")]
-    Stage {
-        path: usize,
-        stage: crate::app::chain::ChainStage,
-    },
     Master,
     Output(usize),
     Setup(crate::app::screen::SetupSection),
@@ -645,9 +640,6 @@ impl RigWerkApp {
             Anchor::Path(slot) => {
                 self.open_sheet(crate::app::screen::Sheet::Path { path: slot });
             }
-            Anchor::Stage { path, stage } => {
-                self.open_sheet(crate::app::screen::Sheet::for_stage(path, stage));
-            }
             Anchor::Output(index) => {
                 self.open_sheet(crate::app::screen::Sheet::Output { output: index });
             }
@@ -656,8 +648,7 @@ impl RigWerkApp {
         self.chrome.setup_section = None;
     }
 
-    /// Errors sort before warnings, so `min` is the worst.  A stage marks
-    /// its path.
+    /// Errors sort before warnings, so `min` is the worst.
     pub(crate) fn anchor_severity(&self, anchor: Anchor) -> Option<IssueSeverity> {
         self.issue_view()
             .visible
@@ -1354,18 +1345,11 @@ fn output_place(rows: &[OutputDeviceRow], device: usize) -> String {
     }
 }
 
-/// A stage marks its path.
 fn same_strip(issue: Anchor, anchor: Anchor) -> bool {
     match anchor {
-        Anchor::Path(slot) => match issue {
-            Anchor::Path(path) | Anchor::Stage { path, .. } => path == slot,
-            _ => false,
-        },
+        Anchor::Path(slot) => matches!(issue, Anchor::Path(path) if path == slot),
         Anchor::Output(index) => matches!(issue, Anchor::Output(output) if output == index),
         Anchor::Setup(section) => matches!(issue, Anchor::Setup(have) if have == section),
-        Anchor::Stage { path, stage } => {
-            matches!(issue, Anchor::Stage { path: have, stage: have_stage } if have == path && have_stage == stage)
-        }
         other => issue == other,
     }
 }

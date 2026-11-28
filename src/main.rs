@@ -1,4 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// The test harness allows `dead_code`, so `forbid` cannot cover `cfg(test)`.
+// Outside tests it cannot be overruled.  The table denies it everywhere.
+#![cfg_attr(not(test), forbid(dead_code))]
 
 mod app;
 mod audio;

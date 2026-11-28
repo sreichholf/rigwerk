@@ -8,10 +8,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::audio::types::{DeviceItem, QuantumInfo};
+use crate::audio::types::DeviceItem;
+#[cfg(target_os = "linux")]
+use crate::audio::types::QuantumInfo;
 
 use super::alsa::{alsa_pcm_is_default, alsa_pcm_name};
 
+#[cfg(target_os = "linux")]
 pub(crate) const LOW_QUANTUM: u32 = crate::audio::types::PIPEWIRE_LOW_QUANTUM;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -150,6 +153,7 @@ fn parse_state(text: &str) -> State {
     State { quantum, rate }
 }
 
+#[cfg(target_os = "linux")]
 fn read_metadata() -> Option<String> {
     let output = Command::new("pw-metadata")
         .args(["-n", "settings"])
@@ -162,12 +166,14 @@ fn read_metadata() -> Option<String> {
 }
 
 /// `None` when `pw-metadata` is missing or PipeWire is not running.
+#[cfg(target_os = "linux")]
 pub(crate) fn state() -> Option<State> {
     read_metadata().map(|text| parse_state(&text))
 }
 
 /// `Ok(0)` was read and nothing is forced.  `Err` was not read: a later
 /// restore must not invent a 0 and clear a setting it never saw.
+#[cfg(target_os = "linux")]
 pub(crate) fn read_forced_quantum() -> Result<u32, String> {
     let text = read_metadata().ok_or_else(|| {
         "pw-metadata not available, so the current quantum was not read".to_owned()
@@ -225,6 +231,7 @@ fn write_metadata(key: &str, value: &str) -> Result<(), String> {
 
 /// `Ok(None)`: the write was accepted and the read-back failed.  The caller
 /// owns the force and must restore the previous value.
+#[cfg(target_os = "linux")]
 pub(crate) fn force_low_quantum() -> Result<Option<State>, String> {
     write_metadata("clock.force-quantum", &LOW_QUANTUM.to_string())?;
     Ok(state())
@@ -235,6 +242,7 @@ pub(crate) fn restore_quantum(previous: u32) -> Result<(), String> {
     write_metadata("clock.force-quantum", &previous.to_string())
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn check_output(device: &DeviceItem, alsa_period: u32) -> Option<QuantumInfo> {
     if !is_pipewire_device(device) {
         return None;

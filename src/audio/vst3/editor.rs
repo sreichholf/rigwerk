@@ -206,10 +206,7 @@ impl Vst3Editor {
     }
 
     pub(crate) fn attach(&mut self, parent: ParentWindow) -> Result<(), String> {
-        let handle = match parent {
-            ParentWindow::X11(window) => window as usize as *mut std::ffi::c_void,
-            ParentWindow::Win32(hwnd) => hwnd,
-        };
+        let handle = parent_handle(parent);
         let frame = self
             .frame
             .as_com_ref::<IPlugFrame>()
@@ -247,6 +244,31 @@ impl Vst3Editor {
 
     pub(crate) fn take_resize_request(&self) -> Option<(u32, u32)> {
         self.frame.take_request()
+    }
+}
+
+/// Windows tests still construct the X11 parent.  Every other build has
+/// one variant, and a one-arm match is rejected.
+fn parent_handle(parent: ParentWindow) -> *mut std::ffi::c_void {
+    #[cfg(not(all(target_os = "windows", test)))]
+    {
+        #[cfg(target_os = "windows")]
+        {
+            let ParentWindow::Win32(handle) = parent;
+            handle
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let ParentWindow::X11(window) = parent;
+            window as usize as *mut std::ffi::c_void
+        }
+    }
+    #[cfg(all(target_os = "windows", test))]
+    {
+        match parent {
+            ParentWindow::X11(window) => window as usize as *mut std::ffi::c_void,
+            ParentWindow::Win32(hwnd) => hwnd,
+        }
     }
 }
 

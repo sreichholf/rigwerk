@@ -24,6 +24,7 @@
 //! here allocates after construction.
 
 use std::ffi::c_void;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ use lv2_sys::{LV2_Atom_Sequence, LV2_Atom_Sequence_Body, LV2_Descriptor, LV2_Han
 use crate::audio::plugins::{ParamIds, PluginParamView, MAX_AUDIO_PORTS};
 
 use super::host::{SUPPLIED_OPTIONS, SUPPORTED};
+#[cfg(test)]
 use super::scan::read_bundle;
 use super::state;
 use super::ttl::TtlStore;
@@ -262,7 +264,7 @@ pub(super) struct PortTable {
 impl PortTable {
     /// The loader parses once and calls [`Self::read_store`].  This is the
     /// form a caller with only a bundle uses.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn read(bundle: &Path, plugin_uri: &str, sample_rate: u32) -> Result<Self, String> {
         let (store, plugins) = read_bundle(bundle)?;
         Self::read_store(&store, &plugins, plugin_uri, sample_rate)

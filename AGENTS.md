@@ -54,6 +54,12 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
+`dead_code` is `deny` in `[lints.rust]`, and `forbid` outside tests
+(`src/main.rs`).  The test harness inserts `allow(dead_code)`, which an
+unconditional `forbid` rejects.  Delete an unused item, or gate it with
+`cfg` to the target that uses it.  Do not write `allow(dead_code)`.
+`vendor/` is its own crate and keeps upstream lints.
+
 The hardware tests read the devices from the environment: `RIGWERK_IN`,
 `RIGWERK_OUT`, optionally `RIGWERK_OUT_BACKEND` and `RIGWERK_BRIDGE_BUFFER`
 (see `src/audio/hardware_tests.rs`).

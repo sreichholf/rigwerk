@@ -137,10 +137,12 @@ impl LogSlot {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn text(&self) -> &str {
         std::str::from_utf8(&self.bytes[..self.len]).unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub(super) fn truncated(&self) -> bool {
         self.truncated
     }
@@ -253,7 +255,7 @@ impl HostState {
 
     /// Built on the caller's thread.  `None` before the first message,
     /// and while the plugin holds the slot: the read never waits.
-    #[cfg_attr(not(test), allow(dead_code))] // No reader in the tree yet.
+    #[cfg(test)]
     pub(crate) fn log_message(&self) -> Option<(String, bool)> {
         let last = try_lock_now(&self.last_log)?;
         last.as_ref()
